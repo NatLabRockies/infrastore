@@ -97,6 +97,17 @@ pub fn decode(
         ElementType::QuadraticFunction => 3,
         ElementType::PiecewiseLinear | ElementType::PiecewiseStep => array.shape[leading_dims],
     };
+    // `chunks_exact` panics on a zero width, and `element_type_of` manufactures
+    // exactly that for an empty `Tuple` — which `validate_array` then accepts,
+    // since arity 0 expects element dims `[0]`. `ElementType::parse` refuses the
+    // `tuple(0,…)` spelling, so such a row cannot arrive from a catalog, but the
+    // crate's own `element_type_of` -> `encode` -> `decode` round trip reaches it
+    // through the public API.
+    if width == 0 {
+        return Err(TimeSeriesError::InvalidParameter(format!(
+            "element_type {element_type} has no values per timestep, so there is nothing to decode"
+        )));
+    }
     let rows = values.chunks_exact(width);
     Ok(match element_type {
         ElementType::Scalar(_) => unreachable!("returned above"),

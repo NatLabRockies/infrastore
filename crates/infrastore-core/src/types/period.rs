@@ -355,6 +355,15 @@ impl Period {
     /// error (a period is one kind or the other). An optional leading `-`
     /// (e.g. `-PT1H`, `-P1M`) parses as a negative period, so the output of
     /// [`Period::to_iso8601`] always round-trips.
+    ///
+    /// Every arithmetic step is checked. `parse_components` applies no
+    /// uniqueness rule, so a string may repeat a unit (`P…D…D`), and only the
+    /// per-component multiplies used to be guarded — the accumulation was a bare
+    /// `+=`. A single day component can reach the edge of `i64` milliseconds on
+    /// its own, so repeating one overflowed: a panic in a debug build, and in a
+    /// release build, where the workspace profile leaves `overflow-checks` off,
+    /// a silently wrapped period. This is fully public and takes an arbitrary
+    /// caller string, including one arriving over gRPC.
     pub fn from_iso8601(s: &str) -> Result<Period> {
         let trimmed = s.trim();
         let invalid =
@@ -385,15 +394,15 @@ impl Period {
                     has_calendar = true;
                 }
                 'M' => {
-                    months += int_val;
+                    months = months.checked_add(int_val).ok_or_else(invalid)?;
                     has_calendar = true;
                 }
                 'W' => {
-                    fixed_ms += int_val.checked_mul(MS_PER_WEEK).ok_or_else(invalid)?;
+                    fixed_ms = add_ms(fixed_ms, int_val.checked_mul(MS_PER_WEEK))?;
                     has_fixed = true;
                 }
                 'D' => {
-                    fixed_ms += int_val.checked_mul(MS_PER_DAY).ok_or_else(invalid)?;
+                    fixed_ms = add_ms(fixed_ms, int_val.checked_mul(MS_PER_DAY))?;
                     has_fixed = true;
                 }
                 _ => return Err(invalid()),
@@ -404,16 +413,16 @@ impl Period {
                 match unit {
                     'H' => {
                         let v = num.parse::<i64>().map_err(|_| invalid())?;
-                        fixed_ms += v.checked_mul(MS_PER_HOUR).ok_or_else(invalid)?;
+                        fixed_ms = add_ms(fixed_ms, v.checked_mul(MS_PER_HOUR))?;
                         has_fixed = true;
                     }
                     'M' => {
                         let v = num.parse::<i64>().map_err(|_| invalid())?;
-                        fixed_ms += v.checked_mul(MS_PER_MIN).ok_or_else(invalid)?;
+                        fixed_ms = add_ms(fixed_ms, v.checked_mul(MS_PER_MIN))?;
                         has_fixed = true;
                     }
                     'S' => {
-                        fixed_ms += seconds_str_to_ms(&num).ok_or_else(invalid)?;
+                        fixed_ms = add_ms(fixed_ms, seconds_str_to_ms(&num))?;
                         has_fixed = true;
                     }
                     _ => return Err(invalid()),
@@ -494,6 +503,14 @@ fn months_between(start: DateTime<Utc>, at: DateTime<Utc>) -> i64 {
 
 /// Split an ISO-8601 component run (e.g. `"1Y6M"` or `"1.5S"`) into
 /// `(number, unit)` pairs. Returns `None` on malformed input.
+/// Accumulate a checked-multiply result into a running millisecond total,
+/// failing the parse on overflow rather than wrapping.
+fn add_ms(total: i64, component: Option<i64>) -> Result<i64> {
+    component
+        .and_then(|c| total.checked_add(c))
+        .ok_or_else(|| TimeSeriesError::InvalidParameter("invalid ISO-8601 duration".to_string()))
+}
+
 fn parse_components(part: &str) -> Option<Vec<(String, char)>> {
     let mut out = Vec::new();
     let mut num = String::new();

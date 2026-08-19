@@ -220,6 +220,66 @@ fn read_sel(ds: &h5::Dataset, dtype: Dtype, ranges: Vec<Range<usize>>) -> Result
 }
 
 /// Read the whole dataset as little-endian bytes (row-major).
+/// The dtype a dataset is physically stored as, or `None` for a type this crate
+/// does not write.
+///
+/// `Bool` is written as `u8` and is indistinguishable from it on disk, so both
+/// map to `Dtype::U8` and the caller treats the pair as one physical type.
+fn stored_dtype(ds: &h5::Dataset) -> Option<Dtype> {
+    let dt = ds.dtype().ok()?;
+    for candidate in [
+        Dtype::F64,
+        Dtype::F32,
+        Dtype::I64,
+        Dtype::I32,
+        Dtype::I16,
+        Dtype::I8,
+        Dtype::U64,
+        Dtype::U32,
+        Dtype::U16,
+        Dtype::U8,
+    ] {
+        let matches = match candidate {
+            Dtype::F64 => dt.is::<f64>(),
+            Dtype::F32 => dt.is::<f32>(),
+            Dtype::I64 => dt.is::<i64>(),
+            Dtype::I32 => dt.is::<i32>(),
+            Dtype::I16 => dt.is::<i16>(),
+            Dtype::I8 => dt.is::<i8>(),
+            Dtype::U64 => dt.is::<u64>(),
+            Dtype::U32 => dt.is::<u32>(),
+            Dtype::U16 => dt.is::<u16>(),
+            Dtype::U8 | Dtype::Bool => dt.is::<u8>(),
+        };
+        if matches {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Assert a standalone dataset holds what the catalog claims.
+///
+/// The packed path has always called [`super::check_dtype`], and so does
+/// `MemoryBackend`; the standalone path decoded with the caller's dtype and
+/// never looked. HDF5 converts happily, so a catalog claiming `i32` for an `f64`
+/// dataset returned truncated integers — `[100.5, 200.5]` read back as
+/// `[100, 200]` — where the packed path reported the mismatch. The state needs a
+/// corrupt artifact rather than any supported call, which is exactly what
+/// `check_dtype` exists to catch.
+fn check_standalone_dtype(ds: &h5::Dataset, hash: &[u8; 32], requested: Dtype) -> Result<()> {
+    let Some(stored) = stored_dtype(ds) else {
+        return Ok(());
+    };
+    // `Bool` and `U8` are the same bytes on disk, so neither can be a mismatch
+    // against the other.
+    let bool_pair = matches!(requested, Dtype::Bool) && matches!(stored, Dtype::U8);
+    if bool_pair {
+        return Ok(());
+    }
+    super::check_dtype(hash, stored, requested)
+}
+
 fn read_all(ds: &h5::Dataset, dtype: Dtype) -> Result<Vec<u8>> {
     macro_rules! rd {
         ($t:ty) => {{
@@ -812,6 +872,23 @@ impl Inner {
             // single hyperslab covering whole chunks.
             let mut buf = vec![0u8; length * width * block];
             for (c, (_, _, array)) in seg.iter().enumerate() {
+                // Checked once per array rather than trusted per timestep. The
+                // slice below indexes by a stride derived from the *shape*, so a
+                // `TypedArray` whose `bytes` do not match it panicked here —
+                // reachable in safe code, since the fields are public and a
+                // struct literal bypasses `TypedArray::new`. The single-add path
+                // reaches `write_sel`, where ndarray reports the same mismatch as
+                // an `IntegrityError`, so the two write paths disagreed on
+                // error-versus-panic for one input; worse, this panicked *after*
+                // the dataset was created, leaving the store mid-write.
+                let needed = length * block;
+                if array.bytes.len() < needed {
+                    return Err(TimeSeriesError::IntegrityError(format!(
+                        "array holds {} bytes but its shape {:?} describes {needed}",
+                        array.bytes.len(),
+                        array.shape
+                    )));
+                }
                 for t in 0..length {
                     let src = &array.bytes[t * block..(t + 1) * block];
                     let dst = (t * width + c) * block;
@@ -947,6 +1024,7 @@ impl Inner {
             }
             Location::Standalone { var } => {
                 let ds = self.dataset(&var)?;
+                check_standalone_dtype(&ds, hash, dtype)?;
                 let full_shape = ds.shape();
                 let total = full_shape.first().copied().unwrap_or(0);
                 match range {
