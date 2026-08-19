@@ -1110,6 +1110,14 @@ async fn bulk_read_refuses_more_keys_than_the_server_allows() {
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::ResourceExhausted, "{err:?}");
     assert!(err.message().contains("split the request"), "{err:?}");
+    // The message is read by a person, so it is checked as one: a substring
+    // assertion passes happily over a run of stray whitespace left by a wrapped
+    // string literal, which is exactly what it used to carry.
+    assert_eq!(
+        err.message(),
+        "bulk_read requested 4 keys, more than this server's limit of 3; split the request",
+        "{err:?}"
+    );
 
     // The keys are never even decoded, so a request that is both oversized and
     // malformed reports the size -- the cheap check runs first.

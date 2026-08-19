@@ -343,12 +343,15 @@ impl CatalogStoreSvc for CatalogStoreService {
         request: Request<BulkReadReq>,
     ) -> Result<Response<BulkReadResp>, Status> {
         let req = request.into_inner();
-        // Checked before anything is decoded or read: the cost of this call is
-        // the caller's to choose, so the ceiling has to apply before the work
-        // starts, not after.
+        // The transport has already decoded the request by the time this runs —
+        // tonic's own limit bounds that — but nothing past it has happened yet:
+        // no key is converted or validated, and the store is not touched. The
+        // cost of this call is the caller's to choose, so the ceiling applies
+        // before that work starts rather than after it.
         if req.keys.len() > self.max_bulk_read_keys {
             return Err(Status::resource_exhausted(format!(
-                "bulk_read requested {} keys, more than this server's limit of {};                  split the request",
+                "bulk_read requested {} keys, more than this server's limit of {}; \
+                 split the request",
                 req.keys.len(),
                 self.max_bulk_read_keys
             )));
