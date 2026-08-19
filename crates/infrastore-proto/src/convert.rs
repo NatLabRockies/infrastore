@@ -372,6 +372,16 @@ pub fn metadata_from_pb(m: pb::TimeSeriesMetadata) -> Result<TimeSeriesMetadata,
 /// `application_data_is_always_empty_in_get_resp`; see the proto comment on field 10.
 pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
     let element_type = data.element_type();
+    // Uniform across every variant, so read once. These describe the values and
+    // travel with them, which is exactly why the read path has to carry them:
+    // `Store::materialize_time_series` populates them on a local read, so
+    // dropping them here made the same call return an undescribed series over
+    // the wire. (`application_data` above is the genuine exception and stays
+    // empty.)
+    let units = data.units().map(str::to_owned);
+    let quantity_kind = data.quantity_kind().map(str::to_owned);
+    let unit_system = data.unit_system().map(|u| u.as_str().to_owned());
+    let component_field = data.component_field().map(str::to_owned);
     match data {
         TimeSeriesData::SingleTimeSeries(s) => pb::GetResp {
             initial_timestamp_rfc3339: s.initial_timestamp.to_rfc3339(),
@@ -379,6 +389,10 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             length: s.length as u64,
             shape: s.data.shape.iter().map(|d| *d as u64).collect(),
             element_type: element_type.to_string(),
+            units: units.clone(),
+            quantity_kind: quantity_kind.clone(),
+            unit_system: unit_system.clone(),
+            component_field: component_field.clone(),
             value_bytes: s.data.bytes.clone(),
             time_series_type: pb::TimeSeriesType::SingleTimeSeries as i32,
             timestamps_rfc3339: Vec::new(),
@@ -395,6 +409,10 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             length: s.length as u64,
             shape: s.data.shape.iter().map(|d| *d as u64).collect(),
             element_type: element_type.to_string(),
+            units: units.clone(),
+            quantity_kind: quantity_kind.clone(),
+            unit_system: unit_system.clone(),
+            component_field: component_field.clone(),
             value_bytes: s.data.bytes.clone(),
             time_series_type: pb::TimeSeriesType::NonSequentialTimeSeries as i32,
             timestamps_rfc3339: s.timestamps.iter().map(|t| t.to_rfc3339()).collect(),
@@ -411,6 +429,10 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             length: d.data.shape[0] as u64,
             shape: d.data.shape.iter().map(|x| *x as u64).collect(),
             element_type: element_type.to_string(),
+            units: units.clone(),
+            quantity_kind: quantity_kind.clone(),
+            unit_system: unit_system.clone(),
+            component_field: component_field.clone(),
             value_bytes: d.data.bytes.clone(),
             time_series_type: pb::TimeSeriesType::Deterministic as i32,
             timestamps_rfc3339: Vec::new(),
@@ -427,6 +449,10 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             length: p.data.shape[0] as u64,
             shape: p.data.shape.iter().map(|x| *x as u64).collect(),
             element_type: element_type.to_string(),
+            units: units.clone(),
+            quantity_kind: quantity_kind.clone(),
+            unit_system: unit_system.clone(),
+            component_field: component_field.clone(),
             value_bytes: p.data.bytes.clone(),
             time_series_type: pb::TimeSeriesType::Probabilistic as i32,
             timestamps_rfc3339: Vec::new(),
@@ -443,6 +469,10 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             length: s.data.shape[0] as u64,
             shape: s.data.shape.iter().map(|x| *x as u64).collect(),
             element_type: element_type.to_string(),
+            units: units.clone(),
+            quantity_kind: quantity_kind.clone(),
+            unit_system: unit_system.clone(),
+            component_field: component_field.clone(),
             value_bytes: s.data.bytes.clone(),
             time_series_type: pb::TimeSeriesType::Scenarios as i32,
             timestamps_rfc3339: Vec::new(),
@@ -457,7 +487,7 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
 }
 
 pub fn get_resp_to_time_series_data(
-    resp: pb::GetResp,
+    mut resp: pb::GetResp,
     name: String,
 ) -> Result<TimeSeriesData, ConvertError> {
     let ts_type = pb::TimeSeriesType::try_from(resp.time_series_type).map_err(|_| {
@@ -473,6 +503,23 @@ pub fn get_resp_to_time_series_data(
             message: format!("unknown element_type {:?}", resp.element_type),
         })?;
     let dtype = element_type.physical_dtype();
+    // Taken before the match, which moves other fields out of `resp`. An
+    // unrecognized unit system is an error rather than a silent `None`, exactly
+    // as on the metadata path: "unspecified" and "a basis this build does not
+    // know" must not look alike.
+    let units = resp.units.take();
+    let quantity_kind = resp.quantity_kind.take();
+    let component_field = resp.component_field.take();
+    let unit_system = resp
+        .unit_system
+        .take()
+        .map(|s| {
+            UnitSystem::parse(&s).ok_or(ConvertError::InvalidValue {
+                field: "unit_system",
+                message: format!("unknown unit_system {s:?}"),
+            })
+        })
+        .transpose()?;
     let data = TypedArray::new(dtype, shape, resp.value_bytes).map_err(|e| {
         ConvertError::InvalidValue {
             field: "value_bytes",
@@ -491,8 +538,7 @@ pub fn get_resp_to_time_series_data(
                 name,
                 // Overwritten below, along with every other variant's.
                 element_type,
-                // The response carries no descriptor fields, so those stay
-                // unset rather than being invented here.
+                // Filled in at the tail, along with every other variant's.
                 units: None,
                 quantity_kind: None,
                 unit_system: None,
@@ -575,8 +621,16 @@ pub fn get_resp_to_time_series_data(
     // The wire carries the element type, so a read over gRPC reports the same
     // one a local read would. Applied here rather than per branch because the
     // constructors resolve it to plain scalars of the array's dtype, which is
-    // right only when that is what the server actually sent.
-    Ok(series?.with_element_type(element_type))
+    // right only when that is what the server actually sent. The unit
+    // descriptors ride along for the same reason: they describe the values, the
+    // core attaches them on a local read, and a client should not be able to
+    // tell the two paths apart.
+    let mut series = series?.with_element_type(element_type);
+    series.set_units(units);
+    series.set_quantity_kind(quantity_kind);
+    series.set_unit_system(unit_system);
+    series.set_component_field(component_field);
+    Ok(series)
 }
 
 // ---- Helpers ----

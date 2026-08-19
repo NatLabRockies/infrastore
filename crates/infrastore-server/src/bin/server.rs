@@ -44,7 +44,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .first()
         .ok_or("config error: [data] files = [] must contain at least one path")?;
 
-    let service = CatalogStoreService::from_path(primary_file)?;
+    let service = CatalogStoreService::from_path(primary_file)?
+        .with_max_bulk_read_keys(cfg.server.max_bulk_read_keys);
     let addr = format!("{}:{}", cfg.server.host, cfg.server.port).parse()?;
     tracing::info!(
         "serving {} on {} (auth: {})",

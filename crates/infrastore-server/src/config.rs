@@ -3,7 +3,21 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+/// The server's TOML configuration.
+///
+/// Every section rejects unknown fields. Serde ignores them by default, which
+/// here meant a misspelling resolved to the *permissive* option: `[auth]` in
+/// place of `[authentication]`, or `methodd = "api_key"`, parsed cleanly, left
+/// `method` on its `"none"` default, passed `validate()`, and served the whole
+/// read surface to anyone — with a single `tracing` line as the only clue. Every
+/// other mistake in this file already fails loudly (`api_key` with no keys, an
+/// unknown method, an empty `files` list), so this closes the one path that
+/// failed open. The cost is that a config written for a newer version, carrying
+/// a key this binary does not know, is refused rather than partly honoured;
+/// for a file that decides whether authentication happens, that is the safer
+/// direction to fail in.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     pub server: ServerSection,
     pub data: DataSection,
@@ -12,12 +26,29 @@ pub struct ServerConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServerSection {
     pub host: String,
     pub port: u16,
+    /// Most keys one `BulkRead` may name. Absent means
+    /// [`crate::service::DEFAULT_MAX_BULK_READ_KEYS`].
+    ///
+    /// `BulkRead` is the only RPC whose response size the caller chooses -- it
+    /// returns a full copy of a series per key and does not collapse duplicates
+    /// -- so without a ceiling a small request can drive an enormous server-side
+    /// allocation. Raise it if a client legitimately reads more than the default
+    /// in one call; note it bounds the *count*, not the bytes, so a store of very
+    /// large series still wants a lower value.
+    #[serde(default = "default_max_bulk_read_keys")]
+    pub max_bulk_read_keys: usize,
+}
+
+fn default_max_bulk_read_keys() -> usize {
+    crate::service::DEFAULT_MAX_BULK_READ_KEYS
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct DataSection {
     /// Paths to HDF5 files served read-only by this server. v0 supports a
     /// single file (the first entry); multi-file is reserved for a follow-up.
@@ -25,6 +56,7 @@ pub struct DataSection {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct AuthSection {
     /// "none" | "api_key". `oauth` is reserved for a later milestone.
     #[serde(default = "default_auth_method")]
@@ -115,6 +147,50 @@ files = ["store.h5"]
         let cfg: ServerConfig = toml::from_str(&format!("{BASE}\n[authentication]\n")).unwrap();
         assert_eq!(cfg.authentication.method, "none");
         cfg.authentication.validate().unwrap();
+    }
+
+    #[test]
+    fn a_misspelled_auth_key_is_a_parse_error_not_a_silent_none() {
+        // The failure this guards against is not a wrong value but a wrong
+        // *name*: serde ignores unknown fields by default, so a typo left
+        // `method` on its "none" default, passed `validate()`, and served the
+        // whole read surface unauthenticated. Every one of these means the
+        // operator intended authentication and would otherwise not have got it.
+        for bad in [
+            // The section itself is misspelled, so the real one is absent.
+            "[auth]\nmethod = \"api_key\"\nkeys = [\"s3cret\"]",
+            // The section is right; the key inside it is not.
+            "[authentication]\nmethodd = \"api_key\"\nkeys = [\"s3cret\"]",
+            "[authentication]\nmethod = \"api_key\"\nkey = [\"s3cret\"]",
+        ] {
+            let err = toml::from_str::<ServerConfig>(&format!("{BASE}\n{bad}\n"))
+                .expect_err("unknown keys must fail the parse");
+            assert!(err.to_string().contains("unknown field"), "{bad}\n-> {err}");
+        }
+
+        // Unknown keys in the other sections are refused the same way.
+        for bad in [
+            "[server]\nhost = \"::1\"\nport = 1\nprot = 2",
+            "[data]\nfiles = []\nfile = \"x\"",
+        ] {
+            assert!(toml::from_str::<ServerConfig>(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_bulk_read_ceiling_defaults_and_can_be_overridden() {
+        let cfg: ServerConfig = toml::from_str(BASE).unwrap();
+        assert_eq!(
+            cfg.server.max_bulk_read_keys,
+            crate::service::DEFAULT_MAX_BULK_READ_KEYS,
+            "an existing config that never heard of the field still loads"
+        );
+
+        let raised: ServerConfig = toml::from_str(
+            "[server]\nhost = \"127.0.0.1\"\nport = 1\nmax_bulk_read_keys = 99\n\n[data]\nfiles = [\"s.h5\"]\n",
+        )
+        .unwrap();
+        assert_eq!(raised.server.max_bulk_read_keys, 99);
     }
 
     #[test]

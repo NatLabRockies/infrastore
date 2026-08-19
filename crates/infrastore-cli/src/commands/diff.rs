@@ -52,6 +52,18 @@ impl Status {
     }
 }
 
+/// One line of the report: what the two stores hold for a single identity.
+struct Row {
+    /// The lossless identity the two sides were paired on, kept to break ties in
+    /// the output order. Never displayed — see [`identity_key`].
+    identity: String,
+    /// That same identity rendered for the reader.
+    rendered: String,
+    status: Status,
+    left: Option<String>,
+    right: Option<String>,
+}
+
 pub fn run(
     left_path: &Path,
     right_path: &Path,
@@ -63,37 +75,47 @@ pub fn run(
     let left = load(left_path, filter.clone())?;
     let right = load(right_path, filter)?;
 
-    // BTreeMap keyed by the rendered identity: `KeyIdentity` is hashable but has
-    // no total order, and a diff has to come out in the same order every run to
-    // be diffable itself.
-    let mut rows: Vec<(String, Status, Option<String>, Option<String>)> = Vec::new();
+    let mut rows: Vec<Row> = Vec::new();
     for (id, (key, hash)) in &left {
-        match right.get(id) {
-            None => rows.push((describe(key), Status::Removed, Some(hash.clone()), None)),
-            Some((_, other)) if other == hash => rows.push((
-                describe(key),
-                Status::Same,
-                Some(hash.clone()),
-                Some(other.clone()),
-            )),
-            Some((_, other)) => rows.push((
-                describe(key),
-                Status::Changed,
-                Some(hash.clone()),
-                Some(other.clone()),
-            )),
-        }
+        let (status, right_hash) = match right.get(id) {
+            None => (Status::Removed, None),
+            Some((_, other)) if other == hash => (Status::Same, Some(other.clone())),
+            Some((_, other)) => (Status::Changed, Some(other.clone())),
+        };
+        rows.push(Row {
+            identity: id.clone(),
+            rendered: describe(key),
+            status,
+            left: Some(hash.clone()),
+            right: right_hash,
+        });
     }
     for (id, (key, hash)) in &right {
         if !left.contains_key(id) {
-            rows.push((describe(key), Status::Added, None, Some(hash.clone())));
+            rows.push(Row {
+                identity: id.clone(),
+                rendered: describe(key),
+                status: Status::Added,
+                left: None,
+                right: Some(hash.clone()),
+            });
         }
     }
-    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    // By the rendering, so the report reads in a sensible order, then by the
+    // identity, so two series that render alike still come out in the same order
+    // every run — a diff has to be diffable itself.
+    rows.sort_by(|a, b| {
+        a.rendered
+            .cmp(&b.rendered)
+            .then_with(|| a.identity.cmp(&b.identity))
+    });
 
-    let counts = |s: Status| rows.iter().filter(|r| r.1 == s).count();
+    let counts = |s: Status| rows.iter().filter(|r| r.status == s).count();
     let differing = rows.len() - counts(Status::Same);
-    let shown: Vec<_> = rows.iter().filter(|r| all || r.1 != Status::Same).collect();
+    let shown: Vec<&Row> = rows
+        .iter()
+        .filter(|r| all || r.status != Status::Same)
+        .collect();
 
     let headers: Vec<String> = ["", "Status", "Series", "Left Hash", "Right Hash"]
         .iter()
@@ -101,13 +123,13 @@ pub fn run(
         .collect();
     let table: Vec<Vec<String>> = shown
         .iter()
-        .map(|(desc, status, l, r)| {
+        .map(|r| {
             vec![
-                status.marker().to_string(),
-                status.as_str().to_string(),
-                desc.clone(),
-                short(l),
-                short(r),
+                r.status.marker().to_string(),
+                r.status.as_str().to_string(),
+                r.rendered.clone(),
+                short(&r.left),
+                short(&r.right),
             ]
         })
         .collect();
@@ -116,12 +138,12 @@ pub fn run(
         f if f.is_json() => {
             let items: Vec<Value> = shown
                 .iter()
-                .map(|(desc, status, l, r)| {
+                .map(|r| {
                     json!({
-                        "status": status.as_str(),
-                        "series": desc,
-                        "left_data_hash": l,
-                        "right_data_hash": r,
+                        "status": r.status.as_str(),
+                        "series": r.rendered,
+                        "left_data_hash": r.left,
+                        "right_data_hash": r.right,
                     })
                 })
                 .collect();
@@ -163,7 +185,7 @@ pub fn run(
     Ok(())
 }
 
-/// `identity -> (key, hex hash)` for one store.
+/// `identity_key -> (key, hex hash)` for one store.
 fn load(
     path: &Path,
     filter: infrastore_core::ListFilter,
@@ -174,14 +196,38 @@ fn load(
         .map_err(|e| e.to_string())?;
     let mut out = BTreeMap::new();
     for (key, hash) in rows {
-        out.insert(describe(&key), (key, fields::hash_hex(&hash)));
+        out.insert(identity_key(&key), (key, fields::hash_hex(&hash)));
     }
     Ok(out)
 }
 
-/// A key rendered as the string that is both its comparison identity and its
-/// display. Every identity field appears, so two series that differ only by
-/// feature or interval are two rows rather than one spurious `changed`.
+/// The string two series are paired on: a lossless, unambiguous rendering of
+/// the whole [`KeyIdentity`].
+///
+/// Distinct from [`describe`], and that separation is the point. `describe`
+/// flattens features to `k=v` pairs joined by `,`, which is not injective — the
+/// feature maps `{"a": "1,b=2"}` and `{"a": "1", "b": "2"}` both render as
+/// `a=1,b=2`. Keying the comparison on that rendering collapsed two distinct
+/// series into one map entry, so one of them vanished from the diff entirely and
+/// two stores that genuinely differed could be reported as `0 changed` with exit
+/// 0 — silently passing a CI gate built on that status. The same collision is
+/// reachable through `name`, which can contain the literal text ` features=`.
+///
+/// `Debug` is used because it escapes strings and round-trips floats exactly
+/// (`-0.0`, `inf` and `-inf` all print distinctly), which is what makes it
+/// injective here. `serde_json` would not do: it writes every non-finite float
+/// as `null`, so `+inf` and `-inf` features would collide again. The key never
+/// leaves this process — it is built, compared, and dropped within one run — so
+/// `Debug`'s lack of a cross-version stability guarantee does not matter.
+fn identity_key(key: &TimeSeriesKey) -> String {
+    format!("{:?}", key.identity())
+}
+
+/// A key rendered for the reader. Every identity field appears, so two series
+/// that differ only by feature or interval are two rows rather than one spurious
+/// `changed`. This is display only — the pairing is done on [`identity_key`],
+/// because this rendering is ambiguous for features whose text contains `,`
+/// or `=`.
 fn describe(key: &TimeSeriesKey) -> String {
     let id = key.identity();
     format!(

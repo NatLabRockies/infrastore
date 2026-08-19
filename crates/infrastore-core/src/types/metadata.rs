@@ -130,7 +130,26 @@ impl FromStr for UnitSystem {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// A feature value. Part of a series' identity, so `Eq`, `Hash` and `Ord` all
+/// have to agree — and for the `Float` variant they agree on *bits*, not on
+/// IEEE comparison.
+///
+/// That is the catalog's own rule, not a convenience: [`crate::hash::features_hash`]
+/// digests a float by its bit pattern, and `features_hash` is the column the
+/// uniqueness index keys on. So the store already treats `0.0` and `-0.0` as two
+/// different series. Deriving `PartialEq` gave IEEE semantics instead, where
+/// `0.0 == -0.0` — equal values that hashed differently, breaking the `Hash`
+/// contract for `FeatureValue`, `Features`, `KeyIdentity` and `TimeSeriesKey`
+/// alike. A `HashSet<TimeSeriesKey>` would hold two members that compare equal
+/// while `contains` missed one of them, and the type disagreed with the catalog
+/// about what a distinct series is.
+///
+/// NaN is canonicalized to one bit pattern, so `Float(NaN) == Float(NaN)` and
+/// `Eq`'s reflexivity is honest — the derived `PartialEq` made `impl Eq` a lie,
+/// since a NaN feature was not equal to itself. (The store rejects a NaN feature
+/// on write, because SQLite cannot store one; this keeps the in-memory type
+/// coherent regardless.)
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FeatureValue {
     Int(i64),
     Float(f64),
@@ -138,35 +157,86 @@ pub enum FeatureValue {
     Str(String),
 }
 
+/// One bit pattern per logical float value: every NaN folds to the same one,
+/// and every other value keeps its own bits (so `-0.0` stays distinct from
+/// `0.0`). Shared by `Eq`, `Hash` and `Ord` so the three cannot drift apart.
+fn canonical_bits(v: f64) -> u64 {
+    if v.is_nan() {
+        f64::NAN.to_bits()
+    } else {
+        v.to_bits()
+    }
+}
+
+/// The discriminant `Ord` and `Hash` order variants by.
+fn variant_tag(v: &FeatureValue) -> u8 {
+    match v {
+        FeatureValue::Int(_) => 0,
+        FeatureValue::Float(_) => 1,
+        FeatureValue::Bool(_) => 2,
+        FeatureValue::Str(_) => 3,
+    }
+}
+
+impl PartialEq for FeatureValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (FeatureValue::Int(a), FeatureValue::Int(b)) => a == b,
+            (FeatureValue::Float(a), FeatureValue::Float(b)) => {
+                canonical_bits(*a) == canonical_bits(*b)
+            }
+            (FeatureValue::Bool(a), FeatureValue::Bool(b)) => a == b,
+            (FeatureValue::Str(a), FeatureValue::Str(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
 impl Eq for FeatureValue {}
 
 impl std::hash::Hash for FeatureValue {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        variant_tag(self).hash(state);
         match self {
-            FeatureValue::Int(v) => {
-                0u8.hash(state);
-                v.hash(state);
-            }
-            FeatureValue::Float(v) => {
-                1u8.hash(state);
-                // Hash NaNs as a single canonical bit pattern so logical
-                // equality holds for hash and PartialEq alike.
-                let bits = if v.is_nan() {
-                    f64::NAN.to_bits()
-                } else {
-                    v.to_bits()
-                };
-                bits.hash(state);
-            }
-            FeatureValue::Bool(v) => {
-                2u8.hash(state);
-                v.hash(state);
-            }
-            FeatureValue::Str(v) => {
-                3u8.hash(state);
-                v.hash(state);
-            }
+            FeatureValue::Int(v) => v.hash(state),
+            FeatureValue::Float(v) => canonical_bits(*v).hash(state),
+            FeatureValue::Bool(v) => v.hash(state),
+            FeatureValue::Str(v) => v.hash(state),
         }
+    }
+}
+
+impl Ord for FeatureValue {
+    /// A total order agreeing with [`Eq`]: variants in tag order, then values.
+    ///
+    /// Floats are compared with [`f64::total_cmp`] over the canonicalized value,
+    /// so every NaN sorts as one value (matching `Eq`) rather than by payload as
+    /// raw `total_cmp` would. It exists so `Features` — a `BTreeMap` of these —
+    /// is `Ord`, which is what gives the columnar readers a deterministic column
+    /// layout for series that differ only by feature.
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        variant_tag(self).cmp(&variant_tag(other)).then_with(|| {
+            match (self, other) {
+                (FeatureValue::Int(a), FeatureValue::Int(b)) => a.cmp(b),
+                (FeatureValue::Float(a), FeatureValue::Float(b)) => {
+                    let (a, b) = (
+                        if a.is_nan() { f64::NAN } else { *a },
+                        if b.is_nan() { f64::NAN } else { *b },
+                    );
+                    a.total_cmp(&b)
+                }
+                (FeatureValue::Bool(a), FeatureValue::Bool(b)) => a.cmp(b),
+                (FeatureValue::Str(a), FeatureValue::Str(b)) => a.cmp(b),
+                // Unreachable: the tags already differed.
+                _ => std::cmp::Ordering::Equal,
+            }
+        })
+    }
+}
+
+impl PartialOrd for FeatureValue {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -245,13 +315,44 @@ pub fn is_reserved_feature_name(name: &str) -> bool {
 /// Applied on the write path only, so a store written before this rule existed
 /// stays readable and its offending series can still be listed and removed.
 pub fn validate_features(features: &Features) -> Result<()> {
-    for key in features.keys() {
+    for (key, value) in features {
         if is_reserved_feature_name(key) {
             return Err(TimeSeriesError::InvalidParameter(format!(
                 "feature name {key:?} is reserved: it names a field of a time series \
                  or of the key that addresses one; reserved names are {}",
                 RESERVED_FEATURE_NAMES.join(", ")
             )));
+        }
+        // Two float values cannot survive the catalog round trip, and both are
+        // refused at the door rather than allowed to change underfoot. A feature
+        // is part of a series' identity, so a value that comes back different
+        // from the one written is not a cosmetic loss.
+        //
+        // NaN: SQLite has none, so `sqlite3_bind_double` stores it as NULL while
+        // `value_kind` still says 'float', and the read path — which hydrates
+        // *every* feature set a listing touches — then fails on the NULL. One
+        // such row made `list_keys`/`list_names`/`get_metadata` fail for the
+        // whole store, including series sharing nothing with it, and survived
+        // reopen because the bad row was on disk.
+        //
+        // Negative zero: SQLite's REAL storage keeps an exactly-integral value
+        // as an integer, so `-0.0` is written and read back as `+0.0` — the sign
+        // is simply gone. Everything else round-trips bit-for-bit, the
+        // infinities included, so this is the whole of the exception.
+        if let FeatureValue::Float(f) = value {
+            let unstorable = if f.is_nan() {
+                Some("NaN")
+            } else if *f == 0.0 && f.is_sign_negative() {
+                Some("negative zero")
+            } else {
+                None
+            };
+            if let Some(what) = unstorable {
+                return Err(TimeSeriesError::InvalidParameter(format!(
+                    "feature {key:?} is {what}, which the catalog cannot store faithfully; \
+                     it would read back as a different value"
+                )));
+            }
         }
     }
     Ok(())

@@ -813,7 +813,10 @@ fn hostile_feature_keys_and_values_round_trip_and_disambiguate() {
         "键 with spaces".into(),
         FeatureValue::Str("值'\"[*]".into()),
     );
-    features.insert("f".into(), FeatureValue::Float(-0.0));
+    // Not -0.0: SQLite's REAL storage drops the sign of a negative zero, so it
+    // is refused on write (see the round-trip test below). The infinities and
+    // subnormals do survive bit-for-bit.
+    features.insert("f".into(), FeatureValue::Float(f64::NEG_INFINITY));
     features.insert("b".into(), FeatureValue::Bool(false));
 
     let key = store
@@ -869,4 +872,215 @@ fn hostile_names_survive_a_non_sequential_disk_round_trip() {
     let ns = got.as_non_sequential().unwrap();
     assert_eq!(ns.name, name);
     assert_eq!(ns.timestamps, timestamps);
+}
+
+#[test]
+fn a_nan_feature_value_is_rejected_and_leaves_the_catalog_readable() {
+    // SQLite has no NaN: `sqlite3_bind_double` stores it as NULL while
+    // `value_kind` still says 'float', and the read path — which hydrates every
+    // feature set a listing touches — then fails on the NULL. Accepting such a
+    // value would make `list_keys`/`list_names`/`get_metadata` fail for the
+    // *whole* store, including series sharing nothing with it, and survive a
+    // reopen because the bad row is on disk. So it fails on the way in.
+    use infrastore_core::FeatureValue;
+    let mut store = create_store(None, true).unwrap();
+    let data = TypedArray::from_slice(vec![3], &[1.0f64, 2.0, 3.0]).unwrap();
+
+    store
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            sts("healthy", data.clone()),
+        ))
+        .unwrap();
+
+    let mut features = Features::new();
+    features.insert("x".into(), FeatureValue::Float(f64::NAN));
+    let err = store
+        .add(
+            AddRequest::new(
+                2,
+                "Generator",
+                OwnerCategory::Component,
+                sts("load", data.clone()),
+            )
+            .with_features(features),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, infrastore_core::TimeSeriesError::InvalidParameter(ref m) if m.contains("NaN")),
+        "{err}"
+    );
+
+    // The rejection is total: nothing was written, so the catalog still reads.
+    assert_eq!(store.list_keys(ListFilter::new()).unwrap().len(), 1);
+
+    // Negative zero is refused for the same reason, and separately: SQLite keeps
+    // an exactly-integral REAL as an integer, so the sign is lost and it reads
+    // back as +0.0.
+    let mut features = Features::new();
+    features.insert("x".into(), FeatureValue::Float(-0.0));
+    let err = store
+        .add(
+            AddRequest::new(
+                3,
+                "Generator",
+                OwnerCategory::Component,
+                sts("load", data.clone()),
+            )
+            .with_features(features),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, infrastore_core::TimeSeriesError::InvalidParameter(ref m)
+            if m.contains("negative zero")),
+        "{err}"
+    );
+
+    // Every other float value round-trips bit-for-bit, the infinities included.
+    for (i, v) in [
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        0.0,
+        1.5,
+        f64::MIN_POSITIVE,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut features = Features::new();
+        features.insert("x".into(), FeatureValue::Float(v));
+        store
+            .add(
+                AddRequest::new(
+                    10 + i as i64,
+                    "Generator",
+                    OwnerCategory::Component,
+                    sts("load", data.clone()),
+                )
+                .with_features(features),
+            )
+            .unwrap_or_else(|e| panic!("float feature {v} should be storable: {e}"));
+    }
+    assert_eq!(store.list_keys(ListFilter::new()).unwrap().len(), 6);
+
+    // And what came back is what went in.
+    for key in store.list_keys(ListFilter::new()).unwrap() {
+        if let Some(FeatureValue::Float(v)) = key.identity().features.get("x") {
+            let stored = store.get_metadata(key.identity()).unwrap();
+            assert_eq!(
+                stored.features.get("x"),
+                Some(&FeatureValue::Float(*v)),
+                "float feature {v} did not survive the catalog"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_element_count_too_large_to_represent_is_an_error_not_a_panic() {
+    // Both of these multiply caller-controlled numbers. Unchecked they panic in
+    // a debug build -- against `TypedArray::new`'s documented `Result` contract
+    // -- and, worse, *wrap* in a release build, where the workspace profile
+    // leaves `overflow-checks` off. A wrapped product of 0 makes an empty buffer
+    // "match" a shape describing 2^61 elements, and a wrapped slot count makes
+    // an impossible ragged row pass the width check that `codec::decode` then
+    // trusts.
+    use infrastore_core::{Dtype, ElementType};
+
+    // Shape product overflows `usize`.
+    let err = TypedArray::new(Dtype::F64, vec![2_305_843_009_213_693_952, 8], vec![]).unwrap_err();
+    assert!(err.contains("usize"), "{err}");
+    let err =
+        TypedArray::from_slice(vec![2_305_843_009_213_693_952, 8], &[] as &[f64]).unwrap_err();
+    assert!(err.contains("usize"), "{err}");
+
+    // Element count fits, but count * dtype size does not.
+    let err = TypedArray::new(Dtype::F64, vec![usize::MAX / 4], vec![]).unwrap_err();
+    assert!(err.contains("usize"), "{err}");
+
+    // A ragged row whose declared point count overflows the slots it would need.
+    let huge = TypedArray::from_f64(vec![1, 1], &[9_223_372_036_854_775_808.0]);
+    let err = ElementType::PiecewiseLinear
+        .validate_array(&huge, 1)
+        .unwrap_err();
+    assert!(
+        matches!(err, infrastore_core::TimeSeriesError::InvalidParameter(ref m)
+            if m.contains("row width")),
+        "{err}"
+    );
+
+    // Ordinary shapes and well-formed ragged rows are unaffected.
+    assert!(TypedArray::new(Dtype::F64, vec![3, 2], vec![0u8; 48]).is_ok());
+    let ok = TypedArray::from_f64(vec![1, 5], &[2.0, 0.0, 1.0, 10.0, 20.0]);
+    assert!(ElementType::PiecewiseLinear.validate_array(&ok, 1).is_ok());
+}
+
+#[test]
+fn feature_value_equality_hashing_and_ordering_agree() {
+    // `FeatureValue` is part of a series' identity, so the three have to be one
+    // rule. They are the *catalog's* rule: `features_hash` digests a float by
+    // its bit pattern, and that hash is what the uniqueness index keys on. A
+    // derived `PartialEq` gave IEEE semantics instead, so `0.0 == -0.0` compared
+    // equal while hashing differently — breaking the `Hash` contract all the way
+    // up through `Features`, `KeyIdentity` and `TimeSeriesKey`.
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    use infrastore_core::FeatureValue;
+
+    fn hash_of(v: &FeatureValue) -> u64 {
+        let mut h = DefaultHasher::new();
+        v.hash(&mut h);
+        h.finish()
+    }
+
+    // Equal implies equal hashes, for every variant.
+    for (a, b) in [
+        (FeatureValue::Int(7), FeatureValue::Int(7)),
+        (FeatureValue::Float(1.5), FeatureValue::Float(1.5)),
+        (FeatureValue::Float(f64::NAN), FeatureValue::Float(f64::NAN)),
+        (
+            FeatureValue::Float(f64::INFINITY),
+            FeatureValue::Float(f64::INFINITY),
+        ),
+        (FeatureValue::Bool(true), FeatureValue::Bool(true)),
+        (FeatureValue::Str("x".into()), FeatureValue::Str("x".into())),
+    ] {
+        assert_eq!(a, b, "{a:?} vs {b:?}");
+        assert_eq!(hash_of(&a), hash_of(&b), "{a:?} vs {b:?}");
+        assert_eq!(a.cmp(&b), std::cmp::Ordering::Equal, "{a:?} vs {b:?}");
+    }
+
+    // `Eq` is reflexive even for NaN, which the derived impl was not: a NaN
+    // feature was not equal to itself, so such a key could never be found in any
+    // `HashMap` or `HashSet` while `impl Eq` claimed otherwise.
+    let nan = FeatureValue::Float(f64::NAN);
+    assert_eq!(nan, nan.clone());
+
+    // Unequal implies a defined, consistent ordering — never `Equal`.
+    for (a, b) in [
+        (FeatureValue::Float(0.0), FeatureValue::Float(-0.0)),
+        (FeatureValue::Float(1.0), FeatureValue::Float(2.0)),
+        (FeatureValue::Int(1), FeatureValue::Float(1.0)),
+        (FeatureValue::Bool(false), FeatureValue::Bool(true)),
+    ] {
+        assert_ne!(a, b, "{a:?} vs {b:?}");
+        assert_ne!(a.cmp(&b), std::cmp::Ordering::Equal, "{a:?} vs {b:?}");
+        assert_eq!(
+            a.cmp(&b),
+            b.cmp(&a).reverse(),
+            "{a:?} vs {b:?} antisymmetry"
+        );
+    }
+
+    // The contract that was actually broken: a set lookup by an equal value.
+    let mut set = std::collections::HashSet::new();
+    set.insert(FeatureValue::Float(0.0));
+    assert!(set.contains(&FeatureValue::Float(0.0)));
+    assert!(
+        !set.contains(&FeatureValue::Float(-0.0)),
+        "-0.0 is a distinct value here, as it is to the catalog"
+    );
 }

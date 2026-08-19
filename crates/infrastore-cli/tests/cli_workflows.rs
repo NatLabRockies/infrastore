@@ -1205,6 +1205,75 @@ fn diff_reports_added_removed_and_changed_and_exits_nonzero() {
     );
 }
 
+/// Two series whose feature maps *render* alike are still two series.
+///
+/// `diff` used to pair rows on the rendered identity, where features are `k=v`
+/// pairs joined by `,`. That rendering is not injective -- `{"a": "1,b=2"}` and
+/// `{"a": "1", "b": "2"}` both come out as `a=1,b=2` -- so the two collapsed
+/// into one map entry, one of them dropped out of the comparison, and a store
+/// that genuinely differed was reported as `0 changed` with exit 0. Anything
+/// gating CI on that status passed silently.
+#[test]
+fn diff_pairs_series_by_identity_not_by_how_the_identity_renders() {
+    let dir = tempfile::tempdir().unwrap();
+    let left = dir.path().join("collide_left.h5");
+    let right = dir.path().join("collide_right.h5");
+
+    // Two series identical but for features that render to the same text.
+    let descriptor = |values: &str| {
+        format!(
+            r#"[{{"owner_id": 42, "owner_type": "G", "name": "load",
+                  "type": "SingleTimeSeries", "element_type": "f64", "csv": "{values}",
+                  "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H",
+                  "features": {{"a": "1,b=2"}}}},
+                 {{"owner_id": 42, "owner_type": "G", "name": "load",
+                  "type": "SingleTimeSeries", "element_type": "f64", "csv": "same.csv",
+                  "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H",
+                  "features": {{"a": "1", "b": "2"}}}}]"#
+        )
+    };
+    write(dir.path(), "same.csv", "value\n1\n2\n");
+    write(dir.path(), "differs.csv", "value\n7\n7\n");
+    let l = write(dir.path(), "cl.json", &descriptor("same.csv"));
+    let r = write(dir.path(), "cr.json", &descriptor("differs.csv"));
+    run(&left, &["add", "--descriptor", l.to_str().unwrap()]);
+    run(&right, &["add", "--descriptor", r.to_str().unwrap()]);
+
+    // Both stores really do hold two series each.
+    assert_eq!(data_lines(&run(&left, &["-f", "csv", "list"])).len(), 2);
+    assert_eq!(data_lines(&run(&right, &["-f", "csv", "list"])).len(), 2);
+
+    // One of the two differs, so the diff reports it and exits nonzero.
+    let output = raw(&left, &["diff", "--against", right.to_str().unwrap()]);
+    assert!(
+        !output.status.success(),
+        "a store that differs must exit nonzero: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    // `--all` so the identical row shows up too. Parsed from `raw`, since a
+    // differing diff deliberately exits nonzero.
+    let json = raw(
+        &left,
+        &[
+            "-f",
+            "json",
+            "diff",
+            "--against",
+            right.to_str().unwrap(),
+            "--all",
+        ],
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&json.stdout)).unwrap();
+    assert_eq!(report["changed"], 1, "{report}");
+    assert_eq!(report["same"], 1, "{report}");
+    assert_eq!(report["added"], 0, "{report}");
+    assert_eq!(report["removed"], 0, "{report}");
+    // Neither series was swallowed by the other.
+    assert_eq!(report["items"].as_array().unwrap().len(), 2, "{report}");
+}
+
 /// `diff` reports the differences by default and exits nonzero on them; `--all`
 /// adds the identical rows, and two stores that agree still exit zero.
 #[test]
@@ -1923,4 +1992,314 @@ fn a_closed_pipe_ends_a_stdout_stream_cleanly_instead_of_panicking() {
     assert!(out.status.success(), "template: {out:?}");
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("a JSON descriptor");
     assert_eq!(doc["type"], "SingleTimeSeries");
+}
+
+#[test]
+fn add_replace_works_on_a_fresh_store_and_alongside_new_series() {
+    // `--replace` means "replace it if it is there". Routing the whole load's
+    // identities through the all-or-nothing bulk remove made it fail with
+    // `NotFound` whenever *any* of them was absent — which is every first load
+    // into a new store, and every descriptor that adds a series next to the ones
+    // it replaces.
+    let dir = tempfile::tempdir().unwrap();
+    let two = r#"[{"owner_id": 42, "owner_type": "Generator", "name": "load",
+                   "type": "SingleTimeSeries", "element_type": "f64", "csv": "v.csv",
+                   "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H"},
+                  {"owner_id": 42, "owner_type": "Generator", "name": "newone",
+                   "type": "SingleTimeSeries", "element_type": "f64", "csv": "v.csv",
+                   "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H"}]"#;
+
+    // Nothing exists yet: --replace still loads.
+    let fresh = dir.path().join("fresh.h5");
+    write(dir.path(), "v.csv", "value\n1\n2\n3\n");
+    let d = write(dir.path(), "two.json", two);
+    run(
+        &fresh,
+        &["add", "--descriptor", d.to_str().unwrap(), "--replace"],
+    );
+    assert_eq!(data_lines(&run(&fresh, &["-f", "csv", "list"])).len(), 2);
+
+    // One of the two already exists: the present one is replaced, the absent one
+    // is added, and neither fails the batch.
+    let mixed = dir.path().join("mixed.h5");
+    seed_one(dir.path(), &mixed);
+    write(dir.path(), "v.csv", "value\n9\n8\n7\n");
+    run(
+        &mixed,
+        &["add", "--descriptor", d.to_str().unwrap(), "--replace"],
+    );
+    let listed = run(&mixed, &["-f", "csv", "list"]);
+    assert_eq!(data_lines(&listed).len(), 2, "{listed}");
+    let values = run(&mixed, &["-f", "csv", "get", "--name", "load"]);
+    assert!(values.contains(",9"), "the new values must win: {values}");
+
+    // Still idempotent: a second identical run replaces rather than duplicating.
+    run(
+        &mixed,
+        &["add", "--descriptor", d.to_str().unwrap(), "--replace"],
+    );
+    assert_eq!(data_lines(&run(&mixed, &["-f", "csv", "list"])).len(), 2);
+}
+
+#[test]
+fn a_failed_in_memory_load_still_leaves_an_openable_store() {
+    // Creating the store stamps the HDF5 half at once, while an in-memory
+    // catalog writes no `.sqlite` until `persist_catalog`. Returning early on a
+    // mid-load error therefore used to leave a stamped array file with no
+    // catalog — the `MismatchedArtifact` state, which is terminal: the corrected
+    // re-run cannot open it either, and the only recovery is to delete the file.
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("halfway.h5");
+    write(dir.path(), "v.csv", "value\n1\n2\n3\n");
+
+    // A descriptor that declares the same series twice: the load opens the
+    // store, then fails on the duplicate.
+    let dup = r#"[{"owner_id": 42, "owner_type": "Generator", "name": "load",
+                   "type": "SingleTimeSeries", "element_type": "f64", "csv": "v.csv",
+                   "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H"},
+                  {"owner_id": 42, "owner_type": "Generator", "name": "load",
+                   "type": "SingleTimeSeries", "element_type": "f64", "csv": "v.csv",
+                   "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H"}]"#;
+    let d = write(dir.path(), "dup.json", dup);
+    let err = run_err(
+        &store,
+        &[
+            "add",
+            "--descriptor",
+            d.to_str().unwrap(),
+            "--catalog",
+            "in-memory",
+        ],
+    );
+    assert!(!err.is_empty(), "the duplicate must still fail the load");
+
+    // Both halves are on disk, and the store opens.
+    assert!(store.exists(), "the HDF5 half should be there");
+    assert!(
+        crate::catalog_beside(&store).exists(),
+        "the catalog half must be written even on the failure path"
+    );
+    run(&store, &["-f", "csv", "list"]);
+
+    // And a corrected load at the same path succeeds.
+    let one = r#"{"owner_id": 42, "owner_type": "Generator", "name": "load",
+                  "type": "SingleTimeSeries", "element_type": "f64", "csv": "v.csv",
+                  "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H"}"#;
+    let good = write(dir.path(), "one_only.json", one);
+    run(&store, &["add", "--descriptor", good.to_str().unwrap()]);
+    assert_eq!(data_lines(&run(&store, &["-f", "csv", "list"])).len(), 1);
+}
+
+fn catalog_beside(store: &Path) -> std::path::PathBuf {
+    let mut name = store.as_os_str().to_owned();
+    name.push(".sqlite");
+    std::path::PathBuf::from(name)
+}
+
+/// A timestamped CSV's timestamp column is a claim about the data, not decoration.
+///
+/// The regular types take their timeline from `initial_timestamp` + `resolution`
+/// and store no timestamps of their own, so the column an exported file carries
+/// was stripped and dropped — parsed for the irregular types, discarded for
+/// these. That made the round trip `export` advertises silently lossy: a slice
+/// fed back under a descriptor naming a different grid had every value
+/// relocated onto it, and a column of outright garbage was accepted without a
+/// word.
+#[test]
+fn a_timestamp_column_must_agree_with_the_grid_the_descriptor_declares() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("grid.h5");
+    write(dir.path(), "v.csv", "value\n10\n11\n12\n13\n14\n15\n");
+    let hourly = |name: &str, csv: &str, initial: &str, resolution: &str, owner: i64| {
+        format!(
+            r#"{{"owner_id": {owner}, "owner_type": "Generator", "name": "{name}",
+                 "type": "SingleTimeSeries", "element_type": "f64", "csv": "{csv}",
+                 "initial_timestamp": "{initial}", "resolution": "{resolution}"}}"#
+        )
+    };
+    let d = write(
+        dir.path(),
+        "seed.json",
+        &hourly("load", "v.csv", "2024-01-01T00:00:00Z", "PT1H", 42),
+    );
+    run(&store, &["add", "--descriptor", d.to_str().unwrap()]);
+
+    // Export a slice: it starts at 02:00, not at the series' own start.
+    let slice = run(
+        &store,
+        &[
+            "-f",
+            "csv",
+            "export",
+            "--owner-id",
+            "42",
+            "--name",
+            "load",
+            "--time-range",
+            "2024-01-01T02:00:00Z..2024-01-01T05:00:00Z",
+        ],
+    );
+    assert!(slice.contains("2024-01-01T02:00:00"), "{slice}");
+    write(dir.path(), "slice.csv", &slice);
+
+    // Re-adding it under a descriptor naming a different grid is refused, and
+    // the message says how to resolve it either way.
+    let wrong = write(
+        dir.path(),
+        "wrong.json",
+        &hourly("relocated", "slice.csv", "2030-06-15T00:00:00Z", "PT15M", 7),
+    );
+    let dest = dir.path().join("dest.h5");
+    let err = run_err(&dest, &["add", "--descriptor", wrong.to_str().unwrap()]);
+    assert!(err.contains("2030-06-15"), "{err}");
+    assert!(err.contains("drop the timestamp column"), "{err}");
+    assert!(!dest.exists() || data_lines(&run(&dest, &["-f", "csv", "list"])).is_empty());
+
+    // The same file under the grid it was written from loads, values intact —
+    // the round trip `export` advertises.
+    let right = write(
+        dir.path(),
+        "right.json",
+        &hourly("ok", "slice.csv", "2024-01-01T02:00:00Z", "PT1H", 9),
+    );
+    let round = dir.path().join("round.h5");
+    run(&round, &["add", "--descriptor", right.to_str().unwrap()]);
+    let got = run(&round, &["-f", "csv", "get", "--owner-id", "9"]);
+    assert!(got.contains("2024-01-01T02:00:00"), "{got}");
+    assert!(got.contains(",12"), "{got}");
+
+    // Garbage in the column is reported rather than ignored.
+    write(
+        dir.path(),
+        "garbage.csv",
+        "timestamp,value\nnot-a-timestamp,1.0\nBANANA,2.0\n",
+    );
+    let bad = write(
+        dir.path(),
+        "garbage.json",
+        &hourly("garbage", "garbage.csv", "2024-01-01T00:00:00Z", "PT1H", 8),
+    );
+    let err = run_err(
+        &dir.path().join("garbage.h5"),
+        &["add", "--descriptor", bad.to_str().unwrap()],
+    );
+    assert!(err.contains("invalid timestamp"), "{err}");
+
+    // A value-only CSV is unaffected: no column, nothing to disagree with.
+    let plain = dir.path().join("plain.h5");
+    let d2 = write(
+        dir.path(),
+        "plain.json",
+        &hourly("load", "v.csv", "2024-01-01T00:00:00Z", "PT1H", 42),
+    );
+    run(&plain, &["add", "--descriptor", d2.to_str().unwrap()]);
+    assert_eq!(data_lines(&run(&plain, &["-f", "csv", "list"])).len(), 1);
+}
+
+/// `summary -f csv` is a CSV, not a report with tables in it.
+///
+/// Static and forecast series are two shapes, and the human view shows them as
+/// two tables under two headings. The CSV path printed those headings into the
+/// stream and then emitted both tables, so the output carried rows of 1, 6, 6,
+/// 1, 8 and 8 fields — a strict reader dies on row two. Machine output is now
+/// one uniform table with a `Kind` column and `-` where a column does not apply.
+#[test]
+fn summary_csv_is_one_uniform_table() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("summary.h5");
+    seed_one(dir.path(), &store);
+    // A forecast too, so both shapes are present.
+    run(
+        &store,
+        &["transform", "--horizon", "PT2H", "--interval", "PT1H"],
+    );
+
+    let out = run(&store, &["-f", "csv", "summary"]);
+    let mut lines = out.lines().filter(|l| !l.trim().is_empty());
+    let header = lines.next().expect("a header row");
+    assert!(header.starts_with("Kind,"), "{out}");
+    let width = header.split(',').count();
+
+    let rows: Vec<&str> = lines.collect();
+    assert!(rows.len() >= 2, "both kinds should appear: {out}");
+    for row in &rows {
+        assert_eq!(
+            row.split(',').count(),
+            width,
+            "every row must have the header's width: {out}"
+        );
+    }
+    // No prose headings leaked into the stream.
+    assert!(!out.contains("Static series"), "{out}");
+    assert!(!out.contains("Forecast series"), "{out}");
+    // Both kinds are labelled, and each carries the columns that apply to it.
+    assert!(rows.iter().any(|r| r.starts_with("static,")), "{out}");
+    assert!(rows.iter().any(|r| r.starts_with("forecast,")), "{out}");
+
+    // The human view still shows its two headed tables.
+    let human = run(&store, &["summary"]);
+    assert!(human.contains("Static series"), "{human}");
+    assert!(human.contains("Forecast series"), "{human}");
+}
+
+/// A canvas an SVG cannot express is refused, not written.
+///
+/// `--width`/`--height` are bare floats that went straight into the root
+/// element, so `--width=-100` wrote `width="-100"` (an error per the SVG spec)
+/// and `--width=nan` wrote `width="NaN"` (not a `<length>` at all, and it leaked
+/// into the body geometry as `x="NaN"`). Both reported success and exit 0.
+#[test]
+fn plot_refuses_a_canvas_an_svg_cannot_express() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("canvas.h5");
+    seed_one(dir.path(), &store);
+    let out = dir.path().join("chart.svg");
+
+    for (flag, value) in [
+        ("--width", "-100"),
+        ("--width", "nan"),
+        ("--width", "0"),
+        ("--width", "inf"),
+        ("--width", "10"),
+        ("--height", "-5"),
+        ("--height", "nan"),
+    ] {
+        let err = run_err(
+            &store,
+            &[
+                "plot",
+                "--kind",
+                "line",
+                "--name",
+                "load",
+                &format!("{flag}={value}"),
+                "--out",
+                out.to_str().unwrap(),
+            ],
+        );
+        assert!(
+            err.contains(flag.trim_start_matches("--")),
+            "{flag}={value}: {err}"
+        );
+        assert!(!out.exists(), "{flag}={value} must not write a chart");
+    }
+
+    // An ordinary canvas is unaffected, and lands in the document.
+    run(
+        &store,
+        &[
+            "plot",
+            "--kind",
+            "line",
+            "--name",
+            "load",
+            "--width=800",
+            "--height=400",
+            "--out",
+            out.to_str().unwrap(),
+        ],
+    );
+    let svg = fs::read_to_string(&out).unwrap();
+    assert!(svg.contains(r#"viewBox="0 0 800 400""#), "{svg}");
+    assert!(!svg.contains("NaN"), "{svg}");
 }

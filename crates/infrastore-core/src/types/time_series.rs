@@ -831,10 +831,20 @@ fn validate_forecast_periods(
     };
     check(resolution, "resolution")?;
     check(horizon, "horizon")?;
-    if !interval.is_positive() && !(count == 1 && interval.is_zero()) {
+    // `count <= 1`, not `count == 1`: the interval is the step *between* windows,
+    // so a forecast with one window has none to take and a forecast with none at
+    // all has none either. Restricting the allowance to exactly one window made
+    // a legitimate query on a zero-interval single-window forecast fail —
+    // `resolve_windows` returns an empty selection for a zero-width `time_range`,
+    // and rebuilding that as `count = 0` tripped this check, which
+    // `Store::get_time_series` reports as `IntegrityError`. A caller asking a
+    // well-formed question about an intact store was told the store was corrupt,
+    // and only for the zero-interval encoding: the same query against a
+    // positive-interval forecast returned an empty result.
+    if !interval.is_positive() && !(count <= 1 && interval.is_zero()) {
         return Err(
-            "interval must be strictly positive (zero is allowed only for a single-window \
-             forecast)"
+            "interval must be strictly positive (zero is allowed only for a forecast with at \
+             most one window)"
                 .to_string(),
         );
     }
@@ -1449,10 +1459,13 @@ mod tests {
             let err = validate_forecast_periods(ok, ok, bad_interval, 4).unwrap_err();
             assert!(err.contains("interval must be strictly positive"), "{err}");
         }
-        // A single-window forecast may carry a zero interval (there is no
-        // second window to step to) — but never a negative one.
+        // A forecast with at most one window may carry a zero interval (there
+        // is no second window to step to) — but never a negative one. Zero
+        // windows is the empty selection a zero-width `time_range` produces.
         assert!(validate_forecast_periods(ok, ok, zero, 1).is_ok());
+        assert!(validate_forecast_periods(ok, ok, zero, 0).is_ok());
         assert!(validate_forecast_periods(ok, ok, neg, 1).is_err());
+        assert!(validate_forecast_periods(ok, ok, neg, 0).is_err());
         // Calendar months follow the same rule.
         assert!(
             validate_forecast_periods(Period::Months(0), Period::Months(1), Period::Months(1), 4)

@@ -42,11 +42,41 @@ function _element_type_name(::Type{T}) where {T}
     return name
 end
 
+# The physical dtype an `element_type` string stores, mirroring
+# `ElementType::physical_dtype` in the Rust core. `nothing` for a spelling this
+# wrapper does not recognise — the core is the authority on the vocabulary, so an
+# unknown string is forwarded and rejected there rather than here.
+function _physical_dtype_of(element_type::AbstractString)
+    s = String(element_type)
+    s in ("linear_function", "quadratic_function", "piecewise_linear", "piecewise_step") &&
+        return Float64
+    inner = match(r"^tuple\(\s*\d+\s*,\s*([A-Za-z0-9]+)\s*\)$", s)
+    inner !== nothing && return get(_DTYPE_BY_NAME, inner.captures[1], nothing)
+    return get(_DTYPE_BY_NAME, s, nothing)
+end
+
 # The `element_type` string a write sends: the caller's declaration when it made
 # one, else plain scalars of the array's own element type.
+#
+# A declaration is checked against the array it describes. The bytes on the wire
+# come from `eltype(data)` alone, while the core validates only the *total* byte
+# length — so a same-width disagreement (Int64 as "f64", Bool as "u8", …) is
+# stored and read back as reinterpreted bits with no error anywhere. Only the
+# width-*mismatched* case fails today, which is the wrong half to catch: the
+# silent one is the one that corrupts.
 function _element_type_arg(element_type, data::AbstractArray)
     element_type === nothing && return _element_type_name(eltype(data))
-    return String(element_type)
+    declared = String(element_type)
+    physical = _physical_dtype_of(declared)
+    if physical !== nothing && physical !== eltype(data)
+        throw(
+            InvalidParameterError(
+                "element_type \"$declared\" stores $physical values, but the array's " *
+                "element type is $(eltype(data))",
+            ),
+        )
+    end
+    return declared
 end
 
 # Row-major little-endian bytes for a (possibly multi-dimensional) array. Julia

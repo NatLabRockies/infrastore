@@ -2394,3 +2394,155 @@ fn a_dry_run_validates_without_writing() {
         1
     );
 }
+
+/// A read that fails must not leave the reader's block cache claiming data it
+/// no longer holds.
+///
+/// `WindowSlot` caches a *block* of windows when one window is too large to
+/// read the whole count at once. The HDF5 backend clears the destination buffer
+/// before the lookup that can return `NotFound`, and `read_window` used to
+/// propagate that error without clearing `cached` — so the slot went on
+/// advertising a range over an emptied buffer. The next read landing inside that
+/// range skipped the I/O and indexed the empty slice, turning a removed array
+/// into an out-of-range panic rather than the `NotFound` the failed read had
+/// already reported.
+#[test]
+fn a_failed_window_read_invalidates_the_block_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("blocks.h5");
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+
+    // A horizon big enough that one window is ~400 KB, so the reader caches a
+    // couple of windows per block rather than all five.
+    const H: usize = 50_000;
+    const COUNT: usize = 5;
+    let vals: Vec<f64> = (0..H * COUNT).map(|i| i as f64).collect();
+
+    let mut store = create_store(Some(path.as_path()), false).unwrap();
+    let key = store
+        .add_time_series(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::Deterministic(
+                Deterministic::new(
+                    initial,
+                    Duration::hours(1),
+                    Duration::hours(H as i64),
+                    Duration::hours(1),
+                    COUNT,
+                    f64_arr(vec![H, COUNT], &vals),
+                    "load",
+                )
+                .unwrap(),
+            ),
+            Features::new(),
+        )
+        .unwrap();
+    store.flush().unwrap();
+
+    let mut reader = store
+        .build_forecast_reader(
+            ListFilter::new()
+                .time_series_type(TimeSeriesType::Deterministic)
+                .resolution(Duration::hours(1)),
+        )
+        .unwrap();
+
+    // Populate the cache from the first block.
+    store.forecast_read(&mut reader, initial).unwrap();
+
+    // Take the array away, then read a window in a *different* block: the
+    // failure clears the backing buffer.
+    store.remove_time_series(key.identity()).unwrap();
+    let far = initial + Duration::hours(2);
+    assert!(
+        store.forecast_read(&mut reader, far).is_err(),
+        "the array is gone, so this must fail"
+    );
+
+    // Now read a window back inside the originally cached range. This is the
+    // one that used to panic; it must report the same error instead.
+    let near = initial + Duration::hours(1);
+    assert!(
+        store.forecast_read(&mut reader, near).is_err(),
+        "a stale cache must not resurrect a removed array"
+    );
+}
+
+/// A zero-width `time_range` selects nothing, and that is an answer, not a fault.
+///
+/// `resolve_windows` returns an empty selection for `end == start`, and the
+/// reconstruction then rebuilt the forecast with `count = 0`. For a
+/// zero-interval single-window forecast — the encoding
+/// `transform_single_time_series` writes under `normalize_single_window` — that
+/// tripped `validate_forecast_periods`, whose zero-interval allowance was keyed
+/// on exactly one window. `Store::get_time_series` maps a constructor failure to
+/// `IntegrityError`, so a well-formed query on an intact store reported that the
+/// store was corrupt, and only for this encoding: the same query against a
+/// positive-interval forecast returned an empty forecast successfully.
+#[test]
+fn a_zero_width_range_returns_an_empty_forecast_for_either_interval_encoding() {
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let mut store = create_store(None, true).unwrap();
+
+    // Single window, zero interval.
+    let single = Deterministic::new(
+        initial,
+        Duration::hours(1),
+        Duration::hours(4),
+        Duration::zero(),
+        1,
+        f64_arr(vec![4, 1], &[1.0, 2.0, 3.0, 4.0]),
+        "single_window",
+    )
+    .unwrap();
+    let single_key = store
+        .add_time_series(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::Deterministic(single),
+            Features::new(),
+        )
+        .unwrap();
+
+    // Several windows, positive interval — the control that always worked.
+    let many = Deterministic::new(
+        initial,
+        Duration::hours(1),
+        Duration::hours(4),
+        Duration::hours(2),
+        3,
+        f64_arr(vec![4, 3], &(0..12).map(|i| i as f64).collect::<Vec<_>>()),
+        "many_windows",
+    )
+    .unwrap();
+    let many_key = store
+        .add_time_series(
+            2,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::Deterministic(many),
+            Features::new(),
+        )
+        .unwrap();
+
+    for (label, key) in [("zero interval", &single_key), ("positive", &many_key)] {
+        let empty = store
+            .get_time_series(key.identity(), Some((initial, initial)))
+            .unwrap_or_else(|e| panic!("{label}: zero-width range should select nothing, got {e}"));
+        assert_eq!(
+            empty.as_deterministic().unwrap().count,
+            0,
+            "{label}: a zero-width range selects no windows"
+        );
+    }
+
+    // And the ordinary queries on the zero-interval forecast still return its
+    // one window.
+    for range in [None, Some((initial, initial + Duration::hours(4)))] {
+        let got = store.get_time_series(single_key.identity(), range).unwrap();
+        assert_eq!(got.as_deterministic().unwrap().count, 1, "{range:?}");
+    }
+}

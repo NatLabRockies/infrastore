@@ -137,28 +137,54 @@ fn sub_millisecond_resolutions_are_rejected_not_truncated() {
 }
 
 #[test]
-fn a_sub_millisecond_resolution_is_rejected_by_the_stores_read_path() {
-    // A `SingleTimeSeries` constructor does *not* validate its resolution, so a
-    // sub-millisecond one can be stored. PIN what happens next: a time-range
-    // read errors rather than dividing by a zero-millisecond step.
+fn a_resolution_the_store_cannot_represent_is_refused_on_write() {
+    // A resolution has to be a positive whole number of milliseconds -- what
+    // `Period::is_positive` means -- and the write path now enforces it, as
+    // every forecast constructor already did.
+    //
+    // This used to be a read-path pin: `SingleTimeSeries::new` is infallible, so
+    // the series was storable and the failure surfaced later, differently for
+    // each bad value. Sub-millisecond encoded as `PT0S` and failed only on a
+    // *sliced* read; zero repeated one instant; a negative resolution built a
+    // reader whose timeline ran backwards and whose every `index_at` then
+    // rejected its own timestamps. None of the three was usable, so the line is
+    // drawn at the write instead.
     let mut store = create_store(None, true).unwrap();
+    for bad in [
+        Duration::microseconds(1),
+        Duration::nanoseconds(999_999),
+        Duration::zero(),
+        Duration::hours(-1),
+    ] {
+        let err = store
+            .add(AddRequest::new(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                sts_at("load", t0(), bad),
+            ))
+            .unwrap_err();
+        assert!(
+            matches!(err, infrastore_core::TimeSeriesError::InvalidParameter(ref m)
+                if m.contains("resolution")),
+            "{bad:?}: expected an InvalidParameter about the resolution, got {err:?}"
+        );
+    }
+
+    // One whole millisecond is the finest grid the store can hold, and it works.
     let key = add(
         &mut store,
         1,
-        sts_at("load", t0(), Duration::microseconds(1)),
+        sts_at("load", t0(), Duration::milliseconds(1)),
     );
-
-    // A full read still works — no arithmetic on the resolution is needed.
-    let got = store.get_time_series(key.identity(), None).unwrap();
-    assert_eq!(got.as_single().unwrap().length, 4);
-
-    // A sliced read needs a positive step and is rejected.
-    let err = store
-        .get_time_series(key.identity(), Some((t0(), t0() + Duration::seconds(1))))
-        .unwrap_err();
-    assert!(
-        matches!(err, infrastore_core::TimeSeriesError::InvalidParameter(_)),
-        "expected InvalidParameter, got {err:?}"
+    assert_eq!(
+        store
+            .get_time_series(key.identity(), None)
+            .unwrap()
+            .as_single()
+            .unwrap()
+            .length,
+        4
     );
 }
 

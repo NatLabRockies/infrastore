@@ -1528,3 +1528,348 @@ fn transformed_view_inherits_component_field() {
         Some("max_active_power")
     );
 }
+
+#[test]
+fn a_single_time_series_whose_length_disagrees_with_its_array_is_rejected() {
+    // `length` is a public field that `new` derives from the array, so the two
+    // agree at construction and nothing keeps them agreeing afterwards —
+    // replacing `data`, or deserializing a hand-written payload, breaks the tie.
+    // The catalog row is built from the field, so accepting the mismatch would
+    // persist a row that misdescribes its own bytes: it survives
+    // flush/persist_to/compact, and `check_static_consistency`,
+    // `transform_single_time_series` and `build_static_reader` all then work off
+    // the wrong grid. `NonSequentialTimeSeries` has always enforced the
+    // equivalent rule.
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let mut store = create_store(None, true).unwrap();
+
+    let mut series = SingleTimeSeries::new(
+        initial,
+        Duration::hours(1),
+        TypedArray::from_f64(vec![10], &(0..10).map(f64::from).collect::<Vec<_>>()),
+        "load",
+    );
+    // The array is swapped out; `length` still says 10.
+    series.data = TypedArray::from_f64(vec![3], &[1.0, 2.0, 3.0]);
+
+    let request = || {
+        AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series.clone()),
+        )
+    };
+
+    for (path, err) in [
+        ("add", store.add(request()).unwrap_err()),
+        (
+            "add_time_series_bulk",
+            store.add_time_series_bulk(vec![request()]).unwrap_err(),
+        ),
+    ] {
+        assert!(
+            matches!(err, TimeSeriesError::InvalidParameter(ref m)
+                if m.contains("length 10") && m.contains("3 time steps")),
+            "{path}: {err}"
+        );
+    }
+
+    // Nothing was written by either attempt.
+    assert_eq!(store.list_keys(ListFilter::new()).unwrap().len(), 0);
+
+    // A series whose fields agree is still accepted.
+    let good = SingleTimeSeries::new(
+        initial,
+        Duration::hours(1),
+        TypedArray::from_f64(vec![3], &[1.0, 2.0, 3.0]),
+        "load",
+    );
+    store
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(good),
+        ))
+        .unwrap();
+    assert_eq!(store.list_keys(ListFilter::new()).unwrap().len(), 1);
+}
+
+/// `Deterministic` and `DeterministicSingleTimeSeries` are mutually exclusive
+/// for one family — on *every* path that writes an association row.
+///
+/// The add path has always enforced this. `copy_time_series`, `replace_owner`
+/// and `rename_time_series` did not: they write through
+/// `MetadataStore::insert`/`replace_owner`/`rename`, which skip the check, and
+/// each of the three moves a row to a *new* family identity, which is precisely
+/// the operation that can pair the two. The resulting state is one the rest of
+/// the code treats as unreachable: `resolve_forecast_key` reports the family as
+/// ambiguous with no way to narrow it (both candidates share resolution *and*
+/// interval), and `transform_single_time_series` refuses to run again.
+#[test]
+fn every_write_path_refuses_to_pair_deterministic_with_its_single_view() {
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+
+    // A store whose owner 1 holds a SingleTimeSeries "load" and the DST derived
+    // from it.
+    let seeded = || {
+        let mut store = create_store(None, true).unwrap();
+        let vals: Vec<f64> = (0..24).map(f64::from).collect();
+        store
+            .add(AddRequest::new(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+                    initial,
+                    Duration::hours(1),
+                    TypedArray::from_f64(vec![24], &vals),
+                    "load",
+                )),
+            ))
+            .unwrap();
+        store
+            .transform_single_time_series(
+                Duration::hours(4),
+                Duration::hours(2),
+                None,
+                None,
+                Default::default(),
+            )
+            .unwrap();
+        store
+    };
+
+    // A dense Deterministic on the same grid, added under `owner`/`name`.
+    let dense = |store: &mut infrastore_core::Store, owner: i64, name: &str| {
+        let vals: Vec<f64> = (0..12).map(f64::from).collect();
+        store
+            .add(AddRequest::new(
+                owner,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::Deterministic(
+                    Deterministic::new(
+                        initial,
+                        Duration::hours(1),
+                        Duration::hours(4),
+                        Duration::hours(2),
+                        3,
+                        TypedArray::from_f64(vec![4, 3], &vals),
+                        name,
+                    )
+                    .unwrap(),
+                ),
+            ))
+            .unwrap()
+    };
+
+    let types_of_owner_1 = |store: &infrastore_core::Store| {
+        let mut t: Vec<&'static str> = store
+            .list_keys(ListFilter::new().owner_id(1))
+            .unwrap()
+            .iter()
+            .map(|k| k.time_series_type().as_str())
+            .collect();
+        t.sort_unstable();
+        t
+    };
+
+    // Route 1: copy the Deterministic onto the owner that holds the DST.
+    let mut store = seeded();
+    let src = dense(&mut store, 2, "load");
+    let err = store
+        .copy_time_series(src.identity(), 1, "Generator", None)
+        .unwrap_err();
+    assert!(
+        matches!(err, TimeSeriesError::InvalidParameter(ref m) if m.contains("mutually exclusive")),
+        "copy: {err}"
+    );
+    assert_eq!(
+        types_of_owner_1(&store),
+        ["DeterministicSingleTimeSeries", "SingleTimeSeries"]
+    );
+
+    // Route 2: move the whole owner that holds the Deterministic onto it.
+    let mut store = seeded();
+    dense(&mut store, 3, "load");
+    let err = store
+        .replace_owner(3, 1, OwnerCategory::Component)
+        .unwrap_err();
+    assert!(
+        matches!(err, TimeSeriesError::InvalidParameter(ref m) if m.contains("mutually exclusive")),
+        "replace_owner: {err}"
+    );
+    assert_eq!(
+        types_of_owner_1(&store),
+        ["DeterministicSingleTimeSeries", "SingleTimeSeries"]
+    );
+
+    // Route 3: rename a Deterministic the same owner already holds into the
+    // DST's family.
+    let mut store = seeded();
+    let other = dense(&mut store, 1, "other");
+    let err = store
+        .rename_time_series(other.identity(), "load")
+        .unwrap_err();
+    assert!(
+        matches!(err, TimeSeriesError::InvalidParameter(ref m) if m.contains("mutually exclusive")),
+        "rename: {err}"
+    );
+    // "other" is a different family, so it legitimately survives untouched.
+    assert_eq!(
+        store
+            .list_keys(ListFilter::new().owner_id(1))
+            .unwrap()
+            .iter()
+            .filter(|k| k.name() == "load")
+            .count(),
+        2
+    );
+
+    // The rule still permits the unrelated cases: a Deterministic on a family
+    // with no DST, and a copy to a family that is free.
+    let mut store = seeded();
+    dense(&mut store, 5, "unrelated");
+    assert_eq!(store.list_keys(ListFilter::new()).unwrap().len(), 3);
+}
+
+/// A rename names one series, and touches one row or none.
+///
+/// `MetadataStore::rename` matched any interval when the key carried none —
+/// a predicate copied from `delete_by_key`, where it is a documented
+/// convenience. For a rename it meant a key with `interval: None` updated
+/// *every* interval of a forecast family, and `rename_time_series` committed
+/// that multi-row update before discovering the ambiguity, reporting an error
+/// for an operation that had already taken full effect.
+#[test]
+fn renaming_with_an_underspecified_key_changes_nothing() {
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let mut store = create_store(None, true).unwrap();
+    let vals: Vec<f64> = (0..12).map(f64::from).collect();
+
+    // Two forecasts of one variable that differ only by interval — a day-ahead
+    // and a real-time forecast, which the catalog treats as distinct series.
+    for interval in [Duration::hours(1), Duration::hours(24)] {
+        store
+            .add(AddRequest::new(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::Deterministic(
+                    Deterministic::new(
+                        initial,
+                        Duration::hours(1),
+                        Duration::hours(4),
+                        interval,
+                        3,
+                        TypedArray::from_f64(vec![4, 3], &vals),
+                        "load",
+                    )
+                    .unwrap(),
+                ),
+            ))
+            .unwrap();
+    }
+
+    let underspecified = KeyIdentity {
+        owner_id: 1,
+        owner_category: OwnerCategory::Component,
+        time_series_type: TimeSeriesType::Deterministic,
+        name: "load".into(),
+        resolution: Some(Duration::hours(1).into()),
+        interval: None,
+        features: Features::new(),
+    };
+    assert!(
+        store
+            .rename_time_series(&underspecified, "renamed")
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .list_keys(ListFilter::new())
+            .unwrap()
+            .iter()
+            .filter(|k| k.name() == "load")
+            .count(),
+        2,
+        "a failed rename must leave both rows alone"
+    );
+
+    // Naming the interval renames exactly that one.
+    let exact = KeyIdentity {
+        interval: Some(Duration::hours(24).into()),
+        ..underspecified
+    };
+    store.rename_time_series(&exact, "day_ahead").unwrap();
+    let mut names: Vec<String> = store
+        .list_keys(ListFilter::new())
+        .unwrap()
+        .iter()
+        .map(|k| k.name().to_string())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["day_ahead", "load"]);
+}
+
+/// A reader's column layout is a total order, so series that differ only by
+/// feature land in the same position every run.
+///
+/// `identity_sort_key` used to be `(owner_id, owner_category, name)`. The
+/// catalog's uniqueness index deliberately allows one owner to hold the same
+/// name at the same resolution under different `features_hash` values —
+/// scenarios of one variable — so those rows tied. `sort_by` is stable and the
+/// listing query carries no `ORDER BY`, so the tie fell through to whatever row
+/// order SQLite produced, which is not stable across index choices, catalog
+/// rebuilds, or SQLite versions. A consumer caching "column j is component X"
+/// could then read another component's values with nothing reporting an error.
+#[test]
+fn reader_columns_are_ordered_by_features_when_nothing_else_separates_them() {
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let scenarios = [3i64, 1, 2]; // deliberately not inserted in sorted order
+
+    let column_order = |insertion: &[i64]| -> Vec<i64> {
+        let mut store = create_store(None, true).unwrap();
+        for &s in insertion {
+            let mut features = Features::new();
+            features.insert("scenario".into(), FeatureValue::Int(s));
+            let vals: Vec<f64> = (0..3).map(|i| (s * 100 + i) as f64).collect();
+            store
+                .add(
+                    AddRequest::new(
+                        1,
+                        "Generator",
+                        OwnerCategory::Component,
+                        TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+                            initial,
+                            Duration::hours(1),
+                            TypedArray::from_f64(vec![3], &vals),
+                            "load",
+                        )),
+                    )
+                    .with_features(features),
+                )
+                .unwrap();
+        }
+        let reader = store
+            .build_static_reader(ListFilter::new().resolution(Duration::hours(1)))
+            .unwrap();
+        let group = &reader.groups()[0];
+        assert_eq!(group.num_columns(), insertion.len());
+        group
+            .keys()
+            .iter()
+            .map(|k| match k.identity().features.get("scenario") {
+                Some(FeatureValue::Int(v)) => *v,
+                other => panic!("unexpected feature {other:?}"),
+            })
+            .collect()
+    };
+
+    // Columns come out in feature order regardless of the order they were added.
+    assert_eq!(column_order(&scenarios), vec![1, 2, 3]);
+    assert_eq!(column_order(&[1, 2, 3]), vec![1, 2, 3]);
+    assert_eq!(column_order(&[3, 2, 1]), vec![1, 2, 3]);
+}

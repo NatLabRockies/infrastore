@@ -412,3 +412,64 @@ fn rollback_survives_a_reopen() {
         0.0
     );
 }
+
+/// The array an inner span wrote goes away when that span rolls back.
+///
+/// The catalog half of this is pinned above; this is the physical half, and it
+/// needs a signal the catalog cannot give. An inner rollback used to unwind the
+/// rows while leaving the bytes in the file: `commit_transaction` only consults
+/// `pending_free`, so nothing ever swept the inner span's `staged_hashes`. The
+/// orphan was invisible to `verify_integrity`, which walks only
+/// catalog-referenced arrays, and survived until someone ran `compact`.
+#[test]
+fn an_inner_rollback_removes_the_arrays_that_span_wrote() {
+    each_backend(|store, backend| {
+        store.begin_transaction().unwrap();
+        add(store, 1, 0.0);
+
+        store.begin_transaction().unwrap();
+        let inner = add(store, 2, 100.0);
+        let inner_hash = store.get_metadata(inner.identity()).unwrap().data_hash;
+        assert!(
+            store.locate_array(&inner_hash).is_ok(),
+            "{backend}: the inner add really did write an array"
+        );
+        store.rollback_transaction().unwrap();
+        store.commit_transaction().unwrap();
+
+        assert!(
+            store.locate_array(&inner_hash).is_err(),
+            "{backend}: the rolled-back span's array must not survive"
+        );
+        assert_eq!(store.num_distinct_arrays().unwrap(), 1, "{backend}");
+        assert_eq!(count(store), 1, "{backend}");
+        assert!(
+            store.verify_integrity().unwrap().errors.is_empty(),
+            "{backend}"
+        );
+    });
+}
+
+/// An array an *enclosing* span also wrote is kept when the inner one rolls
+/// back — the sweep rechecks references rather than trusting the staged list.
+#[test]
+fn an_inner_rollback_keeps_an_array_the_outer_span_still_references() {
+    each_backend(|store, backend| {
+        store.begin_transaction().unwrap();
+        let outer = add(store, 1, 0.0);
+        let shared = store.get_metadata(outer.identity()).unwrap().data_hash;
+
+        store.begin_transaction().unwrap();
+        // Same values, so the same content-addressed array, under a new owner.
+        add(store, 2, 0.0);
+        store.rollback_transaction().unwrap();
+
+        assert!(
+            store.locate_array(&shared).is_ok(),
+            "{backend}: owner 1 still references this array"
+        );
+        store.commit_transaction().unwrap();
+        assert!(store.locate_array(&shared).is_ok(), "{backend}");
+        assert_eq!(count(store), 1, "{backend}");
+    });
+}

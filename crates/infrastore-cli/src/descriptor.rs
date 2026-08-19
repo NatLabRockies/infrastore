@@ -126,6 +126,54 @@ pub enum CsvLayout {
     ForecastTimestamped,
 }
 
+/// Check a timestamped CSV against the grid its descriptor declares.
+///
+/// The regular types take their timeline from `initial_timestamp` + `resolution`
+/// and store no timestamps of their own, so the column an exported file carries
+/// has nowhere to go. It was therefore stripped and dropped — parsed for the
+/// irregular types, discarded for these — which made the round trip `export`
+/// advertises silently lossy: feeding a slice back under a descriptor naming a
+/// different grid relocated every value onto it, and a column of outright
+/// garbage was accepted without a word.
+///
+/// A timestamp column is a claim about the data, so it is checked rather than
+/// ignored: the file has to describe the same grid the descriptor does.
+fn check_regular_grid(
+    timestamps: &[String],
+    initial: chrono::DateTime<chrono::Utc>,
+    resolution: infrastore_core::Period,
+    length: usize,
+    name: &str,
+) -> Result<(), String> {
+    if timestamps.len() != length {
+        return Err(format!(
+            "series '{name}': the CSV has {} timestamps but {length} time steps of values",
+            timestamps.len()
+        ));
+    }
+    for (i, raw) in timestamps.iter().enumerate() {
+        let got = parse::parse_timestamp(raw)
+            .map_err(|e| format!("series '{name}', row {}: {e}", i + 1))?;
+        let want = resolution
+            .add_to(initial, i as i64)
+            .ok_or_else(|| format!("series '{name}': the declared grid overflows at step {i}"))?;
+        if got != want {
+            return Err(format!(
+                "series '{name}', row {}: the CSV says {} but the declared grid \
+                 (initial_timestamp {}, resolution {}) puts step {i} at {}. Adjust \
+                 `initial_timestamp`/`resolution` to match the file, or drop the \
+                 timestamp column to accept the declared grid.",
+                i + 1,
+                got.to_rfc3339(),
+                initial.to_rfc3339(),
+                resolution.to_iso8601(),
+                want.to_rfc3339(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl CsvLayout {
     /// How many leading columns to strip before the value block.
     fn leading_cols(self) -> usize {
@@ -549,6 +597,13 @@ impl Descriptor {
         } else {
             None
         };
+        // A wide `SingleTimeSeries` file carries the same timestamp column, and
+        // it describes one grid for every column in the file, so it is checked
+        // once here rather than per owner.
+        if has_timestamps && ts_type == TimeSeriesType::SingleTimeSeries {
+            let (initial, resolution) = self.regular_params()?;
+            check_regular_grid(&csv.timestamps(), initial, resolution, csv.rows, &self.name)?;
+        }
 
         let mut out = Vec::with_capacity(columns.len());
         for (j, (owner_id, owner_type)) in owners.into_iter().enumerate() {
@@ -709,6 +764,9 @@ impl Descriptor {
             TimeSeriesType::SingleTimeSeries => {
                 let (initial, resolution) = self.regular_params()?;
                 let length = self.steps_from_values(csv.values.len(), per_step)?;
+                if layout == CsvLayout::Timestamped {
+                    check_regular_grid(&csv.timestamps(), initial, resolution, length, &self.name)?;
+                }
                 let shape = with_elem(vec![length], elem);
                 let arr = csv_io::build_typed_array(dtype, shape, &csv.values)?;
                 Ok(TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(

@@ -607,10 +607,10 @@ pub fn merge(
 
     let mut store = store_access::open_writable(store_path)?;
     if replace {
+        // Only what the destination already holds; a merge that brings in a
+        // series the destination lacks is the normal case, not a failure.
         let keys: Vec<&infrastore_core::KeyIdentity> = identities.iter().collect();
-        store
-            .remove_time_series_bulk(&keys)
-            .map_err(|e| e.to_string())?;
+        store_access::remove_existing(&mut store, &keys)?;
     }
     let n = store
         .add_time_series_bulk(requests)

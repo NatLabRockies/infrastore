@@ -502,6 +502,13 @@ struct OpenTxn {
     /// rollback — they are unreachable once the catalog rolls back, and leaving
     /// them would orphan bytes no association references.
     staged_hashes: Vec<[u8; 32]>,
+    /// `staged_hashes.len()` as each nesting level was opened, so a rollback can
+    /// tell which writes belong to the level it is unwinding. Without it an
+    /// inner rollback unwound the catalog but left its arrays in the file: the
+    /// outer commit only consults `pending_free`, so the bytes stayed with no
+    /// row referencing them — invisible to `verify_integrity`, which walks only
+    /// catalog-referenced arrays, and reclaimable only by `compact`.
+    marks: Vec<usize>,
     /// Arrays that a removal inside this transaction left unreferenced. The free
     /// is deferred to the outermost commit: while the transaction is open the
     /// bytes must survive, because a rollback restores the catalog rows that
@@ -919,7 +926,9 @@ impl Store {
         let depth = self.txn.as_ref().map_or(0, |t| t.depth);
         self.metadata
             .execute_txn_stmt(&format!("SAVEPOINT {};", Self::txn_savepoint(depth)))?;
-        self.txn.get_or_insert_with(OpenTxn::default).depth = depth + 1;
+        let txn = self.txn.get_or_insert_with(OpenTxn::default);
+        txn.marks.push(txn.staged_hashes.len());
+        txn.depth = depth + 1;
         tracing::debug!(depth = depth + 1, "transaction begun");
         Ok(())
     }
@@ -943,7 +952,11 @@ impl Store {
         self.metadata
             .execute_txn_stmt(&format!("RELEASE {};", Self::txn_savepoint(depth)))?;
         if depth > 0 {
-            self.txn.as_mut().expect("checked above").depth = depth;
+            // The level's writes survive into the enclosing one, so its mark is
+            // simply dropped rather than acted on.
+            let txn = self.txn.as_mut().expect("checked above");
+            txn.marks.pop();
+            txn.depth = depth;
             return Ok(());
         }
         self.txn = None;
@@ -970,7 +983,26 @@ impl Store {
         self.metadata
             .execute_txn_stmt(&format!("ROLLBACK TO {name}; RELEASE {name};"))?;
         if depth > 0 {
-            self.txn.as_mut().expect("checked above").depth = depth;
+            // The catalog has unwound this level, so the arrays it wrote are as
+            // unreachable as an outermost rollback's — free them on the same
+            // terms rather than leaving them for the outer commit, which only
+            // ever looks at `pending_free` and would strand them in the file.
+            // `unreferenced` rechecks each one, so a hash that predates this
+            // level, or that an enclosing level also wrote, is kept.
+            let mark = {
+                let txn = self.txn.as_mut().expect("checked above");
+                txn.depth = depth;
+                txn.marks.pop().unwrap_or(0)
+            };
+            let to_free = self.unreferenced(|t| t.staged_hashes.split_off(mark))?;
+            for hash in &to_free {
+                self.backend.remove_array(hash)?;
+            }
+            tracing::debug!(
+                depth,
+                removed = to_free.len(),
+                "inner transaction rolled back"
+            );
             return Ok(());
         }
         // The catalog is back to its pre-transaction state, so anything this
@@ -1435,6 +1467,26 @@ impl Store {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
         let tx = self.metadata.savepoint()?;
+        // Moving an owner's rows can land a `Deterministic` in a family that
+        // already holds the `DeterministicSingleTimeSeries` view of the same
+        // series, or the reverse — a state the rest of the code treats as
+        // unreachable. Checked over the whole moved set, because the move is one
+        // `UPDATE`.
+        if let Some((name, moving, existing)) =
+            crate::metadata::forecast_family_conflict_on_owner_move(
+                &tx,
+                old_owner,
+                new_owner,
+                owner_category,
+            )?
+        {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "cannot move owner {old_owner} to {new_owner}: '{name}' would put a {} \
+                 and a {} in the same series family; they are mutually exclusive",
+                moving.as_str(),
+                existing.as_str(),
+            )));
+        }
         let updated = MetadataStore::replace_owner(&tx, old_owner, new_owner, owner_category)?;
         tx.commit()?;
         Ok(updated)
@@ -1485,6 +1537,7 @@ impl Store {
         }
 
         let tx = self.metadata.savepoint()?;
+        check_forecast_family_free(&tx, &meta, "copy")?;
         MetadataStore::insert(&tx, &meta)?;
         tx.commit()?;
 
@@ -2631,11 +2684,29 @@ impl Store {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
+        // A rename moves the row to a new family identity, which can put it
+        // alongside the counterpart it is mutually exclusive with. Read the row
+        // first so the check can be posed against the *destination* name.
+        let mut probe = self.metadata.get_by_key(key)?;
+        probe.name = new_name.to_string();
+
         let tx = self.metadata.savepoint()?;
+        check_forecast_family_free(&tx, &probe, "rename to")?;
         let updated = MetadataStore::rename(&tx, key, new_name)?;
         if updated == 0 {
             // No matching row; tx drops (rolls back a no-op).
             return Err(TimeSeriesError::NotFound);
+        }
+        if updated > 1 {
+            // A key names one series, so touching more than one row means the
+            // predicate was wider than the caller asked for. Fail *before* the
+            // commit: this used to commit a multi-row update and only then
+            // discover the ambiguity on the follow-up lookup, reporting an error
+            // for a rename that had already taken full effect. The `tx` drop
+            // rolls it back.
+            return Err(TimeSeriesError::IntegrityError(format!(
+                "rename matched {updated} associations for a single key identity"
+            )));
         }
         tx.commit()?;
         // Rebuild the key from the renamed row (same identity, new name).
@@ -3720,6 +3791,7 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
     let element_type = resolve_element_type(item)?;
     let (hash, group, layout, meta, key) = match &item.data {
         TimeSeriesData::SingleTimeSeries(single) => {
+            validate_single(single)?;
             let hash = array_hash(&single.data);
             (
                 hash,
@@ -4005,28 +4077,115 @@ fn insert_association(
     meta: &TimeSeriesMetadata,
     cache: &mut SharedSetCache,
 ) -> Result<()> {
-    let conflict = if meta.time_series_type == TimeSeriesType::Deterministic {
-        crate::metadata::forecast_family_conflict(
-            tx,
-            meta.owner_id,
-            meta.owner_category,
-            &meta.name,
-            meta.resolution,
-            &crate::hash::features_hash(&meta.features),
-            TimeSeriesType::DeterministicSingleTimeSeries,
-        )
-    } else {
-        Ok(false)
-    };
-    match conflict {
-        Ok(true) => Err(TimeSeriesError::InvalidParameter(format!(
-            "cannot add Deterministic '{}': a DeterministicSingleTimeSeries view of the \
-             same series already exists; they are mutually exclusive",
-            meta.name
-        ))),
-        Ok(false) => MetadataStore::insert_batched(tx, meta, cache).map(|_| ()),
-        Err(e) => Err(e),
+    check_forecast_family_free(tx, meta, "add")?;
+    MetadataStore::insert_batched(tx, meta, cache).map(|_| ())
+}
+
+/// The type that may not share an abstract-deterministic family with `ty`, or
+/// `None` for a type that has no such counterpart.
+fn exclusive_counterpart(ty: TimeSeriesType) -> Option<TimeSeriesType> {
+    match ty {
+        TimeSeriesType::Deterministic => Some(TimeSeriesType::DeterministicSingleTimeSeries),
+        TimeSeriesType::DeterministicSingleTimeSeries => Some(TimeSeriesType::Deterministic),
+        _ => None,
     }
+}
+
+/// Reject an association that would put both `Deterministic` and
+/// `DeterministicSingleTimeSeries` in one family, whichever of the two is
+/// arriving. `verb` names the operation in the error.
+///
+/// Every path that writes an association row has to consult this, not just the
+/// add path. The catalog's unique index keys on `time_series_type` and so cannot
+/// enforce the rule, and `copy_time_series`, `replace_owner` and
+/// `rename_time_series` all move an existing row to a *new* family identity —
+/// which is exactly the operation that can put the pair together. They wrote
+/// through `MetadataStore::insert`/`replace_owner`/`rename` and skipped the
+/// check entirely, so all three could reach a state the rest of the code treats
+/// as impossible: `resolve_forecast_key` then reports the family as ambiguous
+/// forever (both candidates share resolution *and* interval, so no filter
+/// narrows it), and `transform_single_time_series` refuses to run again.
+///
+/// The check is bidirectional here because these paths can move *either* member
+/// into the other's family, where a plain add can only ever bring the
+/// `Deterministic` — a DST is only ever minted by
+/// [`Store::transform_single_time_series`].
+fn check_forecast_family_free(
+    tx: &rusqlite::Connection,
+    meta: &TimeSeriesMetadata,
+    verb: &str,
+) -> Result<()> {
+    let Some(counterpart) = exclusive_counterpart(meta.time_series_type) else {
+        return Ok(());
+    };
+    let conflict = crate::metadata::forecast_family_conflict(
+        tx,
+        meta.owner_id,
+        meta.owner_category,
+        &meta.name,
+        meta.resolution,
+        &crate::hash::features_hash(&meta.features),
+        counterpart,
+    )?;
+    if conflict {
+        return Err(TimeSeriesError::InvalidParameter(format!(
+            "cannot {verb} {} '{}': a {} of the same series already exists; \
+             they are mutually exclusive",
+            meta.time_series_type.as_str(),
+            meta.name,
+            counterpart.as_str(),
+        )));
+    }
+    Ok(())
+}
+
+/// Check that a `SingleTimeSeries` describes its own array.
+///
+/// `length` is a public field that `SingleTimeSeries::new` derives from the
+/// array, so the two agree at construction — but nothing keeps them agreeing
+/// afterwards. Replacing `data` (or deserializing a hand-written payload, which
+/// is a supported round trip) leaves a `length` that describes an array the
+/// series no longer holds, and the catalog row is built from that field. Without
+/// this check the store persists a row that misdescribes its own bytes: reads
+/// return a series whose `length` and `data.length()` disagree, the mismatch
+/// survives `flush`/`persist_to`/`compact`, and every consumer that trusts the
+/// catalog — `check_static_consistency`, `transform_single_time_series`,
+/// `build_static_reader` — works off the wrong grid.
+///
+/// The sibling [`validate_non_sequential`] has always enforced the equivalent
+/// rule; this is the static path catching up.
+fn validate_single(series: &SingleTimeSeries) -> Result<()> {
+    if series.length != series.data.length() {
+        return Err(TimeSeriesError::InvalidParameter(format!(
+            "SingleTimeSeries declares length {} but its array holds {} time steps",
+            series.length,
+            series.data.length()
+        )));
+    }
+    // The resolution has to be a period the store can actually represent, which
+    // `Period::is_positive` defines as a whole number of milliseconds greater
+    // than zero. `SingleTimeSeries::new` is infallible, so until this check
+    // every forecast constructor rejected such a period while the static path
+    // waved it through, and the result was a series nothing could read back:
+    //
+    //   * a negative resolution built a `StaticReader` whose timeline ran
+    //     *backwards*, and whose every `index_at` then failed on its own
+    //     timestamps;
+    //   * zero repeated one instant `length` times;
+    //   * a sub-millisecond resolution encoded as `PT0S` and read back as zero,
+    //     so a sliced read failed on a zero-length step.
+    //
+    // All three were writable and none was usable, which is the worst place to
+    // draw the line. Callers wanting a finer grid should scale their unit — a
+    // 500 µs series is a 500-unit series with the unit recorded in `units`.
+    if !series.resolution.is_positive() {
+        return Err(TimeSeriesError::InvalidParameter(format!(
+            "SingleTimeSeries resolution {} is not a positive whole number of milliseconds; \
+             the store cannot represent it",
+            series.resolution.to_iso8601()
+        )));
+    }
+    Ok(())
 }
 
 fn validate_non_sequential(series: &NonSequentialTimeSeries) -> Result<()> {

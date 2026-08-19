@@ -948,28 +948,36 @@ def test_microsecond_datetimes_round_trip_through_disk(tmp_path):
     assert reopened.get_time_series(key).initial_timestamp == precise
 
 
-def test_a_microsecond_resolution_is_silently_truncated_to_zero():
-    """FINDING F13 (see TEST_COVERAGE_PLAN.md §9), from the Python side.
+def test_a_microsecond_resolution_is_refused_rather_than_truncated():
+    """Formerly FINDING F13, pinned as truncate-and-accept; now fixed.
 
-    A `Period` is a whole number of milliseconds, so a `timedelta` finer than
-    that loses its magnitude. The store *accepts* the series and reports the
-    resolution as ``PT0S`` rather than rejecting the input — pinned, not fixed.
+    A `Period` is a whole number of milliseconds, so a finer `timedelta` loses
+    its magnitude and encoded as ``PT0S``. The store used to *accept* such a
+    series: a full read worked, a time-sliced read then failed on a zero-length
+    step, and the resolution read back as ``PT0S`` rather than what was asked
+    for. It is now rejected on write, as every forecast constructor already did.
     """
     store = Store.create(in_memory=True)
+    with pytest.raises(InvalidParameterError, match="resolution"):
+        _add(
+            store,
+            1,
+            SingleTimeSeries(
+                T0, timedelta(microseconds=1), np.arange(4, dtype=np.float64), "micro"
+            ),
+        )
+
+    # One whole millisecond is the finest grid the store can express, and it is
+    # unaffected.
     key = _add(
         store,
         1,
         SingleTimeSeries(
-            T0, timedelta(microseconds=1), np.arange(4, dtype=np.float64), "micro"
+            T0, timedelta(milliseconds=1), np.arange(4, dtype=np.float64), "milli"
         ),
     )
-    assert key.resolution == "PT0S", "PIN: a sub-millisecond resolution becomes PT0S"
-
-    # A full read still works; a time-sliced read cannot, because the grid step
-    # is zero.
+    assert key.resolution == "PT0.001S"
     assert store.get_time_series(key).length == 4
-    with pytest.raises(InvalidParameterError):
-        store.get_time_series(key, time_range=(T0, T0 + timedelta(seconds=1)))
 
 
 def test_sub_second_resolutions_are_exact_down_to_one_millisecond():

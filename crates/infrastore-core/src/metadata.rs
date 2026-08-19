@@ -1179,11 +1179,20 @@ impl MetadataStore {
         let f_hash = features_hash(&key.features);
         let resolution_iso = key.resolution.map(period_to_iso);
         let interval_iso = key.interval.map(period_to_iso);
+        // Both period predicates distinguish NULL, so this matches exactly the
+        // row the key names. [`Self::delete_by_key`] deliberately treats a NULL
+        // interval as "any interval" — a documented convenience for removal —
+        // and this once copied that predicate without the reasoning behind it.
+        // The two operations do not want the same rule: a rename with
+        // `interval: None` then updated *every* interval of a forecast family,
+        // and since a `KeyIdentity` carries `Some` interval for every forecast
+        // type and `None` only for the static types, the wildcard could not even
+        // be asked for deliberately.
         tx.execute(
             "UPDATE time_series_associations SET name = ?1
              WHERE owner_id = ?2 AND owner_category = ?3 AND time_series_type = ?4 AND name = ?5
                AND ((?6 IS NULL AND resolution IS NULL) OR resolution = ?6)
-               AND (?7 IS NULL OR interval = ?7)
+               AND ((?7 IS NULL AND interval IS NULL) OR interval = ?7)
                AND features_hash = ?8",
             params![
                 new_name,
@@ -2932,6 +2941,60 @@ pub fn forecast_family_conflict(
         )
         .optional()?;
     Ok(exists.is_some())
+}
+
+/// The first series whose move from `old_owner` to `new_owner` would put both
+/// `Deterministic` and `DeterministicSingleTimeSeries` in one family, as
+/// `(name, moving_type, existing_type)`.
+///
+/// [`forecast_family_conflict`] answers the question for one prospective row;
+/// this answers it for the whole set that [`MetadataStore::replace_owner`] moves
+/// in a single `UPDATE`, which cannot be decomposed into per-row checks without
+/// listing every row first. The `CASE` maps each moving row to the type it
+/// excludes, so one query covers both directions.
+pub fn forecast_family_conflict_on_owner_move(
+    tx: &Connection,
+    old_owner: i64,
+    new_owner: i64,
+    owner_category: OwnerCategory,
+) -> Result<Option<(String, TimeSeriesType, TimeSeriesType)>> {
+    let det = TimeSeriesType::Deterministic.code();
+    let dst = TimeSeriesType::DeterministicSingleTimeSeries.code();
+    let row: Option<(String, i64, i64)> = tx
+        .prepare_cached(
+            "SELECT moving.name, moving.time_series_type, existing.time_series_type
+             FROM time_series_associations AS moving
+             JOIN time_series_associations AS existing
+               ON existing.owner_id = ?2
+              AND existing.owner_category = moving.owner_category
+              AND existing.name = moving.name
+              AND ((moving.resolution IS NULL AND existing.resolution IS NULL)
+                   OR existing.resolution = moving.resolution)
+              AND existing.features_hash = moving.features_hash
+              AND existing.time_series_type = CASE moving.time_series_type
+                                                WHEN ?4 THEN ?5
+                                                WHEN ?5 THEN ?4
+                                              END
+             WHERE moving.owner_id = ?1 AND moving.owner_category = ?3
+             LIMIT 1",
+        )?
+        .query_row(
+            params![old_owner, new_owner, owner_category.code(), det, dst],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    row.map(|(name, moving, existing)| {
+        Ok((
+            name,
+            TimeSeriesType::from_code(moving).ok_or_else(|| {
+                TimeSeriesError::IntegrityError(format!("unknown time_series_type {moving}"))
+            })?,
+            TimeSeriesType::from_code(existing).ok_or_else(|| {
+                TimeSeriesError::IntegrityError(format!("unknown time_series_type {existing}"))
+            })?,
+        ))
+    })
+    .transpose()
 }
 
 #[cfg(test)]

@@ -2745,38 +2745,44 @@ end
     end
 end
 
-@testset "a Microsecond resolution is silently flattened to zero" begin
-    # FINDING F13, from the Julia side: a `Period` is a whole number of
-    # milliseconds, so a `Microsecond(1)` resolution loses its magnitude. The add
-    # succeeds and the stored resolution reads back as `Millisecond(0)` rather
-    # than being rejected. PINNED, not fixed.
+@testset "a Microsecond resolution is refused, not flattened to zero" begin
+    # Formerly FINDING F13, pinned as flatten-and-accept; now fixed. A `Period`
+    # is a whole number of milliseconds, so `Microsecond(1)` lost its magnitude:
+    # the add succeeded, the resolution read back as `Millisecond(0)`, and only a
+    # time-sliced read then failed, on a zero-length step. The write path now
+    # rejects any resolution that is not a positive whole millisecond, as every
+    # forecast constructor already did.
     store = Store(in_memory=true)
     t = DateTime(2024, 1, 1)
+    # Note `_period_to_iso` rounds to the nearest millisecond, so only values
+    # that round to zero (or below) are refused here; `Nanosecond(999_999)`
+    # rounds *up* to 1 ms and is stored as such.
+    for bad in [Microsecond(1), Microsecond(499), Millisecond(0), Hour(-1)]
+        @test_throws InfraStore.InvalidParameterError add_time_series!(
+            store,
+            1,
+            "Generator",
+            Component,
+            SingleTimeSeries(t, bad, Float64[1, 2, 3, 4], "micro"),
+        )
+    end
+    @test isempty(list_keys(store; owner_id=1))
+
+    # One whole millisecond is the finest grid the store can express.
     add_time_series!(
         store,
         1,
         "Generator",
         Component,
-        SingleTimeSeries(t, Microsecond(1), Float64[1, 2, 3, 4], "micro"),
+        SingleTimeSeries(t, Millisecond(1), Float64[1, 2, 3, 4], "milli"),
     )
     keys = list_keys(store; owner_id=1)
     @test length(keys) == 1
-    @test keys[1].resolution == Millisecond(0)
-
-    # A full read still works; a time-sliced one cannot divide by a zero step.
+    @test keys[1].resolution == Millisecond(1)
     got = get_time_series(
-        SingleTimeSeries, store, 1, Component, "micro"; resolution=Millisecond(0)
+        SingleTimeSeries, store, 1, Component, "milli"; resolution=Millisecond(1)
     )
     @test length(got.data) == 4
-    @test_throws InfraStore.InvalidParameterError get_time_series(
-        SingleTimeSeries,
-        store,
-        1,
-        Component,
-        "micro";
-        resolution=Millisecond(0),
-        time_range=(t, t + Second(1)),
-    )
 end
 
 @testset "pre-1970 and far-future timestamps round trip" begin
@@ -3444,6 +3450,24 @@ end
     end
     @test length(list_keys(store)) == 3
 
+    # `commit_transaction!` runs inside the block's protected region: an error at
+    # commit time propagates to the caller, the rollback attempt is logged rather
+    # than masking it, and the store is left usable. (Sabotage the block's own
+    # transaction so its commit has nothing to release.)
+    @test_logs (:error, r"rollback failed") match_mode = :any begin
+        @test_throws InfraStore.InvalidParameterError transaction(store) do
+            add(6, 500.0)
+            rollback_transaction!(store)
+        end
+    end
+    @test !in_transaction(store)
+    @test length(list_keys(store)) == 3
+    transaction(store) do
+        add(6, 500.0)
+    end
+    @test length(list_keys(store)) == 4
+    @test !in_transaction(store)
+
     # Committing what was never begun is an error, not a silent no-op.
     @test_throws InfraStore.InvalidParameterError commit_transaction!(store)
     @test_throws InfraStore.InvalidParameterError rollback_transaction!(store)
@@ -3790,5 +3814,140 @@ end
             @test [k.owner_id for k in list_keys(reopened)] == [1]
             @test verify_integrity(reopened) == 0
         end
+    end
+end
+
+@testset "a dtype disagreement is reported, never reinterpreted" begin
+    # Both halves of this are the same mistake: bytes decoded as a type the store
+    # did not store them as. The dtype is known on both paths — the FFI reports
+    # it on a read, and `eltype(data)` fixes it on a write — so a disagreement is
+    # a question the wrapper can answer rather than a reinterpretation it should
+    # perform. Silently reinterpreting produced numbers like `5.0e-323` in place
+    # of `Int64[10, 20, 30]`, with no error anywhere.
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+
+    k = add_time_series!(
+        store, 1, "Generator", Component,
+        SingleTimeSeries(t0, res, Int64[10, 20, 30], "counts"),
+    )
+    h = get_metadata(store, k).data_hash
+
+    # Reading as the wrong type is an error naming the right one...
+    err = try
+        get_array_by_hash(store, h)   # T defaults to Float64
+        nothing
+    catch e
+        e
+    end
+    @test err isa InfraStore.InvalidParameterError
+    @test occursin("Int64", sprint(showerror, err))
+    # ...and reading as the stored type still works.
+    @test get_array_by_hash(store, h, Int64) == Int64[10, 20, 30]
+
+    # A declared element_type must agree with the array it describes. The
+    # core validates only the total byte length, so a same-width mismatch
+    # (Int64 declared "f64") used to be stored and read back as garbage;
+    # only the width-mismatched case failed.
+    @test_throws InfraStore.InvalidParameterError add_time_series!(
+        store, 2, "Generator", Component,
+        SingleTimeSeries(t0, res, Int64[1, 2, 3, 4], "m"; element_type="f64"),
+    )
+    # The inner dtype of a tuple/function spelling is checked the same way.
+    @test_throws InfraStore.InvalidParameterError add_time_series!(
+        store, 3, "Generator", Component,
+        SingleTimeSeries(t0, res, Int64[1 2; 3 4], "t"; element_type="tuple(2,f64)"),
+    )
+
+    # Agreeing declarations, and no declaration at all, are unaffected.
+    ki = add_time_series!(
+        store, 4, "Generator", Component,
+        SingleTimeSeries(t0, res, Int64[1, 2, 3, 4], "ok_i64"; element_type="i64"),
+    )
+    @test get_time_series(store, ki).data == Int64[1, 2, 3, 4]
+    add_time_series!(
+        store, 5, "Generator", Component,
+        SingleTimeSeries(
+            t0, res, Float64[1 2; 3 4], "ok_tuple"; element_type="tuple(2,f64)"
+        ),
+    )
+    kn = add_time_series!(
+        store, 6, "Generator", Component,
+        SingleTimeSeries(t0, res, Int64[7, 8], "inferred"),
+    )
+    @test get_time_series(store, kn).data == Int64[7, 8]
+end
+
+@testset "timestamps convert exactly, not through a float" begin
+    # `_to_unix_ms` used to be `Int64(datetime2unix(dt) * 1000)`, routing an
+    # integer millisecond count through Float64 seconds. Outside one accidentally
+    # exact window (roughly 2004-2038) the product is not integral for a
+    # millisecond-precision instant, and `Int64` threw `InexactError` on an
+    # ordinary timestamp. A `DateTime` is already integer milliseconds, so the
+    # conversion needs no float at all.
+    for dt in [
+        DateTime(1900, 1, 1),
+        DateTime(1969, 12, 31, 23, 59, 59, 999),
+        DateTime(1970, 1, 1),
+        DateTime(2024, 1, 1, 0, 0, 0, 123),
+        DateTime(2038, 3, 19, 21, 10, 26, 23),   # threw before the fix
+        DateTime(2200, 6, 15, 12, 34, 56, 789),
+        DateTime(9999, 12, 31, 23, 59, 59, 999),
+    ]
+        @test InfraStore._from_unix_ms(InfraStore._to_unix_ms(dt)) == dt
+    end
+    @test InfraStore._to_unix_ms(DateTime(1970, 1, 1)) == 0
+    @test InfraStore._to_unix_ms(DateTime(1969, 12, 31, 23, 59, 59, 999)) == -1
+
+    # And it reaches the store: a far-future millisecond timestamp round-trips.
+    store = Store(in_memory=true)
+    t = DateTime(2038, 3, 19, 21, 10, 26, 23)
+    k = add_time_series!(
+        store, 1, "Generator", Component,
+        SingleTimeSeries(t, Hour(1), Float64[1, 2, 3], "load"),
+    )
+    @test get_time_series(store, k).initial_timestamp == t
+end
+
+@testset "Store(path=...) creates a file-backed store" begin
+    # `in_memory` used to default to `true`, and the non-`overwrite` branch
+    # passed both it and the path to `infrastore_store_create_with_catalog`,
+    # which ignores the path when in-memory wins. The contradictory pair was
+    # accepted silently: the user got an in-memory store, and everything written
+    # was discarded at `close!` with no file ever created. It now defaults to
+    # "whatever the path implies", and the contradiction is an error -- the same
+    # rule the `overwrite=true` branch has always enforced.
+    mktempdir() do dir
+        path = joinpath(dir, "inferred.h5")
+        s = Store(path=path)
+        @test get_path(s) == path
+        @test catalog_mode(s) === :attached
+        add_time_series!(
+            s, 1, "Generator", Component,
+            SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), Float64[1, 2, 3], "load"),
+        )
+        close!(s)
+        @test isfile(path)
+
+        # It really is a store, and it holds what was written.
+        open_store(path; read_only=true) do reopened
+            @test length(list_keys(reopened)) == 1
+        end
+
+        # No path still means in-memory.
+        mem = Store()
+        @test get_path(mem) === nothing
+        @test catalog_mode(mem) === :memory
+        close!(mem)
+
+        # Asking for both is refused rather than silently resolved.
+        @test_throws ArgumentError Store(path=joinpath(dir, "x.h5"), in_memory=true)
+
+        # And an explicit `in_memory=false` with a path still works.
+        p2 = joinpath(dir, "explicit.h5")
+        s2 = Store(path=p2, in_memory=false)
+        close!(s2)
+        @test isfile(p2)
     end
 end

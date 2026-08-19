@@ -239,6 +239,179 @@ def test_numpy_array_received_as_ndarray():
     assert arr.shape == (24,)
 
 
+@pytest.mark.parametrize(
+    "descr", ["<f8", ">f8", ">f4", ">i8", ">i4", ">i2", ">u8", ">u2"]
+)
+def test_byte_order_is_normalised_not_reinterpreted(descr):
+    """A big-endian array stores its values, not its bytes.
+
+    `.dtype.name` drops byte order (`np.dtype('>f8').name == 'float64'`) while
+    `.tobytes()` keeps it, so a big-endian array used to be written under a
+    little-endian label and read back byte-reversed -- silently, since every
+    reversed value is still a legal number. The binding normalises to the
+    store's documented little-endian layout instead.
+    """
+    store = Store.create(in_memory=True)
+    initial = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    expected = np.array([1, 2, 3], dtype=descr)
+
+    series = SingleTimeSeries(initial, timedelta(hours=1), expected, "load")
+    key = store.add_time_series(1, "Generator", OwnerCategory.Component, series)
+    got = np.asarray(store.get_time_series(key).data)
+
+    # Values survive, and the caller gets them in the host's own byte order.
+    assert np.array_equal(got, expected)
+    assert got.dtype == np.dtype(descr).newbyteorder("=")
+
+
+def test_single_byte_dtypes_are_unaffected_by_byte_order():
+    """`bool`/`int8`/`uint8` have no byte order to normalise ('|' in numpy)."""
+    store = Store.create(in_memory=True)
+    initial = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    for owner, values in enumerate(
+        [
+            np.array([True, False, True]),
+            np.array([-1, 0, 1], dtype=np.int8),
+            np.array([0, 128, 255], dtype=np.uint8),
+        ]
+    ):
+        series = SingleTimeSeries(initial, timedelta(hours=1), values, "load")
+        key = store.add_time_series(
+            owner + 1, "Generator", OwnerCategory.Component, series
+        )
+        got = np.asarray(store.get_time_series(key).data)
+        assert np.array_equal(got, values)
+        assert got.dtype == values.dtype
+
+
+def test_non_contiguous_big_endian_array_round_trips():
+    """The two representational normalisations compose: order and byte order."""
+    store = Store.create(in_memory=True)
+    initial = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    # A strided view of a big-endian array: neither C-contiguous nor LE.
+    expected = np.arange(12, dtype=">f8").reshape(3, 4)[:, ::2]
+    assert not expected.flags["C_CONTIGUOUS"]
+
+    series = SingleTimeSeries(initial, timedelta(hours=1), expected, "load")
+    key = store.add_time_series(1, "Generator", OwnerCategory.Component, series)
+    got = np.asarray(store.get_time_series(key).data)
+
+    assert np.array_equal(got, expected)
+    assert got.shape == expected.shape
+
+
+def test_bad_data_hash_raises_a_catchable_error():
+    """A malformed hash is an ordinary bad argument, not an uncatchable panic.
+
+    The length guard counted bytes while the loop sliced character boundaries,
+    so a 64-*byte* string of multi-byte characters sliced through a character and
+    panicked. PyO3 surfaces a panic as `PanicException`, which inherits from
+    `BaseException` -- escaping both `except Exception` and this package's own
+    exception hierarchy.
+    """
+    store = Store.create(in_memory=True)
+    for bad in [
+        "\U0001F600" * 16,  # 64 bytes, 16 characters
+        "\u00e9" * 32,  # 64 bytes, 32 characters
+        "z" * 64,  # right length, not hex
+        "ab",  # too short
+        "",
+    ]:
+        with pytest.raises(InvalidParameterError):
+            store.get_array_by_hash(bad)
+        with pytest.raises(InvalidParameterError):
+            store.count_array_references(bad)
+
+
+def test_resolution_must_be_a_whole_positive_millisecond():
+    """The store cannot represent a finer or non-positive grid, so it says so.
+
+    Periods are stored as an integer count of milliseconds. A sub-millisecond
+    resolution encodes as PT0S and used to read back as zero; zero repeated one
+    instant; a negative one built a reader whose timeline ran backwards. All
+    three were writable and none was readable.
+    """
+    store = Store.create(in_memory=True)
+    initial = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    values = np.arange(4, dtype=np.float64)
+
+    for bad in [
+        timedelta(microseconds=1),
+        timedelta(microseconds=999),
+        timedelta(0),
+        timedelta(hours=-1),
+    ]:
+        series = SingleTimeSeries(initial, bad, values, "load")
+        with pytest.raises(InvalidParameterError, match="resolution"):
+            store.add_time_series(1, "Generator", OwnerCategory.Component, series)
+
+    # One whole millisecond is the finest grid there is, and it works.
+    series = SingleTimeSeries(initial, timedelta(milliseconds=1), values, "load")
+    key = store.add_time_series(1, "Generator", OwnerCategory.Component, series)
+    assert len(np.asarray(store.get_time_series(key).data)) == 4
+
+
+def test_omitted_descriptor_kwargs_keep_what_the_series_carries():
+    """Re-adding a series read back from the store keeps its descriptors.
+
+    `units`, `quantity_kind`, `unit_system`, `component_field` and
+    `application_data` were set unconditionally from kwargs defaulting to None,
+    so a read-then-re-add silently cleared five of the six descriptors that
+    `get_time_series` had just populated -- while keeping `element_type`, which
+    was already guarded. The value classes expose no properties for the five, so
+    the caller could neither notice nor re-supply what was lost.
+    """
+    store = Store.create(in_memory=True)
+    initial = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    series = SingleTimeSeries(initial, timedelta(hours=1), np.arange(4.0), "load")
+    described = dict(
+        units="MW",
+        quantity_kind="ActivePower",
+        unit_system="component_base",
+        component_field="max_active_power",
+        application_data='{"a": 1}',
+        element_type="f64",
+    )
+    key = store.add_time_series(
+        1, "Generator", OwnerCategory.Component, series, **described
+    )
+
+    # Read it back and re-add it under a new owner, supplying nothing.
+    round_tripped = store.get_time_series(key)
+    key2 = store.add_time_series(
+        2, "Generator", OwnerCategory.Component, round_tripped
+    )
+    meta = store.get_metadata(key2)
+    for field, expected in described.items():
+        assert meta[field] == expected, field
+
+    # The bulk path behaves the same way.
+    (key3,) = store.add_time_series_bulk(
+        [
+            {
+                "owner_id": 3,
+                "owner_type": "Generator",
+                "owner_category": OwnerCategory.Component,
+                "time_series": store.get_time_series(key),
+            }
+        ]
+    )
+    meta3 = store.get_metadata(key3)
+    for field, expected in described.items():
+        assert meta3[field] == expected, f"bulk: {field}"
+
+    # An explicitly supplied value still overrides.
+    key4 = store.add_time_series(
+        4,
+        "Generator",
+        OwnerCategory.Component,
+        store.get_time_series(key),
+        units="kW",
+    )
+    assert store.get_metadata(key4)["units"] == "kW"
+    assert store.get_metadata(key4)["quantity_kind"] == "ActivePower"
+
+
 def test_non_sequential_round_trip_and_slice():
     store = Store.create(in_memory=True)
     initial = datetime(2024, 1, 1, tzinfo=timezone.utc)

@@ -1,13 +1,20 @@
 # ---- Operations -----------------------------------------------------------
 
 # Convert a DateTime to Unix milliseconds.
+#
+# Integer arithmetic throughout. `datetime2unix` returns Float64 *seconds*, and
+# multiplying that back up by 1000 does not land on an integer for most
+# millisecond-precision instants outside roughly 2004-2038 -- `Int64` then threw
+# `InexactError` on a perfectly ordinary timestamp. A `DateTime` is already an
+# integer millisecond count internally, so no float need be involved.
 function _to_unix_ms(dt::DateTime)
-    return Int64(Dates.datetime2unix(dt) * 1000)
+    return Dates.value(dt) - Dates.UNIXEPOCH
 end
 
-# Convert milliseconds since epoch back into a DateTime.
+# Convert milliseconds since epoch back into a DateTime. The exact inverse of
+# `_to_unix_ms`, and likewise float-free.
 function _from_unix_ms(ms::Int64)
-    return Dates.unix2datetime(ms / 1000)
+    return DateTime(Dates.UTM(ms + Dates.UNIXEPOCH))
 end
 
 # Lower an optional `(start, end)` DateTime range to the FFI's
@@ -338,9 +345,14 @@ end
 """
     get_array_by_hash(store, data_hash, ::Type{T}=Float64) -> Vector{T}
 
-Fetch the full stored array for a 32-byte content hash, interpreting the raw
-element bytes as `T`. For multi-dimensional element shapes the result is the
-flat row-major vector; the caller reshapes using the known element shape.
+Fetch the full stored array for a 32-byte content hash, decoding the raw element
+bytes as `T`. For multi-dimensional element shapes the result is the flat
+row-major vector; the caller reshapes using the known element shape.
+
+Throws [`InvalidParameterError`](@ref) when the array is not stored as `T`. The
+store knows its own dtype and reports it through the ABI, so a mismatch is a
+question this call can answer rather than a reinterpretation it should perform;
+the error names the dtype to ask for.
 """
 function get_array_by_hash(
     store::Store, data_hash::Vector{UInt8}, ::Type{T}=Float64
@@ -361,6 +373,15 @@ function get_array_by_hash(
         copy(unsafe_wrap(Array, out_data[], Int(out_len[]); own=false))
     finally
         _free_u8(out_data[], out_len[])
+    end
+    stored = _julia_dtype(out_dtype[])
+    if stored !== T
+        throw(
+            InvalidParameterError(
+                "array is stored as $stored, not $T; " *
+                "call get_array_by_hash(store, data_hash, $stored)",
+            ),
+        )
     end
     return collect(reinterpret(T, bytes))
 end

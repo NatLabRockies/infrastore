@@ -36,9 +36,13 @@
 //! `Period::Fixed` wraps a [`chrono::Duration`], which *can* hold a finer span,
 //! and the conversion is lossy in one direction only: constructing
 //! `Period::fixed(Duration::microseconds(500))` succeeds but encodes as `PT0S`.
-//! `SingleTimeSeries::new` does not validate its resolution, so such a series can
-//! be stored, and its resolution reads back as zero. Callers building a period
-//! from a sub-millisecond duration should round it themselves.
+//! Such a period is not [`Period::is_positive`], and **no write path accepts one
+//! as a resolution** — the forecast constructors reject it, and so does the
+//! static path, which validates a `SingleTimeSeries` before it is stored. A
+//! series on a grid finer than a millisecond is therefore not storable at all,
+//! rather than storable and unreadable. Callers needing a finer grid should scale
+//! the unit instead: a 500 µs series is a 500-unit series that records the unit
+//! in `units`.
 //!
 //! Note that this floor applies to *periods*, not to timestamps: an
 //! `initial_timestamp` is stored as an RFC3339 string and keeps nanoseconds, so a
