@@ -3450,6 +3450,24 @@ end
     end
     @test length(list_keys(store)) == 3
 
+    # `commit_transaction!` runs inside the block's protected region: an error at
+    # commit time propagates to the caller, the rollback attempt is logged rather
+    # than masking it, and the store is left usable. (Sabotage the block's own
+    # transaction so its commit has nothing to release.)
+    @test_logs (:error, r"rollback failed") match_mode = :any begin
+        @test_throws InfraStore.InvalidParameterError transaction(store) do
+            add(6, 500.0)
+            rollback_transaction!(store)
+        end
+    end
+    @test !in_transaction(store)
+    @test length(list_keys(store)) == 3
+    transaction(store) do
+        add(6, 500.0)
+    end
+    @test length(list_keys(store)) == 4
+    @test !in_transaction(store)
+
     # Committing what was never begun is an error, not a silent no-op.
     @test_throws InfraStore.InvalidParameterError commit_transaction!(store)
     @test_throws InfraStore.InvalidParameterError rollback_transaction!(store)

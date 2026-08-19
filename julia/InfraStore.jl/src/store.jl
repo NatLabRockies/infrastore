@@ -388,8 +388,13 @@ caused the unwind is the one the caller sees.
 """
 function transaction(f::Function, store::Store)
     begin_transaction!(store)
+    # `commit_transaction!` must stay inside the protected region: if the commit
+    # itself throws, the transaction is still open and must be rolled back, or it
+    # would leak holding the SQLite write lock.
     result = try
-        f()
+        r = f()
+        commit_transaction!(store)
+        r
     catch
         try
             rollback_transaction!(store)
@@ -399,6 +404,5 @@ function transaction(f::Function, store::Store)
         end
         rethrow()
     end
-    commit_transaction!(store)
     return result
 end
