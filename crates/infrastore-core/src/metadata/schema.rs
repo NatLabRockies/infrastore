@@ -370,7 +370,13 @@ CREATE INDEX IF NOT EXISTS idx_parent_child_child
 -- store that lacks it is harmless.
 -- Hand-inspection view: decodes the two integer discriminants and both content
 -- hashes back to readable text. Nothing in the library reads it.
-CREATE VIEW IF NOT EXISTS time_series_readable AS
+--
+-- Dropped and recreated rather than `CREATE ... IF NOT EXISTS`, so a store
+-- written by an older build picks up the current definition on its next
+-- writable open instead of keeping a stale one forever. A view holds no data,
+-- so this costs nothing and cannot lose anything.
+DROP VIEW IF EXISTS time_series_readable;
+CREATE VIEW time_series_readable AS
 SELECT id, owner_id, owner_type,
        CASE owner_category WHEN 0 THEN 'Component'
                            WHEN 1 THEN 'SupplementalAttribute'
@@ -388,6 +394,12 @@ SELECT id, owner_id, owner_type,
        element_type, element_shape, application_data,
        lower(hex(data_hash))       AS data_hash,
        lower(hex(features_hash))   AS features_hash,
-       lower(hex(timestamps_hash)) AS timestamps_hash
+       -- `hex()` is not NULL-propagating: it renders NULL as the empty string,
+       -- so an absent timestamps hash came through the view as `''` with
+       -- `typeof` 'text', indistinguishable from a genuinely empty blob and
+       -- invisible to `WHERE timestamps_hash IS NULL`. Only
+       -- `NonSequentialTimeSeries` rows carry one, so that was almost every row.
+       CASE WHEN timestamps_hash IS NULL THEN NULL
+            ELSE lower(hex(timestamps_hash)) END AS timestamps_hash
 FROM time_series_associations;
 "#;

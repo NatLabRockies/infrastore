@@ -969,7 +969,15 @@ pub(crate) fn build_forecast_entries(
     let mut slots: Vec<WindowSlot> = Vec::new();
     // Dedup key: forecasts sharing an array *and* read plan read identical
     // windows, so they collapse to one slot (one backend read per timestamp).
-    let mut slot_of: HashMap<([u8; 32], WindowRead), usize> = HashMap::new();
+    // Keyed on the element type as well as the array and its read shape. A slot
+    // carries the `element_type` its window bytes are to be read under, and
+    // `array_hash` covers dtype, shape and bytes but *not* that logical type —
+    // so two forecasts holding byte-identical arrays under different declared
+    // element types collapsed into one slot, and whichever arrived second was
+    // handed the first one's meaning. `entry_slot(i).element_type()` is the only
+    // place a caller learns how to decode a window, so the wrong answer there is
+    // silently wrong values, not an error.
+    let mut slot_of: HashMap<([u8; 32], WindowRead, ElementType), usize> = HashMap::new();
     let mut entries = Vec::with_capacity(items.len());
     for (m, shape) in items {
         if !type_accepted(reported, m.time_series_type) {
@@ -990,34 +998,36 @@ pub(crate) fn build_forecast_entries(
         }
         // Validate every row's layout, even ones that land on an existing slot.
         let (window_shape, read) = entry_layout(&m, &shape, count)?;
-        let slot = *slot_of.entry((m.data_hash, read)).or_insert_with(|| {
-            let bytes = window_shape.iter().product::<usize>().max(1)
-                * m.element_type.physical_dtype().size();
-            let mut buf = vec![0u8; bytes];
-            buf.clear();
-            // Block-cache the dense path at the storage chunk width so a window
-            // sweep decompresses each chunk once; the derived path reads a
-            // contiguous run per window and is not block-cached.
-            let block_cols = match read {
-                WindowRead::Dense { count_axis } => {
-                    window_block_cols(m.element_type.physical_dtype(), &shape, count_axis)
-                }
-                WindowRead::Derived { .. } => 1,
-            };
-            slots.push(WindowSlot {
-                hash: m.data_hash,
-                element_type: m.element_type,
-                window_shape: window_shape.clone(),
-                read,
-                count,
-                block_cols,
-                cached: None,
-                block: Vec::new(),
-                buf,
-                filled: false,
+        let slot = *slot_of
+            .entry((m.data_hash, read, m.element_type))
+            .or_insert_with(|| {
+                let bytes = window_shape.iter().product::<usize>().max(1)
+                    * m.element_type.physical_dtype().size();
+                let mut buf = vec![0u8; bytes];
+                buf.clear();
+                // Block-cache the dense path at the storage chunk width so a window
+                // sweep decompresses each chunk once; the derived path reads a
+                // contiguous run per window and is not block-cached.
+                let block_cols = match read {
+                    WindowRead::Dense { count_axis } => {
+                        window_block_cols(m.element_type.physical_dtype(), &shape, count_axis)
+                    }
+                    WindowRead::Derived { .. } => 1,
+                };
+                slots.push(WindowSlot {
+                    hash: m.data_hash,
+                    element_type: m.element_type,
+                    window_shape: window_shape.clone(),
+                    read,
+                    count,
+                    block_cols,
+                    cached: None,
+                    block: Vec::new(),
+                    buf,
+                    filled: false,
+                });
+                slots.len() - 1
             });
-            slots.len() - 1
-        });
         entries.push(ForecastEntry {
             key: TimeSeriesKey::from_metadata(&m)?,
             slot,

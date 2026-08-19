@@ -3951,3 +3951,63 @@ end
         @test isfile(p2)
     end
 end
+
+@testset "a key-addressed forecast read checks the type it was asked for" begin
+    # The FFI reports the type it matched, and this path used to decode as the
+    # requested `T` regardless. Asking for a `Deterministic` with a
+    # `Probabilistic` key returned a `Deterministic{Float64,3}` whose `count`
+    # disagreed with its own second axis — the percentile axis silently absorbed
+    # as a leading dimension, the percentiles themselves dropped, no error. The
+    # attribute-addressed form and `bulk_read` both dispatched correctly, which
+    # is what made the asymmetry visible.
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    p = Probabilistic(
+        t0, Hour(1), Hour(2), Hour(1), 4, [0.1, 0.5, 0.9],
+        reshape(collect(1.0:24.0), (3, 2, 4)), "load",
+    )
+    kp = add_time_series!(store, 1, "Generator", Component, p)
+
+    # The right type reads, and keeps what makes it that type.
+    got = get_time_series(Probabilistic, store, kp)
+    @test got isa Probabilistic
+    @test size(got.data) == (3, 2, 4)
+    @test got.percentiles == [0.1, 0.5, 0.9]
+
+    # The wrong ones are refused, naming what the key actually holds.
+    for T in (Deterministic, Scenarios)
+        err = try
+            get_time_series(T, store, kp)
+            nothing
+        catch e
+            e
+        end
+        @test err isa InfraStore.InvalidParameterError
+        @test occursin("Probabilistic", sprint(showerror, err))
+    end
+
+    # A Deterministic key still reads as one...
+    d = Deterministic(
+        t0, Hour(1), Hour(2), Hour(1), 3, reshape(collect(1.0:6.0), (2, 3)), "det"
+    )
+    kd = add_time_series!(store, 2, "Generator", Component, d)
+    @test get_time_series(Deterministic, store, kd) isa Deterministic
+    @test_throws InfraStore.InvalidParameterError get_time_series(Probabilistic, store, kd)
+
+    # ...and the two deterministic forms stay interchangeable, because a
+    # DeterministicSingleTimeSeries is a view that always reads back dense.
+    add_time_series!(
+        store, 3, "Generator", Component,
+        SingleTimeSeries(t0, Hour(1), collect(1.0:8.0), "load"),
+    )
+    transform_single_time_series!(store, Hour(2), Hour(1))
+    kdst = only(
+        filter(
+            k -> key_info(k).time_series_type == DeterministicSingleTimeSeries,
+            get_time_series_keys(store, 3, Component),
+        ),
+    )
+    @test get_time_series(Deterministic, store, kdst) isa Deterministic
+    @test get_time_series(DeterministicSingleTimeSeries, store, kdst) isa Deterministic
+    @test_throws InfraStore.InvalidParameterError get_time_series(Scenarios, store, kdst)
+end
