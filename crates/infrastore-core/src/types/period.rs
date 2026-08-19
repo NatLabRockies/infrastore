@@ -398,11 +398,11 @@ impl Period {
                     has_calendar = true;
                 }
                 'W' => {
-                    fixed_ms = add_ms(fixed_ms, int_val.checked_mul(MS_PER_WEEK))?;
+                    fixed_ms = add_ms(fixed_ms, int_val.checked_mul(MS_PER_WEEK), invalid)?;
                     has_fixed = true;
                 }
                 'D' => {
-                    fixed_ms = add_ms(fixed_ms, int_val.checked_mul(MS_PER_DAY))?;
+                    fixed_ms = add_ms(fixed_ms, int_val.checked_mul(MS_PER_DAY), invalid)?;
                     has_fixed = true;
                 }
                 _ => return Err(invalid()),
@@ -413,16 +413,16 @@ impl Period {
                 match unit {
                     'H' => {
                         let v = num.parse::<i64>().map_err(|_| invalid())?;
-                        fixed_ms = add_ms(fixed_ms, v.checked_mul(MS_PER_HOUR))?;
+                        fixed_ms = add_ms(fixed_ms, v.checked_mul(MS_PER_HOUR), invalid)?;
                         has_fixed = true;
                     }
                     'M' => {
                         let v = num.parse::<i64>().map_err(|_| invalid())?;
-                        fixed_ms = add_ms(fixed_ms, v.checked_mul(MS_PER_MIN))?;
+                        fixed_ms = add_ms(fixed_ms, v.checked_mul(MS_PER_MIN), invalid)?;
                         has_fixed = true;
                     }
                     'S' => {
-                        fixed_ms = add_ms(fixed_ms, seconds_str_to_ms(&num))?;
+                        fixed_ms = add_ms(fixed_ms, seconds_str_to_ms(&num), invalid)?;
                         has_fixed = true;
                     }
                     _ => return Err(invalid()),
@@ -505,10 +505,18 @@ fn months_between(start: DateTime<Utc>, at: DateTime<Utc>) -> i64 {
 /// `(number, unit)` pairs. Returns `None` on malformed input.
 /// Accumulate a checked-multiply result into a running millisecond total,
 /// failing the parse on overflow rather than wrapping.
-fn add_ms(total: i64, component: Option<i64>) -> Result<i64> {
+///
+/// Takes the caller's `invalid` so an overflow reports the same
+/// `invalid ISO-8601 period '<input>'` as every other parse failure, naming the
+/// string that caused it.
+fn add_ms(
+    total: i64,
+    component: Option<i64>,
+    invalid: impl Fn() -> TimeSeriesError,
+) -> Result<i64> {
     component
         .and_then(|c| total.checked_add(c))
-        .ok_or_else(|| TimeSeriesError::InvalidParameter("invalid ISO-8601 duration".to_string()))
+        .ok_or_else(invalid)
 }
 
 fn parse_components(part: &str) -> Option<Vec<(String, char)>> {

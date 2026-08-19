@@ -1102,7 +1102,15 @@ fn malformed_inputs_report_errors_rather_than_panicking() {
         "PT2562047788015H2562047788015H",
         "P106751991167W106751991167W",
     ] {
-        assert!(Period::from_iso8601(s).is_err(), "{s} should be rejected");
+        let err = Period::from_iso8601(s).unwrap_err();
+        // An overflow reads like every other parse failure and names the input,
+        // rather than reporting a different, vaguer message than a malformed
+        // string would.
+        assert!(
+            matches!(err, infrastore_core::TimeSeriesError::InvalidParameter(ref m)
+                if m.contains("invalid ISO-8601 period") && m.contains(s)),
+            "{s}: {err}"
+        );
     }
     // A single in-range component is unaffected.
     assert!(Period::from_iso8601("P106751991167D").is_ok());

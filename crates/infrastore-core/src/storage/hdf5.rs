@@ -884,7 +884,7 @@ impl Inner {
                 let needed = length * block;
                 if array.bytes.len() < needed {
                     return Err(TimeSeriesError::IntegrityError(format!(
-                        "array holds {} bytes but its shape {:?} describes {needed}",
+                        "array holds {} bytes but its shape {:?} describes {needed} bytes",
                         array.bytes.len(),
                         array.shape
                     )));

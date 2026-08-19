@@ -140,7 +140,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Vec<DateTime<Utc>>> {
     // returning the `IntegrityError` this module promises for a malformed blob.
     // Every timestamp after the first costs at least one byte, so the remaining
     // length is a hard ceiling on how many can still arrive.
-    let mut out = Vec::with_capacity(count.min(bytes.len().saturating_sub(pos) + 1));
+    let mut out = Vec::with_capacity(count.min(bytes.len().saturating_sub(pos).saturating_add(1)));
     out.push(first);
     // The accumulator starts from the base's *linear* nanoseconds, so a
     // leap-second base contributes its extra nanoseconds to every later value
