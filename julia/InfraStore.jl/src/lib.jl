@@ -45,6 +45,32 @@ function lib_path()
     return p
 end
 
+# ---- Runtime symbol resolution ----------------------------------------------
+#
+# `_filter_list_json` (catalog.jl) shares one call site across several exports,
+# so its FFI symbol is a runtime `Symbol` argument rather than a literal
+# `@ccall` target, and must be resolved with `dlsym`. Doing that on every call
+# via `dlsym(dlopen(lib_path()), fname)` reopens the library each time — bumping
+# its reference count with no matching `dlclose`, and walking the dynamic symbol
+# table from scratch — about 190x the cost of a cached lookup, measured over a
+# `list_time_series` loop. `_cached_dlsym` opens the library at most once and
+# memoizes each symbol thereafter; the lock covers both the lazy `dlopen` and
+# the dict, since Julia may call into this from multiple tasks.
+const _SYMBOL_CACHE_LOCK = ReentrantLock()
+const _SYMBOL_CACHE = Dict{Symbol, Ptr{Cvoid}}()
+const _LIB_HANDLE = Ref{Ptr{Cvoid}}(C_NULL)
+
+function _cached_dlsym(fname::Symbol)
+    return lock(_SYMBOL_CACHE_LOCK) do
+        get!(_SYMBOL_CACHE, fname) do
+            if _LIB_HANDLE[] == C_NULL
+                _LIB_HANDLE[] = dlopen(lib_path())
+            end
+            return dlsym(_LIB_HANDLE[], fname)
+        end
+    end
+end
+
 # ---- Status codes (must match crates/infrastore-ffi/src/lib.rs) ----
 
 const INFRASTORE_OK = Int32(0)
@@ -60,6 +86,7 @@ const INFRASTORE_ERR_INCOMPATIBLE_FORMAT = Int32(9)
 const INFRASTORE_ERR_DUPLICATE_ASSOCIATION = Int32(10)
 const INFRASTORE_ERR_STORE_EXISTS = Int32(11)
 const INFRASTORE_ERR_MISMATCHED_ARTIFACT = Int32(12)
+const INFRASTORE_ERR_RECONCILE_CONFLICT = Int32(13)
 const INFRASTORE_ERR_INTERNAL = Int32(99)
 
 # ---- Owner category --------------------------------------------------------
@@ -113,35 +140,35 @@ end
 abstract type TimeSeriesException <: Exception end
 
 struct NotFoundError <: TimeSeriesException
-    msg::String;
+    msg::String
 end
 
 struct DuplicateTimeSeriesError <: TimeSeriesException
-    msg::String;
+    msg::String
 end
 
 struct DuplicateAssociationError <: TimeSeriesException
-    msg::String;
+    msg::String
 end
 
 struct InvalidParameterError <: TimeSeriesException
-    msg::String;
+    msg::String
 end
 
 struct IntegrityError <: TimeSeriesException
-    msg::String;
+    msg::String
 end
 
 struct ReadOnlyStoreError <: TimeSeriesException
-    msg::String;
+    msg::String
 end
 
 struct IncompatibleFormatError <: TimeSeriesException
-    msg::String;
+    msg::String
 end
 
 struct IOError <: TimeSeriesException
-    msg::String;
+    msg::String
 end
 
 """
@@ -152,7 +179,7 @@ discard its arrays while keeping its catalog, leaving a store that reopens
 cleanly with every array missing. Open it instead, or pass `overwrite=true`.
 """
 struct StoreExistsError <: TimeSeriesException
-    msg::String;
+    msg::String
 end
 
 """
@@ -163,12 +190,25 @@ so they are halves of two different saves — one was copied, replaced, or creat
 without the other, or a save was interrupted between writing them.
 """
 struct MismatchedArtifactError <: TimeSeriesException
-    msg::String;
+    msg::String
+end
+
+"""
+    ReconcileConflictError
+
+A JSON reconcile of the time-series association catalog
+([`reconcile_time_series_associations_openapi!`](@ref)) found rows the
+requested policy cannot resolve: geometry drift, descriptive drift under
+`:strict`, a JSON row naming a series the catalog does not hold, or an
+`expected_address` mismatch. The message names every offending row.
+"""
+struct ReconcileConflictError <: TimeSeriesException
+    msg::String
 end
 
 struct GenericError <: TimeSeriesException
-    msg::String;
-    code::Int32;
+    msg::String
+    code::Int32
 end
 
 function Base.showerror(io::IO, e::TimeSeriesException)
@@ -214,6 +254,8 @@ function _check(code::Int32)
         throw(StoreExistsError(msg))
     elseif code == INFRASTORE_ERR_MISMATCHED_ARTIFACT
         throw(MismatchedArtifactError(msg))
+    elseif code == INFRASTORE_ERR_RECONCILE_CONFLICT
+        throw(ReconcileConflictError(msg))
     else
         throw(GenericError(msg, code))
     end

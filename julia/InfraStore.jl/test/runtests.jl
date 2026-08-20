@@ -1043,10 +1043,10 @@ end
 @testset "get_forecast_parameters" begin
     store = Store(in_memory=true)
     t0 = DateTime(2024, 1, 1)
-    res = Hour(1);
-    hor = Hour(4);
-    ivl = Hour(2);
-    count = 3;
+    res = Hour(1)
+    hor = Hour(4)
+    ivl = Hour(2)
+    count = 3
     H = 4
     data = Float64[h * 10 + c for h in 1:H, c in 1:count]
     add_time_series!(
@@ -2179,6 +2179,270 @@ end
 
     close!(target)
     close!(store)
+end
+
+# ---- OpenAPI-row association serde ------------------------------------------
+#
+# `export_time_series_associations_openapi`/`export_supplemental_attribute_associations_openapi`/
+# `import_supplemental_attribute_associations_openapi!`/
+# `reconcile_time_series_associations_openapi!` wrap the four Rust core
+# `openapi` methods. The golden tests below reproduce two of the checked-in
+# fixtures at `conformance/openapi_row_fixtures/` (the core's own golden tests
+# pin the rest); the reconcile tests exercise the D4 policy matrix one cell at
+# a time, mirroring `crates/infrastore-core/tests/openapi.rs`.
+
+const _OPENAPI_FIXTURES_DIR = normpath(
+    joinpath(@__DIR__, "..", "..", "..", "conformance", "openapi_row_fixtures")
+)
+
+function _openapi_fixture(name)
+    return InfraStore.JSON.parse(
+        read(joinpath(_OPENAPI_FIXTURES_DIR, "$name.json"), String)
+    )
+end
+
+@testset "OpenAPI-row association serde" begin
+    @testset "export_time_series_associations_openapi reproduces the single_time_series fixture" begin
+        store = Store(in_memory=true)
+        single = SingleTimeSeries(
+            DateTime(2030, 1, 1), Hour(1), fill(0.0, 8760), "max_active_power";
+            units="MW", quantity_kind="ActivePower", unit_system=NaturalUnits,
+            component_field="max_active_power",
+        )
+        add_time_series!(
+            store, 7, "ThermalStandard", Component, single;
+            features=Dict("scenario" => "high_load", "year" => 2030),
+        )
+
+        json = export_time_series_associations_openapi(store; address="time_series.h5")
+        rows = InfraStore.JSON.parse(json)
+        @test length(rows) == 1
+        row = rows[1]
+        delete!(row, "id")
+        want = _openapi_fixture("single_time_series")
+        delete!(want, "id")
+        @test row == want
+
+        close!(store)
+    end
+
+    @testset "export_supplemental_attribute_associations_openapi reproduces the fixture" begin
+        store = Store(in_memory=true)
+        add_supplemental_attribute_association!(
+            store,
+            SupplementalAttributeAssociation(
+                7, "ThermalStandard", 481, "GeometricDistributionForcedOutage"
+            ),
+        )
+        json = export_supplemental_attribute_associations_openapi(store)
+        @test InfraStore.JSON.parse(json) ==
+            [_openapi_fixture("supplemental_attribute_association")]
+        close!(store)
+    end
+
+    @testset "supplemental-attribute export/import round trips" begin
+        source = Store(in_memory=true)
+        add_supplemental_attribute_associations!(
+            source,
+            [
+                SupplementalAttributeAssociation(1, "Generator", 100, "GeographicInfo"),
+                SupplementalAttributeAssociation(2, "Load", 100, "GeographicInfo"),
+            ],
+        )
+        exported = export_supplemental_attribute_associations_openapi(source)
+
+        target = Store(in_memory=true)
+        @test import_supplemental_attribute_associations_openapi!(target, exported) == 2
+        re_exported = export_supplemental_attribute_associations_openapi(target)
+        @test InfraStore.JSON.parse(re_exported) == InfraStore.JSON.parse(exported)
+
+        close!(source)
+        close!(target)
+    end
+
+    @testset "supplemental-attribute import rejects a duplicate within the batch" begin
+        store = Store(in_memory=true)
+        json = InfraStore.JSON.json([
+            Dict(
+                "component_id" => 1, "component_type" => "Generator",
+                "attribute_id" => 100, "attribute_type" => "GeographicInfo",
+            ),
+            Dict(
+                "component_id" => 1, "component_type" => "Generator",
+                "attribute_id" => 100, "attribute_type" => "GeographicInfo",
+            ),
+        ])
+        @test_throws InfraStore.DuplicateAssociationError import_supplemental_attribute_associations_openapi!(
+            store, json
+        )
+        @test export_supplemental_attribute_associations_openapi(store) == "[]"
+        close!(store)
+    end
+
+    # One `SingleTimeSeries` row every reconcile test below either matches
+    # verbatim or perturbs one column of.
+    function _reconcile_fixture_store()
+        store = Store(in_memory=true)
+        single = SingleTimeSeries(
+            DateTime(2030, 1, 1), Hour(1), fill(0.0, 24), "load";
+            units="MW", quantity_kind="ActivePower", unit_system=NaturalUnits,
+            component_field="load",
+        )
+        add_time_series!(store, 1, "Generator", Component, single)
+        return store
+    end
+
+    function _reconcile_clean_row()
+        return Dict(
+            "owner_id" => 1, "owner_type" => "Generator", "owner_category" => "Component",
+            "time_series_type" => "SingleTimeSeries", "name" => "load",
+            "features" => Dict(),
+            "address" => "store.h5", "element_type" => "f64", "element_shape" => [],
+            "units" => "MW", "quantity_kind" => "ActivePower",
+            "unit_system" => "NATURAL_UNITS", "component_field" => "load",
+            "initial_timestamp" => "2030-01-01T00:00:00Z", "resolution" => "PT1H",
+            "length" => 24,
+        )
+    end
+
+    @testset "reconcile: clean match is a no-op under either policy" begin
+        for policy in (:strict, :update_descriptive)
+            store = _reconcile_fixture_store()
+            json = InfraStore.JSON.json([_reconcile_clean_row()])
+            report = reconcile_time_series_associations_openapi!(store, json; policy=policy)
+            @test report isa ReconcileReport
+            @test report.matched == 1
+            @test report.updated == 0
+            @test report.missing_in_store == 0
+            @test report.unmatched_in_store == 0
+            @test isempty(report.conflicts)
+            close!(store)
+        end
+    end
+
+    @testset "reconcile: descriptive drift errors under strict" begin
+        store = _reconcile_fixture_store()
+        row = _reconcile_clean_row()
+        row["units"] = "kW"
+        json = InfraStore.JSON.json([row])
+        err = try
+            reconcile_time_series_associations_openapi!(store, json; policy=:strict)
+            nothing
+        catch e
+            e
+        end
+        @test err isa InfraStore.ReconcileConflictError
+        @test occursin("units", err.msg)
+        close!(store)
+    end
+
+    @testset "reconcile: descriptive drift is applied under update_descriptive" begin
+        store = _reconcile_fixture_store()
+        row = _reconcile_clean_row()
+        row["units"] = "kW"
+        row["component_field"] = "net_load"
+        json = InfraStore.JSON.json([row])
+        report = reconcile_time_series_associations_openapi!(
+            store, json; policy=:update_descriptive
+        )
+        @test report.matched == 1
+        @test report.updated == 1
+        @test report.unmatched_in_store == 0
+        @test length(report.conflicts) == 1
+
+        exported = export_time_series_associations_openapi(store; address="store.h5")
+        rows = InfraStore.JSON.parse(exported)
+        @test length(rows) == 1
+        @test rows[1]["units"] == "kW"
+        @test rows[1]["component_field"] == "net_load"
+        @test rows[1]["length"] == 24
+        close!(store)
+    end
+
+    @testset "reconcile: geometry drift errors under both policies" begin
+        for policy in (:strict, :update_descriptive)
+            store = _reconcile_fixture_store()
+            row = _reconcile_clean_row()
+            row["length"] = 25
+            json = InfraStore.JSON.json([row])
+            err = try
+                reconcile_time_series_associations_openapi!(store, json; policy=policy)
+                nothing
+            catch e
+                e
+            end
+            @test err isa InfraStore.ReconcileConflictError
+            @test occursin("geometry drift", err.msg)
+            @test occursin("length", err.msg)
+            close!(store)
+        end
+    end
+
+    @testset "reconcile: a JSON row with no catalog match errors" begin
+        store = _reconcile_fixture_store()
+        row = _reconcile_clean_row()
+        row["name"] = "a_series_the_store_does_not_have"
+        json = InfraStore.JSON.json([row])
+        @test_throws InfraStore.ReconcileConflictError reconcile_time_series_associations_openapi!(
+            store, json; policy=:strict
+        )
+        close!(store)
+    end
+
+    @testset "reconcile: tolerates and counts a catalog row absent from the json" begin
+        store = _reconcile_fixture_store()
+        report = reconcile_time_series_associations_openapi!(store, "[]"; policy=:strict)
+        @test report.matched == 0
+        @test report.unmatched_in_store == 1
+        close!(store)
+    end
+
+    @testset "reconcile: address check passes when it matches, fails when it does not" begin
+        store = _reconcile_fixture_store()
+        json = InfraStore.JSON.json([_reconcile_clean_row()])
+        report = reconcile_time_series_associations_openapi!(
+            store, json; policy=:strict, expected_address="store.h5"
+        )
+        @test report.matched == 1
+
+        err = try
+            reconcile_time_series_associations_openapi!(
+                store, json; policy=:strict, expected_address="other_store.h5"
+            )
+            nothing
+        catch e
+            e
+        end
+        @test err isa InfraStore.ReconcileConflictError
+        @test occursin("address", err.msg)
+        close!(store)
+    end
+
+    @testset "reconcile: an unknown policy symbol is rejected" begin
+        store = _reconcile_fixture_store()
+        @test_throws InfraStore.InvalidParameterError reconcile_time_series_associations_openapi!(
+            store, "[]"; policy=:bogus
+        )
+        close!(store)
+    end
+
+    @testset "the memoized _cached_dlsym path is exercised by any list_* call" begin
+        store = Store(in_memory=true)
+        add_time_series!(
+            store, 1, "Generator", Component,
+            SingleTimeSeries(DateTime(2030, 1, 1), Hour(1), Float64[1, 2, 3, 4], "load"),
+        )
+        # Two different symbols through the same cache, each called twice: the
+        # second call of each must be a cache hit, not a second `dlopen`.
+        for _ in 1:2
+            @test length(list_time_series(store)) == 1
+            @test length(list_keys(store)) == 1
+        end
+        @test InfraStore._cached_dlsym(:infrastore_store_list_time_series) isa Ptr
+        @test haskey(InfraStore._SYMBOL_CACHE, :infrastore_store_list_time_series)
+        @test haskey(InfraStore._SYMBOL_CACHE, :infrastore_store_list_keys)
+        close!(store)
+    end
 end
 
 # ---- Coverage parity: dtypes, error paths, and untested exports -------------

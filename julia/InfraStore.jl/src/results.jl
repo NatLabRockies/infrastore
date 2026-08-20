@@ -322,6 +322,34 @@ struct CompactionReport
     bytes_reclaimed::Int
 end
 
+"""
+    ReconcileReport
+
+Outcome of a successful [`reconcile_time_series_associations_openapi!`](@ref)
+call. A failed call throws `InfraStore.ReconcileConflictError` instead of
+returning this: every drift or mismatch the requested policy cannot resolve
+aborts the whole call, naming every offender in one message.
+
+- `matched` — JSON rows that matched a catalog row by identity, whether left
+  unchanged or rewritten.
+- `updated` — of the matched rows, how many had a descriptive column rewritten.
+  Always `0` under `:strict`.
+- `missing_in_store` — always `0` on a successful reconcile; a JSON row naming
+  a series the catalog does not hold is always fatal.
+- `unmatched_in_store` — catalog rows that no JSON row referenced. Tolerated
+  under both policies: a document only ever carries the owners it contains.
+- `conflicts` — human-readable notes on matched rows that needed attention:
+  under `:update_descriptive`, one entry per row whose descriptive columns were
+  overwritten, naming the row and which columns changed.
+"""
+struct ReconcileReport
+    matched::Int
+    updated::Int
+    missing_in_store::Int
+    unmatched_in_store::Int
+    conflicts::Vector{String}
+end
+
 # The result types are compared and hashed by value. Julia's default `==` for an
 # immutable struct is `===`-based, which would compare the `Vector` / `Dict`
 # fields above by identity, so `==`, a matching `hash`, and a field-labelled
@@ -344,6 +372,7 @@ const _RESULT_TYPES = (
     :ForecastTimeline,
     :CompressionSettings,
     :CompactionReport,
+    :ReconcileReport,
 )
 
 # 32-byte content hashes read as hex; everything else uses its own `repr`.

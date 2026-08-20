@@ -37,6 +37,7 @@ class IncompatibleForecastError(TimeSeriesError): ...
 class StorageError(TimeSeriesError): ...
 class StoreExistsError(TimeSeriesError): ...
 class MismatchedArtifactError(TimeSeriesError): ...
+class ReconcileConflictError(TimeSeriesError): ...
 
 # ---- Enums -----------------------------------------------------------------
 
@@ -717,6 +718,33 @@ class Store:
         child_id: int | None = None,
         child_types: list[str] | None = None,
     ) -> int: ...
+
+    # ---- OpenAPI-row association serde -------------------------------------
+
+    def export_time_series_associations_openapi(
+        self,
+        *,
+        address: str,
+        owner_id: int | None = None,
+        owner_category: OwnerCategory | None = None,
+        owner_type: str | None = None,
+        time_series_type: TimeSeriesType | None = None,
+        name: str | None = None,
+        name_glob: str | None = None,
+        component_field: str | None = None,
+        resolution: Period | None = None,
+        interval: Period | None = None,
+        features: dict[str, int | float | bool | str] | None = None,
+    ) -> str: ...
+    def export_supplemental_attribute_associations_openapi(self) -> str: ...
+    def import_supplemental_attribute_associations_openapi(self, json: str) -> int: ...
+    def reconcile_time_series_associations_openapi(
+        self,
+        json: str,
+        *,
+        policy: str = "strict",
+        expected_address: str | None = None,
+    ) -> dict[str, Any]: ...
 
 def init_tracing(filter: str) -> None: ...
 def decode_element_values(

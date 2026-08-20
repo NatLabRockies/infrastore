@@ -40,6 +40,12 @@ pub const INFRASTORE_ERR_STORE_EXISTS: i32 = 11;
 /// The HDF5 file and its catalog do not carry the same generation stamp: they
 /// are halves of two different saves.
 pub const INFRASTORE_ERR_MISMATCHED_ARTIFACT: i32 = 12;
+/// A JSON reconcile of the time-series association catalog
+/// (`infrastore_store_reconcile_time_series_associations_openapi`) found rows
+/// the requested policy cannot resolve: geometry drift, descriptive drift under
+/// the strict policy, a JSON row naming a series the catalog does not hold, or
+/// an `expected_address` mismatch. The error message names every offending row.
+pub const INFRASTORE_ERR_RECONCILE_CONFLICT: i32 = 13;
 pub const INFRASTORE_ERR_INTERNAL: i32 = 99;
 
 thread_local! {
@@ -67,6 +73,7 @@ fn map_core_error(e: core_lib::TimeSeriesError) -> i32 {
         E::IncompatibleFormat { .. } => INFRASTORE_ERR_INCOMPATIBLE_FORMAT,
         E::StoreExists { .. } => INFRASTORE_ERR_STORE_EXISTS,
         E::MismatchedArtifact { .. } => INFRASTORE_ERR_MISMATCHED_ARTIFACT,
+        E::ReconcileConflict(_) => INFRASTORE_ERR_RECONCILE_CONFLICT,
         _ => INFRASTORE_ERR_INTERNAL,
     };
     set_error(e.to_string());
@@ -6611,25 +6618,33 @@ pub unsafe extern "C" fn infrastore_store_has_supplemental_attribute_association
 
 /// Attachments matching `filter_json` as a JSON array, in insertion order. Each
 /// object carries `component_id`, `component_type`, `attribute_id`, and
-/// `attribute_type`. Probe-then-fetch.
+/// `attribute_type`. Returns the JSON through `out_json` as an **owned**
+/// allocation the caller releases with `infrastore_string_free`; `out_len` is
+/// its byte length.
+///
+/// This listing is catalog-scaled (a no-filter call exports the whole table),
+/// so — unlike the other `list_supplemental_attribute_*` exports in this
+/// section, which stay probe-then-fetch because they are bounded by one
+/// owner's edges — it follows the owned-string convention `infrastore_store_list_keys`
+/// and friends use, to avoid running the query and serializing every row twice.
 ///
 /// # Safety
 ///
 /// `handle` must be a live store handle and `filter_json` null or valid
-/// null-terminated UTF-8. `out_len` must be writable; `buf` must be null or
-/// valid for `cap` bytes.
+/// null-terminated UTF-8. `out_json` must be valid for writing one pointer and
+/// `out_len` for writing one `u64`; on success `*out_json` must be released
+/// exactly once with `infrastore_string_free`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_list_supplemental_attribute_associations(
     handle: *const InfraStoreHandle,
     filter_json: *const c_char,
-    buf: *mut c_char,
-    cap: u64,
+    out_json: *mut *mut c_char,
     out_len: *mut u64,
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_len.is_null() {
-        set_error("out_len is null");
+    if out_json.is_null() || out_len.is_null() {
+        set_error("a required pointer is null");
         return INFRASTORE_ERR_NULL_POINTER;
     }
     let filter: core_lib::SupplementalAttributeFilter =
@@ -6637,13 +6652,21 @@ pub unsafe extern "C" fn infrastore_store_list_supplemental_attribute_associatio
             Ok(f) => f,
             Err(c) => return c,
         };
-    match store
+    let rows = match store
         .inner
         .list_supplemental_attribute_associations(&filter)
     {
-        Ok(rows) => unsafe { write_json_out(&rows, buf, cap, out_len) },
-        Err(e) => map_core_error(e),
-    }
+        Ok(r) => r,
+        Err(e) => return map_core_error(e),
+    };
+    let json = match serde_json::to_string(&rows) {
+        Ok(j) => j,
+        Err(e) => {
+            set_error(e.to_string());
+            return INFRASTORE_ERR_INTERNAL;
+        }
+    };
+    unsafe { write_owned_str_out(json, out_json, out_len) }
 }
 
 /// Distinct attribute ids matching `filter_json`, ascending, as a JSON array —
@@ -7170,6 +7193,227 @@ pub unsafe extern "C" fn infrastore_store_count_parent_child_associations(
         }
         Err(e) => map_core_error(e),
     }
+}
+
+// ---- OpenAPI-row association serde -----------------------------------------
+//
+// Four exports over `infrastore_core::openapi` (crate-private there; `Store`
+// inherent methods are the public surface): two exports and a reconcile report
+// use the owned-string convention (catalog-scaled or structured output), and
+// import returns its row count through an out-param, matching
+// `infrastore_store_add_supplemental_attribute_associations` above.
+
+/// Export `time_series_associations` matching the filter as a sorted
+/// OpenAPI-row JSON array, each row stamped with `address` verbatim. Filters
+/// match `infrastore_store_list_keys`. Returns the JSON through `out_json` as
+/// an **owned** allocation the caller releases with `infrastore_string_free`;
+/// `out_len` is its byte length.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle. `address` must be a valid,
+/// null-terminated UTF-8 string. The scalar filter flags/values are plain
+/// scalars; `name`, `resolution`, `interval`, `features_json`, and
+/// `component_field` must each be null or a null-terminated UTF-8 string.
+/// `out_json` must be valid for writing one pointer and `out_len` for writing
+/// one `u64`; on success `*out_json` must be released exactly once with
+/// `infrastore_string_free`.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn infrastore_store_export_time_series_associations_openapi(
+    handle: *const InfraStoreHandle,
+    address: *const c_char,
+    has_owner: bool,
+    owner_id: i64,
+    has_owner_category: bool,
+    owner_category: i32,
+    has_time_series_type: bool,
+    time_series_type: i32,
+    name: *const c_char,
+    resolution: *const c_char,
+    interval: *const c_char,
+    features_json: *const c_char,
+    component_field: *const c_char,
+    out_json: *mut *mut c_char,
+    out_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = deref_handle!(ref handle);
+    if out_json.is_null() || out_len.is_null() {
+        set_error("a required pointer is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let address = match unsafe { cstr_to_str(address) } {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    let filter = match unsafe {
+        build_list_filter(
+            has_owner,
+            owner_id,
+            has_owner_category,
+            owner_category,
+            has_time_series_type,
+            time_series_type,
+            name,
+            resolution,
+            interval,
+            features_json,
+            component_field,
+        )
+    } {
+        Ok(f) => f,
+        Err(c) => return c,
+    };
+    let json = match store
+        .inner
+        .export_time_series_associations_openapi(address, &filter)
+    {
+        Ok(j) => j,
+        Err(e) => return map_core_error(e),
+    };
+    unsafe { write_owned_str_out(json, out_json, out_len) }
+}
+
+/// Export the whole `supplemental_attribute_associations` table as an
+/// OpenAPI-row JSON array, sorted by `(component_id, attribute_id)`. Returns
+/// the JSON through `out_json` as an **owned** allocation the caller releases
+/// with `infrastore_string_free`; `out_len` is its byte length.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle. `out_json` must be valid for writing
+/// one pointer and `out_len` for writing one `u64`; on success `*out_json`
+/// must be released exactly once with `infrastore_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_store_export_supplemental_attribute_associations_openapi(
+    handle: *const InfraStoreHandle,
+    out_json: *mut *mut c_char,
+    out_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = deref_handle!(ref handle);
+    if out_json.is_null() || out_len.is_null() {
+        set_error("a required pointer is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let json = match store
+        .inner
+        .export_supplemental_attribute_associations_openapi()
+    {
+        Ok(j) => j,
+        Err(e) => return map_core_error(e),
+    };
+    unsafe { write_owned_str_out(json, out_json, out_len) }
+}
+
+/// Bulk-ingest a JSON array of supplemental-attribute association OpenAPI rows
+/// in one all-or-nothing transaction — the import half of the round trip whose
+/// export is `infrastore_store_export_supplemental_attribute_associations_openapi`.
+/// When non-null, `out_added` receives the number inserted.
+///
+/// # Safety
+///
+/// `handle` must be a live mutable store handle and `json` a valid,
+/// null-terminated UTF-8 string. When non-null, `out_added` must point to
+/// writable `u64` storage.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_store_import_supplemental_attribute_associations_openapi(
+    handle: *mut InfraStoreHandle,
+    json: *const c_char,
+    out_added: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = deref_handle!(mut handle);
+    let json = match unsafe { cstr_to_str(json) } {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    match store
+        .inner
+        .import_supplemental_attribute_associations_openapi(json)
+    {
+        Ok(n) => {
+            if !out_added.is_null() {
+                unsafe { *out_added = n as u64 };
+            }
+            INFRASTORE_OK
+        }
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// Reconcile a JSON array of time-series association OpenAPI rows against this
+/// store's catalog: match by identity, apply `policy` to any descriptive
+/// drift, and return `INFRASTORE_ERR_RECONCILE_CONFLICT` (naming every
+/// offending row in the error message) for anything neither policy can
+/// resolve. `policy` is `0` (strict: any drift — descriptive or geometric — is
+/// an error) or `1` (update_descriptive: descriptive drift is rewritten from
+/// the JSON; geometry drift is still an error); any other value is
+/// `INFRASTORE_ERR_INVALID_PARAMETER`. When non-null, `expected_address` must
+/// match every row's own `address` field or the whole call fails.
+///
+/// On success, writes the JSON-serialized report
+/// (`{"matched":…,"updated":…,"missing_in_store":…,"unmatched_in_store":…,
+/// "conflicts":[…]}`) through `out_json` as an **owned** allocation released
+/// with `infrastore_string_free`; `out_len` is its byte length.
+///
+/// # Safety
+///
+/// `handle` must be a live mutable store handle. `json` must be a valid,
+/// null-terminated UTF-8 string. `expected_address` must be null or a valid,
+/// null-terminated UTF-8 string. `out_json` must be valid for writing one
+/// pointer and `out_len` for writing one `u64`; on success `*out_json` must be
+/// released exactly once with `infrastore_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_store_reconcile_time_series_associations_openapi(
+    handle: *mut InfraStoreHandle,
+    json: *const c_char,
+    policy: i32,
+    expected_address: *const c_char,
+    out_json: *mut *mut c_char,
+    out_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = deref_handle!(mut handle);
+    if out_json.is_null() || out_len.is_null() {
+        set_error("a required pointer is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let json = match unsafe { cstr_to_str(json) } {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    let policy = match policy {
+        0 => core_lib::ReconcilePolicy::Strict,
+        1 => core_lib::ReconcilePolicy::UpdateDescriptive,
+        other => {
+            set_error(format!(
+                "invalid reconcile policy {other}, expected 0 (strict) or 1 (update_descriptive)"
+            ));
+            return INFRASTORE_ERR_INVALID_PARAMETER;
+        }
+    };
+    let expected_address = match unsafe { cstr_to_optional_string(expected_address) } {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    let report = match store.inner.reconcile_time_series_associations_openapi(
+        json,
+        policy,
+        expected_address.as_deref(),
+    ) {
+        Ok(r) => r,
+        Err(e) => return map_core_error(e),
+    };
+    let report_json = match serde_json::to_string(&report) {
+        Ok(j) => j,
+        Err(e) => {
+            set_error(e.to_string());
+            return INFRASTORE_ERR_INTERNAL;
+        }
+    };
+    unsafe { write_owned_str_out(report_json, out_json, out_len) }
 }
 
 // ---- Free helpers ---------------------------------------------------------

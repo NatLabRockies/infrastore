@@ -53,6 +53,15 @@
  */
 #define INFRASTORE_ERR_MISMATCHED_ARTIFACT 12
 
+/**
+ * A JSON reconcile of the time-series association catalog
+ * (`infrastore_store_reconcile_time_series_associations_openapi`) found rows
+ * the requested policy cannot resolve: geometry drift, descriptive drift under
+ * the strict policy, a JSON row naming a series the catalog does not hold, or
+ * an `expected_address` mismatch. The error message names every offending row.
+ */
+#define INFRASTORE_ERR_RECONCILE_CONFLICT 13
+
 #define INFRASTORE_ERR_INTERNAL 99
 
 /**
@@ -2202,18 +2211,26 @@ int32_t infrastore_store_has_supplemental_attribute_association(const struct Inf
 /**
  * Attachments matching `filter_json` as a JSON array, in insertion order. Each
  * object carries `component_id`, `component_type`, `attribute_id`, and
- * `attribute_type`. Probe-then-fetch.
+ * `attribute_type`. Returns the JSON through `out_json` as an **owned**
+ * allocation the caller releases with `infrastore_string_free`; `out_len` is
+ * its byte length.
+ *
+ * This listing is catalog-scaled (a no-filter call exports the whole table),
+ * so — unlike the other `list_supplemental_attribute_*` exports in this
+ * section, which stay probe-then-fetch because they are bounded by one
+ * owner's edges — it follows the owned-string convention `infrastore_store_list_keys`
+ * and friends use, to avoid running the query and serializing every row twice.
  *
  * # Safety
  *
  * `handle` must be a live store handle and `filter_json` null or valid
- * null-terminated UTF-8. `out_len` must be writable; `buf` must be null or
- * valid for `cap` bytes.
+ * null-terminated UTF-8. `out_json` must be valid for writing one pointer and
+ * `out_len` for writing one `u64`; on success `*out_json` must be released
+ * exactly once with `infrastore_string_free`.
  */
 int32_t infrastore_store_list_supplemental_attribute_associations(const struct InfraStore *handle,
                                                                   const char *filter_json,
-                                                                  char *buf,
-                                                                  uint64_t cap,
+                                                                  char **out_json,
                                                                   uint64_t *out_len);
 
 /**
@@ -2447,6 +2464,102 @@ int32_t infrastore_store_replace_parent_child_component_id(struct InfraStore *ha
 int32_t infrastore_store_count_parent_child_associations(const struct InfraStore *handle,
                                                          const char *filter_json,
                                                          int64_t *out_count);
+
+/**
+ * Export `time_series_associations` matching the filter as a sorted
+ * OpenAPI-row JSON array, each row stamped with `address` verbatim. Filters
+ * match `infrastore_store_list_keys`. Returns the JSON through `out_json` as
+ * an **owned** allocation the caller releases with `infrastore_string_free`;
+ * `out_len` is its byte length.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle. `address` must be a valid,
+ * null-terminated UTF-8 string. The scalar filter flags/values are plain
+ * scalars; `name`, `resolution`, `interval`, `features_json`, and
+ * `component_field` must each be null or a null-terminated UTF-8 string.
+ * `out_json` must be valid for writing one pointer and `out_len` for writing
+ * one `u64`; on success `*out_json` must be released exactly once with
+ * `infrastore_string_free`.
+ */
+int32_t infrastore_store_export_time_series_associations_openapi(const struct InfraStore *handle,
+                                                                 const char *address,
+                                                                 bool has_owner,
+                                                                 int64_t owner_id,
+                                                                 bool has_owner_category,
+                                                                 int32_t owner_category,
+                                                                 bool has_time_series_type,
+                                                                 int32_t time_series_type,
+                                                                 const char *name,
+                                                                 const char *resolution,
+                                                                 const char *interval,
+                                                                 const char *features_json,
+                                                                 const char *component_field,
+                                                                 char **out_json,
+                                                                 uint64_t *out_len);
+
+/**
+ * Export the whole `supplemental_attribute_associations` table as an
+ * OpenAPI-row JSON array, sorted by `(component_id, attribute_id)`. Returns
+ * the JSON through `out_json` as an **owned** allocation the caller releases
+ * with `infrastore_string_free`; `out_len` is its byte length.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle. `out_json` must be valid for writing
+ * one pointer and `out_len` for writing one `u64`; on success `*out_json`
+ * must be released exactly once with `infrastore_string_free`.
+ */
+int32_t infrastore_store_export_supplemental_attribute_associations_openapi(const struct InfraStore *handle,
+                                                                            char **out_json,
+                                                                            uint64_t *out_len);
+
+/**
+ * Bulk-ingest a JSON array of supplemental-attribute association OpenAPI rows
+ * in one all-or-nothing transaction — the import half of the round trip whose
+ * export is `infrastore_store_export_supplemental_attribute_associations_openapi`.
+ * When non-null, `out_added` receives the number inserted.
+ *
+ * # Safety
+ *
+ * `handle` must be a live mutable store handle and `json` a valid,
+ * null-terminated UTF-8 string. When non-null, `out_added` must point to
+ * writable `u64` storage.
+ */
+int32_t infrastore_store_import_supplemental_attribute_associations_openapi(struct InfraStore *handle,
+                                                                            const char *json,
+                                                                            uint64_t *out_added);
+
+/**
+ * Reconcile a JSON array of time-series association OpenAPI rows against this
+ * store's catalog: match by identity, apply `policy` to any descriptive
+ * drift, and return `INFRASTORE_ERR_RECONCILE_CONFLICT` (naming every
+ * offending row in the error message) for anything neither policy can
+ * resolve. `policy` is `0` (strict: any drift — descriptive or geometric — is
+ * an error) or `1` (update_descriptive: descriptive drift is rewritten from
+ * the JSON; geometry drift is still an error); any other value is
+ * `INFRASTORE_ERR_INVALID_PARAMETER`. When non-null, `expected_address` must
+ * match every row's own `address` field or the whole call fails.
+ *
+ * On success, writes the JSON-serialized report
+ * (`{"matched":…,"updated":…,"missing_in_store":…,"unmatched_in_store":…,
+ * "conflicts":[…]}`) through `out_json` as an **owned** allocation released
+ * with `infrastore_string_free`; `out_len` is its byte length.
+ *
+ * # Safety
+ *
+ * `handle` must be a live mutable store handle. `json` must be a valid,
+ * null-terminated UTF-8 string. `expected_address` must be null or a valid,
+ * null-terminated UTF-8 string. `out_json` must be valid for writing one
+ * pointer and `out_len` for writing one `u64`; on success `*out_json` must be
+ * released exactly once with `infrastore_string_free`.
+ */
+int32_t infrastore_store_reconcile_time_series_associations_openapi(struct InfraStore *handle,
+                                                                    const char *json,
+                                                                    int32_t policy,
+                                                                    const char *expected_address,
+                                                                    char **out_json,
+                                                                    uint64_t *out_len);
 
 /**
  * Release a key handle returned by this library.

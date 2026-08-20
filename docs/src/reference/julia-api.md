@@ -945,6 +945,74 @@ remove_parent_child_associations!(store; parent_types=["Bus"])   # 1
 Neither association catalog is exposed over the [gRPC server](./grpc-api.md) or the
 [`infrastore` CLI](./cli.md).
 
+### OpenAPI-row association serde
+
+Direct JSON serde of the two association catalogs, in the wire spelling
+[SiennaSchemas](https://github.com/NREL-Sienna/SiennaSchemas) defines (`TimeSeries/*.json`,
+`Core/Associations/SupplementalAttributeAssociation.json`). Unlike [`list_time_series`](@ref) /
+[`list_supplemental_attribute_associations`](@ref), which return Julia structs, these four functions
+exchange the wire JSON verbatim — the format a document author (e.g. PowerTableDataParser) reads and
+writes directly.
+
+```julia
+export_time_series_associations_openapi(store; address, filters...) -> String
+export_supplemental_attribute_associations_openapi(store) -> String
+import_supplemental_attribute_associations_openapi!(store, json::AbstractString) -> Int
+reconcile_time_series_associations_openapi!(store, json::AbstractString;
+    policy::Symbol=:strict, expected_address=nothing) -> ReconcileReport
+```
+
+`export_time_series_associations_openapi` takes the same filter keywords as
+[`list_time_series`](@ref) plus a required `address` keyword, stamped verbatim into every row's
+`address` field (the store never interprets it). With no filter this exports the whole catalog,
+sorted by identity.
+
+`export_supplemental_attribute_associations_openapi` exports the whole
+`supplemental_attribute_associations` table, sorted by `(component_id, attribute_id)`;
+`import_supplemental_attribute_associations_openapi!` is its import half — a bulk, all-or-nothing
+insert (a duplicate anywhere in the batch throws `DuplicateAssociationError` and rolls the batch
+back), returning the number of rows inserted.
+
+`reconcile_time_series_associations_openapi!` is not an import: a catalog row's content hash is
+`NOT NULL` and the schemas never carry hashes, so a JSON document can never _create_ a complete
+catalog row. It instead reconciles JSON rows against the store's existing catalog, matched by the
+identity tuple `(owner_id, owner_category, time_series_type, name, resolution, interval, features)`:
+
+| Case                                                                                                                                  | `:strict` (default)                                              | `:update_descriptive`                                   |
+| ------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------- |
+| match, all fields agree                                                                                                               | no-op                                                            | no-op                                                   |
+| match, descriptive drift (`units`, `quantity_kind`, `unit_system`, `component_field`, `application_data`)                             | throws `ReconcileConflictError` naming the row and fields        | JSON wins for those five columns, counted in the report |
+| match, geometry drift (`initial_timestamp`, `length`, `horizon`, `interval`, `count`, `element_type`, `element_shape`, `percentiles`) | throws `ReconcileConflictError`                                  | throws `ReconcileConflictError` (same)                  |
+| JSON row with no catalog match                                                                                                        | throws `ReconcileConflictError`                                  | throws `ReconcileConflictError` (same)                  |
+| catalog row with no JSON row                                                                                                          | tolerated, counted in `unmatched_in_store`                       | tolerated, counted                                      |
+| `address`                                                                                                                             | checked against `expected_address` when given; otherwise ignored | same                                                    |
+
+```julia
+struct ReconcileReport
+    matched::Int
+    updated::Int
+    missing_in_store::Int
+    unmatched_in_store::Int
+    conflicts::Vector{String}
+end
+```
+
+`missing_in_store` is always `0` on a successful call: a JSON row naming a series the catalog does
+not hold is fatal under both policies, so a nonzero count only ever appears inside a thrown
+`ReconcileConflictError`'s message, never in a returned report. The whole call runs in one
+transaction when it writes, and every offending row is named in one error message rather than only
+the first.
+
+```julia
+store = Store(in_memory=true)
+add_time_series!(store, 1, "Generator", Component,
+    SingleTimeSeries(DateTime(2030, 1, 1), Hour(1), zeros(24), "load"))
+
+json = export_time_series_associations_openapi(store; address="store.h5")
+report = reconcile_time_series_associations_openapi!(store, json; expected_address="store.h5")
+report.matched   # 1
+```
+
 ## Errors
 
 All subtype `TimeSeriesException`:
@@ -961,6 +1029,7 @@ All subtype `TimeSeriesException`:
 | `IOError`                   | `INFRASTORE_ERR_IO`                                                                                |
 | `StoreExistsError`          | `INFRASTORE_ERR_STORE_EXISTS`                                                                      |
 | `MismatchedArtifactError`   | `INFRASTORE_ERR_MISMATCHED_ARTIFACT`                                                               |
+| `ReconcileConflictError`    | `INFRASTORE_ERR_RECONCILE_CONFLICT`                                                                |
 | `GenericError`              | Any other non-zero code (carries the numeric `code`)                                               |
 
 The message text comes from the FFI layer's thread-local error buffer.

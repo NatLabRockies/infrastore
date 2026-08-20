@@ -40,6 +40,7 @@ create_exception!(infrastore, IncompatibleForecastError, TimeSeriesError);
 create_exception!(infrastore, StorageError, TimeSeriesError);
 create_exception!(infrastore, StoreExistsError, TimeSeriesError);
 create_exception!(infrastore, MismatchedArtifactError, TimeSeriesError);
+create_exception!(infrastore, ReconcileConflictError, TimeSeriesError);
 
 fn map_err(e: core_lib::TimeSeriesError) -> PyErr {
     use core_lib::TimeSeriesError as E;
@@ -59,6 +60,7 @@ fn map_err(e: core_lib::TimeSeriesError) -> PyErr {
         ref e @ E::IncompatibleFormat { .. } => IncompatibleFormatError::new_err(e.to_string()),
         ref e @ E::StoreExists { .. } => StoreExistsError::new_err(e.to_string()),
         ref e @ E::MismatchedArtifact { .. } => MismatchedArtifactError::new_err(e.to_string()),
+        E::ReconcileConflict(m) => ReconcileConflictError::new_err(m),
         E::Io(e) => IoError::new_err(e.to_string()),
         E::Sqlite(e) => StorageError::new_err(format!("sqlite: {e}")),
         E::Serde(e) => StorageError::new_err(format!("serde: {e}")),
@@ -106,6 +108,19 @@ fn catalog_name(catalog: core_lib::CatalogMode) -> &'static str {
     match catalog {
         core_lib::CatalogMode::Attached => "attached",
         core_lib::CatalogMode::InMemory => "memory",
+    }
+}
+
+/// Translate the Python-facing `policy` argument of
+/// `Store.reconcile_time_series_associations_openapi` into a core
+/// [`ReconcilePolicy`](core_lib::ReconcilePolicy).
+fn parse_reconcile_policy(policy: &str) -> PyResult<core_lib::ReconcilePolicy> {
+    match policy {
+        "strict" => Ok(core_lib::ReconcilePolicy::Strict),
+        "update_descriptive" => Ok(core_lib::ReconcilePolicy::UpdateDescriptive),
+        other => Err(InvalidParameterError::new_err(format!(
+            "unknown reconcile policy '{other}', expected 'strict' or 'update_descriptive'"
+        ))),
     }
 }
 
@@ -3117,6 +3132,109 @@ impl PyStore {
             .count_parent_child_associations(&filter)
             .map_err(map_err)
     }
+
+    // ---- OpenAPI-row association serde -------------------------------------
+    //
+    // Direct JSON serde of the two association catalogs, in the wire spelling
+    // SiennaSchemas defines. The Rust core (`infrastore_core::openapi`) owns
+    // the mapping between catalog rows and schema rows; these four methods are
+    // a thin wrapper over it.
+
+    /// Export `time_series_associations` matching the filter (the same filter
+    /// keywords as `list_time_series`) as a sorted OpenAPI-row JSON array, each
+    /// row stamped with `address` verbatim. With no filter this exports the
+    /// whole catalog.
+    #[pyo3(signature = (
+        *, address, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
+        name=None, name_glob=None, component_field=None, resolution=None, interval=None, features=None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn export_time_series_associations_openapi(
+        &self,
+        address: String,
+        owner_id: Option<i64>,
+        owner_category: Option<PyOwnerCategory>,
+        owner_type: Option<String>,
+        time_series_type: Option<Bound<'_, PyAny>>,
+        name: Option<String>,
+        name_glob: Option<String>,
+        component_field: Option<String>,
+        resolution: Option<Bound<'_, PyAny>>,
+        interval: Option<Bound<'_, PyAny>>,
+        features: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<String> {
+        let filter = build_list_filter(
+            owner_id,
+            owner_category,
+            owner_type,
+            time_series_type.as_ref(),
+            name,
+            name_glob,
+            component_field,
+            resolution,
+            interval,
+            features,
+        )?;
+        self.store()?
+            .export_time_series_associations_openapi(&address, &filter)
+            .map_err(map_err)
+    }
+
+    /// Export the whole `supplemental_attribute_associations` table as an
+    /// OpenAPI-row JSON array, sorted by `(component_id, attribute_id)`.
+    fn export_supplemental_attribute_associations_openapi(&self) -> PyResult<String> {
+        self.store()?
+            .export_supplemental_attribute_associations_openapi()
+            .map_err(map_err)
+    }
+
+    /// Bulk-ingest a JSON array of supplemental-attribute association OpenAPI
+    /// rows in one all-or-nothing transaction, returning the number inserted.
+    /// This is the import half of the round trip whose export is
+    /// `export_supplemental_attribute_associations_openapi()`.
+    fn import_supplemental_attribute_associations_openapi(
+        &mut self,
+        json: &str,
+    ) -> PyResult<usize> {
+        self.store_mut()?
+            .import_supplemental_attribute_associations_openapi(json)
+            .map_err(map_err)
+    }
+
+    /// Reconcile a JSON array of time-series association OpenAPI rows against
+    /// this store's catalog: match by identity, apply `policy` ("strict" or
+    /// "update_descriptive") to any descriptive drift, and raise
+    /// `ReconcileConflictError` (naming every offending row) for anything
+    /// neither policy can resolve. Under "strict" any drift — descriptive or
+    /// geometric — is an error; under "update_descriptive" descriptive drift
+    /// (`units`, `quantity_kind`, `unit_system`, `component_field`,
+    /// `application_data`) is rewritten from the JSON, while geometry drift is
+    /// still an error. `expected_address`, when given, must match every row's
+    /// own `address` field or the whole call fails.
+    ///
+    /// Returns a dict with keys `matched`, `updated`, `missing_in_store`,
+    /// `unmatched_in_store` (all `int`), and `conflicts` (a list of `str`).
+    #[pyo3(signature = (json, *, policy="strict", expected_address=None))]
+    fn reconcile_time_series_associations_openapi<'py>(
+        &mut self,
+        py: Python<'py>,
+        json: &str,
+        policy: &str,
+        expected_address: Option<&str>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let policy = parse_reconcile_policy(policy)?;
+        let report = self
+            .store_mut()?
+            .reconcile_time_series_associations_openapi(json, policy, expected_address)
+            .map_err(map_err)?;
+        let d = PyDict::new(py);
+        d.set_item("matched", report.matched)?;
+        d.set_item("updated", report.updated)?;
+        d.set_item("missing_in_store", report.missing_in_store)?;
+        d.set_item("unmatched_in_store", report.unmatched_in_store)?;
+        d.set_item("conflicts", report.conflicts)?;
+        Ok(d)
+    }
 }
 
 // ---- period helpers -------------------------------------------------------
@@ -3519,6 +3637,10 @@ fn infrastore(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add(
         "MismatchedArtifactError",
         py.get_type::<MismatchedArtifactError>(),
+    )?;
+    m.add(
+        "ReconcileConflictError",
+        py.get_type::<ReconcileConflictError>(),
     )?;
 
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;

@@ -243,7 +243,7 @@ end
 
 # Run one JSON-returning catalog-filter FFI export (`fname`) with the shared
 # filter arguments. The exports share one C signature, so the symbol is resolved
-# at runtime (`dlsym`) and called through the pointer.
+# at runtime (`_cached_dlsym`, `lib.jl`) and called through the pointer.
 #
 # These return an owned string rather than following the probe-then-fetch
 # convention: a listing's size scales with the catalog, and probe-then-fetch
@@ -260,7 +260,7 @@ function _filter_list_json(
     features=Dict{String, Any}(),
     component_field=nothing,
 )
-    fptr = dlsym(dlopen(lib_path()), fname)
+    fptr = _cached_dlsym(fname)
     (has_owner, owner_arg, has_category, category_arg, has_type, type_arg, name_arg, resolution_iso, interval_iso, features_json, component_field_arg) = _filter_args(
         owner_id, owner_category, time_series_type, name, resolution, interval, features,
         component_field,
@@ -634,8 +634,8 @@ end
 Association counts: components with time series, static series, and forecasts.
 """
 function get_counts(store::Store)
-    a = Ref{Int64}(0);
-    b = Ref{Int64}(0);
+    a = Ref{Int64}(0)
+    b = Ref{Int64}(0)
     c = Ref{Int64}(0)
     code = @ccall lib_path().infrastore_store_counts(
         store::Ptr{Cvoid}, a::Ref{Int64}, b::Ref{Int64}, c::Ref{Int64}
@@ -689,9 +689,9 @@ Distinct owners per category and distinct stored arrays per kind. Arrays shared
 by content count once.
 """
 function time_series_counts(store::Store)
-    a = Ref{Int64}(0);
-    b = Ref{Int64}(0);
-    c = Ref{Int64}(0);
+    a = Ref{Int64}(0)
+    b = Ref{Int64}(0)
+    c = Ref{Int64}(0)
     d = Ref{Int64}(0)
     code = @ccall lib_path().infrastore_store_counts_detailed(
         store::Ptr{Cvoid}, a::Ref{Int64}, b::Ref{Int64}, c::Ref{Int64}, d::Ref{Int64}

@@ -133,8 +133,12 @@ end
 const _SUPPLEMENTAL_FILTER_API = (
     (:has_supplemental_attribute_association,
         :infrastore_store_has_supplemental_attribute_association, :bool, nothing),
+    # `:owned_rows`, not `:rows`: a no-filter call exports the whole table, so
+    # this one export follows the owned-string convention instead of
+    # probe-then-fetch, matching the FFI's `infrastore_store_list_keys` and
+    # friends (see `crates/infrastore-ffi/src/lib.rs`).
     (:list_supplemental_attribute_associations,
-        :infrastore_store_list_supplemental_attribute_associations, :rows, nothing),
+        :infrastore_store_list_supplemental_attribute_associations, :owned_rows, nothing),
     (:list_supplemental_attribute_ids,
         :infrastore_store_list_supplemental_attribute_ids, :ids, nothing),
     (:list_components_with_attributes,
@@ -190,6 +194,18 @@ for (T, api) in (
                     buf::Ptr{UInt8},
                     cap::UInt64,
                     len::Ref{UInt64},
+                )::Int32
+            )
+            return $T[_decode_assoc($T, r) for r in JSON.parse(json)]
+        end
+    elseif shape === :owned_rows
+        quote
+            json = _owned_str(
+                (out_json, out_len) -> @ccall lib_path().$sym(
+                    store::Ptr{Cvoid},
+                    filter_json::Cstring,
+                    out_json::Ref{Ptr{Cchar}},
+                    out_len::Ref{UInt64},
                 )::Int32
             )
             return $T[_decode_assoc($T, r) for r in JSON.parse(json)]

@@ -58,6 +58,7 @@ do not hand-edit it. The [Julia binding](./julia-api.md) is the primary consumer
 | `INFRASTORE_ERR_DUPLICATE_ASSOCIATION` | 10    | An attachment or parent/child edge with the same identity already exists. Distinct from `INFRASTORE_ERR_DUPLICATE`, which is about time-series identity.                                       |
 | `INFRASTORE_ERR_STORE_EXISTS`          | 11    | A store already exists where one was about to be created. Creating there would discard its arrays while keeping its catalog. Use `infrastore_store_create_replacing` to discard it on purpose. |
 | `INFRASTORE_ERR_MISMATCHED_ARTIFACT`   | 12    | The HDF5 file and its `.sqlite` catalog do not carry the same generation stamp: they are halves of two different saves.                                                                        |
+| `INFRASTORE_ERR_RECONCILE_CONFLICT`    | 13    | An OpenAPI-row reconcile (`infrastore_store_reconcile_time_series_associations_openapi`) found drift the requested policy cannot resolve.                                                      |
 | `INFRASTORE_ERR_INTERNAL`              | 99    | Unexpected internal error                                                                                                                                                                      |
 
 ## Lifecycle
@@ -823,9 +824,10 @@ language, and an empty list matches nothing. An unknown field or malformed JSON 
 and treats removing nothing as success, not an error.
 
 The list functions use the probe-then-fetch convention: call with `buf = NULL, cap = 0` to learn the
-length via `out_len`, then again with a `len + 1`-byte buffer. (`infrastore_store_list_keys` and
-`infrastore_store_list_array_groups` are the exceptions in this header — they return an owned string
-instead, because a time-series listing is the one result whose size scales with the whole catalog.)
+length via `out_len`, then again with a `len + 1`-byte buffer. (`infrastore_store_list_keys`,
+`infrastore_store_list_array_groups`, and
+`infrastore_store_list_supplemental_attribute_associations` are the exceptions in this header — they
+return an owned string instead, because a no-filter call exports the whole catalog or table.)
 
 ### Supplemental-attribute associations
 
@@ -858,11 +860,13 @@ int32_t infrastore_store_has_supplemental_attribute_association(const struct Inf
                                                         bool *out_found);
 
 /* Matching attachments as a JSON array, in insertion order; each object carries
-   component_id, component_type, attribute_id, attribute_type. Probe-then-fetch. */
+   component_id, component_type, attribute_id, attribute_type. Returns the JSON
+   through out_json as an OWNED allocation, freed with infrastore_string_free
+   (a no-filter call exports the whole table, so this follows the owned-string
+   convention rather than probe-then-fetch). */
 int32_t infrastore_store_list_supplemental_attribute_associations(const struct InfraStore *handle,
                                                           const char *filter_json,
-                                                          char *buf, uint64_t cap,
-                                                          uint64_t *out_len);
+                                                          char **out_json, uint64_t *out_len);
 
 /* Distinct attribute ids of the matching rows, ascending, as a JSON array — the
    attributes attached to a component when component_id is set. Probe-then-fetch. */
@@ -995,6 +999,65 @@ free(json);
 
 Neither association catalog is exposed over the [gRPC server](./grpc-api.md) or the
 [`infrastore` CLI](./cli.md).
+
+## OpenAPI-row Association Serde
+
+Direct JSON serde of the two association catalogs, in the wire spelling
+[SiennaSchemas](https://github.com/NREL-Sienna/SiennaSchemas) defines (`TimeSeries/*.json`,
+`Core/Associations/SupplementalAttributeAssociation.json`). All four exports use the owned-string
+convention.
+
+```c
+/* Export time_series_associations matching the filter as a sorted OpenAPI-row
+   JSON array, each row stamped with address verbatim. Filters match
+   infrastore_store_list_keys. Returns the JSON through out_json as an OWNED
+   allocation, freed with infrastore_string_free. */
+int32_t infrastore_store_export_time_series_associations_openapi(const struct InfraStore *handle,
+                                                          const char *address,
+                                                          bool has_owner, int64_t owner_id,
+                                                          bool has_owner_category, int32_t owner_category,
+                                                          bool has_time_series_type, int32_t time_series_type,
+                                                          const char *name, const char *resolution,
+                                                          const char *interval, const char *features_json,
+                                                          const char *component_field,
+                                                          char **out_json, uint64_t *out_len);
+
+/* Export the whole supplemental_attribute_associations table as an OpenAPI-row
+   JSON array, sorted by (component_id, attribute_id). Owned-string return. */
+int32_t infrastore_store_export_supplemental_attribute_associations_openapi(
+    const struct InfraStore *handle, char **out_json, uint64_t *out_len);
+
+/* Bulk-ingest a JSON array of supplemental-attribute association OpenAPI rows in
+   one all-or-nothing transaction -- the import half of the round trip whose
+   export is infrastore_store_export_supplemental_attribute_associations_openapi.
+   *out_added (when non-NULL) receives the number inserted. */
+int32_t infrastore_store_import_supplemental_attribute_associations_openapi(
+    struct InfraStore *handle, const char *json, uint64_t *out_added);
+
+/* Reconcile a JSON array of time-series association OpenAPI rows against this
+   store's catalog: match by identity, apply policy to any descriptive drift, and
+   return INFRASTORE_ERR_RECONCILE_CONFLICT (naming every offending row in the
+   error message) for anything neither policy can resolve. policy is 0 (strict:
+   any drift is an error) or 1 (update_descriptive: descriptive drift is
+   rewritten from the JSON; geometry drift is still an error); any other value is
+   INFRASTORE_ERR_INVALID_PARAMETER. When non-NULL, expected_address must match
+   every row's own address field or the whole call fails. On success, writes the
+   JSON-serialized report ({"matched":...,"updated":...,"missing_in_store":...,
+   "unmatched_in_store":...,"conflicts":[...]}) through out_json as an OWNED
+   allocation, freed with infrastore_string_free. */
+int32_t infrastore_store_reconcile_time_series_associations_openapi(struct InfraStore *handle,
+                                                            const char *json, int32_t policy,
+                                                            const char *expected_address,
+                                                            char **out_json, uint64_t *out_len);
+```
+
+A catalog row's `data_hash` is `NOT NULL` and the schemas deliberately never carry hashes, so a JSON
+document can never _create_ a complete catalog row:
+`infrastore_store_reconcile_time_series_associations_openapi` reconciles rows against the store's
+existing catalog rather than importing them. There is no corresponding time-series _import_ export —
+the sidecar store stays the authority for which series exist; only the descriptive columns (`units`,
+`quantity_kind`, `unit_system`, `component_field`, `application_data`) can ever be rewritten from a
+document, and only under `policy = 1`.
 
 ## Error Messages
 

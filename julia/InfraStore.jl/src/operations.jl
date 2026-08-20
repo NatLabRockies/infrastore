@@ -588,12 +588,12 @@ end
 # the series, and the bulk-result getters return them, so a series read in bulk
 # and the same series read individually produce equal structs.
 function _bulk_single(result::Ptr{Cvoid}, idx::Integer, name::AbstractString)
-    out_initial = Ref{Int64}(0);
+    out_initial = Ref{Int64}(0)
     out_resolution = Ref{Ptr{Cchar}}(C_NULL)
-    out_dtype = Ref{Int32}(0);
-    out_shape = Ref{Ptr{Int64}}(C_NULL);
+    out_dtype = Ref{Int32}(0)
+    out_shape = Ref{Ptr{Int64}}(C_NULL)
     out_shape_len = Ref{UInt64}(0)
-    out_data = Ref{Ptr{UInt8}}(C_NULL);
+    out_data = Ref{Ptr{UInt8}}(C_NULL)
     out_data_len = Ref{UInt64}(0)
     out_application_data = Ref{Ptr{Cchar}}(C_NULL)
     out_element_type = Ref{Ptr{Cchar}}(C_NULL)
@@ -649,12 +649,12 @@ end
 # Reconstruct one NonSequentialTimeSeries from a bulk-read result slot (carrying
 # `application_data` / `element_type` / `units`, as `_bulk_single` does).
 function _bulk_non_sequential(result::Ptr{Cvoid}, idx::Integer, name::AbstractString)
-    out_ts = Ref{Ptr{Int64}}(C_NULL);
+    out_ts = Ref{Ptr{Int64}}(C_NULL)
     out_ts_len = Ref{UInt64}(0)
-    out_dtype = Ref{Int32}(0);
-    out_shape = Ref{Ptr{Int64}}(C_NULL);
+    out_dtype = Ref{Int32}(0)
+    out_shape = Ref{Ptr{Int64}}(C_NULL)
     out_shape_len = Ref{UInt64}(0)
-    out_data = Ref{Ptr{UInt8}}(C_NULL);
+    out_data = Ref{Ptr{UInt8}}(C_NULL)
     out_data_len = Ref{UInt64}(0)
     out_application_data = Ref{Ptr{Cchar}}(C_NULL)
     out_element_type = Ref{Ptr{Cchar}}(C_NULL)
@@ -714,18 +714,18 @@ end
 function _bulk_forecast(
     result::Ptr{Cvoid}, idx::Integer, type_code::Integer, name::AbstractString
 )
-    out_initial = Ref{Int64}(0);
+    out_initial = Ref{Int64}(0)
     out_res = Ref{Ptr{Cchar}}(C_NULL)
-    out_horizon = Ref{Ptr{Cchar}}(C_NULL);
+    out_horizon = Ref{Ptr{Cchar}}(C_NULL)
     out_interval = Ref{Ptr{Cchar}}(C_NULL)
-    out_count = Ref{UInt64}(0);
+    out_count = Ref{UInt64}(0)
     out_scen = Ref{UInt64}(0)
-    out_ndims = Ref{UInt64}(0);
-    out_dims = Ref{Ptr{UInt64}}(C_NULL);
+    out_ndims = Ref{UInt64}(0)
+    out_dims = Ref{Ptr{UInt64}}(C_NULL)
     out_dtype = Ref{Int32}(0)
-    out_data = Ref{Ptr{UInt8}}(C_NULL);
+    out_data = Ref{Ptr{UInt8}}(C_NULL)
     out_byte_len = Ref{UInt64}(0)
-    out_pct = Ref{Ptr{Float64}}(C_NULL);
+    out_pct = Ref{Ptr{Float64}}(C_NULL)
     out_pct_len = Ref{UInt64}(0)
     out_application_data = Ref{Ptr{Cchar}}(C_NULL)
     out_element_type = Ref{Ptr{Cchar}}(C_NULL)
