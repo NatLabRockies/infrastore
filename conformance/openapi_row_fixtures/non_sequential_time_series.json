@@ -1,0 +1,14 @@
+{
+  "id": 4,
+  "owner_id": 12,
+  "owner_type": "GeometricDistributionForcedOutage",
+  "owner_category": "SupplementalAttribute",
+  "time_series_type": "NonSequentialTimeSeries",
+  "name": "outage_events",
+  "features": {},
+  "address": "time_series.h5",
+  "element_type": "bool",
+  "element_shape": [],
+  "application_data": "{\"module\":\"PowerSystems\"}",
+  "length": 42
+}

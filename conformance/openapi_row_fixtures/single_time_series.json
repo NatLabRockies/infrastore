@@ -1,0 +1,22 @@
+{
+  "id": 3,
+  "owner_id": 7,
+  "owner_type": "ThermalStandard",
+  "owner_category": "Component",
+  "time_series_type": "SingleTimeSeries",
+  "name": "max_active_power",
+  "features": {
+    "scenario": "high_load",
+    "year": 2030
+  },
+  "address": "time_series.h5",
+  "element_type": "f64",
+  "element_shape": [],
+  "units": "MW",
+  "quantity_kind": "ActivePower",
+  "unit_system": "NATURAL_UNITS",
+  "component_field": "max_active_power",
+  "initial_timestamp": "2030-01-01T00:00:00Z",
+  "resolution": "PT1H",
+  "length": 8760
+}

@@ -1,0 +1,24 @@
+{
+  "id": 5,
+  "owner_id": 7,
+  "owner_type": "ThermalStandard",
+  "owner_category": "Component",
+  "time_series_type": "Deterministic",
+  "name": "max_active_power_forecast",
+  "features": {
+    "vintage": true,
+    "weight": 0.5
+  },
+  "address": "time_series.h5",
+  "element_type": "f64",
+  "element_shape": [],
+  "units": "pu",
+  "quantity_kind": "ActivePower",
+  "unit_system": "COMPONENT_BASE",
+  "component_field": "max_active_power",
+  "initial_timestamp": "2030-01-01T00:00:00Z",
+  "resolution": "PT1H",
+  "horizon": "P1D",
+  "interval": "PT1H",
+  "count": 365
+}

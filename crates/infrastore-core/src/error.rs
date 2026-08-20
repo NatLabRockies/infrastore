@@ -78,4 +78,16 @@ pub enum TimeSeriesError {
 
     #[error("serialization error: {0}")]
     Serde(#[from] serde_json::Error),
+
+    /// A JSON reconcile of the time-series association catalog
+    /// (`crate::openapi::reconcile_time_series_associations_openapi`) found
+    /// rows the requested `ReconcilePolicy` cannot resolve: geometry drift
+    /// (never allowed, under either policy), descriptive drift under
+    /// `ReconcilePolicy::Strict`, a JSON row naming a series the catalog does
+    /// not hold, or an `address` that does not match the caller's expectation.
+    /// The message names every offending row and field so a caller sees the
+    /// whole diagnostic in one pass instead of learning about the first
+    /// offender only.
+    #[error("time series association reconcile failed: {0}")]
+    ReconcileConflict(String),
 }

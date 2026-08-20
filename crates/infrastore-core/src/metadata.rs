@@ -28,6 +28,10 @@ use crate::types::time_series::TimeSeriesType;
 /// malformed to name one. Returned by [`MetadataStore::referenced_arrays`].
 pub type ReferencedArrays = (Vec<([u8; 32], ElementType)>, Vec<String>);
 
+/// A catalog row paired with its `INTEGER PRIMARY KEY` (SQLite rowid). See
+/// [`MetadataStore::list_with_id`].
+pub(crate) type IdentifiedRow = (i64, TimeSeriesMetadata);
+
 /// A SQLite value's storage class, for a diagnostic that has to describe a
 /// column holding the wrong kind of thing.
 fn value_kind(value: &rusqlite::types::Value) -> &'static str {
@@ -1208,6 +1212,42 @@ impl MetadataStore {
         .map_err(map_unique_violation)
     }
 
+    /// Overwrite the five descriptive columns — `units`, `quantity_kind`,
+    /// `unit_system`, `component_field`, `application_data` — of the
+    /// association row with catalog `id`, leaving its identity, geometry, and
+    /// both content hashes untouched. `id` is not part of a row's identity, so
+    /// this cannot collide with another row the way [`Self::rename`] can.
+    ///
+    /// The only caller is the OpenAPI reconcile's `UpdateDescriptive` policy
+    /// (`crate::openapi`): those five columns are exactly the ones D4 lets a
+    /// JSON document override on a matched row, because none of them sits in
+    /// `TimeSeriesKey`, the uniqueness index, or `data_hash`.
+    pub fn update_descriptive_by_id(
+        tx: &Connection,
+        id: i64,
+        units: Option<&str>,
+        quantity_kind: Option<&str>,
+        unit_system: Option<UnitSystem>,
+        component_field: Option<&str>,
+        application_data: Option<&str>,
+    ) -> Result<()> {
+        tx.execute(
+            "UPDATE time_series_associations
+             SET units = ?2, quantity_kind = ?3, unit_system = ?4, component_field = ?5,
+                 application_data = ?6
+             WHERE id = ?1",
+            params![
+                id,
+                units,
+                quantity_kind,
+                unit_system.map(|u| u.as_str()),
+                component_field,
+                application_data,
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Delete every association in the store. Returns the removed data_hashes.
     pub fn delete_all(tx: &Connection) -> Result<Vec<[u8; 32]>> {
         let bytes_list: Vec<Vec<u8>> = collect_data_hashes(
@@ -1230,6 +1270,20 @@ impl MetadataStore {
     }
 
     pub fn list(&self, filter: &MetadataFilter) -> Result<Vec<TimeSeriesMetadata>> {
+        Ok(self
+            .list_inner(filter, true)?
+            .0
+            .into_iter()
+            .map(|(_, m)| m)
+            .collect())
+    }
+
+    /// Like [`Self::list`], but pairs each row with its catalog `id` (the
+    /// `INTEGER PRIMARY KEY`, i.e. the SQLite rowid). Internal: nothing needs a
+    /// row's raw id except the OpenAPI export module, which stamps it into the
+    /// wire row's `id` field (`SingleTimeSeries.json` documents that field as
+    /// the catalog rowid).
+    pub(crate) fn list_with_id(&self, filter: &MetadataFilter) -> Result<Vec<IdentifiedRow>> {
         Ok(self.list_inner(filter, true)?.0)
     }
 
@@ -1246,15 +1300,19 @@ impl MetadataStore {
         &self,
         filter: &MetadataFilter,
     ) -> Result<(Vec<TimeSeriesMetadata>, Vec<[u8; 32]>)> {
-        self.list_inner(filter, false)
+        let (rows, cohorts) = self.list_inner(filter, false)?;
+        Ok((rows.into_iter().map(|(_, m)| m).collect(), cohorts))
     }
 
-    /// Shared body of [`Self::list`] and [`Self::list_timeline_cohorts`].
+    /// Shared body of [`Self::list`], [`Self::list_with_id`] and
+    /// [`Self::list_timeline_cohorts`]. Each row carries its catalog `id`
+    /// alongside the metadata; the two `list*` wrappers that don't need it
+    /// drop it.
     fn list_inner(
         &self,
         filter: &MetadataFilter,
         hydrate_timestamps: bool,
-    ) -> Result<(Vec<TimeSeriesMetadata>, Vec<[u8; 32]>)> {
+    ) -> Result<(Vec<IdentifiedRow>, Vec<[u8; 32]>)> {
         let (where_clause, params_vec) = filter.to_sql();
         let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec
             .iter()
@@ -1266,7 +1324,7 @@ impl MetadataStore {
                     data_hash, initial_timestamp, resolution, length, horizon,
                     interval, count, timestamps_hash, units, quantity_kind, unit_system,
                     component_field, percentiles_json, element_type, element_shape,
-                    application_data
+                    application_data, id
              FROM time_series_associations {where_clause}"
         );
         let mut stmt = self.conn.prepare_cached(&sql)?;
@@ -1403,7 +1461,8 @@ impl MetadataStore {
                     }
                 }
             };
-            out.push(partial.into_metadata(features, timestamps));
+            let id = partial.id;
+            out.push((id, partial.into_metadata(features, timestamps)));
         }
         Ok((out, cohorts))
     }
@@ -2624,6 +2683,12 @@ fn collect_data_hashes(
 }
 
 struct MetaRow {
+    /// The catalog's `INTEGER PRIMARY KEY` (SQLite rowid). Not part of
+    /// [`TimeSeriesMetadata`] — that type's identity is the key tuple, not a
+    /// storage-assigned id — so this rides along only for
+    /// [`MetadataStore::list_with_id`], which the OpenAPI export module uses
+    /// to stamp a wire row's documented `id` field.
+    id: i64,
     owner_id: i64,
     owner_type: String,
     owner_category: OwnerCategory,
@@ -2708,6 +2773,7 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<([u8; 32], MetaRo
     let element_type_str: String = row.get(19)?;
     let element_shape_json: Option<String> = row.get(20)?;
     let application_data: Option<String> = row.get(21)?;
+    let id: i64 = row.get(22)?;
 
     // An unrecognized basis is an error, not a silent `None`. The column has no
     // CHECK precisely so a future basis can be added without a format bump,
@@ -2843,6 +2909,7 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<([u8; 32], MetaRo
     Ok((
         features_hash,
         MetaRow {
+            id,
             owner_id,
             owner_type,
             owner_category,

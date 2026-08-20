@@ -23,7 +23,9 @@ use crate::types::key::{
     ForecastTimeSeriesKey, KeyIdentity, NonSequentialTimeSeriesKey, SingleTimeSeriesKey,
     TimeSeriesKey,
 };
-use crate::types::metadata::{Features, OwnerCategory, TimeSeriesMetadata, validate_features};
+use crate::types::metadata::{
+    Features, OwnerCategory, TimeSeriesMetadata, UnitSystem, validate_features,
+};
 use crate::types::period::Period;
 use crate::types::time_series::{
     Descriptors, Deterministic, NonSequentialTimeSeries, Probabilistic, Scenarios,
@@ -164,6 +166,19 @@ impl AddRequest {
         self.features = features;
         self
     }
+}
+
+/// One row's worth of descriptive-column overwrite, addressed by catalog `id`.
+/// Internal: built by [`crate::openapi::reconcile_time_series_associations_openapi`]
+/// and applied in bulk by [`Store::update_time_series_descriptive_bulk`].
+#[derive(Debug, Clone)]
+pub(crate) struct DescriptiveUpdate {
+    pub id: i64,
+    pub units: Option<String>,
+    pub quantity_kind: Option<String>,
+    pub unit_system: Option<UnitSystem>,
+    pub component_field: Option<String>,
+    pub application_data: Option<String>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -1912,6 +1927,50 @@ impl Store {
 
     pub fn list_time_series(&self, filter: ListFilter) -> Result<Vec<TimeSeriesMetadata>> {
         self.metadata.list(&filter.into())
+    }
+
+    /// Like [`Self::list_time_series`], but pairs each row with its catalog
+    /// `id` (the association table's `INTEGER PRIMARY KEY`, i.e. its SQLite
+    /// rowid). Internal: the only consumer is
+    /// [`crate::openapi::export_time_series_associations_openapi`], which
+    /// stamps that id into each wire row per `SingleTimeSeries.json`'s
+    /// documented `id` field. Nothing else in the public API needs a row's
+    /// raw storage id.
+    pub(crate) fn list_time_series_with_id(
+        &self,
+        filter: ListFilter,
+    ) -> Result<Vec<(i64, TimeSeriesMetadata)>> {
+        self.metadata.list_with_id(&filter.into())
+    }
+
+    /// Overwrite the five descriptive columns of every listed row in one
+    /// savepoint, all-or-nothing. Internal: the single write
+    /// [`crate::openapi::reconcile_time_series_associations_openapi`] makes
+    /// under [`crate::openapi::ReconcilePolicy::UpdateDescriptive`]. Every
+    /// other column — identity and geometry alike — is untouched, and the
+    /// `id`s named must already exist (the caller resolved them via
+    /// [`Self::list_time_series_with_id`]).
+    pub(crate) fn update_time_series_descriptive_bulk(
+        &mut self,
+        updates: &[DescriptiveUpdate],
+    ) -> Result<()> {
+        if self.read_only {
+            return Err(TimeSeriesError::ReadOnlyStore);
+        }
+        let tx = self.metadata.savepoint()?;
+        for u in updates {
+            MetadataStore::update_descriptive_by_id(
+                &tx,
+                u.id,
+                u.units.as_deref(),
+                u.quantity_kind.as_deref(),
+                u.unit_system,
+                u.component_field.as_deref(),
+                u.application_data.as_deref(),
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// List the [`TimeSeriesKey`] of every association matching `filter`. This is

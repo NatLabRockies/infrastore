@@ -1,0 +1,23 @@
+{
+  "id": 7,
+  "owner_id": 9,
+  "owner_type": "RenewableDispatch",
+  "owner_category": "Component",
+  "time_series_type": "Scenarios",
+  "name": "scenario_power",
+  "features": {},
+  "address": "time_series.h5",
+  "element_type": "f64",
+  "element_shape": [
+    5
+  ],
+  "units": "MW",
+  "quantity_kind": "ActivePower",
+  "unit_system": "NATURAL_UNITS",
+  "initial_timestamp": "2030-06-15T00:00:00Z",
+  "resolution": "PT1H",
+  "horizon": "PT4H",
+  "interval": "PT1H",
+  "count": 24,
+  "scenario_count": 5
+}

@@ -1,0 +1,1148 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "ACBusType": {
+      "enum": [
+        "PQ",
+        "PV",
+        "REF",
+        "ISOLATED",
+        "SLACK"
+      ],
+      "title": "ACBusType",
+      "type": "string"
+    },
+    "AverageRateCurve": {
+      "properties": {
+        "curve_type": {
+          "const": "AVERAGE_RATE",
+          "type": "string",
+          "default": "AVERAGE_RATE"
+        },
+        "function_data": {
+          "discriminator": {
+            "mapping": {
+              "LINEAR": "#/components/schemas/LinearFunctionData",
+              "PIECEWISE_STEP": "#/components/schemas/PiecewiseStepData"
+            },
+            "propertyName": "function_type"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/definitions/LinearFunctionData"
+            },
+            {
+              "$ref": "#/definitions/PiecewiseStepData"
+            }
+          ]
+        },
+        "initial_input": {
+          "type": "number"
+        },
+        "input_at_zero": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "function_data",
+        "curve_type"
+      ],
+      "title": "AverageRateCurve",
+      "type": "object"
+    },
+    "ComplexNumber": {
+      "properties": {
+        "real": {
+          "type": "number"
+        },
+        "imag": {
+          "type": "number"
+        }
+      },
+      "title": "ComplexNumber",
+      "type": "object"
+    },
+    "CostCurve": {
+      "properties": {
+        "power_units": {
+          "default": "NATURAL_UNITS",
+          "$ref": "#/definitions/UnitSystem"
+        },
+        "value_curve": {
+          "$ref": "#/definitions/ValueCurve"
+        },
+        "variable_cost_type": {
+          "const": "COST",
+          "type": "string",
+          "default": "COST"
+        },
+        "vom_cost": {
+          "default": {
+            "curve_type": "INPUT_OUTPUT",
+            "function_data": {
+              "function_type": "LINEAR",
+              "constant_term": 0,
+              "proportional_term": 0
+            }
+          },
+          "$ref": "#/definitions/InputOutputCurve"
+        }
+      },
+      "required": [
+        "value_curve",
+        "power_units",
+        "vom_cost",
+        "variable_cost_type"
+      ],
+      "title": "CostCurve",
+      "type": "object"
+    },
+    "DbdPnts": {
+      "properties": {
+        "dbd1": {
+          "type": "number"
+        },
+        "dbd2": {
+          "type": "number"
+        }
+      },
+      "title": "DbdPnts",
+      "type": "object"
+    },
+    "EmissionBasis": {
+      "enum": [
+        "FUEL_INPUT",
+        "POWER_OUTPUT"
+      ],
+      "title": "EmissionBasis",
+      "type": "string"
+    },
+    "EnergyUnit": {
+      "enum": [
+        "MMBTU",
+        "GJ",
+        "MWH"
+      ],
+      "title": "EnergyUnit",
+      "type": "string"
+    },
+    "EnergyUnitBasis": {
+      "description": "Unit basis a stored-energy quantity is recorded in (distinct from EnergyUnit, which names fuel energy content). MWH: megawatt-hours, the conventional interchange form. MWMIN: megawatt-minutes, consistent with the minutes basis used for operational durations, so a duration computed as energy over power comes out in minutes with no hidden factor of 60. Defaults to MWH: MWMIN is supported, not preferred.",
+      "enum": [
+        "MWH",
+        "MWMIN"
+      ],
+      "title": "EnergyUnitBasis",
+      "type": "string"
+    },
+    "FdbdPnts": {
+      "properties": {
+        "fdbd1": {
+          "type": "number"
+        },
+        "fdbd2": {
+          "type": "number"
+        }
+      },
+      "title": "FdbdPnts",
+      "type": "object"
+    },
+    "FromTo": {
+      "properties": {
+        "from": {
+          "title": "From",
+          "type": "number"
+        },
+        "to": {
+          "title": "To",
+          "type": "number"
+        }
+      },
+      "title": "FromTo",
+      "type": "object"
+    },
+    "FromTo_ToFrom": {
+      "properties": {
+        "from_to": {
+          "title": "FromTo",
+          "type": "number"
+        },
+        "to_from": {
+          "title": "ToFrom",
+          "type": "number"
+        }
+      },
+      "title": "FromTo_ToFrom",
+      "type": "object"
+    },
+    "FuelCurve": {
+      "properties": {
+        "fuel_cost": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "number"
+            }
+          ]
+        },
+        "power_units": {
+          "$ref": "#/definitions/UnitSystem"
+        },
+        "startup_fuel_offtake": {
+          "description": "Fuel consumed during startup, as a curve in the unit's fuel units.",
+          "$ref": "#/definitions/InputOutputCurve"
+        },
+        "value_curve": {
+          "$ref": "#/definitions/ValueCurve"
+        },
+        "variable_cost_type": {
+          "const": "FUEL",
+          "type": "string",
+          "default": "FUEL"
+        },
+        "vom_cost": {
+          "$ref": "#/definitions/InputOutputCurve"
+        }
+      },
+      "required": [
+        "value_curve",
+        "power_units",
+        "fuel_cost",
+        "vom_cost",
+        "variable_cost_type"
+      ],
+      "title": "FuelCurve",
+      "type": "object"
+    },
+    "FunctionData": {
+      "discriminator": {
+        "mapping": {
+          "LINEAR": "#/components/schemas/LinearFunctionData",
+          "PIECEWISE_LINEAR": "#/components/schemas/PiecewiseLinearData",
+          "PIECEWISE_STEP": "#/components/schemas/PiecewiseStepData",
+          "QUADRATIC": "#/components/schemas/QuadraticFunctionData"
+        },
+        "propertyName": "function_type"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/definitions/LinearFunctionData"
+        },
+        {
+          "$ref": "#/definitions/QuadraticFunctionData"
+        },
+        {
+          "$ref": "#/definitions/PiecewiseLinearData"
+        },
+        {
+          "$ref": "#/definitions/PiecewiseStepData"
+        }
+      ],
+      "title": "FunctionData",
+      "type": "object"
+    },
+    "GenericOperationCost": {
+      "discriminator": {
+        "mapping": {
+          "RENEWABLE": "#/components/schemas/RenewableGenerationCost",
+          "THERMAL": "#/components/schemas/ThermalGenerationCost",
+          "HYDRO_GEN": "#/components/schemas/HydroGenerationCost"
+        },
+        "propertyName": "cost_type"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/definitions/ThermalGenerationCost"
+        },
+        {
+          "$ref": "#/definitions/RenewableGenerationCost"
+        },
+        {
+          "$ref": "#/definitions/HydroGenerationCost"
+        }
+      ],
+      "title": "GenericOperationCost",
+      "type": "object"
+    },
+    "HydroGenerationCost": {
+      "description": "Cost representation for hydro gen units",
+      "properties": {
+        "cost_type": {
+          "const": "HYDRO_GEN",
+          "type": "string",
+          "default": "HYDRO_GEN"
+        },
+        "fixed": {
+          "default": 0.0,
+          "type": "number"
+        },
+        "variable": {
+          "$ref": "#/definitions/ProductionVariableCostCurve"
+        }
+      },
+      "required": [
+        "variable"
+      ],
+      "title": "HydroGenerationCost",
+      "type": "object"
+    },
+    "HydroReservoirCost": {
+      "description": "Cost representation for hydro reservoir",
+      "properties": {
+        "cost_type": {
+          "const": "HYDRO_RES",
+          "type": "string",
+          "default": "HYDRO_RES"
+        },
+        "level_shortage_cost": {
+          "default": 0.0,
+          "type": "number"
+        },
+        "level_surplus_cost": {
+          "default": 0.0,
+          "type": "number"
+        },
+        "spillage_cost": {
+          "default": 0.0,
+          "type": "number"
+        }
+      },
+      "title": "HydroReservoirCost",
+      "type": "object"
+    },
+    "HydroStorageGenerationCost": {
+      "title": "HydroStorageGenerationCost",
+      "type": "object",
+      "discriminator": {
+        "mapping": {
+          "HYDRO_GEN": "#/components/schemas/HydroGenerationCost",
+          "STORAGE": "#/components/schemas/StorageCost"
+        },
+        "propertyName": "cost_type"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/definitions/HydroGenerationCost"
+        },
+        {
+          "$ref": "#/definitions/StorageCost"
+        }
+      ]
+    },
+    "ImpedanceUnitBasis": {
+      "description": "Unit basis a branch/injection impedance is stored in. NATURAL_UNITS: physical ohms (PSS/E RAW native for DC-line impedances). COMPONENT_BASE: per-unit on the component's own base (base_power MVA and voltage base); components whose per-unit data was historically on the system base record that system base in base_power, so there is no separate system-base option. PSS/E supplies device base for DC-line converters and CZ=2 transformer windings.",
+      "enum": [
+        "NATURAL_UNITS",
+        "COMPONENT_BASE"
+      ],
+      "title": "ImpedanceUnitBasis",
+      "type": "string"
+    },
+    "AdmittanceUnitBasis": {
+      "description": "Unit basis a shunt admittance is stored in. NATURAL_UNITS: physical siemens. COMPONENT_MVAR: reactive power at unity voltage (Mvar for susceptance, MW for conductance). COMPONENT_BASE: per-unit on the component's own base (base_power MVA and voltage base) \u2014 a per-unit base, not a power at unity voltage, and not an alternative spelling of COMPONENT_MVAR; components whose per-unit data was historically on the system base record that system base in base_power. Fixed and switched shunts use ShuntAdmittanceUnitBasis instead, which omits COMPONENT_BASE because a shunt has no device MVA rating.",
+      "enum": [
+        "NATURAL_UNITS",
+        "COMPONENT_MVAR",
+        "COMPONENT_BASE"
+      ],
+      "title": "AdmittanceUnitBasis",
+      "type": "string"
+    },
+    "ShuntAdmittanceUnitBasis": {
+      "description": "Subset of AdmittanceUnitBasis for fixed and switched shunts: omits COMPONENT_BASE because a shunt has no device MVA rating to per-unitize against. NATURAL_UNITS: physical siemens. COMPONENT_MVAR: reactive power at unity voltage (Mvar for susceptance, MW for conductance) \u2014 PSS/E RAW native for shunts.",
+      "enum": [
+        "NATURAL_UNITS",
+        "COMPONENT_MVAR"
+      ],
+      "title": "ShuntAdmittanceUnitBasis",
+      "type": "string"
+    },
+    "ImportExportCost": {
+      "properties": {
+        "cost_type": {
+          "const": "IMPORTEXPORT",
+          "type": "string",
+          "default": "IMPORTEXPORT"
+        },
+        "import_offer_curves": {
+          "$ref": "#/definitions/CostCurve"
+        },
+        "export_offer_curves": {
+          "$ref": "#/definitions/CostCurve"
+        },
+        "energy_import_weekly_limit": {
+          "type": "number"
+        },
+        "energy_export_weekly_limit": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "energy_import_weekly_limit",
+        "energy_export_weekly_limit"
+      ],
+      "title": "ImportExportCost",
+      "type": "object"
+    },
+    "IncrementalCurve": {
+      "properties": {
+        "curve_type": {
+          "const": "INCREMENTAL",
+          "type": "string",
+          "default": "INCREMENTAL"
+        },
+        "function_data": {
+          "discriminator": {
+            "mapping": {
+              "LINEAR": "#/components/schemas/LinearFunctionData",
+              "PIECEWISE_STEP": "#/components/schemas/PiecewiseStepData"
+            },
+            "propertyName": "function_type"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/definitions/LinearFunctionData"
+            },
+            {
+              "$ref": "#/definitions/PiecewiseStepData"
+            }
+          ]
+        },
+        "initial_input": {
+          "type": "number"
+        },
+        "input_at_zero": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "function_data",
+        "curve_type"
+      ],
+      "title": "IncrementalCurve",
+      "type": "object"
+    },
+    "InOut": {
+      "properties": {
+        "in": {
+          "type": "number"
+        },
+        "out": {
+          "type": "number"
+        }
+      },
+      "title": "InOut",
+      "type": "object"
+    },
+    "InputOutputCurve": {
+      "default": {
+        "curve_type": "INPUT_OUTPUT",
+        "function_data": {
+          "function_type": "LINEAR",
+          "constant_term": 0,
+          "proportional_term": 0
+        }
+      },
+      "properties": {
+        "curve_type": {
+          "const": "INPUT_OUTPUT",
+          "type": "string",
+          "default": "INPUT_OUTPUT"
+        },
+        "function_data": {
+          "discriminator": {
+            "mapping": {
+              "LINEAR": "#/components/schemas/LinearFunctionData",
+              "PIECEWISE_LINEAR": "#/components/schemas/PiecewiseLinearData",
+              "QUADRATIC": "#/components/schemas/QuadraticFunctionData"
+            },
+            "propertyName": "function_type"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/definitions/QuadraticFunctionData"
+            },
+            {
+              "$ref": "#/definitions/LinearFunctionData"
+            },
+            {
+              "$ref": "#/definitions/PiecewiseLinearData"
+            }
+          ]
+        },
+        "input_at_zero": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "function_data",
+        "curve_type"
+      ],
+      "title": "InputOutputCurve",
+      "type": "object"
+    },
+    "LinearFunctionData": {
+      "properties": {
+        "constant_term": {
+          "type": "number"
+        },
+        "function_type": {
+          "const": "LINEAR",
+          "type": "string",
+          "default": "LINEAR"
+        },
+        "proportional_term": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "proportional_term",
+        "constant_term",
+        "function_type"
+      ],
+      "title": "LinearFunctionData",
+      "type": "object"
+    },
+    "LoadCost": {
+      "description": "Cost representation for controllable load units",
+      "properties": {
+        "cost_type": {
+          "const": "LOAD",
+          "type": "string",
+          "default": "LOAD"
+        },
+        "fixed": {
+          "default": 0.0,
+          "type": "number"
+        },
+        "variable": {
+          "$ref": "#/definitions/CostCurve"
+        }
+      },
+      "required": [
+        "variable"
+      ],
+      "title": "LoadCost",
+      "type": "object"
+    },
+    "MassUnit": {
+      "enum": [
+        "KG",
+        "LB",
+        "SHORT_TON",
+        "METRIC_TON"
+      ],
+      "title": "MassUnit",
+      "type": "string"
+    },
+    "MarketBidCost": {
+      "description": "Cost representation for static (non-time-varying) market bids of energy and ancillary services.",
+      "properties": {
+        "cost_type": {
+          "const": "MARKET_BID",
+          "type": "string",
+          "default": "MARKET_BID"
+        },
+        "no_load_cost": {
+          "description": "No load cost. Legacy scalar promotion: a bare scalar value `s` from a legacy source converts to an `InputOutputCurve` of `LinearFunctionData` with `constant_term = s` and `proportional_term = 0`.",
+          "default": {
+            "curve_type": "INPUT_OUTPUT",
+            "function_data": {
+              "function_type": "LINEAR",
+              "constant_term": 0,
+              "proportional_term": 0
+            }
+          },
+          "$ref": "#/definitions/InputOutputCurve"
+        },
+        "start_up": {
+          "description": "Start-up cost at different stages of the thermal cycle (hot, warm, cold).",
+          "$ref": "#/definitions/StartUpStages"
+        },
+        "shut_down": {
+          "description": "Shut-down cost. Legacy scalar promotion: a bare scalar value `s` from a legacy source converts to an `InputOutputCurve` of `LinearFunctionData` with `constant_term = s` and `proportional_term = 0`.",
+          "default": {
+            "curve_type": "INPUT_OUTPUT",
+            "function_data": {
+              "function_type": "LINEAR",
+              "constant_term": 0,
+              "proportional_term": 0
+            }
+          },
+          "$ref": "#/definitions/InputOutputCurve"
+        },
+        "incremental_offer_curves": {
+          "description": "Sell offer curves data as a `CostCurve` of `PiecewiseIncrementalCurve`.",
+          "$ref": "#/definitions/CostCurve"
+        },
+        "decremental_offer_curves": {
+          "description": "Buy offer curves data as a `CostCurve` of `PiecewiseIncrementalCurve`.",
+          "$ref": "#/definitions/CostCurve"
+        },
+        "ancillary_service_offers": {
+          "description": "IDs of the ancillary service components that this market bid offers into.",
+          "type": "array",
+          "items": {
+            "type": "integer"
+          }
+        }
+      },
+      "required": [
+        "no_load_cost",
+        "start_up",
+        "shut_down",
+        "incremental_offer_curves",
+        "decremental_offer_curves",
+        "ancillary_service_offers"
+      ],
+      "title": "MarketBidCost",
+      "type": "object"
+    },
+    "MinMax": {
+      "properties": {
+        "max": {
+          "title": "Max",
+          "type": "number"
+        },
+        "min": {
+          "title": "Min",
+          "type": "number"
+        }
+      },
+      "title": "MinMax",
+      "type": "object"
+    },
+    "PiecewiseLinearData": {
+      "properties": {
+        "function_type": {
+          "const": "PIECEWISE_LINEAR",
+          "type": "string",
+          "default": "PIECEWISE_LINEAR"
+        },
+        "points": {
+          "items": {
+            "$ref": "#/definitions/XY_Coords"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "points",
+        "function_type"
+      ],
+      "title": "PiecewiseLinearData",
+      "type": "object"
+    },
+    "PiecewiseStepData": {
+      "properties": {
+        "function_type": {
+          "const": "PIECEWISE_STEP",
+          "type": "string",
+          "default": "PIECEWISE_STEP"
+        },
+        "x_coords": {
+          "items": {
+            "type": "number"
+          },
+          "type": "array"
+        },
+        "y_coords": {
+          "items": {
+            "type": "number"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "x_coords",
+        "y_coords",
+        "function_type"
+      ],
+      "title": "PiecewiseStepData",
+      "type": "object"
+    },
+    "PollutantType": {
+      "enum": [
+        "CO2",
+        "CO2E",
+        "CH4",
+        "N2O",
+        "NOX",
+        "SO2",
+        "CO",
+        "VOC",
+        "PM25",
+        "PM10",
+        "HG",
+        "HAP",
+        "CUSTOM"
+      ],
+      "title": "PollutantType",
+      "type": "string"
+    },
+    "PrimeMovers": {
+      "enum": [
+        "BA",
+        "BT",
+        "CA",
+        "CC",
+        "CE",
+        "CP",
+        "CS",
+        "CT",
+        "ES",
+        "FC",
+        "FW",
+        "GT",
+        "HA",
+        "HB",
+        "HK",
+        "HY",
+        "IC",
+        "PS",
+        "OT",
+        "ST",
+        "PVe",
+        "WT",
+        "WS"
+      ],
+      "title": "PrimeMovers",
+      "type": "string"
+    },
+    "ProductionVariableCostCurve": {
+      "title": "ProductionVariableCostCurve",
+      "discriminator": {
+        "mapping": {
+          "COST": "#/components/schemas/CostCurve",
+          "FUEL": "#/components/schemas/FuelCurve"
+        },
+        "propertyName": "variable_cost_type"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/definitions/CostCurve"
+        },
+        {
+          "$ref": "#/definitions/FuelCurve"
+        }
+      ],
+      "type": "object"
+    },
+    "QuadraticFunctionData": {
+      "properties": {
+        "constant_term": {
+          "type": "number"
+        },
+        "function_type": {
+          "const": "QUADRATIC",
+          "type": "string",
+          "default": "QUADRATIC"
+        },
+        "proportional_term": {
+          "type": "number"
+        },
+        "quadratic_term": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "quadratic_term",
+        "proportional_term",
+        "constant_term",
+        "function_type"
+      ],
+      "title": "QuadraticFunctionData",
+      "type": "object"
+    },
+    "RenewableGenerationCost": {
+      "description": "Cost representation for renewable generation units",
+      "properties": {
+        "cost_type": {
+          "const": "RENEWABLE",
+          "type": "string",
+          "default": "RENEWABLE"
+        },
+        "curtailment_cost": {
+          "default": {
+            "variable_cost_type": "COST",
+            "value_curve": {
+              "curve_type": "INPUT_OUTPUT",
+              "function_data": {
+                "function_type": "LINEAR",
+                "constant_term": 0,
+                "proportional_term": 0
+              }
+            },
+            "vom_cost": {
+              "curve_type": "INPUT_OUTPUT",
+              "function_data": {
+                "function_type": "LINEAR",
+                "constant_term": 0,
+                "proportional_term": 0
+              }
+            }
+          },
+          "$ref": "#/definitions/CostCurve"
+        },
+        "variable": {
+          "$ref": "#/definitions/CostCurve"
+        },
+        "fixed": {
+          "type": "number",
+          "default": 0.0
+        }
+      },
+      "required": [
+        "variable"
+      ],
+      "title": "RenewableGenerationCost",
+      "type": "object"
+    },
+    "ReservoirLocation": {
+      "enum": [
+        "HEAD",
+        "TAIL"
+      ],
+      "title": "ReservoirLocation",
+      "type": "string"
+    },
+    "StartUpShutDown": {
+      "properties": {
+        "startup": {
+          "title": "StartUp",
+          "type": "number"
+        },
+        "shutdown": {
+          "title": "ShutDown",
+          "type": "number"
+        }
+      },
+      "title": "StartUpShutDown",
+      "type": "object"
+    },
+    "StartUpStages": {
+      "properties": {
+        "startup_stages_type": {
+          "const": "STAGES",
+          "type": "string",
+          "default": "STAGES"
+        },
+        "cold": {
+          "type": "number"
+        },
+        "hot": {
+          "type": "number"
+        },
+        "warm": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "hot",
+        "warm",
+        "cold"
+      ],
+      "title": "StartUpStages",
+      "type": "object"
+    },
+    "StorageCost": {
+      "description": "Cost representation for storage units",
+      "properties": {
+        "cost_type": {
+          "const": "STORAGE",
+          "type": "string",
+          "default": "STORAGE"
+        },
+        "charge_variable_cost": {
+          "$ref": "#/definitions/CostCurve"
+        },
+        "discharge_variable_cost": {
+          "$ref": "#/definitions/CostCurve"
+        },
+        "fixed": {
+          "default": 0.0,
+          "type": "number"
+        },
+        "shut_down": {
+          "default": 0.0,
+          "type": "number"
+        },
+        "start_up": {
+          "default": 0.0,
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "properties": {
+                "charge": {
+                  "type": "number"
+                },
+                "discharge": {
+                  "type": "number"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "energy_shortage_cost": {
+          "default": 0.0,
+          "type": "number"
+        },
+        "energy_surplus_cost": {
+          "default": 0.0,
+          "type": "number"
+        }
+      },
+      "required": [
+        "fixed",
+        "start_up",
+        "shut_down"
+      ],
+      "title": "StorageCost",
+      "type": "object"
+    },
+    "StorageTech": {
+      "description": "defines the storage technology used in an energy Storage system, based on the options in EIA form 923.",
+      "enum": [
+        "PTES",
+        "LIB",
+        "LAB",
+        "FLWB",
+        "SIB",
+        "ZIB",
+        "HGS",
+        "LAES",
+        "OTHER_CHEM",
+        "OTHER_MECH",
+        "OTHER_THERM"
+      ],
+      "title": "StorageTech",
+      "type": "string"
+    },
+    "ThermalFuels": {
+      "description": "Thermal fuels that reflect options in the EIA annual energy review.",
+      "enum": [
+        "ANTHRACITE_COAL",
+        "BITUMINOUS_COAL",
+        "LIGNITE_COAL",
+        "SUBBITUMINOUS_COAL",
+        "WASTE_COAL",
+        "REFINED_COAL",
+        "SYNTHESIS_GAS_COAL",
+        "DISTILLATE_FUEL_OIL",
+        "JET_FUEL",
+        "KEROSENE",
+        "PETROLEUM_COKE",
+        "RESIDUAL_FUEL_OIL",
+        "PROPANE",
+        "SYNTHESIS_GAS_PETROLEUM_COKE",
+        "WASTE_OIL",
+        "BLAST_FURNACE_GAS",
+        "NATURAL_GAS",
+        "OTHER_GAS",
+        "AG_BYPRODUCT",
+        "MUNICIPAL_WASTE",
+        "OTHER_BIOMASS_SOLIDS",
+        "WOOD_WASTE_SOLIDS",
+        "OTHER_BIOMASS_LIQUIDS",
+        "SLUDGE_WASTE",
+        "BLACK_LIQUOR",
+        "WOOD_WASTE_LIQUIDS",
+        "LANDFILL_GAS",
+        "OTHER_BIOMASS_GAS",
+        "NUCLEAR",
+        "WASTE_HEAT",
+        "TIRE_DERIVED_FUEL",
+        "COAL",
+        "GEOTHERMAL",
+        "OTHER"
+      ],
+      "title": "ThermalFuels",
+      "type": "string"
+    },
+    "ThermalGenerationCost": {
+      "title": "ThermalGenerationCost",
+      "description": "Cost representation for thermal generation units",
+      "properties": {
+        "cost_type": {
+          "const": "THERMAL",
+          "type": "string",
+          "default": "THERMAL"
+        },
+        "fixed": {
+          "description": "Fixed cost of keeping the unit online. For some cost represenations this field can be duplicative",
+          "type": "number"
+        },
+        "shut_down": {
+          "description": "Cost to turn the unit off",
+          "type": "number"
+        },
+        "start_up": {
+          "discriminator": {
+            "mapping": {
+              "STAGES": "#/components/schemas/StartUpStages"
+            },
+            "propertyName": "startup_stages_type"
+          },
+          "description": "Start-up cost can take linear or multi-stage cost",
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "$ref": "#/definitions/StartUpStages"
+            }
+          ]
+        },
+        "variable": {
+          "$ref": "#/definitions/ProductionVariableCostCurve"
+        }
+      },
+      "required": [
+        "variable",
+        "fixed",
+        "start_up",
+        "shut_down"
+      ],
+      "type": "object"
+    },
+    "TurbinePump": {
+      "properties": {
+        "turbine": {
+          "type": "number"
+        },
+        "pump": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "turbine",
+        "pump"
+      ],
+      "title": "TurbinePump",
+      "type": "object"
+    },
+    "TwoTerminalLoss": {
+      "title": "TwoTerminalLoss",
+      "discriminator": {
+        "mapping": {
+          "INCREMENTAL": "#/components/schemas/IncrementalCurve",
+          "INPUT_OUTPUT": "#/components/schemas/InputOutputCurve"
+        },
+        "propertyName": "curve_type"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/definitions/InputOutputCurve"
+        },
+        {
+          "$ref": "#/definitions/IncrementalCurve"
+        }
+      ],
+      "default": {
+        "curve_type": "INPUT_OUTPUT",
+        "function_data": {
+          "function_type": "LINEAR",
+          "constant_term": 0,
+          "proportional_term": 0
+        }
+      },
+      "type": "object"
+    },
+    "UnitSystem": {
+      "description": "Unit basis curve power values are stored in. COMPONENT_BASE: per-unit on the component's own base_power. NATURAL_UNITS: MW/MVA. There is no system-base option: per-unit data historically on the system base records that base in the component's base_power and rides as COMPONENT_BASE.",
+      "enum": [
+        "COMPONENT_BASE",
+        "NATURAL_UNITS"
+      ],
+      "title": "UnitSystem",
+      "type": "string"
+    },
+    "UpDown": {
+      "properties": {
+        "down": {
+          "title": "Down",
+          "type": "number"
+        },
+        "up": {
+          "title": "Up",
+          "type": "number"
+        }
+      },
+      "required": [
+        "up",
+        "down"
+      ],
+      "title": "UpDown",
+      "type": "object"
+    },
+    "ValueCurve": {
+      "discriminator": {
+        "mapping": {
+          "AVERAGE_RATE": "#/components/schemas/AverageRateCurve",
+          "INCREMENTAL": "#/components/schemas/IncrementalCurve",
+          "INPUT_OUTPUT": "#/components/schemas/InputOutputCurve"
+        },
+        "propertyName": "curve_type"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/definitions/InputOutputCurve"
+        },
+        {
+          "$ref": "#/definitions/IncrementalCurve"
+        },
+        {
+          "$ref": "#/definitions/AverageRateCurve"
+        }
+      ],
+      "title": "ValueCurve",
+      "type": "object"
+    },
+    "TechnologyFinancialData": {
+      "properties": {
+        "capital_recovery_period": {
+          "type": "integer"
+        },
+        "technology_base_year": {
+          "type": "integer"
+        },
+        "debt_fraction": {
+          "type": "number"
+        },
+        "debt_rate": {
+          "type": "number"
+        },
+        "return_on_equity": {
+          "type": "number"
+        },
+        "tax_rate": {
+          "type": "number"
+        }
+      },
+      "title": "TechnologyFinancialData",
+      "type": "object"
+    },
+    "XY_Coords": {
+      "properties": {
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ],
+      "title": "XY_Coords",
+      "type": "object"
+    }
+  },
+  "id": "#root"
+}

@@ -18,6 +18,11 @@ pub mod version;
 // timestamp codec), which are not part of the supported API.
 pub(crate) mod hash;
 pub(crate) mod metadata;
+// OpenAPI-row JSON serde for the two association catalogs (adds inherent
+// `Store` methods; see the module docs). Crate-private for the same reason as
+// `metadata`: `ReconcilePolicy` and `ReconcileReport` are the supported public
+// surface, re-exported below.
+pub(crate) mod openapi;
 pub(crate) mod timestamps;
 
 pub use codec::{
@@ -31,6 +36,7 @@ pub use metadata::{
     ForecastSummaryRow, ParentChildAssociation, ParentChildFilter, StaticSummaryRow,
     SupplementalAttributeAssociation, SupplementalAttributeFilter, SupplementalAttributeSummaryRow,
 };
+pub use openapi::{ReconcilePolicy, ReconcileReport};
 pub use reader::{ForecastEntry, ForecastReader, StaticGroup, StaticReader, WindowSlot};
 pub use storage::{ArrayLocation, CompactionReport, Compression, IntegrityReport};
 pub use store::{
