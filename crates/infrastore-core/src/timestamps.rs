@@ -131,7 +131,16 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Vec<DateTime<Utc>>> {
     )
     .ok_or_else(|| bad("base timestamp is out of range".to_string()))?;
 
-    let mut out = Vec::with_capacity(count);
+    // Capacity bounded by what the blob could possibly hold, not by the count it
+    // claims. `count` is a varint out of the data, so a corrupt or hostile row
+    // could name 2^42 timestamps and this reserved for all of them before the
+    // decode loop discovered the blob was eleven bytes long — a measured 48 TiB
+    // reservation that macOS granted lazily, cost 132 ms, and threw away one
+    // instruction later; past `isize::MAX` it panicked outright instead of
+    // returning the `IntegrityError` this module promises for a malformed blob.
+    // Every timestamp after the first costs at least one byte, so the remaining
+    // length is a hard ceiling on how many can still arrive.
+    let mut out = Vec::with_capacity(count.min(bytes.len().saturating_sub(pos).saturating_add(1)));
     out.push(first);
     // The accumulator starts from the base's *linear* nanoseconds, so a
     // leap-second base contributes its extra nanoseconds to every later value

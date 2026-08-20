@@ -623,13 +623,26 @@ function get_time_series(
     return _forecast_from_raw(_forecast_result_type(T), r, String(name))
 end
 
+# Whether a `T`-shaped read may decode a forecast the store matched as
+# `matched`. Only the two deterministic forms are interchangeable, and that is
+# by design: a `DeterministicSingleTimeSeries` is a synthetic view of a
+# `SingleTimeSeries` and always reads back as a `Deterministic`.
+function _forecast_request_matches(::Type{T}, matched::Type) where {T}
+    return _forecast_result_type(T) === _forecast_result_type(matched)
+end
+
 """
     get_time_series(T, store, key; time_range)
 
-Key-based counterpart to the attribute-addressed forecast reader: the stored
+Key-based counterpart to the attribute-addressed forecast reader. The stored
 type comes from `key` (as returned by `add_time_series!` or
-`get_time_series_keys`); `T` selects how the result is decoded. A
+`get_time_series_keys`), and `T` must agree with it; a
 `DeterministicSingleTimeSeries` key reads back as a [`Deterministic`].
+
+Throws [`InvalidParameterError`](@ref) when `T` names a different forecast type
+than the key does. The axes of the three forecast types mean different things —
+a `Probabilistic` carries a leading percentile axis a `Deterministic` does not —
+so decoding one as another does not merely mislabel the result, it misreads it.
 """
 function get_time_series(
     ::Type{T},
@@ -638,5 +651,19 @@ function get_time_series(
     time_range::Union{Nothing, Tuple{DateTime, DateTime}}=nothing,
 ) where {T <: _ForecastRequest}
     r = _get_forecast_raw(store, key; time_range=time_range)
+    # The FFI reports the type it actually matched, and this used to decode as
+    # `T` regardless. Asking for a `Deterministic` with a `Probabilistic` key
+    # returned a `Deterministic{Float64,3}` whose `count` disagreed with its own
+    # second axis, the percentile axis silently absorbed as a leading dimension
+    # and the percentiles themselves dropped — wrong numbers, no error.
+    matched = _type_for_code(r.matched_type)
+    if !_forecast_request_matches(T, matched)
+        throw(
+            InvalidParameterError(
+                "key names a $matched, not a $T; " *
+                "call get_time_series($matched, store, key)",
+            ),
+        )
+    end
     return _forecast_from_raw(_forecast_result_type(T), r, _key_name(key))
 end

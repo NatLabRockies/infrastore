@@ -2215,10 +2215,38 @@ impl MetadataStore {
         old_id: i64,
         new_id: i64,
     ) -> Result<usize> {
+        // `component_type` is a denormalized label carried for filtering, so a
+        // move has to bring it up to date or the moved rows keep describing the
+        // component they came from: filtering by the destination's real type
+        // missed them, filtering by the source's type returned them under the
+        // destination's id, and `supplemental_attribute_summary` split one
+        // component across two contradictory type buckets.
+        //
+        // The destination's type is taken from the rows it already has. When it
+        // has none the catalog has no other record of it — these rows become its
+        // only ones — so the label carries over unchanged, and the caller is the
+        // only one who could know better. (`assoc_counts_by_type` is unaffected
+        // either way: it groups by *attribute* type, not component type.)
+        // Only for a real move. `old_id == new_id` is a supported self-move that
+        // rewrites nothing, so it must not relabel either — a component whose
+        // rows disagree about its type keeps that disagreement rather than
+        // having one of the two picked for it.
+        let destination_type: Option<String> = if old_id == new_id {
+            None
+        } else {
+            tx.prepare_cached(
+                "SELECT component_type FROM supplemental_attribute_associations
+                 WHERE component_id = ?1 LIMIT 1",
+            )?
+            .query_row(params![new_id], |r| r.get(0))
+            .optional()?
+        };
         tx.execute(
             "UPDATE supplemental_attribute_associations
-             SET component_id = ?1 WHERE component_id = ?2",
-            params![new_id, old_id],
+             SET component_id = ?1,
+                 component_type = COALESCE(?3, component_type)
+             WHERE component_id = ?2",
+            params![new_id, old_id, destination_type],
         )
         .map_err(|e| {
             map_association_violation(
@@ -2379,12 +2407,33 @@ impl MetadataStore {
         old_id: i64,
         new_id: i64,
     ) -> Result<usize> {
+        // Same rule as `replace_supplemental_attribute_component_id`: the type
+        // labels are denormalized for filtering, so they move with the id. A
+        // component can appear on either end of an edge, so its type is looked
+        // up from both, and only the end actually being rewritten is relabelled.
+        // Only for a real move, as above.
+        let destination_type: Option<String> = if old_id == new_id {
+            None
+        } else {
+            tx.prepare_cached(
+                "SELECT parent_type FROM parent_child_associations WHERE parent_id = ?1
+                 UNION ALL
+                 SELECT child_type FROM parent_child_associations WHERE child_id = ?1
+                 LIMIT 1",
+            )?
+            .query_row(params![new_id], |r| r.get(0))
+            .optional()?
+        };
         tx.execute(
             "UPDATE parent_child_associations
-             SET parent_id = CASE WHEN parent_id = ?2 THEN ?1 ELSE parent_id END,
-                 child_id  = CASE WHEN child_id  = ?2 THEN ?1 ELSE child_id  END
+             SET parent_id   = CASE WHEN parent_id = ?2 THEN ?1 ELSE parent_id END,
+                 parent_type = CASE WHEN parent_id = ?2 THEN COALESCE(?3, parent_type)
+                                    ELSE parent_type END,
+                 child_id    = CASE WHEN child_id  = ?2 THEN ?1 ELSE child_id  END,
+                 child_type  = CASE WHEN child_id  = ?2 THEN COALESCE(?3, child_type)
+                                    ELSE child_type END
              WHERE parent_id = ?2 OR child_id = ?2",
-            params![new_id, old_id],
+            params![new_id, old_id, destination_type],
         )
         .map_err(|e| {
             map_association_violation(
