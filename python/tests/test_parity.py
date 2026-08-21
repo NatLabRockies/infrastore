@@ -684,16 +684,39 @@ def test_remove_by_filter_spans_both_deterministic_forms():
     assert len(store.list_time_series(time_series_type=TimeSeriesType.SingleTimeSeries)) == 1
 
 
+def test_every_time_series_type_name_is_accepted():
+    """Every member of the enum is reachable by its name.
+
+    The binding holds the accepted names in a list; this is what makes a new
+    variant show up as a failing test rather than a name the filters quietly
+    refuse.
+    """
+    store = _both_forecast_types()
+    for name in (n for n in dir(TimeSeriesType) if not n.startswith("_")):
+        member = getattr(TimeSeriesType, name)
+        assert store.list_time_series(time_series_type=name) == (
+            store.list_time_series(time_series_type=member)
+        ), name
+
+
 def test_an_unusable_requested_type_is_rejected():
     store = _both_forecast_types()
-    # Only a `TimeSeriesType` is accepted: there is no string spelling, and in
-    # particular no family sentinel to reach for.
-    with pytest.raises(TypeError):
-        store.list_time_series(time_series_type="Deterministic")
-    with pytest.raises(TypeError):
+    # A `TimeSeriesType` or one of its own names, and nothing else. The name is
+    # what the docstrings and the type stub have always shown, and it is what a
+    # metadata row reports, so both spellings select the same rows.
+    assert store.list_time_series(time_series_type="Deterministic") == (
+        store.list_time_series(time_series_type=TimeSeriesType.Deterministic)
+    )
+    # A string that is not a type name says so, inside the exception hierarchy,
+    # and names what would have worked. There is in particular no family
+    # sentinel to reach for.
+    with pytest.raises(InvalidParameterError, match="abstract_deterministic"):
         store.resolve_forecast_key(
             1, OWNER_CAT, "det", "abstract_deterministic", resolution=RES_1H
         )
+    with pytest.raises(InvalidParameterError, match="Deterministic"):
+        store.list_time_series(time_series_type="deterministic")  # case-sensitive
+    # Neither a type nor a name.
     with pytest.raises(TypeError):
         store.has_any_time_series(time_series_type=5)
 
@@ -1012,8 +1035,13 @@ def test_sub_second_resolutions_are_exact_down_to_one_millisecond():
 
 def test_a_naive_datetime_is_rejected():
     """A timestamp with no tzinfo would be ambiguous, so it is refused at the
-    boundary rather than being assumed to be UTC."""
-    with pytest.raises(TypeError, match="tzinfo"):
+    boundary rather than being assumed to be UTC.
+
+    The refusal is an `InvalidParameterError` -- a bad argument, reported like
+    every other one. It used to be a bare `TypeError` from the conversion layer,
+    which no `except TimeSeriesError` could catch.
+    """
+    with pytest.raises(InvalidParameterError, match="timezone-aware"):
         SingleTimeSeries(
             datetime(2024, 1, 1), timedelta(hours=1), np.arange(4, dtype=np.float64), "naive"
         )

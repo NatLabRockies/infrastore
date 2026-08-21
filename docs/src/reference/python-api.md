@@ -23,6 +23,14 @@ from infrastore import (
 > `element_type=` keyword on `add_time_series` and decoded with `decode_element_values`.
 > Multi-dimensional arrays (a per-step element shape) are supported via the NumPy array's shape.
 
+## Datetimes
+
+Every `datetime` argument — an initial timestamp, a `NonSequentialTimeSeries` timestamp vector, a
+`time_range` bound, a reader's `when` — must be **timezone-aware**, and any zone will do:
+`datetime.timezone.utc`, a `ZoneInfo`, or a fixed offset. It is converted to UTC on the way in, so
+two aware datetimes naming the same instant are the same instant to the store, and every `datetime`
+read back is UTC. A naive datetime names no instant and raises `InvalidParameterError`.
+
 ## `Store`
 
 ### Constructors
@@ -162,7 +170,7 @@ def list_time_series(
     owner_id: int | None = None,
     owner_category: OwnerCategory | None = None,
     owner_type: str | None = None,
-    time_series_type: TimeSeriesType | None = None,
+    time_series_type: TimeSeriesType | str | None = None,
     name: str | None = None,
     name_glob: str | None = None,   # SQLite GLOB pattern; ANDed with `name`
     component_field: str | None = None,  # exact, case-sensitive
@@ -347,8 +355,13 @@ itself with one exception: **`TimeSeriesType.Deterministic` also matches a store
 deterministic forecast?" wants — whether the forecast was added densely or derived by
 `transform_single_time_series` is a storage detail. Returned rows and keys still carry the concrete
 stored type, and `TimeSeriesType.DeterministicSingleTimeSeries` narrows to the derived form for
-callers auditing which forecasts are synthetic. Passing anything that is not a `TimeSeriesType`
-raises `TypeError`.
+callers auditing which forecasts are synthetic.
+
+A member's **name** is accepted anywhere a `TimeSeriesType` is — `time_series_type="Deterministic"`
+selects exactly what `TimeSeriesType.Deterministic` does. It is the spelling a metadata row reports,
+so a value read out of one can be handed straight back. The match is case-sensitive: an unrecognized
+string raises `InvalidParameterError` naming the valid ones, and a value that is neither a
+`TimeSeriesType` nor a string raises `TypeError`.
 
 ## Forecasts
 

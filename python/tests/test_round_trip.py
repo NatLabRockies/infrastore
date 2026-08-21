@@ -535,6 +535,34 @@ def test_add_time_series_bulk_rejects_missing_keys():
         store.add_time_series_bulk([{"owner_type": "Generator"}])
 
 
+def test_add_time_series_bulk_rejects_unknown_keys():
+    """A misspelled item key raises rather than being silently ignored.
+
+    `add_time_series` gets this for free -- an unexpected keyword argument is a
+    TypeError. The bulk path reads a dict, so a typo used to mean the descriptor
+    it carried was quietly dropped and the series landed without it.
+    """
+    store = Store.create(in_memory=True)
+    item = {
+        "owner_id": 1,
+        "owner_type": "Generator",
+        "owner_category": OwnerCategory.Component,
+        "time_series": make_series(),
+        "unit_sytem": "natural_units",  # sic
+    }
+    with pytest.raises(InvalidParameterError, match="unit_sytem"):
+        store.add_time_series_bulk([item])
+    # Nothing was written.
+    assert store.list_time_series() == []
+    # The error names which item is at fault, and what would have worked.
+    with pytest.raises(InvalidParameterError, match="item 1"):
+        store.add_time_series_bulk([{k: v for k, v in item.items() if k != "unit_sytem"}, item])
+    # A non-string key is refused the same way.
+    good = {k: v for k, v in item.items() if k != "unit_sytem"}
+    with pytest.raises(InvalidParameterError, match="non-string key"):
+        store.add_time_series_bulk([{**good, 7: "x"}])
+
+
 # ---------------------------------------------------------------------------
 # Category-aware ownership
 # ---------------------------------------------------------------------------
@@ -634,3 +662,83 @@ def test_key_repr_includes_owner_category():
     store = Store.create(in_memory=True)
     key = _add_for_category(store, 1, OwnerCategory.Component, "comp")
     assert "owner_category" in repr(key)
+
+
+# ---- timezone handling -----------------------------------------------------
+#
+# The store records instants. Anything that names one is accepted and normalised
+# to UTC; anything that does not is refused inside this package's exception
+# hierarchy. Before this, only `datetime.timezone.utc` itself was accepted --
+# `ZoneInfo("UTC")` is a different object, and a named zone is not a fixed
+# offset, so both were refused by the binding layer with a bare TypeError or
+# ValueError that no `except TimeSeriesError` could catch.
+
+
+def _values(store, key):
+    return store.get_time_series(key).data.tolist()
+
+
+def test_aware_datetimes_in_any_zone_name_the_same_instant():
+    from zoneinfo import ZoneInfo
+
+    utc = datetime(2024, 6, 1, 12, tzinfo=timezone.utc)
+    equivalents = [
+        utc,
+        utc.astimezone(ZoneInfo("UTC")),
+        utc.astimezone(ZoneInfo("America/Denver")),
+        utc.astimezone(ZoneInfo("Asia/Kolkata")),  # a half-hour offset
+        utc.astimezone(timezone(timedelta(hours=-7))),
+    ]
+    data = np.array([1.0, 2.0, 3.0], dtype=np.float64)
+    for when in equivalents:
+        store = Store.create(in_memory=True)
+        ts = SingleTimeSeries(when, timedelta(hours=1), data, "load")
+        # The constructor normalises: the series reports the same UTC instant
+        # whichever zone it was handed.
+        assert ts.initial_timestamp == utc, when.tzinfo
+        key = store.add_time_series(1, "Generator", OwnerCategory.Component, ts)
+        assert store.get_time_series(key).initial_timestamp == utc
+
+
+def test_naive_datetime_is_refused_inside_the_exception_hierarchy():
+    naive = datetime(2024, 6, 1, 12)
+    with pytest.raises(InvalidParameterError, match="timezone-aware"):
+        SingleTimeSeries(naive, timedelta(hours=1), np.array([1.0]), "load")
+
+
+def test_a_non_datetime_is_refused_inside_the_exception_hierarchy():
+    with pytest.raises(InvalidParameterError, match="expected a datetime"):
+        SingleTimeSeries("2024-01-01", timedelta(hours=1), np.array([1.0]), "load")
+
+
+def test_every_instant_argument_accepts_a_named_zone():
+    from zoneinfo import ZoneInfo
+
+    denver = ZoneInfo("America/Denver")
+    start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    store = Store.create(in_memory=True)
+    data = np.arange(24, dtype=np.float64)
+    key = store.add_time_series(
+        1,
+        "Generator",
+        OwnerCategory.Component,
+        SingleTimeSeries(start.astimezone(denver), timedelta(hours=1), data, "load"),
+    )
+
+    # get_time_series / bulk_read time ranges.
+    window = (
+        start.astimezone(denver),
+        (start + timedelta(hours=4)).astimezone(denver),
+    )
+    assert _values(store, key)[:4] == store.get_time_series(key, time_range=window).data.tolist()
+    assert store.bulk_read([key], time_range=window)[0].data.tolist() == [0.0, 1.0, 2.0, 3.0]
+
+    # NonSequentialTimeSeries timestamps.
+    stamps = [(start + timedelta(hours=i)).astimezone(denver) for i in range(3)]
+    nsts = NonSequentialTimeSeries(stamps, np.array([1.0, 2.0, 3.0]), "events")
+    assert nsts.timestamps == [start + timedelta(hours=i) for i in range(3)]
+
+    # static_read's `when`.
+    reader = store.build_static_reader(timedelta(hours=1))
+    store.static_read(reader, (start + timedelta(hours=2)).astimezone(denver))
+    assert reader.group_values(0).tolist() == [2.0]
