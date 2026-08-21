@@ -19,10 +19,12 @@ module InfraStoreTimeZonesExt
 
 using Dates: DateTime, UTC
 using InfraStore: InfraStore
-using TimeZones: ZonedDateTime, astimezone, TimeZone
+using TimeZones: ZonedDateTime
 
-# `astimezone` then the naive local reading of the result: the UTC wall clock of
-# the instant, which is exactly what `_to_unix_ms` counts from the epoch.
-InfraStore._utc_datetime(zdt::ZonedDateTime) = DateTime(astimezone(zdt, TimeZone("UTC")))
+# `DateTime(zdt, UTC)` is TimeZones' own spelling for "the UTC wall clock of this
+# instant", which is exactly what `_to_unix_ms` counts from the epoch. `UTC` here
+# is `Dates.UTC`, the zone marker Julia's own `now(UTC)` takes -- TimeZones
+# defines the method, `Dates` defines the marker.
+InfraStore._utc_datetime(zdt::ZonedDateTime) = DateTime(zdt, UTC)
 
 end

@@ -106,13 +106,18 @@ pub fn parse_utc_offset(s: &str) -> Result<FixedOffset, String> {
         return Ok(FixedOffset::east_opt(0).expect("zero is a valid offset"));
     }
     // Reuse chrono's own offset grammar by parsing a timestamp that is nothing
-    // but the offset, so `+05:30`, `-0700`, and `+08` all behave as they would
-    // in an RFC3339 string.
-    let normalized = if t.len() == 3 {
-        // `+HH` -- chrono wants at least four digits of offset here.
-        format!("{t}:00")
-    } else {
-        t.to_string()
+    // but the offset -- after widening the two *basic* ISO-8601 spellings onto
+    // the extended one it takes. `parse_from_rfc3339` accepts `±HH:MM` alone,
+    // while `date +%z` prints `-0700` and a whole-hour offset is usually written
+    // `-07`; both are what someone reaches for, and neither would otherwise
+    // parse.
+    let digits = |rest: &str| rest.chars().all(|c| c.is_ascii_digit());
+    let normalized = match t.len() {
+        3 if t.starts_with(['+', '-']) && digits(&t[1..]) => format!("{t}:00"),
+        5 if t.starts_with(['+', '-']) && digits(&t[1..]) => {
+            format!("{}:{}", &t[..3], &t[3..])
+        }
+        _ => t.to_string(),
     };
     DateTime::parse_from_rfc3339(&format!("1970-01-01T00:00:00{normalized}"))
         .map(|dt| *dt.offset())
@@ -370,6 +375,49 @@ pub fn parse_compression(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every offset spelling the doc comment promises must actually parse.
+    ///
+    /// The extended form is all `DateTime::parse_from_rfc3339` takes on its own;
+    /// the two basic forms are widened onto it first, and `date +%z` prints one
+    /// of them.
+    #[test]
+    fn every_documented_offset_spelling_parses() {
+        let east = |h: i32, m: i32| FixedOffset::east_opt(h * 3600 + m * 60).unwrap();
+        for (spec, want) in [
+            ("UTC", east(0, 0)),
+            ("utc", east(0, 0)),
+            ("Z", east(0, 0)),
+            ("-07:00", east(-7, 0)),
+            ("+05:30", east(5, 30)),
+            ("-0700", east(-7, 0)),
+            ("+0530", east(5, 30)),
+            ("-07", east(-7, 0)),
+            ("+08", east(8, 0)),
+            ("  -07:00  ", east(-7, 0)),
+        ] {
+            assert_eq!(
+                parse_utc_offset(spec).unwrap(),
+                want,
+                "{spec} did not parse to the offset it names"
+            );
+        }
+    }
+
+    #[test]
+    fn a_named_zone_is_refused_with_the_ambiguity_as_the_reason() {
+        let err = parse_utc_offset("America/Denver").unwrap_err();
+        assert!(err.contains("named zones are not accepted"), "{err}");
+        assert!(err.contains("daylight saving"), "{err}");
+
+        // Nothing that merely looks offset-shaped slips through.
+        for bad in ["07:00", "-7:00", "-070", "-07:0", "+2400x", "", "-"] {
+            assert!(
+                parse_utc_offset(bad).is_err(),
+                "{bad:?} must not parse as an offset"
+            );
+        }
+    }
 
     #[test]
     fn periods_round_trip() {
