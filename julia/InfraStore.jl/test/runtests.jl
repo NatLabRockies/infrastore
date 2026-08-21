@@ -2184,12 +2184,10 @@ end
 # ---- OpenAPI-row association serde ------------------------------------------
 #
 # `export_time_series_associations_openapi`/`export_supplemental_attribute_associations_openapi`/
-# `import_supplemental_attribute_associations_openapi!`/
-# `reconcile_time_series_associations_openapi!` wrap the four Rust core
-# `openapi` methods. The golden tests below reproduce two of the checked-in
-# fixtures at `conformance/openapi_row_fixtures/` (the core's own golden tests
-# pin the rest); the reconcile tests exercise the policy matrix one cell at
-# a time, mirroring `crates/infrastore-core/tests/openapi.rs`.
+# `import_supplemental_attribute_associations_openapi!` wrap the three Rust
+# core `openapi` methods. The golden tests below reproduce two of the
+# checked-in fixtures at `conformance/openapi_row_fixtures/` (the core's own
+# golden tests pin the rest).
 
 const _OPENAPI_FIXTURES_DIR = normpath(
     joinpath(@__DIR__, "..", "..", "..", "conformance", "openapi_row_fixtures")
@@ -2277,119 +2275,23 @@ end
         close!(store)
     end
 
-    # One `SingleTimeSeries` row every reconcile test below either matches
-    # verbatim or perturbs one column of.
-    function _reconcile_fixture_store()
+    # Infrastore never reconciles a data array against its association row: a
+    # geometry disagreement between the two is rejected at the add boundary
+    # instead, loudly and without writing anything. `Deterministic`'s `count`
+    # is a separate field from the array's own shape (unlike `SingleTimeSeries`,
+    # whose `length` this binding always derives from `data`), so it is the
+    # one static/forecast type this binding can hand the store a mismatch for.
+    @testset "add_time_series! rejects a Deterministic count/shape mismatch and leaves the store untouched" begin
         store = Store(in_memory=true)
-        single = SingleTimeSeries(
-            DateTime(2030, 1, 1), Hour(1), fill(0.0, 24), "load";
-            units="MW", quantity_kind="ActivePower", unit_system=NaturalUnits,
-            component_field="load",
+        mismatched = Deterministic(
+            DateTime(2030, 1, 1), Hour(1), Day(1), Hour(1),
+            364,  # disagrees with the array's own count axis (365)
+            fill(0.0, 24, 365), "max_active_power_forecast",
         )
-        add_time_series!(store, 1, "Generator", Component, single)
-        return store
-    end
-
-    # Carries `uri` (required by the schema) but deliberately no `data_hash`,
-    # exercising that reconcile accepts a document from a producer that never
-    # computes it — both are informational and never matched against the
-    # catalog.
-    function _reconcile_clean_row()
-        return Dict(
-            "owner_id" => 1, "owner_type" => "Generator", "owner_category" => "Component",
-            "time_series_type" => "SingleTimeSeries", "name" => "load",
-            "features" => Dict(),
-            "uri" => "store.h5", "element_type" => "f64", "element_shape" => [],
-            "units" => "MW", "quantity_kind" => "ActivePower",
-            "unit_system" => "NATURAL_UNITS", "component_field" => "load",
-            "initial_timestamp" => "2030-01-01T00:00:00Z", "resolution" => "PT1H",
-            "length" => 24,
+        @test_throws InfraStore.InvalidParameterError add_time_series!(
+            store, 7, "ThermalStandard", Component, mismatched
         )
-    end
-
-    @testset "reconcile: clean match is a no-op under strict" begin
-        store = _reconcile_fixture_store()
-        json = InfraStore.JSON.json([_reconcile_clean_row()])
-        report = reconcile_time_series_associations_openapi!(store, json; policy=:strict)
-        @test report isa ReconcileReport
-        @test report.matched == 1
-        @test report.updated == 0
-        @test report.missing_in_store == 0
-        @test report.unmatched_in_store == 0
-        @test isempty(report.conflicts)
-        close!(store)
-    end
-
-    @testset "reconcile: descriptive drift errors under strict" begin
-        store = _reconcile_fixture_store()
-        row = _reconcile_clean_row()
-        row["units"] = "kW"
-        json = InfraStore.JSON.json([row])
-        err = try
-            reconcile_time_series_associations_openapi!(store, json; policy=:strict)
-            nothing
-        catch e
-            e
-        end
-        @test err isa InfraStore.ReconcileConflictError
-        @test occursin("units", err.msg)
-        close!(store)
-    end
-
-    @testset "reconcile: geometry drift errors under strict" begin
-        store = _reconcile_fixture_store()
-        row = _reconcile_clean_row()
-        row["length"] = 25
-        json = InfraStore.JSON.json([row])
-        err = try
-            reconcile_time_series_associations_openapi!(store, json; policy=:strict)
-            nothing
-        catch e
-            e
-        end
-        @test err isa InfraStore.ReconcileConflictError
-        @test occursin("geometry drift", err.msg)
-        @test occursin("length", err.msg)
-        close!(store)
-    end
-
-    @testset "reconcile: a JSON row with no catalog match errors" begin
-        store = _reconcile_fixture_store()
-        row = _reconcile_clean_row()
-        row["name"] = "a_series_the_store_does_not_have"
-        json = InfraStore.JSON.json([row])
-        @test_throws InfraStore.ReconcileConflictError reconcile_time_series_associations_openapi!(
-            store, json; policy=:strict
-        )
-        close!(store)
-    end
-
-    @testset "reconcile: tolerates and counts a catalog row absent from the json" begin
-        store = _reconcile_fixture_store()
-        report = reconcile_time_series_associations_openapi!(store, "[]"; policy=:strict)
-        @test report.matched == 0
-        @test report.unmatched_in_store == 1
-        close!(store)
-    end
-
-    @testset "reconcile: ignores a foreign uri and omitted data_hash" begin
-        # `_reconcile_clean_row` carries a `uri` that does not match this
-        # store's own hex-encoded content hash for the row, and no
-        # `data_hash` at all — a plausible shape for a document produced by
-        # another store. Neither participates in identity or comparison, so
-        # the match still succeeds.
-        store = _reconcile_fixture_store()
-        json = InfraStore.JSON.json([_reconcile_clean_row()])
-        report = reconcile_time_series_associations_openapi!(store, json; policy=:strict)
-        @test report.matched == 1
-        close!(store)
-    end
-
-    @testset "reconcile: an unknown policy symbol is rejected" begin
-        store = _reconcile_fixture_store()
-        @test_throws InfraStore.InvalidParameterError reconcile_time_series_associations_openapi!(
-            store, "[]"; policy=:bogus
-        )
+        @test isempty(list_time_series(store))
         close!(store)
     end
 

@@ -53,15 +53,6 @@
  */
 #define INFRASTORE_ERR_MISMATCHED_ARTIFACT 12
 
-/**
- * A JSON reconcile of the time-series association catalog
- * (`infrastore_store_reconcile_time_series_associations_openapi`) found rows
- * the requested policy cannot resolve: geometry drift, descriptive drift under
- * the strict policy, or a JSON row naming a series the catalog does not hold.
- * The error message names every offending row.
- */
-#define INFRASTORE_ERR_RECONCILE_CONFLICT 13
-
 #define INFRASTORE_ERR_INTERNAL 99
 
 /**
@@ -2528,37 +2519,6 @@ int32_t infrastore_store_export_supplemental_attribute_associations_openapi(cons
 int32_t infrastore_store_import_supplemental_attribute_associations_openapi(struct InfraStore *handle,
                                                                             const char *json,
                                                                             uint64_t *out_added);
-
-/**
- * Reconcile a JSON array of time-series association OpenAPI rows against this
- * store's catalog: match by identity, apply `policy` to any descriptive
- * drift, and return `INFRASTORE_ERR_RECONCILE_CONFLICT` (naming every
- * offending row in the error message) for anything neither policy can
- * resolve. `policy` must be `0` (strict: any drift — descriptive or
- * geometric — is an error); any other value is
- * `INFRASTORE_ERR_INVALID_PARAMETER`. A policy that lets the JSON document
- * win descriptive drift is deferred to a follow-up — `1` is reserved for it
- * but not yet accepted. A row's `uri` and `data_hash` are informational and
- * never checked — a document from another store may carry foreign values
- * for either.
- *
- * On success, writes the JSON-serialized report
- * (`{"matched":…,"updated":…,"missing_in_store":…,"unmatched_in_store":…,
- * "conflicts":[…]}`) through `out_json` as an **owned** allocation released
- * with `infrastore_string_free`; `out_len` is its byte length.
- *
- * # Safety
- *
- * `handle` must be a live mutable store handle. `json` must be a valid,
- * null-terminated UTF-8 string. `out_json` must be valid for writing one
- * pointer and `out_len` for writing one `u64`; on success `*out_json` must be
- * released exactly once with `infrastore_string_free`.
- */
-int32_t infrastore_store_reconcile_time_series_associations_openapi(struct InfraStore *handle,
-                                                                    const char *json,
-                                                                    int32_t policy,
-                                                                    char **out_json,
-                                                                    uint64_t *out_len);
 
 /**
  * Release a key handle returned by this library.

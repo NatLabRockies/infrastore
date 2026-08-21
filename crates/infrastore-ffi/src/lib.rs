@@ -40,12 +40,6 @@ pub const INFRASTORE_ERR_STORE_EXISTS: i32 = 11;
 /// The HDF5 file and its catalog do not carry the same generation stamp: they
 /// are halves of two different saves.
 pub const INFRASTORE_ERR_MISMATCHED_ARTIFACT: i32 = 12;
-/// A JSON reconcile of the time-series association catalog
-/// (`infrastore_store_reconcile_time_series_associations_openapi`) found rows
-/// the requested policy cannot resolve: geometry drift, descriptive drift under
-/// the strict policy, or a JSON row naming a series the catalog does not hold.
-/// The error message names every offending row.
-pub const INFRASTORE_ERR_RECONCILE_CONFLICT: i32 = 13;
 pub const INFRASTORE_ERR_INTERNAL: i32 = 99;
 
 thread_local! {
@@ -73,7 +67,6 @@ fn map_core_error(e: core_lib::TimeSeriesError) -> i32 {
         E::IncompatibleFormat { .. } => INFRASTORE_ERR_INCOMPATIBLE_FORMAT,
         E::StoreExists { .. } => INFRASTORE_ERR_STORE_EXISTS,
         E::MismatchedArtifact { .. } => INFRASTORE_ERR_MISMATCHED_ARTIFACT,
-        E::ReconcileConflict(_) => INFRASTORE_ERR_RECONCILE_CONFLICT,
         _ => INFRASTORE_ERR_INTERNAL,
     };
     set_error(e.to_string());
@@ -7197,10 +7190,10 @@ pub unsafe extern "C" fn infrastore_store_count_parent_child_associations(
 
 // ---- OpenAPI-row association serde -----------------------------------------
 //
-// Four exports over `infrastore_core::openapi` (crate-private there; `Store`
-// inherent methods are the public surface): two exports and a reconcile report
-// use the owned-string convention (catalog-scaled or structured output), and
-// import returns its row count through an out-param, matching
+// Three exports over `infrastore_core::openapi` (crate-private there; `Store`
+// inherent methods are the public surface): the two exports use the
+// owned-string convention (catalog-scaled output), and import returns its row
+// count through an out-param, matching
 // `infrastore_store_add_supplemental_attribute_associations` above.
 
 /// Export `time_series_associations` matching the filter as a sorted
@@ -7333,74 +7326,6 @@ pub unsafe extern "C" fn infrastore_store_import_supplemental_attribute_associat
         }
         Err(e) => map_core_error(e),
     }
-}
-
-/// Reconcile a JSON array of time-series association OpenAPI rows against this
-/// store's catalog: match by identity, apply `policy` to any descriptive
-/// drift, and return `INFRASTORE_ERR_RECONCILE_CONFLICT` (naming every
-/// offending row in the error message) for anything neither policy can
-/// resolve. `policy` must be `0` (strict: any drift — descriptive or
-/// geometric — is an error); any other value is
-/// `INFRASTORE_ERR_INVALID_PARAMETER`. A policy that lets the JSON document
-/// win descriptive drift is deferred to a follow-up — `1` is reserved for it
-/// but not yet accepted. A row's `uri` and `data_hash` are informational and
-/// never checked — a document from another store may carry foreign values
-/// for either.
-///
-/// On success, writes the JSON-serialized report
-/// (`{"matched":…,"updated":…,"missing_in_store":…,"unmatched_in_store":…,
-/// "conflicts":[…]}`) through `out_json` as an **owned** allocation released
-/// with `infrastore_string_free`; `out_len` is its byte length.
-///
-/// # Safety
-///
-/// `handle` must be a live mutable store handle. `json` must be a valid,
-/// null-terminated UTF-8 string. `out_json` must be valid for writing one
-/// pointer and `out_len` for writing one `u64`; on success `*out_json` must be
-/// released exactly once with `infrastore_string_free`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn infrastore_store_reconcile_time_series_associations_openapi(
-    handle: *mut InfraStoreHandle,
-    json: *const c_char,
-    policy: i32,
-    out_json: *mut *mut c_char,
-    out_len: *mut u64,
-) -> i32 {
-    clear_error();
-    let store = deref_handle!(mut handle);
-    if out_json.is_null() || out_len.is_null() {
-        set_error("a required pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let json = match unsafe { cstr_to_str(json) } {
-        Ok(s) => s,
-        Err(c) => return c,
-    };
-    let policy = match policy {
-        0 => core_lib::ReconcilePolicy::Strict,
-        other => {
-            set_error(format!(
-                "invalid reconcile policy {other}, expected 0 (strict); update_descriptive (1) \
-                 is not yet implemented"
-            ));
-            return INFRASTORE_ERR_INVALID_PARAMETER;
-        }
-    };
-    let report = match store
-        .inner
-        .reconcile_time_series_associations_openapi(json, policy)
-    {
-        Ok(r) => r,
-        Err(e) => return map_core_error(e),
-    };
-    let report_json = match serde_json::to_string(&report) {
-        Ok(j) => j,
-        Err(e) => {
-            set_error(e.to_string());
-            return INFRASTORE_ERR_INTERNAL;
-        }
-    };
-    unsafe { write_owned_str_out(report_json, out_json, out_len) }
 }
 
 // ---- Free helpers ---------------------------------------------------------

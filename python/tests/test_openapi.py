@@ -1,13 +1,11 @@
 """Direct JSON serde of the two association catalogs in the OpenAPI wire
 spelling: `export_time_series_associations_openapi`,
-`export_supplemental_attribute_associations_openapi`,
-`import_supplemental_attribute_associations_openapi`, and
-`reconcile_time_series_associations_openapi`.
+`export_supplemental_attribute_associations_openapi`, and
+`import_supplemental_attribute_associations_openapi`.
 
 The golden tests reproduce two of the checked-in fixtures at
 `conformance/openapi_row_fixtures/` (the core's own golden tests pin the
-rest); the reconcile tests exercise the policy matrix one cell at a time,
-mirroring `crates/infrastore-core/tests/openapi.rs`.
+rest).
 """
 
 import json
@@ -137,98 +135,3 @@ class TestSupplementalAttributeExportImport:
         with pytest.raises(infrastore.DuplicateAssociationError):
             store.import_supplemental_attribute_associations_openapi(json.dumps([row, row]))
         assert store.export_supplemental_attribute_associations_openapi() == "[]"
-
-
-def reconcile_fixture_store():
-    """One `SingleTimeSeries` row every reconcile test below either matches
-    verbatim or perturbs one column of."""
-    store = Store.create(in_memory=True)
-    store.add_time_series(
-        owner_id=1, owner_type="Generator", owner_category=OwnerCategory.Component,
-        time_series=SingleTimeSeries(T0, HOUR, np.zeros(24, dtype=np.float64), "load"),
-        units="MW", quantity_kind="ActivePower", unit_system="natural_units",
-        component_field="load",
-    )
-    return store
-
-
-def clean_reconcile_row():
-    """Carries `uri` (required by the schema) but deliberately no
-    `data_hash`, exercising that reconcile accepts a document from a
-    producer that never computes it — both are informational and never
-    matched against the catalog."""
-    return {
-        "owner_id": 1, "owner_type": "Generator", "owner_category": "Component",
-        "time_series_type": "SingleTimeSeries", "name": "load", "features": {},
-        "uri": "store.h5", "element_type": "f64", "element_shape": [],
-        "units": "MW", "quantity_kind": "ActivePower", "unit_system": "NATURAL_UNITS",
-        "component_field": "load",
-        "initial_timestamp": "2030-01-01T00:00:00Z", "resolution": "PT1H", "length": 24,
-    }
-
-
-class TestReconcile:
-    def test_clean_match_is_a_no_op(self):
-        store = reconcile_fixture_store()
-        report = store.reconcile_time_series_associations_openapi(
-            json.dumps([clean_reconcile_row()]), policy="strict"
-        )
-        assert report == {
-            "matched": 1, "updated": 0, "missing_in_store": 0,
-            "unmatched_in_store": 0, "conflicts": [],
-        }
-
-    def test_descriptive_drift_errors_under_strict(self):
-        store = reconcile_fixture_store()
-        row = clean_reconcile_row()
-        row["units"] = "kW"
-        with pytest.raises(infrastore.ReconcileConflictError, match="units"):
-            store.reconcile_time_series_associations_openapi(
-                json.dumps([row]), policy="strict"
-            )
-
-    def test_geometry_drift_errors_under_strict(self):
-        store = reconcile_fixture_store()
-        row = clean_reconcile_row()
-        row["length"] = 25
-        with pytest.raises(infrastore.ReconcileConflictError, match="geometry drift"):
-            store.reconcile_time_series_associations_openapi(
-                json.dumps([row]), policy="strict"
-            )
-
-    def test_json_row_with_no_catalog_match_errors(self):
-        store = reconcile_fixture_store()
-        row = clean_reconcile_row()
-        row["name"] = "a_series_the_store_does_not_have"
-        with pytest.raises(infrastore.ReconcileConflictError):
-            store.reconcile_time_series_associations_openapi(
-                json.dumps([row]), policy="strict"
-            )
-
-    def test_tolerates_and_counts_a_catalog_row_absent_from_the_json(self):
-        store = reconcile_fixture_store()
-        report = store.reconcile_time_series_associations_openapi("[]", policy="strict")
-        assert report["matched"] == 0
-        assert report["unmatched_in_store"] == 1
-
-    def test_ignores_a_foreign_uri_and_omitted_data_hash(self):
-        # `clean_reconcile_row` carries a `uri` that does not match this
-        # store's own hex-encoded content hash for the row, and no
-        # `data_hash` at all — a plausible shape for a document produced by
-        # another store. Neither participates in identity or comparison, so
-        # the match still succeeds.
-        store = reconcile_fixture_store()
-        report = store.reconcile_time_series_associations_openapi(
-            json.dumps([clean_reconcile_row()]),
-            policy="strict",
-        )
-        assert report["matched"] == 1
-
-    def test_unknown_policy_string_is_rejected(self):
-        store = reconcile_fixture_store()
-        with pytest.raises(infrastore.InvalidParameterError):
-            store.reconcile_time_series_associations_openapi("[]", policy="bogus")
-
-
-def test_reconcile_conflict_error_is_a_time_series_error():
-    assert issubclass(infrastore.ReconcileConflictError, infrastore.TimeSeriesError)

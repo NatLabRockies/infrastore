@@ -86,7 +86,6 @@ const INFRASTORE_ERR_INCOMPATIBLE_FORMAT = Int32(9)
 const INFRASTORE_ERR_DUPLICATE_ASSOCIATION = Int32(10)
 const INFRASTORE_ERR_STORE_EXISTS = Int32(11)
 const INFRASTORE_ERR_MISMATCHED_ARTIFACT = Int32(12)
-const INFRASTORE_ERR_RECONCILE_CONFLICT = Int32(13)
 const INFRASTORE_ERR_INTERNAL = Int32(99)
 
 # ---- Owner category --------------------------------------------------------
@@ -193,19 +192,6 @@ struct MismatchedArtifactError <: TimeSeriesException
     msg::String
 end
 
-"""
-    ReconcileConflictError
-
-A JSON reconcile of the time-series association catalog
-([`reconcile_time_series_associations_openapi!`](@ref)) found rows the
-requested policy cannot resolve: geometry drift, descriptive drift under
-`:strict`, or a JSON row naming a series the catalog does not hold. The
-message names every offending row.
-"""
-struct ReconcileConflictError <: TimeSeriesException
-    msg::String
-end
-
 struct GenericError <: TimeSeriesException
     msg::String
     code::Int32
@@ -254,8 +240,6 @@ function _check(code::Int32)
         throw(StoreExistsError(msg))
     elseif code == INFRASTORE_ERR_MISMATCHED_ARTIFACT
         throw(MismatchedArtifactError(msg))
-    elseif code == INFRASTORE_ERR_RECONCILE_CONFLICT
-        throw(ReconcileConflictError(msg))
     else
         throw(GenericError(msg, code))
     end

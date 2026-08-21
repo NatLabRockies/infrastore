@@ -58,7 +58,6 @@ do not hand-edit it. The [Julia binding](./julia-api.md) is the primary consumer
 | `INFRASTORE_ERR_DUPLICATE_ASSOCIATION` | 10    | An attachment or parent/child edge with the same identity already exists. Distinct from `INFRASTORE_ERR_DUPLICATE`, which is about time-series identity.                                       |
 | `INFRASTORE_ERR_STORE_EXISTS`          | 11    | A store already exists where one was about to be created. Creating there would discard its arrays while keeping its catalog. Use `infrastore_store_create_replacing` to discard it on purpose. |
 | `INFRASTORE_ERR_MISMATCHED_ARTIFACT`   | 12    | The HDF5 file and its `.sqlite` catalog do not carry the same generation stamp: they are halves of two different saves.                                                                        |
-| `INFRASTORE_ERR_RECONCILE_CONFLICT`    | 13    | An OpenAPI-row reconcile (`infrastore_store_reconcile_time_series_associations_openapi`) found drift the requested policy cannot resolve.                                                      |
 | `INFRASTORE_ERR_INTERNAL`              | 99    | Unexpected internal error                                                                                                                                                                      |
 
 ## Lifecycle
@@ -1004,7 +1003,7 @@ Neither association catalog is exposed over the [gRPC server](./grpc-api.md) or 
 
 Direct JSON serde of the two association catalogs, in the wire spelling
 [SiennaSchemas](https://github.com/Sienna-Platform/SiennaSchemas) defines (`TimeSeries/*.json`,
-`Core/Associations/SupplementalAttributeAssociation.json`). All four exports use the owned-string
+`Core/Associations/SupplementalAttributeAssociation.json`). The two exports use the owned-string
 convention.
 
 ```c
@@ -1033,34 +1032,14 @@ int32_t infrastore_store_export_supplemental_attribute_associations_openapi(
    *out_added (when non-NULL) receives the number inserted. */
 int32_t infrastore_store_import_supplemental_attribute_associations_openapi(
     struct InfraStore *handle, const char *json, uint64_t *out_added);
-
-/* Reconcile a JSON array of time-series association OpenAPI rows against this
-   store's catalog: match by identity, apply policy to any descriptive drift, and
-   return INFRASTORE_ERR_RECONCILE_CONFLICT (naming every offending row in the
-   error message) for anything the policy can't resolve. policy must be 0
-   (strict: any drift -- descriptive or geometric -- is an error); any other
-   value is INFRASTORE_ERR_INVALID_PARAMETER. A policy that rewrites descriptive
-   drift from the JSON is deferred to a follow-up -- 1 is reserved for it but
-   not yet accepted. A row's uri and data_hash are informational and never
-   checked -- a document from another store may carry foreign values for
-   either. On success, writes the JSON-serialized report
-   ({"matched":...,"updated":...,"missing_in_store":...,
-   "unmatched_in_store":...,"conflicts":[...]}) through out_json as an OWNED
-   allocation, freed with infrastore_string_free. */
-int32_t infrastore_store_reconcile_time_series_associations_openapi(struct InfraStore *handle,
-                                                            const char *json, int32_t policy,
-                                                            char **out_json, uint64_t *out_len);
 ```
 
 A catalog row's `data_hash` is `NOT NULL`, and infrastore fills a row's `uri`/`data_hash` wire
-fields with that same content hash, hex-encoded, on export. The schemas never require a document to
-carry either: `infrastore_store_reconcile_time_series_associations_openapi` reconciles rows against
-the store's existing catalog rather than importing them, and treats an incoming row's
-`uri`/`data_hash` as purely informational. There is no corresponding time-series _import_ export —
-the sidecar store stays the authority for which series exist. A policy letting the descriptive
-columns (`units`, `quantity_kind`, `unit_system`, `component_field`, `application_data`) be
-rewritten from a document is deferred to a follow-up; `policy = 0` (strict) is the only value
-accepted today.
+fields with that same content hash, hex-encoded, on export. There is no corresponding time-series
+_import_ export: infrastore never modifies the associations table or the data to make an incoming
+document agree with what it already holds. A geometry disagreement between an added series and its
+own association row is rejected at the add boundary instead (`INFRASTORE_ERR_INVALID_PARAMETER`),
+loudly and without writing anything.
 
 ## Error Messages
 

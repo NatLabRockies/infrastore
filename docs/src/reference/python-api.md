@@ -762,9 +762,9 @@ Neither association catalog is exposed over the [gRPC server](grpc-api.md) or th
 Direct JSON serde of the two association catalogs, in the wire spelling
 [SiennaSchemas](https://github.com/Sienna-Platform/SiennaSchemas) defines (`TimeSeries/*.json`,
 `Core/Associations/SupplementalAttributeAssociation.json`). Unlike `list_time_series` /
-`list_supplemental_attribute_associations`, which return Python objects, these four methods exchange
-the wire JSON verbatim — the format a document author (e.g. PowerTableDataParser) reads and writes
-directly.
+`list_supplemental_attribute_associations`, which return Python objects, these three methods
+exchange the wire JSON verbatim — the format a document author (e.g. PowerTableDataParser) reads and
+writes directly.
 
 ```python
 def export_time_series_associations_openapi(
@@ -774,9 +774,6 @@ def export_time_series_associations_openapi(
 ) -> str: ...
 def export_supplemental_attribute_associations_openapi(self) -> str: ...
 def import_supplemental_attribute_associations_openapi(self, json: str) -> int: ...
-def reconcile_time_series_associations_openapi(
-    self, json: str, *, policy: str = "strict",
-) -> dict: ...
 ```
 
 `export_time_series_associations_openapi` takes the same filter keywords as `list_time_series`.
@@ -790,31 +787,10 @@ identity.
 insert (a duplicate anywhere in the batch raises `DuplicateAssociationError` and rolls the batch
 back), returning the number of rows inserted.
 
-`reconcile_time_series_associations_openapi` is not an import: a catalog row's content hash is
-`NOT NULL`, but the schemas never require a document to carry it, so a JSON document can never
-_create_ a complete catalog row. It instead reconciles JSON rows against the store's existing
-catalog, matched by the identity tuple
-`(owner_id, owner_category, time_series_type, name, resolution, interval,
-features)`. `"strict"` is
-currently the only accepted `policy`; a policy that lets the JSON document win descriptive drift is
-deferred to a follow-up:
-
-| Case                                                                                                                                  | `"strict"` (default, and only accepted value)             |
-| ------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
-| match, all fields agree                                                                                                               | no-op                                                     |
-| match, descriptive drift (`units`, `quantity_kind`, `unit_system`, `component_field`, `application_data`)                             | raises `ReconcileConflictError` naming the row and fields |
-| match, geometry drift (`initial_timestamp`, `length`, `horizon`, `interval`, `count`, `element_type`, `element_shape`, `percentiles`) | raises `ReconcileConflictError`                           |
-| JSON row with no catalog match                                                                                                        | raises `ReconcileConflictError`                           |
-| catalog row with no JSON row                                                                                                          | tolerated, counted in `unmatched_in_store`                |
-| `uri` / `data_hash`                                                                                                                   | informational, never checked                              |
-
-The returned dict has keys `matched`, `updated`, `missing_in_store`, `unmatched_in_store` (all
-`int`), and `conflicts` (a list of `str`) — `updated` and `conflicts` are always `0`/empty under
-`"strict"`, reserved for the deferred policy. `missing_in_store` is always `0` on a successful call:
-a JSON row naming a series the catalog does not hold is fatal, so a nonzero count only ever appears
-inside a raised `ReconcileConflictError`'s message, never in a returned report. The whole call runs
-in one transaction when it writes, and every offending row is named in one error message rather than
-only the first.
+There is no corresponding time-series _import_ method: infrastore never modifies the associations
+table or the data to make an incoming document agree with what it already holds. A geometry
+disagreement between an added series and its own association row is rejected at the add boundary
+instead (`InvalidParameterError`), loudly and without writing anything.
 
 ```python
 store = Store.create(in_memory=True)
@@ -824,30 +800,27 @@ store.add_time_series(
 )
 
 json_str = store.export_time_series_associations_openapi()
-report = store.reconcile_time_series_associations_openapi(json_str)
-report["matched"]  # 1
 ```
 
 ## Exceptions
 
 All inherit from `TimeSeriesError`:
 
-| Exception                   | Raised when                                                       |
-| --------------------------- | ----------------------------------------------------------------- |
-| `NotFoundError`             | A key or array does not exist                                     |
-| `DuplicateTimeSeriesError`  | Adding a series whose key already exists                          |
-| `DuplicateAssociationError` | Re-adding an attachment or edge that already exists               |
-| `InvalidParameterError`     | Bad arguments (bad feature type, malformed period, …)             |
-| `IntegrityError`            | On-disk inconsistency detected                                    |
-| `ReadOnlyStoreError`        | A write on a read-only store                                      |
-| `IoError`                   | Filesystem I/O failure                                            |
-| `ConnectionError`           | Connection failure (module-scoped, not the builtin)               |
-| `IncompatibleFormatError`   | Store written in an incompatible on-disk format                   |
-| `IncompatibleForecastError` | Forecast parameters clash with existing forecasts                 |
-| `StorageError`              | SQLite catalog or serialization failure                           |
-| `StoreExistsError`          | Creating a store where one already exists                         |
-| `MismatchedArtifactError`   | The `.h5` and `.sqlite` halves came from two saves                |
-| `ReconcileConflictError`    | An OpenAPI-row reconcile found drift the policy could not resolve |
+| Exception                   | Raised when                                           |
+| --------------------------- | ----------------------------------------------------- |
+| `NotFoundError`             | A key or array does not exist                         |
+| `DuplicateTimeSeriesError`  | Adding a series whose key already exists              |
+| `DuplicateAssociationError` | Re-adding an attachment or edge that already exists   |
+| `InvalidParameterError`     | Bad arguments (bad feature type, malformed period, …) |
+| `IntegrityError`            | On-disk inconsistency detected                        |
+| `ReadOnlyStoreError`        | A write on a read-only store                          |
+| `IoError`                   | Filesystem I/O failure                                |
+| `ConnectionError`           | Connection failure (module-scoped, not the builtin)   |
+| `IncompatibleFormatError`   | Store written in an incompatible on-disk format       |
+| `IncompatibleForecastError` | Forecast parameters clash with existing forecasts     |
+| `StorageError`              | SQLite catalog or serialization failure               |
+| `StoreExistsError`          | Creating a store where one already exists             |
+| `MismatchedArtifactError`   | The `.h5` and `.sqlite` halves came from two saves    |
 
 A malformed ISO 8601 period string raises `InvalidParameterError` (inside the hierarchy). Only a
 period argument that is neither a `timedelta` nor a `str` raises a plain `TypeError`, which

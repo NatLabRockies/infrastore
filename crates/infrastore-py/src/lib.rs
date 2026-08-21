@@ -40,7 +40,6 @@ create_exception!(infrastore, IncompatibleForecastError, TimeSeriesError);
 create_exception!(infrastore, StorageError, TimeSeriesError);
 create_exception!(infrastore, StoreExistsError, TimeSeriesError);
 create_exception!(infrastore, MismatchedArtifactError, TimeSeriesError);
-create_exception!(infrastore, ReconcileConflictError, TimeSeriesError);
 
 fn map_err(e: core_lib::TimeSeriesError) -> PyErr {
     use core_lib::TimeSeriesError as E;
@@ -60,7 +59,6 @@ fn map_err(e: core_lib::TimeSeriesError) -> PyErr {
         ref e @ E::IncompatibleFormat { .. } => IncompatibleFormatError::new_err(e.to_string()),
         ref e @ E::StoreExists { .. } => StoreExistsError::new_err(e.to_string()),
         ref e @ E::MismatchedArtifact { .. } => MismatchedArtifactError::new_err(e.to_string()),
-        E::ReconcileConflict(m) => ReconcileConflictError::new_err(m),
         E::Io(e) => IoError::new_err(e.to_string()),
         E::Sqlite(e) => StorageError::new_err(format!("sqlite: {e}")),
         E::Serde(e) => StorageError::new_err(format!("serde: {e}")),
@@ -108,19 +106,6 @@ fn catalog_name(catalog: core_lib::CatalogMode) -> &'static str {
     match catalog {
         core_lib::CatalogMode::Attached => "attached",
         core_lib::CatalogMode::InMemory => "memory",
-    }
-}
-
-/// Translate the Python-facing `policy` argument of
-/// `Store.reconcile_time_series_associations_openapi` into a core
-/// [`ReconcilePolicy`](core_lib::ReconcilePolicy). `"update_descriptive"` is
-/// reserved for a follow-up policy that is not yet implemented.
-fn parse_reconcile_policy(policy: &str) -> PyResult<core_lib::ReconcilePolicy> {
-    match policy {
-        "strict" => Ok(core_lib::ReconcilePolicy::Strict),
-        other => Err(InvalidParameterError::new_err(format!(
-            "unknown reconcile policy '{other}', expected 'strict'"
-        ))),
     }
 }
 
@@ -3200,40 +3185,6 @@ impl PyStore {
             .import_supplemental_attribute_associations_openapi(json)
             .map_err(map_err)
     }
-
-    /// Reconcile a JSON array of time-series association OpenAPI rows against
-    /// this store's catalog: match by identity, apply `policy` ("strict" is
-    /// currently the only accepted value) to any descriptive drift, and raise
-    /// `ReconcileConflictError` (naming every offending row) for anything the
-    /// policy can't resolve. Under "strict" any drift — descriptive or
-    /// geometric — is an error. A policy that rewrites descriptive drift
-    /// (`units`, `quantity_kind`, `unit_system`, `component_field`,
-    /// `application_data`) from the JSON is deferred to a follow-up. A row's
-    /// `uri` and `data_hash` are informational and never checked — a document
-    /// from another store may carry foreign values for either.
-    ///
-    /// Returns a dict with keys `matched`, `updated`, `missing_in_store`,
-    /// `unmatched_in_store` (all `int`), and `conflicts` (a list of `str`).
-    #[pyo3(signature = (json, *, policy="strict"))]
-    fn reconcile_time_series_associations_openapi<'py>(
-        &mut self,
-        py: Python<'py>,
-        json: &str,
-        policy: &str,
-    ) -> PyResult<Bound<'py, PyDict>> {
-        let policy = parse_reconcile_policy(policy)?;
-        let report = self
-            .store_mut()?
-            .reconcile_time_series_associations_openapi(json, policy)
-            .map_err(map_err)?;
-        let d = PyDict::new(py);
-        d.set_item("matched", report.matched)?;
-        d.set_item("updated", report.updated)?;
-        d.set_item("missing_in_store", report.missing_in_store)?;
-        d.set_item("unmatched_in_store", report.unmatched_in_store)?;
-        d.set_item("conflicts", report.conflicts)?;
-        Ok(d)
-    }
 }
 
 // ---- period helpers -------------------------------------------------------
@@ -3636,10 +3587,6 @@ fn infrastore(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add(
         "MismatchedArtifactError",
         py.get_type::<MismatchedArtifactError>(),
-    )?;
-    m.add(
-        "ReconcileConflictError",
-        py.get_type::<ReconcileConflictError>(),
     )?;
 
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;

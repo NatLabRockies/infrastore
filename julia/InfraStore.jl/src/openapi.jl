@@ -4,32 +4,11 @@
 # SiennaSchemas defines (`TimeSeries/*.json`,
 # `Core/Associations/SupplementalAttributeAssociation.json`). The Rust core
 # (`infrastore_core::openapi`) owns the mapping between catalog rows and schema
-# rows; this file is a thin wrapper over the four FFI exports it backs.
+# rows; this file is a thin wrapper over the three FFI exports it backs.
 #
-# Two exports and the reconcile report use the owned-string convention
-# (`_owned_str`) because their size scales with the catalog or because the
-# report is itself structured JSON; import returns its row count through an
+# The two exports use the owned-string convention (`_owned_str`) because their
+# size scales with the catalog; import returns its row count through an
 # out-param, matching `add_supplemental_attribute_associations!`.
-
-# `:strict` -> 0 (must match `infrastore_core::ReconcilePolicy` /
-# `crates/infrastore-ffi/src/lib.rs`). `:update_descriptive` (1) is reserved
-# for a follow-up policy that is not yet implemented.
-function _reconcile_policy_code(policy::Symbol)
-    policy === :strict && return Int32(0)
-    return throw(
-        InvalidParameterError("unknown reconcile policy $(repr(policy)); expected :strict")
-    )
-end
-
-function _decode_reconcile_report(r::AbstractDict)
-    return ReconcileReport(
-        Int(r["matched"]),
-        Int(r["updated"]),
-        Int(r["missing_in_store"]),
-        Int(r["unmatched_in_store"]),
-        String[String(c) for c in r["conflicts"]],
-    )
-end
 
 """
     export_time_series_associations_openapi(store; owner_id=nothing,
@@ -113,37 +92,4 @@ function import_supplemental_attribute_associations_openapi!(
         )::Int32
     )
     return Int(out[])
-end
-
-"""
-    reconcile_time_series_associations_openapi!(store, json::AbstractString;
-        policy::Symbol=:strict) -> ReconcileReport
-
-Reconcile a JSON array of time-series association OpenAPI rows against the
-store's catalog: match by identity, apply `policy` (`:strict` is currently the
-only accepted value) to any descriptive drift, and throw
-`InfraStore.ReconcileConflictError` (naming every offending row) for anything
-the policy can't resolve. Under `:strict` any drift — descriptive or
-geometric — is an error. A policy that rewrites descriptive drift (`units`,
-`quantity_kind`, `unit_system`, `component_field`, `application_data`) from
-the JSON is deferred to a follow-up. A row's `uri` and `data_hash` are
-informational and never checked — a document from another store may carry
-foreign values for either. Runs in one transaction when it writes.
-"""
-function reconcile_time_series_associations_openapi!(
-    store::Store, json::AbstractString; policy::Symbol=:strict
-)
-    policy_code = _reconcile_policy_code(policy)
-    json_arg = String(json)
-    report_json = _owned_str(
-        (out_json, out_len) ->
-            @ccall lib_path().infrastore_store_reconcile_time_series_associations_openapi(
-                store::Ptr{Cvoid},
-                json_arg::Cstring,
-                policy_code::Int32,
-                out_json::Ref{Ptr{Cchar}},
-                out_len::Ref{UInt64},
-            )::Int32
-    )
-    return _decode_reconcile_report(JSON.parse(report_json))
 end

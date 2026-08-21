@@ -950,16 +950,14 @@ Neither association catalog is exposed over the [gRPC server](./grpc-api.md) or 
 Direct JSON serde of the two association catalogs, in the wire spelling
 [SiennaSchemas](https://github.com/Sienna-Platform/SiennaSchemas) defines (`TimeSeries/*.json`,
 `Core/Associations/SupplementalAttributeAssociation.json`). Unlike [`list_time_series`](@ref) /
-[`list_supplemental_attribute_associations`](@ref), which return Julia structs, these four functions
-exchange the wire JSON verbatim — the format a document author (e.g. PowerTableDataParser) reads and
-writes directly.
+[`list_supplemental_attribute_associations`](@ref), which return Julia structs, these three
+functions exchange the wire JSON verbatim — the format a document author (e.g. PowerTableDataParser)
+reads and writes directly.
 
 ```julia
 export_time_series_associations_openapi(store; filters...) -> String
 export_supplemental_attribute_associations_openapi(store) -> String
 import_supplemental_attribute_associations_openapi!(store, json::AbstractString) -> Int
-reconcile_time_series_associations_openapi!(store, json::AbstractString;
-    policy::Symbol=:strict) -> ReconcileReport
 ```
 
 `export_time_series_associations_openapi` takes the same filter keywords as
@@ -973,49 +971,10 @@ whole catalog, sorted by identity.
 insert (a duplicate anywhere in the batch throws `DuplicateAssociationError` and rolls the batch
 back), returning the number of rows inserted.
 
-`reconcile_time_series_associations_openapi!` is not an import: a catalog row's content hash is
-`NOT NULL`, but the schemas never require a document to carry it, so a JSON document can never
-_create_ a complete catalog row. It instead reconciles JSON rows against the store's existing
-catalog, matched by the identity tuple
-`(owner_id, owner_category, time_series_type, name, resolution, interval,
-features)`. `:strict` is
-currently the only accepted `policy`; a policy that lets the JSON document win descriptive drift is
-deferred to a follow-up:
-
-| Case                                                                                                                                  | `:strict` (default, and only accepted value)              |
-| ------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
-| match, all fields agree                                                                                                               | no-op                                                     |
-| match, descriptive drift (`units`, `quantity_kind`, `unit_system`, `component_field`, `application_data`)                             | throws `ReconcileConflictError` naming the row and fields |
-| match, geometry drift (`initial_timestamp`, `length`, `horizon`, `interval`, `count`, `element_type`, `element_shape`, `percentiles`) | throws `ReconcileConflictError`                           |
-| JSON row with no catalog match                                                                                                        | throws `ReconcileConflictError`                           |
-| catalog row with no JSON row                                                                                                          | tolerated, counted in `unmatched_in_store`                |
-| `uri` / `data_hash`                                                                                                                   | informational, never checked                              |
-
-```julia
-struct ReconcileReport
-    matched::Int
-    updated::Int
-    missing_in_store::Int
-    unmatched_in_store::Int
-    conflicts::Vector{String}
-end
-```
-
-`updated` and `conflicts` are always `0`/empty under `:strict`, reserved for the deferred policy.
-`missing_in_store` is always `0` on a successful call: a JSON row naming a series the catalog does
-not hold is fatal, so a nonzero count only ever appears inside a thrown `ReconcileConflictError`'s
-message, never in a returned report. The whole call runs in one transaction when it writes, and
-every offending row is named in one error message rather than only the first.
-
-```julia
-store = Store(in_memory=true)
-add_time_series!(store, 1, "Generator", Component,
-    SingleTimeSeries(DateTime(2030, 1, 1), Hour(1), zeros(24), "load"))
-
-json = export_time_series_associations_openapi(store)
-report = reconcile_time_series_associations_openapi!(store, json)
-report.matched   # 1
-```
+There is no corresponding time-series _import_: infrastore never modifies the associations table or
+the data to make an incoming document agree with what it already holds. A geometry disagreement
+between an added series and its own association row is rejected at the add boundary instead
+(`InvalidParameterError`), loudly and without writing anything.
 
 ## Errors
 
@@ -1033,7 +992,6 @@ All subtype `TimeSeriesException`:
 | `IOError`                   | `INFRASTORE_ERR_IO`                                                                                |
 | `StoreExistsError`          | `INFRASTORE_ERR_STORE_EXISTS`                                                                      |
 | `MismatchedArtifactError`   | `INFRASTORE_ERR_MISMATCHED_ARTIFACT`                                                               |
-| `ReconcileConflictError`    | `INFRASTORE_ERR_RECONCILE_CONFLICT`                                                                |
 | `GenericError`              | Any other non-zero code (carries the numeric `code`)                                               |
 
 The message text comes from the FFI layer's thread-local error buffer.
