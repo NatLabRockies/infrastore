@@ -1,17 +1,18 @@
 //! Tests for the OpenAPI-row JSON serde of the two association catalogs
-//! (`crate::openapi`): the frozen wire contract and the time-series
-//! reconcile.
+//! (`crate::openapi`): the frozen wire contract, plus the add-boundary
+//! rejection tests for a geometry mismatch between a series and its
+//! association row (infrastore never reconciles the two — a mismatch fails
+//! the addition instead).
 //!
 //! The golden tests build a store whose rows reproduce the checked-in
 //! fixtures at `conformance/openapi_row_fixtures/*.json` and assert the
-//! export is value-equal to each one; the reconcile tests exercise the
-//! policy matrix one cell at a time against a small dedicated store.
+//! export is value-equal to each one.
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{
-    FeatureValue, Features, ListFilter, OwnerCategory, ReconcilePolicy, Scenarios,
-    SingleTimeSeries, Store, SupplementalAttributeAssociation, TimeSeriesData, TimeSeriesError,
-    TransformPolicy, TypedArray, UnitSystem, create_store,
+    FeatureValue, Features, ListFilter, OwnerCategory, Scenarios, SingleTimeSeries, Store,
+    SupplementalAttributeAssociation, TimeSeriesData, TimeSeriesError, TransformPolicy, TypedArray,
+    UnitSystem, create_store,
 };
 
 // ---- shared helpers ---------------------------------------------------------
@@ -509,45 +510,25 @@ fn sa_import_rolls_back_a_duplicate_within_the_batch() {
     assert_eq!(exported, "[]");
 }
 
-#[test]
-fn reconcile_rejects_malformed_json() {
-    let mut store = create_store(None, true).expect("in-memory store should initialize");
-    let err = store
-        .reconcile_time_series_associations_openapi("{not valid json", ReconcilePolicy::Strict)
-        .unwrap_err();
-    assert!(matches!(err, TimeSeriesError::Serde(_)));
-}
+// ---- add-boundary rejection: geometry vs. association row -----------------
+//
+// Infrastore never reconciles a data array against its association row —
+// see the module docs. A mismatch between the two is rejected at the add
+// boundary instead, loudly and without writing anything.
 
 #[test]
-fn reconcile_rejects_unknown_fields() {
+fn add_rejects_single_time_series_length_mismatch_and_leaves_store_untouched() {
     let mut store = create_store(None, true).expect("in-memory store should initialize");
-    let json = r#"[{"owner_id":1,"owner_type":"Generator","owner_category":"Component",
-        "time_series_type":"SingleTimeSeries","name":"load","features":{},
-        "uri":"store.h5","element_type":"f64","element_shape":[],"bogus_field":true}]"#;
-    let err = store
-        .reconcile_time_series_associations_openapi(json, ReconcilePolicy::Strict)
-        .unwrap_err();
-    assert!(matches!(err, TimeSeriesError::Serde(_)));
-}
-
-// ---- reconcile: policy matrix --------------------------------------------
-
-/// One `SingleTimeSeries` row: owner 1 "Generator", name "load", 24 hourly
-/// points from 2030-01-01, full descriptive set. The base every reconcile test
-/// below either matches verbatim or perturbs one column of.
-fn reconcile_fixture_store() -> Store {
-    let mut store = create_store(None, true).expect("in-memory store should initialize");
-    let single = SingleTimeSeries::new(
+    let mut single = SingleTimeSeries::new(
         ts(2030, 1, 1, 0, 0, 0),
         Duration::hours(1),
         zeros(vec![24]),
         "load",
-    )
-    .with_units("MW")
-    .with_quantity_kind("ActivePower")
-    .with_unit_system(UnitSystem::NaturalUnits)
-    .with_component_field("load");
-    store
+    );
+    // Declared length disagrees with the array itself, bypassing the
+    // constructor's own derivation of `length` from `data`.
+    single.length = 25;
+    let err = store
         .add_time_series(
             1,
             "Generator",
@@ -555,110 +536,95 @@ fn reconcile_fixture_store() -> Store {
             TimeSeriesData::SingleTimeSeries(single),
             Features::new(),
         )
-        .expect("base row should add");
-    store
-}
-
-/// A clean row matching `reconcile_fixture_store`'s one row exactly. Carries
-/// `uri` (required by the schema) but deliberately no `data_hash`, exercising
-/// that reconcile accepts a document from a producer that never computes it —
-/// both are informational and never matched against the catalog.
-fn clean_row_json() -> serde_json::Value {
-    serde_json::json!({
-        "owner_id": 1, "owner_type": "Generator", "owner_category": "Component",
-        "time_series_type": "SingleTimeSeries", "name": "load", "features": {},
-        "uri": "store.h5", "element_type": "f64", "element_shape": [],
-        "units": "MW", "quantity_kind": "ActivePower", "unit_system": "NATURAL_UNITS",
-        "component_field": "load",
-        "initial_timestamp": "2030-01-01T00:00:00Z", "resolution": "PT1H", "length": 24
-    })
-}
-
-#[test]
-fn reconcile_clean_match_is_a_no_op_under_strict() {
-    let policy = ReconcilePolicy::Strict;
-    let mut store = reconcile_fixture_store();
-    let json = serde_json::to_string(&vec![clean_row_json()]).unwrap();
-    let report = store
-        .reconcile_time_series_associations_openapi(&json, policy)
-        .unwrap_or_else(|e| panic!("{policy:?} should succeed on a clean match: {e}"));
-    assert_eq!(report.matched, 1);
-    assert_eq!(report.updated, 0);
-    assert_eq!(report.missing_in_store, 0);
-    assert_eq!(report.unmatched_in_store, 0);
-    assert!(report.conflicts.is_empty());
-}
-
-#[test]
-fn reconcile_descriptive_drift_errors_under_strict() {
-    let mut store = reconcile_fixture_store();
-    let mut row = clean_row_json();
-    row["units"] = serde_json::json!("kW");
-    let json = serde_json::to_string(&vec![row]).unwrap();
-    let err = store
-        .reconcile_time_series_associations_openapi(&json, ReconcilePolicy::Strict)
         .unwrap_err();
-    match err {
-        TimeSeriesError::ReconcileConflict(msg) => {
-            assert!(msg.contains("units"), "{msg}");
-        }
-        other => panic!("expected ReconcileConflict, got {other}"),
-    }
+    assert!(matches!(err, TimeSeriesError::InvalidParameter(_)), "{err}");
+    assert!(
+        store
+            .list_time_series(ListFilter::new())
+            .expect("list should succeed")
+            .is_empty(),
+        "a rejected add must leave the catalog untouched"
+    );
 }
 
 #[test]
-fn reconcile_geometry_drift_errors_under_strict() {
-    let policy = ReconcilePolicy::Strict;
-    let mut store = reconcile_fixture_store();
-    let mut row = clean_row_json();
-    row["length"] = serde_json::json!(25);
-    let json = serde_json::to_string(&vec![row]).unwrap();
+fn add_rejects_deterministic_shape_mismatch_and_leaves_store_untouched() {
+    let mut store = create_store(None, true).expect("in-memory store should initialize");
+    let mut deterministic = infrastore_core::Deterministic::new(
+        ts(2030, 1, 1, 0, 0, 0),
+        Duration::hours(1),
+        Duration::days(1),
+        Duration::hours(1),
+        365,
+        zeros(vec![24, 365]),
+        "max_active_power_forecast",
+    )
+    .expect("deterministic should construct");
+    // Declared `count` no longer agrees with the array's own window axis,
+    // bypassing the constructor's own shape check.
+    deterministic.count = 364;
     let err = store
-        .reconcile_time_series_associations_openapi(&json, policy)
+        .add_time_series(
+            7,
+            "ThermalStandard",
+            OwnerCategory::Component,
+            TimeSeriesData::Deterministic(deterministic),
+            Features::new(),
+        )
         .unwrap_err();
-    match err {
-        TimeSeriesError::ReconcileConflict(msg) => {
-            assert!(msg.contains("geometry drift"), "{policy:?}: {msg}");
-            assert!(msg.contains("length"), "{policy:?}: {msg}");
-        }
-        other => panic!("{policy:?}: expected ReconcileConflict, got {other}"),
-    }
+    assert!(matches!(err, TimeSeriesError::InvalidParameter(_)), "{err}");
+    assert!(
+        store
+            .list_time_series(ListFilter::new())
+            .expect("list should succeed")
+            .is_empty(),
+        "a rejected add must leave the catalog untouched"
+    );
 }
 
 #[test]
-fn reconcile_json_row_with_no_catalog_match_errors() {
-    let mut store = reconcile_fixture_store();
-    let mut row = clean_row_json();
-    row["name"] = serde_json::json!("a_series_the_store_does_not_have");
-    let json = serde_json::to_string(&vec![row]).unwrap();
-    let err = store
-        .reconcile_time_series_associations_openapi(&json, ReconcilePolicy::Strict)
-        .unwrap_err();
-    assert!(matches!(err, TimeSeriesError::ReconcileConflict(_)));
-}
-
-#[test]
-fn reconcile_tolerates_and_counts_a_catalog_row_absent_from_the_json() {
-    // An empty document against a non-empty catalog: nothing to match, but the
-    // one catalog row is tolerated as a superset, not an error.
-    let mut store = reconcile_fixture_store();
-    let report = store
-        .reconcile_time_series_associations_openapi("[]", ReconcilePolicy::Strict)
-        .expect("an empty document should not fail on its own");
-    assert_eq!(report.matched, 0);
-    assert_eq!(report.unmatched_in_store, 1);
-}
-
-#[test]
-fn reconcile_ignores_a_foreign_uri_and_omitted_data_hash() {
-    // `clean_row_json` carries a `uri` that does not match this store's own
-    // hex-encoded content hash for the row, and no `data_hash` at all — a
-    // plausible shape for a document produced by another store. Neither
-    // participates in identity or comparison, so the match still succeeds.
-    let mut store = reconcile_fixture_store();
-    let json = serde_json::to_string(&vec![clean_row_json()]).unwrap();
-    let report = store
-        .reconcile_time_series_associations_openapi(&json, ReconcilePolicy::Strict)
-        .expect("a foreign uri/missing data_hash should not fail reconcile");
-    assert_eq!(report.matched, 1);
+fn add_bulk_rejects_geometry_mismatch_and_leaves_the_whole_batch_untouched() {
+    // A batch of two: a clean row and a mismatched one. The mismatch must
+    // reject the whole batch, including the row that would otherwise have
+    // added cleanly.
+    let mut store = create_store(None, true).expect("in-memory store should initialize");
+    let clean = SingleTimeSeries::new(
+        ts(2030, 1, 1, 0, 0, 0),
+        Duration::hours(1),
+        zeros(vec![24]),
+        "load",
+    );
+    let mut broken = SingleTimeSeries::new(
+        ts(2030, 1, 1, 0, 0, 0),
+        Duration::hours(1),
+        zeros(vec![24]),
+        "generation",
+    );
+    broken.length = 10;
+    let items = vec![
+        infrastore_core::AddRequest {
+            owner_id: 1,
+            owner_type: "Generator".to_string(),
+            owner_category: OwnerCategory::Component,
+            data: TimeSeriesData::SingleTimeSeries(clean),
+            features: Features::new(),
+        },
+        infrastore_core::AddRequest {
+            owner_id: 1,
+            owner_type: "Generator".to_string(),
+            owner_category: OwnerCategory::Component,
+            data: TimeSeriesData::SingleTimeSeries(broken),
+            features: Features::new(),
+        },
+    ];
+    let err = store.add_time_series_bulk(items).unwrap_err();
+    assert!(matches!(err, TimeSeriesError::InvalidParameter(_)), "{err}");
+    assert!(
+        store
+            .list_time_series(ListFilter::new())
+            .expect("list should succeed")
+            .is_empty(),
+        "a rejected bulk add must leave the catalog untouched, including the rows before the \
+         offending one"
+    );
 }

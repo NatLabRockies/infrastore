@@ -51,16 +51,6 @@
 //! matters and how periods and features participate in a total order despite
 //! not being numeric.
 //!
-//! # Reconcile
-//!
-//! A `data_hash` is `NOT NULL` in the catalog and names dense arrays the
-//! schemas deliberately never carry, so a JSON document can never *create* a
-//! complete catalog row. [`reconcile_ts_rows`] therefore reconciles JSON rows
-//! against the store's existing catalog, matched by the identity tuple above.
-//! See [`ReconcilePolicy`] and [`ReconcileReport`] for the exact policy
-//! matrix; [`TimeSeriesError::ReconcileConflict`] is the failure mode for
-//! every case the policy cannot resolve.
-//!
 //! # Fixture correction
 //!
 //! The checked-in fixtures at `conformance/openapi_row_fixtures/*.json` were
@@ -71,20 +61,14 @@
 //! fixtures were corrected to Rust's spelling rather than the module bending
 //! to match them; any ISO-8601 string remains schema-valid either way.
 
-use std::collections::{HashMap, HashSet};
-
 use chrono::{DateTime, SecondsFormat, Utc};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Map, Value};
 
-use crate::error::{Result, TimeSeriesError};
+use crate::error::Result;
 use crate::metadata::{SupplementalAttributeAssociation, SupplementalAttributeFilter};
 use crate::store::{ListFilter, Store};
-use crate::types::element_type::ElementType;
-use crate::types::metadata::{
-    FeatureValue, Features, OwnerCategory, TimeSeriesMetadata, UnitSystem,
-};
-use crate::types::period::Period;
+use crate::types::metadata::{FeatureValue, Features, TimeSeriesMetadata, UnitSystem};
 use crate::types::time_series::TimeSeriesType;
 
 // ============================================================================
@@ -138,8 +122,7 @@ fn sort_key(meta: &TimeSeriesMetadata) -> SortKey {
 }
 
 /// A plain scalar map: `{"scenario": "high_load", "year": 2030}`, never the
-/// store's internally-tagged [`FeatureValue`] form. The inverse of
-/// [`plain_to_features`].
+/// store's internally-tagged [`FeatureValue`] form.
 fn features_to_plain(features: &Features) -> Map<String, Value> {
     let mut out = Map::with_capacity(features.len());
     for (key, value) in features {
@@ -154,53 +137,12 @@ fn features_to_plain(features: &Features) -> Map<String, Value> {
     out
 }
 
-/// Parse a plain scalar feature map back into [`Features`]. A JSON integer
-/// literal (no decimal point or exponent) becomes [`FeatureValue::Int`]; one
-/// with a fractional part becomes [`FeatureValue::Float`] — the same
-/// distinction `serde_json::Number::as_i64` / `as_f64` already draws from the
-/// literal's own spelling, so this never has to guess. Any other JSON shape
-/// (array, object, null) is rejected: the wire contract is scalars only.
-fn plain_to_features(map: &Map<String, Value>) -> Result<Features> {
-    let mut out = Features::new();
-    for (key, value) in map {
-        let parsed = match value {
-            Value::Bool(b) => FeatureValue::Bool(*b),
-            Value::String(s) => FeatureValue::Str(s.clone()),
-            Value::Number(n) => match n.as_i64() {
-                Some(i) => FeatureValue::Int(i),
-                None => n.as_f64().map(FeatureValue::Float).ok_or_else(|| {
-                    TimeSeriesError::InvalidParameter(format!(
-                        "feature {key:?} has a number the store cannot represent: {n}"
-                    ))
-                })?,
-            },
-            other => {
-                return Err(TimeSeriesError::InvalidParameter(format!(
-                    "feature {key:?} must be an int, float, bool, or string; got {other}"
-                )));
-            }
-        };
-        out.insert(key.clone(), parsed);
-    }
-    Ok(out)
-}
-
 /// `NATURAL_UNITS` / `COMPONENT_BASE`, the schema's spelling — the module maps
 /// to and from the store's snake_case [`UnitSystem::as_str`].
 fn unit_system_wire(system: UnitSystem) -> &'static str {
     match system {
         UnitSystem::NaturalUnits => "NATURAL_UNITS",
         UnitSystem::ComponentBase => "COMPONENT_BASE",
-    }
-}
-
-fn parse_unit_system_wire(s: &str) -> Result<UnitSystem> {
-    match s {
-        "NATURAL_UNITS" => Ok(UnitSystem::NaturalUnits),
-        "COMPONENT_BASE" => Ok(UnitSystem::ComponentBase),
-        other => Err(TimeSeriesError::InvalidParameter(format!(
-            "unknown unit_system {other:?}; expected NATURAL_UNITS or COMPONENT_BASE"
-        ))),
     }
 }
 
@@ -371,434 +313,6 @@ fn export_ts_rows(store: &Store, filter: &ListFilter) -> Result<String> {
 }
 
 // ============================================================================
-// Time-series associations: reconcile
-// ============================================================================
-
-/// How [`reconcile_ts_rows`] treats a matched row whose descriptive columns
-/// (`units`, `quantity_kind`, `unit_system`, `component_field`,
-/// `application_data`) differ between the JSON document and the catalog.
-///
-/// Geometry drift (`initial_timestamp`, `length`, `horizon`, `interval`,
-/// `count`, `element_type`, `element_shape`, `percentiles`) and a JSON row
-/// with no catalog match are hard errors regardless of policy: geometry
-/// describes the arrays the catalog actually holds, which a document can
-/// never override, and a JSON row naming a series the catalog does not hold
-/// means the document claims data the store cannot back up (`data_hash` is
-/// `NOT NULL` and the schemas never carry it).
-///
-/// `Strict` is the only variant for now — a policy that lets the JSON
-/// document win descriptive drift is deferred to a follow-up. The enum keeps
-/// this shape (rather than dropping the parameter) so the wire/API contract
-/// across every binding does not have to change again when that policy
-/// returns.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ReconcilePolicy {
-    /// Any drift at all — descriptive or geometric — is a hard error.
-    #[default]
-    Strict,
-}
-
-/// Outcome of a successful [`reconcile_ts_rows`] call.
-///
-/// A failed call returns [`TimeSeriesError::ReconcileConflict`] instead of
-/// this: every drift or mismatch the requested policy cannot resolve aborts
-/// the *whole* call (naming every offender in one message), so this report is
-/// only meaningful once every JSON row has been accounted for cleanly.
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
-pub struct ReconcileReport {
-    /// JSON rows that matched a catalog row by identity, whether left
-    /// unchanged or rewritten.
-    pub matched: usize,
-    /// Of the matched rows, how many had a descriptive column rewritten.
-    /// Always 0 while [`ReconcilePolicy::Strict`] is the only policy:
-    /// descriptive drift is a hard error there, never a silent update.
-    pub updated: usize,
-    /// Always 0 on a successful reconcile. A JSON row naming a series the
-    /// catalog does not hold is always fatal (see [`ReconcilePolicy`]'s
-    /// docs), so this count never survives into a returned `Ok`; the field
-    /// exists because the failure path names the same count in its error
-    /// message.
-    pub missing_in_store: usize,
-    /// Catalog rows that no JSON row referenced. Tolerated under both
-    /// policies: an export dumps the whole catalog, but a document — PTDP's
-    /// staged output, a hand-augmented file — only ever carries the owners it
-    /// contains, so a nonzero count here is the expected shape of a partial
-    /// document, not a problem.
-    pub unmatched_in_store: usize,
-    /// Human-readable notes on matched rows that needed attention: one entry
-    /// per row whose descriptive columns were overwritten, naming the row
-    /// and which columns changed. Always empty while [`ReconcilePolicy::Strict`]
-    /// is the only policy, since it never overwrites — reserved for the
-    /// deferred policy that will populate it.
-    pub conflicts: Vec<String>,
-}
-
-/// One incoming JSON row of the time-series association catalog, as parsed
-/// for [`reconcile_ts_rows`]. Every field the wire schema defines is
-/// represented; unknown field names are rejected (typo protection). `uri` and
-/// `data_hash` are informational — a document from another store may carry
-/// foreign values for either, and neither participates in identity or
-/// comparison. `uri` is required by the schema so it must parse; `data_hash`
-/// is optional there, matching an incoming producer that may not compute it.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawTsRow {
-    // Parsed only so a JSON row carrying them deserializes (`deny_unknown_fields`
-    // would otherwise reject them); reconcile treats both as purely
-    // informational, so neither is read past this struct. `owner_type` is a
-    // denormalized label the identity tuple and every comparison ignore,
-    // matching the catalog's own treatment of it.
-    owner_id: i64,
-    #[allow(dead_code)]
-    owner_type: String,
-    owner_category: String,
-    time_series_type: String,
-    name: String,
-    #[serde(default)]
-    features: Map<String, Value>,
-    #[allow(dead_code)]
-    uri: String,
-    #[allow(dead_code)]
-    #[serde(default)]
-    data_hash: Option<String>,
-    element_type: String,
-    #[serde(default)]
-    element_shape: Vec<usize>,
-    #[serde(default)]
-    units: Option<String>,
-    #[serde(default)]
-    quantity_kind: Option<String>,
-    #[serde(default)]
-    unit_system: Option<String>,
-    #[serde(default)]
-    component_field: Option<String>,
-    #[serde(default)]
-    application_data: Option<String>,
-    #[serde(default)]
-    initial_timestamp: Option<String>,
-    #[serde(default)]
-    resolution: Option<String>,
-    #[serde(default)]
-    length: Option<usize>,
-    #[serde(default)]
-    horizon: Option<String>,
-    #[serde(default)]
-    interval: Option<String>,
-    #[serde(default)]
-    count: Option<usize>,
-    #[serde(default)]
-    percentiles: Option<Vec<f64>>,
-    #[serde(default)]
-    scenario_count: Option<usize>,
-}
-
-/// The tuple every row is matched by: `(owner_id, owner_category,
-/// time_series_type, name, resolution, interval, features)` — the same shape
-/// as the catalog's `uq_ts_assoc` uniqueness index, just carrying decoded
-/// values instead of the index's encoded columns.
-type Identity = (
-    i64,
-    OwnerCategory,
-    TimeSeriesType,
-    String,
-    Option<Period>,
-    Option<Period>,
-    Features,
-);
-
-fn identity_of_metadata(meta: &TimeSeriesMetadata) -> Identity {
-    (
-        meta.owner_id,
-        meta.owner_category,
-        meta.time_series_type,
-        meta.name.clone(),
-        meta.resolution,
-        meta.interval,
-        meta.features.clone(),
-    )
-}
-
-/// A [`RawTsRow`] after its string-encoded fields (periods, timestamp,
-/// element type, unit system, features) have been decoded into the store's
-/// own types, so the comparisons in [`geometry_diff`] and [`descriptive_diff`]
-/// never have to re-parse or juggle `Result`.
-struct ParsedTsRow {
-    identity: Identity,
-    initial_timestamp: Option<DateTime<Utc>>,
-    /// Static `length`, or — for a `Scenarios` row, which the wire form spells
-    /// as `scenario_count` rather than `length` (the schema treats `scenario_count` as the
-    /// catalog's `length`) — that value instead. Folding the two into one
-    /// field here is what lets [`geometry_diff`] compare a `Scenarios` row's
-    /// geometry with the same code path as every other type.
-    length: Option<usize>,
-    horizon: Option<Period>,
-    interval: Option<Period>,
-    count: Option<usize>,
-    element_type: ElementType,
-    element_shape: Vec<usize>,
-    percentiles: Option<Vec<f64>>,
-    units: Option<String>,
-    quantity_kind: Option<String>,
-    unit_system: Option<UnitSystem>,
-    component_field: Option<String>,
-    application_data: Option<String>,
-}
-
-impl RawTsRow {
-    /// A short human-readable label for error messages: enough to find the
-    /// row in the source document without echoing the whole object.
-    fn row_label(&self) -> String {
-        format!(
-            "{} owner {} \"{}\"",
-            self.time_series_type, self.owner_id, self.name
-        )
-    }
-
-    fn parse(&self) -> Result<ParsedTsRow> {
-        let owner_category = OwnerCategory::parse(&self.owner_category).ok_or_else(|| {
-            TimeSeriesError::InvalidParameter(format!(
-                "{}: unknown owner_category {:?}",
-                self.row_label(),
-                self.owner_category
-            ))
-        })?;
-        let time_series_type = TimeSeriesType::parse(&self.time_series_type).ok_or_else(|| {
-            TimeSeriesError::InvalidParameter(format!(
-                "{}: unknown time_series_type {:?}",
-                self.row_label(),
-                self.time_series_type
-            ))
-        })?;
-        let element_type = ElementType::parse(&self.element_type).ok_or_else(|| {
-            TimeSeriesError::InvalidParameter(format!(
-                "{}: unknown element_type {:?}",
-                self.row_label(),
-                self.element_type
-            ))
-        })?;
-        let unit_system = self
-            .unit_system
-            .as_deref()
-            .map(parse_unit_system_wire)
-            .transpose()?;
-        let resolution = self
-            .resolution
-            .as_deref()
-            .map(Period::from_iso8601)
-            .transpose()?;
-        let horizon = self
-            .horizon
-            .as_deref()
-            .map(Period::from_iso8601)
-            .transpose()?;
-        let interval = self
-            .interval
-            .as_deref()
-            .map(Period::from_iso8601)
-            .transpose()?;
-        let features = plain_to_features(&self.features)?;
-        let initial_timestamp = self
-            .initial_timestamp
-            .as_deref()
-            .map(|s| {
-                DateTime::parse_from_rfc3339(s)
-                    .map(|d| d.with_timezone(&Utc))
-                    .map_err(|e| {
-                        TimeSeriesError::InvalidParameter(format!(
-                            "{}: invalid initial_timestamp {s:?}: {e}",
-                            self.row_label()
-                        ))
-                    })
-            })
-            .transpose()?;
-
-        Ok(ParsedTsRow {
-            identity: (
-                self.owner_id,
-                owner_category,
-                time_series_type,
-                self.name.clone(),
-                resolution,
-                interval,
-                features,
-            ),
-            initial_timestamp,
-            length: self.length.or(self.scenario_count),
-            horizon,
-            interval,
-            count: self.count,
-            element_type,
-            element_shape: self.element_shape.clone(),
-            percentiles: self.percentiles.clone(),
-            units: self.units.clone(),
-            quantity_kind: self.quantity_kind.clone(),
-            unit_system,
-            component_field: self.component_field.clone(),
-            application_data: self.application_data.clone(),
-        })
-    }
-}
-
-/// Geometry fields: columns that describe the physically stored array,
-/// which a document is never allowed to override under either policy.
-/// `interval` is included for documentation completeness even though it is
-/// also part of [`Identity`] — a *matched* row's interval can therefore never
-/// actually be reported here, since a JSON row with a different interval
-/// would already have failed to find a catalog match at all.
-fn geometry_diff(row: &ParsedTsRow, meta: &TimeSeriesMetadata) -> Vec<&'static str> {
-    let mut drift = Vec::new();
-    let timestamps_agree = match (row.initial_timestamp, meta.initial_timestamp) {
-        (Some(a), Some(b)) => a.timestamp_millis() == b.timestamp_millis(),
-        (None, None) => true,
-        _ => false,
-    };
-    if !timestamps_agree {
-        drift.push("initial_timestamp");
-    }
-    // `meta.length` is populated for every type — `TypedArray::length` is
-    // `shape[0]` — but the wire row only carries it for `SingleTimeSeries`,
-    // `NonSequentialTimeSeries`, and `Scenarios` (as `scenario_count`). For
-    // `Deterministic`/`DeterministicSingleTimeSeries`/`Probabilistic` it holds
-    // the horizon-in-steps or percentile-count instead — an internal value the
-    // wire contract never exposes, so a JSON row can never carry it and this
-    // check must not compare it.
-    let length_is_wire_visible = matches!(
-        meta.time_series_type,
-        TimeSeriesType::SingleTimeSeries
-            | TimeSeriesType::NonSequentialTimeSeries
-            | TimeSeriesType::Scenarios
-    );
-    if length_is_wire_visible && row.length != meta.length {
-        drift.push("length");
-    }
-    if row.horizon != meta.horizon {
-        drift.push("horizon");
-    }
-    if row.interval != meta.interval {
-        drift.push("interval");
-    }
-    if row.count != meta.count {
-        drift.push("count");
-    }
-    if row.element_type != meta.element_type {
-        drift.push("element_type");
-    }
-    if row.element_shape.as_slice() != wire_element_shape(meta) {
-        drift.push("element_shape");
-    }
-    if row.percentiles != meta.percentiles {
-        drift.push("percentiles");
-    }
-    drift
-}
-
-/// Descriptive fields: the five columns a future reconcile policy could let a
-/// JSON document override on a matched row, because none of them sits in
-/// [`crate::types::key::TimeSeriesKey`], the catalog's uniqueness index, or
-/// `data_hash`. Under the current [`ReconcilePolicy::Strict`]-only policy any
-/// drift here is still a hard error.
-fn descriptive_diff(row: &ParsedTsRow, meta: &TimeSeriesMetadata) -> Vec<&'static str> {
-    let mut drift = Vec::new();
-    if row.units != meta.units {
-        drift.push("units");
-    }
-    if row.quantity_kind != meta.quantity_kind {
-        drift.push("quantity_kind");
-    }
-    if row.unit_system != meta.unit_system {
-        drift.push("unit_system");
-    }
-    if row.component_field != meta.component_field {
-        drift.push("component_field");
-    }
-    if row.application_data != meta.application_data {
-        drift.push("application_data");
-    }
-    drift
-}
-
-/// Reconcile a JSON array of time-series association rows against the
-/// store's catalog under `policy`. See [`ReconcilePolicy`] and
-/// [`ReconcileReport`] for the full semantics.
-fn reconcile_ts_rows(
-    store: &mut Store,
-    json: &str,
-    policy: ReconcilePolicy,
-) -> Result<ReconcileReport> {
-    let rows: Vec<RawTsRow> = serde_json::from_str(json)?;
-
-    let catalog = store.list_time_series(ListFilter::new())?;
-    let mut by_identity: HashMap<Identity, TimeSeriesMetadata> =
-        HashMap::with_capacity(catalog.len());
-    for meta in catalog {
-        by_identity.insert(identity_of_metadata(&meta), meta);
-    }
-
-    let mut referenced: HashSet<Identity> = HashSet::new();
-    let mut fatal: Vec<String> = Vec::new();
-    let mut clean = 0usize;
-
-    for row in &rows {
-        let parsed = match row.parse() {
-            Ok(parsed) => parsed,
-            Err(e) => {
-                fatal.push(format!("{}: {e}", row.row_label()));
-                continue;
-            }
-        };
-
-        let Some(meta) = by_identity.get(&parsed.identity) else {
-            fatal.push(format!(
-                "{}: the store's catalog holds no series with this identity",
-                row.row_label()
-            ));
-            continue;
-        };
-        referenced.insert(parsed.identity.clone());
-
-        let geometry_drift = geometry_diff(&parsed, meta);
-        if !geometry_drift.is_empty() {
-            fatal.push(format!(
-                "{}: geometry drift ({}) — a document can never override the columns that \
-                 describe the stored array",
-                row.row_label(),
-                geometry_drift.join(", ")
-            ));
-            continue;
-        }
-
-        let descriptive_drift = descriptive_diff(&parsed, meta);
-        if descriptive_drift.is_empty() {
-            clean += 1;
-            continue;
-        }
-        match policy {
-            ReconcilePolicy::Strict => {
-                fatal.push(format!(
-                    "{}: descriptive drift ({}) under strict reconcile",
-                    row.row_label(),
-                    descriptive_drift.join(", ")
-                ));
-            }
-        }
-    }
-
-    if !fatal.is_empty() {
-        return Err(TimeSeriesError::ReconcileConflict(fatal.join("; ")));
-    }
-
-    let unmatched_in_store = by_identity.len() - referenced.len();
-
-    Ok(ReconcileReport {
-        matched: clean,
-        updated: 0,
-        missing_in_store: 0,
-        unmatched_in_store,
-        conflicts: Vec::new(),
-    })
-}
-
-// ============================================================================
 // Supplemental-attribute associations
 // ============================================================================
 
@@ -815,10 +329,10 @@ fn export_sa_rows(store: &Store) -> Result<String> {
 }
 
 /// One row of the incoming SA-association JSON, denying unknown fields so a
-/// typo'd column name fails loudly rather than silently vanishing. Unlike the
-/// time-series reconcile, this is a straight bulk insert: the row shape
-/// already matches [`SupplementalAttributeAssociation`] exactly, with no
-/// `uri` field to tolerate.
+/// typo'd column name fails loudly rather than silently vanishing. A straight
+/// bulk insert: the row shape already matches
+/// [`SupplementalAttributeAssociation`] exactly, with no `uri` field to
+/// tolerate.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSaRow {
@@ -878,19 +392,5 @@ impl Store {
         json: &str,
     ) -> Result<usize> {
         import_sa_rows(self, json)
-    }
-
-    /// Reconcile a JSON array of time-series association rows against this
-    /// store's catalog: match by identity, apply `policy` to any
-    /// descriptive drift, and error loudly on anything neither policy can
-    /// resolve. A row's `uri`/`data_hash` are informational, never matched —
-    /// a document from another store may carry foreign values for both. See
-    /// [`ReconcilePolicy`] and [`ReconcileReport`].
-    pub fn reconcile_time_series_associations_openapi(
-        &mut self,
-        json: &str,
-        policy: ReconcilePolicy,
-    ) -> Result<ReconcileReport> {
-        reconcile_ts_rows(self, json, policy)
     }
 }
