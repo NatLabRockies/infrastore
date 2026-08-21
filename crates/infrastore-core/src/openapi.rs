@@ -10,21 +10,25 @@
 //! already produces into JSON, and JSON back into the calls that already
 //! exist for writing.
 //!
-//! # Wire contract (design doc D3)
+//! # Wire contract
 //!
 //! A time-series association row carries the fields every type shares —
 //! `id` (the catalog rowid), `owner_id`, `owner_type`, `owner_category`,
 //! `time_series_type`, `name`, `features` (a *plain* scalar map — int, float,
 //! bool, or string values, never the store's internally-tagged
-//! [`crate::types::metadata::FeatureValue`] form), `address` (the caller's
-//! string, stamped verbatim and never interpreted), `element_type`,
+//! [`crate::types::metadata::FeatureValue`] form), `uri` (the schema's locator
+//! for the dense data, unique within one store, no required format —
+//! infrastore fills it with [`crate::hash::hash_hex`] of the row's own
+//! `data_hash`, never a caller-supplied value), `element_type`,
 //! `element_shape` — plus optional descriptive fields (`units`,
-//! `quantity_kind`, `unit_system`, `component_field`, `application_data`)
-//! that are *omitted* from the JSON object when unset, never written as
-//! `null`. `unit_system` maps the store's snake_case internal spelling to the
-//! schema's `NATURAL_UNITS` / `COMPONENT_BASE`; omitted (not merely absent)
-//! means *unspecified*, which is a different thing from natural units, so the
-//! two must stay distinguishable through the round trip.
+//! `quantity_kind`, `unit_system`, `component_field`, `application_data`) and
+//! the optional `data_hash` (the same hex string as `uri`, exported because
+//! the schema also carries it as its own field) that are *omitted* from the
+//! JSON object when unset, never written as `null`. `unit_system` maps the
+//! store's snake_case internal spelling to the schema's `NATURAL_UNITS` /
+//! `COMPONENT_BASE`; omitted (not merely absent) means *unspecified*, which is
+//! a different thing from natural units, so the two must stay distinguishable
+//! through the round trip.
 //!
 //! On top of the shared fields, each of the six [`TimeSeriesType`] values adds
 //! its own geometry fields — see [`ts_row_to_json`] — and every field that
@@ -48,7 +52,7 @@
 //! matters and how periods and features participate in a total order despite
 //! not being numeric.
 //!
-//! # Reconcile (design doc D4)
+//! # Reconcile
 //!
 //! A `data_hash` is `NOT NULL` in the catalog and names dense arrays the
 //! schemas deliberately never carry, so a JSON document can never *create* a
@@ -256,10 +260,11 @@ fn insert_forecast_fields(row: &mut Map<String, Value>, meta: &TimeSeriesMetadat
     }
 }
 
-/// Map one catalog row to its OpenAPI wire object (D3). `id` is the catalog
-/// rowid ([`Store::list_time_series_with_id`]); `address` is the caller's
-/// string, stamped verbatim and never interpreted by the store.
-fn ts_row_to_json(id: i64, address: &str, meta: &TimeSeriesMetadata) -> Value {
+/// Map one catalog row to its OpenAPI wire object. `id` is the catalog
+/// rowid ([`Store::list_time_series_with_id`]); `uri` and `data_hash` are
+/// both derived from the row's own `data_hash` via [`crate::hash::hash_hex`]
+/// — infrastore never accepts a caller-supplied locator for its own rows.
+fn ts_row_to_json(id: i64, meta: &TimeSeriesMetadata) -> Value {
     let mut row = Map::new();
     row.insert("id".into(), Value::from(id));
     row.insert("owner_id".into(), Value::from(meta.owner_id));
@@ -277,7 +282,9 @@ fn ts_row_to_json(id: i64, address: &str, meta: &TimeSeriesMetadata) -> Value {
         "features".into(),
         Value::Object(features_to_plain(&meta.features)),
     );
-    row.insert("address".into(), Value::from(address));
+    let hash_hex = crate::hash::hash_hex(&meta.data_hash);
+    row.insert("uri".into(), Value::from(hash_hex.clone()));
+    row.insert("data_hash".into(), Value::from(hash_hex));
     row.insert(
         "element_type".into(),
         Value::from(meta.element_type.to_string()),
@@ -355,11 +362,11 @@ fn ts_row_to_json(id: i64, address: &str, meta: &TimeSeriesMetadata) -> Value {
 /// Export `time_series_associations` as a sorted OpenAPI-row JSON array. Pure
 /// mapping over rows [`Store::list_time_series_with_id`] already produced —
 /// see the module docs for the wire contract and sort order.
-fn export_ts_rows(store: &Store, address: &str, filter: &ListFilter) -> Result<String> {
+fn export_ts_rows(store: &Store, filter: &ListFilter) -> Result<String> {
     let rows = store.list_time_series_with_id(filter.clone())?;
     let mut keyed: Vec<(SortKey, Value)> = rows
         .iter()
-        .map(|(id, meta)| (sort_key(meta), ts_row_to_json(*id, address, meta)))
+        .map(|(id, meta)| (sort_key(meta), ts_row_to_json(*id, meta)))
         .collect();
     keyed.sort_by(|a, b| a.0.cmp(&b.0));
     let array: Vec<Value> = keyed.into_iter().map(|(_, row)| row).collect();
@@ -427,18 +434,20 @@ pub struct ReconcileReport {
 
 /// One incoming JSON row of the time-series association catalog, as parsed
 /// for [`reconcile_ts_rows`]. Every field the wire schema defines is
-/// represented; unknown field names are rejected (typo protection), but `id`
-/// and `address` are informational per D4 — `id` is never read here at all,
-/// and `address` only ever feeds the `expected_address` check, never
-/// identity or comparison.
+/// represented; unknown field names are rejected (typo protection), but `id`,
+/// `uri`, and `data_hash` are informational — a document from another store
+/// may carry foreign values for any of the three, and none of them
+/// participates in identity or comparison. `uri` is required by the schema so
+/// it must parse; `data_hash` is optional there, matching an incoming
+/// producer that may not compute it.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawTsRow {
-    // Parsed only so a JSON row carrying it deserializes (`deny_unknown_fields`
-    // would otherwise reject it); D4 makes both purely informational, so
-    // neither is read past this struct. `owner_type` is a denormalized label
-    // the identity tuple and every comparison ignore, matching the catalog's
-    // own treatment of it.
+    // Parsed only so a JSON row carrying them deserializes (`deny_unknown_fields`
+    // would otherwise reject them); reconcile treats all three as purely
+    // informational, so none is read past this struct. `owner_type` is a
+    // denormalized label the identity tuple and every comparison ignore,
+    // matching the catalog's own treatment of it.
     #[allow(dead_code)]
     #[serde(default)]
     id: Option<i64>,
@@ -450,8 +459,11 @@ struct RawTsRow {
     name: String,
     #[serde(default)]
     features: Map<String, Value>,
+    #[allow(dead_code)]
+    uri: String,
+    #[allow(dead_code)]
     #[serde(default)]
-    address: Option<String>,
+    data_hash: Option<String>,
     element_type: String,
     #[serde(default)]
     element_shape: Vec<usize>,
@@ -483,7 +495,7 @@ struct RawTsRow {
     scenario_count: Option<usize>,
 }
 
-/// The tuple every row is matched by (D4): `(owner_id, owner_category,
+/// The tuple every row is matched by: `(owner_id, owner_category,
 /// time_series_type, name, resolution, interval, features)` — the same shape
 /// as the catalog's `uq_ts_assoc` uniqueness index, just carrying decoded
 /// values instead of the index's encoded columns.
@@ -517,8 +529,8 @@ struct ParsedTsRow {
     identity: Identity,
     initial_timestamp: Option<DateTime<Utc>>,
     /// Static `length`, or — for a `Scenarios` row, which the wire form spells
-    /// as `scenario_count` rather than `length` (D3: "`scenario_count` = the
-    /// catalog's `length`") — that value instead. Folding the two into one
+    /// as `scenario_count` rather than `length` (the schema treats `scenario_count` as the
+    /// catalog's `length`) — that value instead. Folding the two into one
     /// field here is what lets [`geometry_diff`] compare a `Scenarios` row's
     /// geometry with the same code path as every other type.
     length: Option<usize>,
@@ -708,13 +720,12 @@ fn descriptive_diff(row: &ParsedTsRow, meta: &TimeSeriesMetadata) -> Vec<&'stati
 }
 
 /// Reconcile a JSON array of time-series association rows against the
-/// store's catalog under `policy` (D4). See [`ReconcilePolicy`] and
+/// store's catalog under `policy`. See [`ReconcilePolicy`] and
 /// [`ReconcileReport`] for the full semantics.
 fn reconcile_ts_rows(
     store: &mut Store,
     json: &str,
     policy: ReconcilePolicy,
-    expected_address: Option<&str>,
 ) -> Result<ReconcileReport> {
     let rows: Vec<RawTsRow> = serde_json::from_str(json)?;
 
@@ -732,16 +743,6 @@ fn reconcile_ts_rows(
     let mut conflicts: Vec<String> = Vec::new();
 
     for row in &rows {
-        if let (Some(expected), Some(actual)) = (expected_address, row.address.as_deref())
-            && actual != expected
-        {
-            fatal.push(format!(
-                "{}: address {actual:?} does not match the expected storage file {expected:?}",
-                row.row_label()
-            ));
-            continue;
-        }
-
         let parsed = match row.parse() {
             Ok(parsed) => parsed,
             Err(e) => {
@@ -841,7 +842,7 @@ fn export_sa_rows(store: &Store) -> Result<String> {
 /// typo'd column name fails loudly rather than silently vanishing. Unlike the
 /// time-series reconcile, this is a straight bulk insert: the row shape
 /// already matches [`SupplementalAttributeAssociation`] exactly, with no
-/// `id`/`address` fields to tolerate.
+/// `id`/`uri` fields to tolerate.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSaRow {
@@ -879,14 +880,11 @@ fn import_sa_rows(store: &mut Store, json: &str) -> Result<usize> {
 
 impl Store {
     /// Export `time_series_associations` matching `filter` as a JSON array of
-    /// OpenAPI rows, each stamped with `address` verbatim. See the module
-    /// docs for the wire contract (D3) and sort order.
-    pub fn export_time_series_associations_openapi(
-        &self,
-        address: &str,
-        filter: &ListFilter,
-    ) -> Result<String> {
-        export_ts_rows(self, address, filter)
+    /// OpenAPI rows, each carrying `uri` and `data_hash` computed from the
+    /// row's own content hash. See the module docs for the wire contract and
+    /// sort order.
+    pub fn export_time_series_associations_openapi(&self, filter: &ListFilter) -> Result<String> {
+        export_ts_rows(self, filter)
     }
 
     /// Export the whole `supplemental_attribute_associations` table as a JSON
@@ -907,15 +905,16 @@ impl Store {
     }
 
     /// Reconcile a JSON array of time-series association rows against this
-    /// store's catalog (D4): match by identity, apply `policy` to any
+    /// store's catalog: match by identity, apply `policy` to any
     /// descriptive drift, and error loudly on anything neither policy can
-    /// resolve. See [`ReconcilePolicy`] and [`ReconcileReport`].
+    /// resolve. A row's `uri`/`data_hash` are informational, never matched —
+    /// a document from another store may carry foreign values for both. See
+    /// [`ReconcilePolicy`] and [`ReconcileReport`].
     pub fn reconcile_time_series_associations_openapi(
         &mut self,
         json: &str,
         policy: ReconcilePolicy,
-        expected_address: Option<&str>,
     ) -> Result<ReconcileReport> {
-        reconcile_ts_rows(self, json, policy, expected_address)
+        reconcile_ts_rows(self, json, policy)
     }
 }

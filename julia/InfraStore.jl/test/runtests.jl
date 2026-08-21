@@ -2214,7 +2214,7 @@ end
             features=Dict("scenario" => "high_load", "year" => 2030),
         )
 
-        json = export_time_series_associations_openapi(store; address="time_series.h5")
+        json = export_time_series_associations_openapi(store)
         rows = InfraStore.JSON.parse(json)
         @test length(rows) == 1
         row = rows[1]
@@ -2292,12 +2292,16 @@ end
         return store
     end
 
+    # Carries `uri` (required by the schema) but deliberately no `data_hash`,
+    # exercising that reconcile accepts a document from a producer that never
+    # computes it — both are informational and never matched against the
+    # catalog.
     function _reconcile_clean_row()
         return Dict(
             "owner_id" => 1, "owner_type" => "Generator", "owner_category" => "Component",
             "time_series_type" => "SingleTimeSeries", "name" => "load",
             "features" => Dict(),
-            "address" => "store.h5", "element_type" => "f64", "element_shape" => [],
+            "uri" => "store.h5", "element_type" => "f64", "element_shape" => [],
             "units" => "MW", "quantity_kind" => "ActivePower",
             "unit_system" => "NATURAL_UNITS", "component_field" => "load",
             "initial_timestamp" => "2030-01-01T00:00:00Z", "resolution" => "PT1H",
@@ -2350,7 +2354,7 @@ end
         @test report.unmatched_in_store == 0
         @test length(report.conflicts) == 1
 
-        exported = export_time_series_associations_openapi(store; address="store.h5")
+        exported = export_time_series_associations_openapi(store)
         rows = InfraStore.JSON.parse(exported)
         @test length(rows) == 1
         @test rows[1]["units"] == "kW"
@@ -2397,24 +2401,16 @@ end
         close!(store)
     end
 
-    @testset "reconcile: address check passes when it matches, fails when it does not" begin
+    @testset "reconcile: ignores a foreign uri and omitted data_hash" begin
+        # `_reconcile_clean_row` carries a `uri` that does not match this
+        # store's own hex-encoded content hash for the row, and no
+        # `data_hash` at all — a plausible shape for a document produced by
+        # another store. Neither participates in identity or comparison, so
+        # the match still succeeds.
         store = _reconcile_fixture_store()
         json = InfraStore.JSON.json([_reconcile_clean_row()])
-        report = reconcile_time_series_associations_openapi!(
-            store, json; policy=:strict, expected_address="store.h5"
-        )
+        report = reconcile_time_series_associations_openapi!(store, json; policy=:strict)
         @test report.matched == 1
-
-        err = try
-            reconcile_time_series_associations_openapi!(
-                store, json; policy=:strict, expected_address="other_store.h5"
-            )
-            nothing
-        catch e
-            e
-        end
-        @test err isa InfraStore.ReconcileConflictError
-        @test occursin("address", err.msg)
         close!(store)
     end
 

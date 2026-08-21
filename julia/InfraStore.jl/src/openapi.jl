@@ -34,19 +34,19 @@ function _decode_reconcile_report(r::AbstractDict)
 end
 
 """
-    export_time_series_associations_openapi(store; address, owner_id=nothing,
+    export_time_series_associations_openapi(store; owner_id=nothing,
         owner_category=nothing, time_series_type=nothing, name=nothing,
         resolution=nothing, interval=nothing, features=Dict(),
         component_field=nothing) -> String
 
 Export `time_series_associations` matching the filter (the same filter
-keywords as [`list_time_series`](@ref)) as a sorted OpenAPI-row JSON array,
-each row stamped with `address` verbatim. With no filter this exports the
-whole catalog.
+keywords as [`list_time_series`](@ref)) as a sorted OpenAPI-row JSON array.
+Each row's `uri` and `data_hash` are the hex-encoded content hash the store
+already has for that row — never a caller-supplied locator. With no filter
+this exports the whole catalog.
 """
 function export_time_series_associations_openapi(
     store::Store;
-    address::AbstractString,
     owner_id=nothing,
     owner_category=nothing,
     time_series_type=nothing,
@@ -60,12 +60,10 @@ function export_time_series_associations_openapi(
         owner_id, owner_category, time_series_type, name, resolution, interval, features,
         component_field,
     )
-    address_arg = String(address)
     return _owned_str(
         (out_json, out_len) ->
             @ccall lib_path().infrastore_store_export_time_series_associations_openapi(
                 store::Ptr{Cvoid},
-                address_arg::Cstring,
                 has_owner::Bool,
                 owner_arg::Int64,
                 has_category::Bool,
@@ -121,7 +119,7 @@ end
 
 """
     reconcile_time_series_associations_openapi!(store, json::AbstractString;
-        policy::Symbol=:strict, expected_address=nothing) -> ReconcileReport
+        policy::Symbol=:strict) -> ReconcileReport
 
 Reconcile a JSON array of time-series association OpenAPI rows against the
 store's catalog: match by identity, apply `policy` (`:strict` or
@@ -131,25 +129,21 @@ neither policy can resolve. Under `:strict` any drift — descriptive or
 geometric — is an error; under `:update_descriptive` descriptive drift
 (`units`, `quantity_kind`, `unit_system`, `component_field`,
 `application_data`) is rewritten from the JSON, while geometry drift is still
-an error. `expected_address`, when given, must match every row's own `address`
-field or the whole call fails. Runs in one transaction when it writes.
+an error. A row's `uri` and `data_hash` are informational and never checked —
+a document from another store may carry foreign values for either. Runs in
+one transaction when it writes.
 """
 function reconcile_time_series_associations_openapi!(
-    store::Store,
-    json::AbstractString;
-    policy::Symbol=:strict,
-    expected_address::Union{Nothing, AbstractString}=nothing,
+    store::Store, json::AbstractString; policy::Symbol=:strict
 )
     policy_code = _reconcile_policy_code(policy)
     json_arg = String(json)
-    address_arg = expected_address === nothing ? C_NULL : String(expected_address)
     report_json = _owned_str(
         (out_json, out_len) ->
             @ccall lib_path().infrastore_store_reconcile_time_series_associations_openapi(
                 store::Ptr{Cvoid},
                 json_arg::Cstring,
                 policy_code::Int32,
-                address_arg::Cstring,
                 out_json::Ref{Ptr{Cchar}},
                 out_len::Ref{UInt64},
             )::Int32

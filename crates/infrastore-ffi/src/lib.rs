@@ -43,8 +43,8 @@ pub const INFRASTORE_ERR_MISMATCHED_ARTIFACT: i32 = 12;
 /// A JSON reconcile of the time-series association catalog
 /// (`infrastore_store_reconcile_time_series_associations_openapi`) found rows
 /// the requested policy cannot resolve: geometry drift, descriptive drift under
-/// the strict policy, a JSON row naming a series the catalog does not hold, or
-/// an `expected_address` mismatch. The error message names every offending row.
+/// the strict policy, or a JSON row naming a series the catalog does not hold.
+/// The error message names every offending row.
 pub const INFRASTORE_ERR_RECONCILE_CONFLICT: i32 = 13;
 pub const INFRASTORE_ERR_INTERNAL: i32 = 99;
 
@@ -7204,16 +7204,16 @@ pub unsafe extern "C" fn infrastore_store_count_parent_child_associations(
 // `infrastore_store_add_supplemental_attribute_associations` above.
 
 /// Export `time_series_associations` matching the filter as a sorted
-/// OpenAPI-row JSON array, each row stamped with `address` verbatim. Filters
-/// match `infrastore_store_list_keys`. Returns the JSON through `out_json` as
-/// an **owned** allocation the caller releases with `infrastore_string_free`;
-/// `out_len` is its byte length.
+/// OpenAPI-row JSON array. Each row's `uri` and `data_hash` are the
+/// hex-encoded content hash the store already has for that row — never a
+/// caller-supplied locator. Filters match `infrastore_store_list_keys`.
+/// Returns the JSON through `out_json` as an **owned** allocation the caller
+/// releases with `infrastore_string_free`; `out_len` is its byte length.
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. `address` must be a valid,
-/// null-terminated UTF-8 string. The scalar filter flags/values are plain
-/// scalars; `name`, `resolution`, `interval`, `features_json`, and
+/// `handle` must be a live store handle. The scalar filter flags/values are
+/// plain scalars; `name`, `resolution`, `interval`, `features_json`, and
 /// `component_field` must each be null or a null-terminated UTF-8 string.
 /// `out_json` must be valid for writing one pointer and `out_len` for writing
 /// one `u64`; on success `*out_json` must be released exactly once with
@@ -7222,7 +7222,6 @@ pub unsafe extern "C" fn infrastore_store_count_parent_child_associations(
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_export_time_series_associations_openapi(
     handle: *const InfraStoreHandle,
-    address: *const c_char,
     has_owner: bool,
     owner_id: i64,
     has_owner_category: bool,
@@ -7243,10 +7242,6 @@ pub unsafe extern "C" fn infrastore_store_export_time_series_associations_openap
         set_error("a required pointer is null");
         return INFRASTORE_ERR_NULL_POINTER;
     }
-    let address = match unsafe { cstr_to_str(address) } {
-        Ok(s) => s,
-        Err(c) => return c,
-    };
     let filter = match unsafe {
         build_list_filter(
             has_owner,
@@ -7265,10 +7260,7 @@ pub unsafe extern "C" fn infrastore_store_export_time_series_associations_openap
         Ok(f) => f,
         Err(c) => return c,
     };
-    let json = match store
-        .inner
-        .export_time_series_associations_openapi(address, &filter)
-    {
+    let json = match store.inner.export_time_series_associations_openapi(&filter) {
         Ok(j) => j,
         Err(e) => return map_core_error(e),
     };
@@ -7350,8 +7342,9 @@ pub unsafe extern "C" fn infrastore_store_import_supplemental_attribute_associat
 /// resolve. `policy` is `0` (strict: any drift — descriptive or geometric — is
 /// an error) or `1` (update_descriptive: descriptive drift is rewritten from
 /// the JSON; geometry drift is still an error); any other value is
-/// `INFRASTORE_ERR_INVALID_PARAMETER`. When non-null, `expected_address` must
-/// match every row's own `address` field or the whole call fails.
+/// `INFRASTORE_ERR_INVALID_PARAMETER`. A row's `uri` and `data_hash` are
+/// informational and never checked — a document from another store may carry
+/// foreign values for either.
 ///
 /// On success, writes the JSON-serialized report
 /// (`{"matched":…,"updated":…,"missing_in_store":…,"unmatched_in_store":…,
@@ -7361,7 +7354,6 @@ pub unsafe extern "C" fn infrastore_store_import_supplemental_attribute_associat
 /// # Safety
 ///
 /// `handle` must be a live mutable store handle. `json` must be a valid,
-/// null-terminated UTF-8 string. `expected_address` must be null or a valid,
 /// null-terminated UTF-8 string. `out_json` must be valid for writing one
 /// pointer and `out_len` for writing one `u64`; on success `*out_json` must be
 /// released exactly once with `infrastore_string_free`.
@@ -7370,7 +7362,6 @@ pub unsafe extern "C" fn infrastore_store_reconcile_time_series_associations_ope
     handle: *mut InfraStoreHandle,
     json: *const c_char,
     policy: i32,
-    expected_address: *const c_char,
     out_json: *mut *mut c_char,
     out_len: *mut u64,
 ) -> i32 {
@@ -7394,15 +7385,10 @@ pub unsafe extern "C" fn infrastore_store_reconcile_time_series_associations_ope
             return INFRASTORE_ERR_INVALID_PARAMETER;
         }
     };
-    let expected_address = match unsafe { cstr_to_optional_string(expected_address) } {
-        Ok(s) => s,
-        Err(c) => return c,
-    };
-    let report = match store.inner.reconcile_time_series_associations_openapi(
-        json,
-        policy,
-        expected_address.as_deref(),
-    ) {
+    let report = match store
+        .inner
+        .reconcile_time_series_associations_openapi(json, policy)
+    {
         Ok(r) => r,
         Err(e) => return map_core_error(e),
     };

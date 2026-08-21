@@ -724,7 +724,6 @@ class Store:
     def export_time_series_associations_openapi(
         self,
         *,
-        address: str,
         owner_id: int | None = None,
         owner_category: OwnerCategory | None = None,
         owner_type: str | None = None,
@@ -743,7 +742,6 @@ class Store:
         json: str,
         *,
         policy: str = "strict",
-        expected_address: str | None = None,
     ) -> dict[str, Any]: ...
 
 def init_tracing(filter: str) -> None: ...

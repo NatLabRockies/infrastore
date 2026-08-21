@@ -199,8 +199,8 @@ end
 A JSON reconcile of the time-series association catalog
 ([`reconcile_time_series_associations_openapi!`](@ref)) found rows the
 requested policy cannot resolve: geometry drift, descriptive drift under
-`:strict`, a JSON row naming a series the catalog does not hold, or an
-`expected_address` mismatch. The message names every offending row.
+`:strict`, or a JSON row naming a series the catalog does not hold. The
+message names every offending row.
 """
 struct ReconcileConflictError <: TimeSeriesException
     msg::String

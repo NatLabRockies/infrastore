@@ -9,7 +9,8 @@
     "vintage": true,
     "weight": 0.5
   },
-  "address": "time_series.h5",
+  "uri": "a12833691846225366aa8400a270fc2d86557251a500c5b2ddeb3cf076e1dc82",
+  "data_hash": "a12833691846225366aa8400a270fc2d86557251a500c5b2ddeb3cf076e1dc82",
   "element_type": "f64",
   "element_shape": [],
   "units": "pu",

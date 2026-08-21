@@ -57,8 +57,8 @@
  * A JSON reconcile of the time-series association catalog
  * (`infrastore_store_reconcile_time_series_associations_openapi`) found rows
  * the requested policy cannot resolve: geometry drift, descriptive drift under
- * the strict policy, a JSON row naming a series the catalog does not hold, or
- * an `expected_address` mismatch. The error message names every offending row.
+ * the strict policy, or a JSON row naming a series the catalog does not hold.
+ * The error message names every offending row.
  */
 #define INFRASTORE_ERR_RECONCILE_CONFLICT 13
 
@@ -2467,23 +2467,22 @@ int32_t infrastore_store_count_parent_child_associations(const struct InfraStore
 
 /**
  * Export `time_series_associations` matching the filter as a sorted
- * OpenAPI-row JSON array, each row stamped with `address` verbatim. Filters
- * match `infrastore_store_list_keys`. Returns the JSON through `out_json` as
- * an **owned** allocation the caller releases with `infrastore_string_free`;
- * `out_len` is its byte length.
+ * OpenAPI-row JSON array. Each row's `uri` and `data_hash` are the
+ * hex-encoded content hash the store already has for that row — never a
+ * caller-supplied locator. Filters match `infrastore_store_list_keys`.
+ * Returns the JSON through `out_json` as an **owned** allocation the caller
+ * releases with `infrastore_string_free`; `out_len` is its byte length.
  *
  * # Safety
  *
- * `handle` must be a live store handle. `address` must be a valid,
- * null-terminated UTF-8 string. The scalar filter flags/values are plain
- * scalars; `name`, `resolution`, `interval`, `features_json`, and
+ * `handle` must be a live store handle. The scalar filter flags/values are
+ * plain scalars; `name`, `resolution`, `interval`, `features_json`, and
  * `component_field` must each be null or a null-terminated UTF-8 string.
  * `out_json` must be valid for writing one pointer and `out_len` for writing
  * one `u64`; on success `*out_json` must be released exactly once with
  * `infrastore_string_free`.
  */
 int32_t infrastore_store_export_time_series_associations_openapi(const struct InfraStore *handle,
-                                                                 const char *address,
                                                                  bool has_owner,
                                                                  int64_t owner_id,
                                                                  bool has_owner_category,
@@ -2538,8 +2537,9 @@ int32_t infrastore_store_import_supplemental_attribute_associations_openapi(stru
  * resolve. `policy` is `0` (strict: any drift — descriptive or geometric — is
  * an error) or `1` (update_descriptive: descriptive drift is rewritten from
  * the JSON; geometry drift is still an error); any other value is
- * `INFRASTORE_ERR_INVALID_PARAMETER`. When non-null, `expected_address` must
- * match every row's own `address` field or the whole call fails.
+ * `INFRASTORE_ERR_INVALID_PARAMETER`. A row's `uri` and `data_hash` are
+ * informational and never checked — a document from another store may carry
+ * foreign values for either.
  *
  * On success, writes the JSON-serialized report
  * (`{"matched":…,"updated":…,"missing_in_store":…,"unmatched_in_store":…,
@@ -2549,7 +2549,6 @@ int32_t infrastore_store_import_supplemental_attribute_associations_openapi(stru
  * # Safety
  *
  * `handle` must be a live mutable store handle. `json` must be a valid,
- * null-terminated UTF-8 string. `expected_address` must be null or a valid,
  * null-terminated UTF-8 string. `out_json` must be valid for writing one
  * pointer and `out_len` for writing one `u64`; on success `*out_json` must be
  * released exactly once with `infrastore_string_free`.
@@ -2557,7 +2556,6 @@ int32_t infrastore_store_import_supplemental_attribute_associations_openapi(stru
 int32_t infrastore_store_reconcile_time_series_associations_openapi(struct InfraStore *handle,
                                                                     const char *json,
                                                                     int32_t policy,
-                                                                    const char *expected_address,
                                                                     char **out_json,
                                                                     uint64_t *out_len);
 

@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "SupplementalAttributeAssociation",
-  "description": "Links a supplemental attribute to the component it describes — the JSON form of a row in infrastore's `supplemental_attribute_associations` catalog table, field-for-field. `component_type` and `attribute_type` are denormalized labels carried for filtering and reporting, not identity: identity is the `(component_id, attribute_id)` pair. Lives in Core because either side may be a Core or an Operations type. Unlike `components`, `supplemental_attributes` is a flat, untyped array, so `attribute_type` is this record's only per-row type discriminator. GridDB's `supplemental_attributes_association` table will be reconciled to this spelling later (user decision 2026-08-19).",
+  "description": "Links a supplemental attribute to the component it describes — the JSON form of a row in the store's `supplemental_attribute_associations` catalog table, field-for-field. `component_type` and `attribute_type` are denormalized labels carried for filtering and reporting, not identity: identity is the `(component_id, attribute_id)` pair. Lives in Core because either side may be a Core or an Operations type. Unlike `components`, `supplemental_attributes` is a flat, untyped array, so `attribute_type` is this record's only per-row type discriminator.",
   "type": "object",
   "properties": {
     "component_id": {
@@ -9,7 +9,7 @@
       "type": "integer"
     },
     "component_type": {
-      "description": "Type name of the component the attribute describes. A denormalized label matching infrastore's column, used for filtering; not part of the row's identity, which is the `(component_id, attribute_id)` pair.",
+      "description": "Type name of the component the attribute describes. A denormalized label matching the relational mirror's column, used for filtering; not part of the row's identity, which is the `(component_id, attribute_id)` pair.",
       "type": "string"
     },
     "attribute_id": {

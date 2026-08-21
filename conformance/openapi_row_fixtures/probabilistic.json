@@ -8,7 +8,8 @@
   "features": {
     "model": "ensemble"
   },
-  "address": "time_series.h5",
+  "uri": "a2f05839347da77f4d71fa3a7910568d7bbd299f905410ff83389ca7a7a9dbcb",
+  "data_hash": "a2f05839347da77f4d71fa3a7910568d7bbd299f905410ff83389ca7a7a9dbcb",
   "element_type": "f64",
   "element_shape": [
     3

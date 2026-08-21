@@ -229,7 +229,7 @@ fn build_fixture_store() -> Store {
 fn export_reproduces_every_time_series_fixture() {
     let store = build_fixture_store();
     let json = store
-        .export_time_series_associations_openapi("time_series.h5", &ListFilter::new())
+        .export_time_series_associations_openapi(&ListFilter::new())
         .expect("export should succeed");
     let rows: Vec<serde_json::Value> = serde_json::from_str(&json).expect("export is a JSON array");
 
@@ -327,7 +327,7 @@ fn export_sort_order_does_not_depend_on_insertion_order() {
         .expect("probabilistic should add");
 
     let shuffled = store
-        .export_time_series_associations_openapi("time_series.h5", &ListFilter::new())
+        .export_time_series_associations_openapi(&ListFilter::new())
         .expect("export should succeed");
     let shuffled_rows: Vec<serde_json::Value> =
         serde_json::from_str(&shuffled).expect("export is a JSON array");
@@ -404,7 +404,7 @@ fn export_sort_order_does_not_depend_on_insertion_order() {
         .expect("scenarios should add");
 
     let ordered_json = ordered
-        .export_time_series_associations_openapi("time_series.h5", &ListFilter::new())
+        .export_time_series_associations_openapi(&ListFilter::new())
         .expect("export should succeed");
     let ordered_rows: Vec<serde_json::Value> =
         serde_json::from_str(&ordered_json).expect("export is a JSON array");
@@ -522,11 +522,7 @@ fn sa_import_rolls_back_a_duplicate_within_the_batch() {
 fn reconcile_rejects_malformed_json() {
     let mut store = create_store(None, true).expect("in-memory store should initialize");
     let err = store
-        .reconcile_time_series_associations_openapi(
-            "{not valid json",
-            ReconcilePolicy::Strict,
-            None,
-        )
+        .reconcile_time_series_associations_openapi("{not valid json", ReconcilePolicy::Strict)
         .unwrap_err();
     assert!(matches!(err, TimeSeriesError::Serde(_)));
 }
@@ -536,14 +532,14 @@ fn reconcile_rejects_unknown_fields() {
     let mut store = create_store(None, true).expect("in-memory store should initialize");
     let json = r#"[{"owner_id":1,"owner_type":"Generator","owner_category":"Component",
         "time_series_type":"SingleTimeSeries","name":"load","features":{},
-        "element_type":"f64","element_shape":[],"bogus_field":true}]"#;
+        "uri":"store.h5","element_type":"f64","element_shape":[],"bogus_field":true}]"#;
     let err = store
-        .reconcile_time_series_associations_openapi(json, ReconcilePolicy::Strict, None)
+        .reconcile_time_series_associations_openapi(json, ReconcilePolicy::Strict)
         .unwrap_err();
     assert!(matches!(err, TimeSeriesError::Serde(_)));
 }
 
-// ---- reconcile: D4 policy matrix --------------------------------------------
+// ---- reconcile: policy matrix --------------------------------------------
 
 /// One `SingleTimeSeries` row: owner 1 "Generator", name "load", 24 hourly
 /// points from 2030-01-01, full descriptive set. The base every reconcile test
@@ -572,12 +568,15 @@ fn reconcile_fixture_store() -> Store {
     store
 }
 
-/// A clean row matching `reconcile_fixture_store`'s one row exactly.
+/// A clean row matching `reconcile_fixture_store`'s one row exactly. Carries
+/// `uri` (required by the schema) but deliberately no `data_hash`, exercising
+/// that reconcile accepts a document from a producer that never computes it —
+/// both are informational and never matched against the catalog.
 fn clean_row_json() -> serde_json::Value {
     serde_json::json!({
         "owner_id": 1, "owner_type": "Generator", "owner_category": "Component",
         "time_series_type": "SingleTimeSeries", "name": "load", "features": {},
-        "address": "store.h5", "element_type": "f64", "element_shape": [],
+        "uri": "store.h5", "element_type": "f64", "element_shape": [],
         "units": "MW", "quantity_kind": "ActivePower", "unit_system": "NATURAL_UNITS",
         "component_field": "load",
         "initial_timestamp": "2030-01-01T00:00:00Z", "resolution": "PT1H", "length": 24
@@ -590,7 +589,7 @@ fn reconcile_clean_match_is_a_no_op_under_either_policy() {
         let mut store = reconcile_fixture_store();
         let json = serde_json::to_string(&vec![clean_row_json()]).unwrap();
         let report = store
-            .reconcile_time_series_associations_openapi(&json, policy, None)
+            .reconcile_time_series_associations_openapi(&json, policy)
             .unwrap_or_else(|e| panic!("{policy:?} should succeed on a clean match: {e}"));
         assert_eq!(report.matched, 1);
         assert_eq!(report.updated, 0);
@@ -607,7 +606,7 @@ fn reconcile_descriptive_drift_errors_under_strict() {
     row["units"] = serde_json::json!("kW");
     let json = serde_json::to_string(&vec![row]).unwrap();
     let err = store
-        .reconcile_time_series_associations_openapi(&json, ReconcilePolicy::Strict, None)
+        .reconcile_time_series_associations_openapi(&json, ReconcilePolicy::Strict)
         .unwrap_err();
     match err {
         TimeSeriesError::ReconcileConflict(msg) => {
@@ -625,7 +624,7 @@ fn reconcile_descriptive_drift_is_applied_under_update_descriptive() {
     row["component_field"] = serde_json::json!("net_load");
     let json = serde_json::to_string(&vec![row]).unwrap();
     let report = store
-        .reconcile_time_series_associations_openapi(&json, ReconcilePolicy::UpdateDescriptive, None)
+        .reconcile_time_series_associations_openapi(&json, ReconcilePolicy::UpdateDescriptive)
         .expect("update_descriptive should resolve descriptive drift");
     assert_eq!(report.matched, 1);
     assert_eq!(report.updated, 1);
@@ -634,7 +633,7 @@ fn reconcile_descriptive_drift_is_applied_under_update_descriptive() {
 
     // The rewrite is durable: exporting again reflects the JSON's values.
     let exported = store
-        .export_time_series_associations_openapi("store.h5", &ListFilter::new())
+        .export_time_series_associations_openapi(&ListFilter::new())
         .expect("export should succeed");
     let rows: Vec<serde_json::Value> = serde_json::from_str(&exported).unwrap();
     assert_eq!(rows.len(), 1);
@@ -652,7 +651,7 @@ fn reconcile_geometry_drift_errors_under_both_policies() {
         row["length"] = serde_json::json!(25);
         let json = serde_json::to_string(&vec![row]).unwrap();
         let err = store
-            .reconcile_time_series_associations_openapi(&json, policy, None)
+            .reconcile_time_series_associations_openapi(&json, policy)
             .unwrap_err();
         match err {
             TimeSeriesError::ReconcileConflict(msg) => {
@@ -671,7 +670,7 @@ fn reconcile_json_row_with_no_catalog_match_errors() {
     row["name"] = serde_json::json!("a_series_the_store_does_not_have");
     let json = serde_json::to_string(&vec![row]).unwrap();
     let err = store
-        .reconcile_time_series_associations_openapi(&json, ReconcilePolicy::Strict, None)
+        .reconcile_time_series_associations_openapi(&json, ReconcilePolicy::Strict)
         .unwrap_err();
     assert!(matches!(err, TimeSeriesError::ReconcileConflict(_)));
 }
@@ -682,41 +681,22 @@ fn reconcile_tolerates_and_counts_a_catalog_row_absent_from_the_json() {
     // one catalog row is tolerated as a superset, not an error.
     let mut store = reconcile_fixture_store();
     let report = store
-        .reconcile_time_series_associations_openapi("[]", ReconcilePolicy::Strict, None)
+        .reconcile_time_series_associations_openapi("[]", ReconcilePolicy::Strict)
         .expect("an empty document should not fail on its own");
     assert_eq!(report.matched, 0);
     assert_eq!(report.unmatched_in_store, 1);
 }
 
 #[test]
-fn reconcile_address_check_passes_when_it_matches() {
+fn reconcile_ignores_a_foreign_uri_and_omitted_data_hash() {
+    // `clean_row_json` carries a `uri` that does not match this store's own
+    // hex-encoded content hash for the row, and no `data_hash` at all — a
+    // plausible shape for a document produced by another store. Neither
+    // participates in identity or comparison, so the match still succeeds.
     let mut store = reconcile_fixture_store();
     let json = serde_json::to_string(&vec![clean_row_json()]).unwrap();
     let report = store
-        .reconcile_time_series_associations_openapi(
-            &json,
-            ReconcilePolicy::Strict,
-            Some("store.h5"),
-        )
-        .expect("matching address should not fail");
+        .reconcile_time_series_associations_openapi(&json, ReconcilePolicy::Strict)
+        .expect("a foreign uri/missing data_hash should not fail reconcile");
     assert_eq!(report.matched, 1);
-}
-
-#[test]
-fn reconcile_address_check_fails_when_it_mismatches() {
-    let mut store = reconcile_fixture_store();
-    let json = serde_json::to_string(&vec![clean_row_json()]).unwrap();
-    let err = store
-        .reconcile_time_series_associations_openapi(
-            &json,
-            ReconcilePolicy::Strict,
-            Some("other_store.h5"),
-        )
-        .unwrap_err();
-    match err {
-        TimeSeriesError::ReconcileConflict(msg) => {
-            assert!(msg.contains("address"), "{msg}");
-        }
-        other => panic!("expected ReconcileConflict, got {other}"),
-    }
 }

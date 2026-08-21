@@ -3141,17 +3141,17 @@ impl PyStore {
     // a thin wrapper over it.
 
     /// Export `time_series_associations` matching the filter (the same filter
-    /// keywords as `list_time_series`) as a sorted OpenAPI-row JSON array, each
-    /// row stamped with `address` verbatim. With no filter this exports the
-    /// whole catalog.
+    /// keywords as `list_time_series`) as a sorted OpenAPI-row JSON array.
+    /// Each row's `uri` and `data_hash` are the hex-encoded content hash the
+    /// store already has for that row — never a caller-supplied locator.
+    /// With no filter this exports the whole catalog.
     #[pyo3(signature = (
-        *, address, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
+        *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
         name=None, name_glob=None, component_field=None, resolution=None, interval=None, features=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn export_time_series_associations_openapi(
         &self,
-        address: String,
         owner_id: Option<i64>,
         owner_category: Option<PyOwnerCategory>,
         owner_type: Option<String>,
@@ -3176,7 +3176,7 @@ impl PyStore {
             features,
         )?;
         self.store()?
-            .export_time_series_associations_openapi(&address, &filter)
+            .export_time_series_associations_openapi(&filter)
             .map_err(map_err)
     }
 
@@ -3209,23 +3209,23 @@ impl PyStore {
     /// geometric — is an error; under "update_descriptive" descriptive drift
     /// (`units`, `quantity_kind`, `unit_system`, `component_field`,
     /// `application_data`) is rewritten from the JSON, while geometry drift is
-    /// still an error. `expected_address`, when given, must match every row's
-    /// own `address` field or the whole call fails.
+    /// still an error. A row's `uri` and `data_hash` are informational and
+    /// never checked — a document from another store may carry foreign
+    /// values for either.
     ///
     /// Returns a dict with keys `matched`, `updated`, `missing_in_store`,
     /// `unmatched_in_store` (all `int`), and `conflicts` (a list of `str`).
-    #[pyo3(signature = (json, *, policy="strict", expected_address=None))]
+    #[pyo3(signature = (json, *, policy="strict"))]
     fn reconcile_time_series_associations_openapi<'py>(
         &mut self,
         py: Python<'py>,
         json: &str,
         policy: &str,
-        expected_address: Option<&str>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let policy = parse_reconcile_policy(policy)?;
         let report = self
             .store_mut()?
-            .reconcile_time_series_associations_openapi(json, policy, expected_address)
+            .reconcile_time_series_associations_openapi(json, policy)
             .map_err(map_err)?;
         let d = PyDict::new(py);
         d.set_item("matched", report.matched)?;
