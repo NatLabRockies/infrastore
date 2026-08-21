@@ -13,13 +13,12 @@
 //! # Wire contract
 //!
 //! A time-series association row carries the fields every type shares —
-//! `id` (the catalog rowid), `owner_id`, `owner_type`, `owner_category`,
-//! `time_series_type`, `name`, `features` (a *plain* scalar map — int, float,
-//! bool, or string values, never the store's internally-tagged
-//! [`crate::types::metadata::FeatureValue`] form), `uri` (the schema's locator
-//! for the dense data, unique within one store, no required format —
-//! infrastore fills it with [`crate::hash::hash_hex`] of the row's own
-//! `data_hash`, never a caller-supplied value), `element_type`,
+//! `owner_id`, `owner_type`, `owner_category`, `time_series_type`, `name`,
+//! `features` (a *plain* scalar map — int, float, bool, or string values, never
+//! the store's internally-tagged [`crate::types::metadata::FeatureValue`] form),
+//! `uri` (the schema's locator for the dense data, unique within one store, no
+//! required format — infrastore fills it with [`crate::hash::hash_hex`] of the
+//! row's own `data_hash`, never a caller-supplied value), `element_type`,
 //! `element_shape` — plus optional descriptive fields (`units`,
 //! `quantity_kind`, `unit_system`, `component_field`, `application_data`) and
 //! the optional `data_hash` (the same hex string as `uri`, exported because
@@ -260,13 +259,11 @@ fn insert_forecast_fields(row: &mut Map<String, Value>, meta: &TimeSeriesMetadat
     }
 }
 
-/// Map one catalog row to its OpenAPI wire object. `id` is the catalog
-/// rowid ([`Store::list_time_series_with_id`]); `uri` and `data_hash` are
+/// Map one catalog row to its OpenAPI wire object. `uri` and `data_hash` are
 /// both derived from the row's own `data_hash` via [`crate::hash::hash_hex`]
 /// — infrastore never accepts a caller-supplied locator for its own rows.
-fn ts_row_to_json(id: i64, meta: &TimeSeriesMetadata) -> Value {
+fn ts_row_to_json(meta: &TimeSeriesMetadata) -> Value {
     let mut row = Map::new();
-    row.insert("id".into(), Value::from(id));
     row.insert("owner_id".into(), Value::from(meta.owner_id));
     row.insert("owner_type".into(), Value::from(meta.owner_type.clone()));
     row.insert(
@@ -360,13 +357,13 @@ fn ts_row_to_json(id: i64, meta: &TimeSeriesMetadata) -> Value {
 }
 
 /// Export `time_series_associations` as a sorted OpenAPI-row JSON array. Pure
-/// mapping over rows [`Store::list_time_series_with_id`] already produced —
-/// see the module docs for the wire contract and sort order.
+/// mapping over rows [`Store::list_time_series`] already produced — see the
+/// module docs for the wire contract and sort order.
 fn export_ts_rows(store: &Store, filter: &ListFilter) -> Result<String> {
-    let rows = store.list_time_series_with_id(filter.clone())?;
+    let rows = store.list_time_series(filter.clone())?;
     let mut keyed: Vec<(SortKey, Value)> = rows
         .iter()
-        .map(|(id, meta)| (sort_key(meta), ts_row_to_json(*id, meta)))
+        .map(|meta| (sort_key(meta), ts_row_to_json(meta)))
         .collect();
     keyed.sort_by(|a, b| a.0.cmp(&b.0));
     let array: Vec<Value> = keyed.into_iter().map(|(_, row)| row).collect();
@@ -438,23 +435,19 @@ pub struct ReconcileReport {
 
 /// One incoming JSON row of the time-series association catalog, as parsed
 /// for [`reconcile_ts_rows`]. Every field the wire schema defines is
-/// represented; unknown field names are rejected (typo protection), but `id`,
-/// `uri`, and `data_hash` are informational — a document from another store
-/// may carry foreign values for any of the three, and none of them
-/// participates in identity or comparison. `uri` is required by the schema so
-/// it must parse; `data_hash` is optional there, matching an incoming
-/// producer that may not compute it.
+/// represented; unknown field names are rejected (typo protection). `uri` and
+/// `data_hash` are informational — a document from another store may carry
+/// foreign values for either, and neither participates in identity or
+/// comparison. `uri` is required by the schema so it must parse; `data_hash`
+/// is optional there, matching an incoming producer that may not compute it.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawTsRow {
     // Parsed only so a JSON row carrying them deserializes (`deny_unknown_fields`
-    // would otherwise reject them); reconcile treats all three as purely
-    // informational, so none is read past this struct. `owner_type` is a
+    // would otherwise reject them); reconcile treats both as purely
+    // informational, so neither is read past this struct. `owner_type` is a
     // denormalized label the identity tuple and every comparison ignore,
     // matching the catalog's own treatment of it.
-    #[allow(dead_code)]
-    #[serde(default)]
-    id: Option<i64>,
     owner_id: i64,
     #[allow(dead_code)]
     owner_type: String,
@@ -734,11 +727,11 @@ fn reconcile_ts_rows(
 ) -> Result<ReconcileReport> {
     let rows: Vec<RawTsRow> = serde_json::from_str(json)?;
 
-    let catalog = store.list_time_series_with_id(ListFilter::new())?;
-    let mut by_identity: HashMap<Identity, (i64, TimeSeriesMetadata)> =
+    let catalog = store.list_time_series(ListFilter::new())?;
+    let mut by_identity: HashMap<Identity, TimeSeriesMetadata> =
         HashMap::with_capacity(catalog.len());
-    for (id, meta) in catalog {
-        by_identity.insert(identity_of_metadata(&meta), (id, meta));
+    for meta in catalog {
+        by_identity.insert(identity_of_metadata(&meta), meta);
     }
 
     let mut referenced: HashSet<Identity> = HashSet::new();
@@ -754,7 +747,7 @@ fn reconcile_ts_rows(
             }
         };
 
-        let Some((_id, meta)) = by_identity.get(&parsed.identity) else {
+        let Some(meta) = by_identity.get(&parsed.identity) else {
             fatal.push(format!(
                 "{}: the store's catalog holds no series with this identity",
                 row.row_label()
@@ -825,7 +818,7 @@ fn export_sa_rows(store: &Store) -> Result<String> {
 /// typo'd column name fails loudly rather than silently vanishing. Unlike the
 /// time-series reconcile, this is a straight bulk insert: the row shape
 /// already matches [`SupplementalAttributeAssociation`] exactly, with no
-/// `id`/`uri` fields to tolerate.
+/// `uri` field to tolerate.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSaRow {

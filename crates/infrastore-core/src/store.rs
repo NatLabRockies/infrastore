@@ -1914,20 +1914,6 @@ impl Store {
         self.metadata.list(&filter.into())
     }
 
-    /// Like [`Self::list_time_series`], but pairs each row with its catalog
-    /// `id` (the association table's `INTEGER PRIMARY KEY`, i.e. its SQLite
-    /// rowid). Internal: the only consumer is
-    /// [`crate::openapi::export_time_series_associations_openapi`], which
-    /// stamps that id into each wire row per `SingleTimeSeries.json`'s
-    /// documented `id` field. Nothing else in the public API needs a row's
-    /// raw storage id.
-    pub(crate) fn list_time_series_with_id(
-        &self,
-        filter: ListFilter,
-    ) -> Result<Vec<(i64, TimeSeriesMetadata)>> {
-        self.metadata.list_with_id(&filter.into())
-    }
-
     /// List the [`TimeSeriesKey`] of every association matching `filter`. This is
     /// the key-centric counterpart of [`Self::list_time_series`]: each row is
     /// reduced to its identifying + descriptive key, dropping physical storage

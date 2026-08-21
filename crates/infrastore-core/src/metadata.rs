@@ -28,8 +28,9 @@ use crate::types::time_series::TimeSeriesType;
 /// malformed to name one. Returned by [`MetadataStore::referenced_arrays`].
 pub type ReferencedArrays = (Vec<([u8; 32], ElementType)>, Vec<String>);
 
-/// A catalog row paired with its `INTEGER PRIMARY KEY` (SQLite rowid). See
-/// [`MetadataStore::list_with_id`].
+/// A catalog row paired with its `INTEGER PRIMARY KEY` (SQLite rowid). Used
+/// internally by [`Self::list_inner`]; public APIs surface metadata without
+/// the raw storage id.
 pub(crate) type IdentifiedRow = (i64, TimeSeriesMetadata);
 
 /// A SQLite value's storage class, for a diagnostic that has to describe a
@@ -1242,15 +1243,6 @@ impl MetadataStore {
             .collect())
     }
 
-    /// Like [`Self::list`], but pairs each row with its catalog `id` (the
-    /// `INTEGER PRIMARY KEY`, i.e. the SQLite rowid). Internal: nothing needs a
-    /// row's raw id except the OpenAPI export module, which stamps it into the
-    /// wire row's `id` field (`SingleTimeSeries.json` documents that field as
-    /// the catalog rowid).
-    pub(crate) fn list_with_id(&self, filter: &MetadataFilter) -> Result<Vec<IdentifiedRow>> {
-        Ok(self.list_inner(filter, true)?.0)
-    }
-
     /// [`Self::list`] without hydrating timestamp vectors, paired with the
     /// distinct vectors the matched rows reference.
     ///
@@ -1268,10 +1260,9 @@ impl MetadataStore {
         Ok((rows.into_iter().map(|(_, m)| m).collect(), cohorts))
     }
 
-    /// Shared body of [`Self::list`], [`Self::list_with_id`] and
-    /// [`Self::list_timeline_cohorts`]. Each row carries its catalog `id`
-    /// alongside the metadata; the two `list*` wrappers that don't need it
-    /// drop it.
+    /// Shared body of [`Self::list`] and [`Self::list_timeline_cohorts`]. Each
+    /// row carries its catalog `id` alongside the metadata; the wrappers that
+    /// don't need it drop it.
     fn list_inner(
         &self,
         filter: &MetadataFilter,
@@ -2649,9 +2640,7 @@ fn collect_data_hashes(
 struct MetaRow {
     /// The catalog's `INTEGER PRIMARY KEY` (SQLite rowid). Not part of
     /// [`TimeSeriesMetadata`] — that type's identity is the key tuple, not a
-    /// storage-assigned id — so this rides along only for
-    /// [`MetadataStore::list_with_id`], which the OpenAPI export module uses
-    /// to stamp a wire row's documented `id` field.
+    /// storage-assigned id — but used internally by [`Self::list_inner`].
     id: i64,
     owner_id: i64,
     owner_type: String,

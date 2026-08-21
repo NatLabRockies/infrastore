@@ -409,17 +409,8 @@ fn export_sort_order_does_not_depend_on_insertion_order() {
     let ordered_rows: Vec<serde_json::Value> =
         serde_json::from_str(&ordered_json).expect("export is a JSON array");
 
-    // The `id` column tracks insertion order and legitimately differs between
-    // the two stores; strip it before comparing the sort order itself.
-    let without_ids = |rows: Vec<serde_json::Value>| -> Vec<serde_json::Value> {
-        rows.into_iter()
-            .map(|mut row| {
-                row.as_object_mut().expect("row is an object").remove("id");
-                row
-            })
-            .collect()
-    };
-    assert_eq!(without_ids(shuffled_rows), without_ids(ordered_rows));
+    // The sort order should be identical regardless of insertion order.
+    assert_eq!(shuffled_rows, ordered_rows);
 }
 
 // ---- golden: supplemental-attribute export/import round trip --------------

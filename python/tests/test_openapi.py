@@ -59,9 +59,7 @@ class TestTimeSeriesExport:
         rows = json.loads(store.export_time_series_associations_openapi())
         assert len(rows) == 1
         row = rows[0]
-        row.pop("id")
         want = fixture("single_time_series")
-        want.pop("id")
         assert row == want
 
     def test_empty_filter_exports_the_whole_catalog(self):

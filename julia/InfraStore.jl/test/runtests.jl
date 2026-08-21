@@ -2218,9 +2218,7 @@ end
         rows = InfraStore.JSON.parse(json)
         @test length(rows) == 1
         row = rows[1]
-        delete!(row, "id")
         want = _openapi_fixture("single_time_series")
-        delete!(want, "id")
         @test row == want
 
         close!(store)
