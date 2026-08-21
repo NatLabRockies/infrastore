@@ -6,7 +6,7 @@ spelling: `export_time_series_associations_openapi`,
 
 The golden tests reproduce two of the checked-in fixtures at
 `conformance/openapi_row_fixtures/` (the core's own golden tests pin the
-rest); the reconcile tests exercise the D4 policy matrix one cell at a time,
+rest); the reconcile tests exercise the policy matrix one cell at a time,
 mirroring `crates/infrastore-core/tests/openapi.rs`.
 """
 

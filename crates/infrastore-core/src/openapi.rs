@@ -88,7 +88,7 @@ use crate::types::time_series::TimeSeriesType;
 // Time-series associations: export
 // ============================================================================
 
-/// The identity tuple export sorts by (D3): `(owner_id, owner_category code,
+/// The identity tuple export sorts by: `(owner_id, owner_category code,
 /// time_series_type code, name, resolution, interval, features)`, compared as
 /// **typed** values rather than their string spellings.
 ///
@@ -206,7 +206,7 @@ fn parse_unit_system_wire(s: &str) -> Result<UnitSystem> {
 /// timestamp renders with no fractional part at all (`"...T00:00:00Z"`), and
 /// anything with a nonzero millisecond remainder renders with exactly three
 /// fractional digits — never nanoseconds, which is what softens the schema's
-/// "keeps nanoseconds" wording (D3).
+/// "keeps nanoseconds" wording.
 fn format_initial_timestamp(ts: DateTime<Utc>) -> String {
     let millis = ts.timestamp_millis();
     let floored = DateTime::<Utc>::from_timestamp_millis(millis)
@@ -219,7 +219,7 @@ fn format_initial_timestamp(ts: DateTime<Utc>) -> String {
     floored.to_rfc3339_opts(format, true)
 }
 
-/// The true per-step trailing shape (D3's `element_shape`), derived from the
+/// The true per-step trailing shape (the wire contract's `element_shape`), derived from the
 /// catalog's own `element_shape` column.
 ///
 /// [`crate::types::array::TypedArray::element_shape`] — the source of
@@ -367,7 +367,7 @@ fn export_ts_rows(store: &Store, address: &str, filter: &ListFilter) -> Result<S
 }
 
 // ============================================================================
-// Time-series associations: reconcile (D4)
+// Time-series associations: reconcile
 // ============================================================================
 
 /// How [`reconcile_ts_rows`] treats a matched row whose descriptive columns
@@ -630,7 +630,7 @@ impl RawTsRow {
     }
 }
 
-/// Geometry fields (D4): columns that describe the physically stored array,
+/// Geometry fields: columns that describe the physically stored array,
 /// which a document is never allowed to override under either policy.
 /// `interval` is included for documentation completeness even though it is
 /// also part of [`Identity`] — a *matched* row's interval can therefore never
@@ -683,7 +683,7 @@ fn geometry_diff(row: &ParsedTsRow, meta: &TimeSeriesMetadata) -> Vec<&'static s
     drift
 }
 
-/// Descriptive fields (D4): the five columns [`ReconcilePolicy::UpdateDescriptive`]
+/// Descriptive fields: the five columns [`ReconcilePolicy::UpdateDescriptive`]
 /// lets a JSON document override on a matched row, because none of them sits
 /// in [`crate::types::key::TimeSeriesKey`], the catalog's uniqueness index, or
 /// `data_hash`.

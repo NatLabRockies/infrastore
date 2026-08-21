@@ -2188,7 +2188,7 @@ end
 # `reconcile_time_series_associations_openapi!` wrap the four Rust core
 # `openapi` methods. The golden tests below reproduce two of the checked-in
 # fixtures at `conformance/openapi_row_fixtures/` (the core's own golden tests
-# pin the rest); the reconcile tests exercise the D4 policy matrix one cell at
+# pin the rest); the reconcile tests exercise the policy matrix one cell at
 # a time, mirroring `crates/infrastore-core/tests/openapi.rs`.
 
 const _OPENAPI_FIXTURES_DIR = normpath(

@@ -1219,7 +1219,7 @@ impl MetadataStore {
     /// this cannot collide with another row the way [`Self::rename`] can.
     ///
     /// The only caller is the OpenAPI reconcile's `UpdateDescriptive` policy
-    /// (`crate::openapi`): those five columns are exactly the ones D4 lets a
+    /// (`crate::openapi`): those five columns are exactly the ones reconcile lets a
     /// JSON document override on a matched row, because none of them sits in
     /// `TimeSeriesKey`, the uniqueness index, or `data_hash`.
     pub fn update_descriptive_by_id(

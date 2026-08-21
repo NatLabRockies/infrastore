@@ -1,10 +1,10 @@
 //! Tests for the OpenAPI-row JSON serde of the two association catalogs
-//! (`crate::openapi`): the frozen wire contract (D3) and the time-series
-//! reconcile (D4).
+//! (`crate::openapi`): the frozen wire contract and the time-series
+//! reconcile.
 //!
 //! The golden tests build a store whose rows reproduce the checked-in
 //! fixtures at `conformance/openapi_row_fixtures/*.json` and assert the
-//! export is value-equal to each one; the reconcile tests exercise the D4
+//! export is value-equal to each one; the reconcile tests exercise the
 //! policy matrix one cell at a time against a small dedicated store.
 
 use chrono::{DateTime, Duration, TimeZone, Utc};

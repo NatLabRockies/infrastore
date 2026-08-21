@@ -760,7 +760,7 @@ Neither association catalog is exposed over the [gRPC server](grpc-api.md) or th
 ### OpenAPI-row association serde
 
 Direct JSON serde of the two association catalogs, in the wire spelling
-[SiennaSchemas](https://github.com/NREL-Sienna/SiennaSchemas) defines (`TimeSeries/*.json`,
+[SiennaSchemas](https://github.com/Sienna-Platform/SiennaSchemas) defines (`TimeSeries/*.json`,
 `Core/Associations/SupplementalAttributeAssociation.json`). Unlike `list_time_series` /
 `list_supplemental_attribute_associations`, which return Python objects, these four methods exchange
 the wire JSON verbatim — the format a document author (e.g. PowerTableDataParser) reads and writes
