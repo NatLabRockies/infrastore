@@ -390,19 +390,19 @@ impl Period {
             let int_val = num.parse::<i64>().map_err(|_| invalid())?;
             match unit {
                 'Y' => {
-                    months += int_val.checked_mul(12).ok_or_else(invalid)?;
+                    months = add_component(months, int_val.checked_mul(12), invalid)?;
                     has_calendar = true;
                 }
                 'M' => {
-                    months = months.checked_add(int_val).ok_or_else(invalid)?;
+                    months = add_component(months, Some(int_val), invalid)?;
                     has_calendar = true;
                 }
                 'W' => {
-                    fixed_ms = add_ms(fixed_ms, int_val.checked_mul(MS_PER_WEEK), invalid)?;
+                    fixed_ms = add_component(fixed_ms, int_val.checked_mul(MS_PER_WEEK), invalid)?;
                     has_fixed = true;
                 }
                 'D' => {
-                    fixed_ms = add_ms(fixed_ms, int_val.checked_mul(MS_PER_DAY), invalid)?;
+                    fixed_ms = add_component(fixed_ms, int_val.checked_mul(MS_PER_DAY), invalid)?;
                     has_fixed = true;
                 }
                 _ => return Err(invalid()),
@@ -413,16 +413,16 @@ impl Period {
                 match unit {
                     'H' => {
                         let v = num.parse::<i64>().map_err(|_| invalid())?;
-                        fixed_ms = add_ms(fixed_ms, v.checked_mul(MS_PER_HOUR), invalid)?;
+                        fixed_ms = add_component(fixed_ms, v.checked_mul(MS_PER_HOUR), invalid)?;
                         has_fixed = true;
                     }
                     'M' => {
                         let v = num.parse::<i64>().map_err(|_| invalid())?;
-                        fixed_ms = add_ms(fixed_ms, v.checked_mul(MS_PER_MIN), invalid)?;
+                        fixed_ms = add_component(fixed_ms, v.checked_mul(MS_PER_MIN), invalid)?;
                         has_fixed = true;
                     }
                     'S' => {
-                        fixed_ms = add_ms(fixed_ms, seconds_str_to_ms(&num), invalid)?;
+                        fixed_ms = add_component(fixed_ms, seconds_str_to_ms(&num), invalid)?;
                         has_fixed = true;
                     }
                     _ => return Err(invalid()),
@@ -503,13 +503,14 @@ fn months_between(start: DateTime<Utc>, at: DateTime<Utc>) -> i64 {
 
 /// Split an ISO-8601 component run (e.g. `"1Y6M"` or `"1.5S"`) into
 /// `(number, unit)` pairs. Returns `None` on malformed input.
-/// Accumulate a checked-multiply result into a running millisecond total,
-/// failing the parse on overflow rather than wrapping.
+/// Accumulate a checked-multiply result into a running total, failing the parse
+/// on overflow rather than wrapping. Used for both accumulators: the fixed
+/// millisecond count and the calendar month count.
 ///
 /// Takes the caller's `invalid` so an overflow reports the same
 /// `invalid ISO-8601 period '<input>'` as every other parse failure, naming the
 /// string that caused it.
-fn add_ms(
+fn add_component(
     total: i64,
     component: Option<i64>,
     invalid: impl Fn() -> TimeSeriesError,
