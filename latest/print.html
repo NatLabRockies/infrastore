@@ -915,6 +915,27 @@ on the same day-of-month each step rather than every <code>N</code> milliseconds
 month. Periods are encoded as ISO-8601 duration strings (<code>PT1H</code>, <code>P1M</code>, <code>P1Y</code>) on disk and across
 every binding (the Python/gRPC surfaces accept a <code>timedelta</code>/duration for fixed periods and an
 ISO-8601 string for either kind, and return the ISO-8601 string).</p>
+<h3 id="timestamp-precision"><a class="header" href="#timestamp-precision">Timestamp precision</a></h3>
+<p>Every instant the store records — a <code>SingleTimeSeries</code> or forecast <code>initial_timestamp</code>, and every
+entry of a <code>NonSequentialTimeSeries</code> timestamp vector — is <strong>a whole number of milliseconds</strong>, the
+same floor a fixed period has. One millisecond is the finest resolution a period can express, and it
+is likewise the finest instant a series can be written at.</p>
+<p>The rule is enforced on write, in the core, for all five addable types: a finer instant is rejected
+with an <code>InvalidParameter</code> error rather than truncated. This is what makes a timestamp mean the same
+thing in every consumer. The bindings do not share one precision — the C ABI and Julia exchange
+instants as <code>i64</code> Unix milliseconds, Python's <code>datetime</code> is microsecond, and gRPC and the Rust core
+carry a full RFC 3339 string — so a finer instant would be silently truncated at some boundaries and
+not others, putting the same series on different instants depending on who read it. For a
+<code>NonSequentialTimeSeries</code> whose timestamps are less than a millisecond apart it is worse: two
+distinct timestamps collapse into one, and the vector stops being strictly increasing on the way
+back out.</p>
+<p>A series needing a finer grid should scale its unit and record it in <code>units</code>, exactly as it must for
+a sub-millisecond resolution: a 500 µs series is a 500-unit series.</p>
+<p>Two things are deliberately <em>not</em> constrained. A <strong>query bound</strong> — a <code>time_range</code> end, a reader's
+<code>when</code> — may be arbitrarily fine; it is not stored, and the read paths already say what an off-grid
+bound does (see <a href="explanation/../reference/rust-api.html#reading-a-time-range">reading a time range</a>). And <strong>reads
+stay permissive</strong>: an artifact written before this rule may hold finer instants and still reads back
+exactly as written, which is why the rule does not change <code>DATA_FORMAT_VERSION</code>.</p>
 <h3 id="typed-n-dimensional-arrays"><a class="header" href="#typed-n-dimensional-arrays">Typed, N-dimensional arrays</a></h3>
 <p>Every series' values are a <strong><code>TypedArray</code></strong>: an element <code>dtype</code> (<code>f64</code>, <code>f32</code>, the integer widths,
 or <code>bool</code>) and a shape <code>[length, k1, k2, …]</code>. The first axis is time; the trailing axes are a fixed
@@ -2483,8 +2504,19 @@ store = open_store("system.h5"; read_only=true)
 <h2 id="add-a-series-2"><a class="header" href="#add-a-series-2">Add a Series</a></h2>
 <pre><code class="language-julia"># `name` ("load") is a required field on the struct.
 ts = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(100.0:123.0), "load")
-
-key = add_time_series!(
+</code></pre>
+<p>A bare <code>DateTime</code> carries no zone, and this package reads one as <strong>UTC</strong>. If your timestamps are
+genuinely zoned, <code>using TimeZones</code> and pass a <code>ZonedDateTime</code> instead — it names an instant on its
+own, and is accepted anywhere a <code>DateTime</code> is:</p>
+<pre><code class="language-julia">using TimeZones
+ts = SingleTimeSeries(
+    ZonedDateTime(DateTime(2024, 1, 1), tz"America/Denver"),   # = 2024-01-01T07:00Z
+    Hour(1), collect(100.0:123.0), "load",
+)
+</code></pre>
+<p>Reads return a <code>DateTime</code> in UTC either way; see
+<a href="guides/../reference/julia-api.html#time-and-resolution-conversions">Time and resolution conversions</a>.</p>
+<pre><code class="language-julia">key = add_time_series!(
     store,
     42,
     "Generator",
@@ -4065,7 +4097,10 @@ library reads it. It costs no storage, is created by the same idempotent DDL as 
 and so lands on an existing store's first writable open without a <code>data_format_version</code> change.</p>
 <h2 id="field-encoding-notes"><a class="header" href="#field-encoding-notes">Field Encoding Notes</a></h2>
 <ul>
-<li><strong>Timestamps</strong> are RFC 3339 strings in UTC.</li>
+<li><strong>Timestamps</strong> are RFC 3339 strings in UTC, holding a whole number of <strong>milliseconds</strong>. The format
+could carry finer digits and a store written before the precision rule may, so a reader must parse
+the full string; but no current write path produces one — see
+<a href="reference/../explanation/data-model.html#timestamp-precision">timestamp precision</a>.</li>
 <li><strong>Periods</strong> (<code>resolution</code>, <code>horizon</code>, <code>interval</code>) are canonical <strong>ISO-8601 duration strings</strong> in
 SQLite (<code>PT1H</code>, <code>P1M</code>, <code>P1Y</code>), and the packed dataset name's <code>{res}</code> field uses the same encoding.
 Calendar periods (<code>Month</code>/<code>Quarter</code>/<code>Year</code>) are stored distinctly from fixed spans.</li>
@@ -4567,7 +4602,9 @@ commits together or rolls back together.</li>
 <li><strong><code>get_time_series</code></strong> — Reconstructs the stored type as a <a href="reference/rust-api.html#timeseriesdata"><code>TimeSeriesData</code></a>
 variant (static series and all forecast types). With <code>time_range = Some((start, end))</code>, slices on
 the time axis; the returned series's <code>initial_timestamp</code> and <code>length</code> reflect the slice. For
-forecasts the window is resolved over the <code>count</code> axis (<code>resolve_windows</code>). <code>end</code> is exclusive.</li>
+forecasts the window is resolved over the <code>count</code> axis (<code>resolve_windows</code>). <code>start</code> is inclusive
+and <code>end</code> is exclusive — see <a href="reference/rust-api.html#reading-a-time-range">Reading a time range</a> for what each type
+applies that to.</li>
 <li><strong><code>clear_time_series</code></strong> — <code>Some((id, category))</code> removes one owner's series (the owner is the
 <code>(owner_id, owner_category)</code> pair); <code>None</code> removes all. Returns the count removed. Underlying
 arrays are freed only when their last reference is gone.</li>
@@ -4608,6 +4645,34 @@ to match the HDF5 file already beside it. Unlike <code>persist_to</code>, copies
 in place. A checkpoint, not a mode switch — the catalog stays in RAM afterwards. For a
 <code>CatalogMode::Attached</code> store this is <code>flush</code>.</li>
 </ul>
+<h3 id="reading-a-time-range"><a class="header" href="#reading-a-time-range">Reading a time range</a></h3>
+<p><code>get_time_series(key, Some((start, end)))</code> selects on the time axis. The rule is the same for all
+six types — <strong><code>start</code> is inclusive, <code>end</code> is exclusive</strong> — but what it is applied <em>to</em> differs,
+because the types disagree about what a stored value is:</p>
+<div class="table-wrapper"><table><thead><tr><th>Type</th><th>Selected</th></tr></thead><tbody>
+<tr><td><code>NonSequentialTimeSeries</code></td><td>every timestamp <code>t</code> with <code>start &lt;= t &lt; end</code></td></tr>
+<tr><td><code>SingleTimeSeries</code></td><td>every step whose <strong>covered interval</strong> <code>[t, t + resolution)</code> overlaps the range</td></tr>
+<tr><td><code>Deterministic</code> / <code>Probabilistic</code> / <code>Scenarios</code> / <code>DeterministicSingleTimeSeries</code></td><td>every window whose <strong>start</strong> <code>w</code> has <code>start &lt;= w &lt; end</code>, and <code>start</code> must <em>be</em> a window boundary</td></tr>
+</tbody></table>
+</div>
+<p>The two static rows differ only at the <code>start</code> bound, and only when <code>start</code> falls strictly inside a
+step. An irregular series pairs a value with an <em>instant</em>, so a value at <code>t &lt; start</code> is outside the
+range. A regular series pairs a value with the <em>step it covers</em>, so the step containing <code>start</code> does
+overlap the range and is returned — which means the sliced series' <code>initial_timestamp</code> can be
+earlier than the <code>start</code> that was asked for. The bounds need not be grid-aligned; <code>start</code> is floored
+and <code>end</code> is ceiled onto the grid (calendar-aware for a monthly resolution). The <code>end</code> bound behaves
+identically under either reading: a step at or after <code>end</code> cannot overlap <code>[start, end)</code>.</p>
+<p>Forecasts are stricter on purpose. A window is a whole array, not a point, so there is no partial
+window to return: an off-grid <code>start</code> is rejected with <code>InvalidParameter</code> rather than snapped, at
+any magnitude — including one finer than a millisecond, which <a href="reference/rust-api.html#period"><code>Period::steps_between</code></a>
+checks the exact landing for. A <code>start</code> that is aligned but at or past the last window is rejected
+too, rather than returning an empty selection.</p>
+<p><code>end &lt; start</code> is <code>InvalidParameter</code> for every type. Query bounds themselves are unconstrained: they
+may be finer than the millisecond every <em>stored</em> instant is held to (see
+<a href="reference/../explanation/data-model.html#timestamp-precision">timestamp precision</a>).</p>
+<p>A <a href="reference/rust-api.html#readers">reader</a> is exact rather than range-based: <code>index_at</code> maps a timestamp to its index and
+errors if that instant is not on the timeline — for both the regular and the irregular case. It
+never floors, ceils, or clamps.</p>
 <h3 id="introspection"><a class="header" href="#introspection">Introspection</a></h3>
 <p>Grouped catalog queries the bindings use instead of listing every association and aggregating in the
 caller. All are read-only and hit SQLite once.</p>
@@ -5055,6 +5120,11 @@ impl Deterministic {
 }
 <span class="boring">}</span></code></pre></pre>
 <p><code>new</code> validates <code>data.shape</code> against <code>[H, count, *E]</code> where <code>H = horizon / resolution</code>.</p>
+<p><code>validate</code> re-checks those same invariants against the values the struct currently holds, and
+returns the same <code>Err(String)</code>. Every field is <code>pub</code> and the type derives <code>Deserialize</code>, so a struct
+literal, a field assignment, or <code>serde_json::from_str</code> all produce a value that never met <code>new</code> —
+which is why <code>add_time_series</code> calls <code>validate</code> on the write path rather than trusting the
+constructor. <code>Probabilistic</code> and <code>Scenarios</code> carry the same method.</p>
 <h3 id="probabilistic"><a class="header" href="#probabilistic"><code>Probabilistic</code></a></h3>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
@@ -5610,6 +5680,14 @@ Multi-dimensional arrays (a per-step element shape) are supported via the NumPy 
 <code>datetime.timezone.utc</code>, a <code>ZoneInfo</code>, or a fixed offset. It is converted to UTC on the way in, so
 two aware datetimes naming the same instant are the same instant to the store, and every <code>datetime</code>
 read back is UTC. A naive datetime names no instant and raises <code>InvalidParameterError</code>.</p>
+<p>A <code>datetime</code> that is <strong>stored</strong> — an initial timestamp, or an entry of a <code>NonSequentialTimeSeries</code>
+timestamp vector — must also be a whole number of milliseconds; <code>microsecond</code> must be a multiple of
+1000. A finer instant raises <code>InvalidParameterError</code> rather than being silently truncated, because
+it cannot survive every binding intact (see
+<a href="reference/../explanation/data-model.html#timestamp-precision">timestamp precision</a>). Note that
+<code>datetime.now(timezone.utc)</code> carries microseconds: quantize it, e.g.
+<code>now.replace(microsecond=now.microsecond // 1000 * 1000)</code>. A <code>datetime</code> used only as a <em>query</em> bound
+— a <code>time_range</code> end, a reader's <code>when</code> — is unconstrained.</p>
 <h2 id="store-1"><a class="header" href="#store-1"><code>Store</code></a></h2>
 <h3 id="constructors-1"><a class="header" href="#constructors-1">Constructors</a></h3>
 <pre><code class="language-python">@classmethod
@@ -6472,6 +6550,11 @@ series type are <code>nothing</code>.</p>
 <code>dtype</code> field holds the <strong>Julia element type</strong> (<code>Float64</code>, <code>Bool</code>, …). Metadata instead carries the
 store's canonical <code>element_type</code> <strong>string</strong>, which names both the meaning and (through it) the
 dtype. An <code>owner_category</code> field is an <code>OwnerCategory</code>, never a string.</p>
+<p>A requested type is always the bare one — <code>SingleTimeSeries</code>, never <code>SingleTimeSeries{Float64}</code>. A
+series is addressed by its identity (owner, category, type, name, resolution, interval, features),
+which carries no element type, so parameters on a <em>request</em> would have nothing to select on; passing
+them raises <code>InvalidParameterError</code> rather than being quietly ignored. The element type comes back
+on the result instead, in its own <code>{T,N}</code> and in a reader group's <code>dtype</code>.</p>
 <pre><code class="language-julia">struct TimeSeriesMetadata                    # get_metadata / list_time_series
     owner_id          :: Int64
     owner_type        :: String
@@ -7115,7 +7198,23 @@ end
 </code></pre>
 <h2 id="time-and-resolution-conversions"><a class="header" href="#time-and-resolution-conversions">Time and Resolution Conversions</a></h2>
 <ul>
-<li><code>DateTime</code> is converted to/from Unix milliseconds at the boundary.</li>
+<li><code>DateTime</code> is converted to/from Unix milliseconds at the boundary, and is interpreted as <strong>UTC</strong> —
+Julia's <code>DateTime</code> carries no zone, so the wrapper has to pick a reading, and UTC is the one under
+which a value written here comes back as itself.</li>
+<li>A <strong><code>TimeZones.ZonedDateTime</code> is accepted wherever a <code>DateTime</code> is</strong> — an initial timestamp, a
+timestamp vector, a <code>time_range</code> bound, a reader's <code>t</code> — and is converted to the instant it names.
+It needs no convention, so prefer it when your data is genuinely zoned. TimeZones is a <strong>weak
+dependency</strong>: the conversion lives in the <code>InfraStoreTimeZonesExt</code> extension, which loads when you
+<code>using TimeZones</code>, so nobody else pays for the tz database. Passing one without loading TimeZones
+raises an <code>InvalidParameterError</code> saying so.</li>
+<li><strong>Reads always return a <code>DateTime</code></strong>, in UTC, whichever kind went in. Returning a <code>ZonedDateTime</code>
+would mean inventing a zone the store never recorded — it stores instants, not civil time.</li>
+<li>A vector of <code>ZonedDateTime</code>s is ordered by the <strong>instants</strong> it names, not by its local wall
+clocks, so the strictly-increasing rule is checked after conversion.</li>
+<li>Milliseconds are lossless in both directions: the store records every instant to the millisecond
+and refuses a finer one on write, so this boundary cannot truncate a series written under that
+rule. See <a href="reference/../explanation/data-model.html#timestamp-precision">timestamp precision</a>. (An artifact
+written before the rule may hold finer instants; those still truncate here.)</li>
 <li><code>resolution</code> is passed as a <code>Period</code> and converted to an ISO-8601 duration string; reads return
 resolution as a <code>Period</code> (<code>Millisecond</code> for fixed durations).</li>
 </ul>
@@ -8405,6 +8504,7 @@ in the consumer's object graph — which is why the association flags are bare i
 <tr><td><code>-f</code>, <code>--format</code></td><td>Output format: <code>table</code> (default), <code>json</code>, <code>jsonl</code>, or <code>csv</code>.</td></tr>
 <tr><td><code>--log-level</code></td><td>Tracing filter; also read from <code>RUST_LOG</code>. Defaults to <code>warn</code>.</td></tr>
 <tr><td><code>-y</code>, <code>--yes</code></td><td>Answer every confirmation prompt with yes.</td></tr>
+<tr><td><code>--assume-timezone &lt;ZONE&gt;</code></td><td>Read timestamps that carry no time zone as being in this one: <code>UTC</code>, or a fixed offset like <code>-07:00</code>.</td></tr>
 </tbody></table>
 </div>
 <p><code>--store</code> (or <code>INFRASTORE_STORE</code>) is required by every command except <code>template</code> and <code>completions</code>.</p>
@@ -8444,6 +8544,32 @@ pretty document.</p>
 <p><code>-y</code>/<code>--yes</code> answers every prompt, so a script no longer has to know which commands prompt or which
 flag each spells it with. The per-command <code>--force</code> flags still work and are what a one-off reaches
 for.</p>
+<h3 id="zoneless-timestamps"><a class="header" href="#zoneless-timestamps">Zoneless timestamps</a></h3>
+<p>A timestamp with no offset — <code>2024-01-01T00:00:00</code>, or the <code>2024-01-01 00:00:00</code> that most CSV
+writers produce — names a wall-clock reading, not an instant, and the store records instants. Such a
+timestamp is therefore refused, and the error names the flag that resolves it:</p>
+<pre><code class="language-console">$ infrastore --store s.h5 add --csv load.csv ...
+Error: timestamp '2024-01-01 00:00:00' names no time zone, so it names no instant. Give it an
+offset (RFC3339, like 2024-01-01T00:00:00Z), or pass --assume-timezone UTC (or a fixed offset
+like -07:00) to read every zoneless timestamp with it.
+</code></pre>
+<p><code>--assume-timezone</code> supplies the missing offset for the whole invocation:</p>
+<pre><code class="language-console">$ infrastore --store s.h5 --assume-timezone UTC     add --csv load.csv ...   # read as UTC
+$ infrastore --store s.h5 --assume-timezone -07:00  add --csv load.csv ...   # 00:00 becomes 07:00Z
+</code></pre>
+<p>Three things to know:</p>
+<ul>
+<li>It applies <strong>only</strong> where an offset is missing. A timestamp that carries its own offset is never
+overridden, so a mixed file loads correctly and a fully-offset file is unaffected.</li>
+<li>It is global, so it also covers <code>--time-range</code> bounds and <code>--issue-time</code>, which hit the same
+parser.</li>
+<li>Named zones (<code>America/Denver</code>) are <strong>not</strong> accepted. A zoneless timestamp in a zone with daylight
+saving is not always a single instant — the skipped hour names none and the repeated hour names
+two — so the flag would have to fail part-way through an ingest or silently pick one. Data written
+zoneless in this domain is nearly always local <em>standard</em> time, which is a fixed offset
+year-round; pass that offset. Data that really is civil time with daylight saving should carry its
+offsets in the file, where each row can say which side of a transition it is on.</li>
+</ul>
 <h2 id="commands"><a class="header" href="#commands">Commands</a></h2>
 <p><code>infrastore --help</code> lists these under the same six headings used below. The grouping is a display
 aid only — every command is invoked flat, as <code>infrastore &lt;command&gt;</code>; there are no subcommand
@@ -8776,14 +8902,20 @@ calendar ones. This is also the spelling every command <em>prints</em>, so a dur
 <code>invalid duration '1h': durations are ISO-8601 — did you mean 'PT1H'?</code></p>
 </li>
 <li>
-<p><strong>Timestamps</strong> (<code>initial_timestamp</code>, non-sequential timestamp column): RFC3339 (e.g.
-<code>2024-01-01T00:00:00Z</code>) or a bare integer of epoch milliseconds.</p>
+<p><strong>Timestamps</strong> (<code>initial_timestamp</code>, non-sequential timestamp column, <code>--time-range</code> bounds,
+<code>--issue-time</code>): RFC3339 (e.g. <code>2024-01-01T00:00:00Z</code>) or a bare integer of epoch milliseconds. A
+<em>stored</em> timestamp must be a whole number of milliseconds — a finer one is refused by <code>add</code> rather
+than truncated, and the epoch-millisecond form cannot express one at all. See
+<a href="reference/../explanation/data-model.html#timestamp-precision">timestamp precision</a>. A timestamp with no
+offset needs <a href="reference/cli.html#zoneless-timestamps"><code>--assume-timezone</code></a>.</p>
 </li>
 <li>
-<p><strong><code>--time-range</code></strong> is a pair of <em>timestamps</em>, not a duration: <code>START..END</code> (half-open), where each
-side is parsed as a timestamp. For example
+<p><strong><code>--time-range</code></strong> is a pair of <em>timestamps</em>, not a duration: <code>START..END</code> (half-open — <code>START</code>
+inclusive, <code>END</code> exclusive), where each side is parsed as a timestamp. For example
 <code>--time-range 2024-01-01T01:00:00Z..2024-01-01T03:00:00Z</code>. A duration such as <code>--time-range 1h</code> is
-rejected with <code>invalid --time-range '1h' (expected START..END)</code>.</p>
+rejected with <code>invalid --time-range '1h' (expected START..END)</code>. A range bound need not be
+grid-aligned for a static series, and must be a window boundary for a forecast; see
+<a href="reference/rust-api.html#reading-a-time-range">reading a time range</a> for what each type selects.</p>
 </li>
 </ul>
 <h2 id="descriptor-schema"><a class="header" href="#descriptor-schema">Descriptor Schema</a></h2>
@@ -9055,6 +9187,9 @@ cd crates/infrastore-py &amp;&amp; maturin develop &amp;&amp; pytest ../../pytho
 cargo build -p infrastore-ffi --release
 export INFRASTORE_LIB=$PWD/target/release/libinfrastore_ffi.dylib  # .so on Linux
 julia --project=julia/InfraStore.jl julia/InfraStore.jl/test/runtests.jl
+# The ZonedDateTime tests need the TimeZones weak dependency, which is only
+# loadable through the test target; the run above skips them with a warning:
+julia --project=julia/InfraStore.jl -e 'using Pkg; Pkg.test()'
 </code></pre>
 <h2 id="the-on-disk-format-is-a-contract"><a class="header" href="#the-on-disk-format-is-a-contract">The On-Disk Format Is a Contract</a></h2>
 <p>The HDF5 layout, the SQLite schema, and the <a href="./explanation/content-addressing.html">hashing rules</a>

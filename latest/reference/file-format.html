@@ -683,7 +683,10 @@ library reads it. It costs no storage, is created by the same idempotent DDL as 
 and so lands on an existing store's first writable open without a <code>data_format_version</code> change.</p>
 <h2 id="field-encoding-notes"><a class="header" href="#field-encoding-notes">Field Encoding Notes</a></h2>
 <ul>
-<li><strong>Timestamps</strong> are RFC 3339 strings in UTC.</li>
+<li><strong>Timestamps</strong> are RFC 3339 strings in UTC, holding a whole number of <strong>milliseconds</strong>. The format
+could carry finer digits and a store written before the precision rule may, so a reader must parse
+the full string; but no current write path produces one — see
+<a href="../explanation/data-model.html#timestamp-precision">timestamp precision</a>.</li>
 <li><strong>Periods</strong> (<code>resolution</code>, <code>horizon</code>, <code>interval</code>) are canonical <strong>ISO-8601 duration strings</strong> in
 SQLite (<code>PT1H</code>, <code>P1M</code>, <code>P1Y</code>), and the packed dataset name's <code>{res}</code> field uses the same encoding.
 Calendar periods (<code>Month</code>/<code>Quarter</code>/<code>Year</code>) are stored distinctly from fixed spans.</li>

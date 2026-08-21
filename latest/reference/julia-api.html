@@ -369,6 +369,11 @@ series type are <code>nothing</code>.</p>
 <code>dtype</code> field holds the <strong>Julia element type</strong> (<code>Float64</code>, <code>Bool</code>, …). Metadata instead carries the
 store's canonical <code>element_type</code> <strong>string</strong>, which names both the meaning and (through it) the
 dtype. An <code>owner_category</code> field is an <code>OwnerCategory</code>, never a string.</p>
+<p>A requested type is always the bare one — <code>SingleTimeSeries</code>, never <code>SingleTimeSeries{Float64}</code>. A
+series is addressed by its identity (owner, category, type, name, resolution, interval, features),
+which carries no element type, so parameters on a <em>request</em> would have nothing to select on; passing
+them raises <code>InvalidParameterError</code> rather than being quietly ignored. The element type comes back
+on the result instead, in its own <code>{T,N}</code> and in a reader group's <code>dtype</code>.</p>
 <pre><code class="language-julia">struct TimeSeriesMetadata                    # get_metadata / list_time_series
     owner_id          :: Int64
     owner_type        :: String
@@ -1012,7 +1017,23 @@ end
 </code></pre>
 <h2 id="time-and-resolution-conversions"><a class="header" href="#time-and-resolution-conversions">Time and Resolution Conversions</a></h2>
 <ul>
-<li><code>DateTime</code> is converted to/from Unix milliseconds at the boundary.</li>
+<li><code>DateTime</code> is converted to/from Unix milliseconds at the boundary, and is interpreted as <strong>UTC</strong> —
+Julia's <code>DateTime</code> carries no zone, so the wrapper has to pick a reading, and UTC is the one under
+which a value written here comes back as itself.</li>
+<li>A <strong><code>TimeZones.ZonedDateTime</code> is accepted wherever a <code>DateTime</code> is</strong> — an initial timestamp, a
+timestamp vector, a <code>time_range</code> bound, a reader's <code>t</code> — and is converted to the instant it names.
+It needs no convention, so prefer it when your data is genuinely zoned. TimeZones is a <strong>weak
+dependency</strong>: the conversion lives in the <code>InfraStoreTimeZonesExt</code> extension, which loads when you
+<code>using TimeZones</code>, so nobody else pays for the tz database. Passing one without loading TimeZones
+raises an <code>InvalidParameterError</code> saying so.</li>
+<li><strong>Reads always return a <code>DateTime</code></strong>, in UTC, whichever kind went in. Returning a <code>ZonedDateTime</code>
+would mean inventing a zone the store never recorded — it stores instants, not civil time.</li>
+<li>A vector of <code>ZonedDateTime</code>s is ordered by the <strong>instants</strong> it names, not by its local wall
+clocks, so the strictly-increasing rule is checked after conversion.</li>
+<li>Milliseconds are lossless in both directions: the store records every instant to the millisecond
+and refuses a finer one on write, so this boundary cannot truncate a series written under that
+rule. See <a href="../explanation/data-model.html#timestamp-precision">timestamp precision</a>. (An artifact
+written before the rule may hold finer instants; those still truncate here.)</li>
 <li><code>resolution</code> is passed as a <code>Period</code> and converted to an ISO-8601 duration string; reads return
 resolution as a <code>Period</code> (<code>Millisecond</code> for fixed durations).</li>
 </ul>

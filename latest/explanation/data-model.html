@@ -279,6 +279,27 @@ on the same day-of-month each step rather than every <code>N</code> milliseconds
 month. Periods are encoded as ISO-8601 duration strings (<code>PT1H</code>, <code>P1M</code>, <code>P1Y</code>) on disk and across
 every binding (the Python/gRPC surfaces accept a <code>timedelta</code>/duration for fixed periods and an
 ISO-8601 string for either kind, and return the ISO-8601 string).</p>
+<h3 id="timestamp-precision"><a class="header" href="#timestamp-precision">Timestamp precision</a></h3>
+<p>Every instant the store records — a <code>SingleTimeSeries</code> or forecast <code>initial_timestamp</code>, and every
+entry of a <code>NonSequentialTimeSeries</code> timestamp vector — is <strong>a whole number of milliseconds</strong>, the
+same floor a fixed period has. One millisecond is the finest resolution a period can express, and it
+is likewise the finest instant a series can be written at.</p>
+<p>The rule is enforced on write, in the core, for all five addable types: a finer instant is rejected
+with an <code>InvalidParameter</code> error rather than truncated. This is what makes a timestamp mean the same
+thing in every consumer. The bindings do not share one precision — the C ABI and Julia exchange
+instants as <code>i64</code> Unix milliseconds, Python's <code>datetime</code> is microsecond, and gRPC and the Rust core
+carry a full RFC 3339 string — so a finer instant would be silently truncated at some boundaries and
+not others, putting the same series on different instants depending on who read it. For a
+<code>NonSequentialTimeSeries</code> whose timestamps are less than a millisecond apart it is worse: two
+distinct timestamps collapse into one, and the vector stops being strictly increasing on the way
+back out.</p>
+<p>A series needing a finer grid should scale its unit and record it in <code>units</code>, exactly as it must for
+a sub-millisecond resolution: a 500 µs series is a 500-unit series.</p>
+<p>Two things are deliberately <em>not</em> constrained. A <strong>query bound</strong> — a <code>time_range</code> end, a reader's
+<code>when</code> — may be arbitrarily fine; it is not stored, and the read paths already say what an off-grid
+bound does (see <a href="../reference/rust-api.html#reading-a-time-range">reading a time range</a>). And <strong>reads
+stay permissive</strong>: an artifact written before this rule may hold finer instants and still reads back
+exactly as written, which is why the rule does not change <code>DATA_FORMAT_VERSION</code>.</p>
 <h3 id="typed-n-dimensional-arrays"><a class="header" href="#typed-n-dimensional-arrays">Typed, N-dimensional arrays</a></h3>
 <p>Every series' values are a <strong><code>TypedArray</code></strong>: an element <code>dtype</code> (<code>f64</code>, <code>f32</code>, the integer widths,
 or <code>bool</code>) and a shape <code>[length, k1, k2, …]</code>. The first axis is time; the trailing axes are a fixed

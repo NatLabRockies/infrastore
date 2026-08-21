@@ -211,6 +211,14 @@ Multi-dimensional arrays (a per-step element shape) are supported via the NumPy 
 <code>datetime.timezone.utc</code>, a <code>ZoneInfo</code>, or a fixed offset. It is converted to UTC on the way in, so
 two aware datetimes naming the same instant are the same instant to the store, and every <code>datetime</code>
 read back is UTC. A naive datetime names no instant and raises <code>InvalidParameterError</code>.</p>
+<p>A <code>datetime</code> that is <strong>stored</strong> — an initial timestamp, or an entry of a <code>NonSequentialTimeSeries</code>
+timestamp vector — must also be a whole number of milliseconds; <code>microsecond</code> must be a multiple of
+1000. A finer instant raises <code>InvalidParameterError</code> rather than being silently truncated, because
+it cannot survive every binding intact (see
+<a href="../explanation/data-model.html#timestamp-precision">timestamp precision</a>). Note that
+<code>datetime.now(timezone.utc)</code> carries microseconds: quantize it, e.g.
+<code>now.replace(microsecond=now.microsecond // 1000 * 1000)</code>. A <code>datetime</code> used only as a <em>query</em> bound
+— a <code>time_range</code> end, a reader's <code>when</code> — is unconstrained.</p>
 <h2 id="store"><a class="header" href="#store"><code>Store</code></a></h2>
 <h3 id="constructors"><a class="header" href="#constructors">Constructors</a></h3>
 <pre><code class="language-python">@classmethod

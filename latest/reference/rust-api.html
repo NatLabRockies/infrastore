@@ -521,7 +521,9 @@ commits together or rolls back together.</li>
 <li><strong><code>get_time_series</code></strong> — Reconstructs the stored type as a <a href="#timeseriesdata"><code>TimeSeriesData</code></a>
 variant (static series and all forecast types). With <code>time_range = Some((start, end))</code>, slices on
 the time axis; the returned series's <code>initial_timestamp</code> and <code>length</code> reflect the slice. For
-forecasts the window is resolved over the <code>count</code> axis (<code>resolve_windows</code>). <code>end</code> is exclusive.</li>
+forecasts the window is resolved over the <code>count</code> axis (<code>resolve_windows</code>). <code>start</code> is inclusive
+and <code>end</code> is exclusive — see <a href="#reading-a-time-range">Reading a time range</a> for what each type
+applies that to.</li>
 <li><strong><code>clear_time_series</code></strong> — <code>Some((id, category))</code> removes one owner's series (the owner is the
 <code>(owner_id, owner_category)</code> pair); <code>None</code> removes all. Returns the count removed. Underlying
 arrays are freed only when their last reference is gone.</li>
@@ -562,6 +564,34 @@ to match the HDF5 file already beside it. Unlike <code>persist_to</code>, copies
 in place. A checkpoint, not a mode switch — the catalog stays in RAM afterwards. For a
 <code>CatalogMode::Attached</code> store this is <code>flush</code>.</li>
 </ul>
+<h3 id="reading-a-time-range"><a class="header" href="#reading-a-time-range">Reading a time range</a></h3>
+<p><code>get_time_series(key, Some((start, end)))</code> selects on the time axis. The rule is the same for all
+six types — <strong><code>start</code> is inclusive, <code>end</code> is exclusive</strong> — but what it is applied <em>to</em> differs,
+because the types disagree about what a stored value is:</p>
+<div class="table-wrapper"><table><thead><tr><th>Type</th><th>Selected</th></tr></thead><tbody>
+<tr><td><code>NonSequentialTimeSeries</code></td><td>every timestamp <code>t</code> with <code>start &lt;= t &lt; end</code></td></tr>
+<tr><td><code>SingleTimeSeries</code></td><td>every step whose <strong>covered interval</strong> <code>[t, t + resolution)</code> overlaps the range</td></tr>
+<tr><td><code>Deterministic</code> / <code>Probabilistic</code> / <code>Scenarios</code> / <code>DeterministicSingleTimeSeries</code></td><td>every window whose <strong>start</strong> <code>w</code> has <code>start &lt;= w &lt; end</code>, and <code>start</code> must <em>be</em> a window boundary</td></tr>
+</tbody></table>
+</div>
+<p>The two static rows differ only at the <code>start</code> bound, and only when <code>start</code> falls strictly inside a
+step. An irregular series pairs a value with an <em>instant</em>, so a value at <code>t &lt; start</code> is outside the
+range. A regular series pairs a value with the <em>step it covers</em>, so the step containing <code>start</code> does
+overlap the range and is returned — which means the sliced series' <code>initial_timestamp</code> can be
+earlier than the <code>start</code> that was asked for. The bounds need not be grid-aligned; <code>start</code> is floored
+and <code>end</code> is ceiled onto the grid (calendar-aware for a monthly resolution). The <code>end</code> bound behaves
+identically under either reading: a step at or after <code>end</code> cannot overlap <code>[start, end)</code>.</p>
+<p>Forecasts are stricter on purpose. A window is a whole array, not a point, so there is no partial
+window to return: an off-grid <code>start</code> is rejected with <code>InvalidParameter</code> rather than snapped, at
+any magnitude — including one finer than a millisecond, which <a href="#period"><code>Period::steps_between</code></a>
+checks the exact landing for. A <code>start</code> that is aligned but at or past the last window is rejected
+too, rather than returning an empty selection.</p>
+<p><code>end &lt; start</code> is <code>InvalidParameter</code> for every type. Query bounds themselves are unconstrained: they
+may be finer than the millisecond every <em>stored</em> instant is held to (see
+<a href="../explanation/data-model.html#timestamp-precision">timestamp precision</a>).</p>
+<p>A <a href="#readers">reader</a> is exact rather than range-based: <code>index_at</code> maps a timestamp to its index and
+errors if that instant is not on the timeline — for both the regular and the irregular case. It
+never floors, ceils, or clamps.</p>
 <h3 id="introspection"><a class="header" href="#introspection">Introspection</a></h3>
 <p>Grouped catalog queries the bindings use instead of listing every association and aggregating in the
 caller. All are read-only and hit SQLite once.</p>
@@ -1009,6 +1039,11 @@ impl Deterministic {
 }
 <span class="boring">}</span></code></pre></pre>
 <p><code>new</code> validates <code>data.shape</code> against <code>[H, count, *E]</code> where <code>H = horizon / resolution</code>.</p>
+<p><code>validate</code> re-checks those same invariants against the values the struct currently holds, and
+returns the same <code>Err(String)</code>. Every field is <code>pub</code> and the type derives <code>Deserialize</code>, so a struct
+literal, a field assignment, or <code>serde_json::from_str</code> all produce a value that never met <code>new</code> —
+which is why <code>add_time_series</code> calls <code>validate</code> on the write path rather than trusting the
+constructor. <code>Probabilistic</code> and <code>Scenarios</code> carry the same method.</p>
 <h3 id="probabilistic"><a class="header" href="#probabilistic"><code>Probabilistic</code></a></h3>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {

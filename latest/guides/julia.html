@@ -216,8 +216,19 @@ store = open_store("system.h5"; read_only=true)
 <h2 id="add-a-series"><a class="header" href="#add-a-series">Add a Series</a></h2>
 <pre><code class="language-julia"># `name` ("load") is a required field on the struct.
 ts = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(100.0:123.0), "load")
-
-key = add_time_series!(
+</code></pre>
+<p>A bare <code>DateTime</code> carries no zone, and this package reads one as <strong>UTC</strong>. If your timestamps are
+genuinely zoned, <code>using TimeZones</code> and pass a <code>ZonedDateTime</code> instead — it names an instant on its
+own, and is accepted anywhere a <code>DateTime</code> is:</p>
+<pre><code class="language-julia">using TimeZones
+ts = SingleTimeSeries(
+    ZonedDateTime(DateTime(2024, 1, 1), tz"America/Denver"),   # = 2024-01-01T07:00Z
+    Hour(1), collect(100.0:123.0), "load",
+)
+</code></pre>
+<p>Reads return a <code>DateTime</code> in UTC either way; see
+<a href="../reference/julia-api.html#time-and-resolution-conversions">Time and resolution conversions</a>.</p>
+<pre><code class="language-julia">key = add_time_series!(
     store,
     42,
     "Generator",

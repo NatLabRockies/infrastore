@@ -201,6 +201,7 @@ in the consumer's object graph — which is why the association flags are bare i
 <tr><td><code>-f</code>, <code>--format</code></td><td>Output format: <code>table</code> (default), <code>json</code>, <code>jsonl</code>, or <code>csv</code>.</td></tr>
 <tr><td><code>--log-level</code></td><td>Tracing filter; also read from <code>RUST_LOG</code>. Defaults to <code>warn</code>.</td></tr>
 <tr><td><code>-y</code>, <code>--yes</code></td><td>Answer every confirmation prompt with yes.</td></tr>
+<tr><td><code>--assume-timezone &lt;ZONE&gt;</code></td><td>Read timestamps that carry no time zone as being in this one: <code>UTC</code>, or a fixed offset like <code>-07:00</code>.</td></tr>
 </tbody></table>
 </div>
 <p><code>--store</code> (or <code>INFRASTORE_STORE</code>) is required by every command except <code>template</code> and <code>completions</code>.</p>
@@ -240,6 +241,32 @@ pretty document.</p>
 <p><code>-y</code>/<code>--yes</code> answers every prompt, so a script no longer has to know which commands prompt or which
 flag each spells it with. The per-command <code>--force</code> flags still work and are what a one-off reaches
 for.</p>
+<h3 id="zoneless-timestamps"><a class="header" href="#zoneless-timestamps">Zoneless timestamps</a></h3>
+<p>A timestamp with no offset — <code>2024-01-01T00:00:00</code>, or the <code>2024-01-01 00:00:00</code> that most CSV
+writers produce — names a wall-clock reading, not an instant, and the store records instants. Such a
+timestamp is therefore refused, and the error names the flag that resolves it:</p>
+<pre><code class="language-console">$ infrastore --store s.h5 add --csv load.csv ...
+Error: timestamp '2024-01-01 00:00:00' names no time zone, so it names no instant. Give it an
+offset (RFC3339, like 2024-01-01T00:00:00Z), or pass --assume-timezone UTC (or a fixed offset
+like -07:00) to read every zoneless timestamp with it.
+</code></pre>
+<p><code>--assume-timezone</code> supplies the missing offset for the whole invocation:</p>
+<pre><code class="language-console">$ infrastore --store s.h5 --assume-timezone UTC     add --csv load.csv ...   # read as UTC
+$ infrastore --store s.h5 --assume-timezone -07:00  add --csv load.csv ...   # 00:00 becomes 07:00Z
+</code></pre>
+<p>Three things to know:</p>
+<ul>
+<li>It applies <strong>only</strong> where an offset is missing. A timestamp that carries its own offset is never
+overridden, so a mixed file loads correctly and a fully-offset file is unaffected.</li>
+<li>It is global, so it also covers <code>--time-range</code> bounds and <code>--issue-time</code>, which hit the same
+parser.</li>
+<li>Named zones (<code>America/Denver</code>) are <strong>not</strong> accepted. A zoneless timestamp in a zone with daylight
+saving is not always a single instant — the skipped hour names none and the repeated hour names
+two — so the flag would have to fail part-way through an ingest or silently pick one. Data written
+zoneless in this domain is nearly always local <em>standard</em> time, which is a fixed offset
+year-round; pass that offset. Data that really is civil time with daylight saving should carry its
+offsets in the file, where each row can say which side of a transition it is on.</li>
+</ul>
 <h2 id="commands"><a class="header" href="#commands">Commands</a></h2>
 <p><code>infrastore --help</code> lists these under the same six headings used below. The grouping is a display
 aid only — every command is invoked flat, as <code>infrastore &lt;command&gt;</code>; there are no subcommand
@@ -572,14 +599,20 @@ calendar ones. This is also the spelling every command <em>prints</em>, so a dur
 <code>invalid duration '1h': durations are ISO-8601 — did you mean 'PT1H'?</code></p>
 </li>
 <li>
-<p><strong>Timestamps</strong> (<code>initial_timestamp</code>, non-sequential timestamp column): RFC3339 (e.g.
-<code>2024-01-01T00:00:00Z</code>) or a bare integer of epoch milliseconds.</p>
+<p><strong>Timestamps</strong> (<code>initial_timestamp</code>, non-sequential timestamp column, <code>--time-range</code> bounds,
+<code>--issue-time</code>): RFC3339 (e.g. <code>2024-01-01T00:00:00Z</code>) or a bare integer of epoch milliseconds. A
+<em>stored</em> timestamp must be a whole number of milliseconds — a finer one is refused by <code>add</code> rather
+than truncated, and the epoch-millisecond form cannot express one at all. See
+<a href="../explanation/data-model.html#timestamp-precision">timestamp precision</a>. A timestamp with no
+offset needs <a href="#zoneless-timestamps"><code>--assume-timezone</code></a>.</p>
 </li>
 <li>
-<p><strong><code>--time-range</code></strong> is a pair of <em>timestamps</em>, not a duration: <code>START..END</code> (half-open), where each
-side is parsed as a timestamp. For example
+<p><strong><code>--time-range</code></strong> is a pair of <em>timestamps</em>, not a duration: <code>START..END</code> (half-open — <code>START</code>
+inclusive, <code>END</code> exclusive), where each side is parsed as a timestamp. For example
 <code>--time-range 2024-01-01T01:00:00Z..2024-01-01T03:00:00Z</code>. A duration such as <code>--time-range 1h</code> is
-rejected with <code>invalid --time-range '1h' (expected START..END)</code>.</p>
+rejected with <code>invalid --time-range '1h' (expected START..END)</code>. A range bound need not be
+grid-aligned for a static series, and must be a window boundary for a forecast; see
+<a href="rust-api.html#reading-a-time-range">reading a time range</a> for what each type selects.</p>
 </li>
 </ul>
 <h2 id="descriptor-schema"><a class="header" href="#descriptor-schema">Descriptor Schema</a></h2>
