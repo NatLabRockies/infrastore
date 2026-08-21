@@ -4179,7 +4179,7 @@ fn validate_data(data: &TimeSeriesData) -> Result<()> {
 /// [`crate::timestamps::require_millisecond_precision`] as a
 /// [`TimeSeriesError`], labelled with the type whose `initial_timestamp` it is.
 fn require_ms(t: chrono::DateTime<chrono::Utc>, label: &str) -> Result<()> {
-    crate::timestamps::require_millisecond_precision(t, &format!("{label} initial_timestamp"))
+    crate::timestamps::require_millisecond_precision(t, || format!("{label} initial_timestamp"))
         .map_err(TimeSeriesError::InvalidParameter)
 }
 
@@ -4249,10 +4249,9 @@ fn validate_non_sequential(series: &NonSequentialTimeSeries) -> Result<()> {
     // a millisecond boundary (the C ABI, and Julia through it). Two timestamps
     // less than a millisecond apart are distinct here and identical there.
     for (i, t) in series.timestamps.iter().enumerate() {
-        crate::timestamps::require_millisecond_precision(
-            *t,
-            &format!("NonSequentialTimeSeries timestamp {i}"),
-        )
+        crate::timestamps::require_millisecond_precision(*t, || {
+            format!("NonSequentialTimeSeries timestamp {i}")
+        })
         .map_err(TimeSeriesError::InvalidParameter)?;
     }
     Ok(())

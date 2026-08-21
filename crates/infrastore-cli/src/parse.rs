@@ -76,12 +76,21 @@ static ASSUMED_OFFSET: OnceLock<Option<FixedOffset>> = OnceLock::new();
 /// Record the global `--assume-timezone`, validating it. Called once, from
 /// `main`, before anything parses a timestamp — so a bad zone fails immediately
 /// rather than part-way through a CSV.
+///
+/// A second call is an error rather than a silent no-op. Discarding the failed
+/// `set` would leave the first zone in place while the caller believes it
+/// installed the second: in `main` that is unreachable, but the unit tests below
+/// run in this same process and assert on how a zoneless timestamp parses, so a
+/// swallowed second set is exactly the shape that turns them order-dependent
+/// with no visible cause.
 pub fn set_assumed_timezone(spec: Option<&str>) -> Result<(), String> {
     let offset = match spec {
         None => None,
         Some(s) => Some(parse_utc_offset(s)?),
     };
-    let _ = ASSUMED_OFFSET.set(offset);
+    ASSUMED_OFFSET
+        .set(offset)
+        .map_err(|_| "the assumed timezone has already been set".to_string())?;
     Ok(())
 }
 

@@ -75,11 +75,17 @@ use crate::error::{Result, TimeSeriesError};
 /// A leap second is spelled by chrono as a sub-second component at or above one
 /// second; the modulo below reads its *fractional* part, so a leap second on a
 /// whole millisecond is accepted like any other instant.
+///
+/// `label` is a closure rather than a `&str` because one caller runs this per
+/// *timestamp* of a `NonSequentialTimeSeries`: building the label eagerly would
+/// allocate a `String` for every entry of a vector that may hold millions, all
+/// of them thrown away on the overwhelmingly common all-pass path.
 pub(crate) fn require_millisecond_precision(
     t: DateTime<Utc>,
-    label: &str,
+    label: impl FnOnce() -> String,
 ) -> std::result::Result<(), String> {
     if !t.timestamp_subsec_nanos().is_multiple_of(1_000_000) {
+        let label = label();
         return Err(format!(
             "{label} {t} is finer than a millisecond; the store records instants to the \
              millisecond, as it does periods. Truncate to a whole millisecond, or scale the \
