@@ -201,6 +201,12 @@ Two conventions hold across every one of them: a `time_series_type` field holds 
 store's canonical `element_type` **string**, which names both the meaning and (through it) the
 dtype. An `owner_category` field is an `OwnerCategory`, never a string.
 
+A requested type is always the bare one — `SingleTimeSeries`, never `SingleTimeSeries{Float64}`. A
+series is addressed by its identity (owner, category, type, name, resolution, interval, features),
+which carries no element type, so parameters on a _request_ would have nothing to select on; passing
+them raises `InvalidParameterError` rather than being quietly ignored. The element type comes back
+on the result instead, in its own `{T,N}` and in a reader group's `dtype`.
+
 ```julia
 struct TimeSeriesMetadata                    # get_metadata / list_time_series
     owner_id          :: Int64

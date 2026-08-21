@@ -650,6 +650,11 @@ function get_time_series(
     key::TimeSeriesKey;
     time_range::TimeRangeArg=nothing,
 ) where {T <: _ForecastRequest}
+    # `Deterministic{Float64,3} <: Deterministic`, so a parameterized spelling
+    # satisfies this bound where the static readers' would reject it. Check before
+    # the read: it used to reach `_forecast_result_type` below and die there with a
+    # `MethodError` naming a private helper, having already paid for the data.
+    _check_request_type(T)
     r = _get_forecast_raw(store, key; time_range=time_range)
     # The FFI reports the type it actually matched, and this used to decode as
     # `T` regardless. Asking for a `Deterministic` with a `Probabilistic` key

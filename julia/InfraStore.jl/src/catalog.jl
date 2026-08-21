@@ -100,6 +100,19 @@ function _type_for_code(code::Integer)
     end
 end
 
+# Every type a request may name. The methods below give each its ABI code; this
+# list exists so the fallback can tell a *parameterized* spelling of one of them
+# (`SingleTimeSeries{Float64}`) from a type that is not a time series type at
+# all. Keep it in step with those methods.
+const _TIME_SERIES_TYPES = (
+    SingleTimeSeries,
+    NonSequentialTimeSeries,
+    Deterministic,
+    DeterministicSingleTimeSeries,
+    Probabilistic,
+    Scenarios,
+)
+
 # The integer type code for a Julia time series type — the inverse of
 # `_type_for_code`. Every code names a stored type; the widening of a
 # `Deterministic` request to both deterministic storage forms happens in the
@@ -111,8 +124,31 @@ _type_code(::Type{DeterministicSingleTimeSeries}) = INFRASTORE_TYPE_DETERMINISTI
 _type_code(::Type{Probabilistic}) = INFRASTORE_TYPE_PROBABILISTIC
 _type_code(::Type{Scenarios}) = INFRASTORE_TYPE_SCENARIOS
 function _type_code(::Type{T}) where {T}
+    for base in _TIME_SERIES_TYPES
+        if T !== base && T <: base
+            # `Type{}` is invariant, so a parameterized spelling never matches the
+            # methods above and lands here. The store addresses a series by its
+            # identity — (owner, category, type, name, resolution, interval,
+            # features) — which carries no element type, so one key already
+            # resolves to exactly one stored array. `{T,N}` on a *request* could
+            # only restate what that array is, never select between arrays. What a
+            # read hands back carries the stored dtype and rank in its own `{T,N}`.
+            throw(
+                InvalidParameterError(
+                    "$T names an element type, which is not part of a time series' " *
+                    "identity; pass $base and take the element type from the result",
+                ),
+            )
+        end
+    end
     return throw(InvalidParameterError("$T is not a time series type"))
 end
+
+# Reject a request type before any work happens. The readers bound their type
+# argument covariantly (`T <: SingleTimeSeries`) rather than pinning it
+# (`::Type{SingleTimeSeries}`), so that `SingleTimeSeries{Float64}` reaches this
+# explanation instead of a `MethodError` naming a signature nobody wrote.
+_check_request_type(::Type{T}) where {T} = (_type_code(T); nothing)
 
 # The type code a catalog *filter* takes: any stored type. `Deterministic` is
 # widened to both deterministic storage forms by the core's catalog predicate,
@@ -483,11 +519,12 @@ end
 # Key-based alias so `SingleTimeSeries` matches the `get_time_series(T, store, key)`
 # shape the other types use (the bare `get_time_series(store, key)` form is kept).
 function get_time_series(
-    ::Type{SingleTimeSeries},
+    ::Type{T},
     store::Store,
     key::TimeSeriesKey;
     time_range::TimeRangeArg=nothing,
-)
+) where {T <: SingleTimeSeries}
+    _check_request_type(T)
     return get_time_series(store, key; time_range=time_range)
 end
 
@@ -499,7 +536,7 @@ is the owner's `OwnerCategory` (`Component` or `SupplementalAttribute`). The
 optional `time_range` `(start, stop)` slices like the key-based form.
 """
 function get_time_series(
-    ::Type{SingleTimeSeries},
+    ::Type{T},
     store::Store,
     owner_id::Integer,
     owner_category::OwnerCategory,
@@ -507,7 +544,8 @@ function get_time_series(
     resolution::Union{Nothing, Period}=nothing,
     features::AbstractDict=Dict{String, Any}(),
     time_range::TimeRangeArg=nothing,
-)
+) where {T <: SingleTimeSeries}
+    _check_request_type(T)
     key = _make_key(
         owner_id,
         owner_category,
@@ -528,7 +566,7 @@ Attribute-addressed counterpart to `get_time_series(NonSequentialTimeSeries, sto
 the key-based form.
 """
 function get_time_series(
-    ::Type{NonSequentialTimeSeries},
+    ::Type{T},
     store::Store,
     owner_id::Integer,
     owner_category::OwnerCategory,
@@ -536,7 +574,8 @@ function get_time_series(
     resolution::Union{Nothing, Period}=nothing,
     features::AbstractDict=Dict{String, Any}(),
     time_range::TimeRangeArg=nothing,
-)
+) where {T <: NonSequentialTimeSeries}
+    _check_request_type(T)
     key = _make_key(
         owner_id,
         owner_category,

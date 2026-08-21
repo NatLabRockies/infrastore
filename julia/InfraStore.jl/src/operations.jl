@@ -915,11 +915,12 @@ function bulk_read(
 end
 
 function get_time_series(
-    ::Type{NonSequentialTimeSeries},
+    ::Type{T},
     store::Store,
     key::TimeSeriesKey;
     time_range::TimeRangeArg=nothing,
-)
+) where {T <: NonSequentialTimeSeries}
+    _check_request_type(T)
     out_timestamps = Ref{Ptr{Int64}}(C_NULL)
     out_timestamps_len = Ref{UInt64}(0)
     out_dtype = Ref{Int32}(0)
