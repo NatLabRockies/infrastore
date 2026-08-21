@@ -78,10 +78,13 @@ function _assoc_json(a::T) where {T <: _AssocRow}
     return Dict{String, Any}(String(f) => getfield(a, f) for f in fieldnames(T))
 end
 
+_assoc_field(::Type{T}, v) where {T <: Integer} = T(v)
+_assoc_field(::Type{String}, v) = String(v)
+
 function _decode_assoc(::Type{T}, r::AbstractDict) where {T <: _AssocRow}
     return T(
         (
-            ft <: Integer ? ft(r[String(f)]) : String(r[String(f)]) for
+            _assoc_field(ft, r[String(f)]) for
             (f, ft) in zip(fieldnames(T), fieldtypes(T))
         )...,
     )
