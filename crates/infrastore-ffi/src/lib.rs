@@ -7339,12 +7339,13 @@ pub unsafe extern "C" fn infrastore_store_import_supplemental_attribute_associat
 /// store's catalog: match by identity, apply `policy` to any descriptive
 /// drift, and return `INFRASTORE_ERR_RECONCILE_CONFLICT` (naming every
 /// offending row in the error message) for anything neither policy can
-/// resolve. `policy` is `0` (strict: any drift — descriptive or geometric — is
-/// an error) or `1` (update_descriptive: descriptive drift is rewritten from
-/// the JSON; geometry drift is still an error); any other value is
-/// `INFRASTORE_ERR_INVALID_PARAMETER`. A row's `uri` and `data_hash` are
-/// informational and never checked — a document from another store may carry
-/// foreign values for either.
+/// resolve. `policy` must be `0` (strict: any drift — descriptive or
+/// geometric — is an error); any other value is
+/// `INFRASTORE_ERR_INVALID_PARAMETER`. A policy that lets the JSON document
+/// win descriptive drift is deferred to a follow-up — `1` is reserved for it
+/// but not yet accepted. A row's `uri` and `data_hash` are informational and
+/// never checked — a document from another store may carry foreign values
+/// for either.
 ///
 /// On success, writes the JSON-serialized report
 /// (`{"matched":…,"updated":…,"missing_in_store":…,"unmatched_in_store":…,
@@ -7377,10 +7378,10 @@ pub unsafe extern "C" fn infrastore_store_reconcile_time_series_associations_ope
     };
     let policy = match policy {
         0 => core_lib::ReconcilePolicy::Strict,
-        1 => core_lib::ReconcilePolicy::UpdateDescriptive,
         other => {
             set_error(format!(
-                "invalid reconcile policy {other}, expected 0 (strict) or 1 (update_descriptive)"
+                "invalid reconcile policy {other}, expected 0 (strict); update_descriptive (1) \
+                 is not yet implemented"
             ));
             return INFRASTORE_ERR_INVALID_PARAMETER;
         }

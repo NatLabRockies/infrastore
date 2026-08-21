@@ -113,13 +113,13 @@ fn catalog_name(catalog: core_lib::CatalogMode) -> &'static str {
 
 /// Translate the Python-facing `policy` argument of
 /// `Store.reconcile_time_series_associations_openapi` into a core
-/// [`ReconcilePolicy`](core_lib::ReconcilePolicy).
+/// [`ReconcilePolicy`](core_lib::ReconcilePolicy). `"update_descriptive"` is
+/// reserved for a follow-up policy that is not yet implemented.
 fn parse_reconcile_policy(policy: &str) -> PyResult<core_lib::ReconcilePolicy> {
     match policy {
         "strict" => Ok(core_lib::ReconcilePolicy::Strict),
-        "update_descriptive" => Ok(core_lib::ReconcilePolicy::UpdateDescriptive),
         other => Err(InvalidParameterError::new_err(format!(
-            "unknown reconcile policy '{other}', expected 'strict' or 'update_descriptive'"
+            "unknown reconcile policy '{other}', expected 'strict'"
         ))),
     }
 }
@@ -3202,16 +3202,15 @@ impl PyStore {
     }
 
     /// Reconcile a JSON array of time-series association OpenAPI rows against
-    /// this store's catalog: match by identity, apply `policy` ("strict" or
-    /// "update_descriptive") to any descriptive drift, and raise
-    /// `ReconcileConflictError` (naming every offending row) for anything
-    /// neither policy can resolve. Under "strict" any drift — descriptive or
-    /// geometric — is an error; under "update_descriptive" descriptive drift
+    /// this store's catalog: match by identity, apply `policy` ("strict" is
+    /// currently the only accepted value) to any descriptive drift, and raise
+    /// `ReconcileConflictError` (naming every offending row) for anything the
+    /// policy can't resolve. Under "strict" any drift — descriptive or
+    /// geometric — is an error. A policy that rewrites descriptive drift
     /// (`units`, `quantity_kind`, `unit_system`, `component_field`,
-    /// `application_data`) is rewritten from the JSON, while geometry drift is
-    /// still an error. A row's `uri` and `data_hash` are informational and
-    /// never checked — a document from another store may carry foreign
-    /// values for either.
+    /// `application_data`) from the JSON is deferred to a follow-up. A row's
+    /// `uri` and `data_hash` are informational and never checked — a document
+    /// from another store may carry foreign values for either.
     ///
     /// Returns a dict with keys `matched`, `updated`, `missing_in_store`,
     /// `unmatched_in_store` (all `int`), and `conflicts` (a list of `str`).

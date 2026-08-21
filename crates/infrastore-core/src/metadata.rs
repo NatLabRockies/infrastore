@@ -1212,42 +1212,6 @@ impl MetadataStore {
         .map_err(map_unique_violation)
     }
 
-    /// Overwrite the five descriptive columns — `units`, `quantity_kind`,
-    /// `unit_system`, `component_field`, `application_data` — of the
-    /// association row with catalog `id`, leaving its identity, geometry, and
-    /// both content hashes untouched. `id` is not part of a row's identity, so
-    /// this cannot collide with another row the way [`Self::rename`] can.
-    ///
-    /// The only caller is the OpenAPI reconcile's `UpdateDescriptive` policy
-    /// (`crate::openapi`): those five columns are exactly the ones reconcile lets a
-    /// JSON document override on a matched row, because none of them sits in
-    /// `TimeSeriesKey`, the uniqueness index, or `data_hash`.
-    pub fn update_descriptive_by_id(
-        tx: &Connection,
-        id: i64,
-        units: Option<&str>,
-        quantity_kind: Option<&str>,
-        unit_system: Option<UnitSystem>,
-        component_field: Option<&str>,
-        application_data: Option<&str>,
-    ) -> Result<()> {
-        tx.execute(
-            "UPDATE time_series_associations
-             SET units = ?2, quantity_kind = ?3, unit_system = ?4, component_field = ?5,
-                 application_data = ?6
-             WHERE id = ?1",
-            params![
-                id,
-                units,
-                quantity_kind,
-                unit_system.map(|u| u.as_str()),
-                component_field,
-                application_data,
-            ],
-        )?;
-        Ok(())
-    }
-
     /// Delete every association in the store. Returns the removed data_hashes.
     pub fn delete_all(tx: &Connection) -> Result<Vec<[u8; 32]>> {
         let bytes_list: Vec<Vec<u8>> = collect_data_hashes(

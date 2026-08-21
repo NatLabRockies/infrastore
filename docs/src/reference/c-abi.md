@@ -1037,12 +1037,13 @@ int32_t infrastore_store_import_supplemental_attribute_associations_openapi(
 /* Reconcile a JSON array of time-series association OpenAPI rows against this
    store's catalog: match by identity, apply policy to any descriptive drift, and
    return INFRASTORE_ERR_RECONCILE_CONFLICT (naming every offending row in the
-   error message) for anything neither policy can resolve. policy is 0 (strict:
-   any drift is an error) or 1 (update_descriptive: descriptive drift is
-   rewritten from the JSON; geometry drift is still an error); any other value is
-   INFRASTORE_ERR_INVALID_PARAMETER. A row's uri and data_hash are informational
-   and never checked -- a document from another store may carry foreign values
-   for either. On success, writes the JSON-serialized report
+   error message) for anything the policy can't resolve. policy must be 0
+   (strict: any drift -- descriptive or geometric -- is an error); any other
+   value is INFRASTORE_ERR_INVALID_PARAMETER. A policy that rewrites descriptive
+   drift from the JSON is deferred to a follow-up -- 1 is reserved for it but
+   not yet accepted. A row's uri and data_hash are informational and never
+   checked -- a document from another store may carry foreign values for
+   either. On success, writes the JSON-serialized report
    ({"matched":...,"updated":...,"missing_in_store":...,
    "unmatched_in_store":...,"conflicts":[...]}) through out_json as an OWNED
    allocation, freed with infrastore_string_free. */
@@ -1056,9 +1057,10 @@ fields with that same content hash, hex-encoded, on export. The schemas never re
 carry either: `infrastore_store_reconcile_time_series_associations_openapi` reconciles rows against
 the store's existing catalog rather than importing them, and treats an incoming row's
 `uri`/`data_hash` as purely informational. There is no corresponding time-series _import_ export —
-the sidecar store stays the authority for which series exist; only the descriptive columns (`units`,
-`quantity_kind`, `unit_system`, `component_field`, `application_data`) can ever be rewritten from a
-document, and only under `policy = 1`.
+the sidecar store stays the authority for which series exist. A policy letting the descriptive
+columns (`units`, `quantity_kind`, `unit_system`, `component_field`, `application_data`) be
+rewritten from a document is deferred to a follow-up; `policy = 0` (strict) is the only value
+accepted today.
 
 ## Error Messages
 

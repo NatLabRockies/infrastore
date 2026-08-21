@@ -795,24 +795,26 @@ back), returning the number of rows inserted.
 _create_ a complete catalog row. It instead reconciles JSON rows against the store's existing
 catalog, matched by the identity tuple
 `(owner_id, owner_category, time_series_type, name, resolution, interval,
-features)`:
+features)`. `"strict"` is
+currently the only accepted `policy`; a policy that lets the JSON document win descriptive drift is
+deferred to a follow-up:
 
-| Case                                                                                                                                  | `"strict"` (default)                                      | `"update_descriptive"`                                  |
-| ------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- | ------------------------------------------------------- |
-| match, all fields agree                                                                                                               | no-op                                                     | no-op                                                   |
-| match, descriptive drift (`units`, `quantity_kind`, `unit_system`, `component_field`, `application_data`)                             | raises `ReconcileConflictError` naming the row and fields | JSON wins for those five columns, counted in the report |
-| match, geometry drift (`initial_timestamp`, `length`, `horizon`, `interval`, `count`, `element_type`, `element_shape`, `percentiles`) | raises `ReconcileConflictError`                           | raises `ReconcileConflictError` (same)                  |
-| JSON row with no catalog match                                                                                                        | raises `ReconcileConflictError`                           | raises `ReconcileConflictError` (same)                  |
-| catalog row with no JSON row                                                                                                          | tolerated, counted in `unmatched_in_store`                | tolerated, counted                                      |
-| `uri` / `data_hash`                                                                                                                   | informational, never checked                              | same                                                    |
+| Case                                                                                                                                  | `"strict"` (default, and only accepted value)             |
+| ------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| match, all fields agree                                                                                                               | no-op                                                     |
+| match, descriptive drift (`units`, `quantity_kind`, `unit_system`, `component_field`, `application_data`)                             | raises `ReconcileConflictError` naming the row and fields |
+| match, geometry drift (`initial_timestamp`, `length`, `horizon`, `interval`, `count`, `element_type`, `element_shape`, `percentiles`) | raises `ReconcileConflictError`                           |
+| JSON row with no catalog match                                                                                                        | raises `ReconcileConflictError`                           |
+| catalog row with no JSON row                                                                                                          | tolerated, counted in `unmatched_in_store`                |
+| `uri` / `data_hash`                                                                                                                   | informational, never checked                              |
 
 The returned dict has keys `matched`, `updated`, `missing_in_store`, `unmatched_in_store` (all
-`int`), and `conflicts` (a list of `str` naming any row `"update_descriptive"` rewrote).
-`missing_in_store` is always `0` on a successful call: a JSON row naming a series the catalog does
-not hold is fatal under both policies, so a nonzero count only ever appears inside a raised
-`ReconcileConflictError`'s message, never in a returned report. The whole call runs in one
-transaction when it writes, and every offending row is named in one error message rather than only
-the first.
+`int`), and `conflicts` (a list of `str`) — `updated` and `conflicts` are always `0`/empty under
+`"strict"`, reserved for the deferred policy. `missing_in_store` is always `0` on a successful call:
+a JSON row naming a series the catalog does not hold is fatal, so a nonzero count only ever appears
+inside a raised `ReconcileConflictError`'s message, never in a returned report. The whole call runs
+in one transaction when it writes, and every offending row is named in one error message rather than
+only the first.
 
 ```python
 store = Store.create(in_memory=True)

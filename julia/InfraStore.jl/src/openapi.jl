@@ -11,15 +11,13 @@
 # report is itself structured JSON; import returns its row count through an
 # out-param, matching `add_supplemental_attribute_associations!`.
 
-# `:strict` -> 0, `:update_descriptive` -> 1 (must match
-# `infrastore_core::ReconcilePolicy` / `crates/infrastore-ffi/src/lib.rs`).
+# `:strict` -> 0 (must match `infrastore_core::ReconcilePolicy` /
+# `crates/infrastore-ffi/src/lib.rs`). `:update_descriptive` (1) is reserved
+# for a follow-up policy that is not yet implemented.
 function _reconcile_policy_code(policy::Symbol)
     policy === :strict && return Int32(0)
-    policy === :update_descriptive && return Int32(1)
     return throw(
-        InvalidParameterError(
-            "unknown reconcile policy $(repr(policy)); expected :strict or :update_descriptive"
-        ),
+        InvalidParameterError("unknown reconcile policy $(repr(policy)); expected :strict")
     )
 end
 
@@ -122,16 +120,15 @@ end
         policy::Symbol=:strict) -> ReconcileReport
 
 Reconcile a JSON array of time-series association OpenAPI rows against the
-store's catalog: match by identity, apply `policy` (`:strict` or
-`:update_descriptive`) to any descriptive drift, and throw
+store's catalog: match by identity, apply `policy` (`:strict` is currently the
+only accepted value) to any descriptive drift, and throw
 `InfraStore.ReconcileConflictError` (naming every offending row) for anything
-neither policy can resolve. Under `:strict` any drift — descriptive or
-geometric — is an error; under `:update_descriptive` descriptive drift
-(`units`, `quantity_kind`, `unit_system`, `component_field`,
-`application_data`) is rewritten from the JSON, while geometry drift is still
-an error. A row's `uri` and `data_hash` are informational and never checked —
-a document from another store may carry foreign values for either. Runs in
-one transaction when it writes.
+the policy can't resolve. Under `:strict` any drift — descriptive or
+geometric — is an error. A policy that rewrites descriptive drift (`units`,
+`quantity_kind`, `unit_system`, `component_field`, `application_data`) from
+the JSON is deferred to a follow-up. A row's `uri` and `data_hash` are
+informational and never checked — a document from another store may carry
+foreign values for either. Runs in one transaction when it writes.
 """
 function reconcile_time_series_associations_openapi!(
     store::Store, json::AbstractString; policy::Symbol=:strict

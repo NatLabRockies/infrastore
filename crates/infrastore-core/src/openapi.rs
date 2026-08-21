@@ -80,7 +80,7 @@ use serde_json::{Map, Value};
 
 use crate::error::{Result, TimeSeriesError};
 use crate::metadata::{SupplementalAttributeAssociation, SupplementalAttributeFilter};
-use crate::store::{DescriptiveUpdate, ListFilter, Store};
+use crate::store::{ListFilter, Store};
 use crate::types::element_type::ElementType;
 use crate::types::metadata::{
     FeatureValue, Features, OwnerCategory, TimeSeriesMetadata, UnitSystem,
@@ -383,19 +383,22 @@ fn export_ts_rows(store: &Store, filter: &ListFilter) -> Result<String> {
 ///
 /// Geometry drift (`initial_timestamp`, `length`, `horizon`, `interval`,
 /// `count`, `element_type`, `element_shape`, `percentiles`) and a JSON row
-/// with no catalog match are hard errors under **either** policy: geometry
+/// with no catalog match are hard errors regardless of policy: geometry
 /// describes the arrays the catalog actually holds, which a document can
 /// never override, and a JSON row naming a series the catalog does not hold
 /// means the document claims data the store cannot back up (`data_hash` is
 /// `NOT NULL` and the schemas never carry it).
+///
+/// `Strict` is the only variant for now — a policy that lets the JSON
+/// document win descriptive drift is deferred to a follow-up. The enum keeps
+/// this shape (rather than dropping the parameter) so the wire/API contract
+/// across every binding does not have to change again when that policy
+/// returns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReconcilePolicy {
     /// Any drift at all — descriptive or geometric — is a hard error.
     #[default]
     Strict,
-    /// Descriptive drift is resolved by letting the JSON document win for
-    /// those five columns; geometry drift is still a hard error.
-    UpdateDescriptive,
 }
 
 /// Outcome of a successful [`reconcile_ts_rows`] call.
@@ -410,8 +413,8 @@ pub struct ReconcileReport {
     /// unchanged or rewritten.
     pub matched: usize,
     /// Of the matched rows, how many had a descriptive column rewritten.
-    /// Always 0 under [`ReconcilePolicy::Strict`]: descriptive drift there is
-    /// a hard error, never a silent update.
+    /// Always 0 while [`ReconcilePolicy::Strict`] is the only policy:
+    /// descriptive drift is a hard error there, never a silent update.
     pub updated: usize,
     /// Always 0 on a successful reconcile. A JSON row naming a series the
     /// catalog does not hold is always fatal (see [`ReconcilePolicy`]'s
@@ -425,10 +428,11 @@ pub struct ReconcileReport {
     /// contains, so a nonzero count here is the expected shape of a partial
     /// document, not a problem.
     pub unmatched_in_store: usize,
-    /// Human-readable notes on matched rows that needed attention: under
-    /// [`ReconcilePolicy::UpdateDescriptive`], one entry per row whose
-    /// descriptive columns were overwritten, naming the row and which columns
-    /// changed.
+    /// Human-readable notes on matched rows that needed attention: one entry
+    /// per row whose descriptive columns were overwritten, naming the row
+    /// and which columns changed. Always empty while [`ReconcilePolicy::Strict`]
+    /// is the only policy, since it never overwrites — reserved for the
+    /// deferred policy that will populate it.
     pub conflicts: Vec<String>,
 }
 
@@ -695,10 +699,11 @@ fn geometry_diff(row: &ParsedTsRow, meta: &TimeSeriesMetadata) -> Vec<&'static s
     drift
 }
 
-/// Descriptive fields: the five columns [`ReconcilePolicy::UpdateDescriptive`]
-/// lets a JSON document override on a matched row, because none of them sits
-/// in [`crate::types::key::TimeSeriesKey`], the catalog's uniqueness index, or
-/// `data_hash`.
+/// Descriptive fields: the five columns a future reconcile policy could let a
+/// JSON document override on a matched row, because none of them sits in
+/// [`crate::types::key::TimeSeriesKey`], the catalog's uniqueness index, or
+/// `data_hash`. Under the current [`ReconcilePolicy::Strict`]-only policy any
+/// drift here is still a hard error.
 fn descriptive_diff(row: &ParsedTsRow, meta: &TimeSeriesMetadata) -> Vec<&'static str> {
     let mut drift = Vec::new();
     if row.units != meta.units {
@@ -739,8 +744,6 @@ fn reconcile_ts_rows(
     let mut referenced: HashSet<Identity> = HashSet::new();
     let mut fatal: Vec<String> = Vec::new();
     let mut clean = 0usize;
-    let mut updates: Vec<DescriptiveUpdate> = Vec::new();
-    let mut conflicts: Vec<String> = Vec::new();
 
     for row in &rows {
         let parsed = match row.parse() {
@@ -751,7 +754,7 @@ fn reconcile_ts_rows(
             }
         };
 
-        let Some((id, meta)) = by_identity.get(&parsed.identity) else {
+        let Some((_id, meta)) = by_identity.get(&parsed.identity) else {
             fatal.push(format!(
                 "{}: the store's catalog holds no series with this identity",
                 row.row_label()
@@ -784,21 +787,6 @@ fn reconcile_ts_rows(
                     descriptive_drift.join(", ")
                 ));
             }
-            ReconcilePolicy::UpdateDescriptive => {
-                conflicts.push(format!(
-                    "{}: updated descriptive columns ({})",
-                    row.row_label(),
-                    descriptive_drift.join(", ")
-                ));
-                updates.push(DescriptiveUpdate {
-                    id: *id,
-                    units: parsed.units,
-                    quantity_kind: parsed.quantity_kind,
-                    unit_system: parsed.unit_system,
-                    component_field: parsed.component_field,
-                    application_data: parsed.application_data,
-                });
-            }
         }
     }
 
@@ -807,18 +795,13 @@ fn reconcile_ts_rows(
     }
 
     let unmatched_in_store = by_identity.len() - referenced.len();
-    let updated = updates.len();
-    let matched = clean + updated;
-    if !updates.is_empty() {
-        store.update_time_series_descriptive_bulk(&updates)?;
-    }
 
     Ok(ReconcileReport {
-        matched,
-        updated,
+        matched: clean,
+        updated: 0,
         missing_in_store: 0,
         unmatched_in_store,
-        conflicts,
+        conflicts: Vec::new(),
     })
 }
 

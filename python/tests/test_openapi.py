@@ -170,11 +170,10 @@ def clean_reconcile_row():
 
 
 class TestReconcile:
-    @pytest.mark.parametrize("policy", ["strict", "update_descriptive"])
-    def test_clean_match_is_a_no_op(self, policy):
+    def test_clean_match_is_a_no_op(self):
         store = reconcile_fixture_store()
         report = store.reconcile_time_series_associations_openapi(
-            json.dumps([clean_reconcile_row()]), policy=policy
+            json.dumps([clean_reconcile_row()]), policy="strict"
         )
         assert report == {
             "matched": 1, "updated": 0, "missing_in_store": 0,
@@ -190,31 +189,13 @@ class TestReconcile:
                 json.dumps([row]), policy="strict"
             )
 
-    def test_descriptive_drift_is_applied_under_update_descriptive(self):
-        store = reconcile_fixture_store()
-        row = clean_reconcile_row()
-        row["units"] = "kW"
-        row["component_field"] = "net_load"
-        report = store.reconcile_time_series_associations_openapi(
-            json.dumps([row]), policy="update_descriptive"
-        )
-        assert report["matched"] == 1
-        assert report["updated"] == 1
-        assert len(report["conflicts"]) == 1
-
-        rows = json.loads(store.export_time_series_associations_openapi())
-        assert rows[0]["units"] == "kW"
-        assert rows[0]["component_field"] == "net_load"
-        assert rows[0]["length"] == 24
-
-    @pytest.mark.parametrize("policy", ["strict", "update_descriptive"])
-    def test_geometry_drift_errors_under_both_policies(self, policy):
+    def test_geometry_drift_errors_under_strict(self):
         store = reconcile_fixture_store()
         row = clean_reconcile_row()
         row["length"] = 25
         with pytest.raises(infrastore.ReconcileConflictError, match="geometry drift"):
             store.reconcile_time_series_associations_openapi(
-                json.dumps([row]), policy=policy
+                json.dumps([row]), policy="strict"
             )
 
     def test_json_row_with_no_catalog_match_errors(self):

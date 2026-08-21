@@ -584,19 +584,18 @@ fn clean_row_json() -> serde_json::Value {
 }
 
 #[test]
-fn reconcile_clean_match_is_a_no_op_under_either_policy() {
-    for policy in [ReconcilePolicy::Strict, ReconcilePolicy::UpdateDescriptive] {
-        let mut store = reconcile_fixture_store();
-        let json = serde_json::to_string(&vec![clean_row_json()]).unwrap();
-        let report = store
-            .reconcile_time_series_associations_openapi(&json, policy)
-            .unwrap_or_else(|e| panic!("{policy:?} should succeed on a clean match: {e}"));
-        assert_eq!(report.matched, 1);
-        assert_eq!(report.updated, 0);
-        assert_eq!(report.missing_in_store, 0);
-        assert_eq!(report.unmatched_in_store, 0);
-        assert!(report.conflicts.is_empty());
-    }
+fn reconcile_clean_match_is_a_no_op_under_strict() {
+    let policy = ReconcilePolicy::Strict;
+    let mut store = reconcile_fixture_store();
+    let json = serde_json::to_string(&vec![clean_row_json()]).unwrap();
+    let report = store
+        .reconcile_time_series_associations_openapi(&json, policy)
+        .unwrap_or_else(|e| panic!("{policy:?} should succeed on a clean match: {e}"));
+    assert_eq!(report.matched, 1);
+    assert_eq!(report.updated, 0);
+    assert_eq!(report.missing_in_store, 0);
+    assert_eq!(report.unmatched_in_store, 0);
+    assert!(report.conflicts.is_empty());
 }
 
 #[test]
@@ -617,49 +616,21 @@ fn reconcile_descriptive_drift_errors_under_strict() {
 }
 
 #[test]
-fn reconcile_descriptive_drift_is_applied_under_update_descriptive() {
+fn reconcile_geometry_drift_errors_under_strict() {
+    let policy = ReconcilePolicy::Strict;
     let mut store = reconcile_fixture_store();
     let mut row = clean_row_json();
-    row["units"] = serde_json::json!("kW");
-    row["component_field"] = serde_json::json!("net_load");
+    row["length"] = serde_json::json!(25);
     let json = serde_json::to_string(&vec![row]).unwrap();
-    let report = store
-        .reconcile_time_series_associations_openapi(&json, ReconcilePolicy::UpdateDescriptive)
-        .expect("update_descriptive should resolve descriptive drift");
-    assert_eq!(report.matched, 1);
-    assert_eq!(report.updated, 1);
-    assert_eq!(report.unmatched_in_store, 0);
-    assert_eq!(report.conflicts.len(), 1);
-
-    // The rewrite is durable: exporting again reflects the JSON's values.
-    let exported = store
-        .export_time_series_associations_openapi(&ListFilter::new())
-        .expect("export should succeed");
-    let rows: Vec<serde_json::Value> = serde_json::from_str(&exported).unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0]["units"], serde_json::json!("kW"));
-    assert_eq!(rows[0]["component_field"], serde_json::json!("net_load"));
-    // Geometry and identity are untouched by the rewrite.
-    assert_eq!(rows[0]["length"], serde_json::json!(24));
-}
-
-#[test]
-fn reconcile_geometry_drift_errors_under_both_policies() {
-    for policy in [ReconcilePolicy::Strict, ReconcilePolicy::UpdateDescriptive] {
-        let mut store = reconcile_fixture_store();
-        let mut row = clean_row_json();
-        row["length"] = serde_json::json!(25);
-        let json = serde_json::to_string(&vec![row]).unwrap();
-        let err = store
-            .reconcile_time_series_associations_openapi(&json, policy)
-            .unwrap_err();
-        match err {
-            TimeSeriesError::ReconcileConflict(msg) => {
-                assert!(msg.contains("geometry drift"), "{policy:?}: {msg}");
-                assert!(msg.contains("length"), "{policy:?}: {msg}");
-            }
-            other => panic!("{policy:?}: expected ReconcileConflict, got {other}"),
+    let err = store
+        .reconcile_time_series_associations_openapi(&json, policy)
+        .unwrap_err();
+    match err {
+        TimeSeriesError::ReconcileConflict(msg) => {
+            assert!(msg.contains("geometry drift"), "{policy:?}: {msg}");
+            assert!(msg.contains("length"), "{policy:?}: {msg}");
         }
+        other => panic!("{policy:?}: expected ReconcileConflict, got {other}"),
     }
 }
 

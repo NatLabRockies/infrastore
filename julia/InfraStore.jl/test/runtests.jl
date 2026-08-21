@@ -2309,19 +2309,17 @@ end
         )
     end
 
-    @testset "reconcile: clean match is a no-op under either policy" begin
-        for policy in (:strict, :update_descriptive)
-            store = _reconcile_fixture_store()
-            json = InfraStore.JSON.json([_reconcile_clean_row()])
-            report = reconcile_time_series_associations_openapi!(store, json; policy=policy)
-            @test report isa ReconcileReport
-            @test report.matched == 1
-            @test report.updated == 0
-            @test report.missing_in_store == 0
-            @test report.unmatched_in_store == 0
-            @test isempty(report.conflicts)
-            close!(store)
-        end
+    @testset "reconcile: clean match is a no-op under strict" begin
+        store = _reconcile_fixture_store()
+        json = InfraStore.JSON.json([_reconcile_clean_row()])
+        report = reconcile_time_series_associations_openapi!(store, json; policy=:strict)
+        @test report isa ReconcileReport
+        @test report.matched == 1
+        @test report.updated == 0
+        @test report.missing_in_store == 0
+        @test report.unmatched_in_store == 0
+        @test isempty(report.conflicts)
+        close!(store)
     end
 
     @testset "reconcile: descriptive drift errors under strict" begin
@@ -2340,46 +2338,21 @@ end
         close!(store)
     end
 
-    @testset "reconcile: descriptive drift is applied under update_descriptive" begin
+    @testset "reconcile: geometry drift errors under strict" begin
         store = _reconcile_fixture_store()
         row = _reconcile_clean_row()
-        row["units"] = "kW"
-        row["component_field"] = "net_load"
+        row["length"] = 25
         json = InfraStore.JSON.json([row])
-        report = reconcile_time_series_associations_openapi!(
-            store, json; policy=:update_descriptive
-        )
-        @test report.matched == 1
-        @test report.updated == 1
-        @test report.unmatched_in_store == 0
-        @test length(report.conflicts) == 1
-
-        exported = export_time_series_associations_openapi(store)
-        rows = InfraStore.JSON.parse(exported)
-        @test length(rows) == 1
-        @test rows[1]["units"] == "kW"
-        @test rows[1]["component_field"] == "net_load"
-        @test rows[1]["length"] == 24
-        close!(store)
-    end
-
-    @testset "reconcile: geometry drift errors under both policies" begin
-        for policy in (:strict, :update_descriptive)
-            store = _reconcile_fixture_store()
-            row = _reconcile_clean_row()
-            row["length"] = 25
-            json = InfraStore.JSON.json([row])
-            err = try
-                reconcile_time_series_associations_openapi!(store, json; policy=policy)
-                nothing
-            catch e
-                e
-            end
-            @test err isa InfraStore.ReconcileConflictError
-            @test occursin("geometry drift", err.msg)
-            @test occursin("length", err.msg)
-            close!(store)
+        err = try
+            reconcile_time_series_associations_openapi!(store, json; policy=:strict)
+            nothing
+        catch e
+            e
         end
+        @test err isa InfraStore.ReconcileConflictError
+        @test occursin("geometry drift", err.msg)
+        @test occursin("length", err.msg)
+        close!(store)
     end
 
     @testset "reconcile: a JSON row with no catalog match errors" begin

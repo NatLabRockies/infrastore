@@ -332,15 +332,16 @@ aborts the whole call, naming every offender in one message.
 
 - `matched` — JSON rows that matched a catalog row by identity, whether left
   unchanged or rewritten.
-- `updated` — of the matched rows, how many had a descriptive column rewritten.
-  Always `0` under `:strict`.
+- `updated` — of the matched rows, how many had a descriptive column
+  rewritten. Always `0` while `:strict` is the only policy.
 - `missing_in_store` — always `0` on a successful reconcile; a JSON row naming
   a series the catalog does not hold is always fatal.
-- `unmatched_in_store` — catalog rows that no JSON row referenced. Tolerated
-  under both policies: a document only ever carries the owners it contains.
-- `conflicts` — human-readable notes on matched rows that needed attention:
-  under `:update_descriptive`, one entry per row whose descriptive columns were
-  overwritten, naming the row and which columns changed.
+- `unmatched_in_store` — catalog rows that no JSON row referenced. Tolerated:
+  a document only ever carries the owners it contains.
+- `conflicts` — human-readable notes on matched rows that needed attention,
+  naming the row and which columns changed. Always empty while `:strict` is
+  the only policy, since it never overwrites — reserved for a follow-up
+  policy.
 """
 struct ReconcileReport
     matched::Int
