@@ -4,6 +4,25 @@
 //! v0 surface — read/write SingleTimeSeries with optional features (passed as
 //! a JSON object). Errors are reported via int32 status codes and a thread-
 //! local message accessed through [`infrastore_last_error_message`].
+//!
+//! # Concurrency
+//!
+//! **One handle, one thread at a time — reads included.** A handle may be moved
+//! between threads, and two handles over two different stores are independent,
+//! but a single handle must never be in two calls at once. `Store` is `Send` and
+//! not `Sync`: its catalog is a `rusqlite::Connection`, which is unsound to
+//! share across threads even for reading, so a concurrent pair of *reads*
+//! through one handle is undefined behaviour and not merely a lost update. The
+//! per-function `# Safety` sections say "must not be used concurrently"; this is
+//! what that means, and why none of them carves out an exception for readers.
+//!
+//! The error state is per-thread, which follows from the same rule: a handle's
+//! calls all happen on one thread at a time, so
+//! [`infrastore_last_error_message`] reports the call the caller just made.
+//!
+//! Two handles onto the *same* on-disk artifact are a different question,
+//! answered by SQLite and HDF5 rather than by this crate: one writer at a time,
+//! and a reader open while a writer is running may observe a partial state.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -15,6 +34,15 @@ use std::slice;
 use chrono::{DateTime, Utc};
 use infrastore_core as core_lib;
 use serde_json::Value;
+
+/// A handle may be moved between threads (see the module's Concurrency
+/// section), which holds only while the store stays `Send`. `Sync` is
+/// deliberately *not* asserted here: it does not hold, and the documented rule
+/// depends on it not holding.
+const _: () = {
+    const fn assert_send<T: Send>() {}
+    assert_send::<core_lib::Store>();
+};
 
 // ---- Status codes ---------------------------------------------------------
 
@@ -1194,9 +1222,12 @@ pub unsafe extern "C" fn infrastore_store_add_non_sequential(
 /// `out_application_data`, `out_element_type`, `out_units`, `out_quantity_kind`,
 /// `out_unit_system`, and `out_component_field` must be valid for writing its
 /// indicated value; those six may be null. The returned shape and data buffers must each be released exactly once
-/// with the matching free function and returned length, and a non-null `*out_application_data` /
-/// `*out_element_type` / `*out_units` / `*out_quantity_kind` / `*out_unit_system` /
-/// `*out_component_field` exactly once with `infrastore_string_free`.
+/// with the matching free function and returned length. `*out_resolution` is an
+/// owned string like the optional six -- it is never null on success, since a
+/// `SingleTimeSeries` always has a resolution -- and it, along with a non-null
+/// `*out_application_data` / `*out_element_type` / `*out_units` /
+/// `*out_quantity_kind` / `*out_unit_system` / `*out_component_field`, must be
+/// freed exactly once with `infrastore_string_free`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_get_single(
@@ -1564,7 +1595,8 @@ pub unsafe extern "C" fn infrastore_store_get_non_sequential(
 /// # Safety
 ///
 /// `handle` must be a live mutable store handle and `key` must be a live key handle created by this
-/// library. Neither handle may be concurrently mutated for the duration of the call.
+/// library. Neither handle may be used concurrently from another thread for the
+/// duration of the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_remove(
     handle: *mut InfraStoreHandle,
@@ -1587,8 +1619,8 @@ pub unsafe extern "C" fn infrastore_store_remove(
 ///
 /// `handle` must be a live mutable store handle. `keys` must point to `len`
 /// valid, non-null key-handle pointers created by this library. `out_removed`
-/// must be valid for writing one `u64`. No handle may be concurrently mutated
-/// for the duration of the call.
+/// must be valid for writing one `u64`. No handle may be used concurrently from
+/// another thread for the duration of the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_remove_bulk(
     handle: *mut InfraStoreHandle,
@@ -1697,8 +1729,9 @@ pub unsafe extern "C" fn infrastore_store_counts(
 /// `handle` must be a live store handle; the filter args are plain scalars.
 /// `out_present` must be valid for writing one `bool`; `out_horizon`,
 /// `out_interval`, and `out_resolution` must each be valid for writing one
-/// `char *`; `out_count` and `out_initial_ms` must each be valid for writing one
-/// `i64`.
+/// `char *`, and each non-null result must be freed exactly once with
+/// `infrastore_string_free`; `out_count` and `out_initial_ms` must each be valid
+/// for writing one `i64`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_get_forecast_parameters(
@@ -2570,8 +2603,11 @@ unsafe fn build_key_from_attrs(
 /// `infrastore_store_list_time_series` array: `owner_id`, `owner_type`,
 /// `owner_category`, `time_series_type`, `name`, `data_hash` (64-character hex),
 /// `initial_timestamp_ms`, `resolution`, `horizon`, `interval`, `count`,
-/// `length`, `percentiles`, `dtype`, `element_shape`, `features`, `units`, and
+/// `length`, `percentiles`, `element_type`, `element_shape`, `features`,
+/// `units`, `quantity_kind`, `unit_system`, `component_field`, and
 /// `application_data`, with the fields that do not apply to the key's type set to `null`.
+/// (There is no `dtype` field; `element_type` is what says how to read the
+/// values.)
 /// That is the whole `TimeSeriesMetadata` the core holds for the association, so
 /// this one export serves every time series type — static and forecast alike.
 /// Returns `INFRASTORE_ERR_NOT_FOUND` when the key names no stored association.
@@ -2719,8 +2755,8 @@ pub unsafe extern "C" fn infrastore_store_has_for_owner(
 /// # Safety
 ///
 /// `handle` must be a live store handle. The scalar filter flags/values are
-/// plain scalars. `name`, `resolution`, `interval`, and `features_json` must
-/// each be null or a null-terminated UTF-8 string. `out_present` must be valid
+/// plain scalars. `name`, `name_glob`, `resolution`, `interval`, and
+/// `features_json` must each be null or a null-terminated UTF-8 string. `out_present` must be valid
 /// for writing one `bool`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
@@ -2733,6 +2769,7 @@ pub unsafe extern "C" fn infrastore_store_has_any_by_filter(
     has_time_series_type: bool,
     time_series_type: i32,
     name: *const c_char,
+    name_glob: *const c_char,
     resolution: *const c_char,
     interval: *const c_char,
     features_json: *const c_char,
@@ -2753,6 +2790,7 @@ pub unsafe extern "C" fn infrastore_store_has_any_by_filter(
             has_time_series_type,
             time_series_type,
             name,
+            name_glob,
             resolution,
             interval,
             features_json,
@@ -2851,8 +2889,9 @@ pub unsafe extern "C" fn infrastore_store_get_array_by_hash(
 ///
 /// # Safety
 ///
-/// - `handle` must be a live, non-null store handle created by this library; no
-///   concurrent mutation is permitted for the duration of the call.
+/// - `handle` must be a live, non-null store handle created by this library, and
+///   must not be used concurrently from another thread for the duration of the
+///   call (see the module's Concurrency section: reads are not an exception).
 /// - `data_hash` must be non-null and point to at least 32 readable bytes.
 /// - `out_sts` and `out_dst` must each be valid for writing one `u64`.
 #[unsafe(no_mangle)]
@@ -4003,9 +4042,10 @@ pub unsafe extern "C" fn infrastore_bulk_result_len(
 /// must be less than its length. Every output pointer except `out_application_data`,
 /// `out_element_type`, `out_units`, `out_quantity_kind`, `out_unit_system`, and
 /// `out_component_field` must be valid for writing its indicated value; those
-/// six may be null, and a non-null `*out_application_data` / `*out_element_type`
-/// / `*out_units` / `*out_quantity_kind` / `*out_unit_system` /
-/// `*out_component_field` must be freed exactly once with
+/// six may be null. `*out_resolution` is an owned string too -- never null on
+/// success -- and it, along with a non-null `*out_application_data` /
+/// `*out_element_type` / `*out_units` / `*out_quantity_kind` /
+/// `*out_unit_system` / `*out_component_field`, must be freed exactly once with
 /// `infrastore_string_free`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
@@ -4333,7 +4373,10 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_non_sequential(
 ///
 /// `result` must be a live bulk-read handle and `index` less than its length.
 /// Every output pointer must be valid for writing its indicated value. The
-/// returned buffers must each be released with the matching `infrastore_buffer_free_*`.
+/// returned buffers must each be released with the matching `infrastore_buffer_free_*`,
+/// and the owned strings -- `*out_resolution`, `*out_horizon`, `*out_interval`,
+/// and any non-null one of the six optional attributes -- exactly once each with
+/// `infrastore_string_free`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_bulk_result_get_forecast(
@@ -4614,8 +4657,9 @@ pub unsafe extern "C" fn infrastore_store_transform_single_time_series(
 ///
 /// # Safety
 ///
-/// - `handle` must be a live, non-null store handle created by this library.
-///   No concurrent mutation is permitted for the duration of the call.
+/// - `handle` must be a live, non-null store handle created by this library, and
+///   must not be used concurrently from another thread for the duration of the
+///   call (see the module's Concurrency section: reads are not an exception).
 /// - `owner_id` and `owner_category` (`0` = Component, `1` = SupplementalAttribute)
 ///   identify the owner. `name` must point to a valid, null-terminated
 ///   UTF-8 string for the duration of the call; `features_json` may be null.
@@ -4634,6 +4678,10 @@ pub unsafe extern "C" fn infrastore_store_transform_single_time_series(
 ///   is not `Probabilistic` the pointer is set to null and `*out_percentiles_len`
 ///   to 0, so no free is needed. When non-null it must be freed exactly once
 ///   with `infrastore_buffer_free_f64` using `*out_percentiles_len`.
+/// - `out_resolution`, `out_horizon` and `out_interval` are owned strings, not
+///   scalars: each must be valid for writing one pointer, and each non-null
+///   result must be freed exactly once with `infrastore_string_free`. They are
+///   set on success for every forecast type.
 /// - `out_application_data` may be null (the metadata lookup is skipped); when non-null it
 ///   must be valid for writing one pointer, and a non-null `*out_application_data` must be
 ///   freed exactly once with `infrastore_string_free`.
@@ -4969,8 +5017,10 @@ unsafe fn emit_forecast_data(
 ///
 /// # Safety
 ///
-/// - `handle` and `key` must be live handles created by this library; no
-///   concurrent mutation is permitted for the duration of the call.
+/// - `handle` and `key` must be live handles created by this library, and
+///   neither may be used concurrently from another thread for the duration of
+///   the call (see the module's Concurrency section: reads are not an
+///   exception).
 /// - All `out_*` scalar pointers, including `out_matched_type`, must be valid
 ///   for writing one value each.
 /// - `out_dims` must be valid for writing one pointer; the returned pointer must
@@ -4981,6 +5031,10 @@ unsafe fn emit_forecast_data(
 ///   not `Probabilistic` the pointer is set to null and `*out_percentiles_len`
 ///   to 0, so no free is needed. When non-null it must be freed exactly once
 ///   with `infrastore_buffer_free_f64` using `*out_percentiles_len`.
+/// - `out_resolution`, `out_horizon` and `out_interval` are owned strings, not
+///   scalars: each must be valid for writing one pointer, and each non-null
+///   result must be freed exactly once with `infrastore_string_free`. They are
+///   set on success for every forecast type.
 /// - `out_application_data` may be null (the metadata lookup is skipped); when non-null it
 ///   must be valid for writing one pointer, and a non-null `*out_application_data` must be
 ///   freed exactly once with `infrastore_string_free`.
@@ -5288,7 +5342,7 @@ pub unsafe extern "C" fn infrastore_store_get_time_series_keys(
 // Serialize keys to a JSON array. Each object carries the identity tuple
 // (`owner_id`, `owner_category`, `time_series_type`, `name`, `resolution`,
 // `features`) plus the per-variant descriptive snapshot. Physical storage detail
-// (`data_hash`, `dtype`, `application_data`, `percentiles`) is deliberately absent —
+// (`data_hash`, `element_type`, `application_data`, `percentiles`) is deliberately absent —
 // it is read on demand via the metadata read descriptors.
 /// Build the JSON object for one key (the per-row shape shared by
 /// `keys_to_json` and `keys_with_hash_to_json`).
@@ -5488,6 +5542,9 @@ fn metadata_to_map(m: &core_lib::TimeSeriesMetadata) -> serde_json::Map<String, 
 /// - `owner_id` / `owner_category` (`0` = Component, `1` = SupplementalAttribute)
 /// - `time_series_type` (the `INFRASTORE_TYPE_*` code)
 /// - `name` (null = no name filter)
+/// - `name_glob` (null = no glob filter; a SQLite `GLOB` pattern over the name,
+///   e.g. `wind_*`. Case-sensitive, and composes with `name` rather than
+///   replacing it — set both and a row must satisfy both.)
 /// - `resolution` (empty/null = no resolution filter)
 /// - `interval` (empty/null = no interval filter; forecasts only — static rows
 ///   have no interval and never match an interval filter)
@@ -5506,8 +5563,8 @@ fn metadata_to_map(m: &core_lib::TimeSeriesMetadata) -> serde_json::Map<String, 
 /// # Safety
 ///
 /// `handle` must be a live store handle. The scalar filter flags/values are plain
-/// scalars. `name`, `component_field`, and `features_json` must each be null or a
-/// null-terminated UTF-8 string. `out_json` must be valid for writing one pointer
+/// scalars. `name`, `name_glob`, `component_field`, and `features_json` must each
+/// be null or a null-terminated UTF-8 string. `out_json` must be valid for writing one pointer
 /// and `out_len` for writing one `u64`; on success `*out_json` must be released
 /// exactly once with `infrastore_string_free`.
 #[unsafe(no_mangle)]
@@ -5521,6 +5578,7 @@ pub unsafe extern "C" fn infrastore_store_list_keys(
     has_time_series_type: bool,
     time_series_type: i32,
     name: *const c_char,
+    name_glob: *const c_char,
     resolution: *const c_char,
     interval: *const c_char,
     features_json: *const c_char,
@@ -5543,6 +5601,7 @@ pub unsafe extern "C" fn infrastore_store_list_keys(
             has_time_series_type,
             time_series_type,
             name,
+            name_glob,
             resolution,
             interval,
             features_json,
@@ -5561,9 +5620,15 @@ pub unsafe extern "C" fn infrastore_store_list_keys(
 }
 
 /// List full time-series metadata rows as a JSON array (see `metadata_to_map`
-/// for the per-row shape: the key fields plus `data_hash`, `dtype`,
-/// `element_shape`, `percentiles`, `units`, and `application_data`). Filters and the
-/// owned-string return (freed with `infrastore_string_free`) match `infrastore_store_list_keys`.
+/// for the per-row shape: the key fields plus `data_hash`,
+/// `initial_timestamp_ms`, `horizon`, `interval`, `count`, `length`,
+/// `percentiles`, `element_type`, `element_shape`, `units`, `quantity_kind`,
+/// `unit_system`, `component_field`, and `application_data`). There is no
+/// `dtype` field -- an earlier version of this line named one, and no row has
+/// ever carried it; `element_type` is what says how to read the values, and a
+/// value read reports the physical dtype through its own `out_dtype`. Filters
+/// and the owned-string return (freed with `infrastore_string_free`) match
+/// `infrastore_store_list_keys`.
 ///
 /// # Safety
 ///
@@ -5579,6 +5644,7 @@ pub unsafe extern "C" fn infrastore_store_list_time_series(
     has_time_series_type: bool,
     time_series_type: i32,
     name: *const c_char,
+    name_glob: *const c_char,
     resolution: *const c_char,
     interval: *const c_char,
     features_json: *const c_char,
@@ -5601,6 +5667,7 @@ pub unsafe extern "C" fn infrastore_store_list_time_series(
             has_time_series_type,
             time_series_type,
             name,
+            name_glob,
             resolution,
             interval,
             features_json,
@@ -5640,6 +5707,7 @@ pub unsafe extern "C" fn infrastore_store_list_names(
     has_time_series_type: bool,
     time_series_type: i32,
     name: *const c_char,
+    name_glob: *const c_char,
     resolution: *const c_char,
     interval: *const c_char,
     features_json: *const c_char,
@@ -5662,6 +5730,7 @@ pub unsafe extern "C" fn infrastore_store_list_names(
             has_time_series_type,
             time_series_type,
             name,
+            name_glob,
             resolution,
             interval,
             features_json,
@@ -5697,6 +5766,7 @@ pub unsafe extern "C" fn infrastore_store_list_owner_types(
     has_time_series_type: bool,
     time_series_type: i32,
     name: *const c_char,
+    name_glob: *const c_char,
     resolution: *const c_char,
     interval: *const c_char,
     features_json: *const c_char,
@@ -5719,6 +5789,7 @@ pub unsafe extern "C" fn infrastore_store_list_owner_types(
             has_time_series_type,
             time_series_type,
             name,
+            name_glob,
             resolution,
             interval,
             features_json,
@@ -5755,6 +5826,7 @@ pub unsafe extern "C" fn infrastore_store_remove_by_filter(
     has_time_series_type: bool,
     time_series_type: i32,
     name: *const c_char,
+    name_glob: *const c_char,
     resolution: *const c_char,
     interval: *const c_char,
     features_json: *const c_char,
@@ -5776,6 +5848,7 @@ pub unsafe extern "C" fn infrastore_store_remove_by_filter(
             has_time_series_type,
             time_series_type,
             name,
+            name_glob,
             resolution,
             interval,
             features_json,
@@ -5936,9 +6009,9 @@ pub unsafe extern "C" fn infrastore_store_resolve_forecast_key(
 ///
 /// # Safety
 ///
-/// `name`, `component_field`, and `features_json` must each be null or a
-/// null-terminated UTF-8 string; `resolution` and `interval` must each be null or
-/// a null-terminated ISO-8601 period.
+/// `name`, `name_glob`, `component_field`, and `features_json` must each be null
+/// or a null-terminated UTF-8 string; `resolution` and `interval` must each be
+/// null or a null-terminated ISO-8601 period.
 #[allow(clippy::too_many_arguments)]
 unsafe fn build_list_filter(
     has_owner: bool,
@@ -5948,6 +6021,7 @@ unsafe fn build_list_filter(
     has_time_series_type: bool,
     time_series_type: i32,
     name: *const c_char,
+    name_glob: *const c_char,
     resolution: *const c_char,
     interval: *const c_char,
     features_json: *const c_char,
@@ -5982,6 +6056,14 @@ unsafe fn build_list_filter(
         Ok(None) => {}
         Err(c) => {
             set_error("name is not valid UTF-8");
+            return Err(c);
+        }
+    }
+    match unsafe { cstr_to_optional_string(name_glob) } {
+        Ok(Some(g)) => filter = filter.name_glob(g),
+        Ok(None) => {}
+        Err(c) => {
+            set_error("name_glob is not valid UTF-8");
             return Err(c);
         }
     }
@@ -6022,7 +6104,7 @@ unsafe fn build_list_filter(
 /// # Safety
 ///
 /// Identical to `infrastore_store_list_keys`: `handle` must be a live store handle;
-/// `name` / `features_json` / `resolution` must each be null or a
+/// `name` / `name_glob` / `features_json` / `resolution` must each be null or a
 /// null-terminated UTF-8 string; `out_json` must be valid for writing one pointer
 /// and `out_len` for writing one `u64`; on success `*out_json` must be released
 /// exactly once with `infrastore_string_free`.
@@ -6037,6 +6119,7 @@ pub unsafe extern "C" fn infrastore_store_list_array_groups(
     has_time_series_type: bool,
     time_series_type: i32,
     name: *const c_char,
+    name_glob: *const c_char,
     resolution: *const c_char,
     interval: *const c_char,
     features_json: *const c_char,
@@ -6059,6 +6142,7 @@ pub unsafe extern "C" fn infrastore_store_list_array_groups(
             has_time_series_type,
             time_series_type,
             name,
+            name_glob,
             resolution,
             interval,
             features_json,
@@ -6124,14 +6208,21 @@ fn features_to_json(features: &core_lib::Features) -> String {
 /// bytes. Each returned string is NUL-terminated and truncated to its capacity;
 /// the reported length is always the untruncated byte length.
 ///
+/// `out_resolution` is the one output that does not follow that convention: it
+/// is a fresh owned allocation on **every** call that passes it, probe included.
+/// Pass null on the probe call -- the documented two-call flow would otherwise
+/// allocate a resolution string the caller has no reason to keep, and leak it.
+///
 /// # Safety
 ///
 /// `key` must be a live key handle created by this library. `out_type`,
-/// `out_resolution`, `out_owner_id`, `out_owner_category`, `out_name_len`, and
-/// `out_features_len` must each be valid for writing one value. `out_owner_category`
-/// receives `0` (Component) or `1` (SupplementalAttribute). `name_buf` /
-/// `features_buf` may be null; when non-null they must be valid for writing
-/// `name_cap` / `features_cap` bytes respectively.
+/// `out_owner_id`, `out_owner_category`, `out_name_len`, and `out_features_len`
+/// must each be valid for writing one value. `out_owner_category` receives `0`
+/// (Component) or `1` (SupplementalAttribute). `out_resolution`, `name_buf` and
+/// `features_buf` may each be null; when non-null, `out_resolution` must be
+/// valid for writing one pointer and a non-null `*out_resolution` must be freed
+/// exactly once with `infrastore_string_free`, and `name_buf` / `features_buf`
+/// must be valid for writing `name_cap` / `features_cap` bytes respectively.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_key_attributes(
@@ -6155,8 +6246,9 @@ pub unsafe extern "C" fn infrastore_key_attributes(
             return INFRASTORE_ERR_NULL_POINTER;
         }
     };
+    // `out_resolution` is deliberately absent: it is optional, so a probe call
+    // need not allocate a string it is going to discard.
     if out_type.is_null()
-        || out_resolution.is_null()
         || out_owner_id.is_null()
         || out_owner_category.is_null()
         || out_name_len.is_null()
@@ -6172,7 +6264,9 @@ pub unsafe extern "C" fn infrastore_key_attributes(
     };
     unsafe {
         *out_type = time_series_type_to_int(k.time_series_type);
-        *out_resolution = opt_period_cstr(k.resolution);
+        if !out_resolution.is_null() {
+            *out_resolution = opt_period_cstr(k.resolution);
+        }
         *out_owner_id = k.owner_id;
         *out_owner_category = category_code;
         write_str_out(&k.name, name_buf, name_cap, out_name_len);
@@ -7431,8 +7525,14 @@ pub struct InfraStoreForecastReaderHandle {
 }
 
 /// Build a [`core_lib::ListFilter`] from the reader build arguments shared by
-/// both readers (owner / category / name / resolution / features /
+/// both readers (owner / category / name / name_glob / resolution / features /
 /// component_field). The time-series type is set by the caller, not here.
+///
+/// # Safety
+///
+/// `name`, `name_glob`, `component_field`, and `features_json` must each be null
+/// or a null-terminated UTF-8 string; `resolution` must be null or a
+/// null-terminated ISO-8601 period.
 #[allow(clippy::too_many_arguments)]
 unsafe fn reader_filter(
     has_owner: bool,
@@ -7440,6 +7540,7 @@ unsafe fn reader_filter(
     has_owner_category: bool,
     owner_category: i32,
     name: *const c_char,
+    name_glob: *const c_char,
     resolution: *const c_char,
     features_json: *const c_char,
     component_field: *const c_char,
@@ -7464,6 +7565,14 @@ unsafe fn reader_filter(
         Ok(None) => {}
         Err(c) => {
             set_error("name is not valid UTF-8");
+            return Err(c);
+        }
+    }
+    match unsafe { cstr_to_optional_string(name_glob) } {
+        Ok(Some(g)) => filter = filter.name_glob(g),
+        Ok(None) => {}
+        Err(c) => {
+            set_error("name_glob is not valid UTF-8");
             return Err(c);
         }
     }
@@ -7506,7 +7615,8 @@ unsafe fn write_i64_slice_out(values: &[i64], buf: *mut i64, cap: u64, out_len: 
 // ---- StaticReader ---------------------------------------------------------
 
 /// Build a [`InfraStoreStaticReaderHandle`] over the static series matching the
-/// filter.
+/// filter. The filter arguments are `infrastore_store_list_keys`', minus the
+/// interval (a static series has none) -- `name_glob` included.
 ///
 /// `time_series_type` is a `TimeSeriesType` discriminant and selects the two
 /// shapes a reader can take:
@@ -7523,10 +7633,11 @@ unsafe fn write_i64_slice_out(values: &[i64], buf: *mut i64, cap: u64, out_len: 
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. `name` / `resolution` / `features_json`
-/// must be null or valid null-terminated UTF-8. `out_reader` must be valid for
-/// writing one pointer; the returned handle must be freed exactly once with
-/// `infrastore_static_reader_free`.
+/// `handle` must be a live store handle. `name` / `name_glob` / `resolution` /
+/// `features_json` / `component_field` -- every string argument -- must be null
+/// or valid null-terminated UTF-8, and must stay readable for the duration of
+/// the call. `out_reader` must be valid for writing one pointer; the returned
+/// handle must be freed exactly once with `infrastore_static_reader_free`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_build_static_reader(
@@ -7537,6 +7648,7 @@ pub unsafe extern "C" fn infrastore_store_build_static_reader(
     has_owner_category: bool,
     owner_category: i32,
     name: *const c_char,
+    name_glob: *const c_char,
     resolution: *const c_char,
     features_json: *const c_char,
     component_field: *const c_char,
@@ -7568,6 +7680,7 @@ pub unsafe extern "C" fn infrastore_store_build_static_reader(
             has_owner_category,
             owner_category,
             name,
+            name_glob,
             resolution,
             features_json,
             component_field,
@@ -7887,6 +8000,8 @@ pub unsafe extern "C" fn infrastore_static_reader_free(reader: *mut InfraStoreSt
 // ---- ForecastReader -------------------------------------------------------
 
 /// Build a [`InfraStoreForecastReaderHandle`] over the forecasts matching the filter.
+/// The filter arguments are `infrastore_store_list_keys`', minus the interval --
+/// `name_glob` included.
 /// `time_series_type` must be a forecast type; a `Deterministic` reader also
 /// includes `DeterministicSingleTimeSeries`, matching the read request rule.
 /// `resolution` must be positive; matched forecasts must share one window
@@ -7894,9 +8009,11 @@ pub unsafe extern "C" fn infrastore_static_reader_free(reader: *mut InfraStoreSt
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. `name` / `features_json` must be null
-/// or valid null-terminated UTF-8. `out_reader` must be valid for writing one
-/// pointer; free the result with `infrastore_forecast_reader_free`.
+/// `handle` must be a live store handle. `name` / `name_glob` / `resolution` /
+/// `features_json` / `component_field` -- every string argument -- must be null
+/// or valid null-terminated UTF-8, and must stay readable for the duration of
+/// the call. `out_reader` must be valid for writing one pointer; free the result
+/// with `infrastore_forecast_reader_free`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_build_forecast_reader(
@@ -7907,6 +8024,7 @@ pub unsafe extern "C" fn infrastore_store_build_forecast_reader(
     owner_category: i32,
     time_series_type: i32,
     name: *const c_char,
+    name_glob: *const c_char,
     resolution: *const c_char,
     features_json: *const c_char,
     component_field: *const c_char,
@@ -7938,6 +8056,7 @@ pub unsafe extern "C" fn infrastore_store_build_forecast_reader(
             has_owner_category,
             owner_category,
             name,
+            name_glob,
             resolution,
             features_json,
             component_field,
@@ -8314,6 +8433,7 @@ mod reader_ffi_tests {
                 false,
                 0,
                 ptr::null(),
+                ptr::null(), // name_glob
                 hour.as_ptr(),
                 ptr::null(),
                 ptr::null(),
@@ -8431,6 +8551,7 @@ mod reader_ffi_tests {
                 0,
                 2, // Deterministic
                 ptr::null(),
+                ptr::null(), // name_glob
                 hour.as_ptr(),
                 ptr::null(),
                 ptr::null(),
@@ -9133,6 +9254,7 @@ mod abi_tests {
                     false,
                     0,
                     ptr::null(),
+                    ptr::null(), // name_glob
                     res.as_ptr(),
                     ptr::null(),
                     ptr::null(),
@@ -9157,6 +9279,7 @@ mod abi_tests {
                     false,
                     0,
                     ptr::null(),
+                    ptr::null(), // name_glob
                     res.as_ptr(),
                     ptr::null(),
                     ptr::null(),
@@ -9248,6 +9371,7 @@ mod abi_tests {
                     false,
                     0,
                     ptr::null(),
+                    ptr::null(), // name_glob
                     ptr::null(),
                     ptr::null(),
                     ptr::null(),
@@ -9751,6 +9875,7 @@ mod abi_tests {
                     false,
                     0,
                     ptr::null(),
+                    ptr::null(), // name_glob
                     res.as_ptr(),
                     ptr::null(),
                     ptr::null(),
@@ -9822,6 +9947,7 @@ mod abi_tests {
                     false,
                     0,
                     ptr::null(),
+                    ptr::null(), // name_glob
                     res.as_ptr(),
                     ptr::null(),
                     ptr::null(),
@@ -9889,6 +10015,7 @@ mod abi_tests {
                     0,
                     2, // Deterministic
                     ptr::null(),
+                    ptr::null(), // name_glob
                     res.as_ptr(),
                     ptr::null(),
                     ptr::null(),
@@ -10070,6 +10197,7 @@ mod abi_tests {
                     false,
                     0,
                     ptr::null(),
+                    ptr::null(), // name_glob
                     ptr::null(),
                     ptr::null(),
                     ptr::null(),

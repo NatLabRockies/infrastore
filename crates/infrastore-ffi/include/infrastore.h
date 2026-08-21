@@ -383,9 +383,12 @@ int32_t infrastore_store_add_non_sequential(struct InfraStore *handle,
  * `out_application_data`, `out_element_type`, `out_units`, `out_quantity_kind`,
  * `out_unit_system`, and `out_component_field` must be valid for writing its
  * indicated value; those six may be null. The returned shape and data buffers must each be released exactly once
- * with the matching free function and returned length, and a non-null `*out_application_data` /
- * `*out_element_type` / `*out_units` / `*out_quantity_kind` / `*out_unit_system` /
- * `*out_component_field` exactly once with `infrastore_string_free`.
+ * with the matching free function and returned length. `*out_resolution` is an
+ * owned string like the optional six -- it is never null on success, since a
+ * `SingleTimeSeries` always has a resolution -- and it, along with a non-null
+ * `*out_application_data` / `*out_element_type` / `*out_units` /
+ * `*out_quantity_kind` / `*out_unit_system` / `*out_component_field`, must be
+ * freed exactly once with `infrastore_string_free`.
  */
 int32_t infrastore_store_get_single(const struct InfraStore *handle,
                                     const struct InfraStoreKey *key,
@@ -475,7 +478,8 @@ int32_t infrastore_store_get_non_sequential(const struct InfraStore *handle,
  * # Safety
  *
  * `handle` must be a live mutable store handle and `key` must be a live key handle created by this
- * library. Neither handle may be concurrently mutated for the duration of the call.
+ * library. Neither handle may be used concurrently from another thread for the
+ * duration of the call.
  */
 int32_t infrastore_store_remove(struct InfraStore *handle, const struct InfraStoreKey *key);
 
@@ -488,8 +492,8 @@ int32_t infrastore_store_remove(struct InfraStore *handle, const struct InfraSto
  *
  * `handle` must be a live mutable store handle. `keys` must point to `len`
  * valid, non-null key-handle pointers created by this library. `out_removed`
- * must be valid for writing one `u64`. No handle may be concurrently mutated
- * for the duration of the call.
+ * must be valid for writing one `u64`. No handle may be used concurrently from
+ * another thread for the duration of the call.
  */
 int32_t infrastore_store_remove_bulk(struct InfraStore *handle,
                                      const struct InfraStoreKey *const *keys,
@@ -537,8 +541,9 @@ int32_t infrastore_store_counts(const struct InfraStore *handle,
  * `handle` must be a live store handle; the filter args are plain scalars.
  * `out_present` must be valid for writing one `bool`; `out_horizon`,
  * `out_interval`, and `out_resolution` must each be valid for writing one
- * `char *`; `out_count` and `out_initial_ms` must each be valid for writing one
- * `i64`.
+ * `char *`, and each non-null result must be freed exactly once with
+ * `infrastore_string_free`; `out_count` and `out_initial_ms` must each be valid
+ * for writing one `i64`.
  */
 int32_t infrastore_store_get_forecast_parameters(const struct InfraStore *handle,
                                                  const char *filter_resolution,
@@ -899,8 +904,11 @@ int32_t infrastore_store_persist_catalog(struct InfraStore *handle);
  * `infrastore_store_list_time_series` array: `owner_id`, `owner_type`,
  * `owner_category`, `time_series_type`, `name`, `data_hash` (64-character hex),
  * `initial_timestamp_ms`, `resolution`, `horizon`, `interval`, `count`,
- * `length`, `percentiles`, `dtype`, `element_shape`, `features`, `units`, and
+ * `length`, `percentiles`, `element_type`, `element_shape`, `features`,
+ * `units`, `quantity_kind`, `unit_system`, `component_field`, and
  * `application_data`, with the fields that do not apply to the key's type set to `null`.
+ * (There is no `dtype` field; `element_type` is what says how to read the
+ * values.)
  * That is the whole `TimeSeriesMetadata` the core holds for the association, so
  * this one export serves every time series type — static and forecast alike.
  * Returns `INFRASTORE_ERR_NOT_FOUND` when the key names no stored association.
@@ -971,8 +979,8 @@ int32_t infrastore_store_has_for_owner(const struct InfraStore *handle,
  * # Safety
  *
  * `handle` must be a live store handle. The scalar filter flags/values are
- * plain scalars. `name`, `resolution`, `interval`, and `features_json` must
- * each be null or a null-terminated UTF-8 string. `out_present` must be valid
+ * plain scalars. `name`, `name_glob`, `resolution`, `interval`, and
+ * `features_json` must each be null or a null-terminated UTF-8 string. `out_present` must be valid
  * for writing one `bool`.
  */
 int32_t infrastore_store_has_any_by_filter(const struct InfraStore *handle,
@@ -983,6 +991,7 @@ int32_t infrastore_store_has_any_by_filter(const struct InfraStore *handle,
                                            bool has_time_series_type,
                                            int32_t time_series_type,
                                            const char *name,
+                                           const char *name_glob,
                                            const char *resolution,
                                            const char *interval,
                                            const char *features_json,
@@ -1032,8 +1041,9 @@ int32_t infrastore_store_get_array_by_hash(const struct InfraStore *handle,
  *
  * # Safety
  *
- * - `handle` must be a live, non-null store handle created by this library; no
- *   concurrent mutation is permitted for the duration of the call.
+ * - `handle` must be a live, non-null store handle created by this library, and
+ *   must not be used concurrently from another thread for the duration of the
+ *   call (see the module's Concurrency section: reads are not an exception).
  * - `data_hash` must be non-null and point to at least 32 readable bytes.
  * - `out_sts` and `out_dst` must each be valid for writing one `u64`.
  */
@@ -1344,9 +1354,10 @@ int64_t infrastore_bulk_result_len(const struct InfraStoreBulkReadHandle *result
  * must be less than its length. Every output pointer except `out_application_data`,
  * `out_element_type`, `out_units`, `out_quantity_kind`, `out_unit_system`, and
  * `out_component_field` must be valid for writing its indicated value; those
- * six may be null, and a non-null `*out_application_data` / `*out_element_type`
- * / `*out_units` / `*out_quantity_kind` / `*out_unit_system` /
- * `*out_component_field` must be freed exactly once with
+ * six may be null. `*out_resolution` is an owned string too -- never null on
+ * success -- and it, along with a non-null `*out_application_data` /
+ * `*out_element_type` / `*out_units` / `*out_quantity_kind` /
+ * `*out_unit_system` / `*out_component_field`, must be freed exactly once with
  * `infrastore_string_free`.
  */
 int32_t infrastore_bulk_result_get_single(const struct InfraStoreBulkReadHandle *result,
@@ -1455,7 +1466,10 @@ int32_t infrastore_bulk_result_get_non_sequential(const struct InfraStoreBulkRea
  *
  * `result` must be a live bulk-read handle and `index` less than its length.
  * Every output pointer must be valid for writing its indicated value. The
- * returned buffers must each be released with the matching `infrastore_buffer_free_*`.
+ * returned buffers must each be released with the matching `infrastore_buffer_free_*`,
+ * and the owned strings -- `*out_resolution`, `*out_horizon`, `*out_interval`,
+ * and any non-null one of the six optional attributes -- exactly once each with
+ * `infrastore_string_free`.
  */
 int32_t infrastore_bulk_result_get_forecast(const struct InfraStoreBulkReadHandle *result,
                                             uint64_t index,
@@ -1577,8 +1591,9 @@ int32_t infrastore_store_transform_single_time_series(struct InfraStore *handle,
  *
  * # Safety
  *
- * - `handle` must be a live, non-null store handle created by this library.
- *   No concurrent mutation is permitted for the duration of the call.
+ * - `handle` must be a live, non-null store handle created by this library, and
+ *   must not be used concurrently from another thread for the duration of the
+ *   call (see the module's Concurrency section: reads are not an exception).
  * - `owner_id` and `owner_category` (`0` = Component, `1` = SupplementalAttribute)
  *   identify the owner. `name` must point to a valid, null-terminated
  *   UTF-8 string for the duration of the call; `features_json` may be null.
@@ -1597,6 +1612,10 @@ int32_t infrastore_store_transform_single_time_series(struct InfraStore *handle,
  *   is not `Probabilistic` the pointer is set to null and `*out_percentiles_len`
  *   to 0, so no free is needed. When non-null it must be freed exactly once
  *   with `infrastore_buffer_free_f64` using `*out_percentiles_len`.
+ * - `out_resolution`, `out_horizon` and `out_interval` are owned strings, not
+ *   scalars: each must be valid for writing one pointer, and each non-null
+ *   result must be freed exactly once with `infrastore_string_free`. They are
+ *   set on success for every forecast type.
  * - `out_application_data` may be null (the metadata lookup is skipped); when non-null it
  *   must be valid for writing one pointer, and a non-null `*out_application_data` must be
  *   freed exactly once with `infrastore_string_free`.
@@ -1657,8 +1676,10 @@ int32_t infrastore_store_get_forecast(const struct InfraStore *handle,
  *
  * # Safety
  *
- * - `handle` and `key` must be live handles created by this library; no
- *   concurrent mutation is permitted for the duration of the call.
+ * - `handle` and `key` must be live handles created by this library, and
+ *   neither may be used concurrently from another thread for the duration of
+ *   the call (see the module's Concurrency section: reads are not an
+ *   exception).
  * - All `out_*` scalar pointers, including `out_matched_type`, must be valid
  *   for writing one value each.
  * - `out_dims` must be valid for writing one pointer; the returned pointer must
@@ -1669,6 +1690,10 @@ int32_t infrastore_store_get_forecast(const struct InfraStore *handle,
  *   not `Probabilistic` the pointer is set to null and `*out_percentiles_len`
  *   to 0, so no free is needed. When non-null it must be freed exactly once
  *   with `infrastore_buffer_free_f64` using `*out_percentiles_len`.
+ * - `out_resolution`, `out_horizon` and `out_interval` are owned strings, not
+ *   scalars: each must be valid for writing one pointer, and each non-null
+ *   result must be freed exactly once with `infrastore_string_free`. They are
+ *   set on success for every forecast type.
  * - `out_application_data` may be null (the metadata lookup is skipped); when non-null it
  *   must be valid for writing one pointer, and a non-null `*out_application_data` must be
  *   freed exactly once with `infrastore_string_free`.
@@ -1769,6 +1794,9 @@ int32_t infrastore_store_get_time_series_keys(const struct InfraStore *handle,
  * - `owner_id` / `owner_category` (`0` = Component, `1` = SupplementalAttribute)
  * - `time_series_type` (the `INFRASTORE_TYPE_*` code)
  * - `name` (null = no name filter)
+ * - `name_glob` (null = no glob filter; a SQLite `GLOB` pattern over the name,
+ *   e.g. `wind_*`. Case-sensitive, and composes with `name` rather than
+ *   replacing it — set both and a row must satisfy both.)
  * - `resolution` (empty/null = no resolution filter)
  * - `interval` (empty/null = no interval filter; forecasts only — static rows
  *   have no interval and never match an interval filter)
@@ -1787,8 +1815,8 @@ int32_t infrastore_store_get_time_series_keys(const struct InfraStore *handle,
  * # Safety
  *
  * `handle` must be a live store handle. The scalar filter flags/values are plain
- * scalars. `name`, `component_field`, and `features_json` must each be null or a
- * null-terminated UTF-8 string. `out_json` must be valid for writing one pointer
+ * scalars. `name`, `name_glob`, `component_field`, and `features_json` must each
+ * be null or a null-terminated UTF-8 string. `out_json` must be valid for writing one pointer
  * and `out_len` for writing one `u64`; on success `*out_json` must be released
  * exactly once with `infrastore_string_free`.
  */
@@ -1800,6 +1828,7 @@ int32_t infrastore_store_list_keys(const struct InfraStore *handle,
                                    bool has_time_series_type,
                                    int32_t time_series_type,
                                    const char *name,
+                                   const char *name_glob,
                                    const char *resolution,
                                    const char *interval,
                                    const char *features_json,
@@ -1809,9 +1838,15 @@ int32_t infrastore_store_list_keys(const struct InfraStore *handle,
 
 /**
  * List full time-series metadata rows as a JSON array (see `metadata_to_map`
- * for the per-row shape: the key fields plus `data_hash`, `dtype`,
- * `element_shape`, `percentiles`, `units`, and `application_data`). Filters and the
- * owned-string return (freed with `infrastore_string_free`) match `infrastore_store_list_keys`.
+ * for the per-row shape: the key fields plus `data_hash`,
+ * `initial_timestamp_ms`, `horizon`, `interval`, `count`, `length`,
+ * `percentiles`, `element_type`, `element_shape`, `units`, `quantity_kind`,
+ * `unit_system`, `component_field`, and `application_data`). There is no
+ * `dtype` field -- an earlier version of this line named one, and no row has
+ * ever carried it; `element_type` is what says how to read the values, and a
+ * value read reports the physical dtype through its own `out_dtype`. Filters
+ * and the owned-string return (freed with `infrastore_string_free`) match
+ * `infrastore_store_list_keys`.
  *
  * # Safety
  *
@@ -1825,6 +1860,7 @@ int32_t infrastore_store_list_time_series(const struct InfraStore *handle,
                                           bool has_time_series_type,
                                           int32_t time_series_type,
                                           const char *name,
+                                          const char *name_glob,
                                           const char *resolution,
                                           const char *interval,
                                           const char *features_json,
@@ -1849,6 +1885,7 @@ int32_t infrastore_store_list_names(const struct InfraStore *handle,
                                     bool has_time_series_type,
                                     int32_t time_series_type,
                                     const char *name,
+                                    const char *name_glob,
                                     const char *resolution,
                                     const char *interval,
                                     const char *features_json,
@@ -1873,6 +1910,7 @@ int32_t infrastore_store_list_owner_types(const struct InfraStore *handle,
                                           bool has_time_series_type,
                                           int32_t time_series_type,
                                           const char *name,
+                                          const char *name_glob,
                                           const char *resolution,
                                           const char *interval,
                                           const char *features_json,
@@ -1898,6 +1936,7 @@ int32_t infrastore_store_remove_by_filter(struct InfraStore *handle,
                                           bool has_time_series_type,
                                           int32_t time_series_type,
                                           const char *name,
+                                          const char *name_glob,
                                           const char *resolution,
                                           const char *interval,
                                           const char *features_json,
@@ -1967,7 +2006,7 @@ int32_t infrastore_store_resolve_forecast_key(const struct InfraStore *handle,
  * # Safety
  *
  * Identical to `infrastore_store_list_keys`: `handle` must be a live store handle;
- * `name` / `features_json` / `resolution` must each be null or a
+ * `name` / `name_glob` / `features_json` / `resolution` must each be null or a
  * null-terminated UTF-8 string; `out_json` must be valid for writing one pointer
  * and `out_len` for writing one `u64`; on success `*out_json` must be released
  * exactly once with `infrastore_string_free`.
@@ -1980,6 +2019,7 @@ int32_t infrastore_store_list_array_groups(const struct InfraStore *handle,
                                            bool has_time_series_type,
                                            int32_t time_series_type,
                                            const char *name,
+                                           const char *name_glob,
                                            const char *resolution,
                                            const char *interval,
                                            const char *features_json,
@@ -2017,14 +2057,21 @@ void infrastore_keys_buffer_free(struct InfraStoreKey **ptr, uint64_t len);
  * bytes. Each returned string is NUL-terminated and truncated to its capacity;
  * the reported length is always the untruncated byte length.
  *
+ * `out_resolution` is the one output that does not follow that convention: it
+ * is a fresh owned allocation on **every** call that passes it, probe included.
+ * Pass null on the probe call -- the documented two-call flow would otherwise
+ * allocate a resolution string the caller has no reason to keep, and leak it.
+ *
  * # Safety
  *
  * `key` must be a live key handle created by this library. `out_type`,
- * `out_resolution`, `out_owner_id`, `out_owner_category`, `out_name_len`, and
- * `out_features_len` must each be valid for writing one value. `out_owner_category`
- * receives `0` (Component) or `1` (SupplementalAttribute). `name_buf` /
- * `features_buf` may be null; when non-null they must be valid for writing
- * `name_cap` / `features_cap` bytes respectively.
+ * `out_owner_id`, `out_owner_category`, `out_name_len`, and `out_features_len`
+ * must each be valid for writing one value. `out_owner_category` receives `0`
+ * (Component) or `1` (SupplementalAttribute). `out_resolution`, `name_buf` and
+ * `features_buf` may each be null; when non-null, `out_resolution` must be
+ * valid for writing one pointer and a non-null `*out_resolution` must be freed
+ * exactly once with `infrastore_string_free`, and `name_buf` / `features_buf`
+ * must be valid for writing `name_cap` / `features_cap` bytes respectively.
  */
 int32_t infrastore_key_attributes(const struct InfraStoreKey *key,
                                   int32_t *out_type,
@@ -2529,7 +2576,8 @@ int32_t infrastore_last_error_message(char *buf, uint64_t buf_len, uint64_t *nee
 
 /**
  * Build a [`InfraStoreStaticReaderHandle`] over the static series matching the
- * filter.
+ * filter. The filter arguments are `infrastore_store_list_keys`', minus the
+ * interval (a static series has none) -- `name_glob` included.
  *
  * `time_series_type` is a `TimeSeriesType` discriminant and selects the two
  * shapes a reader can take:
@@ -2546,10 +2594,11 @@ int32_t infrastore_last_error_message(char *buf, uint64_t buf_len, uint64_t *nee
  *
  * # Safety
  *
- * `handle` must be a live store handle. `name` / `resolution` / `features_json`
- * must be null or valid null-terminated UTF-8. `out_reader` must be valid for
- * writing one pointer; the returned handle must be freed exactly once with
- * `infrastore_static_reader_free`.
+ * `handle` must be a live store handle. `name` / `name_glob` / `resolution` /
+ * `features_json` / `component_field` -- every string argument -- must be null
+ * or valid null-terminated UTF-8, and must stay readable for the duration of
+ * the call. `out_reader` must be valid for writing one pointer; the returned
+ * handle must be freed exactly once with `infrastore_static_reader_free`.
  */
 int32_t infrastore_store_build_static_reader(const struct InfraStore *handle,
                                              int32_t time_series_type,
@@ -2558,6 +2607,7 @@ int32_t infrastore_store_build_static_reader(const struct InfraStore *handle,
                                              bool has_owner_category,
                                              int32_t owner_category,
                                              const char *name,
+                                             const char *name_glob,
                                              const char *resolution,
                                              const char *features_json,
                                              const char *component_field,
@@ -2690,6 +2740,8 @@ void infrastore_static_reader_free(struct InfraStoreStaticReaderHandle *reader);
 
 /**
  * Build a [`InfraStoreForecastReaderHandle`] over the forecasts matching the filter.
+ * The filter arguments are `infrastore_store_list_keys`', minus the interval --
+ * `name_glob` included.
  * `time_series_type` must be a forecast type; a `Deterministic` reader also
  * includes `DeterministicSingleTimeSeries`, matching the read request rule.
  * `resolution` must be positive; matched forecasts must share one window
@@ -2697,9 +2749,11 @@ void infrastore_static_reader_free(struct InfraStoreStaticReaderHandle *reader);
  *
  * # Safety
  *
- * `handle` must be a live store handle. `name` / `features_json` must be null
- * or valid null-terminated UTF-8. `out_reader` must be valid for writing one
- * pointer; free the result with `infrastore_forecast_reader_free`.
+ * `handle` must be a live store handle. `name` / `name_glob` / `resolution` /
+ * `features_json` / `component_field` -- every string argument -- must be null
+ * or valid null-terminated UTF-8, and must stay readable for the duration of
+ * the call. `out_reader` must be valid for writing one pointer; free the result
+ * with `infrastore_forecast_reader_free`.
  */
 int32_t infrastore_store_build_forecast_reader(const struct InfraStore *handle,
                                                bool has_owner,
@@ -2708,6 +2762,7 @@ int32_t infrastore_store_build_forecast_reader(const struct InfraStore *handle,
                                                int32_t owner_category,
                                                int32_t time_series_type,
                                                const char *name,
+                                               const char *name_glob,
                                                const char *resolution,
                                                const char *features_json,
                                                const char *component_field,

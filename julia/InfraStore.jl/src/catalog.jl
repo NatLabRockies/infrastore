@@ -221,7 +221,7 @@ end
 # `infrastore_store_remove_by_filter` FFI takes, as a tuple in argument order.
 function _filter_args(
     owner_id, owner_category, time_series_type, name, resolution, interval, features,
-    component_field=nothing,
+    component_field=nothing, name_glob=nothing,
 )
     has_owner = owner_id !== nothing
     has_category = owner_category !== nothing
@@ -234,6 +234,7 @@ function _filter_args(
         has_type,
         has_type ? _filter_type_code(time_series_type) : Int32(0),
         name === nothing ? C_NULL : String(name),
+        name_glob === nothing ? C_NULL : String(name_glob),
         _period_to_cstr(resolution),
         _period_to_cstr(interval),
         isempty(features) ? C_NULL : JSON.json(features),
@@ -259,11 +260,12 @@ function _filter_list_json(
     interval=nothing,
     features=Dict{String, Any}(),
     component_field=nothing,
+    name_glob=nothing,
 )
     fptr = dlsym(dlopen(lib_path()), fname)
-    (has_owner, owner_arg, has_category, category_arg, has_type, type_arg, name_arg, resolution_iso, interval_iso, features_json, component_field_arg) = _filter_args(
+    (has_owner, owner_arg, has_category, category_arg, has_type, type_arg, name_arg, name_glob_arg, resolution_iso, interval_iso, features_json, component_field_arg) = _filter_args(
         owner_id, owner_category, time_series_type, name, resolution, interval, features,
-        component_field,
+        component_field, name_glob,
     )
     return _owned_str(
         (out_json, out_len) -> @ccall $fptr(
@@ -275,6 +277,7 @@ function _filter_list_json(
             has_type::Bool,
             type_arg::Int32,
             name_arg::Cstring,
+            name_glob_arg::Cstring,
             resolution_iso::Cstring,
             interval_iso::Cstring,
             features_json::Cstring,
@@ -298,6 +301,8 @@ filters, as [`KeyRow`](@ref)s. With no filter set the whole store is listed.
   `transform_single_time_series!` derives; each row still reports its own stored
   type, and passing `DeterministicSingleTimeSeries` selects only those.
 - `name` — exact association name.
+- `name_glob` — a SQLite `GLOB` pattern over the name (e.g. `"wind_*"`),
+  case-sensitive. Composes with `name` rather than replacing it.
 - `resolution` — a `Period`.
 - `interval` — a `Period`; forecasts only (static rows carry no interval and
   never match an interval filter).
@@ -363,10 +368,11 @@ function remove_by_filter!(
     interval::Union{Nothing, Period}=nothing,
     features::AbstractDict=Dict{String, Any}(),
     component_field::Union{Nothing, AbstractString}=nothing,
+    name_glob::Union{Nothing, AbstractString}=nothing,
 )
-    (has_owner, owner_arg, has_category, category_arg, has_type, type_arg, name_arg, resolution_iso, interval_iso, features_json, component_field_arg) = _filter_args(
+    (has_owner, owner_arg, has_category, category_arg, has_type, type_arg, name_arg, name_glob_arg, resolution_iso, interval_iso, features_json, component_field_arg) = _filter_args(
         owner_id, owner_category, time_series_type, name, resolution, interval, features,
-        component_field,
+        component_field, name_glob,
     )
     out_removed = Ref{UInt64}(0)
     code = @ccall lib_path().infrastore_store_remove_by_filter(
@@ -378,6 +384,7 @@ function remove_by_filter!(
         has_type::Bool,
         type_arg::Int32,
         name_arg::Cstring,
+        name_glob_arg::Cstring,
         resolution_iso::Cstring,
         interval_iso::Cstring,
         features_json::Cstring,
@@ -427,10 +434,13 @@ function key_info(key::TimeSeriesKey)
     feat_len = Ref{UInt64}(0)
     # Probe the string lengths (type, resolution, owner id, and owner category are
     # filled on this call too).
+    # `out_resolution` is null on the probe: it is a fresh allocation on every
+    # call that passes it, so the probe would otherwise hand back a string this
+    # call has no use for and the fetch below would overwrite.
     code = @ccall lib_path().infrastore_key_attributes(
         key::Ptr{Cvoid},
         out_type::Ref{Int32},
-        out_res::Ref{Ptr{Cchar}},
+        C_NULL::Ptr{Cvoid},
         out_owner::Ref{Int64},
         out_category::Ref{Int32},
         C_NULL::Ptr{UInt8},
@@ -441,9 +451,6 @@ function key_info(key::TimeSeriesKey)
         feat_len::Ref{UInt64},
     )::Int32
     _check(code)
-    # The probe call also allocates the resolution string; free it and re-read on
-    # the fetch call below.
-    _take_cstr(out_res[])
     name_buf = Vector{UInt8}(undef, Int(name_len[]) + 1)
     feat_buf = Vector{UInt8}(undef, Int(feat_len[]) + 1)
     code = @ccall lib_path().infrastore_key_attributes(
@@ -603,10 +610,11 @@ function has_any_time_series(
     interval=nothing,
     features=Dict{String, Any}(),
     component_field=nothing,
+    name_glob=nothing,
 )
-    (has_owner, owner_arg, has_category, category_arg, has_type, type_arg, name_arg, resolution_iso, interval_iso, features_json, component_field_arg) = _filter_args(
+    (has_owner, owner_arg, has_category, category_arg, has_type, type_arg, name_arg, name_glob_arg, resolution_iso, interval_iso, features_json, component_field_arg) = _filter_args(
         owner_id, owner_category, time_series_type, name, resolution, interval, features,
-        component_field,
+        component_field, name_glob,
     )
     out = Ref{Bool}(false)
     code = @ccall lib_path().infrastore_store_has_any_by_filter(
@@ -618,6 +626,7 @@ function has_any_time_series(
         has_type::Bool,
         type_arg::Int32,
         name_arg::Cstring,
+        name_glob_arg::Cstring,
         resolution_iso::Cstring,
         interval_iso::Cstring,
         features_json::Cstring,

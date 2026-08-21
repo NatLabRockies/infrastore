@@ -32,7 +32,8 @@ do not hand-edit it. The [Julia binding](./julia-api.md) is the primary consumer
   verbatim to the add functions and stored uninterpreted. Element typing does not go here — that is
   `element_type`.
 - **Strings** are null-terminated UTF-8. Optional string arguments (`application_data`,
-  `features_json`, `units`, `quantity_kind`, `unit_system`, `component_field`) accept `NULL`.
+  `features_json`, `units`, `quantity_kind`, `unit_system`, `component_field`, `name_glob`) accept
+  `NULL`.
 - **Features** are passed as a JSON object string whose values are int / float / bool / string. An
   add call whose feature names shadow a time-series or key field (`name`, `resolution`, `owner_id`,
   …) fails with `INFRASTORE_ERR_INVALID_PARAMETER`; see
@@ -219,7 +220,7 @@ int32_t infrastore_store_has_any_by_filter(const struct InfraStore *handle,
                                    bool has_owner, int64_t owner_id,
                                    bool has_owner_category, int32_t owner_category,
                                    bool has_time_series_type, int32_t time_series_type,
-                                   const char *name,
+                                   const char *name, const char *name_glob,  /* GLOB pattern; NULL = unset */
                                    const char *resolution, const char *interval,  /* ISO-8601; NULL = unset */
                                    const char *features_json, const char *component_field,
                                    bool *out_present);
@@ -263,9 +264,11 @@ void    infrastore_keys_buffer_free(struct InfraStoreKey **ptr, uint64_t len);
    1 = SupplementalAttribute), name, and features (a JSON object string, "{}" when
    empty — the shape the attribute-addressed entry points accept). The name and
    features strings use probe-then-fetch — pass NULL buffers / 0 caps to read the
-   required lengths, then call again with len+1-byte buffers. */
+   required lengths, then call again with len+1-byte buffers. `out_resolution`
+   does not: it is a fresh allocation on every call that passes it, so pass NULL
+   on the probe call rather than leaking the string it would return. */
 int32_t infrastore_key_attributes(const struct InfraStoreKey *key,
-                          int32_t *out_type, char **out_resolution,  /* ISO-8601; infrastore_string_free */
+                          int32_t *out_type, char **out_resolution,  /* optional (NULL skips); ISO-8601; infrastore_string_free */
                           int64_t *out_owner_id, int32_t *out_owner_category,
                           char *name_buf, uint64_t name_cap, uint64_t *out_name_len,
                           char *features_buf, uint64_t features_cap, uint64_t *out_features_len);
@@ -553,7 +556,8 @@ int32_t infrastore_store_build_static_reader(const struct InfraStore *handle,
                                      int32_t time_series_type,
                                      bool has_owner, int64_t owner_id,
                                      bool has_owner_category, int32_t owner_category,
-                                     const char *name, const char *resolution,
+                                     const char *name, const char *name_glob,
+                                     const char *resolution,
                                      const char *features_json, const char *component_field,
                                      struct InfraStoreStaticReaderHandle **out_reader);
 
@@ -600,7 +604,8 @@ int32_t infrastore_store_build_forecast_reader(const struct InfraStore *handle,
                                        bool has_owner, int64_t owner_id,
                                        bool has_owner_category, int32_t owner_category,
                                        int32_t time_series_type,
-                                       const char *name, const char *resolution,
+                                       const char *name, const char *name_glob,
+                                       const char *resolution,
                                        const char *features_json, const char *component_field,
                                        struct InfraStoreForecastReaderHandle **out_reader);
 
@@ -769,7 +774,9 @@ int32_t infrastore_store_replace_owner(struct InfraStore *handle,
 /* List keys as a JSON array (identity + per-type descriptive snapshot, no physical
    storage detail). The filters are independent; with none set the whole store is
    listed. `interval` (ISO-8601; NULL = unset) matches forecasts only — static
-   rows carry no interval. `component_field` (NULL = unset) matches the owning
+   rows carry no interval. `name_glob` (NULL = unset) is a SQLite GLOB pattern
+   over the name (`*`/`?`, case-sensitive) and is ANDed with `name` rather than
+   replacing it. `component_field` (NULL = unset) matches the owning
    component's field exactly and case-sensitively; a row that declares none
    matches no value. The JSON comes back as an *owned* allocation through
    out_json (free with infrastore_string_free), with out_len its byte length —
@@ -779,7 +786,8 @@ int32_t infrastore_store_list_keys(const struct InfraStore *handle,
                            bool has_owner, int64_t owner_id,
                            bool has_owner_category, int32_t owner_category,
                            bool has_time_series_type, int32_t time_series_type,
-                           const char *name, const char *resolution, const char *interval,
+                           const char *name, const char *name_glob,
+                           const char *resolution, const char *interval,
                            const char *features_json, const char *component_field,
                            char **out_json, uint64_t *out_len);
 /* Like infrastore_store_list_keys, but each row is annotated with the hex content hash of
@@ -791,7 +799,8 @@ int32_t infrastore_store_list_array_groups(const struct InfraStore *handle,
                                    bool has_owner, int64_t owner_id,
                                    bool has_owner_category, int32_t owner_category,
                                    bool has_time_series_type, int32_t time_series_type,
-                                   const char *name, const char *resolution, const char *interval,
+                                   const char *name, const char *name_glob,
+                                   const char *resolution, const char *interval,
                                    const char *features_json, const char *component_field,
                                    char **out_json, uint64_t *out_len);
 ```
