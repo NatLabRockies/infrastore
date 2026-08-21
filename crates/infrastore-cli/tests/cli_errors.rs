@@ -1933,14 +1933,20 @@ fn verify_exits_one_on_a_corrupt_store() {
     );
     // `verify` reports through its normal output channel and *then* exits 1, so
     // the diagnostic is on stdout with no `Error: ` prefix.
-    let (stdout, _stderr) = run_fail(&store, &["verify"]);
+    //
+    // Both channels go into the failure message. An empty stdout means the
+    // command failed before it could report -- opening the store, or reading
+    // the catalog -- and that says so only on stderr, so an assertion naming
+    // just stdout describes the symptom and hides the cause.
+    let (stdout, stderr) = run_fail(&store, &["verify"]);
     assert!(
         stdout.to_lowercase().contains("hash") || stdout.to_lowercase().contains("integrity"),
-        "expected an integrity report on stdout, got: {stdout}"
+        "expected an integrity report on stdout\n  stdout: {stdout:?}\n  stderr: {stderr:?}"
     );
     // The JSON form carries the same errors, for a scripted caller.
-    let (stdout, _) = run_fail(&store, &["-f", "json", "verify"]);
-    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let (stdout, stderr) = run_fail(&store, &["-f", "json", "verify"]);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("{e}\n  stdout: {stdout:?}\n  stderr: {stderr:?}"));
     let errors = parsed.get("errors").and_then(|v| v.as_array()).unwrap();
     assert_eq!(errors.len(), 1, "got: {stdout}");
     assert!(

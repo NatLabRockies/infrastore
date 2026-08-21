@@ -270,8 +270,10 @@ async fn dtype_preserved_over_grpc() {
     let vals: Vec<i64> = single
         .data
         .bytes
-        .chunks_exact(8)
-        .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|c| i64::from_le_bytes(*c))
         .collect();
     assert_eq!(vals, vec![10, 20, 30]);
 }

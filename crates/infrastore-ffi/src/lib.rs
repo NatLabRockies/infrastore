@@ -8723,8 +8723,10 @@ mod reader_ffi_tests {
             &[3, 2]
         );
         let vals: Vec<i64> = unsafe { slice::from_raw_parts(data_ptr, data_len as usize) }
-            .chunks_exact(8)
-            .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|c| i64::from_le_bytes(*c))
             .collect();
         assert_eq!(vals, vec![10, 11, 20, 21, 30, 31]);
 
@@ -9057,8 +9059,10 @@ mod abi_tests {
         assert_eq!(dtype, core_lib::Dtype::F64.code());
         assert_eq!(shape.len(), 1);
         bytes
-            .chunks_exact(8)
-            .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|c| f64::from_le_bytes(*c))
             .collect()
     }
 

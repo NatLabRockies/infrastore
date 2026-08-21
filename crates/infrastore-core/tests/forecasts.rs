@@ -130,8 +130,10 @@ fn i64_arr(shape: Vec<usize>, vals: &[i64]) -> TypedArray {
 fn to_i64_vec(arr: &TypedArray) -> Vec<i64> {
     assert_eq!(arr.dtype, Dtype::I64);
     arr.bytes
-        .chunks_exact(8)
-        .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|c| i64::from_le_bytes(*c))
         .collect()
 }
 
