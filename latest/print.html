@@ -3108,7 +3108,7 @@ cargo test --workspace
 extension and installs it into the active virtual environment:</p>
 <pre><code class="language-sh">cd crates/infrastore-py
 python3 -m venv .venv &amp;&amp; source .venv/bin/activate
-pip install maturin pytest numpy
+pip install maturin pytest numpy tzdata  # tzdata: zoneinfo on Windows
 maturin develop
 </code></pre>
 <p>Verify the install:</p>
@@ -5604,6 +5604,12 @@ association's <code>element_type</code> (see <a href="reference/./element-types.
 <code>element_type=</code> keyword on <code>add_time_series</code> and decoded with <code>decode_element_values</code>.
 Multi-dimensional arrays (a per-step element shape) are supported via the NumPy array's shape.</p>
 </blockquote>
+<h2 id="datetimes"><a class="header" href="#datetimes">Datetimes</a></h2>
+<p>Every <code>datetime</code> argument — an initial timestamp, a <code>NonSequentialTimeSeries</code> timestamp vector, a
+<code>time_range</code> bound, a reader's <code>when</code> — must be <strong>timezone-aware</strong>, and any zone will do:
+<code>datetime.timezone.utc</code>, a <code>ZoneInfo</code>, or a fixed offset. It is converted to UTC on the way in, so
+two aware datetimes naming the same instant are the same instant to the store, and every <code>datetime</code>
+read back is UTC. A naive datetime names no instant and raises <code>InvalidParameterError</code>.</p>
 <h2 id="store-1"><a class="header" href="#store-1"><code>Store</code></a></h2>
 <h3 id="constructors-1"><a class="header" href="#constructors-1">Constructors</a></h3>
 <pre><code class="language-python">@classmethod
@@ -5734,7 +5740,7 @@ def list_time_series(
     owner_id: int | None = None,
     owner_category: OwnerCategory | None = None,
     owner_type: str | None = None,
-    time_series_type: TimeSeriesType | None = None,
+    time_series_type: TimeSeriesType | str | None = None,
     name: str | None = None,
     name_glob: str | None = None,   # SQLite GLOB pattern; ANDed with `name`
     component_field: str | None = None,  # exact, case-sensitive
@@ -5900,8 +5906,12 @@ itself with one exception: <strong><code>TimeSeriesType.Deterministic</code> als
 deterministic forecast?" wants — whether the forecast was added densely or derived by
 <code>transform_single_time_series</code> is a storage detail. Returned rows and keys still carry the concrete
 stored type, and <code>TimeSeriesType.DeterministicSingleTimeSeries</code> narrows to the derived form for
-callers auditing which forecasts are synthetic. Passing anything that is not a <code>TimeSeriesType</code>
-raises <code>TypeError</code>.</p>
+callers auditing which forecasts are synthetic.</p>
+<p>A member's <strong>name</strong> is accepted anywhere a <code>TimeSeriesType</code> is — <code>time_series_type="Deterministic"</code>
+selects exactly what <code>TimeSeriesType.Deterministic</code> does. It is the spelling a metadata row reports,
+so a value read out of one can be handed straight back. The match is case-sensitive: an unrecognized
+string raises <code>InvalidParameterError</code> naming the valid ones, and a value that is neither a
+<code>TimeSeriesType</code> nor a string raises <code>TypeError</code>.</p>
 <h2 id="forecasts-6"><a class="header" href="#forecasts-6">Forecasts</a></h2>
 <p>Dense forecasts are constructed as <code>Deterministic</code>, <code>Probabilistic</code>, or <code>Scenarios</code> objects and then
 passed to <a href="reference/python-api.html#methods"><code>add_time_series</code></a>. They are read back through <code>get_time_series</code>, which returns
@@ -6784,7 +6794,8 @@ are partitioned into <code>(dtype, element_shape)</code> groups, and each group'
 <code>(num_columns, element_dims...)</code> array.</p>
 <pre><code class="language-julia">build_static_reader(store; resolution::Union{Nothing,Period}=nothing,
                     time_series_type::Type=SingleTimeSeries, owner_id=nothing,
-                    owner_category=nothing, name=nothing, features=Dict()) -&gt; StaticReader
+                    owner_category=nothing, name=nothing, name_glob=nothing,
+                    features=Dict(), component_field=nothing) -&gt; StaticReader
 
 static_grid(reader)       -&gt; StaticGrid  # .initial_timestamp, .resolution (or nothing), .length
 static_timestamps(reader) -&gt; Vector{DateTime}  # every instant on the timeline, in order
@@ -6820,7 +6831,8 @@ forecasts must share one window timeline (<code>initial_timestamp</code> + <code
 <code>InvalidParameterError</code>.</p>
 <pre><code class="language-julia">build_forecast_reader(store, time_series_type::Type; resolution::Period,
                       owner_id=nothing, owner_category=nothing, name=nothing,
-                      features=Dict()) -&gt; ForecastReader
+                      name_glob=nothing, features=Dict(),
+                      component_field=nothing) -&gt; ForecastReader
 
 forecast_timeline(reader)  -&gt; ForecastTimeline
        # (initial_timestamp::DateTime, resolution::Period, interval::Period, count::Int)
@@ -6901,12 +6913,12 @@ replace_owner!(store, old_owner_id, new_owner_id, owner_category::OwnerCategory)
 close!(store) -&gt; Nothing
 </code></pre>
 <pre><code class="language-julia">list_keys(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
-          name=nothing, resolution=nothing, interval=nothing, features=Dict(),
-          component_field=nothing) -&gt; Vector{KeyRow}
+          name=nothing, name_glob=nothing, resolution=nothing, interval=nothing,
+          features=Dict(), component_field=nothing) -&gt; Vector{KeyRow}
 </code></pre>
 <p><code>list_keys</code> lists the key of every stored series as <code>KeyRow</code> structs (identity plus the per-type
 descriptive snapshot: <code>initial_timestamp</code>, <code>resolution</code>, <code>length</code>, <code>horizon</code>, <code>interval</code>, <code>count</code>,
-<code>features</code>; fields that do not apply to a key's type are <code>nothing</code>). All eight filters are optional
+<code>features</code>; fields that do not apply to a key's type are <code>nothing</code>). All nine filters are optional
 and independent, and combine as a conjunction; with none set the whole store is listed:</p>
 <ul>
 <li><code>owner_id</code>, <code>owner_category</code> — scope to one owner.</li>
@@ -6915,6 +6927,8 @@ and independent, and combine as a conjunction; with none set the whole store is 
 <code>DeterministicSingleTimeSeries</code> rows; each row still reports its own stored type, and passing
 <code>DeterministicSingleTimeSeries</code> selects only those.</li>
 <li><code>name</code> — exact association name.</li>
+<li><code>name_glob</code> — a SQLite <code>GLOB</code> pattern over the name (<code>*</code> and <code>?</code>, case-sensitive), e.g.
+<code>"wind_*"</code>. ANDed with <code>name</code> rather than replacing it: set both and a row must satisfy both.</li>
 <li><code>resolution</code> — a <code>Period</code>.</li>
 <li><code>interval</code> — a <code>Period</code>; forecasts only (static rows carry no interval and never match an interval
 filter).</li>
@@ -6927,17 +6941,17 @@ unset.</li>
 <p>Physical storage detail (<code>data_hash</code>, <code>element_type</code>, <code>application_data</code>, <code>percentiles</code>) is not on a
 key — read it via <code>get_metadata</code> / <code>list_time_series</code>.</p>
 <pre><code class="language-julia">has_any_time_series(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
-                    name=nothing, resolution=nothing, interval=nothing, features=Dict(),
-                    component_field=nothing) -&gt; Bool
+                    name=nothing, name_glob=nothing, resolution=nothing, interval=nothing,
+                    features=Dict(), component_field=nothing) -&gt; Bool
 </code></pre>
-<p><code>has_any_time_series</code> is the existence probe over the same eight filters: true iff <code>list_keys</code> with
+<p><code>has_any_time_series</code> is the existence probe over the same nine filters: true iff <code>list_keys</code> with
 that filter would return at least one row, answered off the catalog indexes without hydrating or
 marshaling any rows, so it is safe for hot per-component loops. <code>features</code> is a subset match here,
 unlike the exact-key <code>has_time_series</code> forms, which compare the whole feature set by content hash —
 and it is the one exception to the index-only guarantee: a non-empty <code>features</code> filter cannot be
 answered from an index and falls back to a full listing internally, so prefer the exact-key forms in
 hot loops when the whole feature set is known.</p>
-<p><code>list_array_groups</code> takes the same eight filters and returns the same row fields as <code>list_keys</code>, but
+<p><code>list_array_groups</code> takes the same nine filters and returns the same row fields as <code>list_keys</code>, but
 each row additionally carries <code>data_hash</code> — the 32-byte content hash of the array the row resolves
 to (a <code>Vector{UInt8}</code> hashes and compares by content, so it groups directly as a <code>Dict</code> key). Rows
 that share a stored array share their <code>data_hash</code>: both deduplicated identical arrays and a
@@ -7156,7 +7170,8 @@ recorded with the association at add time.</li>
 verbatim to the add functions and stored uninterpreted. Element typing does not go here — that is
 <code>element_type</code>.</li>
 <li><strong>Strings</strong> are null-terminated UTF-8. Optional string arguments (<code>application_data</code>,
-<code>features_json</code>, <code>units</code>, <code>quantity_kind</code>, <code>unit_system</code>, <code>component_field</code>) accept <code>NULL</code>.</li>
+<code>features_json</code>, <code>units</code>, <code>quantity_kind</code>, <code>unit_system</code>, <code>component_field</code>, <code>name_glob</code>) accept
+<code>NULL</code>.</li>
 <li><strong>Features</strong> are passed as a JSON object string whose values are int / float / bool / string. An
 add call whose feature names shadow a time-series or key field (<code>name</code>, <code>resolution</code>, <code>owner_id</code>,
 …) fails with <code>INFRASTORE_ERR_INVALID_PARAMETER</code>; see
@@ -7328,7 +7343,7 @@ int32_t infrastore_store_has_any_by_filter(const struct InfraStore *handle,
                                    bool has_owner, int64_t owner_id,
                                    bool has_owner_category, int32_t owner_category,
                                    bool has_time_series_type, int32_t time_series_type,
-                                   const char *name,
+                                   const char *name, const char *name_glob,  /* GLOB pattern; NULL = unset */
                                    const char *resolution, const char *interval,  /* ISO-8601; NULL = unset */
                                    const char *features_json, const char *component_field,
                                    bool *out_present);
@@ -7372,9 +7387,11 @@ void    infrastore_keys_buffer_free(struct InfraStoreKey **ptr, uint64_t len);
    1 = SupplementalAttribute), name, and features (a JSON object string, "{}" when
    empty — the shape the attribute-addressed entry points accept). The name and
    features strings use probe-then-fetch — pass NULL buffers / 0 caps to read the
-   required lengths, then call again with len+1-byte buffers. */
+   required lengths, then call again with len+1-byte buffers. `out_resolution`
+   does not: it is a fresh allocation on every call that passes it, so pass NULL
+   on the probe call rather than leaking the string it would return. */
 int32_t infrastore_key_attributes(const struct InfraStoreKey *key,
-                          int32_t *out_type, char **out_resolution,  /* ISO-8601; infrastore_string_free */
+                          int32_t *out_type, char **out_resolution,  /* optional (NULL skips); ISO-8601; infrastore_string_free */
                           int64_t *out_owner_id, int32_t *out_owner_category,
                           char *name_buf, uint64_t name_cap, uint64_t *out_name_len,
                           char *features_buf, uint64_t features_cap, uint64_t *out_features_len);
@@ -7630,7 +7647,8 @@ column <code>j</code> is the key from <code>infrastore_static_reader_group_key(r
                                      int32_t time_series_type,
                                      bool has_owner, int64_t owner_id,
                                      bool has_owner_category, int32_t owner_category,
-                                     const char *name, const char *resolution,
+                                     const char *name, const char *name_glob,
+                                     const char *resolution,
                                      const char *features_json, const char *component_field,
                                      struct InfraStoreStaticReaderHandle **out_reader);
 
@@ -7672,7 +7690,8 @@ has a value at every valid timestamp (no presence mask).</p>
                                        bool has_owner, int64_t owner_id,
                                        bool has_owner_category, int32_t owner_category,
                                        int32_t time_series_type,
-                                       const char *name, const char *resolution,
+                                       const char *name, const char *name_glob,
+                                       const char *resolution,
                                        const char *features_json, const char *component_field,
                                        struct InfraStoreForecastReaderHandle **out_reader);
 
@@ -7829,7 +7848,9 @@ int32_t infrastore_store_replace_owner(struct InfraStore *handle,
 /* List keys as a JSON array (identity + per-type descriptive snapshot, no physical
    storage detail). The filters are independent; with none set the whole store is
    listed. `interval` (ISO-8601; NULL = unset) matches forecasts only — static
-   rows carry no interval. `component_field` (NULL = unset) matches the owning
+   rows carry no interval. `name_glob` (NULL = unset) is a SQLite GLOB pattern
+   over the name (`*`/`?`, case-sensitive) and is ANDed with `name` rather than
+   replacing it. `component_field` (NULL = unset) matches the owning
    component's field exactly and case-sensitively; a row that declares none
    matches no value. The JSON comes back as an *owned* allocation through
    out_json (free with infrastore_string_free), with out_len its byte length —
@@ -7839,7 +7860,8 @@ int32_t infrastore_store_list_keys(const struct InfraStore *handle,
                            bool has_owner, int64_t owner_id,
                            bool has_owner_category, int32_t owner_category,
                            bool has_time_series_type, int32_t time_series_type,
-                           const char *name, const char *resolution, const char *interval,
+                           const char *name, const char *name_glob,
+                           const char *resolution, const char *interval,
                            const char *features_json, const char *component_field,
                            char **out_json, uint64_t *out_len);
 /* Like infrastore_store_list_keys, but each row is annotated with the hex content hash of
@@ -7851,7 +7873,8 @@ int32_t infrastore_store_list_array_groups(const struct InfraStore *handle,
                                    bool has_owner, int64_t owner_id,
                                    bool has_owner_category, int32_t owner_category,
                                    bool has_time_series_type, int32_t time_series_type,
-                                   const char *name, const char *resolution, const char *interval,
+                                   const char *name, const char *name_glob,
+                                   const char *resolution, const char *interval,
                                    const char *features_json, const char *component_field,
                                    char **out_json, uint64_t *out_len);
 </code></pre>

@@ -691,7 +691,8 @@ are partitioned into <code>(dtype, element_shape)</code> groups, and each group'
 <code>(num_columns, element_dims...)</code> array.</p>
 <pre><code class="language-julia">build_static_reader(store; resolution::Union{Nothing,Period}=nothing,
                     time_series_type::Type=SingleTimeSeries, owner_id=nothing,
-                    owner_category=nothing, name=nothing, features=Dict()) -&gt; StaticReader
+                    owner_category=nothing, name=nothing, name_glob=nothing,
+                    features=Dict(), component_field=nothing) -&gt; StaticReader
 
 static_grid(reader)       -&gt; StaticGrid  # .initial_timestamp, .resolution (or nothing), .length
 static_timestamps(reader) -&gt; Vector{DateTime}  # every instant on the timeline, in order
@@ -727,7 +728,8 @@ forecasts must share one window timeline (<code>initial_timestamp</code> + <code
 <code>InvalidParameterError</code>.</p>
 <pre><code class="language-julia">build_forecast_reader(store, time_series_type::Type; resolution::Period,
                       owner_id=nothing, owner_category=nothing, name=nothing,
-                      features=Dict()) -&gt; ForecastReader
+                      name_glob=nothing, features=Dict(),
+                      component_field=nothing) -&gt; ForecastReader
 
 forecast_timeline(reader)  -&gt; ForecastTimeline
        # (initial_timestamp::DateTime, resolution::Period, interval::Period, count::Int)
@@ -808,12 +810,12 @@ replace_owner!(store, old_owner_id, new_owner_id, owner_category::OwnerCategory)
 close!(store) -&gt; Nothing
 </code></pre>
 <pre><code class="language-julia">list_keys(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
-          name=nothing, resolution=nothing, interval=nothing, features=Dict(),
-          component_field=nothing) -&gt; Vector{KeyRow}
+          name=nothing, name_glob=nothing, resolution=nothing, interval=nothing,
+          features=Dict(), component_field=nothing) -&gt; Vector{KeyRow}
 </code></pre>
 <p><code>list_keys</code> lists the key of every stored series as <code>KeyRow</code> structs (identity plus the per-type
 descriptive snapshot: <code>initial_timestamp</code>, <code>resolution</code>, <code>length</code>, <code>horizon</code>, <code>interval</code>, <code>count</code>,
-<code>features</code>; fields that do not apply to a key's type are <code>nothing</code>). All eight filters are optional
+<code>features</code>; fields that do not apply to a key's type are <code>nothing</code>). All nine filters are optional
 and independent, and combine as a conjunction; with none set the whole store is listed:</p>
 <ul>
 <li><code>owner_id</code>, <code>owner_category</code> — scope to one owner.</li>
@@ -822,6 +824,8 @@ and independent, and combine as a conjunction; with none set the whole store is 
 <code>DeterministicSingleTimeSeries</code> rows; each row still reports its own stored type, and passing
 <code>DeterministicSingleTimeSeries</code> selects only those.</li>
 <li><code>name</code> — exact association name.</li>
+<li><code>name_glob</code> — a SQLite <code>GLOB</code> pattern over the name (<code>*</code> and <code>?</code>, case-sensitive), e.g.
+<code>"wind_*"</code>. ANDed with <code>name</code> rather than replacing it: set both and a row must satisfy both.</li>
 <li><code>resolution</code> — a <code>Period</code>.</li>
 <li><code>interval</code> — a <code>Period</code>; forecasts only (static rows carry no interval and never match an interval
 filter).</li>
@@ -834,17 +838,17 @@ unset.</li>
 <p>Physical storage detail (<code>data_hash</code>, <code>element_type</code>, <code>application_data</code>, <code>percentiles</code>) is not on a
 key — read it via <code>get_metadata</code> / <code>list_time_series</code>.</p>
 <pre><code class="language-julia">has_any_time_series(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
-                    name=nothing, resolution=nothing, interval=nothing, features=Dict(),
-                    component_field=nothing) -&gt; Bool
+                    name=nothing, name_glob=nothing, resolution=nothing, interval=nothing,
+                    features=Dict(), component_field=nothing) -&gt; Bool
 </code></pre>
-<p><code>has_any_time_series</code> is the existence probe over the same eight filters: true iff <code>list_keys</code> with
+<p><code>has_any_time_series</code> is the existence probe over the same nine filters: true iff <code>list_keys</code> with
 that filter would return at least one row, answered off the catalog indexes without hydrating or
 marshaling any rows, so it is safe for hot per-component loops. <code>features</code> is a subset match here,
 unlike the exact-key <code>has_time_series</code> forms, which compare the whole feature set by content hash —
 and it is the one exception to the index-only guarantee: a non-empty <code>features</code> filter cannot be
 answered from an index and falls back to a full listing internally, so prefer the exact-key forms in
 hot loops when the whole feature set is known.</p>
-<p><code>list_array_groups</code> takes the same eight filters and returns the same row fields as <code>list_keys</code>, but
+<p><code>list_array_groups</code> takes the same nine filters and returns the same row fields as <code>list_keys</code>, but
 each row additionally carries <code>data_hash</code> — the 32-byte content hash of the array the row resolves
 to (a <code>Vector{UInt8}</code> hashes and compares by content, so it groups directly as a <code>Dict</code> key). Rows
 that share a stored array share their <code>data_hash</code>: both deduplicated identical arrays and a

@@ -205,6 +205,12 @@ association's <code>element_type</code> (see <a href="./element-types.html">Elem
 <code>element_type=</code> keyword on <code>add_time_series</code> and decoded with <code>decode_element_values</code>.
 Multi-dimensional arrays (a per-step element shape) are supported via the NumPy array's shape.</p>
 </blockquote>
+<h2 id="datetimes"><a class="header" href="#datetimes">Datetimes</a></h2>
+<p>Every <code>datetime</code> argument — an initial timestamp, a <code>NonSequentialTimeSeries</code> timestamp vector, a
+<code>time_range</code> bound, a reader's <code>when</code> — must be <strong>timezone-aware</strong>, and any zone will do:
+<code>datetime.timezone.utc</code>, a <code>ZoneInfo</code>, or a fixed offset. It is converted to UTC on the way in, so
+two aware datetimes naming the same instant are the same instant to the store, and every <code>datetime</code>
+read back is UTC. A naive datetime names no instant and raises <code>InvalidParameterError</code>.</p>
 <h2 id="store"><a class="header" href="#store"><code>Store</code></a></h2>
 <h3 id="constructors"><a class="header" href="#constructors">Constructors</a></h3>
 <pre><code class="language-python">@classmethod
@@ -335,7 +341,7 @@ def list_time_series(
     owner_id: int | None = None,
     owner_category: OwnerCategory | None = None,
     owner_type: str | None = None,
-    time_series_type: TimeSeriesType | None = None,
+    time_series_type: TimeSeriesType | str | None = None,
     name: str | None = None,
     name_glob: str | None = None,   # SQLite GLOB pattern; ANDed with `name`
     component_field: str | None = None,  # exact, case-sensitive
@@ -501,8 +507,12 @@ itself with one exception: <strong><code>TimeSeriesType.Deterministic</code> als
 deterministic forecast?" wants — whether the forecast was added densely or derived by
 <code>transform_single_time_series</code> is a storage detail. Returned rows and keys still carry the concrete
 stored type, and <code>TimeSeriesType.DeterministicSingleTimeSeries</code> narrows to the derived form for
-callers auditing which forecasts are synthetic. Passing anything that is not a <code>TimeSeriesType</code>
-raises <code>TypeError</code>.</p>
+callers auditing which forecasts are synthetic.</p>
+<p>A member's <strong>name</strong> is accepted anywhere a <code>TimeSeriesType</code> is — <code>time_series_type="Deterministic"</code>
+selects exactly what <code>TimeSeriesType.Deterministic</code> does. It is the spelling a metadata row reports,
+so a value read out of one can be handed straight back. The match is case-sensitive: an unrecognized
+string raises <code>InvalidParameterError</code> naming the valid ones, and a value that is neither a
+<code>TimeSeriesType</code> nor a string raises <code>TypeError</code>.</p>
 <h2 id="forecasts"><a class="header" href="#forecasts">Forecasts</a></h2>
 <p>Dense forecasts are constructed as <code>Deterministic</code>, <code>Probabilistic</code>, or <code>Scenarios</code> objects and then
 passed to <a href="#methods"><code>add_time_series</code></a>. They are read back through <code>get_time_series</code>, which returns
