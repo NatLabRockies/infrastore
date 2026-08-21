@@ -700,6 +700,46 @@ def test_aware_datetimes_in_any_zone_name_the_same_instant():
         assert store.get_time_series(key).initial_timestamp == utc
 
 
+def test_a_zone_is_read_by_its_offset_not_by_what_it_claims_to_equal():
+    """The UTC fast path keys on identity with `datetime.timezone.utc`.
+
+    A `tzinfo` decides its own equality. One whose `__eq__` claims UTC while its
+    `utcoffset` says otherwise would, under an `==` check, be read at its wall
+    clock -- a silently wrong instant. `astimezone` asks `utcoffset`, so every
+    zone that is not the singleton itself goes through it.
+    """
+    from datetime import tzinfo
+
+    class ClaimsUtc(tzinfo):
+        def utcoffset(self, dt):
+            return timedelta(hours=5)
+
+        def tzname(self, dt):
+            return "CLAIMS_UTC"
+
+        def dst(self, dt):
+            return None
+
+        def __eq__(self, other):
+            return other is timezone.utc or isinstance(other, ClaimsUtc)
+
+        def __hash__(self):
+            return 0
+
+    when = datetime(2024, 6, 1, 12, tzinfo=ClaimsUtc())
+    assert when.tzinfo == timezone.utc  # the claim
+    ts = SingleTimeSeries(when, timedelta(hours=1), np.array([1.0]), "load")
+    assert ts.initial_timestamp == datetime(2024, 6, 1, 7, tzinfo=timezone.utc)
+
+    # `timezone(timedelta(0))` is the singleton, so the fast path still covers
+    # the spelling most callers reach for.
+    zero = timezone(timedelta(0))
+    assert zero is timezone.utc
+    assert SingleTimeSeries(
+        datetime(2024, 6, 1, 12, tzinfo=zero), timedelta(hours=1), np.array([1.0]), "load"
+    ).initial_timestamp == datetime(2024, 6, 1, 12, tzinfo=timezone.utc)
+
+
 def test_naive_datetime_is_refused_inside_the_exception_hierarchy():
     naive = datetime(2024, 6, 1, 12)
     with pytest.raises(InvalidParameterError, match="timezone-aware"):

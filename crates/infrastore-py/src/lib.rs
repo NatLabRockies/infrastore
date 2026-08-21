@@ -113,10 +113,21 @@ impl<'py> FromPyObject<'_, 'py> for PyInstant {
             )));
         }
         let utc = PyTzInfo::utc(obj.py())?;
-        // Already UTC: skip the round trip through Python's conversion.
-        let in_utc = match dt.getattr("tzinfo")?.eq(utc) {
-            Ok(true) => dt.as_any().clone(),
-            _ => dt.call_method1("astimezone", (&utc,))?,
+        // Already `datetime.timezone.utc`: the wall clock is the instant, so
+        // skip the round trip through Python's conversion.
+        //
+        // Identity, not `==`. A `tzinfo` decides its own equality, so an object
+        // whose `__eq__` claims UTC while its `utcoffset` says otherwise would
+        // take this branch and be read at its wall clock -- a silently wrong
+        // instant, in the one place whose whole job is to pin one down. The
+        // singleton cannot lie about its own offset, and it is what
+        // `timezone(timedelta(0))` returns, so this still covers the common
+        // case; every other zone, UTC-equivalent or not, goes through
+        // `astimezone`, which asks `utcoffset` rather than taking its word.
+        let in_utc = if dt.getattr("tzinfo")?.is(utc) {
+            dt.as_any().clone()
+        } else {
+            dt.call_method1("astimezone", (&utc,))?
         };
         Ok(PyInstant(in_utc.extract::<DateTime<Utc>>()?))
     }
