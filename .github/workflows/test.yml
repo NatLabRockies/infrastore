@@ -158,6 +158,16 @@ jobs:
           julia --project=julia/InfraStore.jl -e 'using Pkg; Pkg.instantiate()'
           julia --project=julia/InfraStore.jl "${covflags[@]}" \
             julia/InfraStore.jl/test/runtests.jl
+          # Again through Pkg.test, which is the only environment that has the
+          # TimeZones weak dependency and can therefore load
+          # InfraStoreTimeZonesExt. The run above skips those tests with a
+          # warning, because a weak dependency is not loadable from the
+          # package's own project; this is what actually exercises them.
+          # Linux only: it is one platform's worth of a pure-Julia conversion,
+          # and it pays a second full suite plus a tz-database install.
+          if [ "$RUNNER_OS" = Linux ]; then
+            julia --project=julia/InfraStore.jl -e 'using Pkg; Pkg.test()'
+          fi
 
       # Render both reports from the profiles all three suites just wrote.
       # `--ignore-filename-regex` drops the protobuf code infrastore-proto's build

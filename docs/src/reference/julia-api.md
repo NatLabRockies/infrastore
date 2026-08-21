@@ -201,6 +201,12 @@ Two conventions hold across every one of them: a `time_series_type` field holds 
 store's canonical `element_type` **string**, which names both the meaning and (through it) the
 dtype. An `owner_category` field is an `OwnerCategory`, never a string.
 
+A requested type is always the bare one — `SingleTimeSeries`, never `SingleTimeSeries{Float64}`. A
+series is addressed by its identity (owner, category, type, name, resolution, interval, features),
+which carries no element type, so parameters on a _request_ would have nothing to select on; passing
+them raises `InvalidParameterError` rather than being quietly ignored. The element type comes back
+on the result instead, in its own `{T,N}` and in a reader group's `dtype`.
+
 ```julia
 struct TimeSeriesMetadata                    # get_metadata / list_time_series
     owner_id          :: Int64
@@ -993,7 +999,23 @@ end
 
 ## Time and Resolution Conversions
 
-- `DateTime` is converted to/from Unix milliseconds at the boundary.
+- `DateTime` is converted to/from Unix milliseconds at the boundary, and is interpreted as **UTC** —
+  Julia's `DateTime` carries no zone, so the wrapper has to pick a reading, and UTC is the one under
+  which a value written here comes back as itself.
+- A **`TimeZones.ZonedDateTime` is accepted wherever a `DateTime` is** — an initial timestamp, a
+  timestamp vector, a `time_range` bound, a reader's `t` — and is converted to the instant it names.
+  It needs no convention, so prefer it when your data is genuinely zoned. TimeZones is a **weak
+  dependency**: the conversion lives in the `InfraStoreTimeZonesExt` extension, which loads when you
+  `using TimeZones`, so nobody else pays for the tz database. Passing one without loading TimeZones
+  raises an `InvalidParameterError` saying so.
+- **Reads always return a `DateTime`**, in UTC, whichever kind went in. Returning a `ZonedDateTime`
+  would mean inventing a zone the store never recorded — it stores instants, not civil time.
+- A vector of `ZonedDateTime`s is ordered by the **instants** it names, not by its local wall
+  clocks, so the strictly-increasing rule is checked after conversion.
+- Milliseconds are lossless in both directions: the store records every instant to the millisecond
+  and refuses a finer one on write, so this boundary cannot truncate a series written under that
+  rule. See [timestamp precision](../explanation/data-model.md#timestamp-precision). (An artifact
+  written before the rule may hold finer instants; those still truncate here.)
 - `resolution` is passed as a `Period` and converted to an ISO-8601 duration string; reads return
   resolution as a `Period` (`Millisecond` for fixed durations).
 

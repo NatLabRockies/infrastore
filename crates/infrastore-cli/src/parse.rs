@@ -1,7 +1,9 @@
 //! Small, shared parsers for CLI/descriptor inputs: durations, timestamps,
 //! owner categories, time-series-type names, and `key=value` features.
 
-use chrono::{DateTime, Duration, TimeZone, Utc};
+use std::sync::OnceLock;
+
+use chrono::{DateTime, Duration, FixedOffset, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use infrastore_core::{ElementType, FeatureValue, OwnerCategory, Period, TimeSeriesType};
 
 /// Representative ISO-8601 durations, for the error message a caller sees when
@@ -62,7 +64,96 @@ pub fn period_horizon_steps(horizon: Period, resolution: Period) -> Result<usize
     resolution.divide_into(&horizon).map_err(|e| e.to_string())
 }
 
+/// The offset a *zoneless* timestamp is read with, from the global
+/// `--assume-timezone`. Unset means a zoneless timestamp is an error.
+///
+/// A `OnceLock` set once from `main`, matching how the other global flags are
+/// held (`confirm::set_assume_yes`, `color`): one command per process, and the
+/// alternative is threading a parse setting through every command signature and
+/// the whole descriptor-resolution chain.
+static ASSUMED_OFFSET: OnceLock<Option<FixedOffset>> = OnceLock::new();
+
+/// Record the global `--assume-timezone`, validating it. Called once, from
+/// `main`, before anything parses a timestamp — so a bad zone fails immediately
+/// rather than part-way through a CSV.
+///
+/// A second call is an error rather than a silent no-op. Discarding the failed
+/// `set` would leave the first zone in place while the caller believes it
+/// installed the second: in `main` that is unreachable, but the unit tests below
+/// run in this same process and assert on how a zoneless timestamp parses, so a
+/// swallowed second set is exactly the shape that turns them order-dependent
+/// with no visible cause.
+pub fn set_assumed_timezone(spec: Option<&str>) -> Result<(), String> {
+    let offset = match spec {
+        None => None,
+        Some(s) => Some(parse_utc_offset(s)?),
+    };
+    ASSUMED_OFFSET
+        .set(offset)
+        .map_err(|_| "the assumed timezone has already been set".to_string())?;
+    Ok(())
+}
+
+fn assumed_offset() -> Option<FixedOffset> {
+    ASSUMED_OFFSET.get().copied().flatten()
+}
+
+/// Parse the `--assume-timezone` value: `UTC` (or `Z`), or a fixed UTC offset
+/// spelled `+HH:MM`, `-HH:MM`, `+HHMM`, or `+HH`.
+///
+/// Deliberately **not** an IANA zone name. A zoneless timestamp in a named zone
+/// is not always one instant: an hour that daylight saving skips names none, and
+/// the hour it repeats names two, so `America/Denver` would have to either
+/// reject rows in the middle of an ingest or silently pick one. Data written
+/// zoneless in this domain is almost always local *standard* time — a fixed
+/// offset year-round, which is exactly what this takes — and data that really is
+/// civil time with DST should carry its offsets in the file, where each row can
+/// say which side of the transition it is on.
+pub fn parse_utc_offset(s: &str) -> Result<FixedOffset, String> {
+    let t = s.trim();
+    if t.eq_ignore_ascii_case("utc") || t.eq_ignore_ascii_case("z") {
+        return Ok(FixedOffset::east_opt(0).expect("zero is a valid offset"));
+    }
+    // Reuse chrono's own offset grammar by parsing a timestamp that is nothing
+    // but the offset -- after widening the two *basic* ISO-8601 spellings onto
+    // the extended one it takes. `parse_from_rfc3339` accepts `±HH:MM` alone,
+    // while `date +%z` prints `-0700` and a whole-hour offset is usually written
+    // `-07`; both are what someone reaches for, and neither would otherwise
+    // parse.
+    let digits = |rest: &str| rest.chars().all(|c| c.is_ascii_digit());
+    let normalized = match t.len() {
+        3 if t.starts_with(['+', '-']) && digits(&t[1..]) => format!("{t}:00"),
+        5 if t.starts_with(['+', '-']) && digits(&t[1..]) => {
+            format!("{}:{}", &t[..3], &t[3..])
+        }
+        _ => t.to_string(),
+    };
+    DateTime::parse_from_rfc3339(&format!("1970-01-01T00:00:00{normalized}"))
+        .map(|dt| *dt.offset())
+        .map_err(|_| {
+            if t.contains('/') {
+                format!(
+                    "invalid --assume-timezone '{s}': named zones are not accepted, because a \
+                     zoneless timestamp in one is not always a single instant (daylight saving \
+                     skips one hour and repeats another). Pass the fixed offset the data uses, \
+                     e.g. -07:00 for Mountain Standard Time, or UTC."
+                )
+            } else {
+                format!(
+                    "invalid --assume-timezone '{s}' (use UTC, or a fixed offset like +05:30 or \
+                     -07:00)"
+                )
+            }
+        })
+}
+
 /// Parse an RFC3339 timestamp, or a bare integer of epoch milliseconds.
+///
+/// A *zoneless* timestamp (`2024-01-01T00:00:00`, or the `2024-01-01 00:00:00`
+/// that most CSV writers produce) names no instant on its own, so it is accepted
+/// only when `--assume-timezone` says which offset to read it with. An offset
+/// the input carries itself is never overridden — the flag fills a gap, it does
+/// not relabel data that already said what it meant.
 pub fn parse_timestamp(s: &str) -> Result<DateTime<Utc>, String> {
     let s = s.trim();
     if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
@@ -74,9 +165,45 @@ pub fn parse_timestamp(s: &str) -> Result<DateTime<Utc>, String> {
             .single()
             .ok_or_else(|| format!("invalid epoch-ms timestamp '{s}'"));
     }
+    if let Some(naive) = parse_zoneless(s) {
+        let Some(offset) = assumed_offset() else {
+            return Err(format!(
+                "timestamp '{s}' names no time zone, so it names no instant. Give it an offset \
+                 (RFC3339, like 2024-01-01T00:00:00Z), or pass --assume-timezone UTC (or a fixed \
+                 offset like -07:00) to read every zoneless timestamp with it."
+            ));
+        };
+        return naive
+            .and_local_timezone(offset)
+            .single()
+            .map(|dt| dt.with_timezone(&Utc))
+            .ok_or_else(|| format!("timestamp '{s}' is not a valid instant at offset {offset}"));
+    }
     Err(format!(
         "invalid timestamp '{s}' (use RFC3339 like 2024-01-01T00:00:00Z or epoch milliseconds)"
     ))
+}
+
+/// The zoneless spellings [`parse_timestamp`] recognizes: ISO-8601 with a `T` or
+/// the space separator CSV writers use, seconds and fractional seconds optional,
+/// and a bare date (which is midnight).
+fn parse_zoneless(s: &str) -> Option<NaiveDateTime> {
+    const DATETIME_FORMATS: [&str; 6] = [
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+    ];
+    for format in DATETIME_FORMATS {
+        if let Ok(dt) = NaiveDateTime::parse_from_str(s, format) {
+            return Some(dt);
+        }
+    }
+    NaiveDate::parse_from_str(s, "%Y-%m-%d")
+        .ok()
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
 }
 
 /// A half-open `START..END` time range, as `get`, `grid`, and `export` spell it.
@@ -257,6 +384,49 @@ pub fn parse_compression(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every offset spelling the doc comment promises must actually parse.
+    ///
+    /// The extended form is all `DateTime::parse_from_rfc3339` takes on its own;
+    /// the two basic forms are widened onto it first, and `date +%z` prints one
+    /// of them.
+    #[test]
+    fn every_documented_offset_spelling_parses() {
+        let east = |h: i32, m: i32| FixedOffset::east_opt(h * 3600 + m * 60).unwrap();
+        for (spec, want) in [
+            ("UTC", east(0, 0)),
+            ("utc", east(0, 0)),
+            ("Z", east(0, 0)),
+            ("-07:00", east(-7, 0)),
+            ("+05:30", east(5, 30)),
+            ("-0700", east(-7, 0)),
+            ("+0530", east(5, 30)),
+            ("-07", east(-7, 0)),
+            ("+08", east(8, 0)),
+            ("  -07:00  ", east(-7, 0)),
+        ] {
+            assert_eq!(
+                parse_utc_offset(spec).unwrap(),
+                want,
+                "{spec} did not parse to the offset it names"
+            );
+        }
+    }
+
+    #[test]
+    fn a_named_zone_is_refused_with_the_ambiguity_as_the_reason() {
+        let err = parse_utc_offset("America/Denver").unwrap_err();
+        assert!(err.contains("named zones are not accepted"), "{err}");
+        assert!(err.contains("daylight saving"), "{err}");
+
+        // Nothing that merely looks offset-shaped slips through.
+        for bad in ["07:00", "-7:00", "-070", "-07:0", "+2400x", "", "-"] {
+            assert!(
+                parse_utc_offset(bad).is_err(),
+                "{bad:?} must not parse as an offset"
+            );
+        }
+    }
 
     #[test]
     fn periods_round_trip() {

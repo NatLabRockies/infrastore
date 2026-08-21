@@ -44,11 +44,16 @@
 //! the unit instead: a 500 µs series is a 500-unit series that records the unit
 //! in `units`.
 //!
-//! Note that this floor applies to *periods*, not to timestamps: an
-//! `initial_timestamp` is stored as an RFC3339 string and keeps nanoseconds, so a
-//! grid may be millisecond-*spaced* while being nanosecond-*offset* in its phase.
-//! [`Period::steps_between`] therefore compares grid landings exactly rather than
-//! in whole milliseconds.
+//! The same floor applies to the *instants* a series may be written at — see
+//! [`crate::timestamps::require_millisecond_precision`] — so a grid is
+//! millisecond-*spaced* and millisecond-*phased*, and every grid point it lands
+//! on is a whole millisecond.
+//!
+//! A *query bound* is not a stored instant and stays unconstrained: a caller may
+//! pass an arbitrarily fine `time_range` or reader timestamp. That is why
+//! [`Period::steps_between`] compares grid landings exactly rather than in whole
+//! milliseconds — a bound in the open range `(grid point, grid point + 1ms)`
+//! must be reported as off-grid, not silently snapped onto it.
 
 use chrono::{DateTime, Datelike, Duration, Months, Utc};
 

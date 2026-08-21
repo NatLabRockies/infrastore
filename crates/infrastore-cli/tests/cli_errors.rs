@@ -2831,3 +2831,185 @@ fn a_store_with_no_catalog_half_names_the_file_it_cannot_open() {
         "the diagnostic must name the half that is missing:\n{err}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Zoneless timestamps and --assume-timezone
+// ---------------------------------------------------------------------------
+
+/// The CSV shape this flag exists for: a `timestamp` column with no offset,
+/// which is what pandas, most exporters, and most hand-written files produce.
+fn zoneless_csv(dir: &Path) -> PathBuf {
+    write(
+        dir,
+        "zoneless.csv",
+        "timestamp,value\n2024-01-01 00:00:00,1\n2024-01-01 01:00:00,2\n2024-01-01 02:00:00,3\n",
+    )
+}
+
+/// The `add` argv for a NonSequentialTimeSeries from `csv`, prefixed by `extra`
+/// (the global flags under test). `run`/`run_err` supply `--store` themselves.
+fn add_non_sequential(csv: &Path, extra: &[&str]) -> Vec<String> {
+    let mut args: Vec<&str> = extra.to_vec();
+    args.extend_from_slice(&[
+        "add",
+        "--csv",
+        csv.to_str().unwrap(),
+        "--owner-id",
+        "42",
+        "--owner-type",
+        "Generator",
+        "--name",
+        "load",
+        "--type",
+        "NonSequentialTimeSeries",
+        "--element-type",
+        "f64",
+    ]);
+    args.iter().map(|s| s.to_string()).collect()
+}
+
+/// Without the flag a zoneless timestamp is still an error — it names no
+/// instant, and guessing one silently is what the store's whole timestamp
+/// contract exists to prevent. What changed is that the message now says how to
+/// proceed instead of only what is wrong.
+#[test]
+fn a_zoneless_timestamp_is_refused_with_the_flag_that_fixes_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("system.h5");
+    let csv = zoneless_csv(dir.path());
+
+    let args = add_non_sequential(&csv, &[]);
+    let err = run_err(&store, &args.iter().map(String::as_str).collect::<Vec<_>>());
+    assert!(
+        err.contains("names no time zone") && err.contains("--assume-timezone"),
+        "the diagnostic must name the flag that resolves it:\n{err}"
+    );
+}
+
+/// `--assume-timezone UTC` reads the zoneless column as UTC, which is the
+/// convention both shipped consumers already write under.
+#[test]
+fn assume_timezone_utc_reads_a_zoneless_csv() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("system.h5");
+    let csv = zoneless_csv(dir.path());
+
+    let args = add_non_sequential(&csv, &["--assume-timezone", "UTC"]);
+    run(&store, &args.iter().map(String::as_str).collect::<Vec<_>>());
+
+    let out = run(
+        &store,
+        &["get", "--owner-id", "42", "--name", "load", "-f", "csv"],
+    );
+    let rows = data_lines(&out);
+    assert_eq!(rows[0], "2024-01-01T00:00:00+00:00,1");
+    assert_eq!(rows[2], "2024-01-01T02:00:00+00:00,3");
+}
+
+/// A fixed offset shifts the instants, and is spelled the obvious way — the
+/// leading `-` must not be read as another flag.
+#[test]
+fn assume_timezone_accepts_a_negative_fixed_offset() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("system.h5");
+    let csv = zoneless_csv(dir.path());
+
+    let args = add_non_sequential(&csv, &["--assume-timezone", "-07:00"]);
+    run(&store, &args.iter().map(String::as_str).collect::<Vec<_>>());
+
+    let out = run(
+        &store,
+        &["get", "--owner-id", "42", "--name", "load", "-f", "csv"],
+    );
+    assert_eq!(
+        data_lines(&out)[0],
+        "2024-01-01T07:00:00+00:00,1",
+        "midnight at -07:00 is 07:00 UTC"
+    );
+}
+
+/// The flag fills a gap; it never relabels data that already said what it meant.
+#[test]
+fn assume_timezone_does_not_override_an_offset_the_file_carries() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("system.h5");
+    let csv = write(
+        dir.path(),
+        "aware.csv",
+        "timestamp,value\n2024-01-01T00:00:00Z,1\n2024-01-01T01:00:00Z,2\n2024-01-01T02:00:00Z,3\n",
+    );
+
+    let args = add_non_sequential(&csv, &["--assume-timezone", "-07:00"]);
+    run(&store, &args.iter().map(String::as_str).collect::<Vec<_>>());
+
+    let out = run(
+        &store,
+        &["get", "--owner-id", "42", "--name", "load", "-f", "csv"],
+    );
+    assert_eq!(
+        data_lines(&out)[0],
+        "2024-01-01T00:00:00+00:00,1",
+        "an explicit Z must win over --assume-timezone"
+    );
+}
+
+/// A named zone is refused, and the refusal explains why rather than looking
+/// like an unsupported-format complaint: a zoneless timestamp in a DST zone is
+/// not always one instant.
+#[test]
+fn assume_timezone_refuses_a_named_zone_and_says_why() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("system.h5");
+    seeded_store(dir.path(), &store, "load");
+
+    let err = run_err(&store, &["--assume-timezone", "America/Denver", "list"]);
+    assert!(
+        err.contains("named zones are not accepted") && err.contains("daylight saving"),
+        "the refusal must explain the ambiguity:\n{err}"
+    );
+
+    // And it is reported before any work happens, not part-way through.
+    let err = run_err(&store, &["--assume-timezone", "not-a-zone", "list"]);
+    assert!(err.contains("--assume-timezone"), "{err}");
+}
+
+/// The flag is global, so it reaches a read command's `--time-range` too — the
+/// bounds are typed by hand and hit exactly the same parser.
+#[test]
+fn assume_timezone_applies_to_a_time_range_bound() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("system.h5");
+    seeded_store(dir.path(), &store, "load");
+
+    let out = run(
+        &store,
+        &[
+            "--assume-timezone",
+            "UTC",
+            "get",
+            "--owner-id",
+            "1",
+            "--name",
+            "load",
+            "--time-range",
+            "2024-01-01T01:00:00..2024-01-01T03:00:00",
+            "-f",
+            "csv",
+        ],
+    );
+    assert_eq!(data_lines(&out).len(), 2, "two hourly steps in the range");
+
+    let err = run_err(
+        &store,
+        &[
+            "get",
+            "--owner-id",
+            "1",
+            "--name",
+            "load",
+            "--time-range",
+            "2024-01-01T01:00:00..2024-01-01T03:00:00",
+        ],
+    );
+    assert!(err.contains("names no time zone"), "{err}");
+}

@@ -45,7 +45,24 @@ The store is finalized automatically, but you can release it eagerly with `close
 ```julia
 # `name` ("load") is a required field on the struct.
 ts = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(100.0:123.0), "load")
+```
 
+A bare `DateTime` carries no zone, and this package reads one as **UTC**. If your timestamps are
+genuinely zoned, `using TimeZones` and pass a `ZonedDateTime` instead — it names an instant on its
+own, and is accepted anywhere a `DateTime` is:
+
+```julia
+using TimeZones
+ts = SingleTimeSeries(
+    ZonedDateTime(DateTime(2024, 1, 1), tz"America/Denver"),   # = 2024-01-01T07:00Z
+    Hour(1), collect(100.0:123.0), "load",
+)
+```
+
+Reads return a `DateTime` in UTC either way; see
+[Time and resolution conversions](../reference/julia-api.md#time-and-resolution-conversions).
+
+```julia
 key = add_time_series!(
     store,
     42,

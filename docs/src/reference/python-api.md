@@ -31,6 +31,15 @@ Every `datetime` argument — an initial timestamp, a `NonSequentialTimeSeries` 
 two aware datetimes naming the same instant are the same instant to the store, and every `datetime`
 read back is UTC. A naive datetime names no instant and raises `InvalidParameterError`.
 
+A `datetime` that is **stored** — an initial timestamp, or an entry of a `NonSequentialTimeSeries`
+timestamp vector — must also be a whole number of milliseconds; `microsecond` must be a multiple of
+1000. A finer instant raises `InvalidParameterError` rather than being silently truncated, because
+it cannot survive every binding intact (see
+[timestamp precision](../explanation/data-model.md#timestamp-precision)). Note that
+`datetime.now(timezone.utc)` carries microseconds: quantize it, e.g.
+`now.replace(microsecond=now.microsecond // 1000 * 1000)`. A `datetime` used only as a _query_ bound
+— a `time_range` end, a reader's `when` — is unconstrained.
+
 ## `Store`
 
 ### Constructors
