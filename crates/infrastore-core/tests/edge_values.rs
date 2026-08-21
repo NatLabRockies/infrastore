@@ -1096,11 +1096,16 @@ fn malformed_inputs_report_errors_rather_than_panicking() {
     // 1. An ISO-8601 duration may repeat a unit — `parse_components` applies no
     //    uniqueness rule — and one day component already reaches the edge of i64
     //    milliseconds, so a second overflowed the unguarded `+=`. Reachable from
-    //    an arbitrary caller string, including one arriving over gRPC.
+    //    an arbitrary caller string, including one arriving over gRPC. The
+    //    calendar accumulator is the same shape: a year component multiplies by
+    //    12 under a guard, then lands in `months`, which needs one too.
     for s in [
         "P106751991167D106751991167D",
         "PT2562047788015H2562047788015H",
         "P106751991167W106751991167W",
+        "P768614336404564650Y768614336404564650Y",
+        "P9223372036854775807M9223372036854775807M",
+        "P768614336404564650Y9223372036854775807M",
     ] {
         let err = Period::from_iso8601(s).unwrap_err();
         // An overflow reads like every other parse failure and names the input,
@@ -1114,6 +1119,13 @@ fn malformed_inputs_report_errors_rather_than_panicking() {
     }
     // A single in-range component is unaffected.
     assert!(Period::from_iso8601("P106751991167D").is_ok());
+    // The largest year count a `Period::Months` can hold (the month total is an
+    // i32); one component of it parses, two overflow the accumulator above.
+    assert_eq!(
+        Period::from_iso8601("P178956970Y").unwrap(),
+        Period::months(178_956_970 * 12)
+    );
+    assert_eq!(Period::from_iso8601("P1Y6M").unwrap(), Period::months(18));
     assert_eq!(
         Period::from_iso8601("P1DT2H").unwrap(),
         Period::fixed(Duration::days(1) + Duration::hours(2))

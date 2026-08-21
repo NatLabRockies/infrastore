@@ -123,7 +123,7 @@ The full program is
 
 ```sh
 python3 -m venv .venv && source .venv/bin/activate
-pip install maturin pytest numpy
+pip install maturin pytest numpy tzdata  # tzdata: zoneinfo on Windows
 maturin develop --manifest-path crates/infrastore-py/Cargo.toml
 pytest python/tests
 ```

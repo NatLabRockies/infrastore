@@ -99,9 +99,14 @@ jobs:
       # CLAUDE.md documents for local work) requires an active virtualenv,
       # which setup-python does not provide. target/wheels is cleared first so
       # a cached wheel from an earlier run cannot be installed instead.
+      # `tzdata` is what makes `zoneinfo` work on Windows, which ships no system
+      # time-zone database. The datetime tests name real zones on purpose --
+      # the binding's rule is that any aware instant is accepted -- so skipping
+      # them there would drop the coverage on the one platform whose zone
+      # handling differs.
       - name: Install Python test dependencies
         shell: bash
-        run: python -m pip install --upgrade maturin pytest numpy
+        run: python -m pip install --upgrade maturin pytest numpy tzdata
 
       - name: Build and install the Python extension
         shell: bash

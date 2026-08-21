@@ -83,3 +83,98 @@ def test_class_members_match():
         if ghost_in_stub:
             problems.append(f"{cls_name}: stub members not present at runtime: {sorted(ghost_in_stub)}")
     assert not problems, "\n".join(problems)
+
+
+# ---- signature drift -------------------------------------------------------
+#
+# Name-level checks above catch a member that appears or vanishes. They cannot
+# see a stub whose *arguments* disagree with the runtime's -- a promised keyword
+# that raises TypeError, an argument the stub renamed, one that moved from
+# positional to keyword-only. Both kinds have happened here: the stub advertised
+# `build_static_reader(time_series_type=...)` accepting a str while the runtime
+# refused one, and `__exit__`'s arguments were `_exc_type` / `_exc_value` /
+# `_traceback` at runtime against the stub's unprefixed names.
+#
+# Types and defaults' *values* are still not compared -- the stub is hand-written
+# and deliberately more precise than anything the runtime exposes. Argument
+# names, their order, their kind, and whether they have a default are compared,
+# because those are what a caller writes.
+
+import inspect
+
+
+def stub_signatures():
+    """{(class, method): [(name, kind, has_default)]} for every stubbed method."""
+    tree = ast.parse(STUB_PATH.read_text())
+    out: dict[tuple[str, str], list[tuple[str, str, bool]]] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for item in node.body:
+            if not isinstance(item, ast.FunctionDef):
+                continue
+            # A property is an attribute to the caller, not a call.
+            if any(
+                isinstance(d, ast.Name) and d.id == "property" for d in item.decorator_list
+            ):
+                continue
+            a = item.args
+            params: list[tuple[str, str, bool]] = []
+            pos = a.posonlyargs + a.args
+            pad = len(pos) - len(a.defaults)
+            for i, arg in enumerate(pos):
+                # `inspect.signature` of a bound method or a classmethod drops
+                # the receiver; the stub spells it out.
+                if arg.arg in ("self", "cls"):
+                    continue
+                params.append((arg.arg, "positional", i >= pad))
+            for arg, default in zip(a.kwonlyargs, a.kw_defaults):
+                params.append((arg.arg, "keyword", default is not None))
+            out[(node.name, item.name)] = params
+    return out
+
+
+def runtime_signature(cls, method):
+    """The same shape from the runtime, or None when it exposes no signature."""
+    target = cls if method == "__init__" else getattr(cls, method, None)
+    if target is None:
+        return None
+    try:
+        sig = inspect.signature(target)
+    except (ValueError, TypeError):
+        return None
+    kinds = {
+        inspect.Parameter.POSITIONAL_ONLY: "positional",
+        inspect.Parameter.POSITIONAL_OR_KEYWORD: "positional",
+        inspect.Parameter.KEYWORD_ONLY: "keyword",
+    }
+    params = []
+    for name, p in sig.parameters.items():
+        if name == "self":
+            continue
+        if p.kind not in kinds:  # *args / **kwargs carry no names to compare
+            return None
+        params.append((name, kinds[p.kind], p.default is not inspect.Parameter.empty))
+    return params
+
+
+def test_method_signatures_match():
+    problems = []
+    for (cls_name, method), stub_params in stub_signatures().items():
+        runtime_cls = getattr(infrastore, cls_name, None)
+        if runtime_cls is None or not isinstance(runtime_cls, type):
+            continue
+        if issubclass(runtime_cls, BaseException):
+            continue
+        runtime_params = runtime_signature(runtime_cls, method)
+        if runtime_params is None:
+            continue
+        if runtime_params != stub_params:
+            problems.append(
+                f"{cls_name}.{method}:\n"
+                f"    stub:    {stub_params}\n"
+                f"    runtime: {runtime_params}"
+            )
+    assert not problems, "signature drift between the stub and the runtime:\n" + "\n".join(
+        problems
+    )

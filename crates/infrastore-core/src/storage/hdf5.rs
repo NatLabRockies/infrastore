@@ -26,7 +26,7 @@
 //!   little from DEFLATE anyway.)
 //! * No per-variable dimension objects — HDF5 dataspaces carry the shape.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 use std::path::Path;
 use std::str::FromStr;
@@ -83,6 +83,21 @@ const CHUNK_CACHE_NSLOTS: usize = 8209;
 const CHUNK_CACHE_NBYTES: usize = 64 << 20;
 const CHUNK_CACHE_W0: f64 = 0.75;
 
+/// How much a bulk packed read may over-fetch before it stops reading the
+/// requested columns as one block and reads them one at a time.
+///
+/// A packed dataset holds a whole cohort side by side, so the columns one call
+/// asks for can sit anywhere in a pool thousands wide. One hyperslab over the
+/// span between the first and last of them is a single HDF5 call and is what
+/// makes a whole-cohort read fast; it is also the wrong shape when the wanted
+/// columns are scattered, because the span then covers columns nobody asked
+/// for, over the pool's full time extent. Reading a single late column out of a
+/// wide pool that way allocated gigabytes to return kilobytes.
+///
+/// At this factor the block path reads at most three times what it returns, and
+/// anything sparser pays one call per column and reads exactly what it returns.
+const SPAN_DENSITY: usize = 3;
+
 /// File builder with the store's chunk-cache policy applied.
 fn file_builder() -> h5::FileBuilder {
     let mut b = h5::FileBuilder::new();
@@ -112,10 +127,10 @@ fn packed_ranges(time: Range<usize>, col: usize, element_shape: &[usize]) -> Vec
 
 fn packed_block_ranges(
     time: Range<usize>,
-    width: usize,
+    cols: Range<usize>,
     element_shape: &[usize],
 ) -> Vec<Range<usize>> {
-    let mut ranges = vec![time, 0..width];
+    let mut ranges = vec![time, cols];
     ranges.extend(element_shape.iter().map(|&k| 0..k));
     ranges
 }
@@ -903,7 +918,7 @@ impl Inner {
                 dtype,
                 &buf,
                 &slice_shape,
-                packed_block_ranges(0..length, width, &element_shape),
+                packed_block_ranges(0..length, 0..width, &element_shape),
             )?;
             // Hash rows for the whole segment in one write.
             let mut hash_buf = vec![0u8; width * 64];
@@ -1109,7 +1124,7 @@ impl Inner {
             let bytes = read_sel(
                 &ds,
                 state.dtype,
-                packed_block_ranges(index..index + 1, width, &state.element_shape),
+                packed_block_ranges(index..index + 1, 0..width, &state.element_shape),
             )?;
             rows.insert(dataset.clone(), (bytes, elem_bytes));
         }
@@ -1153,15 +1168,14 @@ impl Inner {
             )));
         }
         let mut placements: Vec<Placement> = Vec::with_capacity(hashes.len());
-        let mut max_col: HashMap<String, usize> = HashMap::new();
+        // Exactly the columns asked for, per dataset -- not a high-water mark.
+        // Ordered, because the fetch below works from the span they cover.
+        let mut wanted_cols: HashMap<String, BTreeSet<usize>> = HashMap::new();
         for (hash, &dtype) in hashes.iter().zip(dtypes) {
             match self.by_hash.get(hash).ok_or(TimeSeriesError::NotFound)? {
                 Location::Packed { dataset, col } => {
                     self.check_packed_dtype(hash, dataset, dtype)?;
-                    max_col
-                        .entry(dataset.clone())
-                        .and_modify(|m| *m = (*m).max(*col))
-                        .or_insert(*col);
+                    wanted_cols.entry(dataset.clone()).or_default().insert(*col);
                     placements.push(Placement::Packed {
                         dataset: dataset.clone(),
                         col: *col,
@@ -1173,37 +1187,75 @@ impl Inner {
             }
         }
 
+        /// The columns of one packed dataset that this call asked for, each
+        /// already extracted from however they were fetched.
         struct DatasetRead {
-            bytes: Vec<u8>,
-            width: usize,
+            columns: HashMap<usize, Vec<u8>>,
             length: usize,
             dtype: Dtype,
             element_shape: Vec<usize>,
-            elem_bytes: usize,
         }
         let mut reads: HashMap<String, DatasetRead> = HashMap::new();
-        for (dataset, &top) in &max_col {
+        for (dataset, cols) in &wanted_cols {
             let state = self.datasets.get(dataset).ok_or_else(|| {
                 TimeSeriesError::IntegrityError(format!("dataset {dataset} missing"))
             })?;
-            let width = top + 1;
             let elem_bytes =
                 state.element_shape.iter().product::<usize>().max(1) * state.dtype.size();
             let ds = self.dataset(dataset)?;
-            let bytes = read_sel(
-                &ds,
-                state.dtype,
-                packed_block_ranges(0..state.length, width, &state.element_shape),
-            )?;
+            // `cols` is a `BTreeSet`, so first and last bound the span.
+            let first = *cols.iter().next().expect("entry implies a column");
+            let last = *cols.iter().next_back().expect("entry implies a column");
+            let span = last - first + 1;
+            let mut columns: HashMap<usize, Vec<u8>> = HashMap::with_capacity(cols.len());
+            if span <= cols.len().saturating_mul(SPAN_DENSITY) {
+                // Dense enough that one hyperslab beats a call per column: the
+                // read is at most `SPAN_DENSITY` times what is returned.
+                let bytes = read_sel(
+                    &ds,
+                    state.dtype,
+                    packed_block_ranges(0..state.length, first..last + 1, &state.element_shape),
+                )?;
+                // The block is `length` rows of `span` elements, so a column
+                // is every `span`-th element starting at its offset. Taken by
+                // `chunks_exact` rather than by index: a short read yields
+                // fewer elements instead of an out-of-bounds slice, and the
+                // shape mismatch is then reported where every other one is,
+                // by `TypedArray::new` below.
+                for &col in cols {
+                    let mut col_bytes = Vec::with_capacity(state.length * elem_bytes);
+                    for block in bytes
+                        .chunks_exact(elem_bytes)
+                        .skip(col - first)
+                        .step_by(span)
+                    {
+                        col_bytes.extend_from_slice(block);
+                    }
+                    columns.insert(col, col_bytes);
+                }
+            } else {
+                // Sparse: one hyperslab per column, which reads exactly what is
+                // returned. A wide pool asked for one late column used to read
+                // every column before it, over the pool's full time extent --
+                // gigabytes to return kilobytes.
+                for &col in cols {
+                    columns.insert(
+                        col,
+                        read_sel(
+                            &ds,
+                            state.dtype,
+                            packed_ranges(0..state.length, col, &state.element_shape),
+                        )?,
+                    );
+                }
+            }
             reads.insert(
                 dataset.clone(),
                 DatasetRead {
-                    bytes,
-                    width,
+                    columns,
                     length: state.length,
                     dtype: state.dtype,
                     element_shape: state.element_shape.clone(),
-                    elem_bytes,
                 },
             );
         }
@@ -1213,16 +1265,11 @@ impl Inner {
             match placement {
                 Placement::Packed { dataset, col } => {
                     let r = reads.get(dataset).expect("dataset read above");
-                    let mut col_bytes = Vec::with_capacity(r.length * r.elem_bytes);
-                    for t in 0..r.length {
-                        let start = (t * r.width + col) * r.elem_bytes;
-                        let block = r.bytes.get(start..start + r.elem_bytes).ok_or_else(|| {
-                            TimeSeriesError::IntegrityError(format!(
-                                "column {col} out of block bounds for dataset {dataset}"
-                            ))
-                        })?;
-                        col_bytes.extend_from_slice(block);
-                    }
+                    // Cloned rather than moved: the same hash may appear more
+                    // than once in `hashes`, and each occurrence owns its array.
+                    // Present by construction -- the read above fetched exactly
+                    // the columns these placements name.
+                    let col_bytes = r.columns.get(col).expect("column read above").clone();
                     let mut shape = vec![r.length];
                     shape.extend_from_slice(&r.element_shape);
                     out.push(
@@ -1668,7 +1715,7 @@ mod tests {
         let mut be = Hdf5Backend::create(&path, Compression::default()).unwrap();
         let written = be.put_packed_block(&hashes, &refs, res()).unwrap();
         assert!(written.iter().all(|&w| w));
-        // read_arrays gathers all columns from one hyperslab per dataset.
+        // Every column of the pool: one hyperslab per dataset.
         let out = be
             .read_arrays(&hashes, &vec![Dtype::F64; hashes.len()])
             .unwrap();
@@ -1681,6 +1728,54 @@ mod tests {
         for (i, a) in arrays.iter().enumerate() {
             assert_eq!(buf[i * elem..(i + 1) * elem], a.bytes[5 * elem..6 * elem]);
         }
+    }
+
+    /// A bulk read fetches the columns it was asked for, whether they sit
+    /// together or scattered across a wide pool.
+    ///
+    /// The two fetch shapes are a cost decision, not a semantic one, so the
+    /// values must not depend on which one runs: a scattered request used to
+    /// read every column from the first wanted one to the last, over the pool's
+    /// full time extent, and slice the rest away.
+    #[test]
+    fn bulk_read_of_scattered_columns_returns_the_same_arrays() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.h5");
+        // One pool 40 columns wide, so a scattered request spans nearly all of
+        // it while wanting two.
+        let arrays: Vec<TypedArray> = (0..40).map(|i| f64_array(vec![8, 3], i as f64)).collect();
+        let hashes: Vec<[u8; 32]> = arrays.iter().map(array_hash).collect();
+        let refs: Vec<&TypedArray> = arrays.iter().collect();
+        let mut be = Hdf5Backend::create(&path, Compression::default()).unwrap();
+        assert!(
+            be.put_packed_block(&hashes, &refs, res())
+                .unwrap()
+                .iter()
+                .all(|&w| w)
+        );
+
+        let read = |picks: &[usize]| {
+            let h: Vec<[u8; 32]> = picks.iter().map(|&i| hashes[i]).collect();
+            be.read_arrays(&h, &vec![Dtype::F64; h.len()]).unwrap()
+        };
+        let expect = |picks: &[usize]| -> Vec<TypedArray> {
+            picks.iter().map(|&i| arrays[i].clone()).collect()
+        };
+
+        // Sparse: the span is 40 columns wide and two are wanted.
+        assert_eq!(read(&[0, 39]), expect(&[0, 39]));
+        // Sparse, and out of column order: results follow the request.
+        assert_eq!(read(&[39, 17, 0]), expect(&[39, 17, 0]));
+        // A single column, anywhere in the pool.
+        assert_eq!(read(&[37]), expect(&[37]));
+        // Dense: adjacent columns still come back in one block read.
+        assert_eq!(read(&[4, 5, 6, 7]), expect(&[4, 5, 6, 7]));
+        // Every column, the whole-cohort case the block read exists for.
+        let all: Vec<usize> = (0..40).collect();
+        assert_eq!(read(&all), arrays);
+        // A repeated hash yields one array per occurrence, on both paths.
+        assert_eq!(read(&[39, 39, 0]), expect(&[39, 39, 0]));
+        assert_eq!(read(&[5, 5, 6]), expect(&[5, 5, 6]));
     }
 
     /// Irregular series pool by their timestamp-vector hash, so two cohorts at

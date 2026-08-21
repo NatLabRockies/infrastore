@@ -33,7 +33,9 @@ Repository = "https://github.com/NatLabRockies/infrastore"
 Issues = "https://github.com/NatLabRockies/infrastore/issues"
 
 [project.optional-dependencies]
-test = ["pytest>=7"]
+# `tzdata` because `zoneinfo` has no time-zone database to read on Windows and
+# the datetime tests name real zones; see the note on `test-requires` below.
+test = ["pytest>=7", "tzdata"]
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
@@ -60,7 +62,14 @@ build-frontend = "build"
 # "several HDF5 instances in one interpreter" from an assumption into a tested
 # property -- on manylinux in particular, where a collision shows up as silent
 # symbol interposition rather than a clean import error.
-test-requires = ["pytest>=7", "netCDF4", "h5py"]
+#
+# `tzdata` is what makes `zoneinfo` work on Windows, which ships no system
+# time-zone database. The datetime tests name real zones deliberately -- the
+# binding accepts any aware instant, and a named zone is the case pyo3's own
+# conversion refuses -- so this is a test dependency on every platform, not a
+# Windows workaround. It is not a runtime dependency of the wheel: the binding
+# converts whatever zone the caller supplies and never resolves one itself.
+test-requires = ["pytest>=7", "netCDF4", "h5py", "tzdata"]
 test-command = "pytest -q {project}/python/tests"
 
 # Install the Rust toolchain before building. The `$HOME/.cargo/bin` PATH override

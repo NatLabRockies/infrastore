@@ -16,7 +16,7 @@ extension and installs it into the active virtual environment:
 ```sh
 cd crates/infrastore-py
 python3 -m venv .venv && source .venv/bin/activate
-pip install maturin pytest numpy
+pip install maturin pytest numpy tzdata  # tzdata: zoneinfo on Windows
 maturin develop
 ```
 

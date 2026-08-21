@@ -1747,6 +1747,52 @@ end
     @test sum(length(g.keys) for g in reader.groups) == 2
 end
 
+@testset "name_glob filter across the catalog and reader surface" begin
+    # The core has had `ListFilter::name_glob` since the discovery surface
+    # landed, and Python and the CLI both expose it; the C ABI did not, so no
+    # Julia caller could reach it and every name-pattern query had to list the
+    # store and filter in Julia.
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+    for (owner, name) in
+        [(1, "wind_speed"), (1, "wind_dir"), (2, "solar_ghi"), (3, "Wind_speed")]
+        add_time_series!(
+            store, owner, "Generator", Component,
+            SingleTimeSeries(t0, res, collect(1.0:4.0), name),
+        )
+    end
+
+    @test sort(list_names(store; name_glob="wind_*")) == ["wind_dir", "wind_speed"]
+    @test length(list_keys(store; name_glob="wind_*")) == 2
+    # The pattern matches the whole name, so a leading `*` reaches both
+    # spellings of the speed series.
+    @test length(list_time_series(store; name_glob="*_speed")) == 2
+    @test length(list_array_groups(store; name_glob="wind_*")) == 2
+    @test list_owner_types(store; name_glob="solar_*") == ["Generator"]
+    @test has_any_time_series(store; name_glob="solar_*")
+    @test !has_any_time_series(store; name_glob="hydro_*")
+
+    # Case-sensitive, as SQLite GLOB is -- the capitalized row is a different
+    # series, not a near miss.
+    @test length(list_keys(store; name_glob="Wind*")) == 1
+
+    # Composes with the other filters rather than replacing them.
+    @test length(list_keys(store; owner_id=1, name_glob="wind_*")) == 2
+    @test isempty(list_keys(store; owner_id=2, name_glob="wind_*"))
+    @test length(list_keys(store; name="wind_dir", name_glob="wind_*")) == 1
+    @test isempty(list_keys(store; name="solar_ghi", name_glob="wind_*"))
+
+    # The reader builders take it too, so a columnar sweep can be scoped by
+    # pattern without listing first.
+    reader = build_static_reader(store; resolution=res, name_glob="wind_*")
+    @test sum(length(g.keys) for g in reader.groups) == 2
+
+    # And it drives a removal.
+    @test remove_by_filter!(store; name_glob="wind_*") == 2
+    @test sort(list_names(store)) == ["Wind_speed", "solar_ghi"]
+end
+
 @testset "Phase 2 additions: units, time_range, discovery, rename, bulk dispatch" begin
     store = Store(in_memory=true)
     t0 = DateTime(2024, 1, 1)
