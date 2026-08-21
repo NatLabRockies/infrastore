@@ -148,7 +148,7 @@ function SingleTimeSeries(
     component_field::Union{Nothing, AbstractString}=nothing,
 )
     return SingleTimeSeries{eltype(data), ndims(data)}(
-        initial,
+        _utc_datetime(initial),
         resolution,
         data isa Array ? data : Array(data),
         String(name),
@@ -199,11 +199,15 @@ function NonSequentialTimeSeries(
 )
     length(timestamps) == size(data, 1) ||
         throw(InvalidParameterError("timestamp count must match data length"))
+    # Normalize first, then check: a vector mixing zones (or `ZonedDateTime`s
+    # from different ones) is ordered by the instants it names, not by the wall
+    # clocks it reads.
+    timestamps = DateTime[_utc_datetime(t) for t in timestamps]
     all(timestamps[i] < timestamps[i + 1] for i in 1:(length(timestamps) - 1)) ||
         throw(InvalidParameterError("timestamps must be strictly increasing"))
     arr = data isa Array ? data : Array(data)
     return NonSequentialTimeSeries{eltype(arr), ndims(arr)}(
-        Vector{DateTime}(timestamps),
+        timestamps,
         arr,
         String(name),
         _maybe_string(application_data),
@@ -265,7 +269,7 @@ function Deterministic(
     component_field::Union{Nothing, AbstractString}=nothing,
 )
     return Deterministic{eltype(data), ndims(data)}(
-        initial,
+        _utc_datetime(initial),
         resolution,
         horizon,
         interval,
@@ -323,7 +327,7 @@ function Probabilistic(
     component_field::Union{Nothing, AbstractString}=nothing,
 )
     return Probabilistic{eltype(data), ndims(data)}(
-        initial,
+        _utc_datetime(initial),
         resolution,
         horizon,
         interval,
@@ -382,7 +386,7 @@ function Scenarios(
     component_field::Union{Nothing, AbstractString}=nothing,
 )
     return Scenarios{eltype(data), ndims(data)}(
-        initial,
+        _utc_datetime(initial),
         resolution,
         horizon,
         interval,

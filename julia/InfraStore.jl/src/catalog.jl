@@ -486,7 +486,7 @@ function get_time_series(
     ::Type{SingleTimeSeries},
     store::Store,
     key::TimeSeriesKey;
-    time_range::Union{Nothing, Tuple{DateTime, DateTime}}=nothing,
+    time_range::TimeRangeArg=nothing,
 )
     return get_time_series(store, key; time_range=time_range)
 end
@@ -506,7 +506,7 @@ function get_time_series(
     name::AbstractString;
     resolution::Union{Nothing, Period}=nothing,
     features::AbstractDict=Dict{String, Any}(),
-    time_range::Union{Nothing, Tuple{DateTime, DateTime}}=nothing,
+    time_range::TimeRangeArg=nothing,
 )
     key = _make_key(
         owner_id,
@@ -535,7 +535,7 @@ function get_time_series(
     name::AbstractString;
     resolution::Union{Nothing, Period}=nothing,
     features::AbstractDict=Dict{String, Any}(),
-    time_range::Union{Nothing, Tuple{DateTime, DateTime}}=nothing,
+    time_range::TimeRangeArg=nothing,
 )
     key = _make_key(
         owner_id,

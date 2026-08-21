@@ -4,11 +4,15 @@
 //! implementation that a caller can nonetheless depend on. Both are pinned so a
 //! future change to either is a deliberate one:
 //!
-//! * **Precision.** The core stores a timestamp as an RFC3339 string but a
-//!   `Period` as an integer count of **milliseconds**. Those two do not have the
-//!   same resolution, and the bindings narrow it further (`datetime` is
-//!   microsecond, Julia's `DateTime` is millisecond). Where a value is truncated
-//!   rather than rejected, that is recorded here.
+//! * **Precision.** The core stores a timestamp as an RFC3339 string, which
+//!   could carry nanoseconds, but a `Period` as an integer count of
+//!   **milliseconds** — and the bindings narrow it further still (`datetime` is
+//!   microsecond, Julia's `DateTime` is millisecond). The millisecond is
+//!   therefore the floor for *both*: a period finer than one is not positive,
+//!   and an instant finer than one is refused on write rather than truncated
+//!   into a different instant in each binding. What the encodings can still
+//!   *hold*, what a query bound may still be, and where a value is truncated
+//!   rather than rejected are all recorded here.
 //! * **Concurrency.** `Store` is single-threaded by construction. This file
 //!   asserts *which* auto-traits it has, what a second handle on one path does,
 //!   and what a reader built before a mutation returns afterwards — no threads
@@ -189,16 +193,18 @@ fn a_resolution_the_store_cannot_represent_is_refused_on_write() {
 }
 
 #[test]
-fn nanosecond_precision_timestamps_survive_the_catalog_round_trip() {
-    // Timestamps are stored as RFC3339 strings, which carry sub-second digits, so
-    // an initial timestamp keeps nanosecond precision even though a *period*
-    // cannot. PIN that: the two have different resolutions.
-    let precise = Utc
-        .with_ymd_and_hms(2024, 1, 1, 0, 0, 0)
-        .unwrap()
-        .with_timezone(&Utc)
-        + Duration::nanoseconds(123_456_789);
-    assert_eq!(precise.timestamp_subsec_nanos(), 123_456_789);
+fn millisecond_precision_timestamps_round_trip_and_finer_ones_are_refused() {
+    // A timestamp is stored as an RFC3339 string, which *could* carry
+    // nanoseconds — but a `Period` is a whole number of milliseconds, and so is
+    // the instant a series may be written at. The two now agree.
+    //
+    // The write path draws the line rather than the encoding, because the
+    // truncation is otherwise silent and binding-dependent: the C ABI and Julia
+    // exchange instants as i64 unix milliseconds, Python's `datetime` is
+    // microsecond, and gRPC and the Rust core keep the full RFC3339 string. The
+    // same series then sat on three different instants depending on who read it.
+    let precise = t0() + Duration::milliseconds(123);
+    assert_eq!(precise.timestamp_subsec_nanos(), 123_000_000);
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
@@ -214,7 +220,7 @@ fn nanosecond_precision_timestamps_survive_the_catalog_round_trip() {
     assert_eq!(
         meta.initial_timestamp,
         Some(precise),
-        "nanoseconds must survive the RFC3339 catalog encoding"
+        "milliseconds must survive the RFC3339 catalog encoding"
     );
     let got = store.get_time_series(key.identity(), None).unwrap();
     assert_eq!(got.as_single().unwrap().initial_timestamp, precise);
@@ -225,6 +231,30 @@ fn nanosecond_precision_timestamps_survive_the_catalog_round_trip() {
             .name,
         "load"
     );
+
+    // Anything finer is refused on write, at every magnitude below a millisecond.
+    let mut store = create_store(None, true).unwrap();
+    for (label, offset) in [
+        ("1ns", Duration::nanoseconds(1)),
+        ("123456789ns", Duration::nanoseconds(123_456_789)),
+        ("1us", Duration::microseconds(1)),
+        ("999us", Duration::microseconds(999)),
+        ("1500us", Duration::microseconds(1_500)),
+    ] {
+        let err = store
+            .add(AddRequest::new(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                sts_at("load", t0() + offset, Duration::hours(1)),
+            ))
+            .unwrap_err();
+        assert!(
+            matches!(err, infrastore_core::TimeSeriesError::InvalidParameter(ref m)
+                if m.contains("finer than a millisecond")),
+            "{label}: expected an InvalidParameter about the precision, got {err:?}"
+        );
+    }
 }
 
 #[test]
@@ -302,12 +332,12 @@ fn a_sub_millisecond_offset_from_a_forecast_window_boundary_is_rejected() {
 }
 
 #[test]
-fn a_forecast_on_a_nanosecond_offset_grid_reads_at_its_own_boundaries() {
-    // The other side of the contract: a sub-millisecond `initial_timestamp` is
-    // supported, so the grid's *phase* can be finer than a millisecond. A read at
-    // the grid's own boundary — nanoseconds included — must work, and a bound
-    // rounded to the millisecond must not.
-    let initial = t0() + Duration::nanoseconds(500);
+fn a_forecast_on_a_millisecond_offset_grid_reads_at_its_own_boundaries() {
+    // The other side of the contract: a grid's *phase* may be any whole
+    // millisecond, not just a whole second, so a read at the grid's own boundary
+    // must work and a bound rounded away from it must not. A finer phase is
+    // refused on write (below), so this is as fine as a grid gets.
+    let initial = t0() + Duration::milliseconds(500);
     let mut store = create_store(None, true).unwrap();
     let det = Deterministic::new(
         initial,
@@ -321,7 +351,7 @@ fn a_forecast_on_a_nanosecond_offset_grid_reads_at_its_own_boundaries() {
     .unwrap();
     let key = add(&mut store, 1, TimeSeriesData::Deterministic(det));
 
-    // The exact window-1 boundary carries the same 500ns phase.
+    // The exact window-1 boundary carries the same 500ms phase.
     let boundary = initial + Duration::hours(1);
     let got = store
         .get_time_series(
@@ -333,7 +363,7 @@ fn a_forecast_on_a_nanosecond_offset_grid_reads_at_its_own_boundaries() {
     assert_eq!(fc.initial_timestamp, boundary);
     assert_eq!(fc.count, 2);
 
-    // The same instant rounded down to the millisecond is not a window boundary.
+    // The same instant rounded down to the second is not a window boundary.
     for rounded in [t0() + Duration::hours(1), t0()] {
         assert!(
             store
@@ -342,9 +372,90 @@ fn a_forecast_on_a_nanosecond_offset_grid_reads_at_its_own_boundaries() {
                     Some((rounded, rounded + Duration::hours(2)))
                 )
                 .is_err(),
-            "a millisecond-rounded bound is off a nanosecond-offset grid"
+            "a second-rounded bound is off a millisecond-offset grid"
         );
     }
+
+    // A forecast whose phase is finer than a millisecond never gets stored.
+    let sub_ms = Deterministic::new(
+        t0() + Duration::nanoseconds(500),
+        Duration::hours(1),
+        Duration::hours(2),
+        Duration::hours(1),
+        3,
+        TypedArray::from_f64(vec![2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+        "sub_ms",
+    )
+    .unwrap();
+    let err = store
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::Deterministic(sub_ms),
+        ))
+        .unwrap_err();
+    assert!(
+        matches!(err, infrastore_core::TimeSeriesError::InvalidParameter(ref m)
+            if m.contains("finer than a millisecond")),
+        "a sub-millisecond forecast phase must be refused on write, got {err:?}"
+    );
+}
+
+#[test]
+fn a_forecast_the_store_cannot_read_back_is_refused_on_write() {
+    // The forecast half of `a_resolution_the_store_cannot_represent_is_refused_
+    // on_write`. Every field on a `Deterministic` is `pub` and the type derives
+    // `Deserialize`, so a struct literal or a `serde_json::from_str` reaches the
+    // store having met no constructor. The store used to trust it, write the
+    // row, and then fail *every read* with an `IntegrityError` — the same
+    // "writable but unusable" state the static path was fixed to reject.
+    let base = Deterministic::new(
+        t0(),
+        Duration::hours(1),
+        Duration::hours(2),
+        Duration::hours(1),
+        3,
+        TypedArray::from_f64(vec![2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+        "det",
+    )
+    .unwrap();
+
+    // A horizon that is not a whole multiple of the resolution: H is undefined.
+    let mut ragged = base.clone();
+    ragged.horizon = Period::fixed(Duration::minutes(90));
+    // A resolution the store cannot represent, exactly as for a static series.
+    let mut zero_res = base.clone();
+    zero_res.resolution = Period::zero();
+    let mut sub_ms_res = base.clone();
+    sub_ms_res.resolution = Period::fixed(Duration::microseconds(500));
+    // A count that disagrees with the array it describes.
+    let mut miscounted = base.clone();
+    miscounted.count = 7;
+
+    let mut store = create_store(None, true).unwrap();
+    for (label, bad) in [
+        ("non-integral horizon", ragged),
+        ("zero resolution", zero_res),
+        ("sub-millisecond resolution", sub_ms_res),
+        ("count disagreeing with the array", miscounted),
+    ] {
+        let err = store
+            .add(AddRequest::new(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::Deterministic(bad),
+            ))
+            .unwrap_err();
+        assert!(
+            matches!(err, infrastore_core::TimeSeriesError::InvalidParameter(_)),
+            "{label}: expected an InvalidParameter on write, got {err:?}"
+        );
+    }
+
+    // Nothing was written: the failures are all pre-commit.
+    assert!(store.list_keys(ListFilter::new()).unwrap().is_empty());
 }
 
 #[test]
@@ -488,14 +599,20 @@ fn a_century_spanning_non_sequential_series_round_trips() {
 #[test]
 fn non_sequential_timestamps_keep_sub_second_precision() {
     // Two timestamps one millisecond apart are distinct (and strictly
-    // increasing); one nanosecond apart also are, because the stored encoding is
-    // RFC3339 rather than a millisecond count.
+    // increasing), and the sub-second component survives the stored encoding —
+    // which is the delta-varint blob, not a whole-second count.
+    //
+    // One *nanosecond* apart is a different matter: see
+    // `sub_millisecond_non_sequential_timestamps_are_refused` below. They are
+    // distinct here and identical to any consumer reading through a millisecond
+    // boundary, so the write path refuses them rather than letting the vector
+    // stop being strictly increasing on the way back out.
     let base = t0();
     let timestamps = vec![
         base,
-        base + Duration::nanoseconds(1),
-        base + Duration::microseconds(1),
         base + Duration::milliseconds(1),
+        base + Duration::milliseconds(2),
+        base + Duration::milliseconds(500),
     ];
     let values = vec![1.0f64, 2.0, 3.0, 4.0];
 
@@ -523,9 +640,50 @@ fn non_sequential_timestamps_keep_sub_second_precision() {
     assert_eq!(
         got.as_non_sequential().unwrap().timestamps,
         timestamps,
-        "sub-millisecond spacing must survive; a millisecond-quantized encoding \
-         would collapse these four into one"
+        "millisecond spacing must survive; a second-quantized encoding would \
+         collapse these four into one"
     );
+}
+
+#[test]
+fn sub_millisecond_non_sequential_timestamps_are_refused() {
+    // Every timestamp in the vector is checked, not just the first: a single
+    // sub-millisecond entry is enough to make the vector non-monotonic once it
+    // crosses a millisecond boundary, which is what the C ABI and Julia read it
+    // through. The failure that produced was a store one binding could write and
+    // another could not read.
+    let base = t0();
+    for (label, offset) in [
+        ("1ns", Duration::nanoseconds(1)),
+        ("1us", Duration::microseconds(1)),
+        ("999999ns", Duration::nanoseconds(999_999)),
+    ] {
+        let series = NonSequentialTimeSeries::new(
+            // Position 1, so the check cannot pass by only looking at the first.
+            vec![
+                base,
+                base + Duration::hours(1) + offset,
+                base + Duration::hours(2),
+            ],
+            TypedArray::from_f64(vec![3], &[1.0, 2.0, 3.0]),
+            "precise",
+        )
+        .unwrap();
+        let mut store = create_store(None, true).unwrap();
+        let err = store
+            .add(AddRequest::new(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::NonSequentialTimeSeries(series),
+            ))
+            .unwrap_err();
+        assert!(
+            matches!(err, infrastore_core::TimeSeriesError::InvalidParameter(ref m)
+                if m.contains("finer than a millisecond") && m.contains("timestamp 1")),
+            "{label}: expected an InvalidParameter naming the offending index, got {err:?}"
+        );
+    }
 }
 
 // ===========================================================================

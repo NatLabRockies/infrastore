@@ -257,7 +257,7 @@ function _get_forecast_raw(
     resolution::Union{Nothing, Period}=nothing,
     interval::Union{Nothing, Period}=nothing,
     features::AbstractDict=Dict{String, Any}(),
-    time_range::Union{Nothing, Tuple{DateTime, DateTime}}=nothing,
+    time_range::TimeRangeArg=nothing,
 )
     resolution_iso = _period_to_cstr(resolution)
     interval_iso = _period_to_cstr(interval)
@@ -425,7 +425,7 @@ end
 function _get_forecast_raw(
     store::Store,
     key::TimeSeriesKey;
-    time_range::Union{Nothing, Tuple{DateTime, DateTime}}=nothing,
+    time_range::TimeRangeArg=nothing,
 )
     time_range_present = time_range !== nothing
     range_start_ms = time_range_present ? _to_unix_ms(time_range[1]) : Int64(0)
@@ -607,7 +607,7 @@ function get_time_series(
     resolution::Union{Nothing, Period}=nothing,
     interval::Union{Nothing, Period}=nothing,
     features::AbstractDict=Dict{String, Any}(),
-    time_range::Union{Nothing, Tuple{DateTime, DateTime}}=nothing,
+    time_range::TimeRangeArg=nothing,
 ) where {T <: _ForecastRequest}
     r = _get_forecast_raw(
         store,
@@ -648,7 +648,7 @@ function get_time_series(
     ::Type{T},
     store::Store,
     key::TimeSeriesKey;
-    time_range::Union{Nothing, Tuple{DateTime, DateTime}}=nothing,
+    time_range::TimeRangeArg=nothing,
 ) where {T <: _ForecastRequest}
     r = _get_forecast_raw(store, key; time_range=time_range)
     # The FFI reports the type it actually matched, and this used to decode as

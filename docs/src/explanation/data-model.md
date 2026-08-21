@@ -114,6 +114,32 @@ month. Periods are encoded as ISO-8601 duration strings (`PT1H`, `P1M`, `P1Y`) o
 every binding (the Python/gRPC surfaces accept a `timedelta`/duration for fixed periods and an
 ISO-8601 string for either kind, and return the ISO-8601 string).
 
+### Timestamp precision
+
+Every instant the store records — a `SingleTimeSeries` or forecast `initial_timestamp`, and every
+entry of a `NonSequentialTimeSeries` timestamp vector — is **a whole number of milliseconds**, the
+same floor a fixed period has. One millisecond is the finest resolution a period can express, and it
+is likewise the finest instant a series can be written at.
+
+The rule is enforced on write, in the core, for all five addable types: a finer instant is rejected
+with an `InvalidParameter` error rather than truncated. This is what makes a timestamp mean the same
+thing in every consumer. The bindings do not share one precision — the C ABI and Julia exchange
+instants as `i64` Unix milliseconds, Python's `datetime` is microsecond, and gRPC and the Rust core
+carry a full RFC 3339 string — so a finer instant would be silently truncated at some boundaries and
+not others, putting the same series on different instants depending on who read it. For a
+`NonSequentialTimeSeries` whose timestamps are less than a millisecond apart it is worse: two
+distinct timestamps collapse into one, and the vector stops being strictly increasing on the way
+back out.
+
+A series needing a finer grid should scale its unit and record it in `units`, exactly as it must for
+a sub-millisecond resolution: a 500 µs series is a 500-unit series.
+
+Two things are deliberately _not_ constrained. A **query bound** — a `time_range` end, a reader's
+`when` — may be arbitrarily fine; it is not stored, and the read paths already say what an off-grid
+bound does (see [reading a time range](../reference/rust-api.md#reading-a-time-range)). And **reads
+stay permissive**: an artifact written before this rule may hold finer instants and still reads back
+exactly as written, which is why the rule does not change `DATA_FORMAT_VERSION`.
+
 ### Typed, N-dimensional arrays
 
 Every series' values are a **`TypedArray`**: an element `dtype` (`f64`, `f32`, the integer widths,

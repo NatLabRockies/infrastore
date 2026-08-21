@@ -3789,9 +3789,9 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
     // to hold.
     validate_features(&item.features)?;
     let element_type = resolve_element_type(item)?;
+    validate_data(&item.data)?;
     let (hash, group, layout, meta, key) = match &item.data {
         TimeSeriesData::SingleTimeSeries(single) => {
-            validate_single(single)?;
             let hash = array_hash(&single.data);
             (
                 hash,
@@ -3833,7 +3833,6 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
             )
         }
         TimeSeriesData::NonSequentialTimeSeries(non_sequential) => {
-            validate_non_sequential(non_sequential)?;
             let hash = array_hash(&non_sequential.data);
             (
                 hash,
@@ -4139,6 +4138,51 @@ fn check_forecast_family_free(
     Ok(())
 }
 
+/// Every invariant a write must hold, for all five addable types, checked at the
+/// one boundary [`build_request_parts`] gives them.
+///
+/// The static types were already validated here; the dense forecasts trusted
+/// their constructors, which is not a boundary — the fields are `pub` and the
+/// types derive `Deserialize`, so a struct literal or a `serde_json::from_str`
+/// reaches the store having met nothing. The result was the failure mode
+/// [`validate_single`]'s comment describes for the static path: a
+/// `Deterministic` whose horizon was not a whole multiple of its resolution, or
+/// whose resolution was zero, was *written* and then failed on every read with
+/// an `IntegrityError` blaming the store for what the caller passed.
+///
+/// Reads deliberately do not go through here. They re-run the same shape and
+/// period checks via the constructors (which is how a genuinely corrupt row is
+/// still caught, as an `IntegrityError`), but they do not apply the millisecond
+/// rule, so an artifact written before it keeps reading back exactly.
+fn validate_data(data: &TimeSeriesData) -> Result<()> {
+    let invalid = TimeSeriesError::InvalidParameter;
+    match data {
+        TimeSeriesData::SingleTimeSeries(single) => validate_single(single),
+        TimeSeriesData::NonSequentialTimeSeries(non_sequential) => {
+            validate_non_sequential(non_sequential)
+        }
+        TimeSeriesData::Deterministic(det) => {
+            require_ms(det.initial_timestamp, "Deterministic")?;
+            det.validate().map_err(invalid)
+        }
+        TimeSeriesData::Probabilistic(prob) => {
+            require_ms(prob.initial_timestamp, "Probabilistic")?;
+            prob.validate().map_err(invalid)
+        }
+        TimeSeriesData::Scenarios(scen) => {
+            require_ms(scen.initial_timestamp, "Scenarios")?;
+            scen.validate().map_err(invalid)
+        }
+    }
+}
+
+/// [`crate::timestamps::require_millisecond_precision`] as a
+/// [`TimeSeriesError`], labelled with the type whose `initial_timestamp` it is.
+fn require_ms(t: chrono::DateTime<chrono::Utc>, label: &str) -> Result<()> {
+    crate::timestamps::require_millisecond_precision(t, &format!("{label} initial_timestamp"))
+        .map_err(TimeSeriesError::InvalidParameter)
+}
+
 /// Check that a `SingleTimeSeries` describes its own array.
 ///
 /// `length` is a public field that `SingleTimeSeries::new` derives from the
@@ -4155,6 +4199,7 @@ fn check_forecast_family_free(
 /// The sibling [`validate_non_sequential`] has always enforced the equivalent
 /// rule; this is the static path catching up.
 fn validate_single(series: &SingleTimeSeries) -> Result<()> {
+    require_ms(series.initial_timestamp, "SingleTimeSeries")?;
     if series.length != series.data.length() {
         return Err(TimeSeriesError::InvalidParameter(format!(
             "SingleTimeSeries declares length {} but its array holds {} time steps",
@@ -4198,6 +4243,17 @@ fn validate_non_sequential(series: &NonSequentialTimeSeries) -> Result<()> {
         return Err(TimeSeriesError::InvalidParameter(
             "timestamps must be strictly increasing".into(),
         ));
+    }
+    // Every timestamp, not just the first: the millisecond rule is what keeps
+    // this vector strictly increasing for a consumer that reads it back through
+    // a millisecond boundary (the C ABI, and Julia through it). Two timestamps
+    // less than a millisecond apart are distinct here and identical there.
+    for (i, t) in series.timestamps.iter().enumerate() {
+        crate::timestamps::require_millisecond_precision(
+            *t,
+            &format!("NonSequentialTimeSeries timestamp {i}"),
+        )
+        .map_err(TimeSeriesError::InvalidParameter)?;
     }
     Ok(())
 }

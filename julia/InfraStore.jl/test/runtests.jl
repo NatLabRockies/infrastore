@@ -4057,3 +4057,63 @@ end
     @test get_time_series(DeterministicSingleTimeSeries, store, kdst) isa Deterministic
     @test_throws InfraStore.InvalidParameterError get_time_series(Scenarios, store, kdst)
 end
+
+# ---------------------------------------------------------------------------
+# ZonedDateTime input (the InfraStoreTimeZonesExt weak-dependency extension)
+# ---------------------------------------------------------------------------
+
+@testset "a bare DateTime is read as UTC, and says so when it cannot be" begin
+    # The convention this package has always used, now stated rather than
+    # implied: a zoneless `DateTime` is the UTC wall clock.
+    store = Store(in_memory=true)
+    initial = DateTime(2024, 1, 1, 12)
+    key = add_time_series!(
+        store, 1, "Generator", Component,
+        SingleTimeSeries(initial, Hour(1), collect(1.0:3.0), "load"),
+    )
+    @test get_time_series(store, key).initial_timestamp == initial
+
+    # Anything that is neither a DateTime nor a ZonedDateTime is an
+    # InvalidParameterError naming the fix, not a bare MethodError.
+    err = try
+        SingleTimeSeries("2024-01-01", Hour(1), collect(1.0:3.0), "load")
+        nothing
+    catch e
+        e
+    end
+    @test err isa InfraStore.InvalidParameterError
+    @test occursin("TimeZones", sprint(showerror, err))
+
+    # A `Date` still means midnight UTC, as it did when the constructors relied
+    # on `convert(DateTime, ::Date)`.
+    date_key = add_time_series!(
+        store, 2, "Generator", Component,
+        SingleTimeSeries(Date(2024, 1, 1), Hour(1), collect(1.0:3.0), "load"),
+    )
+    @test get_time_series(store, date_key).initial_timestamp == DateTime(2024, 1, 1)
+end
+
+# The rest of the timestamp tests need the TimeZones weak dependency, and live in
+# their own file because `tz"..."` cannot even be *lowered* without it — an
+# `if available ... end` block around them would fail to macro-expand rather than
+# skip. `include` is an ordinary runtime call, so it is only reached when the
+# package loaded.
+#
+# `Pkg.test()` always provides TimeZones (see `[targets]` in Project.toml), which
+# is how CI runs this suite. A bare `julia --project=julia/InfraStore.jl
+# test/runtests.jl` does not, since a weak dependency is not loadable from the
+# package's own environment; there the extension tests are skipped out loud
+# rather than failing a run that is otherwise valid.
+if (
+    try
+        @eval using TimeZones
+        true
+    catch
+        false
+    end
+)
+    include("timezones_tests.jl")
+else
+    @warn "TimeZones is not loadable here, so the ZonedDateTime tests were SKIPPED. " *
+        "Run them with: julia --project=julia/InfraStore.jl -e 'using Pkg; Pkg.test()'"
+end

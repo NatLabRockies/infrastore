@@ -17,12 +17,13 @@ infrastore [--store <PATH.h5>] [-f <FORMAT>] [--log-level <FILTER>] <COMMAND>
 
 ### Global options
 
-| Option           | Description                                                                                                                      |
-| ---------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `--store <PATH>` | Path to the HDF5 store file. The `<PATH>.sqlite` catalog is implicit. Falls back to the `INFRASTORE_STORE` environment variable. |
-| `-f`, `--format` | Output format: `table` (default), `json`, `jsonl`, or `csv`.                                                                     |
-| `--log-level`    | Tracing filter; also read from `RUST_LOG`. Defaults to `warn`.                                                                   |
-| `-y`, `--yes`    | Answer every confirmation prompt with yes.                                                                                       |
+| Option                     | Description                                                                                                                      |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `--store <PATH>`           | Path to the HDF5 store file. The `<PATH>.sqlite` catalog is implicit. Falls back to the `INFRASTORE_STORE` environment variable. |
+| `-f`, `--format`           | Output format: `table` (default), `json`, `jsonl`, or `csv`.                                                                     |
+| `--log-level`              | Tracing filter; also read from `RUST_LOG`. Defaults to `warn`.                                                                   |
+| `-y`, `--yes`              | Answer every confirmation prompt with yes.                                                                                       |
+| `--assume-timezone <ZONE>` | Read timestamps that carry no time zone as being in this one: `UTC`, or a fixed offset like `-07:00`.                            |
 
 `--store` (or `INFRASTORE_STORE`) is required by every command except `template` and `completions`.
 
@@ -72,6 +73,39 @@ pretty document.
 `-y`/`--yes` answers every prompt, so a script no longer has to know which commands prompt or which
 flag each spells it with. The per-command `--force` flags still work and are what a one-off reaches
 for.
+
+### Zoneless timestamps
+
+A timestamp with no offset — `2024-01-01T00:00:00`, or the `2024-01-01 00:00:00` that most CSV
+writers produce — names a wall-clock reading, not an instant, and the store records instants. Such a
+timestamp is therefore refused, and the error names the flag that resolves it:
+
+```console
+$ infrastore --store s.h5 add --csv load.csv ...
+Error: timestamp '2024-01-01 00:00:00' names no time zone, so it names no instant. Give it an
+offset (RFC3339, like 2024-01-01T00:00:00Z), or pass --assume-timezone UTC (or a fixed offset
+like -07:00) to read every zoneless timestamp with it.
+```
+
+`--assume-timezone` supplies the missing offset for the whole invocation:
+
+```console
+$ infrastore --store s.h5 --assume-timezone UTC     add --csv load.csv ...   # read as UTC
+$ infrastore --store s.h5 --assume-timezone -07:00  add --csv load.csv ...   # 00:00 becomes 07:00Z
+```
+
+Three things to know:
+
+- It applies **only** where an offset is missing. A timestamp that carries its own offset is never
+  overridden, so a mixed file loads correctly and a fully-offset file is unaffected.
+- It is global, so it also covers `--time-range` bounds and `--issue-time`, which hit the same
+  parser.
+- Named zones (`America/Denver`) are **not** accepted. A zoneless timestamp in a zone with daylight
+  saving is not always a single instant — the skipped hour names none and the repeated hour names
+  two — so the flag would have to fail part-way through an ingest or silently pick one. Data written
+  zoneless in this domain is nearly always local _standard_ time, which is a fixed offset
+  year-round; pass that offset. Data that really is civil time with daylight saving should carry its
+  offsets in the file, where each row can say which side of a transition it is on.
 
 ## Commands
 
@@ -463,12 +497,18 @@ another. The lowercase forms are a command-line shorthand, not a second vocabula
   The human form the CLI used to accept (`1h`, `15min`, `7d`, and a bare integer meaning
   _milliseconds_) is rejected, with the ISO-8601 translation attached:
   `invalid duration '1h': durations are ISO-8601 — did you mean 'PT1H'?`
-- **Timestamps** (`initial_timestamp`, non-sequential timestamp column): RFC3339 (e.g.
-  `2024-01-01T00:00:00Z`) or a bare integer of epoch milliseconds.
-- **`--time-range`** is a pair of _timestamps_, not a duration: `START..END` (half-open), where each
-  side is parsed as a timestamp. For example
+- **Timestamps** (`initial_timestamp`, non-sequential timestamp column, `--time-range` bounds,
+  `--issue-time`): RFC3339 (e.g. `2024-01-01T00:00:00Z`) or a bare integer of epoch milliseconds. A
+  _stored_ timestamp must be a whole number of milliseconds — a finer one is refused by `add` rather
+  than truncated, and the epoch-millisecond form cannot express one at all. See
+  [timestamp precision](../explanation/data-model.md#timestamp-precision). A timestamp with no
+  offset needs [`--assume-timezone`](#zoneless-timestamps).
+- **`--time-range`** is a pair of _timestamps_, not a duration: `START..END` (half-open — `START`
+  inclusive, `END` exclusive), where each side is parsed as a timestamp. For example
   `--time-range 2024-01-01T01:00:00Z..2024-01-01T03:00:00Z`. A duration such as `--time-range 1h` is
-  rejected with `invalid --time-range '1h' (expected START..END)`.
+  rejected with `invalid --time-range '1h' (expected START..END)`. A range bound need not be
+  grid-aligned for a static series, and must be a window boundary for a forecast; see
+  [reading a time range](rust-api.md#reading-a-time-range) for what each type selects.
 
 ## Descriptor Schema
 

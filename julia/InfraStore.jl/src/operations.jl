@@ -1,6 +1,41 @@
 # ---- Operations -----------------------------------------------------------
 
-# Convert a DateTime to Unix milliseconds.
+# Normalize a timestamp argument to the UTC `DateTime` the FFI takes.
+#
+# Julia's `DateTime` carries no time zone, so the wrapper has to decide what one
+# means, and it means UTC -- the store records instants, and this is the only
+# reading under which a value written here comes back as itself. That is a
+# convention, not a fact about the value, which is why it is stated in the docs
+# and in the error below rather than left to be discovered.
+#
+# A `TimeZones.ZonedDateTime` needs no convention: it names an instant outright.
+# The method converting one lives in the `InfraStoreTimeZonesExt` extension, so
+# TimeZones is loaded only by callers who use it -- and until it is loaded, the
+# fallback below says so instead of raising a bare `MethodError`.
+_utc_datetime(dt::DateTime) = dt
+
+# A `Date` is midnight UTC on that day. Not new behavior: the constructors used
+# to hand their argument to a `::DateTime` field, and `convert(DateTime, ::Date)`
+# accepted one silently. Keeping the method keeps this change purely widening --
+# without it, code that passed a `Date` would start hitting the fallback below.
+_utc_datetime(d::Date) = DateTime(d)
+
+function _utc_datetime(x)
+    return throw(
+        InvalidParameterError(
+            "expected a DateTime, which this package reads as UTC, but got a $(typeof(x)). " *
+            "To pass a TimeZones.ZonedDateTime -- which names an instant on its own -- run " *
+            "`using TimeZones` first; that loads the conversion.",
+        ),
+    )
+end
+
+# A `(start, end)` time range argument. The ends are `Any` rather than `DateTime`
+# so a `ZonedDateTime` can be passed when TimeZones is loaded; `_time_range_args`
+# normalizes both through `_utc_datetime`.
+const TimeRangeArg = Union{Nothing, Tuple{Any, Any}}
+
+# Convert a timestamp to Unix milliseconds.
 #
 # Integer arithmetic throughout. `datetime2unix` returns Float64 *seconds*, and
 # multiplying that back up by 1000 does not land on an integer for most
@@ -11,6 +46,10 @@ function _to_unix_ms(dt::DateTime)
     return Dates.value(dt) - Dates.UNIXEPOCH
 end
 
+# Anything else -- a `ZonedDateTime`, or a mistake -- goes through the
+# normalization above first.
+_to_unix_ms(x) = _to_unix_ms(_utc_datetime(x))
+
 # Convert milliseconds since epoch back into a DateTime. The exact inverse of
 # `_to_unix_ms`, and likewise float-free.
 function _from_unix_ms(ms::Int64)
@@ -19,7 +58,7 @@ end
 
 # Lower an optional `(start, end)` DateTime range to the FFI's
 # (present::Bool, start_ms::Int64, end_ms::Int64) triple. `nothing` -> no range.
-function _time_range_args(time_range::Union{Nothing, Tuple{DateTime, DateTime}})
+function _time_range_args(time_range::TimeRangeArg)
     time_range === nothing && return (false, Int64(0), Int64(0))
     return (true, _to_unix_ms(time_range[1]), _to_unix_ms(time_range[2]))
 end
@@ -513,7 +552,7 @@ end
 function get_time_series(
     store::Store,
     key::TimeSeriesKey;
-    time_range::Union{Nothing, Tuple{DateTime, DateTime}}=nothing,
+    time_range::TimeRangeArg=nothing,
 )
     out_initial = Ref{Int64}(0)
     out_resolution = Ref{Ptr{Cchar}}(C_NULL)
@@ -831,7 +870,7 @@ dataset. Pass `time_range = (start, stop)` to slice every series to that window.
 function bulk_read(
     store::Store,
     keys::AbstractVector{TimeSeriesKey};
-    time_range::Union{Nothing, Tuple{DateTime, DateTime}}=nothing,
+    time_range::TimeRangeArg=nothing,
 )
     n = length(keys)
     out = Vector{Any}(undef, n)
@@ -879,7 +918,7 @@ function get_time_series(
     ::Type{NonSequentialTimeSeries},
     store::Store,
     key::TimeSeriesKey;
-    time_range::Union{Nothing, Tuple{DateTime, DateTime}}=nothing,
+    time_range::TimeRangeArg=nothing,
 )
     out_timestamps = Ref{Ptr{Int64}}(C_NULL)
     out_timestamps_len = Ref{UInt64}(0)

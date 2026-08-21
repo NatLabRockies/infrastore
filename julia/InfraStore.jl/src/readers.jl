@@ -250,12 +250,14 @@ carries its `dtype`, `element_shape`, and the `keys` identifying each column.
 static_groups(reader::StaticReader) = reader.groups
 
 """
-    static_read!(reader, t::DateTime) -> reader
+    static_read!(reader, t) -> reader
 
 Read the value of every series at `t`, filling the reader's buffers. Throws if
 `t` is off the reader's timeline. Follow with [`static_values`] per group.
+
+`t` is a `DateTime` (read as UTC) or, with TimeZones loaded, a `ZonedDateTime`.
 """
-function static_read!(reader::StaticReader, t::DateTime)
+function static_read!(reader::StaticReader, t)
     _check(
         @ccall lib_path().infrastore_static_reader_read(
             reader::Ptr{Cvoid},
@@ -498,12 +500,14 @@ function forecast_num_slots(reader::ForecastReader)
 end
 
 """
-    forecast_read!(reader, t::DateTime) -> reader
+    forecast_read!(reader, t) -> reader
 
 Read the forecast window at `t` for every entry, filling the reader's buffers.
 Throws if `t` is off the window timeline. Follow with [`forecast_values`].
+
+`t` is a `DateTime` (read as UTC) or, with TimeZones loaded, a `ZonedDateTime`.
 """
-function forecast_read!(reader::ForecastReader, t::DateTime)
+function forecast_read!(reader::ForecastReader, t)
     _check(
         @ccall lib_path().infrastore_forecast_reader_read(
             reader::Ptr{Cvoid},

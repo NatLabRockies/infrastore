@@ -587,7 +587,10 @@ and so lands on an existing store's first writable open without a `data_format_v
 
 ## Field Encoding Notes
 
-- **Timestamps** are RFC 3339 strings in UTC.
+- **Timestamps** are RFC 3339 strings in UTC, holding a whole number of **milliseconds**. The format
+  could carry finer digits and a store written before the precision rule may, so a reader must parse
+  the full string; but no current write path produces one — see
+  [timestamp precision](../explanation/data-model.md#timestamp-precision).
 - **Periods** (`resolution`, `horizon`, `interval`) are canonical **ISO-8601 duration strings** in
   SQLite (`PT1H`, `P1M`, `P1Y`), and the packed dataset name's `{res}` field uses the same encoding.
   Calendar periods (`Month`/`Quarter`/`Year`) are stored distinctly from fixed spans.
