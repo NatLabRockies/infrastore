@@ -23,7 +23,9 @@ SRC="$(cd "$SRC_ARG" && pwd)"
 # $refs among them keep resolving:
 #   TimeSeries/*.json (six per-type schemas + common.json + the oneOf wrapper)
 #   Core/Associations/SupplementalAttributeAssociation.json
-#   Core/common.json (referenced for UnitSystem)
+#   Core/common.json (trimmed: only UnitSystem is $ref'd by any vendored
+#     schema, so we vendor just that definition rather than the full
+#     1000+-line core-component schema; see TRIMMED_DEFINITIONS below)
 FILES=(
   "TimeSeries/Deterministic.json"
   "TimeSeries/DeterministicSingleTimeSeries.json"
@@ -34,8 +36,12 @@ FILES=(
   "TimeSeries/common.json"
   "TimeSeries/TimeSeriesAssociation.json"
   "Core/Associations/SupplementalAttributeAssociation.json"
-  "Core/common.json"
 )
+
+# Definitions to keep from Core/common.json, trimmed out of the file it's
+# copied from. Extend this list (and re-run) if a future vendored schema
+# $refs another definition from that file.
+TRIMMED_DEFINITIONS=("UnitSystem")
 
 rm -rf "$DEST"
 mkdir -p "$DEST/TimeSeries" "$DEST/Core/Associations"
@@ -49,9 +55,34 @@ for f in "${FILES[@]}"; do
   cp "$src_file" "$DEST/$f"
 done
 
+CORE_COMMON_SRC="$SRC/Core/common.json"
+if [ ! -f "$CORE_COMMON_SRC" ]; then
+  echo "error: expected schema file missing from source checkout: $CORE_COMMON_SRC" >&2
+  exit 1
+fi
+python3 - "$CORE_COMMON_SRC" "$DEST/Core/common.json" "${TRIMMED_DEFINITIONS[@]}" <<'PYEOF'
+import json
+import sys
+
+src_path, dest_path, *keep = sys.argv[1:]
+with open(src_path) as f:
+    data = json.load(f)
+
+missing = [name for name in keep if name not in data["definitions"]]
+if missing:
+    sys.exit(f"error: definitions not found in {src_path}: {missing}")
+
+trimmed = {
+    "$schema": data["$schema"],
+    "definitions": {name: data["definitions"][name] for name in keep},
+    "id": data["id"],
+}
+with open(dest_path, "w") as f:
+    f.write(json.dumps(trimmed, indent=2, ensure_ascii=False) + "\n")
+PYEOF
+
 cd "$SRC"
 SOURCE_REF="$(git rev-parse HEAD)"
-DIRTY_FILES="$(git status --porcelain)"
 cd - >/dev/null
 
 SOURCE_MD="$DEST/SOURCE.md"
@@ -66,21 +97,11 @@ SOURCE_MD="$DEST/SOURCE.md"
   echo "provisions nothing on any platform), so this is a maintainer-run sync rather than a"
   echo "live fetch, mirroring the \`conformance/\` + \`julia/generate_artifacts.jl\` precedent."
   echo
-  echo "- **Source repo**: \`$SRC\` (local checkout; upstream is"
-  echo "  NatLabRockies/SiennaSchemas at the time of writing, but this vendors whatever"
-  echo "  checkout is passed to the sync script)."
+  echo "- **Source repo**: upstream is \`Sienna-Platform/SiennaSchemas\`. The sync script"
+  echo "  vendors whatever local checkout is passed to it."
   echo "- **Source commit**: \`$SOURCE_REF\`"
-  if [ -n "$DIRTY_FILES" ]; then
-    echo "- **Dirty working tree at sync time**: the source checkout had uncommitted"
-    echo "  changes when this copy was made, vendored as-is (working-tree state, not the"
-    echo "  commit above). Modified files:"
-    echo
-    while IFS= read -r line; do
-      echo "  - \`${line:3}\`"
-    done <<<"$DIRTY_FILES"
-  else
-    echo "- **Dirty working tree at sync time**: none; the source checkout was clean."
-  fi
+  echo "- **Sync note**: the vendored copy may include un-merged upstream changes from the"
+  echo "  local checkout used."
   echo "- **Synced**: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo
   echo "## Refreshing"

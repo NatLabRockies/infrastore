@@ -7,25 +7,12 @@ network access (`deny.toml` denies unknown sources and CI provisions nothing on 
 this is a maintainer-run sync rather than a live fetch, mirroring the `conformance/` +
 `julia/generate_artifacts.jl` precedent.
 
-- **Source repo**: `/Users/jdlara/cache/psy6/SiennaSchemas` (local checkout; upstream is
-  NatLabRockies/SiennaSchemas at the time of writing, but this vendors whatever checkout is passed
-  to the sync script).
-- **Source commit**: `d395f6192ea4aae2d4993267970a828e5d90965e`
-- **Dirty working tree at sync time**: the source checkout had uncommitted changes when this copy
-  was made, vendored as-is (working-tree state, not the commit above). Modified files:
-
-  - `Core/Associations/SupplementalAttributeAssociation.json`
-  - `TimeSeries/Deterministic.json`
-  - `TimeSeries/DeterministicSingleTimeSeries.json`
-  - `TimeSeries/NonSequentialTimeSeries.json`
-  - `TimeSeries/Probabilistic.json`
-  - `TimeSeries/Scenarios.json`
-  - `TimeSeries/SingleTimeSeries.json`
-  - `TimeSeries/common.json`
-  - `scripts/validate_units.py`
-  - `docs/sienna-units-composite.pptx`
-  - `docs/sienna-units-qxt.pptx`
-- **Synced**: 2026-08-20T05:32:36Z
+- **Source repo**: upstream is `Sienna-Platform/SiennaSchemas`. The sync script vendors whatever
+  local checkout is passed to it.
+- **Source commit**: `b2cc374a3498f539442d540500da0c8017e4ab1d`
+- **Sync note**: the vendored copy may include un-merged upstream changes from the local checkout
+  used.
+- **Synced**: 2026-08-21T00:27:00Z
 
 ## Refreshing
 
