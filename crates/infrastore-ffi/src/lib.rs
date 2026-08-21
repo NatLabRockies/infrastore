@@ -9437,6 +9437,381 @@ mod abi_tests {
 
     // ---- Invalid UTF-8 -----------------------------------------------------
 
+    /// `name_glob` reaches every filter surface the C ABI exposes.
+    ///
+    /// The Julia suite covers this end to end, but through the dylib; this pins
+    /// it in the crate's own tests, where a signature change is a compile error
+    /// rather than a runtime one in another language. The five JSON-returning
+    /// listings share one C signature, so they are driven through a function
+    /// pointer -- the same way the Julia wrapper resolves them by symbol.
+    #[test]
+    fn name_glob_filters_every_c_abi_surface() {
+        type ListFn = unsafe extern "C" fn(
+            *const InfraStoreHandle,
+            bool,
+            i64,
+            bool,
+            i32,
+            bool,
+            i32,
+            *const c_char,
+            *const c_char,
+            *const c_char,
+            *const c_char,
+            *const c_char,
+            *const c_char,
+            *mut *mut c_char,
+            *mut u64,
+        ) -> i32;
+
+        let store = abi_create_in_memory();
+        for name in ["wind_speed", "wind_dir", "solar_ghi"] {
+            let _ = abi_add_f64(store, 1, name, &[1.0, 2.0]);
+        }
+        let glob = CString::new("wind_*").unwrap();
+
+        let listed = |f: ListFn, pattern: &CStr| -> String {
+            let mut out: *mut c_char = ptr::null_mut();
+            let mut len = 0u64;
+            let rc = unsafe {
+                f(
+                    store,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    0,
+                    ptr::null(),
+                    pattern.as_ptr(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    &mut out,
+                    &mut len,
+                )
+            };
+            assert_eq!(rc, INFRASTORE_OK);
+            let json = unsafe { CStr::from_ptr(out) }.to_str().unwrap().to_string();
+            unsafe { infrastore_string_free(out) };
+            assert_eq!(len as usize, json.len(), "out_len is the byte length");
+            json
+        };
+
+        // The four that carry the matched names.
+        let by_name: [(&str, ListFn); 4] = [
+            ("list_keys", infrastore_store_list_keys),
+            ("list_time_series", infrastore_store_list_time_series),
+            ("list_names", infrastore_store_list_names),
+            ("list_array_groups", infrastore_store_list_array_groups),
+        ];
+        for (label, f) in by_name {
+            let json = listed(f, &glob);
+            assert!(json.contains("wind_speed"), "{label}: {json}");
+            assert!(json.contains("wind_dir"), "{label}: {json}");
+            assert!(
+                !json.contains("solar_ghi"),
+                "{label} must exclude the non-matching row: {json}"
+            );
+        }
+
+        // `list_owner_types` reports the owners of the matched rows rather than
+        // the rows, so the filter shows up as which owners survive it.
+        let nothing = CString::new("hydro_*").unwrap();
+        assert_eq!(
+            listed(infrastore_store_list_owner_types, &glob),
+            "[\"Generator\"]"
+        );
+        assert_eq!(
+            listed(infrastore_store_list_owner_types, &nothing),
+            "[]",
+            "a glob matching no row leaves no owner type"
+        );
+
+        // The existence probe.
+        let mut present = false;
+        assert_eq!(
+            unsafe {
+                infrastore_store_has_any_by_filter(
+                    store,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    0,
+                    ptr::null(),
+                    glob.as_ptr(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    &mut present,
+                )
+            },
+            INFRASTORE_OK
+        );
+        assert!(present);
+
+        // The reader builder, whose filter is built by `reader_filter` rather
+        // than `build_list_filter` -- a second decode of the same argument.
+        let hour = CString::new(HOUR).unwrap();
+        let mut reader: *mut InfraStoreStaticReaderHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                infrastore_store_build_static_reader(
+                    store,
+                    0, // SingleTimeSeries
+                    false,
+                    0,
+                    false,
+                    0,
+                    ptr::null(),
+                    glob.as_ptr(),
+                    hour.as_ptr(),
+                    ptr::null(),
+                    ptr::null(),
+                    &mut reader,
+                )
+            },
+            INFRASTORE_OK
+        );
+        let mut groups = 0u64;
+        assert_eq!(
+            unsafe { infrastore_static_reader_num_groups(reader, &mut groups) },
+            INFRASTORE_OK
+        );
+        let mut columns = 0u64;
+        let (mut dtype, mut shape_len) = (-1i32, 0u64);
+        assert_eq!(
+            unsafe {
+                infrastore_static_reader_group_info(
+                    reader,
+                    0,
+                    &mut dtype,
+                    &mut columns,
+                    ptr::null_mut(),
+                    0,
+                    &mut shape_len,
+                )
+            },
+            INFRASTORE_OK
+        );
+        assert_eq!(
+            (groups, columns),
+            (1, 2),
+            "the two wind series, not the sun"
+        );
+        unsafe { infrastore_static_reader_free(reader) };
+
+        // And the removal, which is the one that changes the store.
+        let mut removed = 0u64;
+        assert_eq!(
+            unsafe {
+                infrastore_store_remove_by_filter(
+                    store,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    0,
+                    ptr::null(),
+                    glob.as_ptr(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    &mut removed,
+                )
+            },
+            INFRASTORE_OK
+        );
+        assert_eq!(removed, 2);
+        let (mut components, mut total, mut arrays) = (0i64, 0i64, 0i64);
+        assert_eq!(
+            unsafe { infrastore_store_counts(store, &mut components, &mut total, &mut arrays) },
+            INFRASTORE_OK
+        );
+        assert_eq!(total, 1, "solar_ghi is what is left");
+
+        unsafe { infrastore_store_free(store) };
+    }
+
+    /// `infrastore_key_attributes` allocates its resolution string on every call
+    /// that asks for it, so the probe call may pass null to skip it.
+    #[test]
+    fn key_attributes_resolution_is_optional() {
+        let store = abi_create_in_memory();
+        let key = abi_add_f64(store, 1, "load", &[1.0, 2.0]);
+
+        let (mut ty, mut owner, mut category) = (-1i32, 0i64, -1i32);
+        let (mut name_len, mut feat_len) = (0u64, 0u64);
+
+        // The probe: null resolution, null buffers, lengths only. Nothing is
+        // allocated, so there is nothing to free.
+        assert_eq!(
+            unsafe {
+                infrastore_key_attributes(
+                    key,
+                    &mut ty,
+                    ptr::null_mut(),
+                    &mut owner,
+                    &mut category,
+                    ptr::null_mut(),
+                    0,
+                    &mut name_len,
+                    ptr::null_mut(),
+                    0,
+                    &mut feat_len,
+                )
+            },
+            INFRASTORE_OK
+        );
+        assert_eq!((owner, category), (1, 0));
+        assert_eq!(name_len, "load".len() as u64);
+        assert_eq!(feat_len, "{}".len() as u64);
+
+        // The fetch: the resolution comes back owned.
+        let mut res: *mut c_char = ptr::null_mut();
+        let mut name_buf = vec![0i8; name_len as usize + 1];
+        let mut feat_buf = vec![0i8; feat_len as usize + 1];
+        assert_eq!(
+            unsafe {
+                infrastore_key_attributes(
+                    key,
+                    &mut ty,
+                    &mut res,
+                    &mut owner,
+                    &mut category,
+                    name_buf.as_mut_ptr(),
+                    name_buf.len() as u64,
+                    &mut name_len,
+                    feat_buf.as_mut_ptr(),
+                    feat_buf.len() as u64,
+                    &mut feat_len,
+                )
+            },
+            INFRASTORE_OK
+        );
+        assert!(!res.is_null());
+        assert_eq!(unsafe { CStr::from_ptr(res) }.to_str().unwrap(), HOUR);
+        unsafe { infrastore_string_free(res) };
+        assert_eq!(
+            unsafe { CStr::from_ptr(name_buf.as_ptr()) }
+                .to_str()
+                .unwrap(),
+            "load"
+        );
+
+        unsafe { infrastore_key_free(key) };
+        unsafe { infrastore_store_free(store) };
+    }
+
+    /// Both filter builders reject an invalid-UTF-8 `name_glob`, and say which
+    /// argument was at fault.
+    ///
+    /// The catalog filters and the reader builders each build their own
+    /// `ListFilter`, so each has its own decode of this argument. A Julia or
+    /// Python caller cannot construct the input -- both hand the ABI a string
+    /// that is UTF-8 by construction -- so a direct C caller is the only one who
+    /// can reach it, and this is the only place it gets exercised.
+    #[test]
+    fn invalid_utf8_name_glob_is_reported_by_both_filter_builders() {
+        let store = abi_create_in_memory();
+        let _ = abi_add_f64(store, 1, "load", &[1.0, 2.0]);
+        // `wind\xff*` is not valid UTF-8; the trailing NUL terminates the C string.
+        let bad_glob: &[u8] = b"wind\xff*\x00";
+        let glob_ptr = bad_glob.as_ptr() as *const c_char;
+        let res = CString::new(HOUR).unwrap();
+
+        // A catalog filter, via `build_list_filter`.
+        let mut out: *mut c_char = ptr::null_mut();
+        let mut len = 0u64;
+        let rc = unsafe {
+            infrastore_store_list_keys(
+                store,
+                false,
+                0,
+                false,
+                0,
+                false,
+                0,
+                ptr::null(),
+                glob_ptr,
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                &mut out,
+                &mut len,
+            )
+        };
+        assert_eq!(rc, INFRASTORE_ERR_INVALID_UTF8);
+        assert!(out.is_null(), "nothing is allocated on the error path");
+        assert!(
+            last_error().contains("name_glob"),
+            "the message must name the argument: {}",
+            last_error()
+        );
+
+        // A reader builder, via `reader_filter`.
+        let mut reader: *mut InfraStoreStaticReaderHandle = ptr::null_mut();
+        let rc = unsafe {
+            infrastore_store_build_static_reader(
+                store,
+                0, // SingleTimeSeries
+                false,
+                0,
+                false,
+                0,
+                ptr::null(),
+                glob_ptr,
+                res.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+                &mut reader,
+            )
+        };
+        assert_eq!(rc, INFRASTORE_ERR_INVALID_UTF8);
+        assert!(reader.is_null(), "no handle is produced on the error path");
+        assert!(
+            last_error().contains("name_glob"),
+            "the message must name the argument: {}",
+            last_error()
+        );
+
+        // A valid glob still works, so the guard is the only thing rejecting.
+        let good = CString::new("lo*").unwrap();
+        let rc = unsafe {
+            infrastore_store_list_keys(
+                store,
+                false,
+                0,
+                false,
+                0,
+                false,
+                0,
+                ptr::null(),
+                good.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                &mut out,
+                &mut len,
+            )
+        };
+        assert_eq!(rc, INFRASTORE_OK);
+        assert!(!out.is_null());
+        let json = unsafe { CStr::from_ptr(out) }.to_str().unwrap().to_string();
+        unsafe { infrastore_string_free(out) };
+        assert!(json.contains("\"load\""), "{json}");
+
+        unsafe { infrastore_store_free(store) };
+    }
+
     #[test]
     fn invalid_utf8_name_returns_err_invalid_utf8_with_a_message() {
         assert_eq!(

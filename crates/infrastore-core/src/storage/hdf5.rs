@@ -1216,15 +1216,19 @@ impl Inner {
                     state.dtype,
                     packed_block_ranges(0..state.length, first..last + 1, &state.element_shape),
                 )?;
+                // The block is `length` rows of `span` elements, so a column
+                // is every `span`-th element starting at its offset. Taken by
+                // `chunks_exact` rather than by index: a short read yields
+                // fewer elements instead of an out-of-bounds slice, and the
+                // shape mismatch is then reported where every other one is,
+                // by `TypedArray::new` below.
                 for &col in cols {
                     let mut col_bytes = Vec::with_capacity(state.length * elem_bytes);
-                    for t in 0..state.length {
-                        let start = (t * span + (col - first)) * elem_bytes;
-                        let block = bytes.get(start..start + elem_bytes).ok_or_else(|| {
-                            TimeSeriesError::IntegrityError(format!(
-                                "column {col} out of block bounds for dataset {dataset}"
-                            ))
-                        })?;
+                    for block in bytes
+                        .chunks_exact(elem_bytes)
+                        .skip(col - first)
+                        .step_by(span)
+                    {
                         col_bytes.extend_from_slice(block);
                     }
                     columns.insert(col, col_bytes);
@@ -1263,15 +1267,9 @@ impl Inner {
                     let r = reads.get(dataset).expect("dataset read above");
                     // Cloned rather than moved: the same hash may appear more
                     // than once in `hashes`, and each occurrence owns its array.
-                    let col_bytes = r
-                        .columns
-                        .get(col)
-                        .ok_or_else(|| {
-                            TimeSeriesError::IntegrityError(format!(
-                                "column {col} missing from the read of dataset {dataset}"
-                            ))
-                        })?
-                        .clone();
+                    // Present by construction -- the read above fetched exactly
+                    // the columns these placements name.
+                    let col_bytes = r.columns.get(col).expect("column read above").clone();
                     let mut shape = vec![r.length];
                     shape.extend_from_slice(&r.element_shape);
                     out.push(
