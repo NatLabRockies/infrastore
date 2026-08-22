@@ -53,9 +53,9 @@ assert np.array_equal(np.asarray(got.data), np.asarray(ts.data))
 3. **`get_time_series(key)`** looked up the association, read the array back by its content hash,
    and reconstructed a `SingleTimeSeries`.
 
-The array is any NumPy array whose dtype is `float64`, `float32`, `int64`, `int32`, `uint64`, or
-`bool` — whatever you pass round-trips unchanged. Shapes beyond `(length,)` attach a per-step
-element shape, such as the coefficient tuple of a cost curve.
+The array is any NumPy array whose dtype is `float64`, `float32`, `int64`, `int32`, `int16`, `int8`,
+`uint64`, `uint32`, `uint16`, `uint8`, or `bool` — whatever you pass round-trips unchanged. Shapes
+beyond `(length,)` attach a per-step element shape, such as the coefficient tuple of a cost curve.
 
 ## Slice and List
 

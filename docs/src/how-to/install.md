@@ -3,31 +3,31 @@
 This recipe builds the components other languages depend on. For the full prerequisites and
 workspace build, see [Installation](../getting-started/installation.md).
 
-> **You may not need to build it.** Each tagged release attaches `libinfrastore_ffi` and the
+> **You may not need to build it.** `Pkg.add("InfraStore")` downloads a prebuilt `libinfrastore_ffi`
+> for the platform as a Julia artifact, and each tagged release also attaches the library and the
 > generated `infrastore.h` to the
 > [Releases page](https://github.com/NatLabRockies/infrastore/releases), linked statically against
-> HDF5 and zlib. Downloading that archive and pointing `INFRASTORE_LIB` at the library (step 3
-> below) skips this whole page. It is the shortest path for Julia today, since `InfraStore.jl` is
-> not yet registered — see [Installation § Julia](../getting-started/installation.md#julia). Build
-> from source when you need a platform the release matrix does not cover, or a library matching a
-> working tree.
+> HDF5 and zlib. Pointing `INFRASTORE_LIB` at a downloaded library (step 3 below) skips the build.
+> Build from source when you need a platform the release matrix does not cover, or a library
+> matching a working tree.
 
-## 1. Install System Libraries
+## 1. Install Build Tools
+
+HDF5 and zlib are compiled from vendored sources and linked statically, so there is **no system HDF5
+to install**. The build needs `cmake`, a C compiler, and `protobuf` for the gRPC codegen:
 
 ```sh
 # macOS
-brew install hdf5 protobuf
+brew install cmake protobuf
 
 # Debian / Ubuntu
-sudo apt-get install libhdf5-dev protobuf-compiler
+sudo apt-get install cmake protobuf-compiler
 ```
 
-If the build fails with `Unable to locate HDF5 root directory and/or headers`, set `HDF5_DIR`:
-
-```sh
-export HDF5_DIR="$(brew --prefix hdf5)"          # macOS
-export HDF5_DIR=/usr/lib/x86_64-linux-gnu/hdf5/serial  # Linux
-```
+Do not set `HDF5_DIR` — it redirects the vendored build at an external HDF5 while static libraries
+are still requested, and the build fails. See
+[Build Prerequisites](../getting-started/installation.md#build-prerequisites) for the system-library
+alternative (`--no-default-features`).
 
 ## 2. Build What You Need
 
@@ -51,7 +51,8 @@ The Python wheel is built separately with `maturin` — see
 
 ## 3. Point Consumers at the Library
 
-The Julia binding and other C consumers locate the cdylib via an environment variable:
+`InfraStore.jl` and other C consumers locate a locally built cdylib via an environment variable,
+which takes precedence over the artifact `Pkg` installed:
 
 ```sh
 export INFRASTORE_LIB=$PWD/target/release/libinfrastore_ffi.dylib  # .so on Linux

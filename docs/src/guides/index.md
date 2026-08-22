@@ -5,6 +5,8 @@ through the full workflow — create or open a store, add series, query, read, a
 idioms of that language, then points at the matching [reference](../reference/index.md) for exact
 signatures.
 
+- [Embedding in a Parent Package](./embedding.md) — The contracts and lifecycle a package like
+  infrasys or InfrastructureSystems.jl has to honor, in one place, language-neutral.
 - [Rust](./rust.md) — Embed `infrastore-core` directly.
 - [Python](./python.md) — Use the `infrastore` PyO3 wheel.
 - [Julia](./julia.md) — Use the `InfraStore.jl` package over the C ABI.

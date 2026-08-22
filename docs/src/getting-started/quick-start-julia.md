@@ -62,16 +62,18 @@ A series can also be addressed by its attributes, which is convenient when a cal
 identifiers:
 
 ```julia
-got = get_time_series(SingleTimeSeries, store, 42, Component, "load"; resolution = Hour(1))
+got = get_time_series(SingleTimeSeries, store, 42, Component, "load";
+                      resolution = Hour(1), features = Dict("model_year" => 2030))
 
 for m in list_time_series(store; owner_id = 42)   # Vector{TimeSeriesMetadata}
     println(m.name, " ", m.resolution, " ", m.units)
 end
-# load PT1H MW
+# load 3600000 milliseconds MW
 ```
 
 `get_time_series`, `has_time_series`, and `remove_time_series!` all accept either a `TimeSeriesKey`
-or `(owner_id, owner_category, name; resolution, features)` attributes.
+or `(owner_id, owner_category, name; resolution, features)` attributes. The attribute form matches
+`features` exactly, which is why the lookup above repeats `model_year`.
 
 ## Writing to Disk
 

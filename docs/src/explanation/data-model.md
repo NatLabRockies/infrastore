@@ -1,9 +1,9 @@
 # Data Model
 
 The data model mirrors the time-series concepts originally developed in
-[InfrastructureSystems.jl](https://github.com/NREL-Sienna/InfrastructureSystems.jl): a **component**
-(or supplemental attribute) owns one or more named time series, and each time series may exist in
-several variants distinguished by **features**.
+[InfrastructureSystems.jl](https://github.com/Sienna-Platform/InfrastructureSystems.jl): a
+**component** (or supplemental attribute) owns one or more named time series, and each time series
+may exist in several variants distinguished by **features**.
 
 ## Owners
 

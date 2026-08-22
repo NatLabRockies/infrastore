@@ -18,6 +18,7 @@
   - [Content Addressing](./explanation/content-addressing.md)
   - [Language Bindings](./explanation/bindings.md)
 - [Developer Guides](./guides/index.md)
+  - [Embedding in a Parent Package](./guides/embedding.md)
   - [Rust](./guides/rust.md)
   - [Python](./guides/python.md)
   - [Julia](./guides/julia.md)

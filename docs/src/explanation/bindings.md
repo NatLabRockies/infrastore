@@ -78,7 +78,9 @@ The conventions that shape the Julia API:
   Python's `store.bulk_read` exposes the same operation directly. Managed bulk _writes_ already take
   the fast block-write path through the existing batch / `add_time_series_bulk` APIs.
 
-`InfraStore.jl` loads the cdylib from the path in the `INFRASTORE_LIB` environment variable. See the
+`InfraStore.jl` loads the cdylib from the `INFRASTORE_LIB` environment variable when it is set, and
+otherwise from the `libinfrastore_ffi` artifact its `Artifacts.toml` pins to the matching GitHub
+Release (see [Integrate with Julia](../how-to/integrate-julia.md)). See the
 [Julia guide](../guides/julia.md), the [C ABI reference](../reference/c-abi.md), and the
 [Julia API reference](../reference/julia-api.md).
 
@@ -114,7 +116,9 @@ pair directly and supports both reads and writes. Its shape:
 - **CSV in, store out.** Numeric values come from a CSV; the metadata that does not fit a flat grid
   (owner, name, type, dtype, resolution, timestamps, units, features) is described in a descriptor
   JSON. All six dtypes and all five writable types are supported, forecasts included.
-- **A global `-f/--format` selects `table` (default), `json`, or `csv`.
+- **A global `-f/--format` selects `table` (default), `json`, `jsonl`, or `csv`.** Read commands
+  render their results in it; write commands report their outcome in it (prose under `table`, a
+  one-object status document under `json`/`jsonl`). Only `template` ignores it.
 - **Store access is isolated.** All store opening lives behind one module, so a future remote/gRPC
   mode can be added without touching the command handlers; today there is no remote mode.
 

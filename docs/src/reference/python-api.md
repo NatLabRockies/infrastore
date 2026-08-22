@@ -48,7 +48,8 @@ it cannot survive every binding intact (see
 @classmethod
 def create(
     cls,
-    path: str | None = None,
+    path: str | os.PathLike | None = None,
+    *,
     in_memory: bool = False,
     compression: str = "deflate",   # "deflate" or "none"
     compression_level: int = 3,     # 0–9, DEFLATE only
@@ -59,12 +60,18 @@ def create(
 
 @classmethod
 def open(
-    cls, path: str, read_only: bool = False, catalog: str = "attached"
+    cls, path: str | os.PathLike, *, read_only: bool = False, catalog: str = "attached"
 ) -> Store: ...
 
 @classmethod
-def open_copy(cls, src: str, dest: str, catalog: str = "attached") -> Store: ...
+def open_copy(
+    cls, src: str | os.PathLike, dest: str | os.PathLike, *, catalog: str = "attached"
+) -> Store: ...
 ```
+
+Every argument after the path(s) is keyword-only; `Store.create("s.h5", True)` raises `TypeError`.
+Paths accept anything `os.fspath` does, `pathlib.Path` included (the shipped stub spells them
+`str`).
 
 - `create(in_memory=True)` — in-memory store; `path` and compression arguments are ignored.
 - `create(path=...)` — writes `path` (HDF5) and `path + ".sqlite"` (metadata).
@@ -98,10 +105,12 @@ The store is also a context manager: `with Store.create(...) as store:` closes i
 `TimeSeriesError` (it is idempotent). `repr(store)` shows the path (or `in-memory`), the read-only
 flag, and `closed` once closed.
 
-### Property
+### Properties
 
 ```python
 store.read_only -> bool
+store.catalog -> str            # "attached" or "memory"
+store.in_transaction -> bool
 ```
 
 ### Methods
@@ -114,6 +123,7 @@ def add_time_series(
     owner_category: OwnerCategory,
     time_series: SingleTimeSeries | NonSequentialTimeSeries
         | Deterministic | Probabilistic | Scenarios,
+    *,
     features: dict[str, int | float | bool | str] | None = None,
     units: str | None = None,
     element_type: str | None = None,
@@ -138,13 +148,58 @@ def add_time_series_bulk(self, items: list[dict]) -> list[TimeSeriesKey]: ...
 # All items commit in ONE metadata transaction (all-or-nothing), which is much
 # faster than looping over add_time_series. Keys are returned in input order.
 
-def transform_single_time_series(self, horizon: timedelta | str, interval: timedelta | str) -> int: ...
+def transform_single_time_series(
+    self,
+    horizon: timedelta | str,
+    interval: timedelta | str,
+    *,
+    owner_category: OwnerCategory | None = None,
+    resolution: timedelta | str | None = None,
+) -> int: ...
+# Derives a DeterministicSingleTimeSeries from every stored SingleTimeSeries —
+# or, with `owner_category` / `resolution`, only from the ones matching — and
+# returns the count. `horizon / resolution` steps must fit inside each source.
+
+def copy_time_series(
+    self,
+    src: TimeSeriesKey,
+    dst_owner_id: int,
+    dst_owner_type: str,
+    *,
+    new_name: str | None = None,
+) -> TimeSeriesKey: ...
+# Attach the same array to another owner (no data is duplicated); returns the new key.
+def rename_time_series(self, key: TimeSeriesKey, new_name: str) -> TimeSeriesKey: ...
+# Same identity, new name; returns the renamed key.
 
 def get_time_series(
     self,
     key: TimeSeriesKey,
+    *,
     time_range: tuple[datetime, datetime] | None = None,
 ) -> SingleTimeSeries | NonSequentialTimeSeries | Deterministic | Probabilistic | Scenarios: ...
+def get_metadata(self, key: TimeSeriesKey) -> dict: ...
+# The whole catalog record for one key — the same dict shape list_time_series
+# returns (see Return shapes), without reading the array.
+def get_array_by_hash(self, data_hash: str) -> numpy.ndarray: ...
+# The raw array behind a 64-char hex content hash, bypassing the catalog.
+def count_array_references(self, data_hash: str) -> dict: ...
+# {"sts": int, "dst": int}: SingleTimeSeries and DeterministicSingleTimeSeries
+# associations sharing that array.
+def resolve_forecast_key(
+    self,
+    owner_id: int,
+    owner_category: OwnerCategory,
+    name: str,
+    requested_type: TimeSeriesType,
+    *,
+    resolution: timedelta | str | None = None,
+    interval: timedelta | str | None = None,
+    features: dict[str, int | float | bool | str] | None = None,
+) -> TimeSeriesKey: ...
+# Attributes + requested type -> the concrete key. TimeSeriesType.Deterministic
+# also matches a stored DeterministicSingleTimeSeries; the returned key's
+# time_series_type says which was found.
 
 def bulk_read(
     self,
@@ -156,8 +211,14 @@ def bulk_read(
 # Results are returned in the same order as `keys`; an empty list of keys returns an empty list.
 
 def remove_time_series(self, key: TimeSeriesKey) -> None: ...
+def remove_time_series_bulk(self, keys: list[TimeSeriesKey]) -> int: ...
+# All-or-nothing: a key matching nothing fails the whole batch. Returns the count removed.
+def remove_by_filter(self, *, ...) -> int: ...
+# Same keyword-only filter arguments as list_time_series; one all-or-nothing
+# transaction; returns the count removed (0 when nothing matched).
 def clear_time_series(
     self,
+    *,
     owner_id: int | None = None,
     owner_category: OwnerCategory | None = None,
 ) -> int: ...
@@ -191,12 +252,24 @@ def list_time_series(
 # series that declares none matches no value, so it cannot select those rows.
 
 def list_array_groups(self, *, ...) -> list[dict]: ...
-# Same keyword-only filter arguments as list_time_series; so do list_keys,
-# list_names, list_owner_types, and remove_by_filter.
-# `time_series_type` is a TimeSeriesType. TimeSeriesType.Deterministic matches
-# both Deterministic and DeterministicSingleTimeSeries rows. Every filter
-# surface takes it, including has_any_time_series, get_resolutions,
-# get_intervals, list_owner_ids, and build_forecast_reader.
+def list_keys(self, *, ...) -> list[TimeSeriesKey]: ...
+def list_names(self, *, ...) -> list[str]:  ...        # distinct names, sorted
+def list_owner_types(self, *, ...) -> list[str]: ...   # distinct owner types, sorted
+# Every `...` above is the same keyword-only filter as list_time_series, and so
+# is remove_by_filter's.
+# `time_series_type` is a TimeSeriesType (or its member name as a str).
+# TimeSeriesType.Deterministic matches both Deterministic and
+# DeterministicSingleTimeSeries rows. Every filter surface takes it, including
+# has_any_time_series, get_resolutions, get_intervals, list_owner_ids, and
+# build_forecast_reader.
+def list_owner_ids(
+    self,
+    owner_category: OwnerCategory,
+    *,
+    time_series_type: TimeSeriesType | None = None,
+    resolution: timedelta | str | None = None,
+) -> list[int]: ...
+# Distinct owner ids of that category holding time series, ascending.
 
 def get_time_series_keys(
     self,
@@ -213,10 +286,20 @@ def is_empty(self) -> bool: ...
 # the store, and it stays correct as the catalog gains tables; a conjunction over
 # the count_* methods does neither.
 def get_resolutions(self, time_series_type: TimeSeriesType | None = None) -> list[str]: ...
-# resolutions are returned as ISO 8601 duration strings, e.g. "PT1H"
+def get_intervals(self, time_series_type: TimeSeriesType | None = None) -> list[str]: ...
+# Distinct resolutions / forecast intervals as ISO 8601 duration strings, e.g. "PT1H".
 def get_time_series_counts(self) -> dict: ...
-def get_forecast_parameters(self, *, resolution: str | None = None,
-                            interval: str | None = None) -> dict: ...
+def time_series_counts_detailed(self) -> dict: ...
+def counts_by_type(self) -> dict[str, int]: ...       # {time_series_type name: count}
+def num_distinct_arrays(self) -> int: ...
+def static_summary(self) -> list[dict]: ...
+def forecast_summary(self) -> list[dict]: ...
+def check_static_consistency(self, resolution: timedelta | str | None = None) -> list[dict]: ...
+# One {"resolution", "initial_timestamp", "length"} per resolution present (or
+# the one given); raises if the SingleTimeSeries of one resolution disagree on
+# their grid — the precondition build_static_reader relies on.
+def get_forecast_parameters(self, *, resolution: timedelta | str | None = None,
+                            interval: timedelta | str | None = None) -> dict: ...
 def get_compression(self) -> dict: ...
 def compact(self) -> dict: ...
 def verify_integrity(self) -> dict: ...
@@ -234,6 +317,7 @@ def persist_catalog(self) -> None: ...
 # reversible only inside a transaction. Blocks nest; the write lock is held
 # until the outermost one ends.
 def transaction(self) -> Transaction: ...   # context manager: commit on exit, roll back on raise
+                                            # `with store.transaction() as s:` binds the Store
 def begin_transaction(self) -> None: ...
 def commit_transaction(self) -> None: ...   # InvalidParameterError if none is open
 def rollback_transaction(self) -> None: ... # InvalidParameterError if none is open
@@ -257,26 +341,36 @@ with store.transaction():
 - **`add_time_series`** accepts a `SingleTimeSeries`, a `NonSequentialTimeSeries`, or a dense
   forecast object (`Deterministic` / `Probabilistic` / `Scenarios`) — see [Forecasts](#forecasts).
   **`transform_single_time_series`** derives a `DeterministicSingleTimeSeries` from every stored
-  `SingleTimeSeries` and returns the count transformed. **`get_time_series`** returns whichever
-  matches the stored type.
+  `SingleTimeSeries` (or the subset its `owner_category` / `resolution` arguments select) and
+  returns the count transformed. **`get_time_series`** returns whichever matches the stored type.
 - **`bulk_read`** returns one typed object per key, in the same order as `keys` (an empty key list
   returns an empty list). It is the bulk counterpart to `get_time_series`: packed `SingleTimeSeries`
   are read in one decompress-once pass per dataset instead of one read per key. Pass the
   keyword-only `time_range=(start, end)` to apply the same window to every key; by default each
   series comes back in full.
-- **`list_time_series`** returns a list of dicts, each with the keys: `owner_id`, `owner_type`,
-  `owner_category`, `time_series_type`, `name`, `data_hash` (hex string), `length`, `resolution`
-  (ISO 8601 duration string, e.g. `PT1H`, or `None`), `timestamps`, `features`, `units`,
-  `quantity_kind`, `unit_system` (`"natural_units"` / `"component_base"` / `None`),
+- **`list_time_series`** returns a list of dicts (the same shape `get_metadata` returns for one
+  key), each with the keys: `owner_id`, `owner_type`, `owner_category`, `time_series_type`, `name`,
+  `data_hash` (hex string), `initial_timestamp` (RFC 3339 string, or `None` for non-sequential
+  series), `length`, `resolution` (ISO 8601 duration string, e.g. `PT1H`, or `None`), `timestamps`,
+  `horizon`, `interval`, `count`, `percentiles`, `element_type`, `element_shape`, `features`,
+  `units`, `quantity_kind`, `unit_system` (`"natural_units"` / `"component_base"` / `None`),
   `component_field`, `application_data`. `timestamps` is a list of RFC 3339 strings for
-  non-sequential series and `None` otherwise. The `features` filter is a subset match — rows must
-  contain at least the given pairs.
+  non-sequential series and `None` otherwise; `horizon` / `interval` / `count` are set for forecasts
+  and `percentiles` for `Probabilistic` only. The `features` filter is a **subset** match — rows
+  must contain at least the given pairs — whereas a `TimeSeriesKey` matches its feature map exactly.
 - **`list_array_groups`** accepts the same filters as `list_time_series` and groups the matching
   series by their underlying stored array. It returns a list of dicts, each with `data_hash` (hex
   string) and `keys` (a list of `TimeSeriesKey`s that resolve to that array). Keys sharing one dict
   share one deduplicated array.
 - **`get_time_series_counts`** returns
-  `{"components_with_time_series": int, "static_time_series": int, "forecasts": int}`.
+  `{"components_with_time_series": int, "static_time_series": int, "forecasts": int}`;
+  **`time_series_counts_detailed`** adds `supplemental_attributes_with_time_series` and spells the
+  other two `static_time_series_count` / `forecast_count`.
+- **`static_summary`** returns one dict per distinct
+  `(owner_type, owner_category, time_series_type, name, initial_timestamp, resolution,
+  time_step_count)`
+  with its `count`; **`forecast_summary`** does the same for forecasts, adding `horizon`,
+  `interval`, and `window_count`.
 - **`get_forecast_parameters`** returns
   `{"horizon": str, "interval": str, "count": int, "resolution": str, "initial_timestamp": str}`,
   where `horizon`, `interval`, and `resolution` are ISO 8601 duration strings (e.g. `"PT1H"`) and
@@ -384,7 +478,7 @@ passed to [`add_time_series`](#methods). They are read back through `get_time_se
 the matching object depending on the stored type (a `DeterministicSingleTimeSeries` is synthesized
 into a `Deterministic` on read). A `DeterministicSingleTimeSeries` is not added directly — derive
 one from stored `SingleTimeSeries` with [`transform_single_time_series`](#methods).
-[`get_time_series_counts`](#timeseriesstore) reports the forecast total under `forecasts`.
+[`get_time_series_counts`](#methods) reports the forecast total under `forecasts`.
 
 ```python
 ts = Deterministic(initial_timestamp, resolution, horizon, interval, count, data, "load_fc")
@@ -492,6 +586,7 @@ def build_static_reader(
     owner_type: str | None = None,
     name: str | None = None,
     name_glob: str | None = None,
+    component_field: str | None = None,
     features: dict[str, int | float | bool | str] | None = None,
 ) -> StaticReader: ...
 def static_read(self, reader: StaticReader, when: datetime) -> None: ...
@@ -506,6 +601,7 @@ def build_forecast_reader(
     owner_type: str | None = None,
     name: str | None = None,
     name_glob: str | None = None,
+    component_field: str | None = None,
     features: dict[str, int | float | bool | str] | None = None,
 ) -> ForecastReader: ...
 def forecast_read(self, reader: ForecastReader, when: datetime) -> None: ...
@@ -849,9 +945,11 @@ All inherit from `TimeSeriesError`:
 | `StoreExistsError`          | Creating a store where one already exists             |
 | `MismatchedArtifactError`   | The `.h5` and `.sqlite` halves came from two saves    |
 
-A malformed ISO 8601 period string raises `InvalidParameterError` (inside the hierarchy). Only a
-period argument that is neither a `timedelta` nor a `str` raises a plain `TypeError`, which
-`except TimeSeriesError` will not catch.
+A malformed ISO 8601 period string raises `InvalidParameterError` (inside the hierarchy), as does a
+naive `datetime`. Only a period argument that is neither a `timedelta` nor a `str` (or a
+`time_series_type` that is neither a `TimeSeriesType` nor a `str`) raises a plain `TypeError`, which
+`except TimeSeriesError` will not catch. `init_tracing` with an unparseable filter raises
+`ValueError`.
 
 Feature-value typing note: because `bool` is a subtype of `int` in Python, the binding checks `bool`
 first, so `True`/`False` features are stored as booleans, not integers.
