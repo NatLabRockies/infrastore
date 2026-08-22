@@ -1,0 +1,6 @@
+{
+  "component_id": 7,
+  "component_type": "ThermalStandard",
+  "attribute_id": 481,
+  "attribute_type": "GeometricDistributionForcedOutage"
+}

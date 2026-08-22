@@ -871,7 +871,7 @@ fn validate_forecast_periods(
     // well-formed question about an intact store was told the store was corrupt,
     // and only for the zero-interval encoding: the same query against a
     // positive-interval forecast returned an empty result.
-    if !interval.is_positive() && !(count <= 1 && interval.is_zero()) {
+    if !(interval.is_positive() || count <= 1 && interval.is_zero()) {
         return Err(
             "interval must be strictly positive (zero is allowed only for a forecast with at \
              most one window)"

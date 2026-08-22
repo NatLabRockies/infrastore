@@ -18,6 +18,11 @@ pub mod version;
 // timestamp codec), which are not part of the supported API.
 pub(crate) mod hash;
 pub(crate) mod metadata;
+// OpenAPI-row JSON serde for the two association catalogs (adds inherent
+// `Store` methods; see the module docs). Crate-private: the `export_*` /
+// `import_supplemental_attribute_associations_openapi` methods on `Store` are
+// the supported public surface.
+pub(crate) mod openapi;
 pub(crate) mod timestamps;
 
 pub use codec::{

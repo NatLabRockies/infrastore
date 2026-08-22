@@ -28,6 +28,11 @@ use crate::types::time_series::TimeSeriesType;
 /// malformed to name one. Returned by [`MetadataStore::referenced_arrays`].
 pub type ReferencedArrays = (Vec<([u8; 32], ElementType)>, Vec<String>);
 
+/// A catalog row paired with its `INTEGER PRIMARY KEY` (SQLite rowid). Used
+/// internally by [`Self::list_inner`]; public APIs surface metadata without
+/// the raw storage id.
+pub(crate) type IdentifiedRow = (i64, TimeSeriesMetadata);
+
 /// A SQLite value's storage class, for a diagnostic that has to describe a
 /// column holding the wrong kind of thing.
 fn value_kind(value: &rusqlite::types::Value) -> &'static str {
@@ -1230,7 +1235,12 @@ impl MetadataStore {
     }
 
     pub fn list(&self, filter: &MetadataFilter) -> Result<Vec<TimeSeriesMetadata>> {
-        Ok(self.list_inner(filter, true)?.0)
+        Ok(self
+            .list_inner(filter, true)?
+            .0
+            .into_iter()
+            .map(|(_, m)| m)
+            .collect())
     }
 
     /// [`Self::list`] without hydrating timestamp vectors, paired with the
@@ -1246,15 +1256,18 @@ impl MetadataStore {
         &self,
         filter: &MetadataFilter,
     ) -> Result<(Vec<TimeSeriesMetadata>, Vec<[u8; 32]>)> {
-        self.list_inner(filter, false)
+        let (rows, cohorts) = self.list_inner(filter, false)?;
+        Ok((rows.into_iter().map(|(_, m)| m).collect(), cohorts))
     }
 
-    /// Shared body of [`Self::list`] and [`Self::list_timeline_cohorts`].
+    /// Shared body of [`Self::list`] and [`Self::list_timeline_cohorts`]. Each
+    /// row carries its catalog `id` alongside the metadata; the wrappers that
+    /// don't need it drop it.
     fn list_inner(
         &self,
         filter: &MetadataFilter,
         hydrate_timestamps: bool,
-    ) -> Result<(Vec<TimeSeriesMetadata>, Vec<[u8; 32]>)> {
+    ) -> Result<(Vec<IdentifiedRow>, Vec<[u8; 32]>)> {
         let (where_clause, params_vec) = filter.to_sql();
         let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec
             .iter()
@@ -1266,7 +1279,7 @@ impl MetadataStore {
                     data_hash, initial_timestamp, resolution, length, horizon,
                     interval, count, timestamps_hash, units, quantity_kind, unit_system,
                     component_field, percentiles_json, element_type, element_shape,
-                    application_data
+                    application_data, id
              FROM time_series_associations {where_clause}"
         );
         let mut stmt = self.conn.prepare_cached(&sql)?;
@@ -1403,7 +1416,8 @@ impl MetadataStore {
                     }
                 }
             };
-            out.push(partial.into_metadata(features, timestamps));
+            let id = partial.id;
+            out.push((id, partial.into_metadata(features, timestamps)));
         }
         Ok((out, cohorts))
     }
@@ -2673,6 +2687,10 @@ fn collect_data_hashes(
 }
 
 struct MetaRow {
+    /// The catalog's `INTEGER PRIMARY KEY` (SQLite rowid). Not part of
+    /// [`TimeSeriesMetadata`] — that type's identity is the key tuple, not a
+    /// storage-assigned id — but used internally by [`Self::list_inner`].
+    id: i64,
     owner_id: i64,
     owner_type: String,
     owner_category: OwnerCategory,
@@ -2757,6 +2775,7 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<([u8; 32], MetaRo
     let element_type_str: String = row.get(19)?;
     let element_shape_json: Option<String> = row.get(20)?;
     let application_data: Option<String> = row.get(21)?;
+    let id: i64 = row.get(22)?;
 
     // An unrecognized basis is an error, not a silent `None`. The column has no
     // CHECK precisely so a future basis can be added without a format bump,
@@ -2892,6 +2911,7 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<([u8; 32], MetaRo
     Ok((
         features_hash,
         MetaRow {
+            id,
             owner_id,
             owner_type,
             owner_category,

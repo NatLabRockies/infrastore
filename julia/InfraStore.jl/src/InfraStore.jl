@@ -69,6 +69,9 @@ export Store,
     count_components_with_attributes,
     supplemental_attribute_counts_by_type,
     supplemental_attribute_summary,
+    export_time_series_associations_openapi,
+    export_supplemental_attribute_associations_openapi,
+    import_supplemental_attribute_associations_openapi!,
     ParentChildAssociation,
     add_parent_child_association!,
     add_parent_child_associations!,
@@ -144,6 +147,7 @@ include("store.jl")
 include("operations.jl")
 include("catalog.jl")
 include("associations.jl")
+include("openapi.jl")
 include("forecasts.jl")
 include("batch.jl")
 include("readers.jl")

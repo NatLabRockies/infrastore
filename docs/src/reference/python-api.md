@@ -779,6 +779,51 @@ store.remove_parent_child_associations(parent_types=["Bus"])   # -> 1
 Neither association catalog is exposed over the [gRPC server](grpc-api.md) or the
 [`infrastore` CLI](cli.md).
 
+### OpenAPI-row association serde
+
+Direct JSON serde of the two association catalogs, in the wire spelling
+[SiennaSchemas](https://github.com/Sienna-Platform/SiennaSchemas) defines (`TimeSeries/*.json`,
+`Core/Associations/SupplementalAttributeAssociation.json`). Unlike `list_time_series` /
+`list_supplemental_attribute_associations`, which return Python objects, these three methods
+exchange the wire JSON verbatim — the format a document author (e.g. PowerTableDataParser) reads and
+writes directly.
+
+```python
+def export_time_series_associations_openapi(
+    self, *, owner_id=None, owner_category=None, owner_type=None,
+    time_series_type=None, name=None, name_glob=None, component_field=None,
+    resolution=None, interval=None, features=None,
+) -> str: ...
+def export_supplemental_attribute_associations_openapi(self) -> str: ...
+def import_supplemental_attribute_associations_openapi(self, json: str) -> int: ...
+```
+
+`export_time_series_associations_openapi` takes the same filter keywords as `list_time_series`.
+Every row's `uri` and `data_hash` are the hex-encoded content hash the store already has for that
+row — never a caller-supplied locator. With no filter this exports the whole catalog, sorted by
+identity.
+
+`export_supplemental_attribute_associations_openapi` exports the whole
+`supplemental_attribute_associations` table, sorted by `(component_id, attribute_id)`;
+`import_supplemental_attribute_associations_openapi` is its import half — a bulk, all-or-nothing
+insert (a duplicate anywhere in the batch raises `DuplicateAssociationError` and rolls the batch
+back), returning the number of rows inserted.
+
+There is no corresponding time-series _import_ method: infrastore never modifies the associations
+table or the data to make an incoming document agree with what it already holds. A geometry
+disagreement between an added series and its own association row is rejected at the add boundary
+instead (`InvalidParameterError`), loudly and without writing anything.
+
+```python
+store = Store.create(in_memory=True)
+store.add_time_series(
+    owner_id=1, owner_type="Generator", owner_category=OwnerCategory.Component,
+    time_series=SingleTimeSeries(t0, timedelta(hours=1), values, "load"),
+)
+
+json_str = store.export_time_series_associations_openapi()
+```
+
 ## Exceptions
 
 All inherit from `TimeSeriesError`:

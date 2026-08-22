@@ -58,3 +58,9 @@ cargo-husky = { version = "1", default-features = false, features = ["precommit-
 # behind the recorded content hash).
 hdf5-metno = "0.14.0"
 tempfile = "3"
+# Validates conformance/openapi_row_fixtures/ against the vendored SiennaSchemas specs
+# (tests/openapi_schema_conformance.rs). `default-features = false` drops
+# `resolve-http`/`resolve-async`/`tls-aws-lc-rs` (reqwest, rustls, tokio, aws-lc-rs): the
+# test resolves every `$ref` itself via a custom `Retrieve` reading straight off the
+# vendored files, so no built-in network/file retriever or async support is needed.
+jsonschema = { version = "0.49.9", default-features = false }

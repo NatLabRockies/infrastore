@@ -955,6 +955,37 @@ remove_parent_child_associations!(store; parent_types=["Bus"])   # 1
 Neither association catalog is exposed over the [gRPC server](./grpc-api.md) or the
 [`infrastore` CLI](./cli.md).
 
+### OpenAPI-row association serde
+
+Direct JSON serde of the two association catalogs, in the wire spelling
+[SiennaSchemas](https://github.com/Sienna-Platform/SiennaSchemas) defines (`TimeSeries/*.json`,
+`Core/Associations/SupplementalAttributeAssociation.json`). Unlike [`list_time_series`](@ref) /
+[`list_supplemental_attribute_associations`](@ref), which return Julia structs, these three
+functions exchange the wire JSON verbatim — the format a document author (e.g. PowerTableDataParser)
+reads and writes directly.
+
+```julia
+export_time_series_associations_openapi(store; filters...) -> String
+export_supplemental_attribute_associations_openapi(store) -> String
+import_supplemental_attribute_associations_openapi!(store, json::AbstractString) -> Int
+```
+
+`export_time_series_associations_openapi` takes the same filter keywords as
+[`list_time_series`](@ref). Every row's `uri` and `data_hash` are the hex-encoded content hash the
+store already has for that row — never a caller-supplied locator. With no filter this exports the
+whole catalog, sorted by identity.
+
+`export_supplemental_attribute_associations_openapi` exports the whole
+`supplemental_attribute_associations` table, sorted by `(component_id, attribute_id)`;
+`import_supplemental_attribute_associations_openapi!` is its import half — a bulk, all-or-nothing
+insert (a duplicate anywhere in the batch throws `DuplicateAssociationError` and rolls the batch
+back), returning the number of rows inserted.
+
+There is no corresponding time-series _import_: infrastore never modifies the associations table or
+the data to make an incoming document agree with what it already holds. A geometry disagreement
+between an added series and its own association row is rejected at the add boundary instead
+(`InvalidParameterError`), loudly and without writing anything.
+
 ## Errors
 
 All subtype `TimeSeriesException`:

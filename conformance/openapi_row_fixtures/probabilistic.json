@@ -1,0 +1,29 @@
+{
+  "owner_id": 9,
+  "owner_type": "RenewableDispatch",
+  "owner_category": "Component",
+  "time_series_type": "Probabilistic",
+  "name": "power_forecast",
+  "features": {
+    "model": "ensemble"
+  },
+  "uri": "a2f05839347da77f4d71fa3a7910568d7bbd299f905410ff83389ca7a7a9dbcb",
+  "data_hash": "a2f05839347da77f4d71fa3a7910568d7bbd299f905410ff83389ca7a7a9dbcb",
+  "element_type": "f64",
+  "element_shape": [
+    3
+  ],
+  "units": "MW",
+  "quantity_kind": "ActivePower",
+  "unit_system": "NATURAL_UNITS",
+  "initial_timestamp": "2030-06-15T00:00:00Z",
+  "resolution": "PT15M",
+  "horizon": "PT4H",
+  "interval": "PT1H",
+  "count": 96,
+  "percentiles": [
+    5.0,
+    50.0,
+    95.0
+  ]
+}

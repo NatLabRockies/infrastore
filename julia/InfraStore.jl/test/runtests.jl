@@ -1043,10 +1043,10 @@ end
 @testset "get_forecast_parameters" begin
     store = Store(in_memory=true)
     t0 = DateTime(2024, 1, 1)
-    res = Hour(1);
-    hor = Hour(4);
-    ivl = Hour(2);
-    count = 3;
+    res = Hour(1)
+    hor = Hour(4)
+    ivl = Hour(2)
+    count = 3
     H = 4
     data = Float64[h * 10 + c for h in 1:H, c in 1:count]
     add_time_series!(
@@ -2225,6 +2225,139 @@ end
 
     close!(target)
     close!(store)
+end
+
+# ---- OpenAPI-row association serde ------------------------------------------
+#
+# `export_time_series_associations_openapi`/`export_supplemental_attribute_associations_openapi`/
+# `import_supplemental_attribute_associations_openapi!` wrap the three Rust
+# core `openapi` methods. The golden tests below reproduce two of the
+# checked-in fixtures at `conformance/openapi_row_fixtures/` (the core's own
+# golden tests pin the rest).
+
+const _OPENAPI_FIXTURES_DIR = normpath(
+    joinpath(@__DIR__, "..", "..", "..", "conformance", "openapi_row_fixtures")
+)
+
+function _openapi_fixture(name)
+    return InfraStore.JSON.parse(
+        read(joinpath(_OPENAPI_FIXTURES_DIR, "$name.json"), String)
+    )
+end
+
+@testset "OpenAPI-row association serde" begin
+    @testset "export_time_series_associations_openapi reproduces the single_time_series fixture" begin
+        store = Store(in_memory=true)
+        single = SingleTimeSeries(
+            DateTime(2030, 1, 1), Hour(1), fill(0.0, 8760), "max_active_power";
+            units="MW", quantity_kind="ActivePower", unit_system=NaturalUnits,
+            component_field="max_active_power",
+        )
+        add_time_series!(
+            store, 7, "ThermalStandard", Component, single;
+            features=Dict("scenario" => "high_load", "year" => 2030),
+        )
+
+        json = export_time_series_associations_openapi(store)
+        rows = InfraStore.JSON.parse(json)
+        @test length(rows) == 1
+        row = rows[1]
+        want = _openapi_fixture("single_time_series")
+        @test row == want
+
+        close!(store)
+    end
+
+    @testset "export_supplemental_attribute_associations_openapi reproduces the fixture" begin
+        store = Store(in_memory=true)
+        add_supplemental_attribute_association!(
+            store,
+            SupplementalAttributeAssociation(
+                7, "ThermalStandard", 481, "GeometricDistributionForcedOutage"
+            ),
+        )
+        json = export_supplemental_attribute_associations_openapi(store)
+        @test InfraStore.JSON.parse(json) ==
+            [_openapi_fixture("supplemental_attribute_association")]
+        close!(store)
+    end
+
+    @testset "supplemental-attribute export/import round trips" begin
+        source = Store(in_memory=true)
+        add_supplemental_attribute_associations!(
+            source,
+            [
+                SupplementalAttributeAssociation(1, "Generator", 100, "GeographicInfo"),
+                SupplementalAttributeAssociation(2, "Load", 100, "GeographicInfo"),
+            ],
+        )
+        exported = export_supplemental_attribute_associations_openapi(source)
+
+        target = Store(in_memory=true)
+        @test import_supplemental_attribute_associations_openapi!(target, exported) == 2
+        re_exported = export_supplemental_attribute_associations_openapi(target)
+        @test InfraStore.JSON.parse(re_exported) == InfraStore.JSON.parse(exported)
+
+        close!(source)
+        close!(target)
+    end
+
+    @testset "supplemental-attribute import rejects a duplicate within the batch" begin
+        store = Store(in_memory=true)
+        json = InfraStore.JSON.json([
+            Dict(
+                "component_id" => 1, "component_type" => "Generator",
+                "attribute_id" => 100, "attribute_type" => "GeographicInfo",
+            ),
+            Dict(
+                "component_id" => 1, "component_type" => "Generator",
+                "attribute_id" => 100, "attribute_type" => "GeographicInfo",
+            ),
+        ])
+        @test_throws InfraStore.DuplicateAssociationError import_supplemental_attribute_associations_openapi!(
+            store, json
+        )
+        @test export_supplemental_attribute_associations_openapi(store) == "[]"
+        close!(store)
+    end
+
+    # Infrastore never reconciles a data array against its association row: a
+    # geometry disagreement between the two is rejected at the add boundary
+    # instead, loudly and without writing anything. `Deterministic`'s `count`
+    # is a separate field from the array's own shape (unlike `SingleTimeSeries`,
+    # whose `length` this binding always derives from `data`), so it is the
+    # one static/forecast type this binding can hand the store a mismatch for.
+    @testset "add_time_series! rejects a Deterministic count/shape mismatch and leaves the store untouched" begin
+        store = Store(in_memory=true)
+        mismatched = Deterministic(
+            DateTime(2030, 1, 1), Hour(1), Day(1), Hour(1),
+            364,  # disagrees with the array's own count axis (365)
+            fill(0.0, 24, 365), "max_active_power_forecast",
+        )
+        @test_throws InfraStore.InvalidParameterError add_time_series!(
+            store, 7, "ThermalStandard", Component, mismatched
+        )
+        @test isempty(list_time_series(store))
+        close!(store)
+    end
+
+    @testset "the memoized _cached_dlsym path is exercised by any list_* call" begin
+        store = Store(in_memory=true)
+        add_time_series!(
+            store, 1, "Generator", Component,
+            SingleTimeSeries(DateTime(2030, 1, 1), Hour(1), Float64[1, 2, 3, 4], "load"),
+        )
+        # Two different symbols through the same cache, each called twice: the
+        # second call of each must be a cache hit, not a second `dlopen`.
+        for _ in 1:2
+            @test length(list_time_series(store)) == 1
+            @test length(list_keys(store)) == 1
+        end
+        @test InfraStore._cached_dlsym(:infrastore_store_list_time_series) isa Ptr
+        @test haskey(InfraStore._SYMBOL_CACHE, :infrastore_store_list_time_series)
+        @test haskey(InfraStore._SYMBOL_CACHE, :infrastore_store_list_keys)
+        close!(store)
+    end
 end
 
 # ---- Coverage parity: dtypes, error paths, and untested exports -------------

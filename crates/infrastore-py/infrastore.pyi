@@ -718,6 +718,25 @@ class Store:
         child_types: list[str] | None = None,
     ) -> int: ...
 
+    # ---- OpenAPI-row association serde -------------------------------------
+
+    def export_time_series_associations_openapi(
+        self,
+        *,
+        owner_id: int | None = None,
+        owner_category: OwnerCategory | None = None,
+        owner_type: str | None = None,
+        time_series_type: TimeSeriesType | None = None,
+        name: str | None = None,
+        name_glob: str | None = None,
+        component_field: str | None = None,
+        resolution: Period | None = None,
+        interval: Period | None = None,
+        features: dict[str, int | float | bool | str] | None = None,
+    ) -> str: ...
+    def export_supplemental_attribute_associations_openapi(self) -> str: ...
+    def import_supplemental_attribute_associations_openapi(self, json: str) -> int: ...
+
 def init_tracing(filter: str) -> None: ...
 def decode_element_values(
     data: Any,

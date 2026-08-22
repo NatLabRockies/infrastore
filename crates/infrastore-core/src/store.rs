@@ -3878,90 +3878,99 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
         // native shape. `DeterministicSingleTimeSeries` is not added
         // directly; it is derived from a stored `SingleTimeSeries` via
         // [`Store::transform_single_time_series`].
-        TimeSeriesData::Deterministic(det) => (
-            array_hash(&det.data),
-            PackGroup::Regular(det.resolution),
-            array_layout_for(TimeSeriesType::Deterministic),
-            forecast_metadata(
-                item,
-                TimeSeriesType::Deterministic,
-                &det.name,
-                det.initial_timestamp,
-                det.resolution,
-                det.horizon,
-                det.interval,
-                det.count,
-                &det.data,
-                element_type,
-                None,
-            ),
-            forecast_key(
-                item,
-                TimeSeriesType::Deterministic,
-                &det.name,
-                det.resolution,
-                det.initial_timestamp,
-                det.horizon,
-                det.interval,
-                det.count,
-            ),
-        ),
-        TimeSeriesData::Probabilistic(prob) => (
-            array_hash(&prob.data),
-            PackGroup::Regular(prob.resolution),
-            array_layout_for(TimeSeriesType::Probabilistic),
-            forecast_metadata(
-                item,
-                TimeSeriesType::Probabilistic,
-                &prob.name,
-                prob.initial_timestamp,
-                prob.resolution,
-                prob.horizon,
-                prob.interval,
-                prob.count,
-                &prob.data,
-                element_type,
-                Some(prob.percentiles.clone()),
-            ),
-            forecast_key(
-                item,
-                TimeSeriesType::Probabilistic,
-                &prob.name,
-                prob.resolution,
-                prob.initial_timestamp,
-                prob.horizon,
-                prob.interval,
-                prob.count,
-            ),
-        ),
-        TimeSeriesData::Scenarios(scen) => (
-            array_hash(&scen.data),
-            PackGroup::Regular(scen.resolution),
-            array_layout_for(TimeSeriesType::Scenarios),
-            forecast_metadata(
-                item,
-                TimeSeriesType::Scenarios,
-                &scen.name,
-                scen.initial_timestamp,
-                scen.resolution,
-                scen.horizon,
-                scen.interval,
-                scen.count,
-                &scen.data,
-                element_type,
-                None,
-            ),
-            forecast_key(
-                item,
-                TimeSeriesType::Scenarios,
-                &scen.name,
-                scen.resolution,
-                scen.initial_timestamp,
-                scen.horizon,
-                scen.interval,
-                scen.count,
-            ),
-        ),
+        TimeSeriesData::Deterministic(det) => {
+            validate_deterministic(det)?;
+            (
+                array_hash(&det.data),
+                PackGroup::Regular(det.resolution),
+                array_layout_for(TimeSeriesType::Deterministic),
+                forecast_metadata(
+                    item,
+                    TimeSeriesType::Deterministic,
+                    &det.name,
+                    det.initial_timestamp,
+                    det.resolution,
+                    det.horizon,
+                    det.interval,
+                    det.count,
+                    &det.data,
+                    element_type,
+                    None,
+                ),
+                forecast_key(
+                    item,
+                    TimeSeriesType::Deterministic,
+                    &det.name,
+                    det.resolution,
+                    det.initial_timestamp,
+                    det.horizon,
+                    det.interval,
+                    det.count,
+                ),
+            )
+        }
+        TimeSeriesData::Probabilistic(prob) => {
+            validate_probabilistic(prob)?;
+            (
+                array_hash(&prob.data),
+                PackGroup::Regular(prob.resolution),
+                array_layout_for(TimeSeriesType::Probabilistic),
+                forecast_metadata(
+                    item,
+                    TimeSeriesType::Probabilistic,
+                    &prob.name,
+                    prob.initial_timestamp,
+                    prob.resolution,
+                    prob.horizon,
+                    prob.interval,
+                    prob.count,
+                    &prob.data,
+                    element_type,
+                    Some(prob.percentiles.clone()),
+                ),
+                forecast_key(
+                    item,
+                    TimeSeriesType::Probabilistic,
+                    &prob.name,
+                    prob.resolution,
+                    prob.initial_timestamp,
+                    prob.horizon,
+                    prob.interval,
+                    prob.count,
+                ),
+            )
+        }
+        TimeSeriesData::Scenarios(scen) => {
+            validate_scenarios(scen)?;
+            (
+                array_hash(&scen.data),
+                PackGroup::Regular(scen.resolution),
+                array_layout_for(TimeSeriesType::Scenarios),
+                forecast_metadata(
+                    item,
+                    TimeSeriesType::Scenarios,
+                    &scen.name,
+                    scen.initial_timestamp,
+                    scen.resolution,
+                    scen.horizon,
+                    scen.interval,
+                    scen.count,
+                    &scen.data,
+                    element_type,
+                    None,
+                ),
+                forecast_key(
+                    item,
+                    TimeSeriesType::Scenarios,
+                    &scen.name,
+                    scen.resolution,
+                    scen.initial_timestamp,
+                    scen.horizon,
+                    scen.interval,
+                    scen.count,
+                ),
+            )
+        }
     };
     Ok(RequestParts {
         hash,
@@ -4255,6 +4264,50 @@ fn validate_non_sequential(series: &NonSequentialTimeSeries) -> Result<()> {
         .map_err(TimeSeriesError::InvalidParameter)?;
     }
     Ok(())
+}
+
+/// Recast a [`validate_forecast_shape`] mismatch as an invalid parameter: at
+/// the add boundary the disagreement is in caller-supplied input, not in data
+/// the store already holds, so it should read the way [`validate_single`] and
+/// [`validate_non_sequential`] already do rather than as an integrity error.
+fn as_invalid_parameter(e: TimeSeriesError) -> TimeSeriesError {
+    match e {
+        TimeSeriesError::IntegrityError(msg) => TimeSeriesError::InvalidParameter(msg),
+        other => other,
+    }
+}
+
+/// Validate that `det.data`'s shape agrees with its declared `resolution` /
+/// `horizon` / `count`: `[H, count, *E]` where `H = horizon / resolution`.
+/// `Deterministic::new` already enforces this at construction, but every
+/// field is `pub`, so a caller can still hand the store a struct whose `data`
+/// was swapped out afterward without rebuilding it — the add path re-checks
+/// rather than trusting the constructor was the one that built it.
+fn validate_deterministic(det: &Deterministic) -> Result<()> {
+    let h = compute_h(det.horizon, det.resolution).map_err(TimeSeriesError::InvalidParameter)?;
+    validate_forecast_shape(&det.data, &[h, det.count], "Deterministic")
+        .map_err(as_invalid_parameter)
+}
+
+/// The [`validate_deterministic`] equivalent for `Probabilistic`: shape must
+/// be `[P, H, count, *E]` where `P` is the percentile count.
+fn validate_probabilistic(prob: &Probabilistic) -> Result<()> {
+    let h = compute_h(prob.horizon, prob.resolution).map_err(TimeSeriesError::InvalidParameter)?;
+    let p = prob.percentiles.len();
+    validate_forecast_shape(&prob.data, &[p, h, prob.count], "Probabilistic")
+        .map_err(as_invalid_parameter)
+}
+
+/// The [`validate_deterministic`] equivalent for `Scenarios`: shape must be
+/// `[scenario_count, H, count, *E]`.
+fn validate_scenarios(scen: &Scenarios) -> Result<()> {
+    let h = compute_h(scen.horizon, scen.resolution).map_err(TimeSeriesError::InvalidParameter)?;
+    validate_forecast_shape(
+        &scen.data,
+        &[scen.scenario_count, h, scen.count],
+        "Scenarios",
+    )
+    .map_err(as_invalid_parameter)
 }
 
 /// Build the metadata row for a dense forecast (`Deterministic` /

@@ -3201,6 +3201,74 @@ impl PyStore {
             .count_parent_child_associations(&filter)
             .map_err(map_err)
     }
+
+    // ---- OpenAPI-row association serde -------------------------------------
+    //
+    // Direct JSON serde of the two association catalogs, in the wire spelling
+    // SiennaSchemas defines. The Rust core (`infrastore_core::openapi`) owns
+    // the mapping between catalog rows and schema rows; these four methods are
+    // a thin wrapper over it.
+
+    /// Export `time_series_associations` matching the filter (the same filter
+    /// keywords as `list_time_series`) as a sorted OpenAPI-row JSON array.
+    /// Each row's `uri` and `data_hash` are the hex-encoded content hash the
+    /// store already has for that row — never a caller-supplied locator.
+    /// With no filter this exports the whole catalog.
+    #[pyo3(signature = (
+        *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
+        name=None, name_glob=None, component_field=None, resolution=None, interval=None, features=None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn export_time_series_associations_openapi(
+        &self,
+        owner_id: Option<i64>,
+        owner_category: Option<PyOwnerCategory>,
+        owner_type: Option<String>,
+        time_series_type: Option<Bound<'_, PyAny>>,
+        name: Option<String>,
+        name_glob: Option<String>,
+        component_field: Option<String>,
+        resolution: Option<Bound<'_, PyAny>>,
+        interval: Option<Bound<'_, PyAny>>,
+        features: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<String> {
+        let filter = build_list_filter(
+            owner_id,
+            owner_category,
+            owner_type,
+            time_series_type.as_ref(),
+            name,
+            name_glob,
+            component_field,
+            resolution,
+            interval,
+            features,
+        )?;
+        self.store()?
+            .export_time_series_associations_openapi(&filter)
+            .map_err(map_err)
+    }
+
+    /// Export the whole `supplemental_attribute_associations` table as an
+    /// OpenAPI-row JSON array, sorted by `(component_id, attribute_id)`.
+    fn export_supplemental_attribute_associations_openapi(&self) -> PyResult<String> {
+        self.store()?
+            .export_supplemental_attribute_associations_openapi()
+            .map_err(map_err)
+    }
+
+    /// Bulk-ingest a JSON array of supplemental-attribute association OpenAPI
+    /// rows in one all-or-nothing transaction, returning the number inserted.
+    /// This is the import half of the round trip whose export is
+    /// `export_supplemental_attribute_associations_openapi()`.
+    fn import_supplemental_attribute_associations_openapi(
+        &mut self,
+        json: &str,
+    ) -> PyResult<usize> {
+        self.store_mut()?
+            .import_supplemental_attribute_associations_openapi(json)
+            .map_err(map_err)
+    }
 }
 
 // ---- period helpers -------------------------------------------------------

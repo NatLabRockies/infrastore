@@ -2249,18 +2249,26 @@ int32_t infrastore_store_has_supplemental_attribute_association(const struct Inf
 /**
  * Attachments matching `filter_json` as a JSON array, in insertion order. Each
  * object carries `component_id`, `component_type`, `attribute_id`, and
- * `attribute_type`. Probe-then-fetch.
+ * `attribute_type`. Returns the JSON through `out_json` as an **owned**
+ * allocation the caller releases with `infrastore_string_free`; `out_len` is
+ * its byte length.
+ *
+ * This listing is catalog-scaled (a no-filter call exports the whole table),
+ * so — unlike the other `list_supplemental_attribute_*` exports in this
+ * section, which stay probe-then-fetch because they are bounded by one
+ * owner's edges — it follows the owned-string convention `infrastore_store_list_keys`
+ * and friends use, to avoid running the query and serializing every row twice.
  *
  * # Safety
  *
  * `handle` must be a live store handle and `filter_json` null or valid
- * null-terminated UTF-8. `out_len` must be writable; `buf` must be null or
- * valid for `cap` bytes.
+ * null-terminated UTF-8. `out_json` must be valid for writing one pointer and
+ * `out_len` for writing one `u64`; on success `*out_json` must be released
+ * exactly once with `infrastore_string_free`.
  */
 int32_t infrastore_store_list_supplemental_attribute_associations(const struct InfraStore *handle,
                                                                   const char *filter_json,
-                                                                  char *buf,
-                                                                  uint64_t cap,
+                                                                  char **out_json,
                                                                   uint64_t *out_len);
 
 /**
@@ -2494,6 +2502,70 @@ int32_t infrastore_store_replace_parent_child_component_id(struct InfraStore *ha
 int32_t infrastore_store_count_parent_child_associations(const struct InfraStore *handle,
                                                          const char *filter_json,
                                                          int64_t *out_count);
+
+/**
+ * Export `time_series_associations` matching the filter as a sorted
+ * OpenAPI-row JSON array. Each row's `uri` and `data_hash` are the
+ * hex-encoded content hash the store already has for that row — never a
+ * caller-supplied locator. Filters match `infrastore_store_list_keys`.
+ * Returns the JSON through `out_json` as an **owned** allocation the caller
+ * releases with `infrastore_string_free`; `out_len` is its byte length.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle. The scalar filter flags/values are
+ * plain scalars; `name`, `resolution`, `interval`, `features_json`, and
+ * `component_field` must each be null or a null-terminated UTF-8 string.
+ * `out_json` must be valid for writing one pointer and `out_len` for writing
+ * one `u64`; on success `*out_json` must be released exactly once with
+ * `infrastore_string_free`.
+ */
+int32_t infrastore_store_export_time_series_associations_openapi(const struct InfraStore *handle,
+                                                                 bool has_owner,
+                                                                 int64_t owner_id,
+                                                                 bool has_owner_category,
+                                                                 int32_t owner_category,
+                                                                 bool has_time_series_type,
+                                                                 int32_t time_series_type,
+                                                                 const char *name,
+                                                                 const char *resolution,
+                                                                 const char *interval,
+                                                                 const char *features_json,
+                                                                 const char *component_field,
+                                                                 char **out_json,
+                                                                 uint64_t *out_len);
+
+/**
+ * Export the whole `supplemental_attribute_associations` table as an
+ * OpenAPI-row JSON array, sorted by `(component_id, attribute_id)`. Returns
+ * the JSON through `out_json` as an **owned** allocation the caller releases
+ * with `infrastore_string_free`; `out_len` is its byte length.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle. `out_json` must be valid for writing
+ * one pointer and `out_len` for writing one `u64`; on success `*out_json`
+ * must be released exactly once with `infrastore_string_free`.
+ */
+int32_t infrastore_store_export_supplemental_attribute_associations_openapi(const struct InfraStore *handle,
+                                                                            char **out_json,
+                                                                            uint64_t *out_len);
+
+/**
+ * Bulk-ingest a JSON array of supplemental-attribute association OpenAPI rows
+ * in one all-or-nothing transaction — the import half of the round trip whose
+ * export is `infrastore_store_export_supplemental_attribute_associations_openapi`.
+ * When non-null, `out_added` receives the number inserted.
+ *
+ * # Safety
+ *
+ * `handle` must be a live mutable store handle and `json` a valid,
+ * null-terminated UTF-8 string. When non-null, `out_added` must point to
+ * writable `u64` storage.
+ */
+int32_t infrastore_store_import_supplemental_attribute_associations_openapi(struct InfraStore *handle,
+                                                                            const char *json,
+                                                                            uint64_t *out_added);
 
 /**
  * Release a key handle returned by this library.

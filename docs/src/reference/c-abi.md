@@ -832,9 +832,10 @@ language, and an empty list matches nothing. An unknown field or malformed JSON 
 and treats removing nothing as success, not an error.
 
 The list functions use the probe-then-fetch convention: call with `buf = NULL, cap = 0` to learn the
-length via `out_len`, then again with a `len + 1`-byte buffer. (`infrastore_store_list_keys` and
-`infrastore_store_list_array_groups` are the exceptions in this header — they return an owned string
-instead, because a time-series listing is the one result whose size scales with the whole catalog.)
+length via `out_len`, then again with a `len + 1`-byte buffer. (`infrastore_store_list_keys`,
+`infrastore_store_list_array_groups`, and
+`infrastore_store_list_supplemental_attribute_associations` are the exceptions in this header — they
+return an owned string instead, because a no-filter call exports the whole catalog or table.)
 
 ### Supplemental-attribute associations
 
@@ -867,11 +868,13 @@ int32_t infrastore_store_has_supplemental_attribute_association(const struct Inf
                                                         bool *out_found);
 
 /* Matching attachments as a JSON array, in insertion order; each object carries
-   component_id, component_type, attribute_id, attribute_type. Probe-then-fetch. */
+   component_id, component_type, attribute_id, attribute_type. Returns the JSON
+   through out_json as an OWNED allocation, freed with infrastore_string_free
+   (a no-filter call exports the whole table, so this follows the owned-string
+   convention rather than probe-then-fetch). */
 int32_t infrastore_store_list_supplemental_attribute_associations(const struct InfraStore *handle,
                                                           const char *filter_json,
-                                                          char *buf, uint64_t cap,
-                                                          uint64_t *out_len);
+                                                          char **out_json, uint64_t *out_len);
 
 /* Distinct attribute ids of the matching rows, ascending, as a JSON array — the
    attributes attached to a component when component_id is set. Probe-then-fetch. */
@@ -1004,6 +1007,48 @@ free(json);
 
 Neither association catalog is exposed over the [gRPC server](./grpc-api.md) or the
 [`infrastore` CLI](./cli.md).
+
+## OpenAPI-row Association Serde
+
+Direct JSON serde of the two association catalogs, in the wire spelling
+[SiennaSchemas](https://github.com/Sienna-Platform/SiennaSchemas) defines (`TimeSeries/*.json`,
+`Core/Associations/SupplementalAttributeAssociation.json`). The two exports use the owned-string
+convention.
+
+```c
+/* Export time_series_associations matching the filter as a sorted OpenAPI-row
+   JSON array. Each row's uri and data_hash are the hex-encoded content hash
+   the store already has for that row -- never a caller-supplied locator.
+   Filters match infrastore_store_list_keys. Returns the JSON through out_json
+   as an OWNED allocation, freed with infrastore_string_free. */
+int32_t infrastore_store_export_time_series_associations_openapi(const struct InfraStore *handle,
+                                                          bool has_owner, int64_t owner_id,
+                                                          bool has_owner_category, int32_t owner_category,
+                                                          bool has_time_series_type, int32_t time_series_type,
+                                                          const char *name, const char *resolution,
+                                                          const char *interval, const char *features_json,
+                                                          const char *component_field,
+                                                          char **out_json, uint64_t *out_len);
+
+/* Export the whole supplemental_attribute_associations table as an OpenAPI-row
+   JSON array, sorted by (component_id, attribute_id). Owned-string return. */
+int32_t infrastore_store_export_supplemental_attribute_associations_openapi(
+    const struct InfraStore *handle, char **out_json, uint64_t *out_len);
+
+/* Bulk-ingest a JSON array of supplemental-attribute association OpenAPI rows in
+   one all-or-nothing transaction -- the import half of the round trip whose
+   export is infrastore_store_export_supplemental_attribute_associations_openapi.
+   *out_added (when non-NULL) receives the number inserted. */
+int32_t infrastore_store_import_supplemental_attribute_associations_openapi(
+    struct InfraStore *handle, const char *json, uint64_t *out_added);
+```
+
+A catalog row's `data_hash` is `NOT NULL`, and infrastore fills a row's `uri`/`data_hash` wire
+fields with that same content hash, hex-encoded, on export. There is no corresponding time-series
+_import_ export: infrastore never modifies the associations table or the data to make an incoming
+document agree with what it already holds. A geometry disagreement between an added series and its
+own association row is rejected at the add boundary instead (`INFRASTORE_ERR_INVALID_PARAMETER`),
+loudly and without writing anything.
 
 ## Error Messages
 
