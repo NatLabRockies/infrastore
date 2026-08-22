@@ -13,13 +13,16 @@
 //! The schemas are draft-07 and their `$ref`s are relative filesystem paths
 //! (`common.json#/definitions/...`, `../Core/common.json#/definitions/...`),
 //! not `$id`-anchored URLs. Each schema is compiled with a synthetic
-//! `file://<absolute path>` base URI matching its location on disk, so the
-//! library's standard relative-URI-reference resolution turns those `$ref`s
-//! into `file://` URIs pointing at the sibling vendored files; a custom
-//! `Retrieve` impl below then reads and parses whichever file the resolver
-//! asks for. This needs no `resolve-file`/`resolve-http` feature and no
-//! network access — see the `jsonschema` dependency comment in
-//! `infrastore-core/Cargo.toml`.
+//! `vendored:///<path relative to schemas_dir()>` base URI — not `file://`,
+//! which on Windows would have to carry `canonicalize()`'s verbatim-path
+//! prefix (`\\?\D:\...`) and is not a valid URI. RFC 3986 relative-reference
+//! resolution is scheme-agnostic, so the library's standard resolution still
+//! turns those `$ref`s into `vendored:` URIs pointing at the sibling vendored
+//! files; a custom `Retrieve` impl below then splits the resolved URI's path
+//! into segments and rejoins them onto `schemas_dir()` with native path
+//! separators, then reads and parses whichever file that names. This needs
+//! no `resolve-file`/`resolve-http` feature and no network access — see the
+//! `jsonschema` dependency comment in `infrastore-core/Cargo.toml`.
 
 use std::path::{Path, PathBuf};
 
@@ -50,21 +53,45 @@ impl Retrieve for VendoredRetriever {
         &self,
         uri: &Uri<String>,
     ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-        let path = uri
-            .as_str()
-            .strip_prefix("file://")
-            .ok_or_else(|| format!("expected a file:// URI, got {uri}"))?;
-        let text = std::fs::read_to_string(path)
+        if uri.scheme().as_str() != "vendored" {
+            return Err(format!("expected a vendored: URI, got {uri}").into());
+        }
+        let mut path = schemas_dir();
+        for segment in uri.path().as_str().split('/') {
+            if segment.is_empty() {
+                continue;
+            }
+            if segment == ".." {
+                return Err(
+                    format!("refusing to escape the vendored schema tree for {uri}").into(),
+                );
+            }
+            path.push(segment);
+        }
+        let text = std::fs::read_to_string(&path)
             .map_err(|e| format!("reading vendored schema referenced as {uri}: {e}"))?;
         Ok(serde_json::from_str(&text)?)
     }
 }
 
+/// Builds a synthetic `vendored:///a/b/c.json` base URI from `path`'s
+/// location relative to `schemas_dir()`, joined with forward slashes
+/// regardless of platform. No `canonicalize()`: on Windows that returns a
+/// verbatim path (`\\?\D:\...`) that is not valid inside a URI.
 fn base_uri_for(path: &Path) -> String {
-    let abs = path
-        .canonicalize()
-        .unwrap_or_else(|e| panic!("canonicalizing {}: {e}", path.display()));
-    format!("file://{}", abs.display())
+    let rel = path
+        .strip_prefix(schemas_dir())
+        .unwrap_or_else(|e| panic!("{} is not under schemas_dir(): {e}", path.display()));
+    let joined = rel
+        .components()
+        .map(|c| {
+            c.as_os_str()
+                .to_str()
+                .unwrap_or_else(|| panic!("non-UTF-8 path component in {}", path.display()))
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+    format!("vendored:///{joined}")
 }
 
 fn read_json(path: &Path) -> Value {
