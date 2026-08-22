@@ -33,7 +33,7 @@ function export_time_series_associations_openapi(
     features=Dict{String, Any}(),
     component_field=nothing,
 )
-    (has_owner, owner_arg, has_category, category_arg, has_type, type_arg, name_arg, resolution_iso, interval_iso, features_json, component_field_arg) = _filter_args(
+    (has_owner, owner_arg, has_category, category_arg, has_type, type_arg, name_arg, _name_glob_arg, resolution_iso, interval_iso, features_json, component_field_arg) = _filter_args(
         owner_id, owner_category, time_series_type, name, resolution, interval, features,
         component_field,
     )

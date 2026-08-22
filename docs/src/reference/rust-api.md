@@ -342,7 +342,9 @@ can be moved between threads, but sharing one requires external synchronization 
 - **`get_time_series`** — Reconstructs the stored type as a [`TimeSeriesData`](#timeseriesdata)
   variant (static series and all forecast types). With `time_range = Some((start, end))`, slices on
   the time axis; the returned series's `initial_timestamp` and `length` reflect the slice. For
-  forecasts the window is resolved over the `count` axis (`resolve_windows`). `end` is exclusive.
+  forecasts the window is resolved over the `count` axis (`resolve_windows`). `start` is inclusive
+  and `end` is exclusive — see [Reading a time range](#reading-a-time-range) for what each type
+  applies that to.
 - **`clear_time_series`** — `Some((id, category))` removes one owner's series (the owner is the
   `(owner_id, owner_category)` pair); `None` removes all. Returns the count removed. Underlying
   arrays are freed only when their last reference is gone.
@@ -382,6 +384,40 @@ can be moved between threads, but sharing one requires external synchronization 
   to match the HDF5 file already beside it. Unlike `persist_to`, copies no arrays: they are already
   in place. A checkpoint, not a mode switch — the catalog stays in RAM afterwards. For a
   `CatalogMode::Attached` store this is `flush`.
+
+### Reading a time range
+
+`get_time_series(key, Some((start, end)))` selects on the time axis. The rule is the same for all
+six types — **`start` is inclusive, `end` is exclusive** — but what it is applied _to_ differs,
+because the types disagree about what a stored value is:
+
+| Type                                                                              | Selected                                                                                         |
+| --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `NonSequentialTimeSeries`                                                         | every timestamp `t` with `start <= t < end`                                                      |
+| `SingleTimeSeries`                                                                | every step whose **covered interval** `[t, t + resolution)` overlaps the range                   |
+| `Deterministic` / `Probabilistic` / `Scenarios` / `DeterministicSingleTimeSeries` | every window whose **start** `w` has `start <= w < end`, and `start` must _be_ a window boundary |
+
+The two static rows differ only at the `start` bound, and only when `start` falls strictly inside a
+step. An irregular series pairs a value with an _instant_, so a value at `t < start` is outside the
+range. A regular series pairs a value with the _step it covers_, so the step containing `start` does
+overlap the range and is returned — which means the sliced series' `initial_timestamp` can be
+earlier than the `start` that was asked for. The bounds need not be grid-aligned; `start` is floored
+and `end` is ceiled onto the grid (calendar-aware for a monthly resolution). The `end` bound behaves
+identically under either reading: a step at or after `end` cannot overlap `[start, end)`.
+
+Forecasts are stricter on purpose. A window is a whole array, not a point, so there is no partial
+window to return: an off-grid `start` is rejected with `InvalidParameter` rather than snapped, at
+any magnitude — including one finer than a millisecond, which [`Period::steps_between`](#period)
+checks the exact landing for. A `start` that is aligned but at or past the last window is rejected
+too, rather than returning an empty selection.
+
+`end < start` is `InvalidParameter` for every type. Query bounds themselves are unconstrained: they
+may be finer than the millisecond every _stored_ instant is held to (see
+[timestamp precision](../explanation/data-model.md#timestamp-precision)).
+
+A [reader](#readers) is exact rather than range-based: `index_at` maps a timestamp to its index and
+errors if that instant is not on the timeline — for both the regular and the irregular case. It
+never floors, ceils, or clamps.
 
 ### Introspection
 
@@ -866,6 +902,12 @@ impl Deterministic {
 ```
 
 `new` validates `data.shape` against `[H, count, *E]` where `H = horizon / resolution`.
+
+`validate` re-checks those same invariants against the values the struct currently holds, and
+returns the same `Err(String)`. Every field is `pub` and the type derives `Deserialize`, so a struct
+literal, a field assignment, or `serde_json::from_str` all produce a value that never met `new` —
+which is why `add_time_series` calls `validate` on the write path rather than trusting the
+constructor. `Probabilistic` and `Scenarios` carry the same method.
 
 ### `Probabilistic`
 

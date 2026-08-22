@@ -187,7 +187,7 @@ flags are inert.
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
-pip install maturin pytest numpy
+pip install maturin pytest numpy tzdata  # tzdata: zoneinfo on Windows
 maturin develop --manifest-path crates/infrastore-py/Cargo.toml
 pytest python/tests
 ```
@@ -199,7 +199,16 @@ cargo build -p infrastore-ffi --release
 export INFRASTORE_LIB=$PWD/target/release/libinfrastore_ffi.dylib  # .so on Linux
 julia --project=julia/InfraStore.jl -e 'using Pkg; Pkg.instantiate()'
 julia --project=julia/InfraStore.jl julia/InfraStore.jl/test/runtests.jl
+# The ZonedDateTime tests need the TimeZones weak dependency, which is only
+# loadable through the test target; the run above skips them with a warning:
+julia --project=julia/InfraStore.jl -e 'using Pkg; Pkg.test()'
 ```
+
+`julia/InfraStore.jl` interprets a bare `Dates.DateTime` as UTC (Julia's carries no zone) and also
+accepts a `TimeZones.ZonedDateTime` anywhere a timestamp goes, converting it to the instant it
+names. TimeZones is a **weak dependency**: the single conversion method lives in
+`ext/InfraStoreTimeZonesExt.jl` and loads with `using TimeZones`. Reads still return a `DateTime` —
+changing that would break `IS3.jl`, which destructures them.
 
 The FFI build script generates `crates/infrastore-ffi/include/infrastore.h` via `cbindgen`. Never
 hand-edit the header. Any change to an exported `extern "C"` function must:
@@ -258,6 +267,15 @@ cargo run -p infrastore-server -- --config my_server.toml
   destructive form. `Store::open_copy` copies both halves and opens the copy, so a consumer that
   means to change a user's artifact never attaches to it read-write; HDF5 has no journal, so an
   interrupted in-place write is unrecoverable. Both shipped consumers already do this by hand.
+- **Timestamps are millisecond-precision.** A `Period` has always been a whole number of
+  milliseconds; every _instant_ the store records (a `SingleTimeSeries` or forecast
+  `initial_timestamp`, every entry of a `NonSequentialTimeSeries` vector) is held to the same floor,
+  enforced on the write path in `Store`'s `validate_data` and refused with `InvalidParameter` rather
+  than truncated. The reason is cross-binding: the C ABI and Julia exchange instants as `i64` Unix
+  milliseconds and Python's `datetime` is microsecond, so a finer instant is silently truncated at
+  some boundaries and not others. Reads stay permissive so a pre-rule artifact still reads back
+  exactly, which is why the rule does not bump `DATA_FORMAT_VERSION`. Query bounds (`time_range`, a
+  reader's `when`) are deliberately unconstrained.
 - `DATA_FORMAT_VERSION` in `crates/infrastore-core/src/version.rs` is the on-disk compatibility
   contract. Any incompatible HDF5 layout, SQLite schema, dtype encoding, or hashing change must bump
   it and update format documentation and compatibility tests.

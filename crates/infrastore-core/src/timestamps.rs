@@ -29,10 +29,13 @@
 //!
 //! # Precision
 //!
-//! Nanosecond resolution over chrono's full range: the base timestamp is stored
-//! as its own `(seconds, nanoseconds)` pair and every later timestamp is
-//! reconstructed by accumulating nanosecond deltas in `i128`, so neither the
-//! epoch offset nor the delta magnitude can overflow.
+//! The *encoding* carries nanosecond resolution over chrono's full range: the
+//! base timestamp is stored as its own `(seconds, nanoseconds)` pair and every
+//! later timestamp is reconstructed by accumulating nanosecond deltas in `i128`,
+//! so neither the epoch offset nor the delta magnitude can overflow. That is
+//! deliberately wider than what the store *accepts*
+//! ([`require_millisecond_precision`]), so a store written before that rule
+//! still decodes exactly.
 //!
 //! The one thing not preserved is a *leap second* (chrono spells one as a
 //! sub-second component at or above one second) at any position after the first:
@@ -42,6 +45,55 @@
 use chrono::{DateTime, Utc};
 
 use crate::error::{Result, TimeSeriesError};
+
+/// The store's timestamp precision contract: a stored instant must be a whole
+/// number of milliseconds.
+///
+/// This is the same floor a [`Period`](crate::Period) has always had (see the
+/// `period.rs` module docs — `is_positive` counts whole milliseconds, and the
+/// ISO-8601 encoding emits at most three fractional digits). Applying it to the
+/// *instants* as well as the *spans* is what makes a timestamp mean the same
+/// thing in every consumer: the C ABI and the Julia binding exchange instants as
+/// `i64` unix milliseconds, and Python's `datetime` is microsecond. A finer
+/// instant cannot survive those boundaries, and truncating it there is silent —
+/// it moves a series onto a different instant in one binding but not another,
+/// and for a `NonSequentialTimeSeries` whose timestamps are less than a
+/// millisecond apart it collapses two into one, which then fails the
+/// strictly-increasing rule on the way back out. Rejecting the write is the only
+/// one of those outcomes a caller can act on.
+///
+/// Callers needing a finer grid should scale the unit, exactly as they must for
+/// a sub-millisecond resolution: a 500 µs series is a 500-unit series that
+/// records the unit in `units`.
+///
+/// Enforced on the **write path only** ([`crate::Store::add`] and every path
+/// that funnels through it). Reads stay permissive, so an artifact written
+/// before this rule keeps reading back exactly as it was written — which is why
+/// the rule does not bump [`crate::DATA_FORMAT_VERSION`]: the on-disk format is
+/// unchanged, only what a new write accepts.
+///
+/// A leap second is spelled by chrono as a sub-second component at or above one
+/// second; the modulo below reads its *fractional* part, so a leap second on a
+/// whole millisecond is accepted like any other instant.
+///
+/// `label` is a closure rather than a `&str` because one caller runs this per
+/// *timestamp* of a `NonSequentialTimeSeries`: building the label eagerly would
+/// allocate a `String` for every entry of a vector that may hold millions, all
+/// of them thrown away on the overwhelmingly common all-pass path.
+pub(crate) fn require_millisecond_precision(
+    t: DateTime<Utc>,
+    label: impl FnOnce() -> String,
+) -> std::result::Result<(), String> {
+    if !t.timestamp_subsec_nanos().is_multiple_of(1_000_000) {
+        let label = label();
+        return Err(format!(
+            "{label} {t} is finer than a millisecond; the store records instants to the \
+             millisecond, as it does periods. Truncate to a whole millisecond, or scale the \
+             unit and record it in `units`."
+        ));
+    }
+    Ok(())
+}
 
 /// Encoding version, the first byte of every blob.
 const VERSION: u8 = 1;
@@ -131,7 +183,16 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Vec<DateTime<Utc>>> {
     )
     .ok_or_else(|| bad("base timestamp is out of range".to_string()))?;
 
-    let mut out = Vec::with_capacity(count);
+    // Capacity bounded by what the blob could possibly hold, not by the count it
+    // claims. `count` is a varint out of the data, so a corrupt or hostile row
+    // could name 2^42 timestamps and this reserved for all of them before the
+    // decode loop discovered the blob was eleven bytes long — a measured 48 TiB
+    // reservation that macOS granted lazily, cost 132 ms, and threw away one
+    // instruction later; past `isize::MAX` it panicked outright instead of
+    // returning the `IntegrityError` this module promises for a malformed blob.
+    // Every timestamp after the first costs at least one byte, so the remaining
+    // length is a hard ceiling on how many can still arrive.
+    let mut out = Vec::with_capacity(count.min(bytes.len().saturating_sub(pos).saturating_add(1)));
     out.push(first);
     // The accumulator starts from the base's *linear* nanoseconds, so a
     // leap-second base contributes its extra nanoseconds to every later value

@@ -1302,3 +1302,96 @@ fn parent_child_counts_match_brute_force_on_a_fan_in_and_fan_out_graph() {
         expected_children.into_iter().collect::<Vec<_>>()
     );
 }
+
+/// Reassigning a component brings its denormalized type label with it.
+///
+/// `component_type` / `parent_type` / `child_type` are carried for filtering,
+/// and the reassignment used to rewrite only the id. The moved rows went on
+/// describing the component they came from, so filtering by the destination's
+/// real type missed them, filtering by the source's type returned them under the
+/// destination's id, and `supplemental_attribute_summary` split one component
+/// across two contradictory type buckets.
+///
+/// The destination's type comes from the rows it already has. Where it has none
+/// the catalog has no other record of it — these rows become its only ones — so
+/// the label carries over unchanged; that case is documented rather than
+/// guessed at.
+#[test]
+fn reassigning_a_component_relabels_the_rows_it_moves() {
+    let mut store = create_store(None, true).unwrap();
+    store
+        .add_supplemental_attribute_associations(vec![
+            typed_attach(1, "ThermalStandard", 10, "GeographicInfo"),
+            typed_attach(2, "RenewableDispatch", 20, "GeographicInfo"),
+        ])
+        .unwrap();
+
+    assert_eq!(
+        store
+            .replace_supplemental_attribute_component_id(1, 2)
+            .unwrap(),
+        1
+    );
+
+    // Component 2 is a RenewableDispatch, and now every row says so.
+    let rows = store
+        .list_supplemental_attribute_associations(&all_attachments())
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    for row in &rows {
+        assert_eq!(row.component_id, 2);
+        assert_eq!(row.component_type, "RenewableDispatch", "{row:?}");
+    }
+
+    // Which is what the type filters and the summary see.
+    let by = |t: &str| {
+        store
+            .list_supplemental_attribute_associations(
+                &SupplementalAttributeFilter::new().component_types([t.to_string()]),
+            )
+            .unwrap()
+            .len()
+    };
+    assert_eq!(by("RenewableDispatch"), 2);
+    assert_eq!(by("ThermalStandard"), 0);
+    let summary = store.supplemental_attribute_summary().unwrap();
+    assert_eq!(summary.len(), 1, "{summary:?}");
+    assert_eq!(summary[0].component_type, "RenewableDispatch");
+
+    // The directed-edge catalog follows the same rule, on whichever end moves.
+    let mut store = create_store(None, true).unwrap();
+    store
+        .add_parent_child_associations(vec![
+            typed_edge(1, "ThermalStandard", 100, "Bus"),
+            typed_edge(2, "RenewableDispatch", 101, "Bus"),
+            typed_edge(200, "Bus", 1, "ThermalStandard"),
+        ])
+        .unwrap();
+    store.replace_parent_child_component_id(1, 2).unwrap();
+
+    let edges = store
+        .list_parent_child_associations(&ParentChildFilter::new())
+        .unwrap();
+    for e in &edges {
+        if e.parent_id == 2 {
+            assert_eq!(e.parent_type, "RenewableDispatch", "{e:?}");
+        }
+        if e.child_id == 2 {
+            assert_eq!(e.child_type, "RenewableDispatch", "{e:?}");
+        }
+        // The end that did not move keeps its own label.
+        if e.parent_id == 200 {
+            assert_eq!(e.parent_type, "Bus", "{e:?}");
+        }
+    }
+    assert_eq!(
+        store
+            .list_parent_child_associations(
+                &ParentChildFilter::new().parent_types(["ThermalStandard".to_string()])
+            )
+            .unwrap()
+            .len(),
+        0,
+        "nothing should still claim the source's type"
+    );
+}

@@ -1084,3 +1084,94 @@ fn feature_value_equality_hashing_and_ordering_agree() {
         "-0.0 is a distinct value here, as it is to the catalog"
     );
 }
+
+#[test]
+fn malformed_inputs_report_errors_rather_than_panicking() {
+    // Four places where caller- or data-supplied numbers reached arithmetic or
+    // an index without a guard. All are reachable from safe, public API; a debug
+    // build panicked and a release build, where the workspace profile leaves
+    // `overflow-checks` off, would have wrapped instead.
+    use infrastore_core::{DecodedValues, Dtype, Period, codec};
+
+    // 1. An ISO-8601 duration may repeat a unit — `parse_components` applies no
+    //    uniqueness rule — and one day component already reaches the edge of i64
+    //    milliseconds, so a second overflowed the unguarded `+=`. Reachable from
+    //    an arbitrary caller string, including one arriving over gRPC. The
+    //    calendar accumulator is the same shape: a year component multiplies by
+    //    12 under a guard, then lands in `months`, which needs one too.
+    for s in [
+        "P106751991167D106751991167D",
+        "PT2562047788015H2562047788015H",
+        "P106751991167W106751991167W",
+        "P768614336404564650Y768614336404564650Y",
+        "P9223372036854775807M9223372036854775807M",
+        "P768614336404564650Y9223372036854775807M",
+    ] {
+        let err = Period::from_iso8601(s).unwrap_err();
+        // An overflow reads like every other parse failure and names the input,
+        // rather than reporting a different, vaguer message than a malformed
+        // string would.
+        assert!(
+            matches!(err, infrastore_core::TimeSeriesError::InvalidParameter(ref m)
+                if m.contains("invalid ISO-8601 period") && m.contains(s)),
+            "{s}: {err}"
+        );
+    }
+    // A single in-range component is unaffected.
+    assert!(Period::from_iso8601("P106751991167D").is_ok());
+    // The largest year count a `Period::Months` can hold (the month total is an
+    // i32); one component of it parses, two overflow the accumulator above.
+    assert_eq!(
+        Period::from_iso8601("P178956970Y").unwrap(),
+        Period::months(178_956_970 * 12)
+    );
+    assert_eq!(Period::from_iso8601("P1Y6M").unwrap(), Period::months(18));
+    assert_eq!(
+        Period::from_iso8601("P1DT2H").unwrap(),
+        Period::fixed(Duration::days(1) + Duration::hours(2))
+    );
+
+    // 2. `element_type_of` manufactures `tuple(0,f64)` for an empty Tuple, and
+    //    `validate_array` accepts it, so the crate's own round trip reached a
+    //    `chunks_exact(0)`.
+    let empty = DecodedValues::Tuple(vec![]);
+    let et = codec::element_type_of(&empty).unwrap();
+    let arr = codec::encode(&empty, &[0]).unwrap();
+    let err = codec::decode(&arr, et, 1).unwrap_err();
+    assert!(
+        matches!(err, infrastore_core::TimeSeriesError::InvalidParameter(ref m)
+            if m.contains("nothing to decode")),
+        "{err}"
+    );
+
+    // 3. A `TypedArray` whose bytes do not match its shape is buildable in safe
+    //    code, because the fields are public. Both write paths must report it;
+    //    the bulk one used to panic on an unchecked slice index, after the
+    //    dataset had already been created.
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = create_store(Some(dir.path().join("bad.h5").as_path()), false).unwrap();
+    let mismatched = TypedArray {
+        dtype: Dtype::F64,
+        shape: vec![4],
+        bytes: vec![0u8; 8],
+    };
+    let request = || {
+        AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+                Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
+                Duration::hours(1),
+                mismatched.clone(),
+                "bad",
+            )),
+        )
+    };
+    assert!(store.add(request()).is_err(), "single add must report it");
+    assert!(
+        store.add_time_series_bulk(vec![request()]).is_err(),
+        "bulk add must report it too, not panic"
+    );
+    assert_eq!(store.list_keys(ListFilter::new()).unwrap().len(), 0);
+}

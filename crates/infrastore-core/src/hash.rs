@@ -70,8 +70,8 @@ fn update_f64_canonical_nans(hasher: &mut Sha256, bytes: &[u8]) {
 
     let bytes = &bytes[..bytes.len() - bytes.len() % 8];
     let mut run_start = 0;
-    for (index, chunk) in bytes.chunks_exact(8).enumerate() {
-        let bits = u64::from_le_bytes(chunk.try_into().unwrap());
+    for (index, chunk) in bytes.as_chunks::<8>().0.iter().enumerate() {
+        let bits = u64::from_le_bytes(*chunk);
         // IEEE NaN: exponent all ones, mantissa non-zero. Covers signaling and
         // sign-negative NaNs, exactly as `f64::is_nan` does.
         if bits & EXP_MASK == EXP_MASK && bits & FRAC_MASK != 0 {
@@ -91,8 +91,8 @@ fn update_f32_canonical_nans(hasher: &mut Sha256, bytes: &[u8]) {
 
     let bytes = &bytes[..bytes.len() - bytes.len() % 4];
     let mut run_start = 0;
-    for (index, chunk) in bytes.chunks_exact(4).enumerate() {
-        let bits = u32::from_le_bytes(chunk.try_into().unwrap());
+    for (index, chunk) in bytes.as_chunks::<4>().0.iter().enumerate() {
+        let bits = u32::from_le_bytes(*chunk);
         if bits & EXP_MASK == EXP_MASK && bits & FRAC_MASK != 0 {
             let offset = index * 4;
             hasher.update(&bytes[run_start..offset]);
@@ -175,7 +175,7 @@ pub fn timestamps_hash(timestamps: &[DateTime<Utc>]) -> [u8; 32] {
 pub fn hash_hex(hash: &[u8; 32]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = [0u8; 64];
-    for (byte, pair) in hash.iter().zip(out.chunks_exact_mut(2)) {
+    for (byte, pair) in hash.iter().zip(out.as_chunks_mut::<2>().0) {
         pair[0] = HEX[(byte >> 4) as usize];
         pair[1] = HEX[(byte & 0x0f) as usize];
     }
@@ -246,8 +246,8 @@ mod tests {
         }
         match data.dtype {
             Dtype::F64 => {
-                for c in data.bytes.chunks_exact(8) {
-                    let v = f64::from_le_bytes(c.try_into().unwrap());
+                for c in data.bytes.as_chunks::<8>().0 {
+                    let v = f64::from_le_bytes(*c);
                     let bits = if v.is_nan() {
                         f64::NAN.to_bits()
                     } else {
@@ -257,8 +257,8 @@ mod tests {
                 }
             }
             Dtype::F32 => {
-                for c in data.bytes.chunks_exact(4) {
-                    let v = f32::from_le_bytes(c.try_into().unwrap());
+                for c in data.bytes.as_chunks::<4>().0 {
+                    let v = f32::from_le_bytes(*c);
                     let bits = if v.is_nan() {
                         f32::NAN.to_bits()
                     } else {

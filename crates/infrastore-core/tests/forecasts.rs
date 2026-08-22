@@ -130,8 +130,10 @@ fn i64_arr(shape: Vec<usize>, vals: &[i64]) -> TypedArray {
 fn to_i64_vec(arr: &TypedArray) -> Vec<i64> {
     assert_eq!(arr.dtype, Dtype::I64);
     arr.bytes
-        .chunks_exact(8)
-        .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|c| i64::from_le_bytes(*c))
         .collect()
 }
 
@@ -2544,5 +2546,76 @@ fn a_zero_width_range_returns_an_empty_forecast_for_either_interval_encoding() {
     for range in [None, Some((initial, initial + Duration::hours(4)))] {
         let got = store.get_time_series(single_key.identity(), range).unwrap();
         assert_eq!(got.as_deterministic().unwrap().count, 1, "{range:?}");
+    }
+}
+
+/// Two forecasts holding identical bytes under different declared element types
+/// are two slots, each reporting its own meaning.
+///
+/// `array_hash` covers dtype, shape and bytes — not the logical element type —
+/// so byte-identical arrays share a `data_hash` by design. The reader's slot
+/// dedup keyed on `(data_hash, WindowRead)` and omitted `element_type`, so the
+/// two collapsed into one slot and whichever entry arrived second was handed the
+/// first one's meaning. `entry_slot(i).element_type()` is the only place a
+/// caller learns how to decode a window, so the wrong answer there is silently
+/// wrong values rather than an error.
+#[test]
+fn identical_bytes_under_different_element_types_do_not_share_a_slot() {
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let mut store = create_store(None, true).unwrap();
+
+    // One array, declared two ways. Both are physically f64 with per-step dims
+    // [2], so nothing but the element type distinguishes them.
+    let vals: Vec<f64> = (0..24).map(|i| i as f64).collect();
+    for (owner, element_type) in [
+        (
+            1i64,
+            infrastore_core::ElementType::Tuple {
+                arity: 2,
+                dtype: Dtype::F64,
+            },
+        ),
+        (2, infrastore_core::ElementType::LinearFunction),
+    ] {
+        let det = Deterministic::new(
+            initial,
+            Duration::hours(1),
+            Duration::hours(4),
+            Duration::hours(2),
+            3,
+            f64_arr(vec![4, 3, 2], &vals),
+            "load",
+        )
+        .unwrap()
+        .with_element_type(element_type);
+        store
+            .add_time_series(
+                owner,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::Deterministic(det),
+                Features::new(),
+            )
+            .unwrap();
+    }
+
+    let reader = store
+        .build_forecast_reader(
+            ListFilter::new()
+                .time_series_type(TimeSeriesType::Deterministic)
+                .resolution(Duration::hours(1)),
+        )
+        .unwrap();
+
+    assert_eq!(reader.entries().len(), 2);
+    for i in 0..reader.entries().len() {
+        let key = reader.entries()[i].key();
+        let declared = store.get_metadata(key.identity()).unwrap().element_type;
+        assert_eq!(
+            reader.entry_slot(i).element_type(),
+            declared,
+            "owner {} must read under its own declared element type",
+            key.owner_id()
+        );
     }
 }

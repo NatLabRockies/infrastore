@@ -99,9 +99,14 @@ jobs:
       # CLAUDE.md documents for local work) requires an active virtualenv,
       # which setup-python does not provide. target/wheels is cleared first so
       # a cached wheel from an earlier run cannot be installed instead.
+      # `tzdata` is what makes `zoneinfo` work on Windows, which ships no system
+      # time-zone database. The datetime tests name real zones on purpose --
+      # the binding's rule is that any aware instant is accepted -- so skipping
+      # them there would drop the coverage on the one platform whose zone
+      # handling differs.
       - name: Install Python test dependencies
         shell: bash
-        run: python -m pip install --upgrade maturin pytest numpy
+        run: python -m pip install --upgrade maturin pytest numpy tzdata
 
       - name: Build and install the Python extension
         shell: bash
@@ -153,6 +158,16 @@ jobs:
           julia --project=julia/InfraStore.jl -e 'using Pkg; Pkg.instantiate()'
           julia --project=julia/InfraStore.jl "${covflags[@]}" \
             julia/InfraStore.jl/test/runtests.jl
+          # Again through Pkg.test, which is the only environment that has the
+          # TimeZones weak dependency and can therefore load
+          # InfraStoreTimeZonesExt. The run above skips those tests with a
+          # warning, because a weak dependency is not loadable from the
+          # package's own project; this is what actually exercises them.
+          # Linux only: it is one platform's worth of a pure-Julia conversion,
+          # and it pays a second full suite plus a tz-database install.
+          if [ "$RUNNER_OS" = Linux ]; then
+            julia --project=julia/InfraStore.jl -e 'using Pkg; Pkg.test()'
+          fi
 
       # Render both reports from the profiles all three suites just wrote.
       # `--ignore-filename-regex` drops the protobuf code infrastore-proto's build

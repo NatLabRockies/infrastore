@@ -33,6 +33,9 @@ cd crates/infrastore-py && maturin develop && pytest ../../python/tests
 cargo build -p infrastore-ffi --release
 export INFRASTORE_LIB=$PWD/target/release/libinfrastore_ffi.dylib  # .so on Linux
 julia --project=julia/InfraStore.jl julia/InfraStore.jl/test/runtests.jl
+# The ZonedDateTime tests need the TimeZones weak dependency, which is only
+# loadable through the test target; the run above skips them with a warning:
+julia --project=julia/InfraStore.jl -e 'using Pkg; Pkg.test()'
 ```
 
 ## The On-Disk Format Is a Contract

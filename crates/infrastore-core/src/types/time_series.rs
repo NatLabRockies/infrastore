@@ -467,33 +467,12 @@ impl Deterministic {
         data: TypedArray,
         name: impl Into<String>,
     ) -> Result<Self, String> {
-        let (resolution, horizon, interval) = (resolution.into(), horizon.into(), interval.into());
-        validate_forecast_periods(resolution, horizon, interval, count)?;
-        let h = compute_h(horizon, resolution)?;
-        // Derive element dims from trailing shape after [H, count].
-        if data.shape.len() < 2 {
-            return Err(format!(
-                "Deterministic: shape {:?} must have at least 2 dims [H, count]",
-                data.shape
-            ));
-        }
-        let elem_dims = &data.shape[2..];
-        let expected_shape: Vec<usize> = std::iter::once(h)
-            .chain(std::iter::once(count))
-            .chain(elem_dims.iter().copied())
-            .collect();
-        if data.shape != expected_shape {
-            return Err(format!(
-                "Deterministic: expected shape {expected_shape:?}, got {:?}",
-                data.shape
-            ));
-        }
         let element_type = ElementType::Scalar(data.dtype);
-        Ok(Self {
+        let out = Self {
             initial_timestamp,
-            resolution,
-            horizon,
-            interval,
+            resolution: resolution.into(),
+            horizon: horizon.into(),
+            interval: interval.into(),
             count,
             data,
             name: name.into(),
@@ -503,7 +482,42 @@ impl Deterministic {
             unit_system: None,
             component_field: None,
             application_data: None,
-        })
+        };
+        out.validate()?;
+        Ok(out)
+    }
+
+    /// Re-check the invariants [`Self::new`] establishes, against the values the
+    /// struct currently holds.
+    ///
+    /// Every field is `pub` and the type derives `Deserialize`, so a struct
+    /// literal, a field assignment, or `serde_json::from_str` all produce a
+    /// `Deterministic` that never met a constructor. The store calls this on the
+    /// write path for exactly that reason: the constructor is not a boundary
+    /// anything can rely on, and a forecast whose periods or shape disagree is
+    /// writable but unreadable.
+    pub fn validate(&self) -> Result<(), String> {
+        validate_forecast_periods(self.resolution, self.horizon, self.interval, self.count)?;
+        let h = compute_h(self.horizon, self.resolution)?;
+        // Derive element dims from trailing shape after [H, count].
+        if self.data.shape.len() < 2 {
+            return Err(format!(
+                "Deterministic: shape {:?} must have at least 2 dims [H, count]",
+                self.data.shape
+            ));
+        }
+        let elem_dims = &self.data.shape[2..];
+        let expected_shape: Vec<usize> = std::iter::once(h)
+            .chain(std::iter::once(self.count))
+            .chain(elem_dims.iter().copied())
+            .collect();
+        if self.data.shape != expected_shape {
+            return Err(format!(
+                "Deterministic: expected shape {expected_shape:?}, got {:?}",
+                self.data.shape
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -612,41 +626,12 @@ impl Probabilistic {
         data: TypedArray,
         name: impl Into<String>,
     ) -> Result<Self, String> {
-        let (resolution, horizon, interval) = (resolution.into(), horizon.into(), interval.into());
-        validate_forecast_periods(resolution, horizon, interval, count)?;
-        if percentiles.is_empty() {
-            return Err("Probabilistic: percentiles must be non-empty".to_string());
-        }
-        if percentiles.windows(2).any(|pair| pair[0] >= pair[1]) {
-            return Err("Probabilistic: percentiles must be strictly increasing".to_string());
-        }
-        let h = compute_h(horizon, resolution)?;
-        let p = percentiles.len();
-        if data.shape.len() < 3 {
-            return Err(format!(
-                "Probabilistic: shape {:?} must have at least 3 dims [P, H, count]",
-                data.shape
-            ));
-        }
-        let elem_dims = &data.shape[3..];
-        let expected_shape: Vec<usize> = std::iter::once(p)
-            .chain(std::iter::once(h))
-            .chain(std::iter::once(count))
-            .chain(elem_dims.iter().copied())
-            .collect();
-        if data.shape != expected_shape {
-            return Err(format!(
-                "Probabilistic: expected shape {expected_shape:?} \
-                 (percentiles={p}, H={h}, count={count}), got {:?}",
-                data.shape
-            ));
-        }
         let element_type = ElementType::Scalar(data.dtype);
-        Ok(Self {
+        let out = Self {
             initial_timestamp,
-            resolution,
-            horizon,
-            interval,
+            resolution: resolution.into(),
+            horizon: horizon.into(),
+            interval: interval.into(),
             count,
             percentiles,
             data,
@@ -657,7 +642,44 @@ impl Probabilistic {
             unit_system: None,
             component_field: None,
             application_data: None,
-        })
+        };
+        out.validate()?;
+        Ok(out)
+    }
+
+    /// Re-check the invariants [`Self::new`] establishes. See
+    /// [`Deterministic::validate`] for why the store calls this on write.
+    pub fn validate(&self) -> Result<(), String> {
+        validate_forecast_periods(self.resolution, self.horizon, self.interval, self.count)?;
+        if self.percentiles.is_empty() {
+            return Err("Probabilistic: percentiles must be non-empty".to_string());
+        }
+        if self.percentiles.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err("Probabilistic: percentiles must be strictly increasing".to_string());
+        }
+        let h = compute_h(self.horizon, self.resolution)?;
+        let p = self.percentiles.len();
+        let count = self.count;
+        if self.data.shape.len() < 3 {
+            return Err(format!(
+                "Probabilistic: shape {:?} must have at least 3 dims [P, H, count]",
+                self.data.shape
+            ));
+        }
+        let elem_dims = &self.data.shape[3..];
+        let expected_shape: Vec<usize> = std::iter::once(p)
+            .chain(std::iter::once(h))
+            .chain(std::iter::once(count))
+            .chain(elem_dims.iter().copied())
+            .collect();
+        if self.data.shape != expected_shape {
+            return Err(format!(
+                "Probabilistic: expected shape {expected_shape:?} \
+                 (percentiles={p}, H={h}, count={count}), got {:?}",
+                self.data.shape
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -763,32 +785,12 @@ impl Scenarios {
         data: TypedArray,
         name: impl Into<String>,
     ) -> Result<Self, String> {
-        let (resolution, horizon, interval) = (resolution.into(), horizon.into(), interval.into());
-        validate_forecast_periods(resolution, horizon, interval, count)?;
-        let h = compute_h(horizon, resolution)?;
-        let elem_dims: Vec<usize> = if data.shape.len() > 3 {
-            data.shape[3..].to_vec()
-        } else {
-            vec![]
-        };
-        let expected_shape: Vec<usize> = std::iter::once(scenario_count)
-            .chain(std::iter::once(h))
-            .chain(std::iter::once(count))
-            .chain(elem_dims)
-            .collect();
-        if data.shape != expected_shape {
-            return Err(format!(
-                "Scenarios: expected shape {expected_shape:?} \
-                 (scenario_count={scenario_count}, H={h}, count={count}), got {:?}",
-                data.shape
-            ));
-        }
         let element_type = ElementType::Scalar(data.dtype);
-        Ok(Self {
+        let out = Self {
             initial_timestamp,
-            resolution,
-            horizon,
-            interval,
+            resolution: resolution.into(),
+            horizon: horizon.into(),
+            interval: interval.into(),
             count,
             scenario_count,
             data,
@@ -799,7 +801,35 @@ impl Scenarios {
             unit_system: None,
             component_field: None,
             application_data: None,
-        })
+        };
+        out.validate()?;
+        Ok(out)
+    }
+
+    /// Re-check the invariants [`Self::new`] establishes. See
+    /// [`Deterministic::validate`] for why the store calls this on write.
+    pub fn validate(&self) -> Result<(), String> {
+        validate_forecast_periods(self.resolution, self.horizon, self.interval, self.count)?;
+        let h = compute_h(self.horizon, self.resolution)?;
+        let (scenario_count, count) = (self.scenario_count, self.count);
+        let elem_dims: Vec<usize> = if self.data.shape.len() > 3 {
+            self.data.shape[3..].to_vec()
+        } else {
+            vec![]
+        };
+        let expected_shape: Vec<usize> = std::iter::once(scenario_count)
+            .chain(std::iter::once(h))
+            .chain(std::iter::once(count))
+            .chain(elem_dims)
+            .collect();
+        if self.data.shape != expected_shape {
+            return Err(format!(
+                "Scenarios: expected shape {expected_shape:?} \
+                 (scenario_count={scenario_count}, H={h}, count={count}), got {:?}",
+                self.data.shape
+            ));
+        }
+        Ok(())
     }
 }
 

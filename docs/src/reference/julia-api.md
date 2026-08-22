@@ -201,6 +201,12 @@ Two conventions hold across every one of them: a `time_series_type` field holds 
 store's canonical `element_type` **string**, which names both the meaning and (through it) the
 dtype. An `owner_category` field is an `OwnerCategory`, never a string.
 
+A requested type is always the bare one — `SingleTimeSeries`, never `SingleTimeSeries{Float64}`. A
+series is addressed by its identity (owner, category, type, name, resolution, interval, features),
+which carries no element type, so parameters on a _request_ would have nothing to select on; passing
+them raises `InvalidParameterError` rather than being quietly ignored. The element type comes back
+on the result instead, in its own `{T,N}` and in a reader group's `dtype`.
+
 ```julia
 struct TimeSeriesMetadata                    # get_metadata / list_time_series
     owner_id          :: Int64
@@ -610,7 +616,8 @@ are partitioned into `(dtype, element_shape)` groups, and each group's values co
 ```julia
 build_static_reader(store; resolution::Union{Nothing,Period}=nothing,
                     time_series_type::Type=SingleTimeSeries, owner_id=nothing,
-                    owner_category=nothing, name=nothing, features=Dict()) -> StaticReader
+                    owner_category=nothing, name=nothing, name_glob=nothing,
+                    features=Dict(), component_field=nothing) -> StaticReader
 
 static_grid(reader)       -> StaticGrid  # .initial_timestamp, .resolution (or nothing), .length
 static_timestamps(reader) -> Vector{DateTime}  # every instant on the timeline, in order
@@ -655,7 +662,8 @@ forecasts must share one window timeline (`initial_timestamp` + `interval` + `co
 ```julia
 build_forecast_reader(store, time_series_type::Type; resolution::Period,
                       owner_id=nothing, owner_category=nothing, name=nothing,
-                      features=Dict()) -> ForecastReader
+                      name_glob=nothing, features=Dict(),
+                      component_field=nothing) -> ForecastReader
 
 forecast_timeline(reader)  -> ForecastTimeline
        # (initial_timestamp::DateTime, resolution::Period, interval::Period, count::Int)
@@ -748,13 +756,13 @@ close!(store) -> Nothing
 
 ```julia
 list_keys(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
-          name=nothing, resolution=nothing, interval=nothing, features=Dict(),
-          component_field=nothing) -> Vector{KeyRow}
+          name=nothing, name_glob=nothing, resolution=nothing, interval=nothing,
+          features=Dict(), component_field=nothing) -> Vector{KeyRow}
 ```
 
 `list_keys` lists the key of every stored series as `KeyRow` structs (identity plus the per-type
 descriptive snapshot: `initial_timestamp`, `resolution`, `length`, `horizon`, `interval`, `count`,
-`features`; fields that do not apply to a key's type are `nothing`). All eight filters are optional
+`features`; fields that do not apply to a key's type are `nothing`). All nine filters are optional
 and independent, and combine as a conjunction; with none set the whole store is listed:
 
 - `owner_id`, `owner_category` — scope to one owner.
@@ -763,6 +771,8 @@ and independent, and combine as a conjunction; with none set the whole store is 
   `DeterministicSingleTimeSeries` rows; each row still reports its own stored type, and passing
   `DeterministicSingleTimeSeries` selects only those.
 - `name` — exact association name.
+- `name_glob` — a SQLite `GLOB` pattern over the name (`*` and `?`, case-sensitive), e.g.
+  `"wind_*"`. ANDed with `name` rather than replacing it: set both and a row must satisfy both.
 - `resolution` — a `Period`.
 - `interval` — a `Period`; forecasts only (static rows carry no interval and never match an interval
   filter).
@@ -777,11 +787,11 @@ key — read it via `get_metadata` / `list_time_series`.
 
 ```julia
 has_any_time_series(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
-                    name=nothing, resolution=nothing, interval=nothing, features=Dict(),
-                    component_field=nothing) -> Bool
+                    name=nothing, name_glob=nothing, resolution=nothing, interval=nothing,
+                    features=Dict(), component_field=nothing) -> Bool
 ```
 
-`has_any_time_series` is the existence probe over the same eight filters: true iff `list_keys` with
+`has_any_time_series` is the existence probe over the same nine filters: true iff `list_keys` with
 that filter would return at least one row, answered off the catalog indexes without hydrating or
 marshaling any rows, so it is safe for hot per-component loops. `features` is a subset match here,
 unlike the exact-key `has_time_series` forms, which compare the whole feature set by content hash —
@@ -789,7 +799,7 @@ and it is the one exception to the index-only guarantee: a non-empty `features` 
 answered from an index and falls back to a full listing internally, so prefer the exact-key forms in
 hot loops when the whole feature set is known.
 
-`list_array_groups` takes the same eight filters and returns the same row fields as `list_keys`, but
+`list_array_groups` takes the same nine filters and returns the same row fields as `list_keys`, but
 each row additionally carries `data_hash` — the 32-byte content hash of the array the row resolves
 to (a `Vector{UInt8}` hashes and compares by content, so it groups directly as a `Dict` key). Rows
 that share a stored array share their `data_hash`: both deduplicated identical arrays and a
@@ -1020,7 +1030,23 @@ end
 
 ## Time and Resolution Conversions
 
-- `DateTime` is converted to/from Unix milliseconds at the boundary.
+- `DateTime` is converted to/from Unix milliseconds at the boundary, and is interpreted as **UTC** —
+  Julia's `DateTime` carries no zone, so the wrapper has to pick a reading, and UTC is the one under
+  which a value written here comes back as itself.
+- A **`TimeZones.ZonedDateTime` is accepted wherever a `DateTime` is** — an initial timestamp, a
+  timestamp vector, a `time_range` bound, a reader's `t` — and is converted to the instant it names.
+  It needs no convention, so prefer it when your data is genuinely zoned. TimeZones is a **weak
+  dependency**: the conversion lives in the `InfraStoreTimeZonesExt` extension, which loads when you
+  `using TimeZones`, so nobody else pays for the tz database. Passing one without loading TimeZones
+  raises an `InvalidParameterError` saying so.
+- **Reads always return a `DateTime`**, in UTC, whichever kind went in. Returning a `ZonedDateTime`
+  would mean inventing a zone the store never recorded — it stores instants, not civil time.
+- A vector of `ZonedDateTime`s is ordered by the **instants** it names, not by its local wall
+  clocks, so the strictly-increasing rule is checked after conversion.
+- Milliseconds are lossless in both directions: the store records every instant to the millisecond
+  and refuses a finer one on write, so this boundary cannot truncate a series written under that
+  rule. See [timestamp precision](../explanation/data-model.md#timestamp-precision). (An artifact
+  written before the rule may hold finer instants; those still truncate here.)
 - `resolution` is passed as a `Period` and converted to an ISO-8601 duration string; reads return
   resolution as a `Period` (`Millisecond` for fixed durations).
 

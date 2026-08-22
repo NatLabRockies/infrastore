@@ -22,7 +22,9 @@ use infrastore_core as core_lib;
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBool, PyBytes, PyDict, PyFloat, PyInt, PyList, PyString};
+use pyo3::types::{
+    PyAny, PyBool, PyBytes, PyDateTime, PyDict, PyFloat, PyInt, PyList, PyString, PyTzInfo,
+};
 
 // ---- Exceptions -----------------------------------------------------------
 
@@ -66,6 +68,79 @@ fn map_err(e: core_lib::TimeSeriesError) -> PyErr {
         // exception rather than failing to compile against a newer core.
         e => TimeSeriesError::new_err(e.to_string()),
     }
+}
+
+/// An instant taken from Python, normalised to UTC.
+///
+/// PyO3's own `DateTime<Utc>` extraction requires the `tzinfo` to *be*
+/// `datetime.timezone.utc`, and its `DateTime<FixedOffset>` extraction asks the
+/// `tzinfo` for `utcoffset(None)`, which every non-fixed zone answers with
+/// `None`. Between them they reject instants that are perfectly well defined:
+/// `ZoneInfo("UTC")` is not `timezone.utc`, and a correct
+/// `ZoneInfo("America/Denver")` timestamp is not a fixed offset. The failure
+/// arrived as a bare `TypeError`/`ValueError` from outside this package's
+/// exception hierarchy, naming pyo3's expectation rather than the store's rule.
+///
+/// The conversion belongs to Python, which is the only party that knows what a
+/// named zone's offset is at a given instant: an aware datetime is converted
+/// with `astimezone(timezone.utc)` and extracted from there. The store's rule is
+/// the one this enforces — an instant must be unambiguous, so a naive datetime
+/// is refused, and everything aware is accepted.
+#[derive(Clone, Copy, Debug)]
+struct PyInstant(DateTime<Utc>);
+
+impl<'py> FromPyObject<'_, 'py> for PyInstant {
+    type Error = PyErr;
+
+    fn extract(obj: pyo3::Borrowed<'_, 'py, PyAny>) -> PyResult<Self> {
+        let dt = obj.cast::<PyDateTime>().map_err(|_| {
+            InvalidParameterError::new_err(format!(
+                "expected a datetime, got {}",
+                obj.get_type()
+                    .name()
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|_| "?".into())
+            ))
+        })?;
+        // `utcoffset()` is None for a naive datetime *and* for an aware one
+        // whose tzinfo declines to place it, which is the same ambiguity.
+        let offset = dt.call_method0("utcoffset")?;
+        if offset.is_none() {
+            return Err(InvalidParameterError::new_err(concat!(
+                "datetime must be timezone-aware; the store records instants, ",
+                "and a naive datetime does not name one ",
+                "(attach datetime.timezone.utc, or any zone)"
+            )));
+        }
+        let utc = PyTzInfo::utc(obj.py())?;
+        // Already `datetime.timezone.utc`: the wall clock is the instant, so
+        // skip the round trip through Python's conversion.
+        //
+        // Identity, not `==`. A `tzinfo` decides its own equality, so an object
+        // whose `__eq__` claims UTC while its `utcoffset` says otherwise would
+        // take this branch and be read at its wall clock -- a silently wrong
+        // instant, in the one place whose whole job is to pin one down. The
+        // singleton cannot lie about its own offset, and it is what
+        // `timezone(timedelta(0))` returns, so this still covers the common
+        // case; every other zone, UTC-equivalent or not, goes through
+        // `astimezone`, which asks `utcoffset` rather than taking its word.
+        let in_utc = if dt.getattr("tzinfo")?.is(utc) {
+            dt.as_any().clone()
+        } else {
+            dt.call_method1("astimezone", (&utc,))?
+        };
+        Ok(PyInstant(in_utc.extract::<DateTime<Utc>>()?))
+    }
+}
+
+/// [`PyInstant`] over a sequence, for the timestamp vectors.
+fn instants_to_utc(v: Vec<PyInstant>) -> Vec<DateTime<Utc>> {
+    v.into_iter().map(|i| i.0).collect()
+}
+
+/// [`PyInstant`] over the optional `(start, end)` pairs.
+fn range_to_utc(r: Option<(PyInstant, PyInstant)>) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    r.map(|(a, b)| (a.0, b.0))
 }
 
 /// Translate the Python-facing compression arguments into a core
@@ -377,7 +452,7 @@ impl PyDeterministic {
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
-        initial_timestamp: DateTime<Utc>,
+        initial_timestamp: PyInstant,
         resolution: Bound<'_, PyAny>,
         horizon: Bound<'_, PyAny>,
         interval: Bound<'_, PyAny>,
@@ -390,7 +465,7 @@ impl PyDeterministic {
         let interval = pyany_to_period(&interval)?;
         let typed = typed_array_from_numpy(data)?;
         let inner = core_lib::Deterministic::new(
-            initial_timestamp,
+            initial_timestamp.0,
             resolution,
             horizon,
             interval,
@@ -479,7 +554,7 @@ impl PyProbabilistic {
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
-        initial_timestamp: DateTime<Utc>,
+        initial_timestamp: PyInstant,
         resolution: Bound<'_, PyAny>,
         horizon: Bound<'_, PyAny>,
         interval: Bound<'_, PyAny>,
@@ -493,7 +568,7 @@ impl PyProbabilistic {
         let interval = pyany_to_period(&interval)?;
         let typed = typed_array_from_numpy(data)?;
         let inner = core_lib::Probabilistic::new(
-            initial_timestamp,
+            initial_timestamp.0,
             resolution,
             horizon,
             interval,
@@ -590,7 +665,7 @@ impl PyScenarios {
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
-        initial_timestamp: DateTime<Utc>,
+        initial_timestamp: PyInstant,
         resolution: Bound<'_, PyAny>,
         horizon: Bound<'_, PyAny>,
         interval: Bound<'_, PyAny>,
@@ -606,7 +681,7 @@ impl PyScenarios {
             InvalidParameterError::new_err("Scenarios: data must have at least one axis")
         })?;
         let inner = core_lib::Scenarios::new(
-            initial_timestamp,
+            initial_timestamp.0,
             resolution,
             horizon,
             interval,
@@ -698,7 +773,7 @@ impl PySingleTimeSeries {
     #[new]
     #[pyo3(signature = (initial_timestamp, resolution, data, name))]
     fn new(
-        initial_timestamp: DateTime<Utc>,
+        initial_timestamp: PyInstant,
         resolution: Bound<'_, PyAny>,
         data: &Bound<'_, PyAny>,
         name: String,
@@ -706,7 +781,7 @@ impl PySingleTimeSeries {
         let resolution = pyany_to_period(&resolution)?;
         let typed = typed_array_from_numpy(data)?;
         Ok(Self {
-            inner: core_lib::SingleTimeSeries::new(initial_timestamp, resolution, typed, name),
+            inner: core_lib::SingleTimeSeries::new(initial_timestamp.0, resolution, typed, name),
         })
     }
 
@@ -774,14 +849,11 @@ impl PyNonSequentialTimeSeries {
     /// `name` is required.
     #[new]
     #[pyo3(signature = (timestamps, data, name))]
-    fn new(
-        timestamps: Vec<DateTime<Utc>>,
-        data: &Bound<'_, PyAny>,
-        name: String,
-    ) -> PyResult<Self> {
+    fn new(timestamps: Vec<PyInstant>, data: &Bound<'_, PyAny>, name: String) -> PyResult<Self> {
         let typed = typed_array_from_numpy(data)?;
-        let inner = core_lib::NonSequentialTimeSeries::new(timestamps, typed, name)
-            .map_err(InvalidParameterError::new_err)?;
+        let inner =
+            core_lib::NonSequentialTimeSeries::new(instants_to_utc(timestamps), typed, name)
+                .map_err(InvalidParameterError::new_err)?;
         Ok(Self { inner })
     }
 
@@ -1345,13 +1417,16 @@ impl PyTransaction {
     /// Commit on a clean exit, roll back otherwise. Never suppresses the
     /// exception that caused the unwind: if the rollback itself fails, that
     /// failure is reported as a warning so the original error still propagates.
-    #[pyo3(signature = (exc_type=None, _exc_value=None, _traceback=None))]
+    // `exc_value` and `traceback` are unused; see the note on `Store.__exit__`
+    // for why they are still spelled without a leading underscore.
+    #[pyo3(signature = (exc_type=None, exc_value=None, traceback=None))]
+    #[allow(unused_variables)]
     fn __exit__(
         &self,
         py: Python<'_>,
         exc_type: Option<Py<PyAny>>,
-        _exc_value: Option<Py<PyAny>>,
-        _traceback: Option<Py<PyAny>>,
+        exc_value: Option<Py<PyAny>>,
+        traceback: Option<Py<PyAny>>,
     ) -> PyResult<bool> {
         let mut store = self.store.borrow_mut(py);
         if exc_type.is_none() {
@@ -1551,12 +1626,17 @@ impl PyStore {
     }
 
     /// Context-manager exit: closes the store. Does not suppress exceptions.
-    #[pyo3(signature = (_exc_type=None, _exc_value=None, _traceback=None))]
+    // The three arguments are unused, but they are named without a leading
+    // underscore on purpose: PyO3 takes the Python keyword name from the Rust
+    // one verbatim, so `_exc_type` made `store.__exit__(exc_type=None)` -- the
+    // spelling the type stub and the protocol both use -- a TypeError.
+    #[pyo3(signature = (exc_type=None, exc_value=None, traceback=None))]
+    #[allow(unused_variables)]
     fn __exit__(
         &mut self,
-        _exc_type: Option<Py<PyAny>>,
-        _exc_value: Option<Py<PyAny>>,
-        _traceback: Option<Py<PyAny>>,
+        exc_type: Option<Py<PyAny>>,
+        exc_value: Option<Py<PyAny>>,
+        traceback: Option<Py<PyAny>>,
     ) -> bool {
         self.close();
         false
@@ -1648,7 +1728,10 @@ impl PyStore {
     /// parameters: `owner_id`, `owner_type`, `owner_category`,
     /// `time_series`, and optionally `features`, `units`, `element_type`,
     /// `application_data`, `quantity_kind`, `unit_system`, and
-    /// `component_field`.
+    /// `component_field`. Any other key raises, as the misspelled keyword it
+    /// almost always is: `add_time_series` rejects one for free, and reading
+    /// only the keys it knows made the bulk path silently drop `unit_sytem` and
+    /// every other typo, along with whatever it was carrying.
     ///
     /// All-or-nothing: if any item fails, the entire batch is rolled back.
     /// Returns the new keys in input order.
@@ -1657,7 +1740,8 @@ impl PyStore {
         items: Vec<Bound<'_, PyDict>>,
     ) -> PyResult<Vec<PyTimeSeriesKey>> {
         let mut requests = Vec::with_capacity(items.len());
-        for item in &items {
+        for (index, item) in items.iter().enumerate() {
+            reject_unknown_item_keys(item, index)?;
             let owner_id: i64 = required_item(item, "owner_id")?;
             let owner_type: String = required_item(item, "owner_type")?;
             let owner_category: PyOwnerCategory = required_item(item, "owner_category")?;
@@ -1816,11 +1900,11 @@ impl PyStore {
         &self,
         py: Python<'_>,
         key: &PyTimeSeriesKey,
-        time_range: Option<(DateTime<Utc>, DateTime<Utc>)>,
+        time_range: Option<(PyInstant, PyInstant)>,
     ) -> PyResult<Py<PyAny>> {
         let data = self
             .store()?
-            .get_time_series(&key.inner, time_range)
+            .get_time_series(&key.inner, range_to_utc(time_range))
             .map_err(map_err)?;
         time_series_data_to_py(py, data)
     }
@@ -1836,12 +1920,12 @@ impl PyStore {
         &self,
         py: Python<'_>,
         keys: Vec<PyTimeSeriesKey>,
-        time_range: Option<(DateTime<Utc>, DateTime<Utc>)>,
+        time_range: Option<(PyInstant, PyInstant)>,
     ) -> PyResult<Vec<Py<PyAny>>> {
         let identities: Vec<&core_lib::KeyIdentity> = keys.iter().map(|k| &k.inner).collect();
         let datas = self
             .store()?
-            .bulk_read_range(&identities, time_range)
+            .bulk_read_range(&identities, range_to_utc(time_range))
             .map_err(map_err)?;
         datas
             .into_iter()
@@ -2269,9 +2353,9 @@ impl PyStore {
 
     /// Fill `reader`'s buffers with every column's value at `when` (off-grid
     /// raises). Afterwards read a group with `reader.group_values(i)`.
-    fn static_read(&self, reader: &mut PyStaticReader, when: DateTime<Utc>) -> PyResult<()> {
+    fn static_read(&self, reader: &mut PyStaticReader, when: PyInstant) -> PyResult<()> {
         self.store()?
-            .static_read(&mut reader.inner, when)
+            .static_read(&mut reader.inner, when.0)
             .map_err(map_err)
     }
 
@@ -2314,9 +2398,9 @@ impl PyStore {
 
     /// Fill `reader`'s buffers with every entry's forecast window at `when`
     /// (off-grid raises). Afterwards read an entry with `reader.entry_values(i)`.
-    fn forecast_read(&self, reader: &mut PyForecastReader, when: DateTime<Utc>) -> PyResult<()> {
+    fn forecast_read(&self, reader: &mut PyForecastReader, when: PyInstant) -> PyResult<()> {
         self.store()?
-            .forecast_read(&mut reader.inner, when)
+            .forecast_read(&mut reader.inner, when.0)
             .map_err(map_err)
     }
 
@@ -3218,17 +3302,44 @@ fn pyany_to_period(v: &Bound<'_, PyAny>) -> PyResult<core_lib::Period> {
 /// transformed form, which is how a caller inspects what it has.
 ///
 /// `param` names the argument in error messages.
+///
+/// The enum member and its name are both accepted. The name is what the
+/// docstrings and the type stub have always shown
+/// (`time_series_type="NonSequentialTimeSeries"`), and what a value read back
+/// out of a metadata dict already is, so refusing it made the documented call
+/// fail and forced a round trip through the enum for no gain.
 fn pyany_to_requested_type(
     v: &Bound<'_, PyAny>,
     param: &str,
 ) -> PyResult<core_lib::TimeSeriesType> {
-    match v.extract::<PyTimeSeriesType>() {
-        Ok(t) => Ok(t.into()),
-        Err(_) => Err(pyo3::exceptions::PyTypeError::new_err(format!(
-            "{param} must be a TimeSeriesType"
-        ))),
+    if let Ok(t) = v.extract::<PyTimeSeriesType>() {
+        return Ok(t.into());
     }
+    if let Ok(name) = v.extract::<String>() {
+        return core_lib::TimeSeriesType::parse(&name).ok_or_else(|| {
+            InvalidParameterError::new_err(format!(
+                "{param} '{name}' is not a time series type; expected one of {}",
+                TIME_SERIES_TYPE_NAMES.join(", ")
+            ))
+        });
+    }
+    Err(pyo3::exceptions::PyTypeError::new_err(format!(
+        "{param} must be a TimeSeriesType or one of its names ({})",
+        TIME_SERIES_TYPE_NAMES.join(", ")
+    )))
 }
+
+/// Every `TimeSeriesType` spelling, for the messages above. Held here rather
+/// than derived, so a new variant shows up as a failing test rather than a
+/// silently short list.
+const TIME_SERIES_TYPE_NAMES: [&str; 6] = [
+    "SingleTimeSeries",
+    "NonSequentialTimeSeries",
+    "Deterministic",
+    "DeterministicSingleTimeSeries",
+    "Probabilistic",
+    "Scenarios",
+];
 
 /// [`pyany_to_requested_type`] over an optional argument, for the filter kwargs
 /// that default to "any type".
@@ -3243,6 +3354,48 @@ fn pyany_to_requested_type_opt(
 }
 
 /// Decode a 64-character lowercase-or-uppercase hex string into a 32-byte hash.
+/// Every key `add_time_series_bulk` reads out of one item dict.
+const BULK_ITEM_KEYS: [&str; 11] = [
+    "owner_id",
+    "owner_type",
+    "owner_category",
+    "time_series",
+    "features",
+    "units",
+    "element_type",
+    "application_data",
+    "quantity_kind",
+    "unit_system",
+    "component_field",
+];
+
+/// Refuse an item carrying a key the bulk add does not read.
+///
+/// The single-series path gets this from PyO3, which rejects an unexpected
+/// keyword argument. The bulk path takes a dict and reads the keys it knows, so
+/// a misspelled one -- `unit_sytem`, `owner_typ` -- was simply not applied, and
+/// the series landed missing whatever that key carried, with no error and no
+/// way to notice short of reading every row back.
+fn reject_unknown_item_keys(item: &Bound<'_, PyDict>, index: usize) -> PyResult<()> {
+    for key in item.keys() {
+        let name: String = match key.extract() {
+            Ok(n) => n,
+            Err(_) => {
+                return Err(InvalidParameterError::new_err(format!(
+                    "bulk add item {index} has a non-string key {key}"
+                )));
+            }
+        };
+        if !BULK_ITEM_KEYS.contains(&name.as_str()) {
+            return Err(InvalidParameterError::new_err(format!(
+                "bulk add item {index} has unknown key '{name}'; expected one of {}",
+                BULK_ITEM_KEYS.join(", ")
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn hash_from_hex(s: &str) -> PyResult<[u8; 32]> {
     // Over bytes, not `&str` slices: the length guard counts bytes, so a
     // 64-*byte* string of multi-byte characters passed it and then sliced

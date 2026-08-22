@@ -199,6 +199,19 @@ struct Cli {
     #[arg(short = 'y', long, global = true)]
     yes: bool,
 
+    /// Read timestamps that carry no time zone as being in this one: UTC, or a
+    /// fixed offset like -07:00.
+    ///
+    /// Without it a zoneless timestamp is an error, because it names no
+    /// instant — which leaves the most ordinary CSV in this domain
+    /// (`2024-01-01 00:00:00,...`) unloadable without rewriting the file. A
+    /// timestamp that carries its own offset is never overridden. Named zones
+    /// (`America/Denver`) are deliberately not accepted; see the flag's error.
+    // `allow_hyphen_values` so a western offset can be written the obvious way,
+    // `--assume-timezone -07:00`, rather than only as `--assume-timezone=-07:00`.
+    #[arg(long, value_name = "ZONE", global = true, allow_hyphen_values = true)]
+    assume_timezone: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -784,6 +797,12 @@ fn real_main() {
     };
     init_tracing(cli.log_level.as_deref());
     confirm::set_assume_yes(cli.yes);
+    // Before anything parses a timestamp, so an unusable zone is reported now
+    // rather than part-way through a CSV.
+    if let Err(e) = parse::set_assumed_timezone(cli.assume_timezone.as_deref()) {
+        output::print_error(cli.format, &e);
+        std::process::exit(1);
+    }
     if let Err(e) = run(&cli) {
         output::print_error(cli.format, &e);
         std::process::exit(1);

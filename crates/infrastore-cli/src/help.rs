@@ -36,11 +36,15 @@ Examples:
   infrastore --store demo.h5 add --csv load.csv --owner-id 42 --owner-type Generator \\
       --name load --type SingleTimeSeries --element-type f64 \\
       --resolution PT1H --initial-timestamp 2024-01-01T00:00:00Z
+  infrastore --store demo.h5 --assume-timezone UTC add --descriptor load.json
 
 A descriptor may hold one object or an array of them (one transaction).
 `infrastore template <TYPE>` prints a starting point; the inline flags above are
 the same fields for a one-off. Set \"layout\": \"wide\" plus an owner_map to load
-one `timestamp,gen_001,gen_002,...` file as one series per column.";
+one `timestamp,gen_001,gen_002,...` file as one series per column.
+
+A timestamp with no offset (`2024-01-01 00:00:00`) names no instant, so it needs
+--assume-timezone UTC, or the fixed offset the data was written in (-07:00).";
 
 pub const INIT: &str = "\
 Examples:

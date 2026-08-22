@@ -1747,6 +1747,52 @@ end
     @test sum(length(g.keys) for g in reader.groups) == 2
 end
 
+@testset "name_glob filter across the catalog and reader surface" begin
+    # The core has had `ListFilter::name_glob` since the discovery surface
+    # landed, and Python and the CLI both expose it; the C ABI did not, so no
+    # Julia caller could reach it and every name-pattern query had to list the
+    # store and filter in Julia.
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+    for (owner, name) in
+        [(1, "wind_speed"), (1, "wind_dir"), (2, "solar_ghi"), (3, "Wind_speed")]
+        add_time_series!(
+            store, owner, "Generator", Component,
+            SingleTimeSeries(t0, res, collect(1.0:4.0), name),
+        )
+    end
+
+    @test sort(list_names(store; name_glob="wind_*")) == ["wind_dir", "wind_speed"]
+    @test length(list_keys(store; name_glob="wind_*")) == 2
+    # The pattern matches the whole name, so a leading `*` reaches both
+    # spellings of the speed series.
+    @test length(list_time_series(store; name_glob="*_speed")) == 2
+    @test length(list_array_groups(store; name_glob="wind_*")) == 2
+    @test list_owner_types(store; name_glob="solar_*") == ["Generator"]
+    @test has_any_time_series(store; name_glob="solar_*")
+    @test !has_any_time_series(store; name_glob="hydro_*")
+
+    # Case-sensitive, as SQLite GLOB is -- the capitalized row is a different
+    # series, not a near miss.
+    @test length(list_keys(store; name_glob="Wind*")) == 1
+
+    # Composes with the other filters rather than replacing them.
+    @test length(list_keys(store; owner_id=1, name_glob="wind_*")) == 2
+    @test isempty(list_keys(store; owner_id=2, name_glob="wind_*"))
+    @test length(list_keys(store; name="wind_dir", name_glob="wind_*")) == 1
+    @test isempty(list_keys(store; name="solar_ghi", name_glob="wind_*"))
+
+    # The reader builders take it too, so a columnar sweep can be scoped by
+    # pattern without listing first.
+    reader = build_static_reader(store; resolution=res, name_glob="wind_*")
+    @test sum(length(g.keys) for g in reader.groups) == 2
+
+    # And it drives a removal.
+    @test remove_by_filter!(store; name_glob="wind_*") == 2
+    @test sort(list_names(store)) == ["Wind_speed", "solar_ghi"]
+end
+
 @testset "Phase 2 additions: units, time_range, discovery, rename, bulk dispatch" begin
     store = Store(in_memory=true)
     t0 = DateTime(2024, 1, 1)
@@ -3473,6 +3519,96 @@ end
     @test_throws InfraStore.InvalidParameterError list_keys(store; time_series_type=Store)
 end
 
+@testset "a parameterized request type is rejected, not ignored" begin
+    # A request names a stored type, never an element type: the store addresses a
+    # series by identity, which carries no dtype, so `SingleTimeSeries{Float64}`
+    # has nothing to select on. Every entry point that takes a type must say so
+    # the same way — this used to be three different failures, one of them a
+    # `MethodError` raised only after the data had already been read.
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+    sts = add_time_series!(
+        store, 1, "Generator", Component,
+        SingleTimeSeries(t0, res, Float64[1, 2, 3, 4], "a"),
+    )
+    nsts = add_time_series!(
+        store, 1, "Generator", Component,
+        NonSequentialTimeSeries([t0, t0 + Hour(2)], Float64[9, 8], "b"),
+    )
+    det = add_time_series!(
+        store, 1, "Generator", Component,
+        Deterministic(t0, Hour(1), Hour(4), Hour(1), 2, rand(4, 2), "d"),
+    )
+
+    # The readers, keyed and attribute-addressed, static and forecast.
+    @test_throws InfraStore.InvalidParameterError get_time_series(
+        SingleTimeSeries{Float64}, store, sts
+    )
+    @test_throws InfraStore.InvalidParameterError get_time_series(
+        SingleTimeSeries{Float64, 1}, store, 1, Component, "a"; resolution=res
+    )
+    @test_throws InfraStore.InvalidParameterError get_time_series(
+        NonSequentialTimeSeries{Float64, 1}, store, nsts
+    )
+    @test_throws InfraStore.InvalidParameterError get_time_series(
+        NonSequentialTimeSeries{Float64}, store, 1, Component, "b"
+    )
+    @test_throws InfraStore.InvalidParameterError get_time_series(
+        Deterministic{Float64, 2}, store, det
+    )
+    @test_throws InfraStore.InvalidParameterError get_time_series(
+        Deterministic{Float64, 2}, store, 1, Component, "d"; resolution=res
+    )
+    # The rest of the type-taking surface.
+    @test_throws InfraStore.InvalidParameterError has_time_series(
+        SingleTimeSeries{Float64}, store, 1, Component, "a"; resolution=res
+    )
+    @test_throws InfraStore.InvalidParameterError get_metadata(
+        Deterministic{Float64, 2}, store, 1, Component, "d"; resolution=res
+    )
+    @test_throws InfraStore.InvalidParameterError remove_time_series!(
+        Scenarios{Float64, 3}, store, 1, Component, "d"; resolution=res
+    )
+    @test_throws InfraStore.InvalidParameterError get_time_series_key(
+        SingleTimeSeries{Float64}, store, 1, Component, "a"; resolution=res
+    )
+    @test_throws InfraStore.InvalidParameterError list_keys(
+        store; time_series_type=SingleTimeSeries{Float64}
+    )
+
+    # The message names the type to pass instead, and is distinct from the one a
+    # type that is no kind of time series gets.
+    err = try
+        get_time_series(SingleTimeSeries{Float64}, store, sts)
+    catch e
+        e
+    end
+    @test occursin("pass SingleTimeSeries", err.msg)
+    @test occursin("not part of a time series' identity", err.msg)
+    @test_throws InfraStore.InvalidParameterError list_keys(
+        store; time_series_type=Vector{Float64}
+    )
+
+    # The forecast key reader validates *before* reading: removing the series
+    # first would make a read raise NotFoundError, so the parameter error proves
+    # nothing was fetched.
+    remove_time_series!(store, det)
+    @test_throws InfraStore.InvalidParameterError get_time_series(
+        Deterministic{Float64, 2}, store, det
+    )
+    @test_throws InfraStore.NotFoundError get_time_series(Deterministic, store, det)
+
+    # Unparameterized requests are untouched, and still carry the stored dtype
+    # and rank out in the result's own parameters.
+    @test typeof(get_time_series(SingleTimeSeries, store, sts)) ==
+        SingleTimeSeries{Float64, 1}
+    @test typeof(get_time_series(NonSequentialTimeSeries, store, nsts)) ==
+        NonSequentialTimeSeries{Float64, 1}
+    @test has_time_series(SingleTimeSeries, store, 1, Component, "a"; resolution=res)
+    close!(store)
+end
+
 @testset "get_time_series_key addresses any type and validates" begin
     # The attribute-addressed counterpart of get_time_series_keys: it works for
     # static types too, not just forecasts, and the handle it returns always
@@ -4083,4 +4219,124 @@ end
         close!(s2)
         @test isfile(p2)
     end
+end
+
+@testset "a key-addressed forecast read checks the type it was asked for" begin
+    # The FFI reports the type it matched, and this path used to decode as the
+    # requested `T` regardless. Asking for a `Deterministic` with a
+    # `Probabilistic` key returned a `Deterministic{Float64,3}` whose `count`
+    # disagreed with its own second axis — the percentile axis silently absorbed
+    # as a leading dimension, the percentiles themselves dropped, no error. The
+    # attribute-addressed form and `bulk_read` both dispatched correctly, which
+    # is what made the asymmetry visible.
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    p = Probabilistic(
+        t0, Hour(1), Hour(2), Hour(1), 4, [0.1, 0.5, 0.9],
+        reshape(collect(1.0:24.0), (3, 2, 4)), "load",
+    )
+    kp = add_time_series!(store, 1, "Generator", Component, p)
+
+    # The right type reads, and keeps what makes it that type.
+    got = get_time_series(Probabilistic, store, kp)
+    @test got isa Probabilistic
+    @test size(got.data) == (3, 2, 4)
+    @test got.percentiles == [0.1, 0.5, 0.9]
+
+    # The wrong ones are refused, naming what the key actually holds.
+    for T in (Deterministic, Scenarios)
+        err = try
+            get_time_series(T, store, kp)
+            nothing
+        catch e
+            e
+        end
+        @test err isa InfraStore.InvalidParameterError
+        @test occursin("Probabilistic", sprint(showerror, err))
+    end
+
+    # A Deterministic key still reads as one...
+    d = Deterministic(
+        t0, Hour(1), Hour(2), Hour(1), 3, reshape(collect(1.0:6.0), (2, 3)), "det"
+    )
+    kd = add_time_series!(store, 2, "Generator", Component, d)
+    @test get_time_series(Deterministic, store, kd) isa Deterministic
+    @test_throws InfraStore.InvalidParameterError get_time_series(Probabilistic, store, kd)
+
+    # ...and the two deterministic forms stay interchangeable, because a
+    # DeterministicSingleTimeSeries is a view that always reads back dense.
+    add_time_series!(
+        store, 3, "Generator", Component,
+        SingleTimeSeries(t0, Hour(1), collect(1.0:8.0), "load"),
+    )
+    transform_single_time_series!(store, Hour(2), Hour(1))
+    kdst = only(
+        filter(
+            k -> key_info(k).time_series_type == DeterministicSingleTimeSeries,
+            get_time_series_keys(store, 3, Component),
+        ),
+    )
+    @test get_time_series(Deterministic, store, kdst) isa Deterministic
+    @test get_time_series(DeterministicSingleTimeSeries, store, kdst) isa Deterministic
+    @test_throws InfraStore.InvalidParameterError get_time_series(Scenarios, store, kdst)
+end
+
+# ---------------------------------------------------------------------------
+# ZonedDateTime input (the InfraStoreTimeZonesExt weak-dependency extension)
+# ---------------------------------------------------------------------------
+
+@testset "a bare DateTime is read as UTC, and says so when it cannot be" begin
+    # The convention this package has always used, now stated rather than
+    # implied: a zoneless `DateTime` is the UTC wall clock.
+    store = Store(in_memory=true)
+    initial = DateTime(2024, 1, 1, 12)
+    key = add_time_series!(
+        store, 1, "Generator", Component,
+        SingleTimeSeries(initial, Hour(1), collect(1.0:3.0), "load"),
+    )
+    @test get_time_series(store, key).initial_timestamp == initial
+
+    # Anything that is neither a DateTime nor a ZonedDateTime is an
+    # InvalidParameterError naming the fix, not a bare MethodError.
+    err = try
+        SingleTimeSeries("2024-01-01", Hour(1), collect(1.0:3.0), "load")
+        nothing
+    catch e
+        e
+    end
+    @test err isa InfraStore.InvalidParameterError
+    @test occursin("TimeZones", sprint(showerror, err))
+
+    # A `Date` still means midnight UTC, as it did when the constructors relied
+    # on `convert(DateTime, ::Date)`.
+    date_key = add_time_series!(
+        store, 2, "Generator", Component,
+        SingleTimeSeries(Date(2024, 1, 1), Hour(1), collect(1.0:3.0), "load"),
+    )
+    @test get_time_series(store, date_key).initial_timestamp == DateTime(2024, 1, 1)
+end
+
+# The rest of the timestamp tests need the TimeZones weak dependency, and live in
+# their own file because `tz"..."` cannot even be *lowered* without it — an
+# `if available ... end` block around them would fail to macro-expand rather than
+# skip. `include` is an ordinary runtime call, so it is only reached when the
+# package loaded.
+#
+# `Pkg.test()` always provides TimeZones (see `[targets]` in Project.toml), which
+# is how CI runs this suite. A bare `julia --project=julia/InfraStore.jl
+# test/runtests.jl` does not, since a weak dependency is not loadable from the
+# package's own environment; there the extension tests are skipped out loud
+# rather than failing a run that is otherwise valid.
+if (
+    try
+        @eval using TimeZones
+        true
+    catch
+        false
+    end
+)
+    include("timezones_tests.jl")
+else
+    @warn "TimeZones is not loadable here, so the ZonedDateTime tests were SKIPPED. " *
+        "Run them with: julia --project=julia/InfraStore.jl -e 'using Pkg; Pkg.test()'"
 end

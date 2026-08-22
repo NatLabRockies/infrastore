@@ -684,16 +684,39 @@ def test_remove_by_filter_spans_both_deterministic_forms():
     assert len(store.list_time_series(time_series_type=TimeSeriesType.SingleTimeSeries)) == 1
 
 
+def test_every_time_series_type_name_is_accepted():
+    """Every member of the enum is reachable by its name.
+
+    The binding holds the accepted names in a list; this is what makes a new
+    variant show up as a failing test rather than a name the filters quietly
+    refuse.
+    """
+    store = _both_forecast_types()
+    for name in (n for n in dir(TimeSeriesType) if not n.startswith("_")):
+        member = getattr(TimeSeriesType, name)
+        assert store.list_time_series(time_series_type=name) == (
+            store.list_time_series(time_series_type=member)
+        ), name
+
+
 def test_an_unusable_requested_type_is_rejected():
     store = _both_forecast_types()
-    # Only a `TimeSeriesType` is accepted: there is no string spelling, and in
-    # particular no family sentinel to reach for.
-    with pytest.raises(TypeError):
-        store.list_time_series(time_series_type="Deterministic")
-    with pytest.raises(TypeError):
+    # A `TimeSeriesType` or one of its own names, and nothing else. The name is
+    # what the docstrings and the type stub have always shown, and it is what a
+    # metadata row reports, so both spellings select the same rows.
+    assert store.list_time_series(time_series_type="Deterministic") == (
+        store.list_time_series(time_series_type=TimeSeriesType.Deterministic)
+    )
+    # A string that is not a type name says so, inside the exception hierarchy,
+    # and names what would have worked. There is in particular no family
+    # sentinel to reach for.
+    with pytest.raises(InvalidParameterError, match="abstract_deterministic"):
         store.resolve_forecast_key(
             1, OWNER_CAT, "det", "abstract_deterministic", resolution=RES_1H
         )
+    with pytest.raises(InvalidParameterError, match="Deterministic"):
+        store.list_time_series(time_series_type="deterministic")  # case-sensitive
+    # Neither a type nor a name.
     with pytest.raises(TypeError):
         store.has_any_time_series(time_series_type=5)
 
@@ -921,24 +944,31 @@ def test_non_sequential_rejects_bad_timestamps():
 # ---------------------------------------------------------------------------
 
 
-def test_microsecond_datetimes_round_trip():
-    """Python's ``datetime`` is microsecond-precision and the core stores an
-    RFC3339 string, so a microsecond initial timestamp survives exactly."""
+def test_millisecond_datetimes_round_trip():
+    """A whole-millisecond ``datetime`` survives exactly.
+
+    Python's ``datetime`` is microsecond-precision and the core stores an
+    RFC3339 string, so a finer instant *could* be carried here — but the C ABI
+    and Julia exchange instants as i64 unix milliseconds, where it could not.
+    The store therefore records instants to the millisecond, as it does periods,
+    and refuses anything finer on write rather than truncating it in one binding
+    and not another. See ``test_sub_millisecond_datetimes_are_refused``.
+    """
     store = Store.create(in_memory=True)
-    precise = datetime(2024, 1, 1, 0, 0, 0, 123456, tzinfo=timezone.utc)
+    precise = datetime(2024, 1, 1, 0, 0, 0, 123000, tzinfo=timezone.utc)
     key = _add(store, 1, _sts("load", np.arange(4, dtype=np.float64), initial=precise))
 
     got = store.get_time_series(key)
     assert got.initial_timestamp == precise
-    assert got.initial_timestamp.microsecond == 123456
+    assert got.initial_timestamp.microsecond == 123000
     # `get_metadata` returns the timestamp as an RFC3339 string, not a datetime
-    # (FINDING F8), but the microseconds are still there.
-    assert store.get_metadata(key)["initial_timestamp"] == "2024-01-01T00:00:00.123456+00:00"
+    # (FINDING F8), but the milliseconds are still there.
+    assert store.get_metadata(key)["initial_timestamp"] == "2024-01-01T00:00:00.123+00:00"
 
 
-def test_microsecond_datetimes_round_trip_through_disk(tmp_path):
-    path = tmp_path / "micro.h5"
-    precise = datetime(2024, 1, 1, 0, 0, 0, 999999, tzinfo=timezone.utc)
+def test_millisecond_datetimes_round_trip_through_disk(tmp_path):
+    path = tmp_path / "milli.h5"
+    precise = datetime(2024, 1, 1, 0, 0, 0, 999000, tzinfo=timezone.utc)
     store = Store.create(path=str(path), in_memory=False)
     key = _add(store, 1, _sts("load", np.arange(4, dtype=np.float64), initial=precise))
     store.flush()
@@ -946,6 +976,24 @@ def test_microsecond_datetimes_round_trip_through_disk(tmp_path):
 
     reopened = Store.open(str(path), read_only=True)
     assert reopened.get_time_series(key).initial_timestamp == precise
+
+
+def test_sub_millisecond_datetimes_are_refused():
+    """The instant half of the millisecond rule that periods already had.
+
+    A `datetime` carrying microseconds that are not a whole millisecond names an
+    instant the store cannot hand to every consumer unchanged, so the write is
+    refused with an actionable error rather than silently moved.
+    """
+    store = Store.create(in_memory=True)
+    for micro in (1, 999, 1500, 123456):
+        precise = datetime(2024, 1, 1, 0, 0, 0, micro, tzinfo=timezone.utc)
+        with pytest.raises(InvalidParameterError, match="finer than a millisecond"):
+            _add(
+                store,
+                1,
+                _sts("load", np.arange(4, dtype=np.float64), initial=precise),
+            )
 
 
 def test_a_microsecond_resolution_is_refused_rather_than_truncated():
@@ -1012,8 +1060,13 @@ def test_sub_second_resolutions_are_exact_down_to_one_millisecond():
 
 def test_a_naive_datetime_is_rejected():
     """A timestamp with no tzinfo would be ambiguous, so it is refused at the
-    boundary rather than being assumed to be UTC."""
-    with pytest.raises(TypeError, match="tzinfo"):
+    boundary rather than being assumed to be UTC.
+
+    The refusal is an `InvalidParameterError` -- a bad argument, reported like
+    every other one. It used to be a bare `TypeError` from the conversion layer,
+    which no `except TimeSeriesError` could catch.
+    """
+    with pytest.raises(InvalidParameterError, match="timezone-aware"):
         SingleTimeSeries(
             datetime(2024, 1, 1), timedelta(hours=1), np.arange(4, dtype=np.float64), "naive"
         )
@@ -1040,13 +1093,13 @@ def test_pre_1970_and_far_future_timestamps_round_trip(tmp_path):
         assert reopened.get_time_series(key).initial_timestamp == cases[name], name
 
 
-def test_non_sequential_timestamps_keep_microsecond_spacing():
+def test_non_sequential_timestamps_keep_millisecond_spacing():
     store = Store.create(in_memory=True)
     timestamps = [
         T0,
-        T0 + timedelta(microseconds=1),
-        T0 + timedelta(microseconds=2),
         T0 + timedelta(milliseconds=1),
+        T0 + timedelta(milliseconds=2),
+        T0 + timedelta(milliseconds=500),
     ]
     key = store.add_time_series(
         1,
@@ -1058,9 +1111,34 @@ def test_non_sequential_timestamps_keep_microsecond_spacing():
     )
     got = store.get_time_series(key)
     assert got.timestamps == timestamps, (
-        "microsecond spacing must survive; a millisecond-quantized encoding would "
+        "millisecond spacing must survive; a second-quantized encoding would "
         "collapse the first three"
     )
+
+
+def test_sub_millisecond_non_sequential_timestamps_are_refused():
+    """Every entry is checked, not just the first.
+
+    Two timestamps less than a millisecond apart are distinct here and identical
+    to any consumer reading them through the C ABI's millisecond boundary, where
+    the vector then stops being strictly increasing. The write is refused, and
+    the error names the offending index.
+    """
+    store = Store.create(in_memory=True)
+    timestamps = [
+        T0,
+        T0 + timedelta(hours=1, microseconds=1),
+        T0 + timedelta(hours=2),
+    ]
+    with pytest.raises(InvalidParameterError, match="timestamp 1"):
+        store.add_time_series(
+            1,
+            OWNER_TYPE,
+            OWNER_CAT,
+            NonSequentialTimeSeries(
+                timestamps, np.arange(3, dtype=np.float64), "precise"
+            ),
+        )
 
 
 def test_a_century_spanning_non_sequential_series_round_trips(tmp_path):

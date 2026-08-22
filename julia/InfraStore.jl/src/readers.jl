@@ -120,7 +120,7 @@ end
 """
     build_static_reader(store; resolution=nothing, time_series_type=SingleTimeSeries,
                         owner_id=nothing, owner_category=nothing, name=nothing,
-                        features=Dict(), component_field=nothing)
+                        name_glob=nothing, features=Dict(), component_field=nothing)
 
 Build a [`StaticReader`] over the static series matching the filter.
 
@@ -130,6 +130,9 @@ resolution per reader — and the matched series must share one grid
 pass no `resolution`: an irregular series has none, and the matched series must
 instead share one timestamp vector (read it with [`static_timestamps`]), which is
 also what pools their arrays on disk.
+
+The remaining keywords are [`list_keys`](@ref)'s filters, `name_glob` (a
+case-sensitive SQLite `GLOB` pattern over the name) included.
 """
 function build_static_reader(
     store::Store;
@@ -138,6 +141,7 @@ function build_static_reader(
     owner_id::Union{Nothing, Integer}=nothing,
     owner_category::Union{Nothing, OwnerCategory}=nothing,
     name::Union{Nothing, AbstractString}=nothing,
+    name_glob::Union{Nothing, AbstractString}=nothing,
     features::AbstractDict=Dict{String, Any}(),
     component_field::Union{Nothing, AbstractString}=nothing,
 )
@@ -152,6 +156,7 @@ function build_static_reader(
     has_category = owner_category !== nothing
     category_arg = has_category ? _category_int(owner_category) : Int32(0)
     name_arg = name === nothing ? C_NULL : String(name)
+    name_glob_arg = name_glob === nothing ? C_NULL : String(name_glob)
     resolution_iso = resolution === nothing ? C_NULL : _period_to_iso(resolution)
     features_arg = isempty(features) ? C_NULL : JSON.json(features)
     component_field_arg = component_field === nothing ? C_NULL : String(component_field)
@@ -164,6 +169,7 @@ function build_static_reader(
         has_category::Bool,
         category_arg::Int32,
         name_arg::Cstring,
+        name_glob_arg::Cstring,
         resolution_iso::Cstring,
         features_arg::Cstring,
         component_field_arg::Cstring,
@@ -244,12 +250,14 @@ carries its `dtype`, `element_shape`, and the `keys` identifying each column.
 static_groups(reader::StaticReader) = reader.groups
 
 """
-    static_read!(reader, t::DateTime) -> reader
+    static_read!(reader, t) -> reader
 
 Read the value of every series at `t`, filling the reader's buffers. Throws if
 `t` is off the reader's timeline. Follow with [`static_values`] per group.
+
+`t` is a `DateTime` (read as UTC) or, with TimeZones loaded, a `ZonedDateTime`.
 """
-function static_read!(reader::StaticReader, t::DateTime)
+function static_read!(reader::StaticReader, t)
     _check(
         @ccall lib_path().infrastore_static_reader_read(
             reader::Ptr{Cvoid},
@@ -372,8 +380,8 @@ end
 
 """
     build_forecast_reader(store, time_series_type; resolution, owner_id=nothing,
-                          owner_category=nothing, name=nothing, features=Dict(),
-                          component_field=nothing)
+                          owner_category=nothing, name=nothing, name_glob=nothing,
+                          features=Dict(), component_field=nothing)
 
 Build a [`ForecastReader`] over forecasts of `time_series_type` (a Julia type:
 `Deterministic`, `Probabilistic`, `Scenarios`, or `DeterministicSingleTimeSeries`).
@@ -381,6 +389,9 @@ A `Deterministic` reader is abstract — it also includes
 `DeterministicSingleTimeSeries`, read into identical `[H, *E]` windows.
 `resolution` (a `Period`) is required; matched forecasts must share one window
 timeline.
+
+The remaining keywords are [`list_keys`](@ref)'s filters, `name_glob` (a
+case-sensitive SQLite `GLOB` pattern over the name) included.
 """
 function build_forecast_reader(
     store::Store,
@@ -389,6 +400,7 @@ function build_forecast_reader(
     owner_id::Union{Nothing, Integer}=nothing,
     owner_category::Union{Nothing, OwnerCategory}=nothing,
     name::Union{Nothing, AbstractString}=nothing,
+    name_glob::Union{Nothing, AbstractString}=nothing,
     features::AbstractDict=Dict{String, Any}(),
     component_field::Union{Nothing, AbstractString}=nothing,
 )
@@ -398,6 +410,7 @@ function build_forecast_reader(
     has_category = owner_category !== nothing
     category_arg = has_category ? _category_int(owner_category) : Int32(0)
     name_arg = name === nothing ? C_NULL : String(name)
+    name_glob_arg = name_glob === nothing ? C_NULL : String(name_glob)
     resolution_iso = _period_to_iso(resolution)
     features_arg = isempty(features) ? C_NULL : JSON.json(features)
     component_field_arg = component_field === nothing ? C_NULL : String(component_field)
@@ -410,6 +423,7 @@ function build_forecast_reader(
         category_arg::Int32,
         Int32(type_code)::Int32,
         name_arg::Cstring,
+        name_glob_arg::Cstring,
         resolution_iso::Cstring,
         features_arg::Cstring,
         component_field_arg::Cstring,
@@ -486,12 +500,14 @@ function forecast_num_slots(reader::ForecastReader)
 end
 
 """
-    forecast_read!(reader, t::DateTime) -> reader
+    forecast_read!(reader, t) -> reader
 
 Read the forecast window at `t` for every entry, filling the reader's buffers.
 Throws if `t` is off the window timeline. Follow with [`forecast_values`].
+
+`t` is a `DateTime` (read as UTC) or, with TimeZones loaded, a `ZonedDateTime`.
 """
-function forecast_read!(reader::ForecastReader, t::DateTime)
+function forecast_read!(reader::ForecastReader, t)
     _check(
         @ccall lib_path().infrastore_forecast_reader_read(
             reader::Ptr{Cvoid},
