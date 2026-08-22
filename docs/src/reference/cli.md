@@ -12,8 +12,10 @@ in the consumer's object graph — which is why the association flags are bare i
 ## Synopsis
 
 ```text
-infrastore [--store <PATH.h5>] [-f <FORMAT>] [--log-level <FILTER>] <COMMAND>
+infrastore [--store <PATH.h5>] [-f <FORMAT>] [--log-level <FILTER>] [-y] [--assume-timezone <ZONE>] <COMMAND>
 ```
+
+Every global option is accepted after the command too (`infrastore add --store demo.h5 …`).
 
 ### Global options
 
@@ -23,18 +25,18 @@ infrastore [--store <PATH.h5>] [-f <FORMAT>] [--log-level <FILTER>] <COMMAND>
 | `-f`, `--format`           | Output format: `table` (default), `json`, `jsonl`, or `csv`.                                                                     |
 | `--log-level`              | Tracing filter; also read from `RUST_LOG`. Defaults to `warn`.                                                                   |
 | `-y`, `--yes`              | Answer every confirmation prompt with yes.                                                                                       |
-| `--assume-timezone <ZONE>` | Read timestamps that carry no time zone as being in this one: `UTC`, or a fixed offset like `-07:00`.                            |
+| `--assume-timezone <ZONE>` | Read timestamps that carry no time zone as being in this one: `UTC` (or `Z`), or a fixed offset — `-07:00`, `-0700`, `-07`.      |
 
 `--store` (or `INFRASTORE_STORE`) is required by every command except `template` and `completions`.
 
 `-f`/`--format` applies to every command, read and write alike. The read/inspection commands
 (`list`, `get`, `grid`, `info`, `export`, `names`, `owner-types`, `owners`, `exists`, `stats`,
-`summary`, `diff`, `verify`, `check-consistency`, `resolutions`, `params`, `compact`, and
-`add --dry-run`) render their results in it. The write commands (`init`, `add`, `merge`, `remove`,
-`rename`, `copy`, `replace-owner`, `clear`, `transform`, `persist`, `plot`, `attach`, `detach`,
-`link`, `unlink`, `reassign`) report their outcome in it: prose under `table`, and a one-object
-status document under `json`/`jsonl`, so a scripted mutation pipes into `jq` the way a scripted
-query does.
+`store-info`, `arrays`, `summary`, `attributes`, `links`, `diff`, `verify`, `check-consistency`,
+`resolutions`, `params`, `compact`, and `add --dry-run`) render their results in it. The write
+commands (`init`, `add`, `merge`, `remove`, `rename`, `copy`, `replace-owner`, `clear`, `transform`,
+`persist`, `plot`, `attach`, `detach`, `link`, `unlink`, `reassign`) report their outcome in it:
+prose under `table`, and a one-object status document under `json`/`jsonl`, so a scripted mutation
+pipes into `jq` the way a scripted query does.
 
 ```console
 $ infrastore --store s.h5 -f json --yes remove --all --owner-id 42 | jq .removed
@@ -109,7 +111,7 @@ Three things to know:
 
 ## Commands
 
-`infrastore --help` lists these under the same six headings used below. The grouping is a display
+`infrastore --help` lists these under the same eight headings used below. The grouping is a display
 aid only — every command is invoked flat, as `infrastore <command>`; there are no subcommand
 namespaces to type.
 
@@ -324,13 +326,13 @@ infrastore completions zsh > ~/.zfunc/_infrastore
 
 ```text
 infrastore --store <PATH> init [--compression <none|deflate[:LEVEL]>] [--no-shuffle] [--catalog <attached|in-memory>]
-infrastore --store <PATH> add --descriptor <FILE.json|-> [--csv <FILE.csv>] [--dry-run] [--replace] [--batch-size N] [--quiet] [--compression <SPEC>] [--no-shuffle] [--catalog <MODE>]
+infrastore --store <PATH> add --descriptor <FILE.json|-> [--csv <FILE.csv>] [--dry-run] [--replace] [--batch-size N] [-q|--quiet] [--compression <SPEC>] [--no-shuffle] [--catalog <MODE>]
 infrastore --store <PATH> add --csv <FILE.csv> --owner-id <I> --owner-type <T> --name <N> --type <T> --element-type <E> [DESCRIPTOR FIELDS...]
 infrastore --store <PATH> merge --from <PATH.h5> [SELECTOR...] [--replace] [--dry-run]
 infrastore --store <PATH> list    [SELECTOR...] [--limit N] [--wide]
 infrastore --store <PATH> get     [SELECTOR...] [--time-range START..END] [--limit N | --full] [--tail] [--stride N] [--plot [--plot-width COLS]] [--window N | --issue-time <TS>]
 infrastore --store <PATH> grid    [SELECTOR...] [--time-range START..END] [--limit N | --full] [--label <auto|owner|full>]
-infrastore --store <PATH> plot    [SELECTOR...] --out <FILE.svg|FILE.html|-> [--kind <line|duration|heatmap|fan|overlay>] [--time-range START..END] [--title <T>] [--width W] [--height H] [--window N] [--limit N]
+infrastore --store <PATH> plot    [SELECTOR...] [--out <FILE.svg|FILE.html|->] [--kind <line|duration|heatmap|fan|overlay>] [--time-range START..END] [--title <T>] [--width W] [--height H] [--window N] [--limit N]
 infrastore --store <PATH> info    [SELECTOR...] [--no-stats]
 infrastore --store <PATH> export  [SELECTOR...] [--dir <DIR>] [--time-range START..END]
 infrastore --store <PATH> names       [SELECTOR...]
@@ -365,9 +367,9 @@ infrastore --store <PATH> params [--resolution <DUR>] [--interval <DUR>]
 infrastore template <SingleTimeSeries|NonSequentialTimeSeries|Deterministic|Probabilistic|Scenarios>
 ```
 
-`--csv` overrides the `csv` path inside the descriptor, and only works for a descriptor that
-describes a single series. Passing it alongside a descriptor array holding more than one object
-fails with `--csv cannot be used with an array descriptor`.
+`--csv` overrides the `csv` path inside the descriptor, and only works when the descriptor is a
+single object (a wide one that expands to many series included). Passing it alongside a descriptor
+array holding more than one object fails with `--csv cannot be used with an array descriptor`.
 
 `transform` takes no selector: it rewrites **every** `SingleTimeSeries` in the store, deriving a
 `DeterministicSingleTimeSeries` from each. `--owner-category` and `--resolution` optionally scope it
@@ -404,16 +406,17 @@ that fails validation never leaves an empty store behind.
 `add --replace` removes any series that already carries one of the identities being added, inside
 the same transaction, which is what makes re-running a load after fixing the data idempotent.
 `add --batch-size N` commits every N series instead of the whole load in one transaction, bounding
-memory for a very large load at the cost of the load's atomicity; `--quiet` silences everything but
-errors, and above 20 series the per-series lines are replaced by a progress counter on stderr.
+memory for a very large load at the cost of the load's atomicity; `-q`/`--quiet` silences everything
+but errors, and above 20 series the per-series lines are replaced by a progress counter on stderr.
 
 `add --descriptor -` reads the JSON from stdin, so a generator script can pipe descriptors straight
 in. Relative `csv` paths in a piped descriptor resolve against the working directory, since there is
 no descriptor file for them to sit beside.
 
 `init --compression` (or `add --compression`) sets the HDF5 compression policy for a store the
-command creates (`none`, `deflate`, or `deflate:LEVEL` with `--no-shuffle` to disable byte-shuffle);
-passing it for an existing store is an error, since the persisted policy governs.
+command creates (`none`, `deflate`, or `deflate:LEVEL` with `--no-shuffle` to disable byte-shuffle;
+a bare `deflate` is level 3, and the default when neither is given); passing it for an existing
+store is an error, since the persisted policy governs.
 
 `--catalog` decides where the SQLite catalog lives **while the command runs**. `attached` (the
 default) commits to `<store>.sqlite` as it goes, so an interrupted load keeps what it had already
@@ -519,10 +522,10 @@ The CSV holds only numbers, preceded by a mandatory header row (plus a leading t
 | Key                            | Required for             | Notes                                                         |
 | ------------------------------ | ------------------------ | ------------------------------------------------------------- |
 | `owner_id`                     | long layout              | Integer component identifier (`i64`). Rejected when wide.     |
-| `owner_type`                   | all                      | In the wide layout, the default for unmapped columns.         |
+| `owner_type`                   | long layout              | Wide: the default for `owner_map` rows that name none.        |
 | `owner_category`               | optional                 | `Component` (default) or `SupplementalAttribute`.             |
 | `name`                         | all                      |                                                               |
-| `type`                         | all                      | One of the five writable types, canonically spelled.          |
+| `type`                         | all                      | One of the five writable types; spellings as for `--type`.    |
 | `element_type`                 | all                      | `f64`/`f32`/`i64`/…, `tuple(N,f64)`, or a function-data kind. |
 | `csv`                          | unless `--csv` is passed | Path relative to the descriptor; `--csv` overrides it.        |
 | `element_shape`                | optional                 | Trailing per-step dims; default scalar (`[]`).                |
@@ -539,7 +542,7 @@ The CSV holds only numbers, preceded by a mandatory header row (plus a leading t
 | `scenario_count`               | `Scenarios` (optional)   | Inferred from the data length if omitted.                     |
 | `layout`                       | optional                 | `long` (default) or `wide`. See below.                        |
 | `owner_map`                    | wide layout              | Sidecar CSV path, or an inline `{"column": owner_id}` object. |
-| `owner_id_from`                | wide layout              | `"header"` when the headers already are owner ids.            |
+| `owner_id_from`                | wide layout              | `"header"` (the only value) when the headers are owner ids.   |
 
 Unknown keys are rejected. Any key not in the table above — including a typo like `resolutionn` — is
 a hard parse error listing the accepted fields, so hand-edited templates fail loudly rather than
@@ -599,12 +602,15 @@ be an input. There are three ways to supply it:
 
 The sidecar CSV's header is mandatory and checked (`column,owner_id` or
 `column,owner_id,owner_type`). Where a row names an `owner_type` it wins; otherwise the descriptor's
-`owner_type` is the default. A column with no mapping is an error that names the unmapped columns —
-a 500-column load that stopped at "some column is unmapped" would leave you diffing two files by
-hand.
+`owner_type` is the default — and it is required whenever any column lacks one, which is always the
+case for the inline object form, since that carries ids only. A column with no mapping is an error
+that names the unmapped columns — a 500-column load that stopped at "some column is unmapped" would
+leave you diffing two files by hand. Exactly one of `owner_map` and `owner_id_from` may be set, and
+either one in a `long` descriptor is an error.
 
-A leading `timestamp` column is stripped if present, and is **required** for a wide
-`NonSequentialTimeSeries` (whose timestamps are explicit rather than a grid). The wide layout covers
+A leading `timestamp` column is **required** for a wide `NonSequentialTimeSeries` (whose timestamps
+are explicit rather than a grid). For a wide `SingleTimeSeries` it is optional, and when present it
+is checked, not ignored — see [Reading back](#reading-back-and-re-adding). The wide layout covers
 the two static types and scalar elements only: a forecast's value block is already three axes deep
 before any per-column split, and a multidimensional element would need a second header row to say
 which column belongs to which `(owner, element)` pair. Both are rejected rather than guessed at.
@@ -654,7 +660,10 @@ live in the catalog, not in the file.
 `add` reads both layouts. It picks between them from the header row, so a file written by `export`
 can be handed straight back to `add` with no column surgery:
 
-- a first column named `timestamp` is read as the time axis;
+- a first column named `timestamp` is read as the time axis. For a `NonSequentialTimeSeries` it _is_
+  the data; for a `SingleTimeSeries` it is **validated** against the descriptor's
+  `initial_timestamp` + `resolution` grid, row count included, so a file sliced out of an export and
+  re-added under the original descriptor fails loudly rather than landing on the wrong instants;
 - leading `issue_time` + `target_time` columns mark the timestamped forecast layout, whose rows run
   window-major with the percentiles/scenarios spread across columns — `add` transposes them back
   into the stored `[series, horizon, count, element]` order;
@@ -700,7 +709,9 @@ across runs and two grid exports can be diffed.
 `plot` writes one **self-contained** file: no external fonts, scripts, stylesheets, or images, so it
 opens in a browser, drops into a report, and survives being emailed. Both light and dark themes are
 written into the document, keyed on `prefers-color-scheme`. An `.html` destination wraps the same
-SVG in a minimal page; `--out -` writes to stdout.
+SVG in a minimal page; `--out -` writes to stdout, and the default is `chart.svg` in the working
+directory. `--width`/`--height` default to 960 × 440 (CSS pixels, fractional values allowed);
+`--limit` caps an `overlay` at 8 windows unless told otherwise.
 
 | `--kind`   | What it shows                                                                     |
 | ---------- | --------------------------------------------------------------------------------- |

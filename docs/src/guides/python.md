@@ -12,10 +12,18 @@ import numpy as np
 from infrastore import Store, SingleTimeSeries, OwnerCategory, TimeSeriesType
 ```
 
-The module exposes `Store`; the static series classes `SingleTimeSeries` and
+The module exposes `Store` and `Transaction`; the static series classes `SingleTimeSeries` and
 `NonSequentialTimeSeries`; the forecast classes `Deterministic`, `Probabilistic`, and `Scenarios`;
-`TimeSeriesKey`; the `TimeSeriesType` and `OwnerCategory` enums; the `init_tracing` function; and an
-exception hierarchy rooted at `TimeSeriesError`.
+`TimeSeriesKey`; the readers `StaticReader` and `ForecastReader`; the association records
+`SupplementalAttributeAssociation` and `ParentChildAssociation`; the `TimeSeriesType` and
+`OwnerCategory` enums; the `init_tracing` and `decode_element_values` functions; `__version__`; and
+an exception hierarchy rooted at `TimeSeriesError`.
+
+If you are building a package on top of infrastore — the way
+[infrasys](https://github.com/NatLabRockies/infrasys) does — read
+[Embedding in a Parent Package](./embedding.md) alongside this guide: it covers the lifecycle
+(scratch store, `persist_to`, `open_copy`), id mapping, and lookup semantics that this page only
+shows the calls for.
 
 ## Open or Create a Store
 
@@ -46,12 +54,12 @@ ts = SingleTimeSeries(
 ```
 
 Use timezone-aware datetimes (UTC is stored). The binding is dtype-generic — it accepts and returns
-NumPy arrays of `float64`, `float32`, `int64`, `int32`, `uint64`, or `bool`, and whatever dtype you
-pass round-trips unchanged. The array may be multi-dimensional: shape `(length,)` for scalar steps,
-or `(length, k1, …)` to attach a per-step element shape (such as cost-curve coefficients). The
-required `name` is an association attribute carried on the object — the same array can be added
-under different names. Use `NonSequentialTimeSeries(timestamps, data, name)` for explicitly
-timestamped series.
+NumPy arrays of `float64`, `float32`, `int64`, `int32`, `int16`, `int8`, `uint64`, `uint32`,
+`uint16`, `uint8`, or `bool`, and whatever dtype you pass round-trips unchanged. The array may be
+multi-dimensional: shape `(length,)` for scalar steps, or `(length, k1, …)` to attach a per-step
+element shape (such as cost-curve coefficients). The required `name` is an association attribute
+carried on the object — the same array can be added under different names. Use
+`NonSequentialTimeSeries(timestamps, data, name)` for explicitly timestamped series.
 
 ## Add a Series
 
@@ -71,6 +79,63 @@ key = store.add_time_series(
 returned `key` exposes `owner_id`, `owner_category`, `time_series_type`, `name`, `resolution`,
 `interval`, and `features` as read-only properties (`resolution` and `interval` are ISO 8601
 duration strings or `None`).
+
+### Descriptors
+
+Beyond `units`, an association can carry `quantity_kind` (what the values measure — `"ActivePower"`;
+the one record of what per-unit values mean), `unit_system` (`"natural_units"` or
+`"component_base"`; unset means _unspecified_, not natural units), `component_field` (the field on
+the owning component these values vary — `"max_active_power"`; also a filter), and
+`application_data` (an opaque string the store returns verbatim — the package-owned slot):
+
+```python
+key = store.add_time_series(
+    owner_id=42, owner_type="Generator", owner_category=OwnerCategory.Component,
+    time_series=ts,
+    units="MW", quantity_kind="ActivePower", unit_system="natural_units",
+    component_field="max_active_power",
+    application_data='{"source": "weather_year_2012"}',
+)
+```
+
+None of them is part of the key or of either content hash, so two adds that differ only in a
+descriptor are a duplicate. See
+[Optional Descriptors](../explanation/data-model.md#optional-descriptors).
+
+### Add many series at once
+
+`add_time_series_bulk` takes a list of dicts mirroring `add_time_series`'s keyword arguments and
+commits them in one catalog transaction, taking the block-sized HDF5 write path. It is the way to
+load a system: an order of magnitude faster than a loop of single adds, and same-shaped series land
+in the same packed dataset.
+
+```python
+keys = store.add_time_series_bulk([
+    {"owner_id": i, "owner_type": "Generator", "owner_category": OwnerCategory.Component,
+     "time_series": series[i], "units": "MW"}
+    for i in range(len(series))
+])   # keys in input order; all-or-nothing
+```
+
+### Transactions
+
+Several operations that must take effect together — replacing a series is an add plus a remove — go
+inside a transaction. Removals are reversible only there; outside one the array bytes are reclaimed
+immediately.
+
+```python
+with store.transaction():
+    new_key = store.add_time_series(owner_id=42, owner_type="Generator",
+                                    owner_category=OwnerCategory.Component,
+                                    time_series=updated)
+    store.remove_time_series(old_key)
+# committed on a clean exit, rolled back if the block raised
+```
+
+Blocks nest (each level is a savepoint), and the store holds the SQLite write lock until the
+outermost one ends. A transaction does not batch: use `add_time_series_bulk` inside it for the
+writes themselves. `begin_transaction` / `commit_transaction` / `rollback_transaction` are the
+explicit form.
 
 ## Read a Series
 
@@ -98,7 +163,16 @@ read in one decompress-once pass per dataset, which is much faster than a `get_t
 
 ```python
 series = store.bulk_read(keys)   # keys: list[TimeSeriesKey]
+window = store.bulk_read(keys, time_range=(start, end))   # the same slice of every key
 ```
+
+### Datetimes and precision
+
+Every `datetime` must be timezone-aware (any zone; converted to UTC on the way in, UTC on the way
+out), and a naive one raises `InvalidParameterError`. A **stored** instant — an initial timestamp, a
+`NonSequentialTimeSeries` timestamp — must also be a whole number of milliseconds, so quantize
+`datetime.now(timezone.utc)` before storing it; query bounds such as `time_range` are unconstrained.
+See [Datetimes](../reference/python-api.md#datetimes).
 
 ## Per-Timestamp Reads (Simulation Loop)
 
@@ -116,7 +190,7 @@ series must share one grid (`initial_timestamp` + `length`), validated at build.
 
 ```python
 reader = store.build_static_reader(timedelta(hours=1))
-grid = reader.grid()               # {"initial_timestamp", "resolution", "length"}
+grid = reader.grid()               # {"initial_timestamp", "resolution", "length", "time_series_type"}
 groups = reader.groups()           # each: {"dtype", "element_type", "element_shape", "keys"}
 for ts in reader.timestamps():
     store.static_read(reader, ts)
@@ -183,7 +257,7 @@ counts = store.get_time_series_counts()        # dict
 ```python
 store.remove_time_series(key)
 # The owner is the (owner_id, owner_category) pair.
-n = store.clear_time_series(42, OwnerCategory.Component)   # all series for one owner; returns count
+n = store.clear_time_series(owner_id=42, owner_category=OwnerCategory.Component)  # one owner; returns count
 store.clear_time_series()                                  # remove everything
 
 # Reassign every series from one owner to another; returns the number moved.
@@ -286,6 +360,17 @@ store.flush()   # sync buffered writes; afterwards system.h5 + system.h5.sqlite 
 
 Keep the two files together — the `.h5` and `.h5.sqlite` pair is a single logical store.
 
+To change a store you did not build in this process, **open a copy**: `Store.open` defaults to
+read-write, and HDF5 has no journal, so an interrupted in-place write is unrecoverable.
+
+```python
+store = Store.open_copy(src, scratch / "time_series.h5")   # src is never opened for writing
+...
+store.persist_to(src)                                       # one atomic rename replaces it
+```
+
+`Store.open(path, read_only=True)` is the right call when nothing will be written.
+
 ### Where the Catalog Lives
 
 By default the catalog _is_ `system.h5.sqlite`, and every commit is durable. Passing
@@ -296,6 +381,7 @@ By default the catalog _is_ `system.h5.sqlite`, and every commit is durable. Pas
 store = Store.create(scratch / "time_series.h5", catalog="memory")
 store.add_time_series(...)
 store.persist_to(destination)     # writes both halves as a matched pair
+store.persist_catalog()           # or: land only the .sqlite half beside the arrays already at path
 ```
 
 Arrays still stream to the HDF5 file, so this does not require the data to fit in memory. It suits
@@ -326,10 +412,10 @@ except TimeSeriesError as e:
     ...                       # anything else from the store
 ```
 
-Argument parsing is the exception to that rule: a period argument (`resolution`, `horizon`,
-`interval`) that is a malformed ISO 8601 duration string raises a plain `ValueError`, and one that
-is neither a `timedelta` nor a `str` raises a plain `TypeError`. Neither is a `TimeSeriesError`, so
-`except TimeSeriesError` will not catch them.
+Argument validation stays inside the hierarchy: a malformed ISO 8601 duration string, a naive
+`datetime`, a sub-millisecond stored timestamp, and an unsupported NumPy dtype all raise
+`InvalidParameterError`. The one exception is a period argument that is neither a `timedelta` nor a
+`str`, which raises a plain `TypeError` that `except TimeSeriesError` will not catch.
 
 One gotcha: because Python's `bool` is a subclass of `int`, the binding deliberately checks `bool`
 first, so `True`/`False` feature values are stored as booleans (not as `1`/`0` integers).

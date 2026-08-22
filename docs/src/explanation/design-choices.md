@@ -7,6 +7,8 @@ parent package such as
 time-series data behind their component models. This page records the decisions that shape the API
 and the on-disk format, and the reasoning behind them, so that developers of those parent packages
 understand what infrastore optimizes for — and, just as importantly, what it deliberately does not.
+The practical counterpart — which calls a parent package should make, and in what order — is
+[Embedding in a Parent Package](../guides/embedding.md).
 
 ## Data Orientation: Optimize for Reading Every Component at One Timestamp
 

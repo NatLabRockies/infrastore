@@ -2,7 +2,8 @@
 
 The Julia package is **`InfraStore.jl`** (module `InfraStore`); it wraps the [C ABI](./c-abi.md)
 cdylib. The library is resolved from the `INFRASTORE_LIB` environment variable (development builds),
-or from the `InfraStore_jll` binary package when installed.
+or else from the `libinfrastore_ffi` artifact that `Pkg` downloads at install time (see
+[Integrate with Julia](../how-to/integrate-julia.md)).
 
 ```julia
 using InfraStore
@@ -18,24 +19,27 @@ Exported names (types first, then functions):
 `Store`, `SupplementalAttribute`, `SupplementalAttributeAssociation`,
 `SupplementalAttributeSummaryRow`, `SupplementalAttributeTypeCount`, `TimeSeriesCounts`,
 `TimeSeriesCountsDetailed`, `TimeSeriesKey`, `TimeSeriesMetadata`, `TimeSeriesTypeCount`,
-`add_parent_child_association!`, `add_parent_child_associations!`,
-`add_supplemental_attribute_association!`, `add_supplemental_attribute_associations!`,
-`add_time_series!`, `add_time_series_bulk!`, `build_forecast_reader`, `build_static_reader`,
-`bulk_read`, `catalog_mode`, `check_static_consistency`, `clear!`, `close!`, `compact!`,
-`copy_time_series!`, `count_array_references`, `count_components_with_attributes`,
-`count_parent_child_associations`, `count_supplemental_attribute_associations`,
-`count_supplemental_attributes`, `counts_by_type`, `flush!`, `forecast_entries`,
-`forecast_num_slots`, `forecast_read!`, `forecast_summary`, `forecast_timeline`, `forecast_values`,
-`get_array_by_hash`, `get_compression`, `get_counts`, `get_forecast_parameters`, `get_intervals`,
-`get_metadata`, `get_path`, `get_resolutions`, `get_time_series`, `get_time_series_key`,
-`get_time_series_keys`, `has_any_time_series`, `has_for_owner`, `has_parent_child_association`,
-`has_supplemental_attribute_association`, `has_time_series`, `in_transaction`, `init_logging`,
-`is_empty`, `key_info`, `list_array_groups`, `list_children`, `list_components_with_attributes`,
-`list_keys`, `list_names`, `list_owner_ids`, `list_owner_types`, `list_parent_child_associations`,
-`list_parents`, `list_supplemental_attribute_associations`, `list_supplemental_attribute_ids`,
-`list_time_series`, `num_distinct_arrays`, `open_copy`, `open_store`, `persist!`,
-`persist_catalog!`, `read_only`, `rollback_transaction!`, `transaction`, `begin_transaction!`,
-`commit_transaction!`, `remove_by_filter!`, `remove_parent_child_associations!`,
+`TransformOutcome`, `UnitSystem` (`NaturalUnits`, `ComponentBase`), `add_parent_child_association!`,
+`add_parent_child_associations!`, `add_supplemental_attribute_association!`,
+`add_supplemental_attribute_associations!`, `add_time_series!`, `add_time_series_bulk!`,
+`build_forecast_reader`, `build_static_reader`, `bulk_read`, `catalog_mode`,
+`check_static_consistency`, `clear!`, `close!`, `compact!`, `copy_time_series!`,
+`count_array_references`, `count_components_with_attributes`,
+`export_supplemental_attribute_associations_openapi`, `export_time_series_associations_openapi`,
+`import_supplemental_attribute_associations_openapi!`, `count_parent_child_associations`,
+`count_supplemental_attribute_associations`, `count_supplemental_attributes`, `counts_by_type`,
+`flush!`, `forecast_entries`, `forecast_num_slots`, `forecast_read!`, `forecast_summary`,
+`forecast_timeline`, `forecast_values`, `get_array_by_hash`, `get_compression`, `get_counts`,
+`get_forecast_parameters`, `get_intervals`, `get_metadata`, `get_path`, `get_resolutions`,
+`get_time_series`, `get_time_series_key`, `get_time_series_keys`, `has_any_time_series`,
+`has_for_owner`, `has_parent_child_association`, `has_supplemental_attribute_association`,
+`has_time_series`, `in_transaction`, `init_logging`, `is_empty`, `key_info`, `list_array_groups`,
+`list_children`, `list_components_with_attributes`, `list_keys`, `list_names`, `list_owner_ids`,
+`list_owner_types`, `list_parent_child_associations`, `list_parents`,
+`list_supplemental_attribute_associations`, `list_supplemental_attribute_ids`, `list_time_series`,
+`num_distinct_arrays`, `open_copy`, `open_store`, `persist!`, `persist_catalog!`, `read_only`,
+`rollback_transaction!`, `transaction`, `begin_transaction!`, `commit_transaction!`,
+`remove_by_filter!`, `remove_parent_child_associations!`,
 `remove_supplemental_attribute_associations!`, `remove_time_series!`, `rename_time_series!`,
 `replace_owner!`, `replace_parent_child_component_id!`,
 `replace_supplemental_attribute_component_id!`, `static_grid`, `static_groups`, `static_read!`,
@@ -46,7 +50,7 @@ Exported names (types first, then functions):
 ## Constructors
 
 ```julia
-Store(; in_memory::Bool=true, path::Union{Nothing,AbstractString}=nothing,
+Store(; in_memory::Union{Nothing,Bool}=nothing, path::Union{Nothing,AbstractString}=nothing,
         compression::Union{Symbol,AbstractString}=:deflate,
         compression_level::Integer=3, shuffle::Bool=true,
         catalog::Union{Nothing,Symbol,AbstractString}=nothing,
@@ -57,6 +61,14 @@ open_copy(src::AbstractString, dest::AbstractString;
           catalog::Union{Symbol,AbstractString}=:attached) -> Store
 catalog_mode(store::Store) -> Symbol
 ```
+
+`in_memory` defaults to whatever `path` implies — in-memory without one, file-backed with one — and
+rarely needs setting; `path` together with `in_memory=true` throws `ArgumentError` (it used to be
+accepted and silently discarded everything written).
+
+A `Store` (and any reader built from it) is **not thread-safe**: the Rust core mutates the handle
+without synchronization, so concurrent calls from two tasks or threads are undefined behavior, not
+merely a race on results. Confine a store to one task, or guard every call with your own lock.
 
 - `Store()` — in-memory store.
 - `Store(in_memory=false, path="system.h5")` — persists to `system.h5` plus `system.h5.sqlite`.
@@ -103,17 +115,29 @@ struct SingleTimeSeries{T,N}
     resolution        :: Period          # e.g. Hour(1), Millisecond(500)
     data              :: Array{T,N}      # any element type; dim 1 = time
     name              :: String          # required association name
-    application_data      :: Union{Nothing,String}
+    application_data  :: Union{Nothing,String}
+    element_type      :: Union{Nothing,String}   # canonical element_type, or nothing for plain scalars
+    units             :: Union{Nothing,String}
+    quantity_kind     :: Union{Nothing,String}
+    unit_system       :: Union{Nothing,UnitSystem}   # nothing = unspecified, not NaturalUnits
+    component_field   :: Union{Nothing,String}
 end
-SingleTimeSeries(initial_timestamp, resolution, data, name; application_data=nothing)
+SingleTimeSeries(initial_timestamp, resolution, data, name; application_data=nothing, element_type=nothing, units=nothing,
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing)
 
 struct NonSequentialTimeSeries{T,N}
     timestamps   :: Vector{DateTime}     # strictly increasing; one per row of dim 1
     data         :: Array{T,N}
     name         :: String
-    application_data :: Union{Nothing,String}
+    application_data  :: Union{Nothing,String}
+    element_type      :: Union{Nothing,String}   # canonical element_type, or nothing for plain scalars
+    units             :: Union{Nothing,String}
+    quantity_kind     :: Union{Nothing,String}
+    unit_system       :: Union{Nothing,UnitSystem}   # nothing = unspecified, not NaturalUnits
+    component_field   :: Union{Nothing,String}
 end
-NonSequentialTimeSeries(timestamps, data, name; application_data=nothing)
+NonSequentialTimeSeries(timestamps, data, name; application_data=nothing, element_type=nothing, units=nothing,
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing)
 
 struct Deterministic{T,N}
     initial_timestamp :: DateTime
@@ -123,10 +147,15 @@ struct Deterministic{T,N}
     count             :: Int
     data              :: Array{T,N}      # (H, count, element_dims...)
     name              :: String
-    application_data      :: Union{Nothing,String}
+    application_data  :: Union{Nothing,String}
+    element_type      :: Union{Nothing,String}   # canonical element_type, or nothing for plain scalars
+    units             :: Union{Nothing,String}
+    quantity_kind     :: Union{Nothing,String}
+    unit_system       :: Union{Nothing,UnitSystem}   # nothing = unspecified, not NaturalUnits
+    component_field   :: Union{Nothing,String}
 end
-Deterministic(initial_timestamp, resolution, horizon, interval, count, data, name;
-              application_data=nothing)
+Deterministic(initial_timestamp, resolution, horizon, interval, count, data, name; application_data=nothing, element_type=nothing, units=nothing,
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing)
 
 struct Probabilistic{T,N}
     initial_timestamp :: DateTime
@@ -137,10 +166,15 @@ struct Probabilistic{T,N}
     percentiles       :: Vector{Float64}
     data              :: Array{T,N}      # (num_percentiles, H, count, element_dims...)
     name              :: String
-    application_data      :: Union{Nothing,String}
+    application_data  :: Union{Nothing,String}
+    element_type      :: Union{Nothing,String}   # canonical element_type, or nothing for plain scalars
+    units             :: Union{Nothing,String}
+    quantity_kind     :: Union{Nothing,String}
+    unit_system       :: Union{Nothing,UnitSystem}   # nothing = unspecified, not NaturalUnits
+    component_field   :: Union{Nothing,String}
 end
-Probabilistic(initial_timestamp, resolution, horizon, interval, count, percentiles, data, name;
-              application_data=nothing)
+Probabilistic(initial_timestamp, resolution, horizon, interval, count, percentiles, data, name; application_data=nothing, element_type=nothing, units=nothing,
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing)
 
 struct Scenarios{T,N}
     initial_timestamp :: DateTime
@@ -151,10 +185,23 @@ struct Scenarios{T,N}
     scenario_count    :: Int             # set from size(data, 1) by the constructor
     data              :: Array{T,N}      # (scenario_count, H, count, element_dims...)
     name              :: String
-    application_data      :: Union{Nothing,String}
+    application_data  :: Union{Nothing,String}
+    element_type      :: Union{Nothing,String}   # canonical element_type, or nothing for plain scalars
+    units             :: Union{Nothing,String}
+    quantity_kind     :: Union{Nothing,String}
+    unit_system       :: Union{Nothing,UnitSystem}   # nothing = unspecified, not NaturalUnits
+    component_field   :: Union{Nothing,String}
 end
-Scenarios(initial_timestamp, resolution, horizon, interval, count, data, name;
-          application_data=nothing)         # note: scenario_count is NOT a constructor argument
+Scenarios(initial_timestamp, resolution, horizon, interval, count, data, name; application_data=nothing, element_type=nothing, units=nothing,
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing)
+# note: scenario_count is NOT a constructor argument
+
+# The five descriptors after `name` are carried on the struct and become the
+# add_time_series! defaults, so a series built with units="MW" keeps them on add.
+# `unit_system` is a `UnitSystem`: `NaturalUnits` (the units named by `units`)
+# or `ComponentBase` (per-unit against the owning component's own base). The
+# store records the declaration only — it holds no base and rescales nothing —
+# and `nothing` means unspecified, which is deliberately not `NaturalUnits`.
 
 # Marker type; never constructed and with no materialized struct. Derived via
 # transform_single_time_series! and read back as a Deterministic. You normally
@@ -269,7 +316,7 @@ grid; enumerate it with `static_timestamps`.
 add_time_series!(
     store::Store, owner_id, owner_type, owner_category::OwnerCategory,
     ts;   # SingleTimeSeries, NonSequentialTimeSeries, or any dense forecast struct
-    features::AbstractDict = Dict(), units = nothing,
+    features::AbstractDict = Dict(), element_type = ts.element_type, units = ts.units,
     quantity_kind = ts.quantity_kind, unit_system = ts.unit_system,
     component_field = ts.component_field, application_data = ts.application_data,
 ) -> TimeSeriesKey
@@ -311,14 +358,17 @@ To read every series' value at one timestamp in a loop (the simulation pattern),
 
 ```julia
 bulk_read(store::Store, keys::AbstractVector{TimeSeriesKey};
-          time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing) -> Vector{SingleTimeSeries}
-# time_range slices every series to that window (default: each series in full)
+          time_range::Union{Nothing,Tuple{Any,Any}}=nothing) -> Vector
+# time_range slices every series to that window (default: each series in full);
+# the bounds are DateTime or, with TimeZones loaded, ZonedDateTime
 ```
 
-Reads many whole `SingleTimeSeries` in one call, returning one per key **in the same order**. Each
-packed dataset is read and decompressed once instead of per series, so this is the efficient way to
-load many complete series (exploration, plotting). Every key must identify a `SingleTimeSeries`; an
-empty key vector returns an empty vector without touching the store.
+Reads many whole series in one call, returning one per key **in the same order**, each as the struct
+matching its stored type (`SingleTimeSeries`, `NonSequentialTimeSeries`, `Deterministic`,
+`Probabilistic`, or `Scenarios`) — the result is a `Vector{Any}`, so narrow it yourself when every
+key is one type. Packed `SingleTimeSeries` are read and decompressed once per dataset instead of per
+series, so this is the efficient way to load many complete series (exploration, plotting). An empty
+key vector returns an empty vector without touching the store.
 
 ```julia
 series = bulk_read(store, keys)   # keys :: Vector{TimeSeriesKey}
@@ -454,25 +504,15 @@ The forecast `name` comes from the struct, e.g.
 ```julia
 add_time_series!(
     store, owner_id, owner_type, owner_category::OwnerCategory,
-    ts::Deterministic;
-    features=Dict(), units=nothing, quantity_kind=nothing, unit_system=nothing,
-    component_field=nothing, application_data=nothing,
-) -> TimeSeriesKey
-
-add_time_series!(
-    store, owner_id, owner_type, owner_category::OwnerCategory,
-    ts::Probabilistic;
-    features=Dict(), units=nothing, quantity_kind=nothing, unit_system=nothing,
-    component_field=nothing, application_data=nothing,
-) -> TimeSeriesKey
-
-add_time_series!(
-    store, owner_id, owner_type, owner_category::OwnerCategory,
-    ts::Scenarios;
-    features=Dict(), units=nothing, quantity_kind=nothing, unit_system=nothing,
-    component_field=nothing, application_data=nothing,
+    ts::Union{Deterministic,Probabilistic,Scenarios};
+    features=Dict(), element_type=ts.element_type, units=ts.units,
+    quantity_kind=ts.quantity_kind, unit_system=ts.unit_system,
+    component_field=ts.component_field, application_data=ts.application_data,
 ) -> TimeSeriesKey
 ```
+
+The descriptor keywords default to the struct's own fields, so a label set at construction survives
+the add; pass a keyword to override it for one association.
 
 A `DeterministicSingleTimeSeries` is not added directly. Derive one from every stored
 `SingleTimeSeries` (sharing the backing array) with:
@@ -480,12 +520,33 @@ A `DeterministicSingleTimeSeries` is not added directly. Derive one from every s
 ```julia
 transform_single_time_series!(store, horizon::Period, interval::Period;
                               owner_category::Union{Nothing,OwnerCategory}=nothing,
-                              resolution::Union{Nothing,Period}=nothing) -> Int  # number transformed
+                              resolution::Union{Nothing,Period}=nothing,
+                              normalize_single_window::Bool=false,
+                              require_uniform_forecast_grid::Bool=false,
+                              dry_run::Bool=false) -> TransformOutcome
+
+struct TransformOutcome
+    transformed         :: Int      # DSTs derived (or that would be, under dry_run)
+    sources             :: Int      # SingleTimeSeries in scope
+    interval            :: Period   # the interval actually stored
+    interval_normalized :: Bool     # true when a single-window request was stored as zero interval
+end
 ```
 
 `count` is derived from each series' length. `owner_category` restricts the transform to one owner
 category (both are transformed when it is `nothing`); `resolution` restricts it to the
-`SingleTimeSeries` at that resolution.
+`SingleTimeSeries` at that resolution. The store performs the whole eligibility check — horizon fit
+and divisibility, interval divisibility, per-resolution grid uniformity, conflicts with existing
+forecasts — so callers need not pre-check per series.
+
+The two policy flags encode a _client's_ contract rather than a storage invariant, and both default
+to permissive. `normalize_single_window` stores a single-window request (interval equal to a horizon
+spanning the whole series) as the zero interval rather than verbatim — the interval is part of the
+key, so this decides which form later lookups must use. `require_uniform_forecast_grid` demands that
+every resolution in scope, and any forecast already stored at the same `(resolution, interval)`,
+agree on the derived `count` and `initial_timestamp`. **InfrastructureSystems.jl passes both as
+`true`.** `dry_run` runs every check and reports the outcome without writing; it is legal against a
+read-only store.
 
 `has_time_series` and `remove_time_series!` take the time series type as their first argument to
 address a type other than `SingleTimeSeries`, the same shape `get_metadata` and `get_time_series`
@@ -717,8 +778,8 @@ num_distinct_arrays(store) -> Int   # distinct content hashes; shared arrays cou
 time_series_counts(store) -> TimeSeriesCountsDetailed   # distinct owners per category + distinct arrays per kind
 list_owner_ids(store, owner_category; time_series_type=nothing, resolution=nothing) -> Vector{Int}
 list_array_groups(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
-                  name=nothing, resolution=nothing, interval=nothing,
-                  features=Dict()) -> Vector{ArrayGroupRow}
+                  name=nothing, name_glob=nothing, resolution=nothing, interval=nothing,
+                  features=Dict(), component_field=nothing) -> Vector{ArrayGroupRow}
                                   # list_keys rows + `data_hash`; group by it to find shared arrays
 count_array_references(store, data_hash::Vector{UInt8}) -> ArrayReferenceCounts  # (sts, dst) refs to a 32-byte hash
 static_summary(store) -> Vector{StaticSummaryRow}   # grouped static rows with a `count`; build your own table
@@ -726,6 +787,16 @@ forecast_summary(store) -> Vector{ForecastSummaryRow}   # grouped forecast rows 
 get_forecast_parameters(store; resolution=nothing, interval=nothing) -> ForecastParameters  # horizon, interval, count, resolution, initial_timestamp; fields `nothing` when none match
 check_static_consistency(store; resolution=nothing) -> Vector{StaticGrid}  # one grid per resolution present (empty when none); throws if the series at one resolution disagree
 get_resolutions(store; time_series_type=nothing) -> Vector{Period}  # distinct resolutions, in the core's stored (lexical-by-ISO) order
+get_intervals(store; time_series_type=nothing) -> Vector{Period}    # distinct forecast intervals, same order; empty for static types
+get_path(store) -> Union{Nothing,String}   # the .h5 path, or nothing for an in-memory store
+read_only(store) -> Bool
+has_for_owner(store, owner_id, owner_category; time_series_type=nothing) -> Bool
+                                  # does this owner have any series (of that type)? One index probe.
+list_names(store; <list_keys filters>) -> Vector{String}        # distinct names, sorted
+list_owner_types(store; <list_keys filters>) -> Vector{String}  # distinct owner types, sorted
+remove_by_filter!(store; <list_keys filters>) -> Int
+                                  # remove every match in one all-or-nothing transaction; count removed
+rename_time_series!(store, key::TimeSeriesKey, new_name) -> TimeSeriesKey  # same identity, new name
 get_compression(store) -> CompressionSettings  # compression=:deflate|:none, level, shuffle; restored from file on open
 verify_integrity(store) -> Int    # number of integrity errors; 0 == intact
 compact!(store) -> CompactionReport   # reclaims both halves; on an on-disk store this rewrites the
@@ -793,11 +864,16 @@ has_any_time_series(store; owner_id=nothing, owner_category=nothing, time_series
 
 `has_any_time_series` is the existence probe over the same nine filters: true iff `list_keys` with
 that filter would return at least one row, answered off the catalog indexes without hydrating or
-marshaling any rows, so it is safe for hot per-component loops. `features` is a subset match here,
-unlike the exact-key `has_time_series` forms, which compare the whole feature set by content hash —
-and it is the one exception to the index-only guarantee: a non-empty `features` filter cannot be
-answered from an index and falls back to a full listing internally, so prefer the exact-key forms in
-hot loops when the whole feature set is known.
+marshaling any rows, so it is safe for hot per-component loops. `features` is a **subset** match
+here, unlike the exact-key `has_time_series` forms, which compare the whole feature set by content
+hash. A `features` filter still stays on indexes: the requested set is probed as an exact set by
+hash first (one covering seek when the caller passes the complete feature set), with an indexed
+per-feature fallback for genuinely partial lists.
+
+The two matching rules are the thing to keep straight when a parent package resolves user queries:
+an attribute-addressed `get_time_series` / `has_time_series` / `remove_time_series!` must be given
+the **complete** feature map or it misses, while the list/filter forms accept a partial one and may
+return several rows — deciding what more than one match means is the caller's job.
 
 ```julia
 is_empty(store) -> Bool
@@ -969,10 +1045,10 @@ Neither association catalog is exposed over the [gRPC server](./grpc-api.md) or 
 
 Direct JSON serde of the two association catalogs, in the wire spelling
 [SiennaSchemas](https://github.com/Sienna-Platform/SiennaSchemas) defines (`TimeSeries/*.json`,
-`Core/Associations/SupplementalAttributeAssociation.json`). Unlike [`list_time_series`](@ref) /
-[`list_supplemental_attribute_associations`](@ref), which return Julia structs, these three
-functions exchange the wire JSON verbatim — the format a document author (e.g. PowerTableDataParser)
-reads and writes directly.
+`Core/Associations/SupplementalAttributeAssociation.json`). Unlike `list_time_series` /
+`list_supplemental_attribute_associations`, which return Julia structs, these three functions
+exchange the wire JSON verbatim — the format a document author (e.g. PowerTableDataParser) reads and
+writes directly.
 
 ```julia
 export_time_series_associations_openapi(store; filters...) -> String
@@ -980,10 +1056,10 @@ export_supplemental_attribute_associations_openapi(store) -> String
 import_supplemental_attribute_associations_openapi!(store, json::AbstractString) -> Int
 ```
 
-`export_time_series_associations_openapi` takes the same filter keywords as
-[`list_time_series`](@ref). Every row's `uri` and `data_hash` are the hex-encoded content hash the
-store already has for that row — never a caller-supplied locator. With no filter this exports the
-whole catalog, sorted by identity.
+`export_time_series_associations_openapi` takes the same filter keywords as `list_time_series`.
+Every row's `uri` and `data_hash` are the hex-encoded content hash the store already has for that
+row — never a caller-supplied locator. With no filter this exports the whole catalog, sorted by
+identity.
 
 `export_supplemental_attribute_associations_openapi` exports the whole
 `supplemental_attribute_associations` table, sorted by `(component_id, attribute_id)`;
@@ -1022,7 +1098,9 @@ The package overloads `Base` so the wrapped types behave like native Julia value
 
 - `==` and `hash` on `TimeSeriesKey` delegate to the Rust core's identity semantics (owner,
   category, type, name, resolution, interval, features), so keys work as `Dict`/`Set` members.
-- `show` renders compact one-liners for `Store`, `TimeSeriesKey`, and the five value types.
+- `show` renders compact one-liners for `Store`, `TimeSeriesKey`, and the five value types; every
+  result struct (`TimeSeriesMetadata`, `KeyRow`, …) gets generated `==`/`hash`/`show`, and
+  `AddBatch` defines `length`.
 - `length`, `eltype`, `getindex`, and `iterate` on `SingleTimeSeries` / `NonSequentialTimeSeries`
   delegate to the wrapped `data` array (element count, not time steps, for multi-dimensional
   values). Forecast types define `length` = window count.

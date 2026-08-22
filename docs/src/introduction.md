@@ -59,8 +59,8 @@ flowchart TB
 - **Typed, N-dimensional arrays** — Store `f64`, `f32`, `i64`, `i32`, `u64`, or `bool` values, with
   an optional per-step element shape (e.g. the coefficient tuple of a cost curve)
 - **Three language bindings** — Use it from Rust, Python, or Julia with the same on-disk format
-- **A `infrastore` command-line tool** — Load time series from CSV, and list, read, and inspect a
-  store straight from a terminal, with `table` / `json` / `csv` output
+- **An `infrastore` command-line tool** — Load time series from CSV, and list, read, export, plot,
+  diff, and inspect a store straight from a terminal, with `table` / `json` / `jsonl` / `csv` output
   ([CLI how-to](./how-to/use-cli.md))
 - **Read-only gRPC service** — Serve a store over the network for remote readers, with optional
   API-key authentication
@@ -70,14 +70,15 @@ flowchart TB
 
 ## Who Should Read This
 
-| Audience                        | Start here                                        |
-| ------------------------------- | ------------------------------------------------- |
-| **Python package developers**   | [Python Developer Guide](./guides/python.md)      |
-| **Julia package developers**    | [Julia Developer Guide](./guides/julia.md)        |
-| **Rust developers**             | [Rust Developer Guide](./guides/rust.md)          |
-| **Command-line users**          | [Use the `infrastore` CLI](./how-to/use-cli.md)   |
-| **Anyone deploying the server** | [gRPC Server & Client](./guides/server.md)        |
-| **Tooling & forensics**         | [On-Disk File Format](./reference/file-format.md) |
+| Audience                           | Start here                                             |
+| ---------------------------------- | ------------------------------------------------------ |
+| **Developers of a package on top** | [Embedding in a Parent Package](./guides/embedding.md) |
+| **Python package developers**      | [Python Developer Guide](./guides/python.md)           |
+| **Julia package developers**       | [Julia Developer Guide](./guides/julia.md)             |
+| **Rust developers**                | [Rust Developer Guide](./guides/rust.md)               |
+| **Command-line users**             | [Use the `infrastore` CLI](./how-to/use-cli.md)        |
+| **Anyone deploying the server**    | [gRPC Server & Client](./guides/server.md)             |
+| **Tooling & forensics**            | [On-Disk File Format](./reference/file-format.md)      |
 
 ## Next Steps
 

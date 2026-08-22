@@ -7,12 +7,13 @@ Most users install a published package and need no build tools at all:
 | Rust     | `cargo add infrastore-core`                                                 |
 | Python   | `pip install infrastore`                                                    |
 | CLI      | [download a binary](#the-infrastore-cli), or `cargo install infrastore-cli` |
-| Julia    | not yet registered — see [Julia](#julia)                                    |
+| Julia    | `pkg> add InfraStore` — see [Julia](#julia)                                 |
 
-The Python wheels are prebuilt and self-contained. The Rust crates build HDF5 and zlib from vendored
-sources and link them statically, so they need `cmake` and a C compiler but **no system HDF5**. The
-same vendored, statically linked stack backs every channel, so the HDF5 version behind the on-disk
-format is pinned by infrastore rather than by the target environment.
+The Python wheels and the Julia binary artifact are prebuilt and self-contained. The Rust crates
+build HDF5 and zlib from vendored sources and link them statically, so they need `cmake` and a C
+compiler but **no system HDF5**. The same vendored, statically linked stack backs every channel, so
+the HDF5 version behind the on-disk format is pinned by infrastore rather than by the target
+environment.
 
 ## The `infrastore` CLI
 
@@ -65,13 +66,22 @@ This compiles HDF5 from vendored sources, so it needs `cmake` and a C compiler (
 
 ## Julia
 
-`InfraStore.jl` is **not yet registered in the Julia General registry**, and neither is the
-`InfraStore_jll` binary package it will eventually load, so `Pkg.add("InfraStore")` does not work
-yet. Until both are registered, install the package from a checkout and point `INFRASTORE_LIB` at a
-cdylib — either `libinfrastore_ffi` from the release archives above, or one you build with
-`cargo build -p infrastore-ffi --release`. [Integrate with Julia](../how-to/integrate-julia.md) has
-the full recipe, and [Releasing](../releasing.md#5-julia--general) tracks what registration still
-needs.
+`InfraStore.jl` is registered in the Julia General registry:
+
+```julia
+using Pkg
+Pkg.add("InfraStore")
+```
+
+The package does not link a system HDF5 or `HDF5_jll`. Its `Artifacts.toml` points at the
+`libinfrastore_ffi` tarball attached to the matching GitHub Release, so `Pkg.add` downloads a
+prebuilt, statically linked library for the platform — Linux x86_64 and aarch64 (glibc), macOS
+x86_64 and Apple Silicon, and Windows x86_64 — and nothing else needs installing. To run against a
+locally built library instead (a working tree, or a platform outside that list), set
+`INFRASTORE_LIB`; it takes precedence over the artifact.
+[Integrate with Julia](../how-to/integrate-julia.md) has both recipes, and
+[Releasing](../releasing.md#5-julia--general) explains why the binary is self-hosted rather than a
+JLL.
 
 The rest of this page covers building the workspace from a checkout.
 

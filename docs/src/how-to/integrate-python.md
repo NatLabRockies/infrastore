@@ -6,7 +6,18 @@ Get the `infrastore` module into a Python environment. For API usage once it imp
 ## Prerequisites
 
 - Python 3.11 or newer.
-- The [system libraries](./install.md#1-install-system-libraries) (HDF5, Protobuf).
+- For `pip install infrastore`: nothing else — the wheels are prebuilt and statically linked.
+- For a from-source build: the [build tools](./install.md#1-install-build-tools) (`cmake`, a C
+  compiler, `protobuf`). No system HDF5 is needed.
+
+## Install From PyPI
+
+```sh
+pip install infrastore
+```
+
+That is the whole recipe for a consumer package such as infrasys. The rest of this page is for
+building the wheel from a checkout.
 
 ## Build and Install the Wheel (development)
 
@@ -17,6 +28,7 @@ extension and installs it into the active virtual environment:
 cd crates/infrastore-py
 python3 -m venv .venv && source .venv/bin/activate
 pip install maturin pytest numpy tzdata  # tzdata: zoneinfo on Windows
+pip install netCDF4 h5py                 # only for the HDF5-interop tests
 maturin develop
 ```
 
@@ -69,12 +81,14 @@ print("ok")
 
 - **`ImportError` for the extension** — Ensure you ran `maturin develop` in the active venv, or that
   `pip install`-ed the wheel into the interpreter you are running.
-- **HDF5 not found during build** — Set `HDF5_DIR` (see
-  [Install](./install.md#1-install-system-libraries)).
+- **HDF5 build errors with `HDF5_DIR` set** — Unset it. The vendored build compiles its own HDF5 and
+  the variable redirects it at an external install while static libraries are still requested (see
+  [Build Prerequisites](../getting-started/installation.md#build-prerequisites)).
 - **`InvalidParameterError` on add** — In Python, pass a NumPy array (any shape) whose dtype is one
-  of `float64`, `float32`, `int64`, `int32`, `uint64`, or `bool`; any other dtype (e.g. `complex128`
-  or a string dtype) raises. Feature values must be `int`/`float`/`bool`/`str`. Timestamps for a
-  `NonSequentialTimeSeries` must be strictly increasing.
+  of `float64`, `float32`, `int64`, `int32`, `int16`, `int8`, `uint64`, `uint32`, `uint16`, `uint8`,
+  or `bool`; any other dtype (e.g. `complex128` or a string dtype) raises. Feature values must be
+  `int`/`float`/`bool`/`str`. Timestamps for a `NonSequentialTimeSeries` must be strictly
+  increasing.
 
 ## Next
 

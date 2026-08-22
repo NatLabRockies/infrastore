@@ -7,17 +7,19 @@ This guide covers building on `InfraStore.jl`, the Julia package that wraps the
 
 ## Load the Package
 
-`InfraStore.jl` resolves the native library from the `INFRASTORE_LIB` environment variable (or the
-`InfraStore_jll` package when installed). Build the cdylib and point at it before
-`using InfraStore`:
+`Pkg.add("InfraStore")` installs the package and downloads the prebuilt native library as an
+artifact, so in a consumer package nothing else is needed:
+
+```julia
+using Dates, InfraStore
+```
+
+Developing against a checkout, `INFRASTORE_LIB` points the package at a local build instead and
+takes precedence over the artifact; set it before the first store call:
 
 ```sh
 cargo build -p infrastore-ffi --release
 export INFRASTORE_LIB=$PWD/target/release/libinfrastore_ffi.dylib  # .so on Linux
-```
-
-```julia
-using Dates, InfraStore
 ```
 
 Exported names include `Store`, `SingleTimeSeries`, `NonSequentialTimeSeries`, the forecast structs
@@ -84,6 +86,66 @@ Notes:
 
 `add_time_series!` returns a `TimeSeriesKey` holding an opaque handle into the store.
 
+Two more rules worth knowing up front. **Stored instants and periods are millisecond-precision**: a
+`Microsecond(1)` resolution, a `Millisecond(0)` one, or a negative period is refused with
+`InvalidParameterError` (query bounds are unconstrained). And a `Store` is **not thread-safe**:
+confine it, and any reader built from it, to one task, or guard every call with your own lock —
+concurrent calls are undefined behavior, not just a race on results.
+
+### Descriptors
+
+Beyond `units`, an association can carry `quantity_kind` (what the values measure — `"ActivePower"`;
+the one record of what per-unit values mean), `unit_system` (`NaturalUnits` or `ComponentBase`;
+`nothing` means _unspecified_, not natural units — the store rescales nothing), `component_field`
+(the field on the owning component these values vary — `"max_active_power"`; also a filter), and
+`application_data` (an opaque string returned verbatim — the package-owned slot). They can be set on
+the struct, where they become the `add_time_series!` defaults, or passed as keywords:
+
+```julia
+ts = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(100.0:123.0), "load";
+                      units = "MW", quantity_kind = "ActivePower",
+                      unit_system = NaturalUnits, component_field = "max_active_power",
+                      application_data = "{\"source\": \"weather_year_2012\"}")
+key = add_time_series!(store, 42, "Generator", Component, ts)   # keeps all five
+```
+
+None of them is part of the key or of either content hash, so two adds that differ only in a
+descriptor are a duplicate. See
+[Optional Descriptors](../explanation/data-model.md#optional-descriptors).
+
+### Add many series at once
+
+`AddBatch` accepts the same `add_time_series!` calls as a `Store` but only accumulates them;
+`add_time_series_bulk!` commits the whole batch in one catalog transaction and takes the block-sized
+HDF5 write path. It is the way to load a system: an order of magnitude faster than a loop of single
+adds, and same-shaped series land in the same packed dataset.
+
+```julia
+batch = AddBatch()
+for (id, ts) in series
+    add_time_series!(batch, id, "Generator", Component, ts; units = "MW")
+end
+keys = add_time_series_bulk!(store, batch)   # keys in input order; all-or-nothing
+```
+
+### Transactions
+
+Several operations that must take effect together — replacing a series is an add plus a remove — go
+inside a transaction. Removals are reversible only there; outside one the array bytes are reclaimed
+immediately.
+
+```julia
+transaction(store) do
+    new_key = add_time_series!(store, 42, "Generator", Component, updated)
+    remove_time_series!(store, old_key)
+end   # committed if the block returns, rolled back if it throws
+```
+
+Blocks nest (each level is a savepoint), and the store holds the SQLite write lock until the
+outermost one ends. A transaction does not batch: use `add_time_series_bulk!` inside it for the
+writes themselves. `begin_transaction!` / `commit_transaction!` / `rollback_transaction!` are the
+explicit form.
+
 ## Read a Series
 
 ```julia
@@ -93,11 +155,13 @@ println(got.initial_timestamp, " ", got.resolution)   # resolution comes back as
 ```
 
 To read **many whole series at once** — e.g. loading everything for a plot — `bulk_read` takes a
-vector of keys and returns the `SingleTimeSeries` in the same order, reading each packed dataset's
-column span once instead of re-reading every chunk per series:
+vector of keys and returns one struct per key in the same order (each of its stored type, so the
+result is a `Vector{Any}`), reading each packed dataset's column span once instead of re-reading
+every chunk per series:
 
 ```julia
-series = bulk_read(store, keys)   # keys :: Vector{TimeSeriesKey}, all SingleTimeSeries
+series = bulk_read(store, keys)   # keys :: Vector{TimeSeriesKey}
+window = bulk_read(store, keys; time_range = (t0, t1))   # the same slice of every key
 ```
 
 ## Attribute-Based Lookups
@@ -116,7 +180,8 @@ meta = get_metadata(
 )
 # meta :: TimeSeriesMetadata — the whole record: owner_id/owner_type/owner_category,
 #          name, time_series_type, data_hash, initial_timestamp, resolution, length,
-#          horizon/interval/count, percentiles, dtype, element_shape, features, units, application_data
+#          horizon/interval/count, percentiles, element_type, element_shape, features,
+#          units, quantity_kind, unit_system, component_field, application_data
 
 # Any other stored type: pass it first, exactly as get_time_series does. Omitting
 # the type reads a SingleTimeSeries.
@@ -125,11 +190,20 @@ scen = get_metadata(Scenarios, store, 42, Component, "wind"; resolution = Hour(1
 values = get_array_by_hash(store, meta.data_hash)     # Vector{Float64}; pass ::Type{T} for other dtypes
 
 # get_time_series itself resolves by attributes too (pass the type as the first argument):
-got = get_time_series(SingleTimeSeries, store, 42, Component, "load"; resolution = Hour(1))
+got = get_time_series(SingleTimeSeries, store, 42, Component, "load";
+                      resolution = Hour(1), features = Dict("model_year" => 2030))
 
-present = has_time_series(store, 42, Component, "load"; resolution = Hour(1))
-remove_time_series!(store, 42, Component, "load"; resolution = Hour(1))
+present = has_time_series(store, 42, Component, "load";
+                          resolution = Hour(1), features = Dict("model_year" => 2030))
+remove_time_series!(store, 42, Component, "load";
+                    resolution = Hour(1), features = Dict("model_year" => 2030))
 ```
+
+These attribute forms match the feature map **exactly** — the series above was added with
+`model_year = 2030`, so omitting `features` here is a `NotFoundError`, not a wildcard. The
+list/filter forms (`list_keys`, `has_any_time_series`, `remove_by_filter!`) match features as a
+subset instead and may return several rows; a package that resolves partial user queries lists, then
+decides what more than one match means.
 
 `get_time_series`, `has_time_series`, and `remove_time_series!` all accept either a `TimeSeriesKey`
 or `(owner_id, owner_category, name; resolution, features)` attributes — the conventions are
@@ -178,14 +252,20 @@ got = get_time_series(Deterministic, store, 42, Component, "load_fc";
 ```
 
 A `DeterministicSingleTimeSeries` is not added directly — derive one from the stored
-`SingleTimeSeries` with `transform_single_time_series!`, which returns the number transformed. It
-optionally restricts the transform to one `owner_category` and/or one `resolution`:
+`SingleTimeSeries` with `transform_single_time_series!`, which returns a `TransformOutcome` whose
+`transformed` field is the count. It optionally restricts the transform to one `owner_category`
+and/or one `resolution`, and `dry_run = true` runs every check without writing:
 
 ```julia
-n = transform_single_time_series!(store, Hour(24), Hour(24))
-n = transform_single_time_series!(store, Hour(24), Hour(24);
-                                  owner_category = Component, resolution = Hour(1))
+n = transform_single_time_series!(store, Hour(24), Hour(24)).transformed
+outcome = transform_single_time_series!(store, Hour(24), Hour(24);
+                                        owner_category = Component, resolution = Hour(1),
+                                        normalize_single_window = true,
+                                        require_uniform_forecast_grid = true)
 ```
+
+The two policy flags reproduce InfrastructureSystems.jl's rules (it passes both as `true`); see the
+[reference](../reference/julia-api.md#forecasts) for what each enforces.
 
 Requesting `Deterministic` also matches a transformed `DeterministicSingleTimeSeries`, so you read a
 forecast the same way whether it was added densely or derived (either returns a `Deterministic`,
@@ -395,16 +475,28 @@ flush!(store)   # sync HDF5 + SQLite; afterwards system.h5 + system.h5.sqlite ca
 
 Keep the `.h5` and `.h5.sqlite` files together.
 
+To change a store you did not build in this process, **open a copy**: `open_store` defaults to
+read-write, and HDF5 has no journal, so an interrupted in-place write is unrecoverable.
+
+```julia
+store = open_copy(src, joinpath(scratch, "time_series.h5"))   # src is never opened for writing
+...
+persist!(store, src)                                          # one atomic rename replaces it
+```
+
+`open_store(path; read_only=true)` is the right call when nothing will be written.
+
 ### Where the Catalog Lives
 
 By default the catalog _is_ `system.h5.sqlite`, and every commit is durable. Passing
-`catalog=:memory` keeps it in RAM instead, so it reaches disk only via [`persist!`](@ref):
+`catalog=:memory` keeps it in RAM instead, so it reaches disk only via `persist!`:
 
 ```julia
 # Build in a scratch directory; nothing is durable until the explicit save.
 store = Store(; in_memory=false, path=joinpath(scratch, "time_series.h5"), catalog=:memory)
 add_time_series!(store, 42, "Generator", Component, ts)
 persist!(store, destination)     # writes both halves as a matched pair
+persist_catalog!(store)          # or: land only the .sqlite half beside the arrays already at path
 ```
 
 Arrays still stream to the HDF5 file, so this does not require the data to fit in memory. It suits
@@ -438,13 +530,19 @@ end
 ```
 
 The available types are `InfraStore.NotFoundError`, `InfraStore.DuplicateTimeSeriesError`,
-`InfraStore.InvalidParameterError`, `InfraStore.IntegrityError`, `InfraStore.ReadOnlyStoreError`,
+`InfraStore.DuplicateAssociationError`, `InfraStore.InvalidParameterError`,
+`InfraStore.IntegrityError`, `InfraStore.ReadOnlyStoreError`, `InfraStore.IOError`,
+`InfraStore.StoreExistsError` (creating over an existing artifact),
+`InfraStore.MismatchedArtifactError` (the `.h5` and `.sqlite` halves came from two saves),
 `InfraStore.IncompatibleFormatError` (the on-disk store was written by an incompatible data format
-version), and `InfraStore.GenericError` (which carries the raw FFI status `code`).
+version), and `InfraStore.GenericError` (which carries the raw FFI status `code`). See the
+[reference](../reference/julia-api.md#errors) for the full table.
 
 ## InfrastructureSystems.jl Integration Notes
 
-The model is designed to back an InfrastructureSystems.jl time-series store:
+[Embedding in a Parent Package](./embedding.md) is the language-neutral version of this section —
+the store lifecycle, id mapping, and lookup semantics a package like InfrastructureSystems.jl has to
+honor. The Julia-specific points:
 
 - Owners are integer component identifiers (`Int64`), matching InfrastructureSystems.jl
   component/attribute IDs.

@@ -7,7 +7,7 @@ own releases. This page is the procedure.
 | -------- | ---------------------------------------------------------------------------------------------- | --------------- |
 | Rust     | `infrastore-core`, `infrastore-proto`, `infrastore-ffi`, `infrastore-server`, `infrastore-cli` | crates.io       |
 | Python   | `infrastore`                                                                                   | PyPI            |
-| Julia    | `InfraStore_jll`, then `InfraStore`                                                            | Julia General   |
+| Julia    | `InfraStore` (binaries via `Artifacts.toml` → GitHub Releases)                                 | Julia General   |
 | Binaries | `infrastore`, `infrastore-server`, `libinfrastore_ffi` + header                                | GitHub Releases |
 
 `infrastore-py` and `infrastore-bench` set `publish = false`: the first ships as the `infrastore`
@@ -15,8 +15,8 @@ wheel on PyPI rather than as a crate, and the second is an internal benchmarking
 
 ## Versioning
 
-The Rust crates, the JLL, `InfraStore.jl`, and the Python package share the workspace version. Bump
-them together and tag the repo once per release, so every registry pins the same commit.
+The Rust crates, `InfraStore.jl`, and the Python package share the workspace version. Bump them
+together and tag the repo once per release, so every registry pins the same commit.
 
 The version lives in four places that must agree:
 
