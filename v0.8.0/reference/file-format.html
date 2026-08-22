@@ -1,0 +1,822 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>On-Disk File Format - infrastore Documentation</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Time-series storage for power-systems and energy simulations, with Rust, Python, and Julia bindings">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../custom.css">
+        <link rel="stylesheet" href="../pagetoc.css">
+        <link rel="stylesheet" href="../version-selector.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">infrastore Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/NatLabRockies/infrastore" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/NatLabRockies/infrastore/tree/v0.8.0/docs/src/reference/file-format.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="on-disk-file-format"><a class="header" href="#on-disk-file-format">On-Disk File Format</a></h1>
+<p>A persisted store is a pair of files that must be kept together:</p>
+<pre><code class="language-text">&lt;name&gt;.h5          # HDF5   — numerical arrays
+&lt;name&gt;.h5.sqlite   # SQLite — metadata associations
+</code></pre>
+<p>The SQLite catalog path is the HDF5 path with <code>.sqlite</code> appended to the file name. This page is the
+authoritative description of both. For the rationale behind the split, see the
+<a href="../explanation/storage-model.html">Storage Model</a>.</p>
+<p>The array file is a <strong>plain HDF5 file</strong>, written directly against libhdf5 — not a NetCDF4 file.
+Earlier releases wrote it through netcdf-c; the layout below is unchanged, but the file no longer
+carries netcdf-c's <code>_NCProperties</code> attribute, and <code>Store::open</code> accepts only files it wrote itself
+(see <code>storage_backend</code> below). The <code>.h5</code> extension is a convention — the store never inspects it.</p>
+<h2 id="format-version"><a class="header" href="#format-version">Format Version</a></h2>
+<p>The HDF5 root carries four global attributes:</p>
+<pre><code class="language-text">data_format_version = "0.16.0"
+compression         = "deflate:3:shuffle"
+storage_backend     = "hdf5"
+catalog_generation  = "9f2c1ab4e70d5836c41b9e2af0d7c358"
+</code></pre>
+<p><code>data_format_version</code> is the semver of the on-disk format (<code>DATA_FORMAT_VERSION</code>). It is bumped when
+the HDF5 layout, the SQLite schema, or the <a href="../explanation/content-addressing.html">hashing domain</a>
+changes in a backward-incompatible way. A purely additive SQLite table does not qualify: it costs
+old readers nothing and old stores pick it up from the idempotent DDL on their first writable open.
+The <a href="#associations"><code>associations</code></a> table landed that way.</p>
+<p><code>compression</code> records the filter policy the store was created with, so that appends made after
+reopening reuse the same filter. It is <strong>not</strong> part of the compatibility contract — see
+<a href="#compression">Compression</a> below.</p>
+<p><code>storage_backend</code> marks the file as one infrastore wrote. <code>Store::open</code> checks it before reading
+anything else and rejects a file that lacks it with <code>InvalidParameter</code> — this is what distinguishes
+an infrastore store from an arbitrary HDF5 file, and it is why stores written by the older
+netcdf-backed releases are refused rather than misread. Such a store has to be regenerated; there is
+no in-place migration.</p>
+<p><code>catalog_generation</code> pairs this file with exactly one catalog; the same value lives in the catalog's
+<a href="#catalog_identity"><code>catalog_identity</code></a> table. <code>Store::open</code> compares the two and rejects a mismatch
+with <code>MismatchedArtifact</code>. It is written at creation and re-minted by every <code>persist_to</code>, which is
+what makes a save interrupted between its two renames detectable — see
+<a href="../explanation/storage-model.html#saving-one-pair-two-renames">Saving</a>. It is additive, so it carries
+no <code>data_format_version</code> change: a store written before it existed has neither the attribute nor the
+table, which reads as "unstamped" and skips the check rather than failing. Compaction preserves the
+existing value rather than minting a new one, since it rewrites only the HDF5 half.</p>
+<p>Opening a store whose recorded version differs from the version this build reads fails with
+<code>IncompatibleFormat</code>, naming both versions. Every bump is backward-incompatible by definition, so
+the check is exact equality and there is no in-place upgrade path: regenerate the store with the
+matching build.</p>
+<p>(<code>0.16.0</code> added the metadata column <code>component_field</code>; <code>0.15.0</code> renamed the metadata column <code>ext</code> to
+<code>application_data</code> and added the <code>quantity_kind</code> and <code>unit_system</code> columns; unlike a new <em>table</em>,
+new <em>columns</em> are not picked up by the idempotent <code>CREATE TABLE IF NOT EXISTS</code> DDL, so a store one
+version behind is rejected on open; <code>0.14.0</code> moved a <code>NonSequentialTimeSeries</code>'s timestamps out of
+the association row: the <code>timestamps_json</code> TEXT column became a <code>timestamps_hash</code> BLOB resolving
+into the new content-addressed <a href="#timestamp_sets"><code>timestamp_sets</code></a> table, and irregular arrays that
+share a time axis are now column-packed into <code>nsts_…</code> datasets keyed by that hash instead of one
+standalone <code>arr_…</code> dataset each; <code>0.13.0</code> replaced the <code>dtype</code> column with <code>element_type</code>, which
+names the <em>logical</em> element type and derives the physical dtype from it — see
+<a href="./element-types.html">Element types</a>; <code>0.12.0</code> changed <code>owner_category</code> and <code>time_series_type</code> from
+TEXT names to small INTEGER codes — see <a href="#discriminant-encoding">Discriminant encoding</a> below;
+<code>0.11.0</code> renamed the metadata column <code>logical_type</code> to <code>ext</code> — an opaque, package-owned extension
+payload (typically JSON) the store stores verbatim and never interprets; <code>0.10.0</code> replaced the
+per-association <code>features</code> table with the content-addressed <code>feature_sets</code> table below, so a feature
+map is stored once and shared by every association that uses it — dropping the <code>association_id</code>
+foreign key and its <code>ON DELETE CASCADE</code>; <code>0.9.0</code> changed the packed-dataset chunking to
+timestamp-major <code>(1, cols, *element_shape)</code> and made the column count <code>cols</code> per-dataset (sized to
+the writing batch) instead of a fixed 1,000, optimizing reads across series by timestamp and bulk
+writes; <code>0.8.0</code> added the forecast <code>interval</code> to the association uniqueness key — so two forecasts
+of one variable that differ only by interval are now distinct series — widening both unique indexes
+(the <code>NULL</code>-folding index now <code>COALESCE</code>s <code>interval</code> as well as <code>resolution</code>); <code>0.7.0</code> made
+<code>resolution</code>/<code>horizon</code>/<code>interval</code> calendar-aware <a href="../explanation/data-model.html">periods</a>: they are
+now encoded as ISO-8601 duration strings (e.g. <code>PT1H</code>, <code>P1M</code>, <code>P1Y</code>) rather than integer
+milliseconds, in both the packed dataset names and the SQLite columns, so irregular periods
+(<code>Month</code>/<code>Quarter</code>/<code>Year</code>) can be represented distinctly from fixed spans; <code>0.6.0</code> added
+<code>owner_category</code> to the association uniqueness key (so the owner identity is the pair
+<code>(owner_id, owner_category)</code>), widening the unique indexes and <code>idx_owner</code>; <code>0.5.0</code> changed the
+owner identifier to a signed 64-bit integer (<code>owner_id</code>); <code>0.4.0</code> is the baseline the Rust port of
+InfrastructureSystems.jl shipped with — the version that introduced <code>DATA_FORMAT_VERSION</code> itself;
+<code>0.3.0</code> switched the time unit from nanoseconds to milliseconds, renaming the SQLite <code>*_ns</code> columns
+to <code>*_ms</code> and encoding the packed dataset name's <code>{res}</code> field in milliseconds instead of whole
+seconds; <code>0.2.0</code> introduced typed, multi-dimensional arrays and the two-mode array layout below;
+<code>0.1.0</code> stored only 1-D <code>f64</code>.)</p>
+<h2 id="arrays-are-typed-and-n-dimensional"><a class="header" href="#arrays-are-typed-and-n-dimensional">Arrays Are Typed and N-Dimensional</a></h2>
+<p>Every stored array is a <strong><code>TypedArray</code></strong>: an element <code>dtype</code>, a <code>shape</code> <code>[length, k1, k2, …]</code> whose
+first axis is time and whose trailing axes are a fixed per-step element shape, and the raw
+row-major, little-endian element bytes. The supported dtypes and their stable integer codes (shared
+with the bindings and the C ABI). Codes 0–5 are the original set and never move; new widths are
+appended:</p>
+<div class="table-wrapper"><table><thead><tr><th>Code</th><th>dtype</th><th>Width</th><th>Code</th><th>dtype</th><th>Width</th></tr></thead><tbody>
+<tr><td>0</td><td><code>f64</code></td><td>8</td><td>6</td><td><code>i16</code></td><td>2</td></tr>
+<tr><td>1</td><td><code>f32</code></td><td>4</td><td>7</td><td><code>i8</code></td><td>1</td></tr>
+<tr><td>2</td><td><code>i64</code></td><td>8</td><td>8</td><td><code>u32</code></td><td>4</td></tr>
+<tr><td>3</td><td><code>i32</code></td><td>4</td><td>9</td><td><code>u16</code></td><td>2</td></tr>
+<tr><td>4</td><td><code>u64</code></td><td>8</td><td>10</td><td><code>u8</code></td><td>1</td></tr>
+<tr><td>5</td><td><code>bool</code></td><td>1</td><td></td><td></td><td></td></tr>
+</tbody></table>
+</div>
+<p>A scalar-per-step series has an empty element shape; a per-step tuple (e.g. the 3 coefficients of a
+quadratic cost curve) has element shape <code>[3]</code>.</p>
+<p>The <em>dtype</em> says how wide an element is. What those elements <strong>mean</strong> — and how a ragged piecewise
+curve is packed into a fixed-width row — is the association's <code>element_type</code>; see
+<a href="./element-types.html">Element types</a>. The dtype above is derived from it.</p>
+<p>The HDF5 file does <strong>not</strong> describe its own element typing, and is not meant to: <code>bool</code> and <code>u8</code> are
+the same byte on disk, and nothing in a dataspace says whether three <code>f64</code>s are a quadratic curve or
+three independent samples. Every read takes the dtype from the catalog's <code>element_type</code> instead. The
+two artifacts are one logical store — an <code>.h5</code> without its <code>.sqlite</code> is not readable in any case —
+so this removes a second, weaker source of truth rather than adding a dependency. Where a backend
+does know a dtype independently (a packed dataset's name encodes it), the catalog's value is checked
+against it and a mismatch is an integrity error.</p>
+<h2 id="hdf5-layout"><a class="header" href="#hdf5-layout">HDF5 Layout</a></h2>
+<p>Arrays live under a two-level group hierarchy, in one of <strong>two storage modes</strong>:</p>
+<pre><code class="language-text">&lt;name&gt;.h5
+├── attribute  data_format_version = "0.16.0"
+├── attribute  compression         = "deflate:3:shuffle"
+├── attribute  storage_backend     = "hdf5"
+└── group      time_series/
+    └── group  single/
+        ├── dset  sts_{dtype}_{shape}_{length}_{res}      packed  (length, cols, *element_shape)
+        ├── dset  sts_{dtype}_{shape}_{length}_{res}_h    u8  (cols, 64)   # per-column hex hashes
+        ├── dset  sts_{dtype}_{shape}_{length}_{res}__1   packed spill dataset
+        ├── dset  nsts_{dtype}_{shape}_{length}_{tshash}  packed irregular cohort
+        ├── dset  nsts_{dtype}_{shape}_{length}_{tshash}_h  u8  (cols, 64)
+        ├── dset  arr_{hex_hash}                          standalone  [length, *element_shape]
+        └── ...
+</code></pre>
+<p>Datasets carry <strong>no dimension scales and no dimension names</strong> — shape is read straight off the HDF5
+dataspace. (The netcdf-backed releases created a named dimension per axis, <code>{dataset}_t</code>,
+<code>{dataset}_c</code>, and so on; those objects are gone.) On open the backend recovers each packed
+dataset's column count from the second extent of its dataspace, which is how per-dataset widths
+round-trip.</p>
+<p>The hash companion <code>{dataset}_h</code> is a <code>(cols, 64)</code> array of <code>u8</code> holding each column's 64 lowercase
+hex characters as raw bytes — not an HDF5 string dataset. <strong>An all-zero row marks a free slot.</strong></p>
+<h3 id="packed-mode"><a class="header" href="#packed-mode">Packed mode</a></h3>
+<p>Used for every <strong>static</strong> series: <code>SingleTimeSeries</code>, the underlying array of a
+<code>DeterministicSingleTimeSeries</code>, and <code>NonSequentialTimeSeries</code>. Many arrays that share a
+<code>(dtype, element_shape, length)</code> <strong>and a time axis</strong> are column-packed into one dataset:</p>
+<div class="table-wrapper"><table><thead><tr><th>Element</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>sts_</code></td><td>Prefix for a packed <code>SingleTimeSeries</code> / DST pool</td></tr>
+<tr><td><code>nsts_</code></td><td>Prefix for a packed <code>NonSequentialTimeSeries</code> cohort</td></tr>
+<tr><td><code>{dtype}</code></td><td>Element dtype string (<code>f64</code>, <code>i64</code>, …)</td></tr>
+<tr><td><code>{shape}</code></td><td>Element shape: <code>s</code> = scalar, <code>3</code> = <code>[3]</code>, <code>3x2</code> = <code>[3, 2]</code></td></tr>
+<tr><td><code>{length}</code></td><td>Number of timesteps (size of the time axis)</td></tr>
+<tr><td><code>{res}</code></td><td><code>sts_</code> only: resolution as an ISO-8601 duration (<code>PT1H</code>, <code>P1M</code>; no <code>_</code>)</td></tr>
+<tr><td><code>{tshash}</code></td><td><code>nsts_</code> only: 64 hex chars, the timestamp vector's content hash</td></tr>
+<tr><td><code>__{n}</code></td><td>Spill suffix; absent for the first dataset, <code>__1</code>, <code>__2</code>, … after</td></tr>
+</tbody></table>
+</div>
+<p>The trailing element is what pins the <strong>time axis</strong>, which is what makes packing meaningful at all:
+the chunking is timestamp-major, so row <code>t</code> of a dataset is "every column at the same instant". A
+regular series takes its axis from the resolution; an irregular one carries the axis explicitly, and
+two of them share one exactly when their timestamp vectors are equal — which the catalog already
+answers by content-addressing those vectors (see <a href="#timestamp_sets"><code>timestamp_sets</code></a>). The full
+64-char hash is used, not a prefix: the name is parsed back into the pool key when the index is
+rebuilt at open, so a truncated form could let two distinct time axes collide into one pool.</p>
+<p>The dataset shape is <code>(length, cols, *element_shape)</code> and chunking is <code>(1, cols, *element_shape)</code>,
+so one HDF5 chunk holds a single timestamp across every column — making a read across series by
+timestamp one chunk, and a buffered bulk write fill whole chunks. <code>cols</code> is chosen per dataset: a
+managed bulk write sizes it to the batch, while an incremental one-at-a-time write path uses a
+default width (<code>DEFAULT_COLS_PER_DATASET = 1000</code>). In both cases <code>cols</code> is capped so one chunk stays
+within a byte budget (<code>MAX_CHUNK_BYTES = 1 MiB</code>); a batch wider than the cap spills across datasets.</p>
+<ul>
+<li><strong>Rows are timesteps, columns are series.</strong> Column <code>i</code> holds one complete series.</li>
+<li><strong>Hash companion variable.</strong> Each packed dataset has a sibling <strong>string</strong> variable <code>{dataset}_h</code>
+of shape <code>(cols,)</code>. Slot <code>i</code> holds the lowercase hex SHA-256 (64 chars) of column <code>i</code>, or an empty
+string if the column is free. This is the on-disk index: on open, the backend scans every <code>…_h</code>,
+decodes the non-empty hashes, and rebuilds its <code>hash → (dataset, column)</code> map. (The backend also
+recovers each dataset's <code>cols</code> from its column dimension length, so per-dataset widths
+round-trip.)</li>
+<li><strong>Spill.</strong> When a family's current dataset is full — a batch exceeds the column cap, or
+incremental writes fill a default-width dataset — the next write creates a spill dataset <code>…__1</code>,
+then <code>…__2</code>, and so on.</li>
+</ul>
+<h3 id="standalone-mode"><a class="header" href="#standalone-mode">Standalone mode</a></h3>
+<p>Used for the dense forecast arrays (<strong><code>Deterministic</code></strong>, <strong><code>Probabilistic</code></strong>, <strong><code>Scenarios</code></strong>), and
+for a <strong><code>NonSequentialTimeSeries</code></strong> whose time axis nothing else shares. Each array is its own
+typed, multi-dimensional variable named <code>arr_{hex_hash}</code> in the <code>time_series/single</code> group. There is
+no column packing and no companion hash variable — the variable name carries the hash.</p>
+<ul>
+<li><strong>A lone <code>NonSequentialTimeSeries</code></strong> is shaped <code>[length, *element_shape]</code> and chunked as a single
+whole-array chunk. It stores its explicit, strictly-increasing timestamps in the catalog, not in
+the array. Packing is only a win once a cohort is several columns wide — a packed dataset spreads
+one array over <code>length</code> chunks — so a series alone on its time axis stays standalone. Whether a
+given array is packed or standalone is a write-time choice with no effect on reads (they resolve
+by content hash and handle either), and one cohort can hold columns of both.</li>
+<li><strong>Dense forecasts</strong> are shaped <code>[H, count, *element_shape]</code> (<code>Deterministic</code>),
+<code>[num_percentiles, H, count, *element_shape]</code> (<code>Probabilistic</code>), or
+<code>[num_scenarios, H, count, *element_shape]</code> (<code>Scenarios</code>), where <code>count</code> is the number of forecast
+windows. They are chunked in <strong>bounded blocks along the <code>count</code> (window) axis</strong> — full on every
+other axis, <code>cols</code> windows wide, where <code>cols</code> is the largest count keeping one chunk within the
+same 1 MiB budget the packed datasets use. Reading a single window therefore decompresses one
+block rather than the whole array, and the <code>ForecastReader</code> aligns its in-memory cache to the same
+block width so sweeping the window timeline decompresses each block exactly once. The chunk width
+is not recorded anywhere: it is a write-time storage choice that reads transparently regardless of
+the width a store was written with, so it does not affect the data-format version.</li>
+</ul>
+<h3 id="compression"><a class="header" href="#compression">Compression</a></h3>
+<p>Compression is chosen at store creation and applies to every data variable, packed and standalone
+alike (the <code>…_h</code> hash variables are strings and are not compressed). The <strong>default</strong> is DEFLATE
+(zlib) level 3 with the byte-shuffle filter; the level (0–9) and shuffle can be changed, or
+compression turned off entirely. The choice is persisted in the <code>compression</code> global attribute and
+restored when the store is reopened, so later appends reuse the same filter:</p>
+<div class="table-wrapper"><table><thead><tr><th>Attribute value</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>none</code></td><td>No compression filter</td></tr>
+<tr><td><code>deflate:{level}:shuffle</code></td><td>DEFLATE at <code>level</code> (0–9), byte-shuffle on</td></tr>
+<tr><td><code>deflate:{level}:noshuffle</code></td><td>DEFLATE at <code>level</code> (0–9), byte-shuffle off</td></tr>
+</tbody></table>
+</div>
+<p>An absent or unparseable attribute falls back to the default (<code>deflate:3:shuffle</code>), which is what
+such a file was written with. Compression is a storage detail only: arrays decode transparently
+regardless of the filter, so stores written with different settings stay mutually readable and
+<code>data_format_version</code> is unaffected by the choice.</p>
+<h3 id="deletion-and-compaction"><a class="header" href="#deletion-and-compaction">Deletion and compaction</a></h3>
+<ul>
+<li><strong>Packed:</strong> deletion zero-fills both the column's hash row and the column's data, so no stale
+values are readable through a reused slot. The slot becomes reusable by the next compatible write.
+The dataset does not shrink.</li>
+<li><strong>Standalone:</strong> deletion unlinks the HDF5 dataset. The object is unreachable immediately and stays
+gone across a reopen, but the space it occupied is not returned to the filesystem until a
+compaction (HDF5 cannot reclaim space in place). Re-adding the same content therefore rewrites the
+dataset rather than re-indexing it.</li>
+<li><strong>Feature sets and timestamp vectors:</strong> because both are shared, deleting an association never
+deletes either; removing the last association that referenced one leaves it unreachable.
+<code>compact()</code> deletes unreachable rows and reports the counts as <code>feature_sets_reclaimed</code> and
+<code>timestamp_sets_reclaimed</code>.</li>
+</ul>
+<p><code>compact()</code> on an on-disk store <strong>rewrites the <code>.h5</code> file</strong>, because that is the only way HDF5 gives
+the freed space back:</p>
+<ol>
+<li>The catalog is swept of unreachable feature sets and timestamp vectors, then read for the live
+set — the catalog, not the file, is what makes an array live.</li>
+<li>Every live array is written into a fresh file at <code>&lt;store&gt;.h5.repack</code>, sibling to the original so
+the two share a filesystem. Layouts are planned from scratch: packed pools are created at exactly
+their cohort width rather than the growth-sized width an incremental write reserves.</li>
+<li>The store's HDF5 handle is closed, the temp file is renamed over the original, and the store
+reopens on the result. A crash before the rename leaves the original untouched plus a stray
+<code>.repack</code> file, which the next compaction deletes.</li>
+</ol>
+<p>What the new file therefore lacks: freed packed slots, unreferenced datasets (an interrupted bulk
+add's leftovers, or tombstones left by a store written before deletion unlinked), and the slack in
+over-wide packed pools. The <code>.sqlite</code> half is not touched — arrays are content-addressed, so a
+different physical layout is invisible to it — and <code>data_format_version</code> is unchanged, because the
+rewrite emits the same format.</p>
+<p>Compaction assumes the process running it is the file's only user. On Unix another process holding
+the file open keeps reading the pre-compaction inode; on Windows its lock makes the rename fail, and
+the error surfaces with the compacting store still open on the original file.</p>
+<h2 id="sqlite-schema"><a class="header" href="#sqlite-schema">SQLite Schema</a></h2>
+<p>The catalog database is created with <code>PRAGMA foreign_keys = ON</code> and the following DDL (idempotent —
+<code>CREATE TABLE IF NOT EXISTS</code>).</p>
+<h3 id="time_series_associations"><a class="header" href="#time_series_associations"><code>time_series_associations</code></a></h3>
+<p>One row per association between an owner and a stored array.</p>
+<div class="table-wrapper"><table><thead><tr><th>Column</th><th>Type</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>id</code></td><td>INTEGER</td><td>Primary key</td></tr>
+<tr><td><code>owner_id</code></td><td>INTEGER</td><td>Owner identity; signed 64-bit integer identifier (part of key)</td></tr>
+<tr><td><code>owner_type</code></td><td>TEXT</td><td>Owner's concrete type, descriptive</td></tr>
+<tr><td><code>owner_category</code></td><td>INTEGER</td><td>Code, <code>CHECK</code> in (0, 1); part of key — see below</td></tr>
+<tr><td><code>time_series_type</code></td><td>INTEGER</td><td>Code, <code>CHECK</code> between 0 and 5; part of key — see below</td></tr>
+<tr><td><code>name</code></td><td>TEXT</td><td>Series name</td></tr>
+<tr><td><code>initial_timestamp</code></td><td>TEXT</td><td>RFC 3339 string; <code>NULL</code> for <code>NonSequentialTimeSeries</code></td></tr>
+<tr><td><code>resolution</code></td><td>TEXT</td><td>ISO-8601 duration (<code>PT1H</code>, <code>P1M</code>, …); <code>NULL</code> for non-sequential</td></tr>
+<tr><td><code>length</code></td><td>INTEGER</td><td>Number of timesteps</td></tr>
+<tr><td><code>horizon</code></td><td>TEXT</td><td>ISO-8601 forecast horizon; <code>NULL</code> for non-forecasts</td></tr>
+<tr><td><code>interval</code></td><td>TEXT</td><td>ISO-8601 forecast interval; <code>NULL</code> for non-forecasts</td></tr>
+<tr><td><code>count</code></td><td>INTEGER</td><td>Forecast window count; <code>NULL</code> for non-forecasts</td></tr>
+<tr><td><code>timestamps_hash</code></td><td>BLOB</td><td>32-byte SHA-256 of the timestamp vector (<code>NonSequentialTimeSeries</code>)</td></tr>
+<tr><td><code>units</code></td><td>TEXT</td><td>Free-form units label</td></tr>
+<tr><td><code>quantity_kind</code></td><td>TEXT</td><td>What the values measure (QUDT <code>QuantityKind</code> name); <code>NULL</code> if unset</td></tr>
+<tr><td><code>unit_system</code></td><td>TEXT</td><td><code>natural_units</code> or <code>component_base</code>; <code>NULL</code> means <em>unspecified</em></td></tr>
+<tr><td><code>component_field</code></td><td>TEXT</td><td>Owning component's field these values vary; <code>NULL</code> if unset</td></tr>
+<tr><td><code>percentiles_json</code></td><td>TEXT</td><td>JSON array of percentiles for <code>Probabilistic</code>; <code>NULL</code> else</td></tr>
+<tr><td><code>element_type</code></td><td>TEXT</td><td>Canonical element-type string (<code>NOT NULL DEFAULT 'f64'</code>)</td></tr>
+<tr><td><code>element_shape</code></td><td>TEXT</td><td>JSON array of per-step dims (<code>[]</code> = scalar)</td></tr>
+<tr><td><code>application_data</code></td><td>TEXT</td><td>Opaque package-owned payload (JSON), verbatim; <code>NULL</code> if unset</td></tr>
+<tr><td><code>data_hash</code></td><td>BLOB</td><td>32-byte SHA-256 of the array; links to an HDF5 column/variable</td></tr>
+<tr><td><code>features_hash</code></td><td>BLOB</td><td>32-byte SHA-256 of the feature map</td></tr>
+</tbody></table>
+</div>
+<p>The two content-address hashes are the last two columns. Column order is not load-bearing — every
+statement names its columns — so the layout is chosen for readability.</p>
+<h3 id="feature_sets"><a class="header" href="#feature_sets"><code>feature_sets</code></a></h3>
+<p>The expanded feature map, one row per key. The typed columns are populated according to
+<code>value_kind</code>.</p>
+<p>Feature sets are <strong>content-addressed</strong>, exactly as arrays are: the table is keyed by the SHA-256 of
+the feature map, and one set is stored once and shared by every association whose <code>features_hash</code>
+matches. The association row already carries that hash, so no join column is needed. Two
+associations with the same features therefore reference the same rows here — including a
+<code>DeterministicSingleTimeSeries</code> and the <code>SingleTimeSeries</code> it was derived from, which is why
+<a href="../explanation/data-model.html"><code>transform_single_time_series</code></a> writes no feature rows at all.</p>
+<div class="table-wrapper"><table><thead><tr><th>Column</th><th>Type</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>key</code></td><td>TEXT</td><td>Feature name</td></tr>
+<tr><td><code>value_kind</code></td><td>TEXT</td><td><code>CHECK</code> in (<code>int</code>, <code>float</code>, <code>bool</code>, <code>str</code>)</td></tr>
+<tr><td><code>value_int</code></td><td>INTEGER</td><td>Set when <code>value_kind = 'int'</code></td></tr>
+<tr><td><code>value_float</code></td><td>REAL</td><td>Set when <code>value_kind = 'float'</code></td></tr>
+<tr><td><code>value_bool</code></td><td>INTEGER</td><td>0/1, set when <code>value_kind = 'bool'</code></td></tr>
+<tr><td><code>value_str</code></td><td>TEXT</td><td>Set when <code>value_kind = 'str'</code></td></tr>
+<tr><td><code>features_hash</code></td><td>BLOB</td><td>32-byte SHA-256 of the feature map</td></tr>
+<tr><td></td><td></td><td><code>PRIMARY KEY (features_hash, key)</code></td></tr>
+</tbody></table>
+</div>
+<p>An empty feature map stores no rows.</p>
+<p>There is deliberately <strong>no foreign key</strong> to <code>time_series_associations</code> and <strong>no cascade</strong>: rows here
+are shared, so deleting one association must not delete a set another association still uses.
+Removing the last association that referenced a set instead leaves it unreachable — the same
+deletion semantics as the HDF5 side's unreachable standalone variables. <code>Store::compact</code> sweeps
+unreachable sets and reports the count as <code>feature_sets_reclaimed</code>; clearing a store drops them all
+outright.</p>
+<h3 id="timestamp_sets"><a class="header" href="#timestamp_sets"><code>timestamp_sets</code></a></h3>
+<p>The explicit timestamp vector of a <code>NonSequentialTimeSeries</code>, content-addressed exactly as feature
+sets are. The association row carries only the 32-byte <code>timestamps_hash</code>.</p>
+<div class="table-wrapper"><table><thead><tr><th>Column</th><th>Type</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>timestamps_hash</code></td><td>BLOB</td><td>32-byte SHA-256 of <code>data</code>; <code>PRIMARY KEY</code></td></tr>
+<tr><td><code>data</code></td><td>BLOB</td><td>The vector in the compact encoding below</td></tr>
+</tbody></table>
+</div>
+<p>Three things this buys, in descending order of how much they matter:</p>
+<ul>
+<li><strong>The vector is stored once per distinct time axis.</strong> Irregular series in a power-systems model
+overwhelmingly share one — event times, an outage schedule, a market timeline — so a thousand
+components sampled at the same instants hold one copy between them.</li>
+<li><strong>The association table stays narrow.</strong> The vector used to live inline as an RFC 3339 JSON array
+(24 bytes per timestamp, ~210 KB for a year of hourly data), which pushed those rows into SQLite
+overflow pages and made every scan-shaped catalog query read and parse megabytes it had no use
+for. A listing now decodes each distinct vector once, as it already did for features.</li>
+<li><strong>It is the cohort key the packed HDF5 layout groups irregular arrays by</strong> (see
+<a href="#packed-mode">Packed mode</a>).</li>
+</ul>
+<p><code>data</code> is not human-readable, deliberately — the readable projection below covers hand inspection of
+everything else. Its layout is:</p>
+<pre><code class="language-text">[0]      version   u8       currently 1
+[1]      unit      u8       delta unit: 0=ns, 1=µs, 2=ms, 3=s, 4=min, 5=hour, 6=day
+then     count     uvarint  number of timestamps
+if count &gt; 0:
+  base_secs        svarint  seconds since the Unix epoch (zigzag)
+  base_nanos       uvarint  sub-second nanoseconds of the first timestamp
+  delta_1..delta_n svarint  successive differences, in `unit`s (zigzag)
+</code></pre>
+<p>Varints are LEB128; signed values are zigzag-encoded first. The unit is the coarsest one that
+divides every delta, which is what makes the encoding cheap: irregularity in this domain is usually
+coarse (event times on whole seconds or minutes, a regular grid with gaps), so a year of hourly
+timestamps becomes 8,760 single-byte deltas — ~8.8 KB against ~210 KB for the JSON form. A vector
+with genuine microsecond jitter degrades to ~4–5 bytes per timestamp, still well under JSON.
+Precision is nanoseconds over chrono's full range; the base timestamp is stored as its own
+<code>(seconds, nanoseconds)</code> pair and later ones are reconstructed by accumulating deltas in 128-bit
+arithmetic. The one thing not preserved is a leap second after the first position, which normalizes
+into the following second.</p>
+<p>Like <code>feature_sets</code>, there is <strong>no foreign key</strong> and <strong>no cascade</strong>: rows are shared.
+<code>Store::compact</code> sweeps unreachable vectors and reports the count as <code>timestamp_sets_reclaimed</code>.</p>
+<h3 id="supplemental_attribute_associations"><a class="header" href="#supplemental_attribute_associations"><code>supplemental_attribute_associations</code></a></h3>
+<p>Which supplemental attributes are attached to which components. Columns match infrasys' table of the
+same name, whose logic this replaces. See
+<a href="../explanation/data-model.html#associations-between-entities">Associations Between Entities</a> for the
+data model.</p>
+<pre><code class="language-sql">CREATE TABLE supplemental_attribute_associations (
+    id             INTEGER PRIMARY KEY,
+    component_id   INTEGER NOT NULL,
+    component_type TEXT    NOT NULL,
+    attribute_id   INTEGER NOT NULL,
+    attribute_type TEXT    NOT NULL
+);
+
+CREATE UNIQUE INDEX uq_sa_assoc
+    ON supplemental_attribute_associations(component_id, attribute_id);
+CREATE INDEX idx_sa_assoc_attribute
+    ON supplemental_attribute_associations(attribute_id, component_id, component_type);
+</code></pre>
+<p><code>uq_sa_assoc</code> makes the <code>(component_id, attribute_id)</code> pair the row's identity — the type columns
+are denormalized labels for filtering, so the same pair under different type names is a duplicate
+and surfaces as <code>DuplicateAssociation</code>. That index also serves lookups keyed on the component;
+<code>idx_sa_assoc_attribute</code> serves the reverse direction ("which components carry this attribute").</p>
+<p>One attribute may be attached to many components; one component may carry many attributes. Only the
+exact pair is constrained.</p>
+<h3 id="parent_child_associations"><a class="header" href="#parent_child_associations"><code>parent_child_associations</code></a></h3>
+<p>Directed edges between components — a generator (parent) connected to a bus (child), say. Both
+endpoints are always components, which is why there is no category column: a supplemental attribute
+cannot appear here by construction.</p>
+<pre><code class="language-sql">CREATE TABLE parent_child_associations (
+    id          INTEGER PRIMARY KEY,
+    parent_id   INTEGER NOT NULL,
+    parent_type TEXT    NOT NULL,
+    child_id    INTEGER NOT NULL,
+    child_type  TEXT    NOT NULL
+);
+
+CREATE UNIQUE INDEX uq_parent_child
+    ON parent_child_associations(parent_id, child_id);
+CREATE INDEX idx_parent_child_child
+    ON parent_child_associations(child_id, parent_id, parent_type);
+</code></pre>
+<p>Identity is the <strong>ordered</strong> <code>(parent_id, child_id)</code> pair, so the reversed pair is a different edge.
+There is no relationship-kind column: two components may be related at most once. Recording a second
+kind of edge between the same pair would need such a column added and <code>uq_parent_child</code> widened —
+which is a format change, unlike the tables themselves.</p>
+<h3 id="properties-shared-by-both-association-tables"><a class="header" href="#properties-shared-by-both-association-tables">Properties shared by both association tables</a></h3>
+<p>Neither table has a <strong>foreign key</strong> — to <code>time_series_associations</code> or anywhere else — and neither
+cascades. The endpoints live in the consumer's object graph, not in this store, so the store never
+observes a component or attribute being deleted and a cascade could never fire. Removing a time
+series therefore leaves both tables untouched, and vice versa; consumers issue both calls when they
+want both effects.</p>
+<p>Both are also independent of each other: the same integer may name a row in each without collision.</p>
+<h4 id="compatibility"><a class="header" href="#compatibility">Compatibility</a></h4>
+<p>Both tables were added <strong>without</strong> bumping <code>data_format_version</code>, which is why a <code>0.10.0</code> store may
+or may not contain them:</p>
+<ul>
+<li>Opening a store for writing applies the full DDL, which is idempotent, so a store written before
+they existed gains both on first writable open.</li>
+<li>Opening read-only cannot run DDL. Reads of a missing table return empty results (<code>0</code>, <code>false</code>, no
+rows) rather than failing.</li>
+</ul>
+<p>The version gate is exact equality with no upgrade path, so bumping for purely additive tables would
+have made every existing store unreadable in exchange for nothing.</p>
+<h3 id="schema_version"><a class="header" href="#schema_version"><code>schema_version</code></a></h3>
+<pre><code class="language-sql">CREATE TABLE schema_version (version INTEGER NOT NULL);
+</code></pre>
+<p>A single-column table holding the catalog schema version. Creating the catalog inserts <code>version = 1</code>
+if the table is empty; <code>1</code> is the current value. This tracks the SQLite schema alone and is distinct
+from the HDF5 <code>data_format_version</code> attribute, which governs the artifact as a whole and is the
+value <code>open</code> validates.</p>
+<h3 id="catalog_identity"><a class="header" href="#catalog_identity"><code>catalog_identity</code></a></h3>
+<pre><code class="language-sql">CREATE TABLE catalog_identity (generation TEXT NOT NULL);
+</code></pre>
+<p>Holds zero or one row pairing this catalog with one HDF5 file, whose <code>catalog_generation</code> root
+attribute carries the same value. <code>Store::open</code> compares them and rejects a mismatch with
+<code>MismatchedArtifact</code>, which is what turns an interrupted <code>persist_to</code> — two renames that cannot be
+made atomic together — into a loud error instead of a store that quietly disagrees with itself. It
+also catches one half being copied without the other.</p>
+<p>Added additively, so it lands on an existing store's first writable open without a
+<code>data_format_version</code> change. A store predating it has no row here and no root attribute, and reads
+as unstamped rather than as a mismatch. Because a read-only open cannot run the DDL, every read of
+this table tolerates the table being absent.</p>
+<h3 id="indexes"><a class="header" href="#indexes">Indexes</a></h3>
+<pre><code class="language-sql">CREATE UNIQUE INDEX uq_ts_assoc ON time_series_associations
+    (owner_id, owner_category, time_series_type, name, resolution, interval, features_hash);
+CREATE UNIQUE INDEX uq_ts_assoc_coalesced ON time_series_associations
+    (owner_id, owner_category, time_series_type, name,
+     COALESCE(resolution, ''), COALESCE(interval, ''), features_hash);
+
+CREATE INDEX idx_hash       ON time_series_associations(data_hash);
+CREATE INDEX idx_owner      ON time_series_associations(owner_id, owner_category);
+CREATE INDEX idx_resolution ON time_series_associations(resolution);
+
+-- Secondary indexes for the filter / discovery surface.
+CREATE INDEX idx_ts_type        ON time_series_associations(time_series_type);
+CREATE INDEX idx_name           ON time_series_associations(name);
+CREATE INDEX idx_owner_type     ON time_series_associations(owner_type);
+CREATE INDEX idx_category_owner ON time_series_associations(owner_category, owner_id);
+CREATE INDEX idx_interval       ON time_series_associations(interval);
+CREATE INDEX idx_component_field ON time_series_associations(component_field)
+    WHERE component_field IS NOT NULL;
+</code></pre>
+<p><code>idx_component_field</code> is the only <strong>partial</strong> index, because <code>component_field</code> is the only optional
+column anything filters on: a store that never sets it would otherwise pay index maintenance on
+every insert to record one <code>NULL</code> per row and buy nothing, so the <code>WHERE</code> clause makes that case
+cost zero entries. SQLite still uses it for the predicate the filter issues — <code>component_field = ?</code>
+cannot be true of a <code>NULL</code> whatever the parameter binds to — but it can never serve an <code>IS NULL</code>
+query, which is the same reason <code>ListFilter::component_field</code> cannot select the rows that left the
+field unset.</p>
+<p>An index over a column that already exists is additive: a store gains any it lacks on its first
+writable open, at a one-time build cost proportional to catalog size, with no <code>data_format_version</code>
+change. <code>idx_component_field</code> is the exception, because it names a column introduced by a bump — it
+applies only to a catalog already carrying <code>component_field</code>, and an older store never reaches the
+DDL, being rejected by the version check first.</p>
+<p>Together the two unique indexes enforce <a href="../explanation/data-model.html#keys">key uniqueness</a>; a
+violation surfaces as <code>DuplicateTimeSeries</code>. Both <code>owner_id</code> and <code>owner_category</code> are part of the
+key, so a component and a supplemental attribute that share an <code>owner_id</code> are independent owners.
+<code>interval</code> is part of the key, so two forecasts of one variable at the same resolution but different
+intervals are distinct series. SQLite treats <code>NULL</code> values as distinct in a <code>UNIQUE</code> index, so
+<code>uq_ts_assoc</code> does not constrain rows with a <code>NULL</code> <code>resolution</code> or <code>interval</code> (e.g.
+<code>NonSequentialTimeSeries</code>, or any static series, which carry no interval). <code>uq_ts_assoc_coalesced</code>
+covers that case by folding <code>NULL</code> to the empty-string sentinel via <code>COALESCE</code> before enforcing
+uniqueness (the empty string is never a valid ISO-8601 period).</p>
+<p>These two were named <code>uq_assoc</code> and <code>uq_assoc_coalesced</code> before the association tables above existed
+and made a bare "assoc" ambiguous. The DDL drops the old names before creating the new ones, so a
+store written by an earlier build is renamed in place on its first writable open rather than
+accumulating two equivalent index pairs. Index names are not part of the on-disk contract, so this
+carries no <code>data_format_version</code> change.</p>
+<h3 id="time_series_readable-view"><a class="header" href="#time_series_readable-view"><code>time_series_readable</code> (view)</a></h3>
+<pre><code class="language-sql">CREATE VIEW time_series_readable AS
+SELECT id, owner_id, owner_type,
+       CASE owner_category WHEN 0 THEN 'Component'
+                           WHEN 1 THEN 'SupplementalAttribute'
+                           ELSE 'unknown(' || owner_category || ')' END AS owner_category,
+       CASE time_series_type WHEN 0 THEN 'SingleTimeSeries'
+                             WHEN 1 THEN 'NonSequentialTimeSeries'
+                             WHEN 2 THEN 'Deterministic'
+                             WHEN 3 THEN 'DeterministicSingleTimeSeries'
+                             WHEN 4 THEN 'Probabilistic'
+                             WHEN 5 THEN 'Scenarios'
+                             ELSE 'unknown(' || time_series_type || ')' END AS time_series_type,
+       name,
+       initial_timestamp, resolution, length, horizon, interval, count,
+       units, quantity_kind, unit_system, component_field,
+       element_type, element_shape, application_data,
+       lower(hex(data_hash))       AS data_hash,
+       lower(hex(features_hash))   AS features_hash,
+       lower(hex(timestamps_hash)) AS timestamps_hash
+FROM time_series_associations;
+</code></pre>
+<p>This view decodes both discriminants and every content hash, so it is the convenient thing to query
+by hand. Nothing in the library reads it.</p>
+<p>A projection of the association table with both hashes hex-encoded, for humans opening the catalog
+in <code>sqlite3</code> — see <a href="#reading-the-catalog-by-hand">Reading the catalog by hand</a>. Nothing in the
+library reads it. It costs no storage, is created by the same idempotent DDL as the tables above,
+and so lands on an existing store's first writable open without a <code>data_format_version</code> change.</p>
+<h2 id="field-encoding-notes"><a class="header" href="#field-encoding-notes">Field Encoding Notes</a></h2>
+<ul>
+<li><strong>Timestamps</strong> are RFC 3339 strings in UTC, holding a whole number of <strong>milliseconds</strong>. The format
+could carry finer digits and a store written before the precision rule may, so a reader must parse
+the full string; but no current write path produces one — see
+<a href="../explanation/data-model.html#timestamp-precision">timestamp precision</a>.</li>
+<li><strong>Periods</strong> (<code>resolution</code>, <code>horizon</code>, <code>interval</code>) are canonical <strong>ISO-8601 duration strings</strong> in
+SQLite (<code>PT1H</code>, <code>P1M</code>, <code>P1Y</code>), and the packed dataset name's <code>{res}</code> field uses the same encoding.
+Calendar periods (<code>Month</code>/<code>Quarter</code>/<code>Year</code>) are stored distinctly from fixed spans.</li>
+<li><strong>Hashes</strong> are raw 32-byte <code>BLOB</code>s in SQLite, lowercase hex in HDF5 (the <code>…_h</code> dataset for packed
+arrays, the <code>arr_</code> dataset name for standalone arrays). <code>BLOB</code> rather than hex <code>TEXT</code> in SQLite
+because the two hash columns sit in the association table, in <code>idx_hash</code>, and in both unique
+indexes — hex would cost roughly 32% more catalog space — and because a <code>BLOB</code> literal (<code>X'…'</code>)
+compares case-insensitively while a hex <code>TEXT</code> column would not. The
+<a href="#reading-the-catalog-by-hand"><code>time_series_readable</code> view</a> supplies the readable form.</li>
+<li><strong><code>element_shape</code></strong> is the per-step shape only (the trailing axes); the time <code>length</code> is a
+separate column.</li>
+</ul>
+<h3 id="discriminant-encoding"><a class="header" href="#discriminant-encoding">Discriminant encoding</a></h3>
+<p><code>owner_category</code> and <code>time_series_type</code> are stored as small <strong>INTEGER codes</strong>, not names:</p>
+<div class="table-wrapper"><table><thead><tr><th><code>owner_category</code></th><th>code</th><th></th><th><code>time_series_type</code></th><th>code</th></tr></thead><tbody>
+<tr><td><code>Component</code></td><td>0</td><td></td><td><code>SingleTimeSeries</code></td><td>0</td></tr>
+<tr><td><code>SupplementalAttribute</code></td><td>1</td><td></td><td><code>NonSequentialTimeSeries</code></td><td>1</td></tr>
+<tr><td></td><td></td><td></td><td><code>Deterministic</code></td><td>2</td></tr>
+<tr><td></td><td></td><td></td><td><code>DeterministicSingleTimeSeries</code></td><td>3</td></tr>
+<tr><td></td><td></td><td></td><td><code>Probabilistic</code></td><td>4</td></tr>
+<tr><td></td><td></td><td></td><td><code>Scenarios</code></td><td>5</td></tr>
+</tbody></table>
+</div>
+<p>Both columns sit in the two wide unique indexes, and <code>time_series_type</code> additionally in
+<code>idx_ts_type</code> while <code>owner_category</code> sits in <code>idx_owner</code> and <code>idx_category_owner</code>. A 1-byte code
+instead of a 9–29 byte string shrinks those indexes by roughly 35% and the whole catalog by roughly
+29% on a 400k-row store, and makes type-scoped scans about 1.2x faster warm (1.4–1.5x under page
+cache pressure). Point lookups by key are unaffected — those are dominated by the 32-byte
+<code>features_hash</code>.</p>
+<p>Two code assignments are load-bearing and cannot be reordered without a version bump:</p>
+<ul>
+<li><strong><code>Deterministic</code> (2) and <code>DeterministicSingleTimeSeries</code> (3) are adjacent.</strong> A request for
+<code>Deterministic</code> matches both (see <a href="../explanation/data-model.html">the data model</a>), so adjacency
+lets that widen to <code>time_series_type BETWEEN 2 AND 3</code> — one index seek instead of a two-value
+<code>IN</code>.</li>
+<li><strong>The static types (0–1) and forecast types (2–5) are contiguous blocks</strong>, so the static and
+forecast summary queries each scope with a single <code>BETWEEN</code>.</li>
+</ul>
+<p>The C ABI uses the same integers for its <code>ts_type</code> arguments, so there is one mapping rather than
+two. The <a href="#time_series_readable-view"><code>time_series_readable</code> view</a> decodes both columns for hand
+inspection.</p>
+<h2 id="inspecting-a-store-by-hand"><a class="header" href="#inspecting-a-store-by-hand">Inspecting a Store by Hand</a></h2>
+<p>The quickest route is the CLI, which resolves the hash-to-location step for you:</p>
+<pre><code class="language-sh">infrastore --store system.h5 store-info          # both file paths, format version, compression
+infrastore --store system.h5 arrays              # every distinct array, its location and sharers
+infrastore --store system.h5 info --name load    # one series: data_hash, hdf5_dataset, hdf5_column
+</code></pre>
+<p>To go straight at the files:</p>
+<pre><code class="language-sh">h5ls -r system.h5                        # groups, datasets, dtypes, shapes
+h5dump -A -n system.h5                   # root attributes and the object list
+sqlite3 system.h5.sqlite '.schema'
+# Query the view, not the table, to see decoded discriminants.
+sqlite3 system.h5.sqlite \
+  'SELECT name, time_series_type, element_type, element_shape, length FROM time_series_readable;'
+# Both association tables are absent in stores written before they existed.
+sqlite3 system.h5.sqlite 'SELECT * FROM supplemental_attribute_associations;'
+sqlite3 system.h5.sqlite 'SELECT * FROM parent_child_associations;'
+</code></pre>
+<h3 id="reading-the-catalog-by-hand"><a class="header" href="#reading-the-catalog-by-hand">Reading the catalog by hand</a></h3>
+<p><code>sqlite3</code> renders a <code>BLOB</code> as raw bytes in its default <code>list</code> mode and in <code>.mode box</code> / <code>.mode json</code>,
+which corrupts the terminal (and, in box mode, the table borders). Use the
+<strong><code>time_series_readable</code></strong> view, which is the association table with both hashes hex-encoded:</p>
+<pre><code class="language-sh">sqlite3 system.h5.sqlite 'SELECT name, data_hash FROM time_series_readable;'
+</code></pre>
+<p>The view spells hashes in lowercase, matching <code>hash_hex</code> in the core, every binding, and the CLI, so
+a value copied from it compares equal to one printed anywhere else. Against the base table, use
+<code>hex(data_hash)</code> or <code>.mode quote</code>; <code>hex()</code> returns uppercase.</p>
+<p>The view is created by the same idempotent DDL as the tables, on a store's first writable open, so
+an older store gains it without a format bump. Nothing in the library reads it.</p>
+<h3 id="mapping-an-association-to-its-bytes"><a class="header" href="#mapping-an-association-to-its-bytes">Mapping an association to its bytes</a></h3>
+<p>Read the association's <code>data_hash</code>. For a <strong>standalone</strong> array, read the dataset named
+<code>arr_&lt;hex_hash&gt;</code> directly. For a <strong>packed</strong> array, hex-encode the hash and find the matching row in
+the relevant <code>sts_…_h</code> dataset; that row index is the column index into the <code>sts_…</code> dataset. Note
+that a packed pool which fills up spills into <code>{name}__1</code>, <code>{name}__2</code>, so the dataset holding a
+given array is not derivable from its metadata — scan the <code>_h</code> datasets, or let <code>infrastore info</code> /
+<code>infrastore arrays</code> report the resolved <code>dataset</code> and <code>column</code>.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../reference/index.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../reference/element-types.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../reference/index.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../reference/element-types.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="../mermaid.min.js"></script>
+        <script src="../mermaid-init.js"></script>
+        <script src="../pagetoc.js"></script>
+        <script src="../version-selector.js"></script>
+
+
+
+    </div>
+    </body>
+</html>

@@ -1,0 +1,552 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Data Model - infrastore Documentation</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Time-series storage for power-systems and energy simulations, with Rust, Python, and Julia bindings">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../custom.css">
+        <link rel="stylesheet" href="../pagetoc.css">
+        <link rel="stylesheet" href="../version-selector.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">infrastore Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/NatLabRockies/infrastore" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/NatLabRockies/infrastore/tree/v0.8.0/docs/src/explanation/data-model.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="data-model"><a class="header" href="#data-model">Data Model</a></h1>
+<p>The data model mirrors the time-series concepts originally developed in
+<a href="https://github.com/NREL-Sienna/InfrastructureSystems.jl">InfrastructureSystems.jl</a>: a <strong>component</strong>
+(or supplemental attribute) owns one or more named time series, and each time series may exist in
+several variants distinguished by <strong>features</strong>.</p>
+<h2 id="owners"><a class="header" href="#owners">Owners</a></h2>
+<p>Every time series belongs to an owner, identified by three fields:</p>
+<div class="table-wrapper"><table><thead><tr><th>Field</th><th>Type</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>owner_id</code></td><td><code>i64</code></td><td>Stable identity of the owning object (a component identifier)</td></tr>
+<tr><td><code>owner_type</code></td><td>string</td><td>The owner's concrete type, e.g. <code>"Generator"</code></td></tr>
+<tr><td><code>owner_category</code></td><td><code>OwnerCategory</code></td><td><code>Component</code> or <code>SupplementalAttribute</code></td></tr>
+</tbody></table>
+</div>
+<p><code>owner_id</code> is a signed 64-bit integer identifier. The <strong>owner identity is the pair
+<code>(owner_id, owner_category)</code></strong>: both participate in the association's uniqueness constraint, while
+<code>owner_type</code> is descriptive. Component and supplemental-attribute integer-id streams are
+independent, so the same <code>owner_id</code> can name a component <strong>and</strong> a supplemental attribute at once —
+the category disambiguates them, keeping the two owners' series distinct. Owner-scoped operations
+therefore take the category alongside the id (see <a href="#keys">Keys</a>).</p>
+<h2 id="time-series-types"><a class="header" href="#time-series-types">Time-Series Types</a></h2>
+<p>The data model defines six time-series types, all present in the <code>TimeSeriesType</code> enum and the
+metadata schema. Both static series types are implemented across every interface. The four forecast
+types support reading values across the Rust core, the C ABI, Python, Julia, and gRPC. Dense
+forecasts are written through the generic <code>add_time_series</code> across the Rust core, Python, and Julia
+(the C ABI keeps the per-type <code>infrastore_store_add_forecast</code> / <code>infrastore_store_add_probabilistic</code>
+transport functions), and <code>DeterministicSingleTimeSeries</code> is derived from stored <code>SingleTimeSeries</code>
+via <code>transform_single_time_series</code> (gRPC stays read-only):</p>
+<div class="table-wrapper"><table><thead><tr><th>Type</th><th>Write path</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>SingleTimeSeries</code></td><td><code>add_time_series</code></td><td>One array sampled at a fixed resolution</td></tr>
+<tr><td><code>NonSequentialTimeSeries</code></td><td><code>add_time_series</code></td><td>Values at explicit, irregular timestamps</td></tr>
+<tr><td><code>Deterministic</code></td><td><code>add_time_series</code></td><td>Forecast: a <code>(horizon × count)</code> window matrix</td></tr>
+<tr><td><code>DeterministicSingleTimeSeries</code></td><td>derived by <code>transform_single_time_series</code></td><td>Forecast view over an underlying <code>SingleTimeSeries</code></td></tr>
+<tr><td><code>Probabilistic</code></td><td><code>add_time_series</code></td><td>Forecast with percentile bands</td></tr>
+<tr><td><code>Scenarios</code></td><td><code>add_time_series</code></td><td>Forecast with discrete scenarios</td></tr>
+</tbody></table>
+</div>
+<p>All six types can be <strong>read</strong> from every interface: the Rust core, the C ABI, Python, Julia, the
+<code>infrastore</code> CLI, and the gRPC server. The <strong>write</strong> paths in the table are available in the Rust
+core, the C ABI, Python, Julia, and the CLI — never over gRPC, whose service is read-only. And no
+interface adds a <code>DeterministicSingleTimeSeries</code> directly: it only ever comes into existence by
+transforming a stored <code>SingleTimeSeries</code>.</p>
+<p><strong><code>DeterministicSingleTimeSeries</code> is a storage-level view, and reads always return a
+<code>Deterministic</code>.</strong> This is by design in every binding: <code>TimeSeriesData</code> has no
+<code>DeterministicSingleTimeSeries</code> variant, and a read synthesizes the windowed <code>Deterministic</code> from
+the underlying static array without copying it. The <code>DeterministicSingleTimeSeries</code> tag stays
+visible in <em>catalog</em> surfaces — keys, metadata rows, counts, summaries — so callers can see which of
+their forecasts are synthetic, and can address, copy, or remove the association.</p>
+<p>It is never something you must <em>ask for</em>. <strong>A request for <code>Deterministic</code> matches both storage
+forms</strong> — in reads, key resolution, catalog filters, and reader builds alike — so which one a store
+holds stays an internal detail. Requesting <code>DeterministicSingleTimeSeries</code> narrows to the derived
+form, which is how a caller audits what it has. This mirrors InfrastructureSystems.jl, where a
+<code>Deterministic</code> request lowers to both concrete type names.</p>
+<p>Reading forecast <em>values</em> is wired across the Rust core, the C ABI, Python, Julia, and gRPC. Writing
+dense forecasts goes through the generic <code>add_time_series</code> (a <code>Deterministic</code>, <code>Probabilistic</code>, or
+<code>Scenarios</code> object) in the Rust core, Python, and Julia, with the C ABI exposing the per-type
+<code>infrastore_store_add_forecast</code> / <code>infrastore_store_add_probabilistic</code> transport; a
+<code>DeterministicSingleTimeSeries</code> is produced by <code>transform_single_time_series</code>. The read-only gRPC
+server serves forecast reads but does not accept writes. See <a href="#forecasts">Forecasts</a> below.</p>
+<h3 id="nonsequentialtimeseries"><a class="header" href="#nonsequentialtimeseries"><code>NonSequentialTimeSeries</code></a></h3>
+<p>A <code>NonSequentialTimeSeries</code> pairs each value with an explicit UTC timestamp. Timestamps must be
+strictly increasing and their count must match the data length.</p>
+<p>The timestamp vector is stored in the catalog, <strong>content-addressed and shared</strong>: series sampled at
+the same instants — an outage schedule, a set of event times, a market timeline — hold one copy
+between them rather than one each. That shared vector is also the series' <em>cohort</em>: the values of
+every series on it are column-packed into one timestamp-major HDF5 dataset, exactly as
+<code>SingleTimeSeries</code> at one resolution are, so a <a href="../reference/rust-api.html#readers"><code>StaticReader</code></a>
+can sweep them a timestamp at a time. A series alone on its time axis keeps a standalone array
+instead — packing only pays once a cohort is several columns wide. See the
+<a href="./storage-model.html">storage model</a> for the layout.</p>
+<h3 id="singletimeseries"><a class="header" href="#singletimeseries"><code>SingleTimeSeries</code></a></h3>
+<p>A <code>SingleTimeSeries</code> is an <code>initial_timestamp</code>, a <code>resolution</code> (a <a href="#periods">period</a>), and an array
+of values:</p>
+<pre><code class="language-text">value
+  ^
+  |        *
+  |     *     *
+  |  *           *
+  +--+--+--+--+--+--&gt; time
+   t0 t0+r  ...   t0+(n-1)r
+</code></pre>
+<p>The timestamps are implied — sample <code>i</code> is at <code>initial_timestamp + i * resolution</code> — so only the
+values are stored.</p>
+<h3 id="periods"><a class="header" href="#periods">Periods</a></h3>
+<p><code>resolution</code>, and the forecast <code>horizon</code>/<code>interval</code>, are <strong>calendar-aware periods</strong>, not plain fixed
+spans. A period is one of two kinds:</p>
+<ul>
+<li><strong>fixed</strong> — a fixed nanosecond span (<code>Hour</code>, <code>Minute</code>, <code>Day</code>, <code>Week</code>), backed by a duration;</li>
+<li><strong>calendar</strong> — a count of calendar months (<code>Month</code> = 1, <code>Quarter</code> = 3, <code>Year</code> = 12), where
+<code>initial_timestamp + i * resolution</code> is computed by calendar arithmetic (so a monthly grid lands
+on the same day-of-month each step rather than every <code>N</code> milliseconds).</li>
+</ul>
+<p>A fixed period is <strong>never</strong> equal to a calendar one, even when their spans coincide for a given
+month. Periods are encoded as ISO-8601 duration strings (<code>PT1H</code>, <code>P1M</code>, <code>P1Y</code>) on disk and across
+every binding (the Python/gRPC surfaces accept a <code>timedelta</code>/duration for fixed periods and an
+ISO-8601 string for either kind, and return the ISO-8601 string).</p>
+<h3 id="timestamp-precision"><a class="header" href="#timestamp-precision">Timestamp precision</a></h3>
+<p>Every instant the store records — a <code>SingleTimeSeries</code> or forecast <code>initial_timestamp</code>, and every
+entry of a <code>NonSequentialTimeSeries</code> timestamp vector — is <strong>a whole number of milliseconds</strong>, the
+same floor a fixed period has. One millisecond is the finest resolution a period can express, and it
+is likewise the finest instant a series can be written at.</p>
+<p>The rule is enforced on write, in the core, for all five addable types: a finer instant is rejected
+with an <code>InvalidParameter</code> error rather than truncated. This is what makes a timestamp mean the same
+thing in every consumer. The bindings do not share one precision — the C ABI and Julia exchange
+instants as <code>i64</code> Unix milliseconds, Python's <code>datetime</code> is microsecond, and gRPC and the Rust core
+carry a full RFC 3339 string — so a finer instant would be silently truncated at some boundaries and
+not others, putting the same series on different instants depending on who read it. For a
+<code>NonSequentialTimeSeries</code> whose timestamps are less than a millisecond apart it is worse: two
+distinct timestamps collapse into one, and the vector stops being strictly increasing on the way
+back out.</p>
+<p>A series needing a finer grid should scale its unit and record it in <code>units</code>, exactly as it must for
+a sub-millisecond resolution: a 500 µs series is a 500-unit series.</p>
+<p>Two things are deliberately <em>not</em> constrained. A <strong>query bound</strong> — a <code>time_range</code> end, a reader's
+<code>when</code> — may be arbitrarily fine; it is not stored, and the read paths already say what an off-grid
+bound does (see <a href="../reference/rust-api.html#reading-a-time-range">reading a time range</a>). And <strong>reads
+stay permissive</strong>: an artifact written before this rule may hold finer instants and still reads back
+exactly as written, which is why the rule does not change <code>DATA_FORMAT_VERSION</code>.</p>
+<h3 id="typed-n-dimensional-arrays"><a class="header" href="#typed-n-dimensional-arrays">Typed, N-dimensional arrays</a></h3>
+<p>Every series' values are a <strong><code>TypedArray</code></strong>: an element <code>dtype</code> (<code>f64</code>, <code>f32</code>, the integer widths,
+or <code>bool</code>) and a shape <code>[length, k1, k2, …]</code>. The first axis is time; the trailing axes are a fixed
+<strong>per-step element shape</strong>, so a step can hold a scalar (empty element shape) or a small tuple — for
+example the 3 coefficients of a quadratic cost curve (element shape <code>[3]</code>). The association's
+<code>element_type</code> says what those elements mean and how a ragged value (a piecewise curve, say) is
+packed into a fixed-width row — see <a href="../reference/element-types.html">Element types</a>. The optional
+<code>application_data</code> payload travels alongside for a binding's own use; the store never interprets it.</p>
+<h3 id="forecasts"><a class="header" href="#forecasts">Forecasts</a></h3>
+<p>The four forecast types store their values as a content-addressed <code>TypedArray</code> in its <strong>native
+shape</strong> (the dense types as standalone HDF5 variables; a <code>DeterministicSingleTimeSeries</code> reuses its
+backing <code>SingleTimeSeries</code> array), while the windowing parameters live in metadata. A forecast
+association records <code>horizon</code> (the span each window covers), <code>interval</code> (the spacing between
+successive window start times), <code>count</code> (the number of windows), and — for <code>Probabilistic</code> — a
+<code>percentiles</code> vector.</p>
+<div class="table-wrapper"><table><thead><tr><th>Type</th><th>Conventional array shape</th><th>Extra metadata</th></tr></thead><tbody>
+<tr><td><code>Deterministic</code></td><td><code>(horizon_count, count)</code></td><td>—</td></tr>
+<tr><td><code>DeterministicSingleTimeSeries</code></td><td>the backing <code>SingleTimeSeries</code> array</td><td>—</td></tr>
+<tr><td><code>Probabilistic</code></td><td><code>(percentile_count, horizon_count, count)</code></td><td><code>percentiles</code></td></tr>
+<tr><td><code>Scenarios</code></td><td><code>(scenario_count, horizon_count, count)</code></td><td>—</td></tr>
+</tbody></table>
+</div>
+<p>The store does not interpret the layout — the caller owns the array shape (the Rust core takes a
+native-shape <code>TypedArray</code> inside a <code>Deterministic</code> / <code>Probabilistic</code> / <code>Scenarios</code> object; the C ABI
+takes a row-major byte buffer with explicit dims, and the Julia wrapper accepts a native array and
+serializes it row-major), and a <code>DeterministicSingleTimeSeries</code> deduplicates against the static
+series it forecasts. A <code>DeterministicSingleTimeSeries</code> is not added directly — it is derived from
+every stored <code>SingleTimeSeries</code> by <code>transform_single_time_series</code> (Rust core, C ABI, Python, Julia),
+sharing the underlying array. Because a <code>DeterministicSingleTimeSeries</code> is a synthetic view of a
+<code>SingleTimeSeries</code>, it is <strong>mutually exclusive</strong> with a real <code>Deterministic</code> for the same family
+(<code>owner</code>, <code>name</code>, <code>resolution</code>, <code>features</code>, regardless of interval): adding a <code>Deterministic</code> when a
+<code>DeterministicSingleTimeSeries</code> view exists — or deriving one when a <code>Deterministic</code> exists — raises
+<code>InvalidParameter</code>. Forecast values read back through the high-level path — <code>get_time_series</code>
+returns a forecast object in the Rust core, Python, and over gRPC, and Julia exposes
+<code>get_time_series(Deterministic, …)</code> / <code>get_time_series(Probabilistic, …)</code> /
+<code>get_time_series(Scenarios, …)</code> — while the low-level metadata + array path remains available for
+raw access. See the <a href="../reference/rust-api.html#forecasts">Rust API</a> and
+<a href="../reference/c-abi.html#forecasts">C ABI</a>.</p>
+<h2 id="features"><a class="header" href="#features">Features</a></h2>
+<p>Two series can share an owner and a name yet differ — for example a load profile for model year 2030
+versus 2050. <strong>Features</strong> disambiguate them. A feature map is a set of typed key/value pairs:</p>
+<pre><code class="language-python">features = {"model_year": 2030, "scenario": "high", "calibrated": True}
+</code></pre>
+<p>Feature values are one of four kinds: <code>int</code>, <code>float</code>, <code>bool</code>, or <code>str</code>. Internally the map is sorted
+by key (a <code>BTreeMap</code>), which gives a stable order for hashing and for the uniqueness constraint.</p>
+<h3 id="reserved-feature-names"><a class="header" href="#reserved-feature-names">Reserved feature names</a></h3>
+<p>A feature name may not collide with a field of a time series or of the <a href="#keys">key</a> that addresses
+one. Consumers routinely spread a feature map into a keyword-argument query — for example
+<code>get_time_series(...; name = "load", model_year = 2030)</code> — and a feature called <code>name</code> or
+<code>resolution</code> would shadow the real field there and silently change what the query means. Adding a
+time series with one of these names raises <code>InvalidParameter</code>:</p>
+<pre><code class="language-text">application_data, component_field, count, data, data_hash, dtype, element_shape, element_type, ext,
+features, horizon, initial_timestamp, interval, length, name, owner_category, owner_id, owner_type,
+percentiles, quantity_kind, resolution, scenario_count, time_series_type, timestamps, unit_system,
+units
+</code></pre>
+<p><code>dtype</code> and <code>ext</code> no longer name metadata fields — <code>element_type</code> and <code>application_data</code> replaced
+them — but both stay reserved. <code>dtype</code> is still how every binding spells a <code>TypedArray</code>'s physical
+type, and a consumer still passing the retired <code>ext=</code> should fail loudly rather than have it
+silently accepted as an ordinary feature.</p>
+<p>The match is exact and case-sensitive, like every other identifier in the catalog: <code>resolution</code> is
+rejected, while <code>Resolution</code> and <code>resolution_hours</code> are ordinary feature names. The rule applies to
+writes only, so a store written before it existed stays readable and its series can still be listed
+and removed.</p>
+<h2 id="keys"><a class="header" href="#keys">Keys</a></h2>
+<p>A <strong><code>TimeSeriesKey</code></strong> is the logical handle that re-finds a series. It is exactly the tuple that
+must be unique:</p>
+<pre><code class="language-text">TimeSeriesKey = (owner_id, owner_category, time_series_type, name, resolution, interval, features)
+</code></pre>
+<p><code>add_time_series</code> returns a key; <code>get_time_series</code>, <code>has_time_series</code>, and <code>remove_time_series</code> take
+one. Two series with the same key cannot coexist — attempting to add a duplicate raises
+<code>DuplicateTimeSeries</code>. Change any element of the tuple (a different <code>name</code>, a different <code>model_year</code>
+feature, a different <code>resolution</code>, a different forecast <code>interval</code>, or a different <code>owner_category</code>)
+and you have a distinct series. <code>interval</code> is <code>NULL</code> for the static types (which never carry one);
+for forecasts it lets two series of one variable at the same resolution but different intervals
+(e.g. a day-ahead and a real-time forecast) coexist as distinct series. Because <code>owner_category</code> is
+part of the key, a component and a supplemental attribute that share a numeric <code>owner_id</code> keep
+entirely separate sets of series.</p>
+<pre class="mermaid">flowchart LR
+    OWNER[&quot;owner_id=42, category=Component, type=Generator&quot;]
+    OWNER --&gt; K1[&quot;name=load&lt;br/&gt;year=2030&quot;]
+    OWNER --&gt; K2[&quot;name=load&lt;br/&gt;year=2050&quot;]
+    OWNER --&gt; K3[&quot;name=max_active_power&quot;]
+    K1 --&gt; A1[(&quot;array A&quot;)]
+    K2 --&gt; A2[(&quot;array B&quot;)]
+    K3 --&gt; A1
+
+    style OWNER fill:#4a9eff,color:#fff
+    style K1 fill:#17a2b8,color:#fff
+    style K2 fill:#17a2b8,color:#fff
+    style K3 fill:#17a2b8,color:#fff
+    style A1 fill:#28a745,color:#fff
+    style A2 fill:#28a745,color:#fff
+</pre>
+<p>Note that two different keys (<code>K1</code> and <code>K3</code> above) can point at the <em>same</em> underlying array. The key
+is a metadata concept; the array is shared by <a href="./content-addressing.html">content addressing</a>.</p>
+<h2 id="optional-descriptors"><a class="header" href="#optional-descriptors">Optional Descriptors</a></h2>
+<p>Each association can also carry:</p>
+<ul>
+<li><strong><code>units</code></strong> — a free-form, end-user-facing label such as <code>"MW"</code>. No dimensional analysis is
+performed.</li>
+<li><strong><code>quantity_kind</code></strong> — what kind of physical quantity the values measure, e.g. <code>"ActivePower"</code>,
+<code>"Energy"</code>, <code>"Length"</code>. Free-form; the recommended vocabulary is a
+<a href="https://www.qudt.org/pages/QUDToverviewPage.html">QUDT</a> <code>QuantityKind</code> local name. It sits
+<em>above</em> <code>units</code> rather than duplicating it, for two reasons. A units library's dimensional
+analysis cannot separate active from reactive power — both are <code>[M L^2 T^-3]</code> — but a quantity
+kind can. And when <code>unit_system</code> is <code>component_base</code> the values are per-unit and therefore
+dimensionless, so this is the only surviving record of what they measure and which base converts
+them back. The column is deliberately unconstrained: the composite economic quantities an energy
+modeler needs (<code>$/MWh</code>, <code>MMBtu/MWh</code>) are exactly where QUDT's coverage thins out.</li>
+<li><strong><code>unit_system</code></strong> — which basis the values are expressed in: <code>natural_units</code> (the units named by
+<code>units</code>) or <code>component_base</code> (per-unit against the owning component's own base). This is the
+per-unit declaration power-systems modelers know as the <em>unit system</em>; PowerSystems.jl spells the
+same idea <code>UnitSystem</code>, with <code>NATURAL_UNITS</code> and <code>DEVICE_BASE</code>. It is a <strong>label, not a
+conversion</strong>: the store holds no base value and rescales nothing, so converting <code>component_base</code>
+values back to natural units is the consumer's job, using the base that lives on the owning
+component in its own object graph. Unset means <em>unspecified</em>, which is deliberately <strong>not</strong> the
+same as <code>natural_units</code> — every association written before this field existed is unset, and
+reading those as natural units would assert a basis nobody declared.</li>
+<li><strong><code>component_field</code></strong> — the field on the owning component whose value these values are the
+time-varying form of, e.g. <code>"max_active_power"</code> or <code>"rating"</code>. Free-form and never interpreted: it
+names a field in the consumer's own object model, which the store has no view of. It records what
+the values are <em>for</em>, where <code>name</code> only says which series they are — the two coincide by
+convention in many models but are not the same thing, since one component may carry several series
+for one field (a forecast and an actual, a set of weather years) and <code>name</code> is part of a series'
+identity where this is not. Named for the common case; when the owner is a supplemental attribute
+it names a field on that attribute.</li>
+<li><strong><code>application_data</code></strong> — an opaque, <strong>package-owned</strong> extension payload stored verbatim (typically
+JSON) that a binding writes and reads for its own purposes. The store never parses or interprets
+it, and end users are not expected to set it. Element typing does <em>not</em> live here: that is
+<code>element_type</code> below, a first-class column the store owns and validates.</li>
+<li><strong><code>element_type</code></strong> — what the array's elements <em>mean</em>, in the store's own language-neutral
+vocabulary: a dtype spelling (<code>f64</code>, <code>i64</code>, …) for plain numbers, else <code>tuple(N,dtype)</code> or one of
+the function-data kinds (<code>linear_function</code>, <code>quadratic_function</code>, <code>piecewise_linear</code>,
+<code>piecewise_step</code>). It supersedes a separate physical <code>dtype</code>: the dtype of the stored bytes is
+derived from it. Unlike <code>units</code> and <code>application_data</code> it is <em>not</em> inert — the write path
+validates the array's dtype and per-step shape against it. See
+<a href="../reference/element-types.html">Element types</a>.</li>
+</ul>
+<p><code>units</code>, <code>quantity_kind</code>, <code>unit_system</code>, <code>component_field</code>, and <code>application_data</code> are recorded in
+metadata and returned on read, but they do not affect identity or storage: they are absent from the
+key and from both content hashes, so two series differing only in a descriptor are a duplicate.</p>
+<p><code>component_field</code> is the one descriptor that is also a <strong>filter</strong> (<code>ListFilter::component_field</code>,
+and its equivalent in every binding): "every series that varies this field", alone or scoped to one
+owner. Being descriptive rather than identifying, it narrows a listing but never addresses a single
+row on its own — one component may carry several series for one field, distinguished by name or
+features. It matches exactly and case-sensitively, and a series that declares no <code>component_field</code>
+matches no value, so the filter cannot select the rows that left it unset.</p>
+<h2 id="associations-between-entities"><a class="header" href="#associations-between-entities">Associations Between Entities</a></h2>
+<p>Beyond owning time series, catalog entities can be related to each other. The catalog records two
+such relationships, in two separate tables, because they are not the same kind of thing: attaching
+an attribute to a component and wiring one component to another have different identities and
+different query patterns.</p>
+<h3 id="supplemental-attributes-attached-to-components"><a class="header" href="#supplemental-attributes-attached-to-components">Supplemental attributes attached to components</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Field</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>component_id</code>, <code>component_type</code></td><td>The component carrying the attribute</td></tr>
+<tr><td><code>attribute_id</code>, <code>attribute_type</code></td><td>The supplemental attribute being carried</td></tr>
+</tbody></table>
+</div>
+<p><strong>Identity is the <code>(component_id, attribute_id)</code> pair.</strong> The type names are denormalized labels, not
+part of identity: re-attaching the same pair under different type names is a duplicate and is
+rejected. One attribute may be attached to many components, and one component may carry many
+attributes; only the exact pair is constrained.</p>
+<h3 id="parentchild-edges-between-components"><a class="header" href="#parentchild-edges-between-components">Parent/child edges between components</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Field</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>parent_id</code>, <code>parent_type</code></td><td>The parent component, e.g. a generator</td></tr>
+<tr><td><code>child_id</code>, <code>child_type</code></td><td>The child component, e.g. the bus it connects to</td></tr>
+</tbody></table>
+</div>
+<p>Both endpoints are always components, so unlike time-series owners there is no category to
+disambiguate. <strong>Identity is the ordered <code>(parent_id, child_id)</code> pair</strong> — the reversed pair is a
+different edge. There is no relationship-kind column, so a given pair may be related at most once.</p>
+<h3 id="properties-shared-by-both"><a class="header" href="#properties-shared-by-both">Properties shared by both</a></h3>
+<p>Two consequences of the deliberate absence of foreign keys and cascades:</p>
+<ul>
+<li><strong>Associations and time series are independent in both directions.</strong> Removing a component's time
+series does not remove its attribute attachments or its edges, and removing either does not touch
+any series. A consumer that wants both effects makes both calls.</li>
+<li><strong>The store never observes a deletion it did not perform.</strong> Components and attributes live in the
+consumer's object graph, so a cascade could never fire; consumers call the matching <code>remove_*</code>
+with the appropriate filter instead.</li>
+</ul>
+<p>Filtering takes lists of <strong>concrete</strong> type names, rendered into SQL <code>IN (…)</code>. Expanding an abstract
+type into its subtypes stays in the calling language, where the type hierarchy lives.</p>
+<blockquote>
+<p>Terminology: rows of the <code>time_series_associations</code> table — the owner-to-time-series records
+described above — are also called "associations" throughout this documentation and the code. They
+are unrelated to the entity-to-entity tables described in this section.</p>
+</blockquote>
+<p>Both are available in the Rust core, the C ABI, Julia, and Python; neither is exposed over gRPC or
+the <code>infrastore</code> CLI. The supplemental-attribute surface is the wider of the two (it carries counts
+and a grouped summary) because each of its operations is driven by an existing consumer; the
+parent/child surface is deliberately narrower for now.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../explanation/design-choices.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../explanation/storage-model.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../explanation/design-choices.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../explanation/storage-model.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="../mermaid.min.js"></script>
+        <script src="../mermaid-init.js"></script>
+        <script src="../pagetoc.js"></script>
+        <script src="../version-selector.js"></script>
+
+
+
+    </div>
+    </body>
+</html>
