@@ -2494,6 +2494,33 @@ impl MetadataStore {
     pub fn count_parent_child_associations(&self, filter: &ParentChildFilter) -> Result<i64> {
         self.assoc_count(PARENT_CHILD_TABLE, &filter.endpoints(), "COUNT(*)")
     }
+
+    /// Whether the catalog holds no content of any kind — the emptiness
+    /// predicate behind [`crate::Store::is_empty`]. One short-circuited
+    /// `SELECT 1 ... LIMIT 1` per content table, so it costs index probes
+    /// rather than the aggregate scans a conjunction over the count APIs would.
+    ///
+    /// **Every persistent content table must be probed here.** This is the one
+    /// place that knows the full set. A table added to `schema.rs` and not
+    /// added here makes a non-empty store report empty, and a consumer that
+    /// skips writing the artifact when the store is empty (InfrastructureSystems.jl
+    /// does exactly this) then drops those rows with no error.
+    ///
+    /// Excluded deliberately: `schema_version` and `catalog_identity` are
+    /// bookkeeping and never empty; `feature_sets` and `timestamp_sets` are
+    /// content-addressed side tables that only ever hold rows referenced from
+    /// `time_series_associations`, so they are covered by probing it.
+    pub fn is_empty(&self) -> Result<bool> {
+        if self.exists(&MetadataFilter::default())? {
+            return Ok(false);
+        }
+        for table in [SUPPLEMENTAL_ATTRIBUTE_TABLE, PARENT_CHILD_TABLE] {
+            if self.assoc_has(table, &EndpointFilter::default())? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
 }
 
 /// Borrow a boxed parameter list as rusqlite's slice-of-trait-objects form.

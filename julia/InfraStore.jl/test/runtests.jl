@@ -2227,6 +2227,60 @@ end
     close!(store)
 end
 
+@testset "is_empty" begin
+    # Emptiness must account for every persistent table, not just the ones the
+    # caller happens to know about: IS skips writing the artifact entirely when
+    # the store reports empty, so anything the predicate misses is dropped with
+    # no error. Each catalog is therefore held in isolation.
+    store = Store(in_memory=true)
+    @test is_empty(store)
+
+    key = add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        SingleTimeSeries(DateTime(2030, 1, 1), Hour(1), collect(1.0:4.0), "load"),
+    )
+    @test !is_empty(store)
+    remove_time_series!(store, key)
+    @test is_empty(store)
+
+    add_supplemental_attribute_association!(
+        store, SupplementalAttributeAssociation(1, "Generator", 100, "GeographicInfo")
+    )
+    @test !is_empty(store)
+    @test remove_supplemental_attribute_associations!(store) == 1
+    @test is_empty(store)
+
+    # The case a client-side conjunction over the other two tables gets wrong.
+    add_parent_child_association!(
+        store, ParentChildAssociation(1, "Generator", 7, "Bus")
+    )
+    @test !is_empty(store)
+    @test remove_parent_child_associations!(store) == 1
+    @test is_empty(store)
+
+    # Emptiness survives persist!/open_store in both directions.
+    dir = mktempdir()
+    dest = joinpath(dir, "empty.h5")
+    persist!(store, dest)
+    reopened = open_store(dest; read_only=true)
+    @test is_empty(reopened)
+    close!(reopened)
+
+    add_parent_child_association!(
+        store, ParentChildAssociation(1, "Generator", 7, "Bus")
+    )
+    dest2 = joinpath(dir, "edges.h5")
+    persist!(store, dest2)
+    populated = open_store(dest2; read_only=true)
+    @test !is_empty(populated)
+    close!(populated)
+
+    close!(store)
+end
+
 # ---- OpenAPI-row association serde ------------------------------------------
 #
 # `export_time_series_associations_openapi`/`export_supplemental_attribute_associations_openapi`/

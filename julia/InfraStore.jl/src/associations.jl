@@ -662,6 +662,27 @@ function read_only(store::Store)
 end
 
 """
+    is_empty(store) -> Bool
+
+Whether the store holds no persistent content of any kind — no time series, and
+no associations in any catalog.
+
+Answered by short-circuited existence probes, one per catalog table, so the cost
+does not grow with the store. Prefer it over a conjunction over the counting
+functions: that runs a full aggregation, and it silently stops being correct
+when the catalog gains a table.
+"""
+function is_empty(store::Store)
+    out = Ref{Bool}(false)
+    _check(
+        @ccall lib_path().infrastore_store_is_empty(
+            store::Ptr{Cvoid}, out::Ref{Bool}
+        )::Int32
+    )
+    return out[]
+end
+
+"""
     get_compression(store) -> CompressionSettings
 
 Return the store's [`CompressionSettings`](@ref). For a store opened from disk

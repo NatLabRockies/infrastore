@@ -165,6 +165,11 @@ impl Store {
     // series (of type T)?". Both probes answer from a covering index and are
     // safe for hot loops.
     pub fn has_any_time_series(&self, filter: ListFilter) -> Result<bool>;
+    // Whether the store holds no content of any kind — no time series, no
+    // associations in any catalog. One short-circuited existence probe per
+    // catalog table, so it is O(1) in store size, and it covers tables a
+    // client-side conjunction over the count APIs would miss.
+    pub fn is_empty(&self) -> Result<bool>;
 
     // Resolve a forecast addressed by attributes + a requested type to the one
     // matching key. `NotFound` if nothing matches; `InvalidParameter` if ambiguous.

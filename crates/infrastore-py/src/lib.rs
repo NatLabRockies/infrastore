@@ -2131,6 +2131,17 @@ impl PyStore {
         self.store()?.has_any_time_series(filter).map_err(map_err)
     }
 
+    /// Return True if the store holds no persistent content of any kind — no
+    /// time series, and no associations in any catalog.
+    ///
+    /// Answered by short-circuited existence probes, one per catalog table, so
+    /// the cost does not grow with the store. Prefer it over a conjunction over
+    /// the ``count_*`` methods: that runs a full aggregation, and it silently
+    /// stops being correct when the catalog gains a table.
+    fn is_empty(&self) -> PyResult<bool> {
+        self.store()?.is_empty().map_err(map_err)
+    }
+
     #[pyo3(signature = (time_series_type=None))]
     fn get_resolutions(
         &self,
