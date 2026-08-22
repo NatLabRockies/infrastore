@@ -30,8 +30,8 @@ Exported names (types first, then functions):
 `get_metadata`, `get_path`, `get_resolutions`, `get_time_series`, `get_time_series_key`,
 `get_time_series_keys`, `has_any_time_series`, `has_for_owner`, `has_parent_child_association`,
 `has_supplemental_attribute_association`, `has_time_series`, `in_transaction`, `init_logging`,
-`key_info`, `list_array_groups`, `list_children`, `list_components_with_attributes`, `list_keys`,
-`list_names`, `list_owner_ids`, `list_owner_types`, `list_parent_child_associations`,
+`is_empty`, `key_info`, `list_array_groups`, `list_children`, `list_components_with_attributes`,
+`list_keys`, `list_names`, `list_owner_ids`, `list_owner_types`, `list_parent_child_associations`,
 `list_parents`, `list_supplemental_attribute_associations`, `list_supplemental_attribute_ids`,
 `list_time_series`, `num_distinct_arrays`, `open_copy`, `open_store`, `persist!`,
 `persist_catalog!`, `read_only`, `rollback_transaction!`, `transaction`, `begin_transaction!`,
@@ -798,6 +798,16 @@ unlike the exact-key `has_time_series` forms, which compare the whole feature se
 and it is the one exception to the index-only guarantee: a non-empty `features` filter cannot be
 answered from an index and falls back to a full listing internally, so prefer the exact-key forms in
 hot loops when the whole feature set is known.
+
+```julia
+is_empty(store) -> Bool
+```
+
+`is_empty` is the store-wide predicate: true iff the store holds nothing at all — no time series,
+and no associations in either catalog. It is one short-circuited existence probe per catalog table,
+so its cost does not grow with the store, and it is the store's own answer: as the catalog gains
+tables it stays correct, where a caller-side conjunction over `get_counts` and the
+`count_*_associations` functions both costs a full aggregation and silently goes stale.
 
 `list_array_groups` takes the same nine filters and returns the same row fields as `list_keys`, but
 each row additionally carries `data_hash` — the 32-byte content hash of the array the row resolves

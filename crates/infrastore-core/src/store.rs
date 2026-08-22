@@ -2631,6 +2631,23 @@ impl Store {
         self.metadata.exists(&filter.into())
     }
 
+    /// Whether the store holds no persistent content of any kind — no time
+    /// series, and no associations in any catalog.
+    ///
+    /// Short-circuited `SELECT 1 ... LIMIT 1` existence probes, one per
+    /// content table, so the cost is a handful of index seeks regardless of
+    /// how much the store holds. Answering the same question from outside
+    /// means a conjunction over the count APIs — eight `O(rows)` aggregate
+    /// scans — that also goes stale the moment the schema grows a table.
+    /// This is the store's own answer: adding a table means updating one
+    /// function here rather than every binding and every consumer.
+    ///
+    /// Note that `BulkAdd::is_empty` is an unrelated predicate over buffered
+    /// requests, not over store content.
+    pub fn is_empty(&self) -> Result<bool> {
+        self.metadata.is_empty()
+    }
+
     pub fn get_resolutions(&self, time_series_type: Option<TimeSeriesType>) -> Result<Vec<Period>> {
         self.metadata.distinct_resolutions(time_series_type)
     }

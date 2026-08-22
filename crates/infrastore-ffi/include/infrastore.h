@@ -629,6 +629,20 @@ int32_t infrastore_store_get_intervals(const struct InfraStore *handle,
 int32_t infrastore_store_read_only(const struct InfraStore *handle, bool *out_read_only);
 
 /**
+ * Write whether the store holds no persistent content of any kind — no time
+ * series, no associations in any catalog — into `*out`. Short-circuited
+ * existence probes, so it is O(1) in store size; prefer it over a
+ * client-side conjunction over the count entry points, which costs a full
+ * aggregation and silently goes stale as the catalog schema grows.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle and `out` valid for writing one
+ * `bool`.
+ */
+int32_t infrastore_store_is_empty(const struct InfraStore *handle, bool *out);
+
+/**
  * Write the store's backing HDF5 file path into `buf` (probe-then-fetch: call with a
  * null `buf` to learn `*out_len`, then again with a buffer of that size). An
  * in-memory store has no path: `*out_has_path` is set to false and `*out_len` to 0.

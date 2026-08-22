@@ -1959,6 +1959,36 @@ pub unsafe extern "C" fn infrastore_store_read_only(
     INFRASTORE_OK
 }
 
+/// Write whether the store holds no persistent content of any kind — no time
+/// series, no associations in any catalog — into `*out`. Short-circuited
+/// existence probes, so it is O(1) in store size; prefer it over a
+/// client-side conjunction over the count entry points, which costs a full
+/// aggregation and silently goes stale as the catalog schema grows.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle and `out` valid for writing one
+/// `bool`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_store_is_empty(
+    handle: *const InfraStoreHandle,
+    out: *mut bool,
+) -> i32 {
+    clear_error();
+    let store = deref_handle!(ref handle);
+    if out.is_null() {
+        set_error("out is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    match store.inner.is_empty() {
+        Ok(empty) => {
+            unsafe { *out = empty };
+            INFRASTORE_OK
+        }
+        Err(e) => map_core_error(e),
+    }
+}
+
 /// Write the store's backing HDF5 file path into `buf` (probe-then-fetch: call with a
 /// null `buf` to learn `*out_len`, then again with a buffer of that size). An
 /// in-memory store has no path: `*out_has_path` is set to false and `*out_len` to 0.

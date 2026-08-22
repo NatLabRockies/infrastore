@@ -693,6 +693,13 @@ void    infrastore_bulk_result_free(struct InfraStoreBulkReadHandle *result);
 ## Store-Wide Operations
 
 ```c
+/* True iff the store holds nothing at all — no time series, and no associations
+   in any catalog. One short-circuited existence probe per catalog table, so it is
+   O(1) in store size and stays correct as the catalog gains tables; prefer it to
+   a caller-side conjunction over the counting entry points below, which is
+   neither. */
+int32_t infrastore_store_is_empty(const struct InfraStore *handle, bool *out);
+
 int32_t infrastore_store_counts(const struct InfraStore *handle, int64_t *out_components_with_time_series,
                         int64_t *out_static_time_series, int64_t *out_forecasts);
 /* Association count per type as a JSON array of {time_series_type, count};
