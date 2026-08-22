@@ -6329,6 +6329,42 @@ store.remove_parent_child_associations(parent_types=["Bus"])   # -&gt; 1
 </code></pre>
 <p>Neither association catalog is exposed over the <a href="reference/grpc-api.html">gRPC server</a> or the
 <a href="reference/cli.html"><code>infrastore</code> CLI</a>.</p>
+<h3 id="openapi-row-association-serde"><a class="header" href="#openapi-row-association-serde">OpenAPI-row association serde</a></h3>
+<p>Direct JSON serde of the two association catalogs, in the wire spelling
+<a href="https://github.com/Sienna-Platform/SiennaSchemas">SiennaSchemas</a> defines (<code>TimeSeries/*.json</code>,
+<code>Core/Associations/SupplementalAttributeAssociation.json</code>). Unlike <code>list_time_series</code> /
+<code>list_supplemental_attribute_associations</code>, which return Python objects, these three methods
+exchange the wire JSON verbatim — the format a document author (e.g. PowerTableDataParser) reads and
+writes directly.</p>
+<pre><code class="language-python">def export_time_series_associations_openapi(
+    self, *, owner_id=None, owner_category=None, owner_type=None,
+    time_series_type=None, name=None, name_glob=None, component_field=None,
+    resolution=None, interval=None, features=None,
+) -&gt; str: ...
+def export_supplemental_attribute_associations_openapi(self) -&gt; str: ...
+def import_supplemental_attribute_associations_openapi(self, json: str) -&gt; int: ...
+</code></pre>
+<p><code>export_time_series_associations_openapi</code> takes the same filter keywords as <code>list_time_series</code>.
+Every row's <code>uri</code> and <code>data_hash</code> are the hex-encoded content hash the store already has for that
+row — never a caller-supplied locator. With no filter this exports the whole catalog, sorted by
+identity.</p>
+<p><code>export_supplemental_attribute_associations_openapi</code> exports the whole
+<code>supplemental_attribute_associations</code> table, sorted by <code>(component_id, attribute_id)</code>;
+<code>import_supplemental_attribute_associations_openapi</code> is its import half — a bulk, all-or-nothing
+insert (a duplicate anywhere in the batch raises <code>DuplicateAssociationError</code> and rolls the batch
+back), returning the number of rows inserted.</p>
+<p>There is no corresponding time-series <em>import</em> method: infrastore never modifies the associations
+table or the data to make an incoming document agree with what it already holds. A geometry
+disagreement between an added series and its own association row is rejected at the add boundary
+instead (<code>InvalidParameterError</code>), loudly and without writing anything.</p>
+<pre><code class="language-python">store = Store.create(in_memory=True)
+store.add_time_series(
+    owner_id=1, owner_type="Generator", owner_category=OwnerCategory.Component,
+    time_series=SingleTimeSeries(t0, timedelta(hours=1), values, "load"),
+)
+
+json_str = store.export_time_series_associations_openapi()
+</code></pre>
 <h2 id="exceptions"><a class="header" href="#exceptions">Exceptions</a></h2>
 <p>All inherit from <code>TimeSeriesError</code>:</p>
 <div class="table-wrapper"><table><thead><tr><th>Exception</th><th>Raised when</th></tr></thead><tbody>
@@ -7160,6 +7196,30 @@ remove_parent_child_associations!(store; parent_types=["Bus"])   # 1
 </code></pre>
 <p>Neither association catalog is exposed over the <a href="reference/./grpc-api.html">gRPC server</a> or the
 <a href="reference/./cli.html"><code>infrastore</code> CLI</a>.</p>
+<h3 id="openapi-row-association-serde-1"><a class="header" href="#openapi-row-association-serde-1">OpenAPI-row association serde</a></h3>
+<p>Direct JSON serde of the two association catalogs, in the wire spelling
+<a href="https://github.com/Sienna-Platform/SiennaSchemas">SiennaSchemas</a> defines (<code>TimeSeries/*.json</code>,
+<code>Core/Associations/SupplementalAttributeAssociation.json</code>). Unlike <a href="reference/@ref"><code>list_time_series</code></a> /
+<a href="reference/@ref"><code>list_supplemental_attribute_associations</code></a>, which return Julia structs, these three
+functions exchange the wire JSON verbatim — the format a document author (e.g. PowerTableDataParser)
+reads and writes directly.</p>
+<pre><code class="language-julia">export_time_series_associations_openapi(store; filters...) -&gt; String
+export_supplemental_attribute_associations_openapi(store) -&gt; String
+import_supplemental_attribute_associations_openapi!(store, json::AbstractString) -&gt; Int
+</code></pre>
+<p><code>export_time_series_associations_openapi</code> takes the same filter keywords as
+<a href="reference/@ref"><code>list_time_series</code></a>. Every row's <code>uri</code> and <code>data_hash</code> are the hex-encoded content hash the
+store already has for that row — never a caller-supplied locator. With no filter this exports the
+whole catalog, sorted by identity.</p>
+<p><code>export_supplemental_attribute_associations_openapi</code> exports the whole
+<code>supplemental_attribute_associations</code> table, sorted by <code>(component_id, attribute_id)</code>;
+<code>import_supplemental_attribute_associations_openapi!</code> is its import half — a bulk, all-or-nothing
+insert (a duplicate anywhere in the batch throws <code>DuplicateAssociationError</code> and rolls the batch
+back), returning the number of rows inserted.</p>
+<p>There is no corresponding time-series <em>import</em>: infrastore never modifies the associations table or
+the data to make an incoming document agree with what it already holds. A geometry disagreement
+between an added series and its own association row is rejected at the add boundary instead
+(<code>InvalidParameterError</code>), loudly and without writing anything.</p>
 <h2 id="errors-1"><a class="header" href="#errors-1">Errors</a></h2>
 <p>All subtype <code>TimeSeriesException</code>:</p>
 <div class="table-wrapper"><table><thead><tr><th>Type</th><th>Mapped from FFI code</th></tr></thead><tbody>
@@ -7998,9 +8058,10 @@ language, and an empty list matches nothing. An unknown field or malformed JSON 
 <code>INFRASTORE_ERR_INVALID_PARAMETER</code>. Every remove function reports its count through <code>out_removed</code>
 and treats removing nothing as success, not an error.</p>
 <p>The list functions use the probe-then-fetch convention: call with <code>buf = NULL, cap = 0</code> to learn the
-length via <code>out_len</code>, then again with a <code>len + 1</code>-byte buffer. (<code>infrastore_store_list_keys</code> and
-<code>infrastore_store_list_array_groups</code> are the exceptions in this header — they return an owned string
-instead, because a time-series listing is the one result whose size scales with the whole catalog.)</p>
+length via <code>out_len</code>, then again with a <code>len + 1</code>-byte buffer. (<code>infrastore_store_list_keys</code>,
+<code>infrastore_store_list_array_groups</code>, and
+<code>infrastore_store_list_supplemental_attribute_associations</code> are the exceptions in this header — they
+return an owned string instead, because a no-filter call exports the whole catalog or table.)</p>
 <h3 id="supplemental-attribute-associations-3"><a class="header" href="#supplemental-attribute-associations-3">Supplemental-attribute associations</a></h3>
 <p>Which supplemental attributes are attached to which components. Identity is the
 <code>(component_id, attribute_id)</code> pair; the type names are denormalized labels, so re-attaching the
@@ -8029,11 +8090,13 @@ int32_t infrastore_store_has_supplemental_attribute_association(const struct Inf
                                                         bool *out_found);
 
 /* Matching attachments as a JSON array, in insertion order; each object carries
-   component_id, component_type, attribute_id, attribute_type. Probe-then-fetch. */
+   component_id, component_type, attribute_id, attribute_type. Returns the JSON
+   through out_json as an OWNED allocation, freed with infrastore_string_free
+   (a no-filter call exports the whole table, so this follows the owned-string
+   convention rather than probe-then-fetch). */
 int32_t infrastore_store_list_supplemental_attribute_associations(const struct InfraStore *handle,
                                                           const char *filter_json,
-                                                          char *buf, uint64_t cap,
-                                                          uint64_t *out_len);
+                                                          char **out_json, uint64_t *out_len);
 
 /* Distinct attribute ids of the matching rows, ascending, as a JSON array — the
    attributes attached to a component when component_id is set. Probe-then-fetch. */
@@ -8156,6 +8219,43 @@ free(json);
 </code></pre>
 <p>Neither association catalog is exposed over the <a href="reference/./grpc-api.html">gRPC server</a> or the
 <a href="reference/./cli.html"><code>infrastore</code> CLI</a>.</p>
+<h2 id="openapi-row-association-serde-2"><a class="header" href="#openapi-row-association-serde-2">OpenAPI-row Association Serde</a></h2>
+<p>Direct JSON serde of the two association catalogs, in the wire spelling
+<a href="https://github.com/Sienna-Platform/SiennaSchemas">SiennaSchemas</a> defines (<code>TimeSeries/*.json</code>,
+<code>Core/Associations/SupplementalAttributeAssociation.json</code>). The two exports use the owned-string
+convention.</p>
+<pre><code class="language-c">/* Export time_series_associations matching the filter as a sorted OpenAPI-row
+   JSON array. Each row's uri and data_hash are the hex-encoded content hash
+   the store already has for that row -- never a caller-supplied locator.
+   Filters match infrastore_store_list_keys. Returns the JSON through out_json
+   as an OWNED allocation, freed with infrastore_string_free. */
+int32_t infrastore_store_export_time_series_associations_openapi(const struct InfraStore *handle,
+                                                          bool has_owner, int64_t owner_id,
+                                                          bool has_owner_category, int32_t owner_category,
+                                                          bool has_time_series_type, int32_t time_series_type,
+                                                          const char *name, const char *resolution,
+                                                          const char *interval, const char *features_json,
+                                                          const char *component_field,
+                                                          char **out_json, uint64_t *out_len);
+
+/* Export the whole supplemental_attribute_associations table as an OpenAPI-row
+   JSON array, sorted by (component_id, attribute_id). Owned-string return. */
+int32_t infrastore_store_export_supplemental_attribute_associations_openapi(
+    const struct InfraStore *handle, char **out_json, uint64_t *out_len);
+
+/* Bulk-ingest a JSON array of supplemental-attribute association OpenAPI rows in
+   one all-or-nothing transaction -- the import half of the round trip whose
+   export is infrastore_store_export_supplemental_attribute_associations_openapi.
+   *out_added (when non-NULL) receives the number inserted. */
+int32_t infrastore_store_import_supplemental_attribute_associations_openapi(
+    struct InfraStore *handle, const char *json, uint64_t *out_added);
+</code></pre>
+<p>A catalog row's <code>data_hash</code> is <code>NOT NULL</code>, and infrastore fills a row's <code>uri</code>/<code>data_hash</code> wire
+fields with that same content hash, hex-encoded, on export. There is no corresponding time-series
+<em>import</em> export: infrastore never modifies the associations table or the data to make an incoming
+document agree with what it already holds. A geometry disagreement between an added series and its
+own association row is rejected at the add boundary instead (<code>INFRASTORE_ERR_INVALID_PARAMETER</code>),
+loudly and without writing anything.</p>
 <h2 id="error-messages"><a class="header" href="#error-messages">Error Messages</a></h2>
 <pre><code class="language-c">int32_t infrastore_last_error_message(char *buf, uint64_t buf_len, uint64_t *needed);
 </code></pre>

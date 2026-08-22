@@ -979,6 +979,30 @@ remove_parent_child_associations!(store; parent_types=["Bus"])   # 1
 </code></pre>
 <p>Neither association catalog is exposed over the <a href="./grpc-api.html">gRPC server</a> or the
 <a href="./cli.html"><code>infrastore</code> CLI</a>.</p>
+<h3 id="openapi-row-association-serde"><a class="header" href="#openapi-row-association-serde">OpenAPI-row association serde</a></h3>
+<p>Direct JSON serde of the two association catalogs, in the wire spelling
+<a href="https://github.com/Sienna-Platform/SiennaSchemas">SiennaSchemas</a> defines (<code>TimeSeries/*.json</code>,
+<code>Core/Associations/SupplementalAttributeAssociation.json</code>). Unlike <a href="@ref"><code>list_time_series</code></a> /
+<a href="@ref"><code>list_supplemental_attribute_associations</code></a>, which return Julia structs, these three
+functions exchange the wire JSON verbatim — the format a document author (e.g. PowerTableDataParser)
+reads and writes directly.</p>
+<pre><code class="language-julia">export_time_series_associations_openapi(store; filters...) -&gt; String
+export_supplemental_attribute_associations_openapi(store) -&gt; String
+import_supplemental_attribute_associations_openapi!(store, json::AbstractString) -&gt; Int
+</code></pre>
+<p><code>export_time_series_associations_openapi</code> takes the same filter keywords as
+<a href="@ref"><code>list_time_series</code></a>. Every row's <code>uri</code> and <code>data_hash</code> are the hex-encoded content hash the
+store already has for that row — never a caller-supplied locator. With no filter this exports the
+whole catalog, sorted by identity.</p>
+<p><code>export_supplemental_attribute_associations_openapi</code> exports the whole
+<code>supplemental_attribute_associations</code> table, sorted by <code>(component_id, attribute_id)</code>;
+<code>import_supplemental_attribute_associations_openapi!</code> is its import half — a bulk, all-or-nothing
+insert (a duplicate anywhere in the batch throws <code>DuplicateAssociationError</code> and rolls the batch
+back), returning the number of rows inserted.</p>
+<p>There is no corresponding time-series <em>import</em>: infrastore never modifies the associations table or
+the data to make an incoming document agree with what it already holds. A geometry disagreement
+between an added series and its own association row is rejected at the add boundary instead
+(<code>InvalidParameterError</code>), loudly and without writing anything.</p>
 <h2 id="errors"><a class="header" href="#errors">Errors</a></h2>
 <p>All subtype <code>TimeSeriesException</code>:</p>
 <div class="table-wrapper"><table><thead><tr><th>Type</th><th>Mapped from FFI code</th></tr></thead><tbody>

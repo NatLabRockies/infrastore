@@ -860,6 +860,42 @@ store.remove_parent_child_associations(parent_types=["Bus"])   # -&gt; 1
 </code></pre>
 <p>Neither association catalog is exposed over the <a href="grpc-api.html">gRPC server</a> or the
 <a href="cli.html"><code>infrastore</code> CLI</a>.</p>
+<h3 id="openapi-row-association-serde"><a class="header" href="#openapi-row-association-serde">OpenAPI-row association serde</a></h3>
+<p>Direct JSON serde of the two association catalogs, in the wire spelling
+<a href="https://github.com/Sienna-Platform/SiennaSchemas">SiennaSchemas</a> defines (<code>TimeSeries/*.json</code>,
+<code>Core/Associations/SupplementalAttributeAssociation.json</code>). Unlike <code>list_time_series</code> /
+<code>list_supplemental_attribute_associations</code>, which return Python objects, these three methods
+exchange the wire JSON verbatim — the format a document author (e.g. PowerTableDataParser) reads and
+writes directly.</p>
+<pre><code class="language-python">def export_time_series_associations_openapi(
+    self, *, owner_id=None, owner_category=None, owner_type=None,
+    time_series_type=None, name=None, name_glob=None, component_field=None,
+    resolution=None, interval=None, features=None,
+) -&gt; str: ...
+def export_supplemental_attribute_associations_openapi(self) -&gt; str: ...
+def import_supplemental_attribute_associations_openapi(self, json: str) -&gt; int: ...
+</code></pre>
+<p><code>export_time_series_associations_openapi</code> takes the same filter keywords as <code>list_time_series</code>.
+Every row's <code>uri</code> and <code>data_hash</code> are the hex-encoded content hash the store already has for that
+row — never a caller-supplied locator. With no filter this exports the whole catalog, sorted by
+identity.</p>
+<p><code>export_supplemental_attribute_associations_openapi</code> exports the whole
+<code>supplemental_attribute_associations</code> table, sorted by <code>(component_id, attribute_id)</code>;
+<code>import_supplemental_attribute_associations_openapi</code> is its import half — a bulk, all-or-nothing
+insert (a duplicate anywhere in the batch raises <code>DuplicateAssociationError</code> and rolls the batch
+back), returning the number of rows inserted.</p>
+<p>There is no corresponding time-series <em>import</em> method: infrastore never modifies the associations
+table or the data to make an incoming document agree with what it already holds. A geometry
+disagreement between an added series and its own association row is rejected at the add boundary
+instead (<code>InvalidParameterError</code>), loudly and without writing anything.</p>
+<pre><code class="language-python">store = Store.create(in_memory=True)
+store.add_time_series(
+    owner_id=1, owner_type="Generator", owner_category=OwnerCategory.Component,
+    time_series=SingleTimeSeries(t0, timedelta(hours=1), values, "load"),
+)
+
+json_str = store.export_time_series_associations_openapi()
+</code></pre>
 <h2 id="exceptions"><a class="header" href="#exceptions">Exceptions</a></h2>
 <p>All inherit from <code>TimeSeriesError</code>:</p>
 <div class="table-wrapper"><table><thead><tr><th>Exception</th><th>Raised when</th></tr></thead><tbody>
