@@ -116,8 +116,9 @@ pair directly and supports both reads and writes. Its shape:
 - **CSV in, store out.** Numeric values come from a CSV; the metadata that does not fit a flat grid
   (owner, name, type, dtype, resolution, timestamps, units, features) is described in a descriptor
   JSON. All six dtypes and all five writable types are supported, forecasts included.
-- **A global `-f/--format` selects `table` (default), `json`, `jsonl`, or `csv`.** Only the read
-  commands honor it; the write commands print plain text.
+- **A global `-f/--format` selects `table` (default), `json`, `jsonl`, or `csv`.** Read commands
+  render their results in it; write commands report their outcome in it (prose under `table`, a
+  one-object status document under `json`/`jsonl`). Only `template` ignores it.
 - **Store access is isolated.** All store opening lives behind one module, so a future remote/gRPC
   mode can be added without touching the command handlers; today there is no remote mode.
 
