@@ -2,7 +2,7 @@
 
 This guide is for developers of a package that uses infrastore as the time-series layer behind its
 own component model — the shipped examples are [infrasys](https://github.com/NatLabRockies/infrasys)
-(Python) and [InfrastructureSystems.jl](https://github.com/NREL-Sienna/InfrastructureSystems.jl)
+(Python) and [InfrastructureSystems.jl](https://github.com/Sienna-Platform/InfrastructureSystems.jl)
 (Julia). It collects the contracts such a package has to honor and the patterns both consumers
 already use, in one place. The per-language guides ([Python](./python.md), [Julia](./julia.md),
 [Rust](./rust.md)) show each call; this page says which calls to reach for and why. The reasoning

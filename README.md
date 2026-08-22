@@ -43,7 +43,7 @@ Under development, unstable API, integrating with parent packages
 - **Read-only gRPC service** — serve a store to remote readers, with optional API-key auth. Writes
   require local filesystem access.
 - **Built for power-systems data** — the data model maps onto
-  [InfrastructureSystems.jl](https://github.com/NREL-Sienna/InfrastructureSystems.jl) and
+  [InfrastructureSystems.jl](https://github.com/Sienna-Platform/InfrastructureSystems.jl) and
   [infrasys](https://github.com/NatLabRockies/infrasys) owners, categories, and time-series
   concepts.
 
