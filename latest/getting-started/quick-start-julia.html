@@ -239,15 +239,17 @@ of a cost curve.</p>
 <h2 id="look-it-up-without-the-key"><a class="header" href="#look-it-up-without-the-key">Look It Up Without the Key</a></h2>
 <p>A series can also be addressed by its attributes, which is convenient when a caller keeps its own
 identifiers:</p>
-<pre><code class="language-julia">got = get_time_series(SingleTimeSeries, store, 42, Component, "load"; resolution = Hour(1))
+<pre><code class="language-julia">got = get_time_series(SingleTimeSeries, store, 42, Component, "load";
+                      resolution = Hour(1), features = Dict("model_year" =&gt; 2030))
 
 for m in list_time_series(store; owner_id = 42)   # Vector{TimeSeriesMetadata}
     println(m.name, " ", m.resolution, " ", m.units)
 end
-# load PT1H MW
+# load 3600000 milliseconds MW
 </code></pre>
 <p><code>get_time_series</code>, <code>has_time_series</code>, and <code>remove_time_series!</code> all accept either a <code>TimeSeriesKey</code>
-or <code>(owner_id, owner_category, name; resolution, features)</code> attributes.</p>
+or <code>(owner_id, owner_category, name; resolution, features)</code> attributes. The attribute form matches
+<code>features</code> exactly, which is why the lookup above repeats <code>model_year</code>.</p>
 <h2 id="writing-to-disk"><a class="header" href="#writing-to-disk">Writing to Disk</a></h2>
 <p>Swap the constructor to persist. The do-block form closes the store on exit, including on throw:</p>
 <pre><code class="language-julia">Store(in_memory=false, path="system.h5") do store

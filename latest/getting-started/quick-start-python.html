@@ -234,9 +234,9 @@ recorded a metadata association keyed by
 <li><strong><code>get_time_series(key)</code></strong> looked up the association, read the array back by its content hash,
 and reconstructed a <code>SingleTimeSeries</code>.</li>
 </ol>
-<p>The array is any NumPy array whose dtype is <code>float64</code>, <code>float32</code>, <code>int64</code>, <code>int32</code>, <code>uint64</code>, or
-<code>bool</code> — whatever you pass round-trips unchanged. Shapes beyond <code>(length,)</code> attach a per-step
-element shape, such as the coefficient tuple of a cost curve.</p>
+<p>The array is any NumPy array whose dtype is <code>float64</code>, <code>float32</code>, <code>int64</code>, <code>int32</code>, <code>int16</code>, <code>int8</code>,
+<code>uint64</code>, <code>uint32</code>, <code>uint16</code>, <code>uint8</code>, or <code>bool</code> — whatever you pass round-trips unchanged. Shapes
+beyond <code>(length,)</code> attach a per-step element shape, such as the coefficient tuple of a cost curve.</p>
 <h2 id="slice-and-list"><a class="header" href="#slice-and-list">Slice and List</a></h2>
 <p>Pass a <code>(start, end)</code> tuple of datetimes to read a window instead of the whole series (<code>end</code> is
 exclusive):</p>

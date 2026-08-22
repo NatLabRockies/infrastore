@@ -188,26 +188,27 @@
 <p>This recipe builds the components other languages depend on. For the full prerequisites and
 workspace build, see <a href="../getting-started/installation.html">Installation</a>.</p>
 <blockquote>
-<p><strong>You may not need to build it.</strong> Each tagged release attaches <code>libinfrastore_ffi</code> and the
+<p><strong>You may not need to build it.</strong> <code>Pkg.add("InfraStore")</code> downloads a prebuilt <code>libinfrastore_ffi</code>
+for the platform as a Julia artifact, and each tagged release also attaches the library and the
 generated <code>infrastore.h</code> to the
 <a href="https://github.com/NatLabRockies/infrastore/releases">Releases page</a>, linked statically against
-HDF5 and zlib. Downloading that archive and pointing <code>INFRASTORE_LIB</code> at the library (step 3
-below) skips this whole page. It is the shortest path for Julia today, since <code>InfraStore.jl</code> is
-not yet registered — see <a href="../getting-started/installation.html#julia">Installation § Julia</a>. Build
-from source when you need a platform the release matrix does not cover, or a library matching a
-working tree.</p>
+HDF5 and zlib. Pointing <code>INFRASTORE_LIB</code> at a downloaded library (step 3 below) skips the build.
+Build from source when you need a platform the release matrix does not cover, or a library
+matching a working tree.</p>
 </blockquote>
-<h2 id="1-install-system-libraries"><a class="header" href="#1-install-system-libraries">1. Install System Libraries</a></h2>
+<h2 id="1-install-build-tools"><a class="header" href="#1-install-build-tools">1. Install Build Tools</a></h2>
+<p>HDF5 and zlib are compiled from vendored sources and linked statically, so there is <strong>no system HDF5
+to install</strong>. The build needs <code>cmake</code>, a C compiler, and <code>protobuf</code> for the gRPC codegen:</p>
 <pre><code class="language-sh"># macOS
-brew install hdf5 protobuf
+brew install cmake protobuf
 
 # Debian / Ubuntu
-sudo apt-get install libhdf5-dev protobuf-compiler
+sudo apt-get install cmake protobuf-compiler
 </code></pre>
-<p>If the build fails with <code>Unable to locate HDF5 root directory and/or headers</code>, set <code>HDF5_DIR</code>:</p>
-<pre><code class="language-sh">export HDF5_DIR="$(brew --prefix hdf5)"          # macOS
-export HDF5_DIR=/usr/lib/x86_64-linux-gnu/hdf5/serial  # Linux
-</code></pre>
+<p>Do not set <code>HDF5_DIR</code> — it redirects the vendored build at an external HDF5 while static libraries
+are still requested, and the build fails. See
+<a href="../getting-started/installation.html#build-prerequisites">Build Prerequisites</a> for the system-library
+alternative (<code>--no-default-features</code>).</p>
 <h2 id="2-build-what-you-need"><a class="header" href="#2-build-what-you-need">2. Build What You Need</a></h2>
 <p><strong>The C ABI cdylib</strong> (used by Julia and any C consumer):</p>
 <pre><code class="language-sh">cargo build -p infrastore-ffi --release
@@ -221,7 +222,8 @@ cargo test --workspace
 <p>The Python wheel is built separately with <code>maturin</code> — see
 <a href="./integrate-python.html">Integrate with Python</a>.</p>
 <h2 id="3-point-consumers-at-the-library"><a class="header" href="#3-point-consumers-at-the-library">3. Point Consumers at the Library</a></h2>
-<p>The Julia binding and other C consumers locate the cdylib via an environment variable:</p>
+<p><code>InfraStore.jl</code> and other C consumers locate a locally built cdylib via an environment variable,
+which takes precedence over the artifact <code>Pkg</code> installed:</p>
 <pre><code class="language-sh">export INFRASTORE_LIB=$PWD/target/release/libinfrastore_ffi.dylib  # .so on Linux
 </code></pre>
 <p>Add it to your shell profile to make it permanent.</p>

@@ -254,7 +254,9 @@ FFI fetches them in one decompress-once pass per dataset into a <code>InfraStore
 Python's <code>store.bulk_read</code> exposes the same operation directly. Managed bulk <em>writes</em> already take
 the fast block-write path through the existing batch / <code>add_time_series_bulk</code> APIs.</li>
 </ul>
-<p><code>InfraStore.jl</code> loads the cdylib from the path in the <code>INFRASTORE_LIB</code> environment variable. See the
+<p><code>InfraStore.jl</code> loads the cdylib from the <code>INFRASTORE_LIB</code> environment variable when it is set, and
+otherwise from the <code>libinfrastore_ffi</code> artifact its <code>Artifacts.toml</code> pins to the matching GitHub
+Release (see <a href="../how-to/integrate-julia.html">Integrate with Julia</a>). See the
 <a href="../guides/julia.html">Julia guide</a>, the <a href="../reference/c-abi.html">C ABI reference</a>, and the
 <a href="../reference/julia-api.html">Julia API reference</a>.</p>
 <h3 id="infrastructuresystemsjl-integration"><a class="header" href="#infrastructuresystemsjl-integration">InfrastructureSystems.jl Integration</a></h3>
@@ -283,7 +285,9 @@ pair directly and supports both reads and writes. Its shape:</p>
 <li><strong>CSV in, store out.</strong> Numeric values come from a CSV; the metadata that does not fit a flat grid
 (owner, name, type, dtype, resolution, timestamps, units, features) is described in a descriptor
 JSON. All six dtypes and all five writable types are supported, forecasts included.</li>
-<li>**A global <code>-f/--format</code> selects <code>table</code> (default), <code>json</code>, or <code>csv</code>.</li>
+<li><strong>A global <code>-f/--format</code> selects <code>table</code> (default), <code>json</code>, <code>jsonl</code>, or <code>csv</code>.</strong> Read commands
+render their results in it; write commands report their outcome in it (prose under <code>table</code>, a
+one-object status document under <code>json</code>/<code>jsonl</code>). Only <code>template</code> ignores it.</li>
 <li><strong>Store access is isolated.</strong> All store opening lives behind one module, so a future remote/gRPC
 mode can be added without touching the command handlers; today there is no remote mode.</li>
 </ul>

@@ -193,26 +193,27 @@
 The store holds only the <em>relationship</em> — the components and supplemental attributes themselves live
 in the consumer's object graph — which is why the association flags are bare ids and type names.</p>
 <h2 id="synopsis"><a class="header" href="#synopsis">Synopsis</a></h2>
-<pre><code class="language-text">infrastore [--store &lt;PATH.h5&gt;] [-f &lt;FORMAT&gt;] [--log-level &lt;FILTER&gt;] &lt;COMMAND&gt;
+<pre><code class="language-text">infrastore [--store &lt;PATH.h5&gt;] [-f &lt;FORMAT&gt;] [--log-level &lt;FILTER&gt;] [-y] [--assume-timezone &lt;ZONE&gt;] &lt;COMMAND&gt;
 </code></pre>
+<p>Every global option is accepted after the command too (<code>infrastore add --store demo.h5 …</code>).</p>
 <h3 id="global-options"><a class="header" href="#global-options">Global options</a></h3>
 <div class="table-wrapper"><table><thead><tr><th>Option</th><th>Description</th></tr></thead><tbody>
 <tr><td><code>--store &lt;PATH&gt;</code></td><td>Path to the HDF5 store file. The <code>&lt;PATH&gt;.sqlite</code> catalog is implicit. Falls back to the <code>INFRASTORE_STORE</code> environment variable.</td></tr>
 <tr><td><code>-f</code>, <code>--format</code></td><td>Output format: <code>table</code> (default), <code>json</code>, <code>jsonl</code>, or <code>csv</code>.</td></tr>
 <tr><td><code>--log-level</code></td><td>Tracing filter; also read from <code>RUST_LOG</code>. Defaults to <code>warn</code>.</td></tr>
 <tr><td><code>-y</code>, <code>--yes</code></td><td>Answer every confirmation prompt with yes.</td></tr>
-<tr><td><code>--assume-timezone &lt;ZONE&gt;</code></td><td>Read timestamps that carry no time zone as being in this one: <code>UTC</code>, or a fixed offset like <code>-07:00</code>.</td></tr>
+<tr><td><code>--assume-timezone &lt;ZONE&gt;</code></td><td>Read timestamps that carry no time zone as being in this one: <code>UTC</code> (or <code>Z</code>), or a fixed offset — <code>-07:00</code>, <code>-0700</code>, <code>-07</code>.</td></tr>
 </tbody></table>
 </div>
 <p><code>--store</code> (or <code>INFRASTORE_STORE</code>) is required by every command except <code>template</code> and <code>completions</code>.</p>
 <p><code>-f</code>/<code>--format</code> applies to every command, read and write alike. The read/inspection commands
 (<code>list</code>, <code>get</code>, <code>grid</code>, <code>info</code>, <code>export</code>, <code>names</code>, <code>owner-types</code>, <code>owners</code>, <code>exists</code>, <code>stats</code>,
-<code>summary</code>, <code>diff</code>, <code>verify</code>, <code>check-consistency</code>, <code>resolutions</code>, <code>params</code>, <code>compact</code>, and
-<code>add --dry-run</code>) render their results in it. The write commands (<code>init</code>, <code>add</code>, <code>merge</code>, <code>remove</code>,
-<code>rename</code>, <code>copy</code>, <code>replace-owner</code>, <code>clear</code>, <code>transform</code>, <code>persist</code>, <code>plot</code>, <code>attach</code>, <code>detach</code>,
-<code>link</code>, <code>unlink</code>, <code>reassign</code>) report their outcome in it: prose under <code>table</code>, and a one-object
-status document under <code>json</code>/<code>jsonl</code>, so a scripted mutation pipes into <code>jq</code> the way a scripted
-query does.</p>
+<code>store-info</code>, <code>arrays</code>, <code>summary</code>, <code>attributes</code>, <code>links</code>, <code>diff</code>, <code>verify</code>, <code>check-consistency</code>,
+<code>resolutions</code>, <code>params</code>, <code>compact</code>, and <code>add --dry-run</code>) render their results in it. The write
+commands (<code>init</code>, <code>add</code>, <code>merge</code>, <code>remove</code>, <code>rename</code>, <code>copy</code>, <code>replace-owner</code>, <code>clear</code>, <code>transform</code>,
+<code>persist</code>, <code>plot</code>, <code>attach</code>, <code>detach</code>, <code>link</code>, <code>unlink</code>, <code>reassign</code>) report their outcome in it:
+prose under <code>table</code>, and a one-object status document under <code>json</code>/<code>jsonl</code>, so a scripted mutation
+pipes into <code>jq</code> the way a scripted query does.</p>
 <pre><code class="language-console">$ infrastore --store s.h5 -f json --yes remove --all --owner-id 42 | jq .removed
 3
 </code></pre>
@@ -268,7 +269,7 @@ year-round; pass that offset. Data that really is civil time with daylight savin
 offsets in the file, where each row can say which side of a transition it is on.</li>
 </ul>
 <h2 id="commands"><a class="header" href="#commands">Commands</a></h2>
-<p><code>infrastore --help</code> lists these under the same six headings used below. The grouping is a display
+<p><code>infrastore --help</code> lists these under the same eight headings used below. The grouping is a display
 aid only — every command is invoked flat, as <code>infrastore &lt;command&gt;</code>; there are no subcommand
 namespaces to type.</p>
 <p>Each group's examples are below its table, and every command carries the same ones in its own help:
@@ -446,13 +447,13 @@ identical series.</p>
 infrastore completions zsh &gt; ~/.zfunc/_infrastore
 </code></pre>
 <pre><code class="language-text">infrastore --store &lt;PATH&gt; init [--compression &lt;none|deflate[:LEVEL]&gt;] [--no-shuffle] [--catalog &lt;attached|in-memory&gt;]
-infrastore --store &lt;PATH&gt; add --descriptor &lt;FILE.json|-&gt; [--csv &lt;FILE.csv&gt;] [--dry-run] [--replace] [--batch-size N] [--quiet] [--compression &lt;SPEC&gt;] [--no-shuffle] [--catalog &lt;MODE&gt;]
+infrastore --store &lt;PATH&gt; add --descriptor &lt;FILE.json|-&gt; [--csv &lt;FILE.csv&gt;] [--dry-run] [--replace] [--batch-size N] [-q|--quiet] [--compression &lt;SPEC&gt;] [--no-shuffle] [--catalog &lt;MODE&gt;]
 infrastore --store &lt;PATH&gt; add --csv &lt;FILE.csv&gt; --owner-id &lt;I&gt; --owner-type &lt;T&gt; --name &lt;N&gt; --type &lt;T&gt; --element-type &lt;E&gt; [DESCRIPTOR FIELDS...]
 infrastore --store &lt;PATH&gt; merge --from &lt;PATH.h5&gt; [SELECTOR...] [--replace] [--dry-run]
 infrastore --store &lt;PATH&gt; list    [SELECTOR...] [--limit N] [--wide]
 infrastore --store &lt;PATH&gt; get     [SELECTOR...] [--time-range START..END] [--limit N | --full] [--tail] [--stride N] [--plot [--plot-width COLS]] [--window N | --issue-time &lt;TS&gt;]
 infrastore --store &lt;PATH&gt; grid    [SELECTOR...] [--time-range START..END] [--limit N | --full] [--label &lt;auto|owner|full&gt;]
-infrastore --store &lt;PATH&gt; plot    [SELECTOR...] --out &lt;FILE.svg|FILE.html|-&gt; [--kind &lt;line|duration|heatmap|fan|overlay&gt;] [--time-range START..END] [--title &lt;T&gt;] [--width W] [--height H] [--window N] [--limit N]
+infrastore --store &lt;PATH&gt; plot    [SELECTOR...] [--out &lt;FILE.svg|FILE.html|-&gt;] [--kind &lt;line|duration|heatmap|fan|overlay&gt;] [--time-range START..END] [--title &lt;T&gt;] [--width W] [--height H] [--window N] [--limit N]
 infrastore --store &lt;PATH&gt; info    [SELECTOR...] [--no-stats]
 infrastore --store &lt;PATH&gt; export  [SELECTOR...] [--dir &lt;DIR&gt;] [--time-range START..END]
 infrastore --store &lt;PATH&gt; names       [SELECTOR...]
@@ -486,9 +487,9 @@ infrastore --store &lt;PATH&gt; resolutions
 infrastore --store &lt;PATH&gt; params [--resolution &lt;DUR&gt;] [--interval &lt;DUR&gt;]
 infrastore template &lt;SingleTimeSeries|NonSequentialTimeSeries|Deterministic|Probabilistic|Scenarios&gt;
 </code></pre>
-<p><code>--csv</code> overrides the <code>csv</code> path inside the descriptor, and only works for a descriptor that
-describes a single series. Passing it alongside a descriptor array holding more than one object
-fails with <code>--csv cannot be used with an array descriptor</code>.</p>
+<p><code>--csv</code> overrides the <code>csv</code> path inside the descriptor, and only works when the descriptor is a
+single object (a wide one that expands to many series included). Passing it alongside a descriptor
+array holding more than one object fails with <code>--csv cannot be used with an array descriptor</code>.</p>
 <p><code>transform</code> takes no selector: it rewrites <strong>every</strong> <code>SingleTimeSeries</code> in the store, deriving a
 <code>DeterministicSingleTimeSeries</code> from each. <code>--owner-category</code> and <code>--resolution</code> optionally scope it
 to one category and/or resolution. <code>--horizon</code> must not exceed the shortest matched series
@@ -518,14 +519,15 @@ that fails validation never leaves an empty store behind.</p>
 <p><code>add --replace</code> removes any series that already carries one of the identities being added, inside
 the same transaction, which is what makes re-running a load after fixing the data idempotent.
 <code>add --batch-size N</code> commits every N series instead of the whole load in one transaction, bounding
-memory for a very large load at the cost of the load's atomicity; <code>--quiet</code> silences everything but
-errors, and above 20 series the per-series lines are replaced by a progress counter on stderr.</p>
+memory for a very large load at the cost of the load's atomicity; <code>-q</code>/<code>--quiet</code> silences everything
+but errors, and above 20 series the per-series lines are replaced by a progress counter on stderr.</p>
 <p><code>add --descriptor -</code> reads the JSON from stdin, so a generator script can pipe descriptors straight
 in. Relative <code>csv</code> paths in a piped descriptor resolve against the working directory, since there is
 no descriptor file for them to sit beside.</p>
 <p><code>init --compression</code> (or <code>add --compression</code>) sets the HDF5 compression policy for a store the
-command creates (<code>none</code>, <code>deflate</code>, or <code>deflate:LEVEL</code> with <code>--no-shuffle</code> to disable byte-shuffle);
-passing it for an existing store is an error, since the persisted policy governs.</p>
+command creates (<code>none</code>, <code>deflate</code>, or <code>deflate:LEVEL</code> with <code>--no-shuffle</code> to disable byte-shuffle;
+a bare <code>deflate</code> is level 3, and the default when neither is given); passing it for an existing
+store is an error, since the persisted policy governs.</p>
 <p><code>--catalog</code> decides where the SQLite catalog lives <strong>while the command runs</strong>. <code>attached</code> (the
 default) commits to <code>&lt;store&gt;.sqlite</code> as it goes, so an interrupted load keeps what it had already
 written. <code>in-memory</code> holds the catalog in RAM instead of journaling every commit — much faster for a
@@ -621,10 +623,10 @@ The CSV holds only numbers, preceded by a mandatory header row (plus a leading t
 <code>NonSequentialTimeSeries</code>).</p>
 <div class="table-wrapper"><table><thead><tr><th>Key</th><th>Required for</th><th>Notes</th></tr></thead><tbody>
 <tr><td><code>owner_id</code></td><td>long layout</td><td>Integer component identifier (<code>i64</code>). Rejected when wide.</td></tr>
-<tr><td><code>owner_type</code></td><td>all</td><td>In the wide layout, the default for unmapped columns.</td></tr>
+<tr><td><code>owner_type</code></td><td>long layout</td><td>Wide: the default for <code>owner_map</code> rows that name none.</td></tr>
 <tr><td><code>owner_category</code></td><td>optional</td><td><code>Component</code> (default) or <code>SupplementalAttribute</code>.</td></tr>
 <tr><td><code>name</code></td><td>all</td><td></td></tr>
-<tr><td><code>type</code></td><td>all</td><td>One of the five writable types, canonically spelled.</td></tr>
+<tr><td><code>type</code></td><td>all</td><td>One of the five writable types; spellings as for <code>--type</code>.</td></tr>
 <tr><td><code>element_type</code></td><td>all</td><td><code>f64</code>/<code>f32</code>/<code>i64</code>/…, <code>tuple(N,f64)</code>, or a function-data kind.</td></tr>
 <tr><td><code>csv</code></td><td>unless <code>--csv</code> is passed</td><td>Path relative to the descriptor; <code>--csv</code> overrides it.</td></tr>
 <tr><td><code>element_shape</code></td><td>optional</td><td>Trailing per-step dims; default scalar (<code>[]</code>).</td></tr>
@@ -641,7 +643,7 @@ The CSV holds only numbers, preceded by a mandatory header row (plus a leading t
 <tr><td><code>scenario_count</code></td><td><code>Scenarios</code> (optional)</td><td>Inferred from the data length if omitted.</td></tr>
 <tr><td><code>layout</code></td><td>optional</td><td><code>long</code> (default) or <code>wide</code>. See below.</td></tr>
 <tr><td><code>owner_map</code></td><td>wide layout</td><td>Sidecar CSV path, or an inline <code>{"column": owner_id}</code> object.</td></tr>
-<tr><td><code>owner_id_from</code></td><td>wide layout</td><td><code>"header"</code> when the headers already are owner ids.</td></tr>
+<tr><td><code>owner_id_from</code></td><td>wide layout</td><td><code>"header"</code> (the only value) when the headers are owner ids.</td></tr>
 </tbody></table>
 </div>
 <p>Unknown keys are rejected. Any key not in the table above — including a typo like <code>resolutionn</code> — is
@@ -691,11 +693,14 @@ be an input. There are three ways to supply it:</p>
 </div>
 <p>The sidecar CSV's header is mandatory and checked (<code>column,owner_id</code> or
 <code>column,owner_id,owner_type</code>). Where a row names an <code>owner_type</code> it wins; otherwise the descriptor's
-<code>owner_type</code> is the default. A column with no mapping is an error that names the unmapped columns —
-a 500-column load that stopped at "some column is unmapped" would leave you diffing two files by
-hand.</p>
-<p>A leading <code>timestamp</code> column is stripped if present, and is <strong>required</strong> for a wide
-<code>NonSequentialTimeSeries</code> (whose timestamps are explicit rather than a grid). The wide layout covers
+<code>owner_type</code> is the default — and it is required whenever any column lacks one, which is always the
+case for the inline object form, since that carries ids only. A column with no mapping is an error
+that names the unmapped columns — a 500-column load that stopped at "some column is unmapped" would
+leave you diffing two files by hand. Exactly one of <code>owner_map</code> and <code>owner_id_from</code> may be set, and
+either one in a <code>long</code> descriptor is an error.</p>
+<p>A leading <code>timestamp</code> column is <strong>required</strong> for a wide <code>NonSequentialTimeSeries</code> (whose timestamps
+are explicit rather than a grid). For a wide <code>SingleTimeSeries</code> it is optional, and when present it
+is checked, not ignored — see <a href="#reading-back-and-re-adding">Reading back</a>. The wide layout covers
 the two static types and scalar elements only: a forecast's value block is already three axes deep
 before any per-column split, and a multidimensional element would need a second header row to say
 which column belongs to which <code>(owner, element)</code> pair. Both are rejected rather than guessed at.</p>
@@ -735,7 +740,10 @@ live in the catalog, not in the file.</p>
 <p><code>add</code> reads both layouts. It picks between them from the header row, so a file written by <code>export</code>
 can be handed straight back to <code>add</code> with no column surgery:</p>
 <ul>
-<li>a first column named <code>timestamp</code> is read as the time axis;</li>
+<li>a first column named <code>timestamp</code> is read as the time axis. For a <code>NonSequentialTimeSeries</code> it <em>is</em>
+the data; for a <code>SingleTimeSeries</code> it is <strong>validated</strong> against the descriptor's
+<code>initial_timestamp</code> + <code>resolution</code> grid, row count included, so a file sliced out of an export and
+re-added under the original descriptor fails loudly rather than landing on the wrong instants;</li>
 <li>leading <code>issue_time</code> + <code>target_time</code> columns mark the timestamped forecast layout, whose rows run
 window-major with the percentiles/scenarios spread across columns — <code>add</code> transposes them back
 into the stored <code>[series, horizon, count, element]</code> order;</li>
@@ -772,7 +780,9 @@ across runs and two grid exports can be diffed.</p>
 <p><code>plot</code> writes one <strong>self-contained</strong> file: no external fonts, scripts, stylesheets, or images, so it
 opens in a browser, drops into a report, and survives being emailed. Both light and dark themes are
 written into the document, keyed on <code>prefers-color-scheme</code>. An <code>.html</code> destination wraps the same
-SVG in a minimal page; <code>--out -</code> writes to stdout.</p>
+SVG in a minimal page; <code>--out -</code> writes to stdout, and the default is <code>chart.svg</code> in the working
+directory. <code>--width</code>/<code>--height</code> default to 960 × 440 (CSS pixels, fractional values allowed);
+<code>--limit</code> caps an <code>overlay</code> at 8 windows unless told otherwise.</p>
 <div class="table-wrapper"><table><thead><tr><th><code>--kind</code></th><th>What it shows</th></tr></thead><tbody>
 <tr><td><code>line</code></td><td>The profile itself, one or more series against time.</td></tr>
 <tr><td><code>duration</code></td><td>The load duration curve: values sorted descending against the percent of time at</td></tr>

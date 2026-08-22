@@ -190,14 +190,22 @@
 <h2 id="prerequisites"><a class="header" href="#prerequisites">Prerequisites</a></h2>
 <ul>
 <li>Python 3.11 or newer.</li>
-<li>The <a href="./install.html#1-install-system-libraries">system libraries</a> (HDF5, Protobuf).</li>
+<li>For <code>pip install infrastore</code>: nothing else — the wheels are prebuilt and statically linked.</li>
+<li>For a from-source build: the <a href="./install.html#1-install-build-tools">build tools</a> (<code>cmake</code>, a C
+compiler, <code>protobuf</code>). No system HDF5 is needed.</li>
 </ul>
+<h2 id="install-from-pypi"><a class="header" href="#install-from-pypi">Install From PyPI</a></h2>
+<pre><code class="language-sh">pip install infrastore
+</code></pre>
+<p>That is the whole recipe for a consumer package such as infrasys. The rest of this page is for
+building the wheel from a checkout.</p>
 <h2 id="build-and-install-the-wheel-development"><a class="header" href="#build-and-install-the-wheel-development">Build and Install the Wheel (development)</a></h2>
 <p>The binding is built with <a href="https://www.maturin.rs/">maturin</a>. <code>maturin develop</code> compiles the
 extension and installs it into the active virtual environment:</p>
 <pre><code class="language-sh">cd crates/infrastore-py
 python3 -m venv .venv &amp;&amp; source .venv/bin/activate
 pip install maturin pytest numpy tzdata  # tzdata: zoneinfo on Windows
+pip install netCDF4 h5py                 # only for the HDF5-interop tests
 maturin develop
 </code></pre>
 <p>Verify the install:</p>
@@ -238,12 +246,14 @@ print("ok")
 <ul>
 <li><strong><code>ImportError</code> for the extension</strong> — Ensure you ran <code>maturin develop</code> in the active venv, or that
 <code>pip install</code>-ed the wheel into the interpreter you are running.</li>
-<li><strong>HDF5 not found during build</strong> — Set <code>HDF5_DIR</code> (see
-<a href="./install.html#1-install-system-libraries">Install</a>).</li>
+<li><strong>HDF5 build errors with <code>HDF5_DIR</code> set</strong> — Unset it. The vendored build compiles its own HDF5 and
+the variable redirects it at an external install while static libraries are still requested (see
+<a href="../getting-started/installation.html#build-prerequisites">Build Prerequisites</a>).</li>
 <li><strong><code>InvalidParameterError</code> on add</strong> — In Python, pass a NumPy array (any shape) whose dtype is one
-of <code>float64</code>, <code>float32</code>, <code>int64</code>, <code>int32</code>, <code>uint64</code>, or <code>bool</code>; any other dtype (e.g. <code>complex128</code>
-or a string dtype) raises. Feature values must be <code>int</code>/<code>float</code>/<code>bool</code>/<code>str</code>. Timestamps for a
-<code>NonSequentialTimeSeries</code> must be strictly increasing.</li>
+of <code>float64</code>, <code>float32</code>, <code>int64</code>, <code>int32</code>, <code>int16</code>, <code>int8</code>, <code>uint64</code>, <code>uint32</code>, <code>uint16</code>, <code>uint8</code>,
+or <code>bool</code>; any other dtype (e.g. <code>complex128</code> or a string dtype) raises. Feature values must be
+<code>int</code>/<code>float</code>/<code>bool</code>/<code>str</code>. Timestamps for a <code>NonSequentialTimeSeries</code> must be strictly
+increasing.</li>
 </ul>
 <h2 id="next"><a class="header" href="#next">Next</a></h2>
 <ul>

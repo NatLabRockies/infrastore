@@ -240,17 +240,18 @@ queryable associations live in a catalog SQLite database
 <li><strong>Typed, N-dimensional arrays</strong> — Store <code>f64</code>, <code>f32</code>, <code>i64</code>, <code>i32</code>, <code>u64</code>, or <code>bool</code> values, with
 an optional per-step element shape (e.g. the coefficient tuple of a cost curve)</li>
 <li><strong>Three language bindings</strong> — Use it from Rust, Python, or Julia with the same on-disk format</li>
-<li><strong>A <code>infrastore</code> command-line tool</strong> — Load time series from CSV, and list, read, and inspect a
-store straight from a terminal, with <code>table</code> / <code>json</code> / <code>csv</code> output
+<li><strong>An <code>infrastore</code> command-line tool</strong> — Load time series from CSV, and list, read, export, plot,
+diff, and inspect a store straight from a terminal, with <code>table</code> / <code>json</code> / <code>jsonl</code> / <code>csv</code> output
 (<a href="./how-to/use-cli.html">CLI how-to</a>)</li>
 <li><strong>Read-only gRPC service</strong> — Serve a store over the network for remote readers, with optional
 API-key authentication</li>
 <li><strong>Designed for power-systems data</strong> — The data model maps onto
-<a href="https://github.com/NREL-Sienna/InfrastructureSystems.jl">InfrastructureSystems.jl</a> and
+<a href="https://github.com/Sienna-Platform/InfrastructureSystems.jl">InfrastructureSystems.jl</a> and
 <a href="https://github.com/NatLabRockies/infrasys">infrasys</a> owners, categories, and time-series concepts</li>
 </ul>
 <h2 id="who-should-read-this"><a class="header" href="#who-should-read-this">Who Should Read This</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Audience</th><th>Start here</th></tr></thead><tbody>
+<tr><td><strong>Developers of a package on top</strong></td><td><a href="./guides/embedding.html">Embedding in a Parent Package</a></td></tr>
 <tr><td><strong>Python package developers</strong></td><td><a href="./guides/python.html">Python Developer Guide</a></td></tr>
 <tr><td><strong>Julia package developers</strong></td><td><a href="./guides/julia.html">Julia Developer Guide</a></td></tr>
 <tr><td><strong>Rust developers</strong></td><td><a href="./guides/rust.html">Rust Developer Guide</a></td></tr>

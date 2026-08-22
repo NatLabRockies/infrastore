@@ -238,17 +238,18 @@ queryable associations live in a catalog SQLite database
 <li><strong>Typed, N-dimensional arrays</strong> — Store <code>f64</code>, <code>f32</code>, <code>i64</code>, <code>i32</code>, <code>u64</code>, or <code>bool</code> values, with
 an optional per-step element shape (e.g. the coefficient tuple of a cost curve)</li>
 <li><strong>Three language bindings</strong> — Use it from Rust, Python, or Julia with the same on-disk format</li>
-<li><strong>A <code>infrastore</code> command-line tool</strong> — Load time series from CSV, and list, read, and inspect a
-store straight from a terminal, with <code>table</code> / <code>json</code> / <code>csv</code> output
+<li><strong>An <code>infrastore</code> command-line tool</strong> — Load time series from CSV, and list, read, export, plot,
+diff, and inspect a store straight from a terminal, with <code>table</code> / <code>json</code> / <code>jsonl</code> / <code>csv</code> output
 (<a href="./how-to/use-cli.html">CLI how-to</a>)</li>
 <li><strong>Read-only gRPC service</strong> — Serve a store over the network for remote readers, with optional
 API-key authentication</li>
 <li><strong>Designed for power-systems data</strong> — The data model maps onto
-<a href="https://github.com/NREL-Sienna/InfrastructureSystems.jl">InfrastructureSystems.jl</a> and
+<a href="https://github.com/Sienna-Platform/InfrastructureSystems.jl">InfrastructureSystems.jl</a> and
 <a href="https://github.com/NatLabRockies/infrasys">infrasys</a> owners, categories, and time-series concepts</li>
 </ul>
 <h2 id="who-should-read-this"><a class="header" href="#who-should-read-this">Who Should Read This</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Audience</th><th>Start here</th></tr></thead><tbody>
+<tr><td><strong>Developers of a package on top</strong></td><td><a href="./guides/embedding.html">Embedding in a Parent Package</a></td></tr>
 <tr><td><strong>Python package developers</strong></td><td><a href="./guides/python.html">Python Developer Guide</a></td></tr>
 <tr><td><strong>Julia package developers</strong></td><td><a href="./guides/julia.html">Julia Developer Guide</a></td></tr>
 <tr><td><strong>Rust developers</strong></td><td><a href="./guides/rust.html">Rust Developer Guide</a></td></tr>
@@ -273,13 +274,14 @@ API-key authentication</li>
 <tr><td>Rust</td><td><code>cargo add infrastore-core</code></td></tr>
 <tr><td>Python</td><td><code>pip install infrastore</code></td></tr>
 <tr><td>CLI</td><td><a href="getting-started/installation.html#the-infrastore-cli">download a binary</a>, or <code>cargo install infrastore-cli</code></td></tr>
-<tr><td>Julia</td><td>not yet registered — see <a href="getting-started/installation.html#julia">Julia</a></td></tr>
+<tr><td>Julia</td><td><code>pkg&gt; add InfraStore</code> — see <a href="getting-started/installation.html#julia">Julia</a></td></tr>
 </tbody></table>
 </div>
-<p>The Python wheels are prebuilt and self-contained. The Rust crates build HDF5 and zlib from vendored
-sources and link them statically, so they need <code>cmake</code> and a C compiler but <strong>no system HDF5</strong>. The
-same vendored, statically linked stack backs every channel, so the HDF5 version behind the on-disk
-format is pinned by infrastore rather than by the target environment.</p>
+<p>The Python wheels and the Julia binary artifact are prebuilt and self-contained. The Rust crates
+build HDF5 and zlib from vendored sources and link them statically, so they need <code>cmake</code> and a C
+compiler but <strong>no system HDF5</strong>. The same vendored, statically linked stack backs every channel, so
+the HDF5 version behind the on-disk format is pinned by infrastore rather than by the target
+environment.</p>
 <h2 id="the-infrastore-cli"><a class="header" href="#the-infrastore-cli">The <code>infrastore</code> CLI</a></h2>
 <h3 id="download-a-prebuilt-binary"><a class="header" href="#download-a-prebuilt-binary">Download a prebuilt binary</a></h3>
 <p>Each tagged release attaches archives to the
@@ -318,13 +320,19 @@ executable. Clear the quarantine flag with <code>xattr -d com.apple.quarantine .
 <p>This compiles HDF5 from vendored sources, so it needs <code>cmake</code> and a C compiler (see
 <a href="getting-started/installation.html#build-prerequisites">Build Prerequisites</a>) and takes a few minutes on the first build.</p>
 <h2 id="julia"><a class="header" href="#julia">Julia</a></h2>
-<p><code>InfraStore.jl</code> is <strong>not yet registered in the Julia General registry</strong>, and neither is the
-<code>InfraStore_jll</code> binary package it will eventually load, so <code>Pkg.add("InfraStore")</code> does not work
-yet. Until both are registered, install the package from a checkout and point <code>INFRASTORE_LIB</code> at a
-cdylib — either <code>libinfrastore_ffi</code> from the release archives above, or one you build with
-<code>cargo build -p infrastore-ffi --release</code>. <a href="getting-started/../how-to/integrate-julia.html">Integrate with Julia</a> has
-the full recipe, and <a href="getting-started/../releasing.html#5-julia--general">Releasing</a> tracks what registration still
-needs.</p>
+<p><code>InfraStore.jl</code> is registered in the Julia General registry:</p>
+<pre><code class="language-julia">using Pkg
+Pkg.add("InfraStore")
+</code></pre>
+<p>The package does not link a system HDF5 or <code>HDF5_jll</code>. Its <code>Artifacts.toml</code> points at the
+<code>libinfrastore_ffi</code> tarball attached to the matching GitHub Release, so <code>Pkg.add</code> downloads a
+prebuilt, statically linked library for the platform — Linux x86_64 and aarch64 (glibc), macOS
+x86_64 and Apple Silicon, and Windows x86_64 — and nothing else needs installing. To run against a
+locally built library instead (a working tree, or a platform outside that list), set
+<code>INFRASTORE_LIB</code>; it takes precedence over the artifact.
+<a href="getting-started/../how-to/integrate-julia.html">Integrate with Julia</a> has both recipes, and
+<a href="getting-started/../releasing.html#5-julia--general">Releasing</a> explains why the binary is self-hosted rather than a
+JLL.</p>
 <p>The rest of this page covers building the workspace from a checkout.</p>
 <h2 id="build-prerequisites"><a class="header" href="#build-prerequisites">Build Prerequisites</a></h2>
 <p>A Rust toolchain, <code>cmake</code>, a C compiler, and <code>protobuf</code> for the gRPC codegen. The Python and Julia
@@ -426,9 +434,9 @@ recorded a metadata association keyed by
 <li><strong><code>get_time_series(key)</code></strong> looked up the association, read the array back by its content hash,
 and reconstructed a <code>SingleTimeSeries</code>.</li>
 </ol>
-<p>The array is any NumPy array whose dtype is <code>float64</code>, <code>float32</code>, <code>int64</code>, <code>int32</code>, <code>uint64</code>, or
-<code>bool</code> — whatever you pass round-trips unchanged. Shapes beyond <code>(length,)</code> attach a per-step
-element shape, such as the coefficient tuple of a cost curve.</p>
+<p>The array is any NumPy array whose dtype is <code>float64</code>, <code>float32</code>, <code>int64</code>, <code>int32</code>, <code>int16</code>, <code>int8</code>,
+<code>uint64</code>, <code>uint32</code>, <code>uint16</code>, <code>uint8</code>, or <code>bool</code> — whatever you pass round-trips unchanged. Shapes
+beyond <code>(length,)</code> attach a per-step element shape, such as the coefficient tuple of a cost curve.</p>
 <h2 id="slice-and-list"><a class="header" href="#slice-and-list">Slice and List</a></h2>
 <p>Pass a <code>(start, end)</code> tuple of datetimes to read a window instead of the whole series (<code>end</code> is
 exclusive):</p>
@@ -520,15 +528,17 @@ of a cost curve.</p>
 <h2 id="look-it-up-without-the-key"><a class="header" href="#look-it-up-without-the-key">Look It Up Without the Key</a></h2>
 <p>A series can also be addressed by its attributes, which is convenient when a caller keeps its own
 identifiers:</p>
-<pre><code class="language-julia">got = get_time_series(SingleTimeSeries, store, 42, Component, "load"; resolution = Hour(1))
+<pre><code class="language-julia">got = get_time_series(SingleTimeSeries, store, 42, Component, "load";
+                      resolution = Hour(1), features = Dict("model_year" =&gt; 2030))
 
 for m in list_time_series(store; owner_id = 42)   # Vector{TimeSeriesMetadata}
     println(m.name, " ", m.resolution, " ", m.units)
 end
-# load PT1H MW
+# load 3600000 milliseconds MW
 </code></pre>
 <p><code>get_time_series</code>, <code>has_time_series</code>, and <code>remove_time_series!</code> all accept either a <code>TimeSeriesKey</code>
-or <code>(owner_id, owner_category, name; resolution, features)</code> attributes.</p>
+or <code>(owner_id, owner_category, name; resolution, features)</code> attributes. The attribute form matches
+<code>features</code> exactly, which is why the lookup above repeats <code>model_year</code>.</p>
 <h2 id="writing-to-disk-1"><a class="header" href="#writing-to-disk-1">Writing to Disk</a></h2>
 <p>Swap the constructor to persist. The do-block form closes the store on exit, including on throw:</p>
 <pre><code class="language-julia">Store(in_memory=false, path="system.h5") do store
@@ -707,11 +717,13 @@ multiple processes writing the same file concurrently — a single writer owns t
 <div style="break-before: page; page-break-before: always;"></div><h1 id="design-choices"><a class="header" href="#design-choices">Design Choices</a></h1>
 <p>infrastore is a foundation library. End users rarely call it directly — they reach it through a
 parent package such as
-<a href="https://github.com/NREL-Sienna/InfrastructureSystems.jl">InfrastructureSystems.jl</a> (IS.jl) or
+<a href="https://github.com/Sienna-Platform/InfrastructureSystems.jl">InfrastructureSystems.jl</a> (IS.jl) or
 <a href="https://github.com/natlabrockies/infrasys">infrasys</a>, which embed infrastore to persist the
 time-series data behind their component models. This page records the decisions that shape the API
 and the on-disk format, and the reasoning behind them, so that developers of those parent packages
-understand what infrastore optimizes for — and, just as importantly, what it deliberately does not.</p>
+understand what infrastore optimizes for — and, just as importantly, what it deliberately does not.
+The practical counterpart — which calls a parent package should make, and in what order — is
+<a href="explanation/../guides/embedding.html">Embedding in a Parent Package</a>.</p>
 <h2 id="data-orientation-optimize-for-reading-every-component-at-one-timestamp"><a class="header" href="#data-orientation-optimize-for-reading-every-component-at-one-timestamp">Data Orientation: Optimize for Reading Every Component at One Timestamp</a></h2>
 <p><strong>The decision.</strong> In the HDF5 file, <code>SingleTimeSeries</code> arrays that share a
 <code>(dtype, element_shape, length, resolution)</code> are packed as columns of one dataset: <strong>columns are
@@ -822,9 +834,9 @@ transaction. The two compose — batch each operation, and use a transaction whe
 be atomic together.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="data-model"><a class="header" href="#data-model">Data Model</a></h1>
 <p>The data model mirrors the time-series concepts originally developed in
-<a href="https://github.com/NREL-Sienna/InfrastructureSystems.jl">InfrastructureSystems.jl</a>: a <strong>component</strong>
-(or supplemental attribute) owns one or more named time series, and each time series may exist in
-several variants distinguished by <strong>features</strong>.</p>
+<a href="https://github.com/Sienna-Platform/InfrastructureSystems.jl">InfrastructureSystems.jl</a>: a
+<strong>component</strong> (or supplemental attribute) owns one or more named time series, and each time series
+may exist in several variants distinguished by <strong>features</strong>.</p>
 <h2 id="owners"><a class="header" href="#owners">Owners</a></h2>
 <p>Every time series belongs to an owner, identified by three fields:</p>
 <div class="table-wrapper"><table><thead><tr><th>Field</th><th>Type</th><th>Meaning</th></tr></thead><tbody>
@@ -1680,7 +1692,9 @@ FFI fetches them in one decompress-once pass per dataset into a <code>InfraStore
 Python's <code>store.bulk_read</code> exposes the same operation directly. Managed bulk <em>writes</em> already take
 the fast block-write path through the existing batch / <code>add_time_series_bulk</code> APIs.</li>
 </ul>
-<p><code>InfraStore.jl</code> loads the cdylib from the path in the <code>INFRASTORE_LIB</code> environment variable. See the
+<p><code>InfraStore.jl</code> loads the cdylib from the <code>INFRASTORE_LIB</code> environment variable when it is set, and
+otherwise from the <code>libinfrastore_ffi</code> artifact its <code>Artifacts.toml</code> pins to the matching GitHub
+Release (see <a href="explanation/../how-to/integrate-julia.html">Integrate with Julia</a>). See the
 <a href="explanation/../guides/julia.html">Julia guide</a>, the <a href="explanation/../reference/c-abi.html">C ABI reference</a>, and the
 <a href="explanation/../reference/julia-api.html">Julia API reference</a>.</p>
 <h3 id="infrastructuresystemsjl-integration"><a class="header" href="#infrastructuresystemsjl-integration">InfrastructureSystems.jl Integration</a></h3>
@@ -1709,7 +1723,9 @@ pair directly and supports both reads and writes. Its shape:</p>
 <li><strong>CSV in, store out.</strong> Numeric values come from a CSV; the metadata that does not fit a flat grid
 (owner, name, type, dtype, resolution, timestamps, units, features) is described in a descriptor
 JSON. All six dtypes and all five writable types are supported, forecasts included.</li>
-<li>**A global <code>-f/--format</code> selects <code>table</code> (default), <code>json</code>, or <code>csv</code>.</li>
+<li><strong>A global <code>-f/--format</code> selects <code>table</code> (default), <code>json</code>, <code>jsonl</code>, or <code>csv</code>.</strong> Read commands
+render their results in it; write commands report their outcome in it (prose under <code>table</code>, a
+one-object status document under <code>json</code>/<code>jsonl</code>). Only <code>template</code> ignores it.</li>
 <li><strong>Store access is isolated.</strong> All store opening lives behind one module, so a future remote/gRPC
 mode can be added without touching the command handlers; today there is no remote mode.</li>
 </ul>
@@ -1747,6 +1763,8 @@ through the full workflow — create or open a store, add series, query, read, a
 idioms of that language, then points at the matching <a href="guides/../reference/index.html">reference</a> for exact
 signatures.</p>
 <ul>
+<li><a href="guides/./embedding.html">Embedding in a Parent Package</a> — The contracts and lifecycle a package like
+infrasys or InfrastructureSystems.jl has to honor, in one place, language-neutral.</li>
 <li><a href="guides/./rust.html">Rust</a> — Embed <code>infrastore-core</code> directly.</li>
 <li><a href="guides/./python.html">Python</a> — Use the <code>infrastore</code> PyO3 wheel.</li>
 <li><a href="guides/./julia.html">Julia</a> — Use the <code>InfraStore.jl</code> package over the C ABI.</li>
@@ -1758,6 +1776,264 @@ signatures.</p>
 <a href="guides/../explanation/index.html">Explanation</a> section — especially
 <a href="guides/../explanation/data-model.html">Data Model</a> and
 <a href="guides/../explanation/content-addressing.html">Content Addressing</a>, which apply equally to every binding.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="embedding-in-a-parent-package"><a class="header" href="#embedding-in-a-parent-package">Embedding in a Parent Package</a></h1>
+<p>This guide is for developers of a package that uses infrastore as the time-series layer behind its
+own component model — the shipped examples are <a href="https://github.com/NatLabRockies/infrasys">infrasys</a>
+(Python) and <a href="https://github.com/Sienna-Platform/InfrastructureSystems.jl">InfrastructureSystems.jl</a>
+(Julia). It collects the contracts such a package has to honor and the patterns both consumers
+already use, in one place. The per-language guides (<a href="guides/./python.html">Python</a>, <a href="guides/./julia.html">Julia</a>,
+<a href="guides/./rust.html">Rust</a>) show each call; this page says which calls to reach for and why. The reasoning
+behind the trade-offs is in <a href="guides/../explanation/design-choices.html">Design Choices</a>.</p>
+<h2 id="what-the-store-owns-and-what-you-do"><a class="header" href="#what-the-store-owns-and-what-you-do">What the Store Owns, and What You Do</a></h2>
+<p>infrastore is deliberately narrow. It stores arrays, associates each one with an owner, and records
+a few relationships between owners. Everything that makes those owners <em>mean</em> something lives in the
+parent package.</p>
+<div class="table-wrapper"><table><thead><tr><th>Concern</th><th>Owner</th></tr></thead><tbody>
+<tr><td>Array bytes, dedup, hashing, compression</td><td>infrastore</td></tr>
+<tr><td>Which series belongs to which owner, under what key</td><td>infrastore</td></tr>
+<tr><td>Component ↔ attribute and parent ↔ child edges</td><td>infrastore</td></tr>
+<tr><td>The components and attributes themselves</td><td><strong>parent package</strong></td></tr>
+<tr><td>The type hierarchy (abstract types, subtypes)</td><td><strong>parent package</strong></td></tr>
+<tr><td>Mapping your object identities to integer ids</td><td><strong>parent package</strong></td></tr>
+<tr><td>Unit conversion, per-unit bases</td><td><strong>parent package</strong></td></tr>
+<tr><td>Partial / fuzzy lookups over features</td><td><strong>parent package</strong></td></tr>
+</tbody></table>
+</div>
+<p>The store never parses a component, never walks a type tree, and never rescales a value. Every
+filter it offers takes concrete strings and exact scalars; a parent package that exposes anything
+richer builds it on top.</p>
+<h2 id="map-your-model-onto-the-catalog"><a class="header" href="#map-your-model-onto-the-catalog">Map Your Model Onto the Catalog</a></h2>
+<p>A series is addressed by an <strong>owner</strong> plus a <strong>key</strong>
+(<a href="guides/../explanation/data-model.html#keys">Data Model § Keys</a>). Deciding how your objects project onto
+those fields is the first integration decision, and the one hardest to change later because it is
+written into every user's artifact.</p>
+<p><strong><code>owner_id</code> is a stable <code>i64</code>.</strong> The store keys on it and never sees your object identities. If
+your components are identified by UUIDs (both shipped consumers are), you allocate an integer per
+component, persist that mapping alongside the store, and keep it stable across save/load — the store
+cannot reconstruct it. Component ids and supplemental-attribute ids are independent streams, so the
+same integer may name one of each; the <strong><code>owner_category</code></strong> (<code>Component</code> / <code>SupplementalAttribute</code>)
+is part of the owner identity and every owner-scoped call takes it.</p>
+<p><strong><code>owner_type</code> is the concrete type name and nothing more.</strong> It is descriptive (not part of the
+uniqueness constraint) and the store has no view of subtyping, so a query for "every <code>Generator</code>"
+must expand the abstract type into its concrete subtypes yourself and pass each one — this is what
+<code>get_all_subtype_names</code> does on the InfrastructureSystems.jl side. An empty type list is a
+deliberate "none of these" and matches nothing.</p>
+<p><strong><code>name</code> identifies, <code>component_field</code> describes.</strong> <code>name</code> is part of the key; <code>component_field</code>
+names the field on the owning component whose time-varying form these values are
+(<code>"max_active_power"</code>). They often coincide by convention, but a component may carry several series
+for one field — an actual and a forecast, several weather years — and only <code>name</code> plus <code>features</code>
+distinguishes them. Set <code>component_field</code> whenever your model knows it: it is the one descriptor
+that is also a filter, and a parent package that wants "every series that varies <code>rating</code>" gets it
+for free.</p>
+<p><strong><code>features</code> are typed scalars</strong> (<code>int</code> / <code>float</code> / <code>bool</code> / <code>str</code>) and part of the key. A handful
+of names are <a href="guides/../explanation/data-model.html#reserved-feature-names">reserved</a> because consumers
+spread feature maps into keyword queries; the store refuses them on write.</p>
+<p><strong><code>units</code>, <code>quantity_kind</code>, <code>unit_system</code></strong> describe the values and affect neither identity nor
+storage. <code>unit_system</code> is a label the store never acts on — <code>component_base</code> means "per-unit against
+a base the owning component holds in <em>your</em> object graph", and converting back is your job. Unset
+means <em>unspecified</em>, which is not the same as <code>natural_units</code>; do not read one as the other. See
+<a href="guides/../explanation/data-model.html#optional-descriptors">Optional Descriptors</a>.</p>
+<p><strong><code>application_data</code> is yours.</strong> It is an opaque payload stored and returned verbatim, so a parent
+package can carry whatever it needs per association (a serialized type tag, a provenance record)
+without the store knowing. Because the store never validates it, version it yourself if its shape
+may change.</p>
+<h2 id="exact-keys-subset-filters"><a class="header" href="#exact-keys-subset-filters">Exact Keys, Subset Filters</a></h2>
+<p>The two lookup families match features differently, and a parent package that offers its own key
+resolution must know which it is calling:</p>
+<ul>
+<li>A <strong><code>TimeSeriesKey</code></strong> — whether built from attributes or returned by an add — is matched
+<strong>exactly</strong>: every field including the full feature map. <code>get_time_series(key)</code>,
+<code>has_time_series(key)</code>, <code>remove_time_series(key)</code> and the attribute-based getters behind them find
+one row or none.</li>
+<li>A <strong>list filter</strong> (<code>list_time_series</code>, <code>list_keys</code>, <code>has_any_time_series</code>, <code>remove_by_filter</code>,
+<code>list_names</code>, …) matches <code>features</code> as a <strong>subset</strong>: a series matches when it carries every
+requested pair, whatever else it carries.</li>
+</ul>
+<p>InfrastructureSystems.jl resolves user queries by subset, so it cannot delegate that resolution to a
+keyed lookup; it lists with the filter and then decides what more than one match means. A parent
+package that inherits the same semantics should do the same, and treat ambiguity as its own error to
+raise — the store will happily return two rows.</p>
+<p>Two more identity facts that surface in parent-package code:</p>
+<ul>
+<li>A <code>DeterministicSingleTimeSeries</code> is derived from a stored <code>SingleTimeSeries</code> with
+<code>transform_single_time_series</code> and <strong>reads back as a <code>Deterministic</code></strong>. The tag stays visible in
+keys, metadata, and counts, and a <code>Deterministic</code> filter matches both. Your reads should not
+special-case it; your catalog displays may.</li>
+<li>Descriptors are outside the key, so two adds that differ only in <code>units</code> or <code>application_data</code> are
+a duplicate. Changing a descriptor means remove and re-add.</li>
+</ul>
+<h2 id="the-store-lifecycle-inside-a-system-object"><a class="header" href="#the-store-lifecycle-inside-a-system-object">The Store Lifecycle Inside a System Object</a></h2>
+<p>Both consumers follow the same shape, and the API was shaped around it. The arrays are never held in
+RAM — a system with hundreds of thousands of series does not fit — so the working store is on-disk
+from the start, in a scratch directory that lives as long as the system object.</p>
+<h3 id="build-scratch-directory-in-memory-catalog"><a class="header" href="#build-scratch-directory-in-memory-catalog">Build: scratch directory, in-memory catalog</a></h3>
+<pre><code class="language-python"># Python
+store = Store.create(scratch / "time_series.h5", catalog="memory")
+</code></pre>
+<pre><code class="language-julia"># Julia
+store = Store(; path=joinpath(scratch, "time_series.h5"), catalog=:memory)
+</code></pre>
+<p><code>catalog="memory"</code> keeps the SQLite half in RAM and skips the per-commit journaling an attached
+catalog pays. That is the right trade for a store beside volatile in-process state: a crash loses
+the system under construction regardless, so durability of the scratch catalog buys nothing. Arrays
+still stream to the HDF5 file, so memory use does not grow with the data. The scratch directory
+holds <strong>no <code>.sqlite</code></strong> until the first save — a half-artifact by design, and one the store refuses
+to open as attached later, because arrays without a catalog naming them are not a store. See
+<a href="guides/../explanation/storage-model.html#where-the-catalog-lives">Where the Catalog Lives</a>.</p>
+<p>Use <code>in_memory=True</code> (no file at all) for unit tests and for stores you know are small. It is not a
+substitute for the scratch-directory store in a real system.</p>
+<h3 id="save-one-call-atomic-pair"><a class="header" href="#save-one-call-atomic-pair">Save: one call, atomic pair</a></h3>
+<pre><code class="language-python">store.persist_to(dest)          # Python
+</code></pre>
+<pre><code class="language-julia">persist!(store, dest)           # Julia
+</code></pre>
+<p><code>persist_to</code> writes both halves to uniquely named temporaries, fsyncs, and renames them into place,
+stamping the pair with a fresh generation so a save interrupted between the two renames is detected
+on the next open (<code>MismatchedArtifact</code>) rather than read as a valid store. This replaced the
+copy-both-files-by-hand dance both consumers once carried, including the close/reopen needed for
+HDF5's Windows file lock. Two things to carry into your own save path:</p>
+<ul>
+<li><strong>A failed save may have destroyed the destination.</strong> The renames replace whatever was there.
+Retry from the still-live store rather than assuming the old artifact survived.</li>
+<li><strong>Saving an attached store onto its own path is a no-op</strong>, while the in-memory-catalog case is the
+real work — the arrays are already at <code>path</code> and the save is what writes the catalog beside them.
+<code>persist_catalog</code> does only that half when the arrays are already where they belong, and is a
+checkpoint rather than a mode switch: the catalog stays in RAM afterwards.</li>
+</ul>
+<h3 id="load-for-editing-always-a-copy"><a class="header" href="#load-for-editing-always-a-copy">Load for editing: always a copy</a></h3>
+<pre><code class="language-python">store = Store.open_copy(src, scratch / "time_series.h5", catalog="memory")   # Python
+</code></pre>
+<pre><code class="language-julia">store = open_copy(src, joinpath(scratch, "time_series.h5"); catalog=:memory)  # Julia
+</code></pre>
+<p><code>open</code> defaults to read-write in every binding, and a read-write open on a user's artifact is the
+one way this library will damage a file they care about: HDF5 has no journal and no repair tool, so
+an interrupted in-place write is unrecoverable. <code>open_copy</code> copies both halves and opens the copy;
+the original is only replaced by the final atomic rename of the next <code>persist_to</code>. Both consumers
+did this by hand before the call existed, and a test in infrasys asserts the loaded directory
+differs from the source — keep an assertion like that, because the copy is load-bearing.</p>
+<p>For a read-only load (a viewer, a reporting script), <code>open(path, read_only=True)</code> is the right call:
+nothing is copied and any mutation raises <code>ReadOnlyStoreError</code>.</p>
+<h3 id="create-refuse-to-clobber"><a class="header" href="#create-refuse-to-clobber">Create: refuse to clobber</a></h3>
+<p><code>Store.create</code> on a path that already holds either half raises <code>StoreExists</code>. The failure mode it
+prevents is a re-run build script producing an empty array file paired with last week's catalog — a
+store that opens cleanly and has nothing behind any row. Pass <code>overwrite=True</code> (<code>overwrite=true</code> in
+Julia) only on a path your package owns and means to discard. See
+<a href="guides/../explanation/storage-model.html#protecting-a-saved-artifact">Protecting a Saved Artifact</a>.</p>
+<h3 id="close-and-move-the-pair-together"><a class="header" href="#close-and-move-the-pair-together">Close, and move the pair together</a></h3>
+<p>Close the store explicitly when the system object is done (both bindings offer a context-manager /
+do-block form). The <code>.h5</code> and <code>.h5.sqlite</code> files are one artifact: move, copy, and delete them
+together, and never ship one without the other — the paired generation stamp makes a lone half a
+<code>MismatchedArtifact</code> on open.</p>
+<h3 id="one-writer-local-disk"><a class="header" href="#one-writer-local-disk">One writer, local disk</a></h3>
+<p>A <code>Store</code> handle is not thread-safe. The Python class is <code>unsendable</code> — touching it from a thread
+other than the one that created it raises — and the Julia one is unsynchronized, so concurrent calls
+from two tasks are undefined behavior; confine a store (and any reader built from it) to one thread
+or task, or guard every call with your own lock. On disk, assume a single writer, and keep a live
+store off network filesystems — HDF5's file lock is best-effort and silently absent on Lustre, GPFS,
+and NFS, and SQLite's WAL is unsafe there too. Build locally, then copy the finished artifact to
+shared storage. See
+<a href="guides/../explanation/storage-model.html#one-writer-and-not-on-a-network-filesystem">One writer, and not on a network filesystem</a>.</p>
+<h2 id="writing-batch-and-make-multi-step-changes-atomic"><a class="header" href="#writing-batch-and-make-multi-step-changes-atomic">Writing: Batch, and Make Multi-Step Changes Atomic</a></h2>
+<p>Two mechanisms compose, and neither substitutes for the other:</p>
+<ul>
+<li><strong>Bulk add</strong> (<code>add_time_series_bulk</code> / <code>AddBatch</code> + <code>add_time_series_bulk!</code>) commits a whole batch
+in one catalog transaction and takes the block-sized HDF5 write path. Series sharing a
+<code>(dtype, element_shape, length, resolution)</code> pack into one dataset whose chunks hold one timestamp
+across every column, which is what makes the simulation read below fast — so land same-shaped
+series in the same batch. A loop of single adds is an order of magnitude slower and fills chunks
+one column at a time.</li>
+<li><strong>Transactions</strong> (<code>with store.transaction():</code> / <code>transaction(store) do … end</code>) make several
+operations succeed or fail together. Inside one, a removal is reversible; outside one it is not,
+because the array bytes are reclaimed immediately. A transaction holds the SQLite write lock until
+it ends, and does not batch anything by itself.</li>
+</ul>
+<p>Values are <strong>immutable</strong>: there is no API to edit a value, slice, or column in place, in any
+binding. "Update this series" in a parent package is <em>add the new array, remove the old one</em> —
+inside a transaction if the user must never observe the gap. Content addressing makes the add cheap
+when the data did not actually change. See
+<a href="guides/../explanation/design-choices.html#data-orientation-optimize-for-reading-every-component-at-one-timestamp">Design Choices</a>.</p>
+<h2 id="reading-in-a-simulation-loop"><a class="header" href="#reading-in-a-simulation-loop">Reading in a Simulation Loop</a></h2>
+<p>The layout is optimized for "every component at one timestamp", and the readers are the API for that
+access: build a <code>StaticReader</code> or <code>ForecastReader</code> once, then step it. A <code>ForecastReader</code> reads each
+distinct backing array once per step and fans it out to every component referencing it, so a
+forecast shared by a hundred components costs one decompression; <code>entry_slot</code> lets your own
+per-component work dedup the same way. The inverse access — one component's full history — is the
+slow direction, and <code>bulk_read</code> over many keys is the right call when you need it, not a loop of
+<code>get_time_series</code>. See the per-language sections:
+<a href="guides/./python.html#per-timestamp-reads-simulation-loop">Python</a>,
+<a href="guides/./julia.html#per-timestamp-reads-simulation-loop">Julia</a>, <a href="guides/./rust.html">Rust</a>.</p>
+<h2 id="time"><a class="header" href="#time">Time</a></h2>
+<ul>
+<li>Every stored instant is a whole number of <strong>milliseconds</strong>; the write path raises
+<code>InvalidParameter</code> rather than truncating, because the C ABI exchanges instants as Unix
+milliseconds while Python's <code>datetime</code> is microsecond. Quantize <code>now()</code> before storing it. Query
+bounds are unconstrained.</li>
+<li><strong>Python</strong> requires timezone-aware <code>datetime</code>s everywhere and returns UTC; a naive value raises.</li>
+<li><strong>Julia</strong> treats a bare <code>DateTime</code> as UTC and returns <code>DateTime</code>; with <code>using TimeZones</code> a
+<code>ZonedDateTime</code> is accepted anywhere a timestamp goes and converted to the instant it names. Reads
+still return <code>DateTime</code>, because InfrastructureSystems.jl destructures them.</li>
+</ul>
+<p>A parent package that has a notion of local time therefore converts at its own boundary and stores
+instants. See <a href="guides/../explanation/data-model.html#timestamp-precision">Timestamp precision</a>.</p>
+<h2 id="associations-beyond-time-series"><a class="header" href="#associations-beyond-time-series">Associations Beyond Time Series</a></h2>
+<p>The catalog records two relationship tables that have nothing to do with time series:
+supplemental-attribute attachments (component ↔ attribute, with counts and grouped summaries) and
+parent/child edges (directed component ↔ component). Both hold <strong>only the relationship</strong> — bare ids
+and type names — so a parent package keeps the objects in its own graph and uses the store as the
+index. <code>replace_owner</code> / <code>reassign</code> renumbers a component in every catalog at once. Bulk inserts are
+all-or-nothing, removals return a count (matching nothing is <code>0</code>, not an error), and the <code>*_types</code>
+filters take concrete type names, exactly like <code>owner_type</code> above. See
+<a href="guides/../explanation/data-model.html#associations-between-entities">Associations Between Entities</a>.</p>
+<h2 id="versions-and-errors"><a class="header" href="#versions-and-errors">Versions and Errors</a></h2>
+<p><strong>Pin a minor range.</strong> The on-disk format is governed by <code>DATA_FORMAT_VERSION</code>; opening an artifact
+written by an incompatible version raises <code>IncompatibleFormat</code> rather than misreading it. The
+bindings track the workspace version, so a parent package depends on a compatible range
+(<code>infrastore&gt;=0.8,&lt;0.9</code> in <code>pyproject.toml</code>; a <code>[compat]</code> entry in <code>Project.toml</code>) and bumps it
+deliberately. Do not cite core source line numbers in your own docs — they move.</p>
+<p><strong>Map the error taxonomy, do not flatten it.</strong> Every binding exposes the core's <code>TimeSeriesError</code>
+variants as distinct types (<code>NotFound</code>, <code>DuplicateTimeSeries</code>, <code>DuplicateAssociation</code>,
+<code>InvalidParameter</code>, <code>ReadOnlyStore</code>, <code>StoreExists</code>, <code>MismatchedArtifact</code>, <code>IncompatibleFormat</code>,
+<code>Integrity</code>, …). The ones a parent package typically translates into its own exceptions are
+<code>NotFound</code> and <code>DuplicateTimeSeries</code> (user-facing), and <code>StoreExists</code> / <code>MismatchedArtifact</code> /
+<code>IncompatibleFormat</code> (artifact-level, usually re-raised with the path). See
+<a href="guides/../reference/python-api.html#exceptions">Python exceptions</a> and
+<a href="guides/../reference/julia-api.html#errors">Julia errors</a>.</p>
+<h2 id="testing-an-integration"><a class="header" href="#testing-an-integration">Testing an Integration</a></h2>
+<ul>
+<li>Use <code>in_memory=True</code> stores in unit tests; they exercise the same core.</li>
+<li><code>verify_integrity</code> re-hashes every array; <code>is_empty</code> is the cheap "nothing here" probe.</li>
+<li>The <code>infrastore</code> CLI reads any artifact your package writes. <code>infrastore list</code> and
+<code>infrastore info</code> are the fastest way to see what a consumer actually stored, and
+<code>infrastore diff --against</code> compares two artifacts by hash without reading arrays — a usable CI
+gate for "the rewrite produced the same store". See
+<a href="guides/../how-to/use-cli.html">Use the <code>infrastore</code> CLI</a>.</li>
+<li>To test unreleased core changes from a consumer checkout, install the binding into the consumer's
+environment (<code>maturin develop --manifest-path crates/infrastore-py/Cargo.toml</code> with the consumer's
+venv active; <code>Pkg.develop(path=...)</code> plus <code>INFRASTORE_LIB</code> for Julia).</li>
+</ul>
+<h2 id="checklist"><a class="header" href="#checklist">Checklist</a></h2>
+<ul>
+<li><input disabled="" type="checkbox"/>
+Integer owner ids are allocated by the package, persisted with the system, and stable across
+save/load.</li>
+<li><input disabled="" type="checkbox"/>
+Abstract-type queries expand to concrete <code>owner_type</code> names before reaching the store.</li>
+<li><input disabled="" type="checkbox"/>
+Feature resolution knows whether it wants exact-key or subset semantics, and ambiguity is the
+package's error.</li>
+<li><input disabled="" type="checkbox"/>
+The working store is on disk in a scratch directory with an in-memory catalog; <code>in_memory</code>
+stores are for tests.</li>
+<li><input disabled="" type="checkbox"/>
+Save goes through <code>persist_to</code>; load-for-edit goes through <code>open_copy</code>; read-only loads pass
+<code>read_only</code>.</li>
+<li><input disabled="" type="checkbox"/>
+Multi-series writes use bulk add; multi-step changes that must be atomic use a transaction.</li>
+<li><input disabled="" type="checkbox"/>
+Timestamps are instants at millisecond precision, converted at the package boundary.</li>
+<li><input disabled="" type="checkbox"/>
+The dependency pins a compatible minor range of infrastore.</li>
+</ul>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="rust-developer-guide"><a class="header" href="#rust-developer-guide">Rust Developer Guide</a></h1>
 <p>This guide covers using <code>infrastore-core</code> from Rust. For exact signatures see the
 <a href="guides/../reference/rust-api.html">Rust API reference</a>.</p>
@@ -2177,10 +2453,17 @@ environment, see <a href="guides/../how-to/integrate-python.html">Integrate with
 import numpy as np
 from infrastore import Store, SingleTimeSeries, OwnerCategory, TimeSeriesType
 </code></pre>
-<p>The module exposes <code>Store</code>; the static series classes <code>SingleTimeSeries</code> and
+<p>The module exposes <code>Store</code> and <code>Transaction</code>; the static series classes <code>SingleTimeSeries</code> and
 <code>NonSequentialTimeSeries</code>; the forecast classes <code>Deterministic</code>, <code>Probabilistic</code>, and <code>Scenarios</code>;
-<code>TimeSeriesKey</code>; the <code>TimeSeriesType</code> and <code>OwnerCategory</code> enums; the <code>init_tracing</code> function; and an
-exception hierarchy rooted at <code>TimeSeriesError</code>.</p>
+<code>TimeSeriesKey</code>; the readers <code>StaticReader</code> and <code>ForecastReader</code>; the association records
+<code>SupplementalAttributeAssociation</code> and <code>ParentChildAssociation</code>; the <code>TimeSeriesType</code> and
+<code>OwnerCategory</code> enums; the <code>init_tracing</code> and <code>decode_element_values</code> functions; <code>__version__</code>; and
+an exception hierarchy rooted at <code>TimeSeriesError</code>.</p>
+<p>If you are building a package on top of infrastore — the way
+<a href="https://github.com/NatLabRockies/infrasys">infrasys</a> does — read
+<a href="guides/./embedding.html">Embedding in a Parent Package</a> alongside this guide: it covers the lifecycle
+(scratch store, <code>persist_to</code>, <code>open_copy</code>), id mapping, and lookup semantics that this page only
+shows the calls for.</p>
 <h2 id="open-or-create-a-store-1"><a class="header" href="#open-or-create-a-store-1">Open or Create a Store</a></h2>
 <pre><code class="language-python"># In-memory: no filesystem I/O.
 store = Store.create(in_memory=True)
@@ -2203,12 +2486,12 @@ and a NumPy array:</p>
 )
 </code></pre>
 <p>Use timezone-aware datetimes (UTC is stored). The binding is dtype-generic — it accepts and returns
-NumPy arrays of <code>float64</code>, <code>float32</code>, <code>int64</code>, <code>int32</code>, <code>uint64</code>, or <code>bool</code>, and whatever dtype you
-pass round-trips unchanged. The array may be multi-dimensional: shape <code>(length,)</code> for scalar steps,
-or <code>(length, k1, …)</code> to attach a per-step element shape (such as cost-curve coefficients). The
-required <code>name</code> is an association attribute carried on the object — the same array can be added
-under different names. Use <code>NonSequentialTimeSeries(timestamps, data, name)</code> for explicitly
-timestamped series.</p>
+NumPy arrays of <code>float64</code>, <code>float32</code>, <code>int64</code>, <code>int32</code>, <code>int16</code>, <code>int8</code>, <code>uint64</code>, <code>uint32</code>,
+<code>uint16</code>, <code>uint8</code>, or <code>bool</code>, and whatever dtype you pass round-trips unchanged. The array may be
+multi-dimensional: shape <code>(length,)</code> for scalar steps, or <code>(length, k1, …)</code> to attach a per-step
+element shape (such as cost-curve coefficients). The required <code>name</code> is an association attribute
+carried on the object — the same array can be added under different names. Use
+<code>NonSequentialTimeSeries(timestamps, data, name)</code> for explicitly timestamped series.</p>
 <h2 id="add-a-series-1"><a class="header" href="#add-a-series-1">Add a Series</a></h2>
 <pre><code class="language-python">key = store.add_time_series(
     owner_id=42,
@@ -2224,6 +2507,49 @@ timestamped series.</p>
 returned <code>key</code> exposes <code>owner_id</code>, <code>owner_category</code>, <code>time_series_type</code>, <code>name</code>, <code>resolution</code>,
 <code>interval</code>, and <code>features</code> as read-only properties (<code>resolution</code> and <code>interval</code> are ISO 8601
 duration strings or <code>None</code>).</p>
+<h3 id="descriptors"><a class="header" href="#descriptors">Descriptors</a></h3>
+<p>Beyond <code>units</code>, an association can carry <code>quantity_kind</code> (what the values measure — <code>"ActivePower"</code>;
+the one record of what per-unit values mean), <code>unit_system</code> (<code>"natural_units"</code> or
+<code>"component_base"</code>; unset means <em>unspecified</em>, not natural units), <code>component_field</code> (the field on
+the owning component these values vary — <code>"max_active_power"</code>; also a filter), and
+<code>application_data</code> (an opaque string the store returns verbatim — the package-owned slot):</p>
+<pre><code class="language-python">key = store.add_time_series(
+    owner_id=42, owner_type="Generator", owner_category=OwnerCategory.Component,
+    time_series=ts,
+    units="MW", quantity_kind="ActivePower", unit_system="natural_units",
+    component_field="max_active_power",
+    application_data='{"source": "weather_year_2012"}',
+)
+</code></pre>
+<p>None of them is part of the key or of either content hash, so two adds that differ only in a
+descriptor are a duplicate. See
+<a href="guides/../explanation/data-model.html#optional-descriptors">Optional Descriptors</a>.</p>
+<h3 id="add-many-series-at-once"><a class="header" href="#add-many-series-at-once">Add many series at once</a></h3>
+<p><code>add_time_series_bulk</code> takes a list of dicts mirroring <code>add_time_series</code>'s keyword arguments and
+commits them in one catalog transaction, taking the block-sized HDF5 write path. It is the way to
+load a system: an order of magnitude faster than a loop of single adds, and same-shaped series land
+in the same packed dataset.</p>
+<pre><code class="language-python">keys = store.add_time_series_bulk([
+    {"owner_id": i, "owner_type": "Generator", "owner_category": OwnerCategory.Component,
+     "time_series": series[i], "units": "MW"}
+    for i in range(len(series))
+])   # keys in input order; all-or-nothing
+</code></pre>
+<h3 id="transactions"><a class="header" href="#transactions">Transactions</a></h3>
+<p>Several operations that must take effect together — replacing a series is an add plus a remove — go
+inside a transaction. Removals are reversible only there; outside one the array bytes are reclaimed
+immediately.</p>
+<pre><code class="language-python">with store.transaction():
+    new_key = store.add_time_series(owner_id=42, owner_type="Generator",
+                                    owner_category=OwnerCategory.Component,
+                                    time_series=updated)
+    store.remove_time_series(old_key)
+# committed on a clean exit, rolled back if the block raised
+</code></pre>
+<p>Blocks nest (each level is a savepoint), and the store holds the SQLite write lock until the
+outermost one ends. A transaction does not batch: use <code>add_time_series_bulk</code> inside it for the
+writes themselves. <code>begin_transaction</code> / <code>commit_transaction</code> / <code>rollback_transaction</code> are the
+explicit form.</p>
 <h2 id="read-a-series-1"><a class="header" href="#read-a-series-1">Read a Series</a></h2>
 <pre><code class="language-python">got = store.get_time_series(key)
 assert np.array_equal(np.asarray(got.data), np.asarray(ts.data))
@@ -2242,7 +2568,14 @@ print(got.length, got.initial_timestamp, got.resolution)
 list of keys and returns the typed series objects in the same order. Packed <code>SingleTimeSeries</code> are
 read in one decompress-once pass per dataset, which is much faster than a <code>get_time_series</code> per key:</p>
 <pre><code class="language-python">series = store.bulk_read(keys)   # keys: list[TimeSeriesKey]
+window = store.bulk_read(keys, time_range=(start, end))   # the same slice of every key
 </code></pre>
+<h3 id="datetimes-and-precision"><a class="header" href="#datetimes-and-precision">Datetimes and precision</a></h3>
+<p>Every <code>datetime</code> must be timezone-aware (any zone; converted to UTC on the way in, UTC on the way
+out), and a naive one raises <code>InvalidParameterError</code>. A <strong>stored</strong> instant — an initial timestamp, a
+<code>NonSequentialTimeSeries</code> timestamp — must also be a whole number of milliseconds, so quantize
+<code>datetime.now(timezone.utc)</code> before storing it; query bounds such as <code>time_range</code> are unconstrained.
+See <a href="guides/../reference/python-api.html#datetimes">Datetimes</a>.</p>
 <h2 id="per-timestamp-reads-simulation-loop"><a class="header" href="#per-timestamp-reads-simulation-loop">Per-Timestamp Reads (Simulation Loop)</a></h2>
 <p><code>get_time_series</code> hands back a whole series or forecast. Simulations instead walk the timeline and,
 at each timestamp, want the value of <em>every</em> series at that instant. For that, build a <strong>reader</strong>
@@ -2254,7 +2587,7 @@ forecasts. (Full signatures: <a href="guides/../reference/python-api.html#reader
 <code>(num_columns, *element_shape)</code> array whose columns line up with that group's <code>keys</code>. All matched
 series must share one grid (<code>initial_timestamp</code> + <code>length</code>), validated at build.</p>
 <pre><code class="language-python">reader = store.build_static_reader(timedelta(hours=1))
-grid = reader.grid()               # {"initial_timestamp", "resolution", "length"}
+grid = reader.grid()               # {"initial_timestamp", "resolution", "length", "time_series_type"}
 groups = reader.groups()           # each: {"dtype", "element_type", "element_shape", "keys"}
 for ts in reader.timestamps():
     store.static_read(reader, ts)
@@ -2306,7 +2639,7 @@ counts = store.get_time_series_counts()        # dict
 <h2 id="remove-and-maintain"><a class="header" href="#remove-and-maintain">Remove and Maintain</a></h2>
 <pre><code class="language-python">store.remove_time_series(key)
 # The owner is the (owner_id, owner_category) pair.
-n = store.clear_time_series(42, OwnerCategory.Component)   # all series for one owner; returns count
+n = store.clear_time_series(owner_id=42, owner_category=OwnerCategory.Component)  # one owner; returns count
 store.clear_time_series()                                  # remove everything
 
 # Reassign every series from one owner to another; returns the number moved.
@@ -2392,6 +2725,13 @@ assert store.list_parents(child_id=7) == [43, 99]
 <pre><code class="language-python">store.flush()   # sync buffered writes; afterwards system.h5 + system.h5.sqlite can be copied
 </code></pre>
 <p>Keep the two files together — the <code>.h5</code> and <code>.h5.sqlite</code> pair is a single logical store.</p>
+<p>To change a store you did not build in this process, <strong>open a copy</strong>: <code>Store.open</code> defaults to
+read-write, and HDF5 has no journal, so an interrupted in-place write is unrecoverable.</p>
+<pre><code class="language-python">store = Store.open_copy(src, scratch / "time_series.h5")   # src is never opened for writing
+...
+store.persist_to(src)                                       # one atomic rename replaces it
+</code></pre>
+<p><code>Store.open(path, read_only=True)</code> is the right call when nothing will be written.</p>
 <h3 id="where-the-catalog-lives-1"><a class="header" href="#where-the-catalog-lives-1">Where the Catalog Lives</a></h3>
 <p>By default the catalog <em>is</em> <code>system.h5.sqlite</code>, and every commit is durable. Passing
 <code>catalog="memory"</code> keeps it in RAM instead, so it reaches disk only when you call <code>persist_to()</code>:</p>
@@ -2399,6 +2739,7 @@ assert store.list_parents(child_id=7) == [43, 99]
 store = Store.create(scratch / "time_series.h5", catalog="memory")
 store.add_time_series(...)
 store.persist_to(destination)     # writes both halves as a matched pair
+store.persist_catalog()           # or: land only the .sqlite half beside the arrays already at path
 </code></pre>
 <p>Arrays still stream to the HDF5 file, so this does not require the data to fit in memory. It suits
 building a store beside volatile in-process state — a crash loses that state anyway, so journaling
@@ -2421,10 +2762,10 @@ except DuplicateTimeSeriesError:
 except TimeSeriesError as e:
     ...                       # anything else from the store
 </code></pre>
-<p>Argument parsing is the exception to that rule: a period argument (<code>resolution</code>, <code>horizon</code>,
-<code>interval</code>) that is a malformed ISO 8601 duration string raises a plain <code>ValueError</code>, and one that
-is neither a <code>timedelta</code> nor a <code>str</code> raises a plain <code>TypeError</code>. Neither is a <code>TimeSeriesError</code>, so
-<code>except TimeSeriesError</code> will not catch them.</p>
+<p>Argument validation stays inside the hierarchy: a malformed ISO 8601 duration string, a naive
+<code>datetime</code>, a sub-millisecond stored timestamp, and an unsupported NumPy dtype all raise
+<code>InvalidParameterError</code>. The one exception is a period argument that is neither a <code>timedelta</code> nor a
+<code>str</code>, which raises a plain <code>TypeError</code> that <code>except TimeSeriesError</code> will not catch.</p>
 <p>One gotcha: because Python's <code>bool</code> is a subclass of <code>int</code>, the binding deliberately checks <code>bool</code>
 first, so <code>True</code>/<code>False</code> feature values are stored as booleans (not as <code>1</code>/<code>0</code> integers).</p>
 <h2 id="a-complete-round-trip"><a class="header" href="#a-complete-round-trip">A Complete Round-Trip</a></h2>
@@ -2478,13 +2819,14 @@ bare level such as <code>"debug"</code> to match everything. Useful targets:</p>
 <a href="guides/../reference/julia-api.html">Julia API reference</a>; to set up the package and the native library, see
 <a href="guides/../how-to/integrate-julia.html">Integrate with Julia</a>.</p>
 <h2 id="load-the-package"><a class="header" href="#load-the-package">Load the Package</a></h2>
-<p><code>InfraStore.jl</code> resolves the native library from the <code>INFRASTORE_LIB</code> environment variable (or the
-<code>InfraStore_jll</code> package when installed). Build the cdylib and point at it before
-<code>using InfraStore</code>:</p>
+<p><code>Pkg.add("InfraStore")</code> installs the package and downloads the prebuilt native library as an
+artifact, so in a consumer package nothing else is needed:</p>
+<pre><code class="language-julia">using Dates, InfraStore
+</code></pre>
+<p>Developing against a checkout, <code>INFRASTORE_LIB</code> points the package at a local build instead and
+takes precedence over the artifact; set it before the first store call:</p>
 <pre><code class="language-sh">cargo build -p infrastore-ffi --release
 export INFRASTORE_LIB=$PWD/target/release/libinfrastore_ffi.dylib  # .so on Linux
-</code></pre>
-<pre><code class="language-julia">using Dates, InfraStore
 </code></pre>
 <p>Exported names include <code>Store</code>, <code>SingleTimeSeries</code>, <code>NonSequentialTimeSeries</code>, the forecast structs
 (<code>Deterministic</code>, <code>Probabilistic</code>, <code>Scenarios</code>), <code>OwnerCategory</code> (<code>Component</code>,
@@ -2535,15 +2877,62 @@ ts = SingleTimeSeries(
 <li>Adding a duplicate <a href="guides/../explanation/data-model.html#keys">key</a> throws <code>DuplicateTimeSeriesError</code>.</li>
 </ul>
 <p><code>add_time_series!</code> returns a <code>TimeSeriesKey</code> holding an opaque handle into the store.</p>
+<p>Two more rules worth knowing up front. <strong>Stored instants and periods are millisecond-precision</strong>: a
+<code>Microsecond(1)</code> resolution, a <code>Millisecond(0)</code> one, or a negative period is refused with
+<code>InvalidParameterError</code> (query bounds are unconstrained). And a <code>Store</code> is <strong>not thread-safe</strong>:
+confine it, and any reader built from it, to one task, or guard every call with your own lock —
+concurrent calls are undefined behavior, not just a race on results.</p>
+<h3 id="descriptors-1"><a class="header" href="#descriptors-1">Descriptors</a></h3>
+<p>Beyond <code>units</code>, an association can carry <code>quantity_kind</code> (what the values measure — <code>"ActivePower"</code>;
+the one record of what per-unit values mean), <code>unit_system</code> (<code>NaturalUnits</code> or <code>ComponentBase</code>;
+<code>nothing</code> means <em>unspecified</em>, not natural units — the store rescales nothing), <code>component_field</code>
+(the field on the owning component these values vary — <code>"max_active_power"</code>; also a filter), and
+<code>application_data</code> (an opaque string returned verbatim — the package-owned slot). They can be set on
+the struct, where they become the <code>add_time_series!</code> defaults, or passed as keywords:</p>
+<pre><code class="language-julia">ts = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(100.0:123.0), "load";
+                      units = "MW", quantity_kind = "ActivePower",
+                      unit_system = NaturalUnits, component_field = "max_active_power",
+                      application_data = "{\"source\": \"weather_year_2012\"}")
+key = add_time_series!(store, 42, "Generator", Component, ts)   # keeps all five
+</code></pre>
+<p>None of them is part of the key or of either content hash, so two adds that differ only in a
+descriptor are a duplicate. See
+<a href="guides/../explanation/data-model.html#optional-descriptors">Optional Descriptors</a>.</p>
+<h3 id="add-many-series-at-once-1"><a class="header" href="#add-many-series-at-once-1">Add many series at once</a></h3>
+<p><code>AddBatch</code> accepts the same <code>add_time_series!</code> calls as a <code>Store</code> but only accumulates them;
+<code>add_time_series_bulk!</code> commits the whole batch in one catalog transaction and takes the block-sized
+HDF5 write path. It is the way to load a system: an order of magnitude faster than a loop of single
+adds, and same-shaped series land in the same packed dataset.</p>
+<pre><code class="language-julia">batch = AddBatch()
+for (id, ts) in series
+    add_time_series!(batch, id, "Generator", Component, ts; units = "MW")
+end
+keys = add_time_series_bulk!(store, batch)   # keys in input order; all-or-nothing
+</code></pre>
+<h3 id="transactions-1"><a class="header" href="#transactions-1">Transactions</a></h3>
+<p>Several operations that must take effect together — replacing a series is an add plus a remove — go
+inside a transaction. Removals are reversible only there; outside one the array bytes are reclaimed
+immediately.</p>
+<pre><code class="language-julia">transaction(store) do
+    new_key = add_time_series!(store, 42, "Generator", Component, updated)
+    remove_time_series!(store, old_key)
+end   # committed if the block returns, rolled back if it throws
+</code></pre>
+<p>Blocks nest (each level is a savepoint), and the store holds the SQLite write lock until the
+outermost one ends. A transaction does not batch: use <code>add_time_series_bulk!</code> inside it for the
+writes themselves. <code>begin_transaction!</code> / <code>commit_transaction!</code> / <code>rollback_transaction!</code> are the
+explicit form.</p>
 <h2 id="read-a-series-2"><a class="header" href="#read-a-series-2">Read a Series</a></h2>
 <pre><code class="language-julia">got = get_time_series(store, key)
 @assert got.data == ts.data
 println(got.initial_timestamp, " ", got.resolution)   # resolution comes back as Millisecond
 </code></pre>
 <p>To read <strong>many whole series at once</strong> — e.g. loading everything for a plot — <code>bulk_read</code> takes a
-vector of keys and returns the <code>SingleTimeSeries</code> in the same order, reading each packed dataset's
-column span once instead of re-reading every chunk per series:</p>
-<pre><code class="language-julia">series = bulk_read(store, keys)   # keys :: Vector{TimeSeriesKey}, all SingleTimeSeries
+vector of keys and returns one struct per key in the same order (each of its stored type, so the
+result is a <code>Vector{Any}</code>), reading each packed dataset's column span once instead of re-reading
+every chunk per series:</p>
+<pre><code class="language-julia">series = bulk_read(store, keys)   # keys :: Vector{TimeSeriesKey}
+window = bulk_read(store, keys; time_range = (t0, t1))   # the same slice of every key
 </code></pre>
 <h2 id="attribute-based-lookups"><a class="header" href="#attribute-based-lookups">Attribute-Based Lookups</a></h2>
 <p>Beyond key handles, <code>InfraStore.jl</code> can resolve a series directly from its attributes — convenient
@@ -2558,7 +2947,8 @@ when a caller keeps its own identifiers (as an InfrastructureSystems.jl-side sto
 )
 # meta :: TimeSeriesMetadata — the whole record: owner_id/owner_type/owner_category,
 #          name, time_series_type, data_hash, initial_timestamp, resolution, length,
-#          horizon/interval/count, percentiles, dtype, element_shape, features, units, application_data
+#          horizon/interval/count, percentiles, element_type, element_shape, features,
+#          units, quantity_kind, unit_system, component_field, application_data
 
 # Any other stored type: pass it first, exactly as get_time_series does. Omitting
 # the type reads a SingleTimeSeries.
@@ -2567,11 +2957,19 @@ scen = get_metadata(Scenarios, store, 42, Component, "wind"; resolution = Hour(1
 values = get_array_by_hash(store, meta.data_hash)     # Vector{Float64}; pass ::Type{T} for other dtypes
 
 # get_time_series itself resolves by attributes too (pass the type as the first argument):
-got = get_time_series(SingleTimeSeries, store, 42, Component, "load"; resolution = Hour(1))
+got = get_time_series(SingleTimeSeries, store, 42, Component, "load";
+                      resolution = Hour(1), features = Dict("model_year" =&gt; 2030))
 
-present = has_time_series(store, 42, Component, "load"; resolution = Hour(1))
-remove_time_series!(store, 42, Component, "load"; resolution = Hour(1))
+present = has_time_series(store, 42, Component, "load";
+                          resolution = Hour(1), features = Dict("model_year" =&gt; 2030))
+remove_time_series!(store, 42, Component, "load";
+                    resolution = Hour(1), features = Dict("model_year" =&gt; 2030))
 </code></pre>
+<p>These attribute forms match the feature map <strong>exactly</strong> — the series above was added with
+<code>model_year = 2030</code>, so omitting <code>features</code> here is a <code>NotFoundError</code>, not a wildcard. The
+list/filter forms (<code>list_keys</code>, <code>has_any_time_series</code>, <code>remove_by_filter!</code>) match features as a
+subset instead and may return several rows; a package that resolves partial user queries lists, then
+decides what more than one match means.</p>
 <p><code>get_time_series</code>, <code>has_time_series</code>, and <code>remove_time_series!</code> all accept either a <code>TimeSeriesKey</code>
 or <code>(owner_id, owner_category, name; resolution, features)</code> attributes — the conventions are
 interchangeable for every time series type, static or forecast.</p>
@@ -2610,12 +3008,17 @@ pass <code>interval=</code> to pin the one you want; without it the read is ambi
                       resolution = Hour(1), interval = Hour(6))
 </code></pre>
 <p>A <code>DeterministicSingleTimeSeries</code> is not added directly — derive one from the stored
-<code>SingleTimeSeries</code> with <code>transform_single_time_series!</code>, which returns the number transformed. It
-optionally restricts the transform to one <code>owner_category</code> and/or one <code>resolution</code>:</p>
-<pre><code class="language-julia">n = transform_single_time_series!(store, Hour(24), Hour(24))
-n = transform_single_time_series!(store, Hour(24), Hour(24);
-                                  owner_category = Component, resolution = Hour(1))
+<code>SingleTimeSeries</code> with <code>transform_single_time_series!</code>, which returns a <code>TransformOutcome</code> whose
+<code>transformed</code> field is the count. It optionally restricts the transform to one <code>owner_category</code>
+and/or one <code>resolution</code>, and <code>dry_run = true</code> runs every check without writing:</p>
+<pre><code class="language-julia">n = transform_single_time_series!(store, Hour(24), Hour(24)).transformed
+outcome = transform_single_time_series!(store, Hour(24), Hour(24);
+                                        owner_category = Component, resolution = Hour(1),
+                                        normalize_single_window = true,
+                                        require_uniform_forecast_grid = true)
 </code></pre>
+<p>The two policy flags reproduce InfrastructureSystems.jl's rules (it passes both as <code>true</code>); see the
+<a href="guides/../reference/julia-api.html#forecasts">reference</a> for what each enforces.</p>
 <p>Requesting <code>Deterministic</code> also matches a transformed <code>DeterministicSingleTimeSeries</code>, so you read a
 forecast the same way whether it was added densely or derived (either returns a <code>Deterministic</code>,
 since a DST has no materialized struct):</p>
@@ -2773,13 +3176,21 @@ list_parents(store; child_id=7)                     # [43, 99]
 <pre><code class="language-julia">flush!(store)   # sync HDF5 + SQLite; afterwards system.h5 + system.h5.sqlite can be copied
 </code></pre>
 <p>Keep the <code>.h5</code> and <code>.h5.sqlite</code> files together.</p>
+<p>To change a store you did not build in this process, <strong>open a copy</strong>: <code>open_store</code> defaults to
+read-write, and HDF5 has no journal, so an interrupted in-place write is unrecoverable.</p>
+<pre><code class="language-julia">store = open_copy(src, joinpath(scratch, "time_series.h5"))   # src is never opened for writing
+...
+persist!(store, src)                                          # one atomic rename replaces it
+</code></pre>
+<p><code>open_store(path; read_only=true)</code> is the right call when nothing will be written.</p>
 <h3 id="where-the-catalog-lives-2"><a class="header" href="#where-the-catalog-lives-2">Where the Catalog Lives</a></h3>
 <p>By default the catalog <em>is</em> <code>system.h5.sqlite</code>, and every commit is durable. Passing
-<code>catalog=:memory</code> keeps it in RAM instead, so it reaches disk only via <a href="guides/@ref"><code>persist!</code></a>:</p>
+<code>catalog=:memory</code> keeps it in RAM instead, so it reaches disk only via <code>persist!</code>:</p>
 <pre><code class="language-julia"># Build in a scratch directory; nothing is durable until the explicit save.
 store = Store(; in_memory=false, path=joinpath(scratch, "time_series.h5"), catalog=:memory)
 add_time_series!(store, 42, "Generator", Component, ts)
 persist!(store, destination)     # writes both halves as a matched pair
+persist_catalog!(store)          # or: land only the .sqlite half beside the arrays already at path
 </code></pre>
 <p>Arrays still stream to the HDF5 file, so this does not require the data to fit in memory. It suits
 building a store beside volatile in-process state — a crash loses that state anyway, so journaling
@@ -2805,11 +3216,17 @@ catch e
 end
 </code></pre>
 <p>The available types are <code>InfraStore.NotFoundError</code>, <code>InfraStore.DuplicateTimeSeriesError</code>,
-<code>InfraStore.InvalidParameterError</code>, <code>InfraStore.IntegrityError</code>, <code>InfraStore.ReadOnlyStoreError</code>,
+<code>InfraStore.DuplicateAssociationError</code>, <code>InfraStore.InvalidParameterError</code>,
+<code>InfraStore.IntegrityError</code>, <code>InfraStore.ReadOnlyStoreError</code>, <code>InfraStore.IOError</code>,
+<code>InfraStore.StoreExistsError</code> (creating over an existing artifact),
+<code>InfraStore.MismatchedArtifactError</code> (the <code>.h5</code> and <code>.sqlite</code> halves came from two saves),
 <code>InfraStore.IncompatibleFormatError</code> (the on-disk store was written by an incompatible data format
-version), and <code>InfraStore.GenericError</code> (which carries the raw FFI status <code>code</code>).</p>
+version), and <code>InfraStore.GenericError</code> (which carries the raw FFI status <code>code</code>). See the
+<a href="guides/../reference/julia-api.html#errors">reference</a> for the full table.</p>
 <h2 id="infrastructuresystemsjl-integration-notes"><a class="header" href="#infrastructuresystemsjl-integration-notes">InfrastructureSystems.jl Integration Notes</a></h2>
-<p>The model is designed to back an InfrastructureSystems.jl time-series store:</p>
+<p><a href="guides/./embedding.html">Embedding in a Parent Package</a> is the language-neutral version of this section —
+the store lifecycle, id mapping, and lookup semantics a package like InfrastructureSystems.jl has to
+honor. The Julia-specific points:</p>
 <ul>
 <li>Owners are integer component identifiers (<code>Int64</code>), matching InfrastructureSystems.jl
 component/attribute IDs.</li>
@@ -3085,26 +3502,27 @@ the <code>debug_span</code> overhead itself.</p>
 <p>This recipe builds the components other languages depend on. For the full prerequisites and
 workspace build, see <a href="how-to/../getting-started/installation.html">Installation</a>.</p>
 <blockquote>
-<p><strong>You may not need to build it.</strong> Each tagged release attaches <code>libinfrastore_ffi</code> and the
+<p><strong>You may not need to build it.</strong> <code>Pkg.add("InfraStore")</code> downloads a prebuilt <code>libinfrastore_ffi</code>
+for the platform as a Julia artifact, and each tagged release also attaches the library and the
 generated <code>infrastore.h</code> to the
 <a href="https://github.com/NatLabRockies/infrastore/releases">Releases page</a>, linked statically against
-HDF5 and zlib. Downloading that archive and pointing <code>INFRASTORE_LIB</code> at the library (step 3
-below) skips this whole page. It is the shortest path for Julia today, since <code>InfraStore.jl</code> is
-not yet registered — see <a href="how-to/../getting-started/installation.html#julia">Installation § Julia</a>. Build
-from source when you need a platform the release matrix does not cover, or a library matching a
-working tree.</p>
+HDF5 and zlib. Pointing <code>INFRASTORE_LIB</code> at a downloaded library (step 3 below) skips the build.
+Build from source when you need a platform the release matrix does not cover, or a library
+matching a working tree.</p>
 </blockquote>
-<h2 id="1-install-system-libraries"><a class="header" href="#1-install-system-libraries">1. Install System Libraries</a></h2>
+<h2 id="1-install-build-tools"><a class="header" href="#1-install-build-tools">1. Install Build Tools</a></h2>
+<p>HDF5 and zlib are compiled from vendored sources and linked statically, so there is <strong>no system HDF5
+to install</strong>. The build needs <code>cmake</code>, a C compiler, and <code>protobuf</code> for the gRPC codegen:</p>
 <pre><code class="language-sh"># macOS
-brew install hdf5 protobuf
+brew install cmake protobuf
 
 # Debian / Ubuntu
-sudo apt-get install libhdf5-dev protobuf-compiler
+sudo apt-get install cmake protobuf-compiler
 </code></pre>
-<p>If the build fails with <code>Unable to locate HDF5 root directory and/or headers</code>, set <code>HDF5_DIR</code>:</p>
-<pre><code class="language-sh">export HDF5_DIR="$(brew --prefix hdf5)"          # macOS
-export HDF5_DIR=/usr/lib/x86_64-linux-gnu/hdf5/serial  # Linux
-</code></pre>
+<p>Do not set <code>HDF5_DIR</code> — it redirects the vendored build at an external HDF5 while static libraries
+are still requested, and the build fails. See
+<a href="how-to/../getting-started/installation.html#build-prerequisites">Build Prerequisites</a> for the system-library
+alternative (<code>--no-default-features</code>).</p>
 <h2 id="2-build-what-you-need"><a class="header" href="#2-build-what-you-need">2. Build What You Need</a></h2>
 <p><strong>The C ABI cdylib</strong> (used by Julia and any C consumer):</p>
 <pre><code class="language-sh">cargo build -p infrastore-ffi --release
@@ -3118,7 +3536,8 @@ cargo test --workspace
 <p>The Python wheel is built separately with <code>maturin</code> — see
 <a href="how-to/./integrate-python.html">Integrate with Python</a>.</p>
 <h2 id="3-point-consumers-at-the-library"><a class="header" href="#3-point-consumers-at-the-library">3. Point Consumers at the Library</a></h2>
-<p>The Julia binding and other C consumers locate the cdylib via an environment variable:</p>
+<p><code>InfraStore.jl</code> and other C consumers locate a locally built cdylib via an environment variable,
+which takes precedence over the artifact <code>Pkg</code> installed:</p>
 <pre><code class="language-sh">export INFRASTORE_LIB=$PWD/target/release/libinfrastore_ffi.dylib  # .so on Linux
 </code></pre>
 <p>Add it to your shell profile to make it permanent.</p>
@@ -3133,14 +3552,22 @@ cargo test --workspace
 <h2 id="prerequisites"><a class="header" href="#prerequisites">Prerequisites</a></h2>
 <ul>
 <li>Python 3.11 or newer.</li>
-<li>The <a href="how-to/./install.html#1-install-system-libraries">system libraries</a> (HDF5, Protobuf).</li>
+<li>For <code>pip install infrastore</code>: nothing else — the wheels are prebuilt and statically linked.</li>
+<li>For a from-source build: the <a href="how-to/./install.html#1-install-build-tools">build tools</a> (<code>cmake</code>, a C
+compiler, <code>protobuf</code>). No system HDF5 is needed.</li>
 </ul>
+<h2 id="install-from-pypi"><a class="header" href="#install-from-pypi">Install From PyPI</a></h2>
+<pre><code class="language-sh">pip install infrastore
+</code></pre>
+<p>That is the whole recipe for a consumer package such as infrasys. The rest of this page is for
+building the wheel from a checkout.</p>
 <h2 id="build-and-install-the-wheel-development"><a class="header" href="#build-and-install-the-wheel-development">Build and Install the Wheel (development)</a></h2>
 <p>The binding is built with <a href="https://www.maturin.rs/">maturin</a>. <code>maturin develop</code> compiles the
 extension and installs it into the active virtual environment:</p>
 <pre><code class="language-sh">cd crates/infrastore-py
 python3 -m venv .venv &amp;&amp; source .venv/bin/activate
 pip install maturin pytest numpy tzdata  # tzdata: zoneinfo on Windows
+pip install netCDF4 h5py                 # only for the HDF5-interop tests
 maturin develop
 </code></pre>
 <p>Verify the install:</p>
@@ -3181,12 +3608,14 @@ print("ok")
 <ul>
 <li><strong><code>ImportError</code> for the extension</strong> — Ensure you ran <code>maturin develop</code> in the active venv, or that
 <code>pip install</code>-ed the wheel into the interpreter you are running.</li>
-<li><strong>HDF5 not found during build</strong> — Set <code>HDF5_DIR</code> (see
-<a href="how-to/./install.html#1-install-system-libraries">Install</a>).</li>
+<li><strong>HDF5 build errors with <code>HDF5_DIR</code> set</strong> — Unset it. The vendored build compiles its own HDF5 and
+the variable redirects it at an external install while static libraries are still requested (see
+<a href="how-to/../getting-started/installation.html#build-prerequisites">Build Prerequisites</a>).</li>
 <li><strong><code>InvalidParameterError</code> on add</strong> — In Python, pass a NumPy array (any shape) whose dtype is one
-of <code>float64</code>, <code>float32</code>, <code>int64</code>, <code>int32</code>, <code>uint64</code>, or <code>bool</code>; any other dtype (e.g. <code>complex128</code>
-or a string dtype) raises. Feature values must be <code>int</code>/<code>float</code>/<code>bool</code>/<code>str</code>. Timestamps for a
-<code>NonSequentialTimeSeries</code> must be strictly increasing.</li>
+of <code>float64</code>, <code>float32</code>, <code>int64</code>, <code>int32</code>, <code>int16</code>, <code>int8</code>, <code>uint64</code>, <code>uint32</code>, <code>uint16</code>, <code>uint8</code>,
+or <code>bool</code>; any other dtype (e.g. <code>complex128</code> or a string dtype) raises. Feature values must be
+<code>int</code>/<code>float</code>/<code>bool</code>/<code>str</code>. Timestamps for a <code>NonSequentialTimeSeries</code> must be strictly
+increasing.</li>
 </ul>
 <h2 id="next-1"><a class="header" href="#next-1">Next</a></h2>
 <ul>
@@ -3194,36 +3623,52 @@ or a string dtype) raises. Feature values must be <code>int</code>/<code>float</
 <li><a href="how-to/../reference/python-api.html">Python API reference</a></li>
 </ul>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="integrate-with-julia"><a class="header" href="#integrate-with-julia">Integrate with Julia</a></h1>
-<p>Wire <code>InfraStore.jl</code> to the native library. For API usage once it loads, see the
-<a href="how-to/../guides/julia.html">Julia Developer Guide</a>.</p>
+<p>Get <code>InfraStore.jl</code> and its native library into a Julia environment. For API usage once it loads,
+see the <a href="how-to/../guides/julia.html">Julia Developer Guide</a>.</p>
 <h2 id="prerequisites-1"><a class="header" href="#prerequisites-1">Prerequisites</a></h2>
 <ul>
 <li>Julia 1.10 or newer.</li>
-<li>The <a href="how-to/./install.html#1-install-system-libraries">system libraries</a> (HDF5, Protobuf).</li>
+<li>For a from-source build only: the <a href="how-to/./install.html#1-install-build-tools">build tools</a> (<code>cmake</code>, a C
+compiler, <code>protobuf</code>). No system HDF5 is needed in either path.</li>
 </ul>
-<h2 id="1-build-the-native-library"><a class="header" href="#1-build-the-native-library">1. Build the Native Library</a></h2>
+<h2 id="install-from-the-registry"><a class="header" href="#install-from-the-registry">Install From the Registry</a></h2>
+<p><code>InfraStore.jl</code> is registered in General, and the native library comes with it:</p>
+<pre><code class="language-julia">using Pkg
+Pkg.add("InfraStore")
+</code></pre>
+<p><code>Pkg</code> downloads the <code>libinfrastore_ffi</code> artifact for your platform from the matching GitHub Release
+(<code>Artifacts.toml</code> in the package pins its URL and hash). The library is linked statically against
+HDF5 and zlib, so there is no <code>HDF5_jll</code> and no system HDF5 involved, and the HDF5 version behind
+the on-disk format is the one infrastore pinned. Artifacts exist for Linux x86_64 and aarch64
+(glibc), macOS x86_64 and Apple Silicon, and Windows x86_64; on any other platform, build the
+library yourself and use the override below.</p>
+<p>That is the whole recipe for a consumer package. The rest of this page is for developing against a
+checkout.</p>
+<h2 id="develop-against-a-checkout"><a class="header" href="#develop-against-a-checkout">Develop Against a Checkout</a></h2>
+<h3 id="1-build-the-native-library"><a class="header" href="#1-build-the-native-library">1. Build the Native Library</a></h3>
 <p><code>InfraStore.jl</code> calls into the C ABI cdylib, so build it first:</p>
 <pre><code class="language-sh">cargo build -p infrastore-ffi --release
 </code></pre>
-<h2 id="2-point-julia-at-the-library"><a class="header" href="#2-point-julia-at-the-library">2. Point Julia at the Library</a></h2>
+<h3 id="2-point-julia-at-the-library"><a class="header" href="#2-point-julia-at-the-library">2. Point Julia at the Library</a></h3>
 <p><code>InfraStore.jl</code> resolves the cdylib at first use, in this order:</p>
 <ol>
 <li>The <code>INFRASTORE_LIB</code> environment variable — the development override, pointing at a build from
 step 1.</li>
-<li>The <code>InfraStore_jll</code> binary package, if it is installed in the active environment.</li>
+<li>The <code>libinfrastore_ffi</code> artifact <code>Pkg</code> downloaded at install time.</li>
 </ol>
 <p>For a development build, export the variable (add it to your shell profile to make it permanent):</p>
 <pre><code class="language-sh">export INFRASTORE_LIB=$PWD/target/release/libinfrastore_ffi.dylib  # .so on Linux
 </code></pre>
 <p><code>using InfraStore</code> always works; the resolution happens on the first call that reaches the native
-library. If neither source yields a path, that call errors (see
-<a href="how-to/integrate-julia.html#troubleshooting">Troubleshooting</a>). With <code>InfraStore_jll</code> installed you can skip the export
-entirely — set <code>INFRASTORE_LIB</code> only when you want your local build to win over the JLL.</p>
-<h2 id="3-instantiate-and-test-the-package"><a class="header" href="#3-instantiate-and-test-the-package">3. Instantiate and Test the Package</a></h2>
+library, and the path is cached for the rest of the session — set the variable before that first
+call. If neither source yields a file, that call errors (see <a href="how-to/integrate-julia.html#troubleshooting">Troubleshooting</a>).
+With the registered package you can skip the export entirely — set <code>INFRASTORE_LIB</code> only when you
+want your local build to win over the artifact.</p>
+<h3 id="3-instantiate-and-test-the-package"><a class="header" href="#3-instantiate-and-test-the-package">3. Instantiate and Test the Package</a></h3>
 <pre><code class="language-sh">julia --project=julia/InfraStore.jl -e 'using Pkg; Pkg.instantiate()'
 julia --project=julia/InfraStore.jl julia/InfraStore.jl/test/runtests.jl
 </code></pre>
-<h2 id="4-use-it-from-your-project"><a class="header" href="#4-use-it-from-your-project">4. Use It From Your Project</a></h2>
+<h3 id="4-use-it-from-your-project"><a class="header" href="#4-use-it-from-your-project">4. Use It From Your Project</a></h3>
 <p>Develop the package into your own environment, then activate it with the library variable set:</p>
 <pre><code class="language-julia">using Pkg
 Pkg.develop(path="/path/to/infrastore/julia/InfraStore.jl")
@@ -3249,9 +3694,11 @@ println("ok")
 </code></pre>
 <h2 id="troubleshooting-1"><a class="header" href="#troubleshooting-1">Troubleshooting</a></h2>
 <ul>
-<li><strong><code>Could not locate libinfrastore_ffi. Set the INFRASTORE_LIB environment variable to a built cdylib, or install InfraStore_jll.</code></strong>
-— Neither resolution path produced a library. Export the variable (step 2) before the first store
-call, in the same shell that launched Julia, or add <code>InfraStore_jll</code> to the environment.</li>
+<li><strong><code>Could not locate libinfrastore_ffi at &lt;path&gt;. Set the INFRASTORE_LIB environment variable to a built cdylib, or reinstall the package to fetch the artifact.</code></strong>
+— The resolved path is not a file. If <code>&lt;path&gt;</code> is under <code>.julia/artifacts</code>, the artifact download
+did not complete — <code>Pkg.instantiate()</code> (or <code>Pkg.add("InfraStore")</code> again) fetches it. If it is
+your own path, export <code>INFRASTORE_LIB</code> before the first store call, in the same shell that
+launched Julia.</li>
 <li><strong><code>could not load library</code></strong> — Check the path exists and has the right extension for your OS
 (<code>.dylib</code> on macOS, <code>.so</code> on Linux, <code>.dll</code> on Windows), and that you built with <code>--release</code> if
 your variable points at <code>target/release</code>.</li>
@@ -3382,20 +3829,42 @@ value-only file from one <code>export</code> wrote (see
 row is data is rejected rather than quietly losing that row to the header.</p>
 <p>The descriptor rejects unknown keys, so a typo (<code>resolutionn</code>) is a hard error rather than a
 silently ignored setting.</p>
+<p><strong>Timestamps must name an instant.</strong> A <code>timestamp</code> column (or <code>initial_timestamp</code>) written as
+<code>2024-01-01 00:00:00</code> — no offset, the way most spreadsheets and databases export — is rejected,
+because it names no instant. Rather than rewrite the file, say what zone it was written in with the
+global <code>--assume-timezone</code> (<code>UTC</code>, or a fixed offset like <code>-07:00</code>; named zones such as
+<code>America/Denver</code> are deliberately not accepted, because a DST fold would make some rows ambiguous):</p>
+<pre><code class="language-sh">infrastore --store demo.h5 --assume-timezone UTC add --descriptor load.json
+</code></pre>
+<p>A timestamp that carries its own offset is never overridden. See
+<a href="how-to/../reference/cli.html#zoneless-timestamps">Zoneless timestamps</a>.</p>
 <h2 id="3-add-it-to-a-store"><a class="header" href="#3-add-it-to-a-store">3. Add It to a Store</a></h2>
 <pre><code class="language-sh">infrastore --store demo.h5 add --descriptor load.json --dry-run   # check first
 infrastore --store demo.h5 add --descriptor load.json
 </code></pre>
 <p>The store (<code>demo.h5</code> and its <code>demo.h5.sqlite</code> catalog) is created on first <code>add</code>, or explicitly with
-<code>infrastore --store demo.h5 init</code> when you want to pin a compression policy up front. A descriptor
-may also be a JSON array of objects to add many series in one transaction. <code>--csv</code> overrides the
-descriptor's <code>csv</code> path, but only for a single-series descriptor: with an array of two or more
-objects it errors (<code>--csv cannot be used with an array descriptor</code>).</p>
+<code>init</code> when you want to pin a compression policy up front:</p>
+<pre><code class="language-sh">infrastore --store demo.h5 init --compression deflate:6                 # default is deflate:3
+infrastore --store demo.h5 init --compression none --catalog in-memory   # see below
+</code></pre>
+<p>A descriptor may also be a JSON array of objects to add many series in one transaction. <code>--csv</code>
+overrides the descriptor's <code>csv</code> path, but only when the descriptor is a single object: with an
+array of two or more it errors (<code>--csv cannot be used with an array descriptor</code>).</p>
 <p><code>--dry-run</code> is worth running first on anything large. It resolves every descriptor and reads every
 CSV in full, then prints the resolved <code>(owner, type, name, element type, shape)</code> table without
 opening the store — which catches the "I got the shape wrong" class of mistake before a multi-GB
 load starts. <code>--replace</code> makes a re-run after fixing the data idempotent, and <code>--descriptor -</code> reads
-the JSON from stdin so a generator script can pipe descriptors straight in.</p>
+the JSON from stdin so a generator script can pipe descriptors straight in:</p>
+<pre><code class="language-sh">infrastore --store demo.h5 add --descriptor batch.json --replace
+generate.py | infrastore --store demo.h5 add --descriptor - --quiet
+</code></pre>
+<p>For a load too large to hold in one transaction, <code>--batch-size N</code> commits every <code>N</code> series (at the
+cost of the load's atomicity), and <code>--catalog in-memory</code> skips the per-commit journaling of the
+SQLite catalog while the command runs — the CLI writes it out at the end of the command either way:</p>
+<pre><code class="language-sh">infrastore --store demo.h5 add --descriptor batch.json --batch-size 500 --catalog in-memory
+</code></pre>
+<p>Every command carries worked examples in its own help — <code>infrastore add --help</code> — and
+<code>infrastore --help</code> is the grouped index.</p>
 <p>For a one-off, the descriptor fields are also <code>add</code> flags:</p>
 <pre><code class="language-sh">infrastore --store demo.h5 add --csv load.csv --owner-id 42 --owner-type Generator \
   --name load --type SingleTimeSeries --element-type f64 --units MW \
@@ -3429,9 +3898,12 @@ the headers already are ids:</p>
 <p><code>infrastore grid</code> writes that same shape back out, so the two are an inverse pair — see below.</p>
 <h2 id="4-read-it-back"><a class="header" href="#4-read-it-back">4. Read It Back</a></h2>
 <p><code>infrastore</code> follows an output convention: a global <code>-f/--format</code> with <code>table</code> (default), <code>json</code>,
-<code>jsonl</code>, and <code>csv</code>. Only the read commands honor it; <code>add</code>, <code>remove</code>, <code>transform</code>, and <code>template</code>
-accept the flag but ignore it and print plain text. <code>jsonl</code> is <code>json</code> line-delimited — one compact
-object per line, which streams into <code>jq</code> where a single pretty array cannot.</p>
+<code>jsonl</code>, and <code>csv</code>. The read commands render their results in it; the write commands (<code>add</code>,
+<code>remove</code>, <code>transform</code>, …) report their outcome in it — prose under <code>table</code>, a one-object status
+document such as <code>{"added": 3, "store": "demo.h5"}</code> under <code>json</code>/<code>jsonl</code> — so a scripted mutation
+pipes into <code>jq</code> the same way a query does. Only <code>template</code> ignores it. <code>jsonl</code> is <code>json</code>
+line-delimited — one compact object per line, which streams into <code>jq</code> where a single pretty array
+cannot. Under <code>-f json</code> an error is a <code>{"status": "error", "message": …}</code> document on stderr.</p>
 <p>Before you can write a selector you need to know what values exist, which is what the discovery
 commands are for:</p>
 <pre><code class="language-sh">infrastore --store demo.h5 names                                      # distinct series names
@@ -3460,8 +3932,13 @@ the headers are bare owner ids, which is exactly the wide form <code>add</code> 
 <p><code>export</code> is the bulk read-direction inverse of <code>add</code>: every series the selector matches is written
 to its own CSV or JSON file under <code>--dir</code> (or to stdout when exactly one matches), optionally sliced
 with <code>--time-range</code>. Setting <code>INFRASTORE_STORE</code> in the environment stands in for <code>--store</code>, every
-destructive command accepts <code>--dry-run</code> to preview its effect, and the global <code>-y</code>/<code>--yes</code> answers
-every confirmation prompt so a script does not have to know which commands ask.</p>
+destructive command except <code>compact</code> accepts <code>--dry-run</code> to preview its effect, and the global
+<code>-y</code>/<code>--yes</code> answers every confirmation prompt so a script does not have to know which commands ask:</p>
+<pre><code class="language-sh">export INFRASTORE_STORE=demo.h5
+infrastore remove --name-glob 'scratch_*' --dry-run      # what would go
+infrastore -y remove --name-glob 'scratch_*'             # no prompt
+infrastore -f csv export --name load --time-range 2024-01-01T00:00:00Z..2024-01-08T00:00:00Z
+</code></pre>
 <p><code>info</code> reports metadata, the array's content hash and where it lives in the HDF5 file, and stats
 over the values: <code>min</code>/<code>max</code>/<code>mean</code>/<code>stddev</code>, the <code>p5</code>–<code>p95</code> percentiles, <code>first</code>/<code>last</code>, and a
 separate <code>non_finite</code> count — or <code>true_count</code>/<code>false_count</code> when the dtype is <code>bool</code>. The stats are
@@ -3470,19 +3947,30 @@ the only part that reads the array — <code>--no-stats</code> skips it for a pu
 differ only by a feature never render as the same row. Its <code>Hash</code> column is the first 12 characters
 of the array's content hash: rows with equal hashes share one array on disk.</p>
 <p><code>get</code>/<code>info</code>/<code>remove</code> select a single series with <code>--owner-id</code>, <code>--owner-category</code>, <code>--name</code>,
-<code>--type</code>, <code>--resolution</code>, and repeated <code>--feature key=value</code> (<code>--feature</code> is the only repeatable
-one); if more than one series matches, <code>infrastore</code> lists the candidates so you can narrow the
-query. The owner is the <code>(owner_id, owner_category)</code> pair, so a component and a supplemental
-attribute may share a numeric id — add <code>--owner-category</code> (<code>Component</code> / <code>SupplementalAttribute</code>) to
-disambiguate. Large series truncate in <code>table</code> output — pass <code>--limit N</code>, <code>--full</code>, or <code>--tail</code> to
-read from the end. <code>--stride N</code> keeps every Nth row and, unlike the display bounds, applies to a
-<code>-f csv</code> pipe too: it selects data rather than shortening a view, and a silently short pipe is a bug
-in whatever consumes it.</p>
+<code>--name-glob</code>, <code>--component-field</code>, <code>--type</code>, <code>--resolution</code>, and repeated <code>--feature key=value</code>
+(<code>--feature</code> is the only repeatable one); if more than one series matches, <code>infrastore</code> lists the
+candidates so you can narrow the query. The owner is the <code>(owner_id, owner_category)</code> pair, so a
+component and a supplemental attribute may share a numeric id — add <code>--owner-category</code> (<code>Component</code>
+/ <code>SupplementalAttribute</code>) to disambiguate. Large series truncate in <code>table</code> output — pass
+<code>--limit N</code>, <code>--full</code>, or <code>--tail</code> to read from the end. <code>--stride N</code> keeps every Nth row and,
+unlike the display bounds, applies to a <code>-f csv</code> pipe too: it selects data rather than shortening a
+view, and a silently short pipe is a bug in whatever consumes it.</p>
+<p><code>--time-range START..END</code> on <code>get</code> takes two <em>timestamps</em> (RFC3339 or epoch-ms), not a duration:</p>
+<pre><code class="language-sh">infrastore --store demo.h5 get --owner-id 42 --name load \
+  --time-range 2024-01-01T01:00:00Z..2024-01-01T03:00:00Z
+</code></pre>
+<p>Selectors accept either spelling: <code>--type single</code> and <code>--type SingleTimeSeries</code> mean the same thing,
+as do <code>--owner-category component</code> and <code>--owner-category Component</code>. What the CLI <em>prints</em> — in
+<code>list</code>/<code>get</code>/<code>info</code> output and in what <code>template</code> writes — is always the canonical CamelCase name,
+so descriptors, rendered rows, and <code>-f json</code> output all string-match each other. The lowercase forms
+are a typing shortcut on the command line, not a second vocabulary.</p>
 <h2 id="5-look-at-it"><a class="header" href="#5-look-at-it">5. Look at It</a></h2>
 <pre><code class="language-sh">infrastore --store demo.h5 get --name load --plot                        # sparkline, no file
 infrastore --store demo.h5 plot --name load --out load.svg               # the profile
 infrastore --store demo.h5 plot --name load --kind duration --out ldc.svg
 infrastore --store demo.h5 plot --name load --kind heatmap --out heat.html
+infrastore --store demo.h5 plot --name load_prob --type Probabilistic --kind fan --window 0 --out fan.svg
+infrastore --store demo.h5 plot --name load --type Deterministic --kind overlay --out forecast.svg
 </code></pre>
 <p><code>plot</code> writes one self-contained file — no external fonts, scripts, or images, and both light and
 dark themes inside it — so it opens in a browser and drops into a report. The five <code>--kind</code> values
@@ -3516,19 +4004,10 @@ infrastore --store demo.h5 link --parent-id 42 --parent-type Generator \
 infrastore --store demo.h5 reassign --old 42 --new 43 # both catalogs follow a renumbered component
 </code></pre>
 <p>The store holds only the <em>relationship</em> — the components and attributes themselves live in the
-consumer's object graph — so the flags are bare ids and type names. <code>attach --from</code> and <code>link --from</code>
-import a whole table in one all-or-nothing transaction; their header is checked, because the four
-columns are two interchangeable-looking <code>(id, type)</code> pairs and a swapped file would silently invert
-every relationship.</p>
-<p><code>--time-range START..END</code> on <code>get</code> takes two <em>timestamps</em> (RFC3339 or epoch-ms), not a duration:</p>
-<pre><code class="language-sh">infrastore --store demo.h5 get --owner-id 42 --name load \
-  --time-range 2024-01-01T01:00:00Z..2024-01-01T03:00:00Z
-</code></pre>
-<p>Selectors accept either spelling: <code>--type single</code> and <code>--type SingleTimeSeries</code> mean the same thing,
-as do <code>--owner-category component</code> and <code>--owner-category Component</code>. What the CLI <em>prints</em> — in
-<code>list</code>/<code>get</code>/<code>info</code> output and in what <code>template</code> writes — is always the canonical CamelCase name,
-so descriptors, rendered rows, and <code>-f json</code> output all string-match each other. The lowercase forms
-are a typing shortcut on the command line, not a second vocabulary.</p>
+consumer's object graph — so the flags are bare ids and type names. <code>attach --from</code> and
+<code>link --from</code> import a whole table in one all-or-nothing transaction; their header is checked,
+because the four columns are two interchangeable-looking <code>(id, type)</code> pairs and a swapped file would
+silently invert every relationship. <code>detach</code> and <code>unlink</code> are the inverses, and take <code>--dry-run</code>.</p>
 <h2 id="8-forecasts"><a class="header" href="#8-forecasts">8. Forecasts</a></h2>
 <p>All five writable types work (<code>SingleTimeSeries</code>, <code>NonSequentialTimeSeries</code>, <code>Deterministic</code>,
 <code>Probabilistic</code>, <code>Scenarios</code>). <code>infrastore template Deterministic</code> prints a descriptor to edit, but
@@ -3543,10 +4022,11 @@ must equal the product of the type's shape:</p>
 </div>
 <p><code>H = horizon / resolution</code> — with the template's <code>"horizon": "PT24H"</code>, <code>"resolution": "PT1H"</code>, and
 <code>"count": 7</code>, a scalar <code>Deterministic</code> needs exactly <code>24 * 7 = 168</code> values, plus the header row. Use
-<code>-f json</code> to read the flat values back at full fidelity. <code>get -f csv</code> on a forecast emits
-<strong>timestamped analysis rows</strong> instead — one row per <code>(window, step)</code> with <code>issue_time</code>/<code>target_time</code>
-columns and one value column per percentile or scenario — so it is not re-ingestible by <code>add</code>
-(static series' <code>get -f csv</code> still round-trips).</p>
+<code>-f json</code> to read the flat values back at full fidelity. <code>get -f csv</code> and <code>export -f csv</code> on a
+forecast emit <strong>timestamped analysis rows</strong> instead — one row per <code>(window, step)</code> with
+<code>issue_time</code>/<code>target_time</code> columns and one value column per percentile or scenario. <code>add</code> recognizes
+that header too and transposes the rows back, so an exported forecast re-adds exactly (see
+<a href="how-to/../reference/cli.html#reading-back-and-re-adding">Reading back, and re-adding</a>).</p>
 <p><code>DeterministicSingleTimeSeries</code> is not added from CSV — store a <code>SingleTimeSeries</code>, then derive it.
 <code>transform</code> takes <strong>no selector</strong>: it rewrites <em>every</em> <code>SingleTimeSeries</code> in the store. <code>--horizon</code>
 must fit inside each one (<code>horizon / resolution</code> steps must not exceed its <code>length</code>), so with the
@@ -3573,6 +4053,22 @@ makes it cheap enough for a CI gate: two series hold the same numbers exactly wh
 same hash. <code>merge</code> moves arrays as bytes, so nothing is lost to a CSV round trip. <code>persist</code> is the
 one write that refuses an existing destination without <code>--force</code>: a save that fails partway may
 already have destroyed what was there.</p>
+<h2 id="10-maintain-it"><a class="header" href="#10-maintain-it">10. Maintain It</a></h2>
+<pre><code class="language-sh">infrastore --store demo.h5 verify                 # re-hash every array; exit 1 on a mismatch
+infrastore --store demo.h5 check-consistency      # every SingleTimeSeries of a resolution on one grid
+infrastore --store demo.h5 stats                  # association, owner, and distinct-array counts
+infrastore --store demo.h5 remove --owner-id 42 --name load --dry-run
+infrastore --store demo.h5 rename --owner-id 42 --name load --new-name load_2024
+infrastore --store demo.h5 compact --force        # rewrite the .h5 so deletions actually shrink it
+</code></pre>
+<p>Deleting frees a column or unlinks a dataset, but HDF5 cannot give the space back in place, so the
+file only shrinks when <code>compact</code> rewrites it from the live set — nothing else may have the store
+open while it runs, and it is the one destructive command with no <code>--dry-run</code>. <code>verify</code> and <code>diff</code>
+use exit status <code>1</code> as an answer, not a failure; <code>2</code> is a usage error
+(<a href="how-to/../reference/cli.html#exit-status">Exit Status</a>).</p>
+<p>Shell completion for bash, zsh, fish, elvish, and PowerShell comes from the binary itself:</p>
+<pre><code class="language-sh">infrastore completions zsh &gt; "${fpath[1]}/_infrastore"
+</code></pre>
 <h2 id="notes-1"><a class="header" href="#notes-1">Notes</a></h2>
 <ul>
 <li>The CLI writes locally; there is no remote/gRPC mode yet (store access is isolated so one can be
@@ -5307,7 +5803,7 @@ impl UnitSystem {
 <span class="boring">}</span></code></pre></pre>
 <p><code>None</code> on a metadata row means <em>unspecified</em>, not <code>NaturalUnits</code>. See
 <a href="reference/../explanation/data-model.html#optional-descriptors">Optional descriptors</a>.</p>
-<h3 id="descriptors"><a class="header" href="#descriptors"><code>Descriptors</code></a></h3>
+<h3 id="descriptors-2"><a class="header" href="#descriptors-2"><code>Descriptors</code></a></h3>
 <p>The descriptive attributes a series carries alongside its array, applied to a reconstructed series
 by <code>TimeSeriesData::set_descriptors</code>:</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
@@ -5698,7 +6194,8 @@ it cannot survive every binding intact (see
 <pre><code class="language-python">@classmethod
 def create(
     cls,
-    path: str | None = None,
+    path: str | os.PathLike | None = None,
+    *,
     in_memory: bool = False,
     compression: str = "deflate",   # "deflate" or "none"
     compression_level: int = 3,     # 0–9, DEFLATE only
@@ -5709,12 +6206,17 @@ def create(
 
 @classmethod
 def open(
-    cls, path: str, read_only: bool = False, catalog: str = "attached"
+    cls, path: str | os.PathLike, *, read_only: bool = False, catalog: str = "attached"
 ) -&gt; Store: ...
 
 @classmethod
-def open_copy(cls, src: str, dest: str, catalog: str = "attached") -&gt; Store: ...
+def open_copy(
+    cls, src: str | os.PathLike, dest: str | os.PathLike, *, catalog: str = "attached"
+) -&gt; Store: ...
 </code></pre>
+<p>Every argument after the path(s) is keyword-only; <code>Store.create("s.h5", True)</code> raises <code>TypeError</code>.
+Paths accept anything <code>os.fspath</code> does, <code>pathlib.Path</code> included (the shipped stub spells them
+<code>str</code>).</p>
 <ul>
 <li><code>create(in_memory=True)</code> — in-memory store; <code>path</code> and compression arguments are ignored.</li>
 <li><code>create(path=...)</code> — writes <code>path</code> (HDF5) and <code>path + ".sqlite"</code> (metadata).</li>
@@ -5747,8 +6249,10 @@ rename replaces the original. Raises <code>StoreExistsError</code> if <code>dest
 <code>store.close()</code> drops the underlying handle and releases its files; subsequent operations raise
 <code>TimeSeriesError</code> (it is idempotent). <code>repr(store)</code> shows the path (or <code>in-memory</code>), the read-only
 flag, and <code>closed</code> once closed.</p>
-<h3 id="property"><a class="header" href="#property">Property</a></h3>
+<h3 id="properties"><a class="header" href="#properties">Properties</a></h3>
 <pre><code class="language-python">store.read_only -&gt; bool
+store.catalog -&gt; str            # "attached" or "memory"
+store.in_transaction -&gt; bool
 </code></pre>
 <h3 id="methods"><a class="header" href="#methods">Methods</a></h3>
 <pre><code class="language-python">def add_time_series(
@@ -5758,6 +6262,7 @@ flag, and <code>closed</code> once closed.</p>
     owner_category: OwnerCategory,
     time_series: SingleTimeSeries | NonSequentialTimeSeries
         | Deterministic | Probabilistic | Scenarios,
+    *,
     features: dict[str, int | float | bool | str] | None = None,
     units: str | None = None,
     element_type: str | None = None,
@@ -5782,13 +6287,58 @@ def add_time_series_bulk(self, items: list[dict]) -&gt; list[TimeSeriesKey]: ...
 # All items commit in ONE metadata transaction (all-or-nothing), which is much
 # faster than looping over add_time_series. Keys are returned in input order.
 
-def transform_single_time_series(self, horizon: timedelta | str, interval: timedelta | str) -&gt; int: ...
+def transform_single_time_series(
+    self,
+    horizon: timedelta | str,
+    interval: timedelta | str,
+    *,
+    owner_category: OwnerCategory | None = None,
+    resolution: timedelta | str | None = None,
+) -&gt; int: ...
+# Derives a DeterministicSingleTimeSeries from every stored SingleTimeSeries —
+# or, with `owner_category` / `resolution`, only from the ones matching — and
+# returns the count. `horizon / resolution` steps must fit inside each source.
+
+def copy_time_series(
+    self,
+    src: TimeSeriesKey,
+    dst_owner_id: int,
+    dst_owner_type: str,
+    *,
+    new_name: str | None = None,
+) -&gt; TimeSeriesKey: ...
+# Attach the same array to another owner (no data is duplicated); returns the new key.
+def rename_time_series(self, key: TimeSeriesKey, new_name: str) -&gt; TimeSeriesKey: ...
+# Same identity, new name; returns the renamed key.
 
 def get_time_series(
     self,
     key: TimeSeriesKey,
+    *,
     time_range: tuple[datetime, datetime] | None = None,
 ) -&gt; SingleTimeSeries | NonSequentialTimeSeries | Deterministic | Probabilistic | Scenarios: ...
+def get_metadata(self, key: TimeSeriesKey) -&gt; dict: ...
+# The whole catalog record for one key — the same dict shape list_time_series
+# returns (see Return shapes), without reading the array.
+def get_array_by_hash(self, data_hash: str) -&gt; numpy.ndarray: ...
+# The raw array behind a 64-char hex content hash, bypassing the catalog.
+def count_array_references(self, data_hash: str) -&gt; dict: ...
+# {"sts": int, "dst": int}: SingleTimeSeries and DeterministicSingleTimeSeries
+# associations sharing that array.
+def resolve_forecast_key(
+    self,
+    owner_id: int,
+    owner_category: OwnerCategory,
+    name: str,
+    requested_type: TimeSeriesType,
+    *,
+    resolution: timedelta | str | None = None,
+    interval: timedelta | str | None = None,
+    features: dict[str, int | float | bool | str] | None = None,
+) -&gt; TimeSeriesKey: ...
+# Attributes + requested type -&gt; the concrete key. TimeSeriesType.Deterministic
+# also matches a stored DeterministicSingleTimeSeries; the returned key's
+# time_series_type says which was found.
 
 def bulk_read(
     self,
@@ -5800,8 +6350,14 @@ def bulk_read(
 # Results are returned in the same order as `keys`; an empty list of keys returns an empty list.
 
 def remove_time_series(self, key: TimeSeriesKey) -&gt; None: ...
+def remove_time_series_bulk(self, keys: list[TimeSeriesKey]) -&gt; int: ...
+# All-or-nothing: a key matching nothing fails the whole batch. Returns the count removed.
+def remove_by_filter(self, *, ...) -&gt; int: ...
+# Same keyword-only filter arguments as list_time_series; one all-or-nothing
+# transaction; returns the count removed (0 when nothing matched).
 def clear_time_series(
     self,
+    *,
     owner_id: int | None = None,
     owner_category: OwnerCategory | None = None,
 ) -&gt; int: ...
@@ -5835,12 +6391,24 @@ def list_time_series(
 # series that declares none matches no value, so it cannot select those rows.
 
 def list_array_groups(self, *, ...) -&gt; list[dict]: ...
-# Same keyword-only filter arguments as list_time_series; so do list_keys,
-# list_names, list_owner_types, and remove_by_filter.
-# `time_series_type` is a TimeSeriesType. TimeSeriesType.Deterministic matches
-# both Deterministic and DeterministicSingleTimeSeries rows. Every filter
-# surface takes it, including has_any_time_series, get_resolutions,
-# get_intervals, list_owner_ids, and build_forecast_reader.
+def list_keys(self, *, ...) -&gt; list[TimeSeriesKey]: ...
+def list_names(self, *, ...) -&gt; list[str]:  ...        # distinct names, sorted
+def list_owner_types(self, *, ...) -&gt; list[str]: ...   # distinct owner types, sorted
+# Every `...` above is the same keyword-only filter as list_time_series, and so
+# is remove_by_filter's.
+# `time_series_type` is a TimeSeriesType (or its member name as a str).
+# TimeSeriesType.Deterministic matches both Deterministic and
+# DeterministicSingleTimeSeries rows. Every filter surface takes it, including
+# has_any_time_series, get_resolutions, get_intervals, list_owner_ids, and
+# build_forecast_reader.
+def list_owner_ids(
+    self,
+    owner_category: OwnerCategory,
+    *,
+    time_series_type: TimeSeriesType | None = None,
+    resolution: timedelta | str | None = None,
+) -&gt; list[int]: ...
+# Distinct owner ids of that category holding time series, ascending.
 
 def get_time_series_keys(
     self,
@@ -5857,10 +6425,20 @@ def is_empty(self) -&gt; bool: ...
 # the store, and it stays correct as the catalog gains tables; a conjunction over
 # the count_* methods does neither.
 def get_resolutions(self, time_series_type: TimeSeriesType | None = None) -&gt; list[str]: ...
-# resolutions are returned as ISO 8601 duration strings, e.g. "PT1H"
+def get_intervals(self, time_series_type: TimeSeriesType | None = None) -&gt; list[str]: ...
+# Distinct resolutions / forecast intervals as ISO 8601 duration strings, e.g. "PT1H".
 def get_time_series_counts(self) -&gt; dict: ...
-def get_forecast_parameters(self, *, resolution: str | None = None,
-                            interval: str | None = None) -&gt; dict: ...
+def time_series_counts_detailed(self) -&gt; dict: ...
+def counts_by_type(self) -&gt; dict[str, int]: ...       # {time_series_type name: count}
+def num_distinct_arrays(self) -&gt; int: ...
+def static_summary(self) -&gt; list[dict]: ...
+def forecast_summary(self) -&gt; list[dict]: ...
+def check_static_consistency(self, resolution: timedelta | str | None = None) -&gt; list[dict]: ...
+# One {"resolution", "initial_timestamp", "length"} per resolution present (or
+# the one given); raises if the SingleTimeSeries of one resolution disagree on
+# their grid — the precondition build_static_reader relies on.
+def get_forecast_parameters(self, *, resolution: timedelta | str | None = None,
+                            interval: timedelta | str | None = None) -&gt; dict: ...
 def get_compression(self) -&gt; dict: ...
 def compact(self) -&gt; dict: ...
 def verify_integrity(self) -&gt; dict: ...
@@ -5878,6 +6456,7 @@ def persist_catalog(self) -&gt; None: ...
 # reversible only inside a transaction. Blocks nest; the write lock is held
 # until the outermost one ends.
 def transaction(self) -&gt; Transaction: ...   # context manager: commit on exit, roll back on raise
+                                            # `with store.transaction() as s:` binds the Store
 def begin_transaction(self) -&gt; None: ...
 def commit_transaction(self) -&gt; None: ...   # InvalidParameterError if none is open
 def rollback_transaction(self) -&gt; None: ... # InvalidParameterError if none is open
@@ -5899,26 +6478,35 @@ on the read paths, and so on. Positional use raises <code>TypeError</code>. The 
 <li><strong><code>add_time_series</code></strong> accepts a <code>SingleTimeSeries</code>, a <code>NonSequentialTimeSeries</code>, or a dense
 forecast object (<code>Deterministic</code> / <code>Probabilistic</code> / <code>Scenarios</code>) — see <a href="reference/python-api.html#forecasts">Forecasts</a>.
 <strong><code>transform_single_time_series</code></strong> derives a <code>DeterministicSingleTimeSeries</code> from every stored
-<code>SingleTimeSeries</code> and returns the count transformed. <strong><code>get_time_series</code></strong> returns whichever
-matches the stored type.</li>
+<code>SingleTimeSeries</code> (or the subset its <code>owner_category</code> / <code>resolution</code> arguments select) and
+returns the count transformed. <strong><code>get_time_series</code></strong> returns whichever matches the stored type.</li>
 <li><strong><code>bulk_read</code></strong> returns one typed object per key, in the same order as <code>keys</code> (an empty key list
 returns an empty list). It is the bulk counterpart to <code>get_time_series</code>: packed <code>SingleTimeSeries</code>
 are read in one decompress-once pass per dataset instead of one read per key. Pass the
 keyword-only <code>time_range=(start, end)</code> to apply the same window to every key; by default each
 series comes back in full.</li>
-<li><strong><code>list_time_series</code></strong> returns a list of dicts, each with the keys: <code>owner_id</code>, <code>owner_type</code>,
-<code>owner_category</code>, <code>time_series_type</code>, <code>name</code>, <code>data_hash</code> (hex string), <code>length</code>, <code>resolution</code>
-(ISO 8601 duration string, e.g. <code>PT1H</code>, or <code>None</code>), <code>timestamps</code>, <code>features</code>, <code>units</code>,
-<code>quantity_kind</code>, <code>unit_system</code> (<code>"natural_units"</code> / <code>"component_base"</code> / <code>None</code>),
+<li><strong><code>list_time_series</code></strong> returns a list of dicts (the same shape <code>get_metadata</code> returns for one
+key), each with the keys: <code>owner_id</code>, <code>owner_type</code>, <code>owner_category</code>, <code>time_series_type</code>, <code>name</code>,
+<code>data_hash</code> (hex string), <code>initial_timestamp</code> (RFC 3339 string, or <code>None</code> for non-sequential
+series), <code>length</code>, <code>resolution</code> (ISO 8601 duration string, e.g. <code>PT1H</code>, or <code>None</code>), <code>timestamps</code>,
+<code>horizon</code>, <code>interval</code>, <code>count</code>, <code>percentiles</code>, <code>element_type</code>, <code>element_shape</code>, <code>features</code>,
+<code>units</code>, <code>quantity_kind</code>, <code>unit_system</code> (<code>"natural_units"</code> / <code>"component_base"</code> / <code>None</code>),
 <code>component_field</code>, <code>application_data</code>. <code>timestamps</code> is a list of RFC 3339 strings for
-non-sequential series and <code>None</code> otherwise. The <code>features</code> filter is a subset match — rows must
-contain at least the given pairs.</li>
+non-sequential series and <code>None</code> otherwise; <code>horizon</code> / <code>interval</code> / <code>count</code> are set for forecasts
+and <code>percentiles</code> for <code>Probabilistic</code> only. The <code>features</code> filter is a <strong>subset</strong> match — rows
+must contain at least the given pairs — whereas a <code>TimeSeriesKey</code> matches its feature map exactly.</li>
 <li><strong><code>list_array_groups</code></strong> accepts the same filters as <code>list_time_series</code> and groups the matching
 series by their underlying stored array. It returns a list of dicts, each with <code>data_hash</code> (hex
 string) and <code>keys</code> (a list of <code>TimeSeriesKey</code>s that resolve to that array). Keys sharing one dict
 share one deduplicated array.</li>
 <li><strong><code>get_time_series_counts</code></strong> returns
-<code>{"components_with_time_series": int, "static_time_series": int, "forecasts": int}</code>.</li>
+<code>{"components_with_time_series": int, "static_time_series": int, "forecasts": int}</code>;
+<strong><code>time_series_counts_detailed</code></strong> adds <code>supplemental_attributes_with_time_series</code> and spells the
+other two <code>static_time_series_count</code> / <code>forecast_count</code>.</li>
+<li><strong><code>static_summary</code></strong> returns one dict per distinct
+<code>(owner_type, owner_category, time_series_type, name, initial_timestamp, resolution, time_step_count)</code>
+with its <code>count</code>; <strong><code>forecast_summary</code></strong> does the same for forecasts, adding <code>horizon</code>,
+<code>interval</code>, and <code>window_count</code>.</li>
 <li><strong><code>get_forecast_parameters</code></strong> returns
 <code>{"horizon": str, "interval": str, "count": int, "resolution": str, "initial_timestamp": str}</code>,
 where <code>horizon</code>, <code>interval</code>, and <code>resolution</code> are ISO 8601 duration strings (e.g. <code>"PT1H"</code>) and
@@ -6006,7 +6594,7 @@ passed to <a href="reference/python-api.html#methods"><code>add_time_series</cod
 the matching object depending on the stored type (a <code>DeterministicSingleTimeSeries</code> is synthesized
 into a <code>Deterministic</code> on read). A <code>DeterministicSingleTimeSeries</code> is not added directly — derive
 one from stored <code>SingleTimeSeries</code> with <a href="reference/python-api.html#methods"><code>transform_single_time_series</code></a>.
-<a href="reference/python-api.html#timeseriesstore"><code>get_time_series_counts</code></a> reports the forecast total under <code>forecasts</code>.</p>
+<a href="reference/python-api.html#methods"><code>get_time_series_counts</code></a> reports the forecast total under <code>forecasts</code>.</p>
 <pre><code class="language-python">ts = Deterministic(initial_timestamp, resolution, horizon, interval, count, data, "load_fc")
 key = store.add_time_series(42, "Generator", OwnerCategory.Component, ts, units="MW")
 </code></pre>
@@ -6088,6 +6676,7 @@ for forecasts. Both share the lifecycle: build → inspect the layout once → <
     owner_type: str | None = None,
     name: str | None = None,
     name_glob: str | None = None,
+    component_field: str | None = None,
     features: dict[str, int | float | bool | str] | None = None,
 ) -&gt; StaticReader: ...
 def static_read(self, reader: StaticReader, when: datetime) -&gt; None: ...
@@ -6102,6 +6691,7 @@ def build_forecast_reader(
     owner_type: str | None = None,
     name: str | None = None,
     name_glob: str | None = None,
+    component_field: str | None = None,
     features: dict[str, int | float | bool | str] | None = None,
 ) -&gt; ForecastReader: ...
 def forecast_read(self, reader: ForecastReader, when: datetime) -&gt; None: ...
@@ -6393,9 +6983,11 @@ json_str = store.export_time_series_associations_openapi()
 <tr><td><code>MismatchedArtifactError</code></td><td>The <code>.h5</code> and <code>.sqlite</code> halves came from two saves</td></tr>
 </tbody></table>
 </div>
-<p>A malformed ISO 8601 period string raises <code>InvalidParameterError</code> (inside the hierarchy). Only a
-period argument that is neither a <code>timedelta</code> nor a <code>str</code> raises a plain <code>TypeError</code>, which
-<code>except TimeSeriesError</code> will not catch.</p>
+<p>A malformed ISO 8601 period string raises <code>InvalidParameterError</code> (inside the hierarchy), as does a
+naive <code>datetime</code>. Only a period argument that is neither a <code>timedelta</code> nor a <code>str</code> (or a
+<code>time_series_type</code> that is neither a <code>TimeSeriesType</code> nor a <code>str</code>) raises a plain <code>TypeError</code>, which
+<code>except TimeSeriesError</code> will not catch. <code>init_tracing</code> with an unparseable filter raises
+<code>ValueError</code>.</p>
 <p>Feature-value typing note: because <code>bool</code> is a subtype of <code>int</code> in Python, the binding checks <code>bool</code>
 first, so <code>True</code>/<code>False</code> features are stored as booleans, not integers.</p>
 <h2 id="init_tracing"><a class="header" href="#init_tracing"><code>init_tracing</code></a></h2>
@@ -6414,7 +7006,8 @@ init_tracing("warn,infrastore_core=trace") # warn globally, trace the core
 <div style="break-before: page; page-break-before: always;"></div><h1 id="julia-api"><a class="header" href="#julia-api">Julia API</a></h1>
 <p>The Julia package is <strong><code>InfraStore.jl</code></strong> (module <code>InfraStore</code>); it wraps the <a href="reference/./c-abi.html">C ABI</a>
 cdylib. The library is resolved from the <code>INFRASTORE_LIB</code> environment variable (development builds),
-or from the <code>InfraStore_jll</code> binary package when installed.</p>
+or else from the <code>libinfrastore_ffi</code> artifact that <code>Pkg</code> downloads at install time (see
+<a href="reference/../how-to/integrate-julia.html">Integrate with Julia</a>).</p>
 <pre><code class="language-julia">using InfraStore
 </code></pre>
 <p>Exported names (types first, then functions):</p>
@@ -6426,24 +7019,27 @@ or from the <code>InfraStore_jll</code> binary package when installed.</p>
 <code>Store</code>, <code>SupplementalAttribute</code>, <code>SupplementalAttributeAssociation</code>,
 <code>SupplementalAttributeSummaryRow</code>, <code>SupplementalAttributeTypeCount</code>, <code>TimeSeriesCounts</code>,
 <code>TimeSeriesCountsDetailed</code>, <code>TimeSeriesKey</code>, <code>TimeSeriesMetadata</code>, <code>TimeSeriesTypeCount</code>,
-<code>add_parent_child_association!</code>, <code>add_parent_child_associations!</code>,
-<code>add_supplemental_attribute_association!</code>, <code>add_supplemental_attribute_associations!</code>,
-<code>add_time_series!</code>, <code>add_time_series_bulk!</code>, <code>build_forecast_reader</code>, <code>build_static_reader</code>,
-<code>bulk_read</code>, <code>catalog_mode</code>, <code>check_static_consistency</code>, <code>clear!</code>, <code>close!</code>, <code>compact!</code>,
-<code>copy_time_series!</code>, <code>count_array_references</code>, <code>count_components_with_attributes</code>,
-<code>count_parent_child_associations</code>, <code>count_supplemental_attribute_associations</code>,
-<code>count_supplemental_attributes</code>, <code>counts_by_type</code>, <code>flush!</code>, <code>forecast_entries</code>,
-<code>forecast_num_slots</code>, <code>forecast_read!</code>, <code>forecast_summary</code>, <code>forecast_timeline</code>, <code>forecast_values</code>,
-<code>get_array_by_hash</code>, <code>get_compression</code>, <code>get_counts</code>, <code>get_forecast_parameters</code>, <code>get_intervals</code>,
-<code>get_metadata</code>, <code>get_path</code>, <code>get_resolutions</code>, <code>get_time_series</code>, <code>get_time_series_key</code>,
-<code>get_time_series_keys</code>, <code>has_any_time_series</code>, <code>has_for_owner</code>, <code>has_parent_child_association</code>,
-<code>has_supplemental_attribute_association</code>, <code>has_time_series</code>, <code>in_transaction</code>, <code>init_logging</code>,
-<code>is_empty</code>, <code>key_info</code>, <code>list_array_groups</code>, <code>list_children</code>, <code>list_components_with_attributes</code>,
-<code>list_keys</code>, <code>list_names</code>, <code>list_owner_ids</code>, <code>list_owner_types</code>, <code>list_parent_child_associations</code>,
-<code>list_parents</code>, <code>list_supplemental_attribute_associations</code>, <code>list_supplemental_attribute_ids</code>,
-<code>list_time_series</code>, <code>num_distinct_arrays</code>, <code>open_copy</code>, <code>open_store</code>, <code>persist!</code>,
-<code>persist_catalog!</code>, <code>read_only</code>, <code>rollback_transaction!</code>, <code>transaction</code>, <code>begin_transaction!</code>,
-<code>commit_transaction!</code>, <code>remove_by_filter!</code>, <code>remove_parent_child_associations!</code>,
+<code>TransformOutcome</code>, <code>UnitSystem</code> (<code>NaturalUnits</code>, <code>ComponentBase</code>), <code>add_parent_child_association!</code>,
+<code>add_parent_child_associations!</code>, <code>add_supplemental_attribute_association!</code>,
+<code>add_supplemental_attribute_associations!</code>, <code>add_time_series!</code>, <code>add_time_series_bulk!</code>,
+<code>build_forecast_reader</code>, <code>build_static_reader</code>, <code>bulk_read</code>, <code>catalog_mode</code>,
+<code>check_static_consistency</code>, <code>clear!</code>, <code>close!</code>, <code>compact!</code>, <code>copy_time_series!</code>,
+<code>count_array_references</code>, <code>count_components_with_attributes</code>,
+<code>export_supplemental_attribute_associations_openapi</code>, <code>export_time_series_associations_openapi</code>,
+<code>import_supplemental_attribute_associations_openapi!</code>, <code>count_parent_child_associations</code>,
+<code>count_supplemental_attribute_associations</code>, <code>count_supplemental_attributes</code>, <code>counts_by_type</code>,
+<code>flush!</code>, <code>forecast_entries</code>, <code>forecast_num_slots</code>, <code>forecast_read!</code>, <code>forecast_summary</code>,
+<code>forecast_timeline</code>, <code>forecast_values</code>, <code>get_array_by_hash</code>, <code>get_compression</code>, <code>get_counts</code>,
+<code>get_forecast_parameters</code>, <code>get_intervals</code>, <code>get_metadata</code>, <code>get_path</code>, <code>get_resolutions</code>,
+<code>get_time_series</code>, <code>get_time_series_key</code>, <code>get_time_series_keys</code>, <code>has_any_time_series</code>,
+<code>has_for_owner</code>, <code>has_parent_child_association</code>, <code>has_supplemental_attribute_association</code>,
+<code>has_time_series</code>, <code>in_transaction</code>, <code>init_logging</code>, <code>is_empty</code>, <code>key_info</code>, <code>list_array_groups</code>,
+<code>list_children</code>, <code>list_components_with_attributes</code>, <code>list_keys</code>, <code>list_names</code>, <code>list_owner_ids</code>,
+<code>list_owner_types</code>, <code>list_parent_child_associations</code>, <code>list_parents</code>,
+<code>list_supplemental_attribute_associations</code>, <code>list_supplemental_attribute_ids</code>, <code>list_time_series</code>,
+<code>num_distinct_arrays</code>, <code>open_copy</code>, <code>open_store</code>, <code>persist!</code>, <code>persist_catalog!</code>, <code>read_only</code>,
+<code>rollback_transaction!</code>, <code>transaction</code>, <code>begin_transaction!</code>, <code>commit_transaction!</code>,
+<code>remove_by_filter!</code>, <code>remove_parent_child_associations!</code>,
 <code>remove_supplemental_attribute_associations!</code>, <code>remove_time_series!</code>, <code>rename_time_series!</code>,
 <code>replace_owner!</code>, <code>replace_parent_child_component_id!</code>,
 <code>replace_supplemental_attribute_component_id!</code>, <code>static_grid</code>, <code>static_groups</code>, <code>static_read!</code>,
@@ -6451,7 +7047,7 @@ or from the <code>InfraStore_jll</code> binary package when installed.</p>
 <code>supplemental_attribute_summary</code>, <code>time_series_counts</code>, <code>transform_single_time_series!</code>,
 <code>verify_integrity</code>.</p>
 <h2 id="constructors-2"><a class="header" href="#constructors-2">Constructors</a></h2>
-<pre><code class="language-julia">Store(; in_memory::Bool=true, path::Union{Nothing,AbstractString}=nothing,
+<pre><code class="language-julia">Store(; in_memory::Union{Nothing,Bool}=nothing, path::Union{Nothing,AbstractString}=nothing,
         compression::Union{Symbol,AbstractString}=:deflate,
         compression_level::Integer=3, shuffle::Bool=true,
         catalog::Union{Nothing,Symbol,AbstractString}=nothing,
@@ -6462,6 +7058,12 @@ open_copy(src::AbstractString, dest::AbstractString;
           catalog::Union{Symbol,AbstractString}=:attached) -&gt; Store
 catalog_mode(store::Store) -&gt; Symbol
 </code></pre>
+<p><code>in_memory</code> defaults to whatever <code>path</code> implies — in-memory without one, file-backed with one — and
+rarely needs setting; <code>path</code> together with <code>in_memory=true</code> throws <code>ArgumentError</code> (it used to be
+accepted and silently discarded everything written).</p>
+<p>A <code>Store</code> (and any reader built from it) is <strong>not thread-safe</strong>: the Rust core mutates the handle
+without synchronization, so concurrent calls from two tasks or threads are undefined behavior, not
+merely a race on results. Confine a store to one task, or guard every call with your own lock.</p>
 <ul>
 <li><code>Store()</code> — in-memory store.</li>
 <li><code>Store(in_memory=false, path="system.h5")</code> — persists to <code>system.h5</code> plus <code>system.h5.sqlite</code>.</li>
@@ -6503,17 +7105,29 @@ view or a range — is normalized to a concrete <code>Array{T,N}</code>).</p>
     resolution        :: Period          # e.g. Hour(1), Millisecond(500)
     data              :: Array{T,N}      # any element type; dim 1 = time
     name              :: String          # required association name
-    application_data      :: Union{Nothing,String}
+    application_data  :: Union{Nothing,String}
+    element_type      :: Union{Nothing,String}   # canonical element_type, or nothing for plain scalars
+    units             :: Union{Nothing,String}
+    quantity_kind     :: Union{Nothing,String}
+    unit_system       :: Union{Nothing,UnitSystem}   # nothing = unspecified, not NaturalUnits
+    component_field   :: Union{Nothing,String}
 end
-SingleTimeSeries(initial_timestamp, resolution, data, name; application_data=nothing)
+SingleTimeSeries(initial_timestamp, resolution, data, name; application_data=nothing, element_type=nothing, units=nothing,
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing)
 
 struct NonSequentialTimeSeries{T,N}
     timestamps   :: Vector{DateTime}     # strictly increasing; one per row of dim 1
     data         :: Array{T,N}
     name         :: String
-    application_data :: Union{Nothing,String}
+    application_data  :: Union{Nothing,String}
+    element_type      :: Union{Nothing,String}   # canonical element_type, or nothing for plain scalars
+    units             :: Union{Nothing,String}
+    quantity_kind     :: Union{Nothing,String}
+    unit_system       :: Union{Nothing,UnitSystem}   # nothing = unspecified, not NaturalUnits
+    component_field   :: Union{Nothing,String}
 end
-NonSequentialTimeSeries(timestamps, data, name; application_data=nothing)
+NonSequentialTimeSeries(timestamps, data, name; application_data=nothing, element_type=nothing, units=nothing,
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing)
 
 struct Deterministic{T,N}
     initial_timestamp :: DateTime
@@ -6523,10 +7137,15 @@ struct Deterministic{T,N}
     count             :: Int
     data              :: Array{T,N}      # (H, count, element_dims...)
     name              :: String
-    application_data      :: Union{Nothing,String}
+    application_data  :: Union{Nothing,String}
+    element_type      :: Union{Nothing,String}   # canonical element_type, or nothing for plain scalars
+    units             :: Union{Nothing,String}
+    quantity_kind     :: Union{Nothing,String}
+    unit_system       :: Union{Nothing,UnitSystem}   # nothing = unspecified, not NaturalUnits
+    component_field   :: Union{Nothing,String}
 end
-Deterministic(initial_timestamp, resolution, horizon, interval, count, data, name;
-              application_data=nothing)
+Deterministic(initial_timestamp, resolution, horizon, interval, count, data, name; application_data=nothing, element_type=nothing, units=nothing,
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing)
 
 struct Probabilistic{T,N}
     initial_timestamp :: DateTime
@@ -6537,10 +7156,15 @@ struct Probabilistic{T,N}
     percentiles       :: Vector{Float64}
     data              :: Array{T,N}      # (num_percentiles, H, count, element_dims...)
     name              :: String
-    application_data      :: Union{Nothing,String}
+    application_data  :: Union{Nothing,String}
+    element_type      :: Union{Nothing,String}   # canonical element_type, or nothing for plain scalars
+    units             :: Union{Nothing,String}
+    quantity_kind     :: Union{Nothing,String}
+    unit_system       :: Union{Nothing,UnitSystem}   # nothing = unspecified, not NaturalUnits
+    component_field   :: Union{Nothing,String}
 end
-Probabilistic(initial_timestamp, resolution, horizon, interval, count, percentiles, data, name;
-              application_data=nothing)
+Probabilistic(initial_timestamp, resolution, horizon, interval, count, percentiles, data, name; application_data=nothing, element_type=nothing, units=nothing,
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing)
 
 struct Scenarios{T,N}
     initial_timestamp :: DateTime
@@ -6551,10 +7175,23 @@ struct Scenarios{T,N}
     scenario_count    :: Int             # set from size(data, 1) by the constructor
     data              :: Array{T,N}      # (scenario_count, H, count, element_dims...)
     name              :: String
-    application_data      :: Union{Nothing,String}
+    application_data  :: Union{Nothing,String}
+    element_type      :: Union{Nothing,String}   # canonical element_type, or nothing for plain scalars
+    units             :: Union{Nothing,String}
+    quantity_kind     :: Union{Nothing,String}
+    unit_system       :: Union{Nothing,UnitSystem}   # nothing = unspecified, not NaturalUnits
+    component_field   :: Union{Nothing,String}
 end
-Scenarios(initial_timestamp, resolution, horizon, interval, count, data, name;
-          application_data=nothing)         # note: scenario_count is NOT a constructor argument
+Scenarios(initial_timestamp, resolution, horizon, interval, count, data, name; application_data=nothing, element_type=nothing, units=nothing,
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing)
+# note: scenario_count is NOT a constructor argument
+
+# The five descriptors after `name` are carried on the struct and become the
+# add_time_series! defaults, so a series built with units="MW" keeps them on add.
+# `unit_system` is a `UnitSystem`: `NaturalUnits` (the units named by `units`)
+# or `ComponentBase` (per-unit against the owning component's own base). The
+# store records the declaration only — it holds no base and rescales nothing —
+# and `nothing` means unspecified, which is deliberately not `NaturalUnits`.
 
 # Marker type; never constructed and with no materialized struct. Derived via
 # transform_single_time_series! and read back as a Deterministic. You normally
@@ -6657,7 +7294,7 @@ grid; enumerate it with <code>static_timestamps</code>.</p>
 <pre><code class="language-julia">add_time_series!(
     store::Store, owner_id, owner_type, owner_category::OwnerCategory,
     ts;   # SingleTimeSeries, NonSequentialTimeSeries, or any dense forecast struct
-    features::AbstractDict = Dict(), units = nothing,
+    features::AbstractDict = Dict(), element_type = ts.element_type, units = ts.units,
     quantity_kind = ts.quantity_kind, unit_system = ts.unit_system,
     component_field = ts.component_field, application_data = ts.application_data,
 ) -&gt; TimeSeriesKey
@@ -6692,13 +7329,16 @@ bare <code>get_time_series(store, key)</code> remains a convenience alias for <c
 <a href="reference/julia-api.html#staticreader"><code>StaticReader</code></a> rather than calling <code>get_time_series</code> per series.</p>
 <h3 id="bulk-reads"><a class="header" href="#bulk-reads">Bulk reads</a></h3>
 <pre><code class="language-julia">bulk_read(store::Store, keys::AbstractVector{TimeSeriesKey};
-          time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing) -&gt; Vector{SingleTimeSeries}
-# time_range slices every series to that window (default: each series in full)
+          time_range::Union{Nothing,Tuple{Any,Any}}=nothing) -&gt; Vector
+# time_range slices every series to that window (default: each series in full);
+# the bounds are DateTime or, with TimeZones loaded, ZonedDateTime
 </code></pre>
-<p>Reads many whole <code>SingleTimeSeries</code> in one call, returning one per key <strong>in the same order</strong>. Each
-packed dataset is read and decompressed once instead of per series, so this is the efficient way to
-load many complete series (exploration, plotting). Every key must identify a <code>SingleTimeSeries</code>; an
-empty key vector returns an empty vector without touching the store.</p>
+<p>Reads many whole series in one call, returning one per key <strong>in the same order</strong>, each as the struct
+matching its stored type (<code>SingleTimeSeries</code>, <code>NonSequentialTimeSeries</code>, <code>Deterministic</code>,
+<code>Probabilistic</code>, or <code>Scenarios</code>) — the result is a <code>Vector{Any}</code>, so narrow it yourself when every
+key is one type. Packed <code>SingleTimeSeries</code> are read and decompressed once per dataset instead of per
+series, so this is the efficient way to load many complete series (exploration, plotting). An empty
+key vector returns an empty vector without touching the store.</p>
 <pre><code class="language-julia">series = bulk_read(store, keys)   # keys :: Vector{TimeSeriesKey}
 </code></pre>
 <h2 id="bulk-adds"><a class="header" href="#bulk-adds">Bulk Adds</a></h2>
@@ -6799,34 +7439,43 @@ dtype and dims and converts to row-major bytes, just like the static <code>add_t
 <code>Deterministic(initial, resolution, horizon, interval, count, data, name)</code>.</p>
 <pre><code class="language-julia">add_time_series!(
     store, owner_id, owner_type, owner_category::OwnerCategory,
-    ts::Deterministic;
-    features=Dict(), units=nothing, quantity_kind=nothing, unit_system=nothing,
-    component_field=nothing, application_data=nothing,
-) -&gt; TimeSeriesKey
-
-add_time_series!(
-    store, owner_id, owner_type, owner_category::OwnerCategory,
-    ts::Probabilistic;
-    features=Dict(), units=nothing, quantity_kind=nothing, unit_system=nothing,
-    component_field=nothing, application_data=nothing,
-) -&gt; TimeSeriesKey
-
-add_time_series!(
-    store, owner_id, owner_type, owner_category::OwnerCategory,
-    ts::Scenarios;
-    features=Dict(), units=nothing, quantity_kind=nothing, unit_system=nothing,
-    component_field=nothing, application_data=nothing,
+    ts::Union{Deterministic,Probabilistic,Scenarios};
+    features=Dict(), element_type=ts.element_type, units=ts.units,
+    quantity_kind=ts.quantity_kind, unit_system=ts.unit_system,
+    component_field=ts.component_field, application_data=ts.application_data,
 ) -&gt; TimeSeriesKey
 </code></pre>
+<p>The descriptor keywords default to the struct's own fields, so a label set at construction survives
+the add; pass a keyword to override it for one association.</p>
 <p>A <code>DeterministicSingleTimeSeries</code> is not added directly. Derive one from every stored
 <code>SingleTimeSeries</code> (sharing the backing array) with:</p>
 <pre><code class="language-julia">transform_single_time_series!(store, horizon::Period, interval::Period;
                               owner_category::Union{Nothing,OwnerCategory}=nothing,
-                              resolution::Union{Nothing,Period}=nothing) -&gt; Int  # number transformed
+                              resolution::Union{Nothing,Period}=nothing,
+                              normalize_single_window::Bool=false,
+                              require_uniform_forecast_grid::Bool=false,
+                              dry_run::Bool=false) -&gt; TransformOutcome
+
+struct TransformOutcome
+    transformed         :: Int      # DSTs derived (or that would be, under dry_run)
+    sources             :: Int      # SingleTimeSeries in scope
+    interval            :: Period   # the interval actually stored
+    interval_normalized :: Bool     # true when a single-window request was stored as zero interval
+end
 </code></pre>
 <p><code>count</code> is derived from each series' length. <code>owner_category</code> restricts the transform to one owner
 category (both are transformed when it is <code>nothing</code>); <code>resolution</code> restricts it to the
-<code>SingleTimeSeries</code> at that resolution.</p>
+<code>SingleTimeSeries</code> at that resolution. The store performs the whole eligibility check — horizon fit
+and divisibility, interval divisibility, per-resolution grid uniformity, conflicts with existing
+forecasts — so callers need not pre-check per series.</p>
+<p>The two policy flags encode a <em>client's</em> contract rather than a storage invariant, and both default
+to permissive. <code>normalize_single_window</code> stores a single-window request (interval equal to a horizon
+spanning the whole series) as the zero interval rather than verbatim — the interval is part of the
+key, so this decides which form later lookups must use. <code>require_uniform_forecast_grid</code> demands that
+every resolution in scope, and any forecast already stored at the same <code>(resolution, interval)</code>,
+agree on the derived <code>count</code> and <code>initial_timestamp</code>. <strong>InfrastructureSystems.jl passes both as
+<code>true</code>.</strong> <code>dry_run</code> runs every check and reports the outcome without writing; it is legal against a
+read-only store.</p>
 <p><code>has_time_series</code> and <code>remove_time_series!</code> take the time series type as their first argument to
 address a type other than <code>SingleTimeSeries</code>, the same shape <code>get_metadata</code> and <code>get_time_series</code>
 use:</p>
@@ -7005,8 +7654,8 @@ num_distinct_arrays(store) -&gt; Int   # distinct content hashes; shared arrays 
 time_series_counts(store) -&gt; TimeSeriesCountsDetailed   # distinct owners per category + distinct arrays per kind
 list_owner_ids(store, owner_category; time_series_type=nothing, resolution=nothing) -&gt; Vector{Int}
 list_array_groups(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
-                  name=nothing, resolution=nothing, interval=nothing,
-                  features=Dict()) -&gt; Vector{ArrayGroupRow}
+                  name=nothing, name_glob=nothing, resolution=nothing, interval=nothing,
+                  features=Dict(), component_field=nothing) -&gt; Vector{ArrayGroupRow}
                                   # list_keys rows + `data_hash`; group by it to find shared arrays
 count_array_references(store, data_hash::Vector{UInt8}) -&gt; ArrayReferenceCounts  # (sts, dst) refs to a 32-byte hash
 static_summary(store) -&gt; Vector{StaticSummaryRow}   # grouped static rows with a `count`; build your own table
@@ -7014,6 +7663,16 @@ forecast_summary(store) -&gt; Vector{ForecastSummaryRow}   # grouped forecast ro
 get_forecast_parameters(store; resolution=nothing, interval=nothing) -&gt; ForecastParameters  # horizon, interval, count, resolution, initial_timestamp; fields `nothing` when none match
 check_static_consistency(store; resolution=nothing) -&gt; Vector{StaticGrid}  # one grid per resolution present (empty when none); throws if the series at one resolution disagree
 get_resolutions(store; time_series_type=nothing) -&gt; Vector{Period}  # distinct resolutions, in the core's stored (lexical-by-ISO) order
+get_intervals(store; time_series_type=nothing) -&gt; Vector{Period}    # distinct forecast intervals, same order; empty for static types
+get_path(store) -&gt; Union{Nothing,String}   # the .h5 path, or nothing for an in-memory store
+read_only(store) -&gt; Bool
+has_for_owner(store, owner_id, owner_category; time_series_type=nothing) -&gt; Bool
+                                  # does this owner have any series (of that type)? One index probe.
+list_names(store; &lt;list_keys filters&gt;) -&gt; Vector{String}        # distinct names, sorted
+list_owner_types(store; &lt;list_keys filters&gt;) -&gt; Vector{String}  # distinct owner types, sorted
+remove_by_filter!(store; &lt;list_keys filters&gt;) -&gt; Int
+                                  # remove every match in one all-or-nothing transaction; count removed
+rename_time_series!(store, key::TimeSeriesKey, new_name) -&gt; TimeSeriesKey  # same identity, new name
 get_compression(store) -&gt; CompressionSettings  # compression=:deflate|:none, level, shuffle; restored from file on open
 verify_integrity(store) -&gt; Int    # number of integrity errors; 0 == intact
 compact!(store) -&gt; CompactionReport   # reclaims both halves; on an on-disk store this rewrites the
@@ -7075,11 +7734,15 @@ key — read it via <code>get_metadata</code> / <code>list_time_series</code>.</
 </code></pre>
 <p><code>has_any_time_series</code> is the existence probe over the same nine filters: true iff <code>list_keys</code> with
 that filter would return at least one row, answered off the catalog indexes without hydrating or
-marshaling any rows, so it is safe for hot per-component loops. <code>features</code> is a subset match here,
-unlike the exact-key <code>has_time_series</code> forms, which compare the whole feature set by content hash —
-and it is the one exception to the index-only guarantee: a non-empty <code>features</code> filter cannot be
-answered from an index and falls back to a full listing internally, so prefer the exact-key forms in
-hot loops when the whole feature set is known.</p>
+marshaling any rows, so it is safe for hot per-component loops. <code>features</code> is a <strong>subset</strong> match
+here, unlike the exact-key <code>has_time_series</code> forms, which compare the whole feature set by content
+hash. A <code>features</code> filter still stays on indexes: the requested set is probed as an exact set by
+hash first (one covering seek when the caller passes the complete feature set), with an indexed
+per-feature fallback for genuinely partial lists.</p>
+<p>The two matching rules are the thing to keep straight when a parent package resolves user queries:
+an attribute-addressed <code>get_time_series</code> / <code>has_time_series</code> / <code>remove_time_series!</code> must be given
+the <strong>complete</strong> feature map or it misses, while the list/filter forms accept a partial one and may
+return several rows — deciding what more than one match means is the caller's job.</p>
 <pre><code class="language-julia">is_empty(store) -&gt; Bool
 </code></pre>
 <p><code>is_empty</code> is the store-wide predicate: true iff the store holds nothing at all — no time series,
@@ -7216,18 +7879,18 @@ remove_parent_child_associations!(store; parent_types=["Bus"])   # 1
 <h3 id="openapi-row-association-serde-1"><a class="header" href="#openapi-row-association-serde-1">OpenAPI-row association serde</a></h3>
 <p>Direct JSON serde of the two association catalogs, in the wire spelling
 <a href="https://github.com/Sienna-Platform/SiennaSchemas">SiennaSchemas</a> defines (<code>TimeSeries/*.json</code>,
-<code>Core/Associations/SupplementalAttributeAssociation.json</code>). Unlike <a href="reference/@ref"><code>list_time_series</code></a> /
-<a href="reference/@ref"><code>list_supplemental_attribute_associations</code></a>, which return Julia structs, these three
-functions exchange the wire JSON verbatim — the format a document author (e.g. PowerTableDataParser)
-reads and writes directly.</p>
+<code>Core/Associations/SupplementalAttributeAssociation.json</code>). Unlike <code>list_time_series</code> /
+<code>list_supplemental_attribute_associations</code>, which return Julia structs, these three functions
+exchange the wire JSON verbatim — the format a document author (e.g. PowerTableDataParser) reads and
+writes directly.</p>
 <pre><code class="language-julia">export_time_series_associations_openapi(store; filters...) -&gt; String
 export_supplemental_attribute_associations_openapi(store) -&gt; String
 import_supplemental_attribute_associations_openapi!(store, json::AbstractString) -&gt; Int
 </code></pre>
-<p><code>export_time_series_associations_openapi</code> takes the same filter keywords as
-<a href="reference/@ref"><code>list_time_series</code></a>. Every row's <code>uri</code> and <code>data_hash</code> are the hex-encoded content hash the
-store already has for that row — never a caller-supplied locator. With no filter this exports the
-whole catalog, sorted by identity.</p>
+<p><code>export_time_series_associations_openapi</code> takes the same filter keywords as <code>list_time_series</code>.
+Every row's <code>uri</code> and <code>data_hash</code> are the hex-encoded content hash the store already has for that
+row — never a caller-supplied locator. With no filter this exports the whole catalog, sorted by
+identity.</p>
 <p><code>export_supplemental_attribute_associations_openapi</code> exports the whole
 <code>supplemental_attribute_associations</code> table, sorted by <code>(component_id, attribute_id)</code>;
 <code>import_supplemental_attribute_associations_openapi!</code> is its import half — a bulk, all-or-nothing
@@ -7259,7 +7922,9 @@ between an added series and its own association row is rejected at the add bound
 <ul>
 <li><code>==</code> and <code>hash</code> on <code>TimeSeriesKey</code> delegate to the Rust core's identity semantics (owner,
 category, type, name, resolution, interval, features), so keys work as <code>Dict</code>/<code>Set</code> members.</li>
-<li><code>show</code> renders compact one-liners for <code>Store</code>, <code>TimeSeriesKey</code>, and the five value types.</li>
+<li><code>show</code> renders compact one-liners for <code>Store</code>, <code>TimeSeriesKey</code>, and the five value types; every
+result struct (<code>TimeSeriesMetadata</code>, <code>KeyRow</code>, …) gets generated <code>==</code>/<code>hash</code>/<code>show</code>, and
+<code>AddBatch</code> defines <code>length</code>.</li>
 <li><code>length</code>, <code>eltype</code>, <code>getindex</code>, and <code>iterate</code> on <code>SingleTimeSeries</code> / <code>NonSequentialTimeSeries</code>
 delegate to the wrapped <code>data</code> array (element count, not time steps, for multi-dimensional
 values). Forecast types define <code>length</code> = window count.</li>
@@ -8620,26 +9285,27 @@ compare, treating length as non-secret.</p>
 The store holds only the <em>relationship</em> — the components and supplemental attributes themselves live
 in the consumer's object graph — which is why the association flags are bare ids and type names.</p>
 <h2 id="synopsis"><a class="header" href="#synopsis">Synopsis</a></h2>
-<pre><code class="language-text">infrastore [--store &lt;PATH.h5&gt;] [-f &lt;FORMAT&gt;] [--log-level &lt;FILTER&gt;] &lt;COMMAND&gt;
+<pre><code class="language-text">infrastore [--store &lt;PATH.h5&gt;] [-f &lt;FORMAT&gt;] [--log-level &lt;FILTER&gt;] [-y] [--assume-timezone &lt;ZONE&gt;] &lt;COMMAND&gt;
 </code></pre>
+<p>Every global option is accepted after the command too (<code>infrastore add --store demo.h5 …</code>).</p>
 <h3 id="global-options"><a class="header" href="#global-options">Global options</a></h3>
 <div class="table-wrapper"><table><thead><tr><th>Option</th><th>Description</th></tr></thead><tbody>
 <tr><td><code>--store &lt;PATH&gt;</code></td><td>Path to the HDF5 store file. The <code>&lt;PATH&gt;.sqlite</code> catalog is implicit. Falls back to the <code>INFRASTORE_STORE</code> environment variable.</td></tr>
 <tr><td><code>-f</code>, <code>--format</code></td><td>Output format: <code>table</code> (default), <code>json</code>, <code>jsonl</code>, or <code>csv</code>.</td></tr>
 <tr><td><code>--log-level</code></td><td>Tracing filter; also read from <code>RUST_LOG</code>. Defaults to <code>warn</code>.</td></tr>
 <tr><td><code>-y</code>, <code>--yes</code></td><td>Answer every confirmation prompt with yes.</td></tr>
-<tr><td><code>--assume-timezone &lt;ZONE&gt;</code></td><td>Read timestamps that carry no time zone as being in this one: <code>UTC</code>, or a fixed offset like <code>-07:00</code>.</td></tr>
+<tr><td><code>--assume-timezone &lt;ZONE&gt;</code></td><td>Read timestamps that carry no time zone as being in this one: <code>UTC</code> (or <code>Z</code>), or a fixed offset — <code>-07:00</code>, <code>-0700</code>, <code>-07</code>.</td></tr>
 </tbody></table>
 </div>
 <p><code>--store</code> (or <code>INFRASTORE_STORE</code>) is required by every command except <code>template</code> and <code>completions</code>.</p>
 <p><code>-f</code>/<code>--format</code> applies to every command, read and write alike. The read/inspection commands
 (<code>list</code>, <code>get</code>, <code>grid</code>, <code>info</code>, <code>export</code>, <code>names</code>, <code>owner-types</code>, <code>owners</code>, <code>exists</code>, <code>stats</code>,
-<code>summary</code>, <code>diff</code>, <code>verify</code>, <code>check-consistency</code>, <code>resolutions</code>, <code>params</code>, <code>compact</code>, and
-<code>add --dry-run</code>) render their results in it. The write commands (<code>init</code>, <code>add</code>, <code>merge</code>, <code>remove</code>,
-<code>rename</code>, <code>copy</code>, <code>replace-owner</code>, <code>clear</code>, <code>transform</code>, <code>persist</code>, <code>plot</code>, <code>attach</code>, <code>detach</code>,
-<code>link</code>, <code>unlink</code>, <code>reassign</code>) report their outcome in it: prose under <code>table</code>, and a one-object
-status document under <code>json</code>/<code>jsonl</code>, so a scripted mutation pipes into <code>jq</code> the way a scripted
-query does.</p>
+<code>store-info</code>, <code>arrays</code>, <code>summary</code>, <code>attributes</code>, <code>links</code>, <code>diff</code>, <code>verify</code>, <code>check-consistency</code>,
+<code>resolutions</code>, <code>params</code>, <code>compact</code>, and <code>add --dry-run</code>) render their results in it. The write
+commands (<code>init</code>, <code>add</code>, <code>merge</code>, <code>remove</code>, <code>rename</code>, <code>copy</code>, <code>replace-owner</code>, <code>clear</code>, <code>transform</code>,
+<code>persist</code>, <code>plot</code>, <code>attach</code>, <code>detach</code>, <code>link</code>, <code>unlink</code>, <code>reassign</code>) report their outcome in it:
+prose under <code>table</code>, and a one-object status document under <code>json</code>/<code>jsonl</code>, so a scripted mutation
+pipes into <code>jq</code> the way a scripted query does.</p>
 <pre><code class="language-console">$ infrastore --store s.h5 -f json --yes remove --all --owner-id 42 | jq .removed
 3
 </code></pre>
@@ -8695,7 +9361,7 @@ year-round; pass that offset. Data that really is civil time with daylight savin
 offsets in the file, where each row can say which side of a transition it is on.</li>
 </ul>
 <h2 id="commands"><a class="header" href="#commands">Commands</a></h2>
-<p><code>infrastore --help</code> lists these under the same six headings used below. The grouping is a display
+<p><code>infrastore --help</code> lists these under the same eight headings used below. The grouping is a display
 aid only — every command is invoked flat, as <code>infrastore &lt;command&gt;</code>; there are no subcommand
 namespaces to type.</p>
 <p>Each group's examples are below its table, and every command carries the same ones in its own help:
@@ -8873,13 +9539,13 @@ identical series.</p>
 infrastore completions zsh &gt; ~/.zfunc/_infrastore
 </code></pre>
 <pre><code class="language-text">infrastore --store &lt;PATH&gt; init [--compression &lt;none|deflate[:LEVEL]&gt;] [--no-shuffle] [--catalog &lt;attached|in-memory&gt;]
-infrastore --store &lt;PATH&gt; add --descriptor &lt;FILE.json|-&gt; [--csv &lt;FILE.csv&gt;] [--dry-run] [--replace] [--batch-size N] [--quiet] [--compression &lt;SPEC&gt;] [--no-shuffle] [--catalog &lt;MODE&gt;]
+infrastore --store &lt;PATH&gt; add --descriptor &lt;FILE.json|-&gt; [--csv &lt;FILE.csv&gt;] [--dry-run] [--replace] [--batch-size N] [-q|--quiet] [--compression &lt;SPEC&gt;] [--no-shuffle] [--catalog &lt;MODE&gt;]
 infrastore --store &lt;PATH&gt; add --csv &lt;FILE.csv&gt; --owner-id &lt;I&gt; --owner-type &lt;T&gt; --name &lt;N&gt; --type &lt;T&gt; --element-type &lt;E&gt; [DESCRIPTOR FIELDS...]
 infrastore --store &lt;PATH&gt; merge --from &lt;PATH.h5&gt; [SELECTOR...] [--replace] [--dry-run]
 infrastore --store &lt;PATH&gt; list    [SELECTOR...] [--limit N] [--wide]
 infrastore --store &lt;PATH&gt; get     [SELECTOR...] [--time-range START..END] [--limit N | --full] [--tail] [--stride N] [--plot [--plot-width COLS]] [--window N | --issue-time &lt;TS&gt;]
 infrastore --store &lt;PATH&gt; grid    [SELECTOR...] [--time-range START..END] [--limit N | --full] [--label &lt;auto|owner|full&gt;]
-infrastore --store &lt;PATH&gt; plot    [SELECTOR...] --out &lt;FILE.svg|FILE.html|-&gt; [--kind &lt;line|duration|heatmap|fan|overlay&gt;] [--time-range START..END] [--title &lt;T&gt;] [--width W] [--height H] [--window N] [--limit N]
+infrastore --store &lt;PATH&gt; plot    [SELECTOR...] [--out &lt;FILE.svg|FILE.html|-&gt;] [--kind &lt;line|duration|heatmap|fan|overlay&gt;] [--time-range START..END] [--title &lt;T&gt;] [--width W] [--height H] [--window N] [--limit N]
 infrastore --store &lt;PATH&gt; info    [SELECTOR...] [--no-stats]
 infrastore --store &lt;PATH&gt; export  [SELECTOR...] [--dir &lt;DIR&gt;] [--time-range START..END]
 infrastore --store &lt;PATH&gt; names       [SELECTOR...]
@@ -8913,9 +9579,9 @@ infrastore --store &lt;PATH&gt; resolutions
 infrastore --store &lt;PATH&gt; params [--resolution &lt;DUR&gt;] [--interval &lt;DUR&gt;]
 infrastore template &lt;SingleTimeSeries|NonSequentialTimeSeries|Deterministic|Probabilistic|Scenarios&gt;
 </code></pre>
-<p><code>--csv</code> overrides the <code>csv</code> path inside the descriptor, and only works for a descriptor that
-describes a single series. Passing it alongside a descriptor array holding more than one object
-fails with <code>--csv cannot be used with an array descriptor</code>.</p>
+<p><code>--csv</code> overrides the <code>csv</code> path inside the descriptor, and only works when the descriptor is a
+single object (a wide one that expands to many series included). Passing it alongside a descriptor
+array holding more than one object fails with <code>--csv cannot be used with an array descriptor</code>.</p>
 <p><code>transform</code> takes no selector: it rewrites <strong>every</strong> <code>SingleTimeSeries</code> in the store, deriving a
 <code>DeterministicSingleTimeSeries</code> from each. <code>--owner-category</code> and <code>--resolution</code> optionally scope it
 to one category and/or resolution. <code>--horizon</code> must not exceed the shortest matched series
@@ -8945,14 +9611,15 @@ that fails validation never leaves an empty store behind.</p>
 <p><code>add --replace</code> removes any series that already carries one of the identities being added, inside
 the same transaction, which is what makes re-running a load after fixing the data idempotent.
 <code>add --batch-size N</code> commits every N series instead of the whole load in one transaction, bounding
-memory for a very large load at the cost of the load's atomicity; <code>--quiet</code> silences everything but
-errors, and above 20 series the per-series lines are replaced by a progress counter on stderr.</p>
+memory for a very large load at the cost of the load's atomicity; <code>-q</code>/<code>--quiet</code> silences everything
+but errors, and above 20 series the per-series lines are replaced by a progress counter on stderr.</p>
 <p><code>add --descriptor -</code> reads the JSON from stdin, so a generator script can pipe descriptors straight
 in. Relative <code>csv</code> paths in a piped descriptor resolve against the working directory, since there is
 no descriptor file for them to sit beside.</p>
 <p><code>init --compression</code> (or <code>add --compression</code>) sets the HDF5 compression policy for a store the
-command creates (<code>none</code>, <code>deflate</code>, or <code>deflate:LEVEL</code> with <code>--no-shuffle</code> to disable byte-shuffle);
-passing it for an existing store is an error, since the persisted policy governs.</p>
+command creates (<code>none</code>, <code>deflate</code>, or <code>deflate:LEVEL</code> with <code>--no-shuffle</code> to disable byte-shuffle;
+a bare <code>deflate</code> is level 3, and the default when neither is given); passing it for an existing
+store is an error, since the persisted policy governs.</p>
 <p><code>--catalog</code> decides where the SQLite catalog lives <strong>while the command runs</strong>. <code>attached</code> (the
 default) commits to <code>&lt;store&gt;.sqlite</code> as it goes, so an interrupted load keeps what it had already
 written. <code>in-memory</code> holds the catalog in RAM instead of journaling every commit — much faster for a
@@ -9048,10 +9715,10 @@ The CSV holds only numbers, preceded by a mandatory header row (plus a leading t
 <code>NonSequentialTimeSeries</code>).</p>
 <div class="table-wrapper"><table><thead><tr><th>Key</th><th>Required for</th><th>Notes</th></tr></thead><tbody>
 <tr><td><code>owner_id</code></td><td>long layout</td><td>Integer component identifier (<code>i64</code>). Rejected when wide.</td></tr>
-<tr><td><code>owner_type</code></td><td>all</td><td>In the wide layout, the default for unmapped columns.</td></tr>
+<tr><td><code>owner_type</code></td><td>long layout</td><td>Wide: the default for <code>owner_map</code> rows that name none.</td></tr>
 <tr><td><code>owner_category</code></td><td>optional</td><td><code>Component</code> (default) or <code>SupplementalAttribute</code>.</td></tr>
 <tr><td><code>name</code></td><td>all</td><td></td></tr>
-<tr><td><code>type</code></td><td>all</td><td>One of the five writable types, canonically spelled.</td></tr>
+<tr><td><code>type</code></td><td>all</td><td>One of the five writable types; spellings as for <code>--type</code>.</td></tr>
 <tr><td><code>element_type</code></td><td>all</td><td><code>f64</code>/<code>f32</code>/<code>i64</code>/…, <code>tuple(N,f64)</code>, or a function-data kind.</td></tr>
 <tr><td><code>csv</code></td><td>unless <code>--csv</code> is passed</td><td>Path relative to the descriptor; <code>--csv</code> overrides it.</td></tr>
 <tr><td><code>element_shape</code></td><td>optional</td><td>Trailing per-step dims; default scalar (<code>[]</code>).</td></tr>
@@ -9068,7 +9735,7 @@ The CSV holds only numbers, preceded by a mandatory header row (plus a leading t
 <tr><td><code>scenario_count</code></td><td><code>Scenarios</code> (optional)</td><td>Inferred from the data length if omitted.</td></tr>
 <tr><td><code>layout</code></td><td>optional</td><td><code>long</code> (default) or <code>wide</code>. See below.</td></tr>
 <tr><td><code>owner_map</code></td><td>wide layout</td><td>Sidecar CSV path, or an inline <code>{"column": owner_id}</code> object.</td></tr>
-<tr><td><code>owner_id_from</code></td><td>wide layout</td><td><code>"header"</code> when the headers already are owner ids.</td></tr>
+<tr><td><code>owner_id_from</code></td><td>wide layout</td><td><code>"header"</code> (the only value) when the headers are owner ids.</td></tr>
 </tbody></table>
 </div>
 <p>Unknown keys are rejected. Any key not in the table above — including a typo like <code>resolutionn</code> — is
@@ -9118,11 +9785,14 @@ be an input. There are three ways to supply it:</p>
 </div>
 <p>The sidecar CSV's header is mandatory and checked (<code>column,owner_id</code> or
 <code>column,owner_id,owner_type</code>). Where a row names an <code>owner_type</code> it wins; otherwise the descriptor's
-<code>owner_type</code> is the default. A column with no mapping is an error that names the unmapped columns —
-a 500-column load that stopped at "some column is unmapped" would leave you diffing two files by
-hand.</p>
-<p>A leading <code>timestamp</code> column is stripped if present, and is <strong>required</strong> for a wide
-<code>NonSequentialTimeSeries</code> (whose timestamps are explicit rather than a grid). The wide layout covers
+<code>owner_type</code> is the default — and it is required whenever any column lacks one, which is always the
+case for the inline object form, since that carries ids only. A column with no mapping is an error
+that names the unmapped columns — a 500-column load that stopped at "some column is unmapped" would
+leave you diffing two files by hand. Exactly one of <code>owner_map</code> and <code>owner_id_from</code> may be set, and
+either one in a <code>long</code> descriptor is an error.</p>
+<p>A leading <code>timestamp</code> column is <strong>required</strong> for a wide <code>NonSequentialTimeSeries</code> (whose timestamps
+are explicit rather than a grid). For a wide <code>SingleTimeSeries</code> it is optional, and when present it
+is checked, not ignored — see <a href="reference/cli.html#reading-back-and-re-adding">Reading back</a>. The wide layout covers
 the two static types and scalar elements only: a forecast's value block is already three axes deep
 before any per-column split, and a multidimensional element would need a second header row to say
 which column belongs to which <code>(owner, element)</code> pair. Both are rejected rather than guessed at.</p>
@@ -9162,7 +9832,10 @@ live in the catalog, not in the file.</p>
 <p><code>add</code> reads both layouts. It picks between them from the header row, so a file written by <code>export</code>
 can be handed straight back to <code>add</code> with no column surgery:</p>
 <ul>
-<li>a first column named <code>timestamp</code> is read as the time axis;</li>
+<li>a first column named <code>timestamp</code> is read as the time axis. For a <code>NonSequentialTimeSeries</code> it <em>is</em>
+the data; for a <code>SingleTimeSeries</code> it is <strong>validated</strong> against the descriptor's
+<code>initial_timestamp</code> + <code>resolution</code> grid, row count included, so a file sliced out of an export and
+re-added under the original descriptor fails loudly rather than landing on the wrong instants;</li>
 <li>leading <code>issue_time</code> + <code>target_time</code> columns mark the timestamped forecast layout, whose rows run
 window-major with the percentiles/scenarios spread across columns — <code>add</code> transposes them back
 into the stored <code>[series, horizon, count, element]</code> order;</li>
@@ -9199,7 +9872,9 @@ across runs and two grid exports can be diffed.</p>
 <p><code>plot</code> writes one <strong>self-contained</strong> file: no external fonts, scripts, stylesheets, or images, so it
 opens in a browser, drops into a report, and survives being emailed. Both light and dark themes are
 written into the document, keyed on <code>prefers-color-scheme</code>. An <code>.html</code> destination wraps the same
-SVG in a minimal page; <code>--out -</code> writes to stdout.</p>
+SVG in a minimal page; <code>--out -</code> writes to stdout, and the default is <code>chart.svg</code> in the working
+directory. <code>--width</code>/<code>--height</code> default to 960 × 440 (CSS pixels, fractional values allowed);
+<code>--limit</code> caps an <code>overlay</code> at 8 windows unless told otherwise.</p>
 <div class="table-wrapper"><table><thead><tr><th><code>--kind</code></th><th>What it shows</th></tr></thead><tbody>
 <tr><td><code>line</code></td><td>The profile itself, one or more series against time.</td></tr>
 <tr><td><code>duration</code></td><td>The load duration curve: values sorted descending against the percent of time at</td></tr>
@@ -9352,15 +10027,15 @@ own releases. This page is the procedure.</p>
 <div class="table-wrapper"><table><thead><tr><th>Channel</th><th>Package(s)</th><th>Registry</th></tr></thead><tbody>
 <tr><td>Rust</td><td><code>infrastore-core</code>, <code>infrastore-proto</code>, <code>infrastore-ffi</code>, <code>infrastore-server</code>, <code>infrastore-cli</code></td><td>crates.io</td></tr>
 <tr><td>Python</td><td><code>infrastore</code></td><td>PyPI</td></tr>
-<tr><td>Julia</td><td><code>InfraStore_jll</code>, then <code>InfraStore</code></td><td>Julia General</td></tr>
+<tr><td>Julia</td><td><code>InfraStore</code> (binaries via <code>Artifacts.toml</code> → GitHub Releases)</td><td>Julia General</td></tr>
 <tr><td>Binaries</td><td><code>infrastore</code>, <code>infrastore-server</code>, <code>libinfrastore_ffi</code> + header</td><td>GitHub Releases</td></tr>
 </tbody></table>
 </div>
 <p><code>infrastore-py</code> and <code>infrastore-bench</code> set <code>publish = false</code>: the first ships as the <code>infrastore</code>
 wheel on PyPI rather than as a crate, and the second is an internal benchmarking tool.</p>
 <h2 id="versioning"><a class="header" href="#versioning">Versioning</a></h2>
-<p>The Rust crates, the JLL, <code>InfraStore.jl</code>, and the Python package share the workspace version. Bump
-them together and tag the repo once per release, so every registry pins the same commit.</p>
+<p>The Rust crates, <code>InfraStore.jl</code>, and the Python package share the workspace version. Bump them
+together and tag the repo once per release, so every registry pins the same commit.</p>
 <p>The version lives in four places that must agree:</p>
 <div class="table-wrapper"><table><thead><tr><th>File</th><th>Field</th></tr></thead><tbody>
 <tr><td><code>Cargo.toml</code></td><td><code>[workspace.package] version</code></td></tr>

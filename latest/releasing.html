@@ -190,15 +190,15 @@ own releases. This page is the procedure.</p>
 <div class="table-wrapper"><table><thead><tr><th>Channel</th><th>Package(s)</th><th>Registry</th></tr></thead><tbody>
 <tr><td>Rust</td><td><code>infrastore-core</code>, <code>infrastore-proto</code>, <code>infrastore-ffi</code>, <code>infrastore-server</code>, <code>infrastore-cli</code></td><td>crates.io</td></tr>
 <tr><td>Python</td><td><code>infrastore</code></td><td>PyPI</td></tr>
-<tr><td>Julia</td><td><code>InfraStore_jll</code>, then <code>InfraStore</code></td><td>Julia General</td></tr>
+<tr><td>Julia</td><td><code>InfraStore</code> (binaries via <code>Artifacts.toml</code> → GitHub Releases)</td><td>Julia General</td></tr>
 <tr><td>Binaries</td><td><code>infrastore</code>, <code>infrastore-server</code>, <code>libinfrastore_ffi</code> + header</td><td>GitHub Releases</td></tr>
 </tbody></table>
 </div>
 <p><code>infrastore-py</code> and <code>infrastore-bench</code> set <code>publish = false</code>: the first ships as the <code>infrastore</code>
 wheel on PyPI rather than as a crate, and the second is an internal benchmarking tool.</p>
 <h2 id="versioning"><a class="header" href="#versioning">Versioning</a></h2>
-<p>The Rust crates, the JLL, <code>InfraStore.jl</code>, and the Python package share the workspace version. Bump
-them together and tag the repo once per release, so every registry pins the same commit.</p>
+<p>The Rust crates, <code>InfraStore.jl</code>, and the Python package share the workspace version. Bump them
+together and tag the repo once per release, so every registry pins the same commit.</p>
 <p>The version lives in four places that must agree:</p>
 <div class="table-wrapper"><table><thead><tr><th>File</th><th>Field</th></tr></thead><tbody>
 <tr><td><code>Cargo.toml</code></td><td><code>[workspace.package] version</code></td></tr>

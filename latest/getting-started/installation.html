@@ -190,13 +190,14 @@
 <tr><td>Rust</td><td><code>cargo add infrastore-core</code></td></tr>
 <tr><td>Python</td><td><code>pip install infrastore</code></td></tr>
 <tr><td>CLI</td><td><a href="#the-infrastore-cli">download a binary</a>, or <code>cargo install infrastore-cli</code></td></tr>
-<tr><td>Julia</td><td>not yet registered — see <a href="#julia">Julia</a></td></tr>
+<tr><td>Julia</td><td><code>pkg&gt; add InfraStore</code> — see <a href="#julia">Julia</a></td></tr>
 </tbody></table>
 </div>
-<p>The Python wheels are prebuilt and self-contained. The Rust crates build HDF5 and zlib from vendored
-sources and link them statically, so they need <code>cmake</code> and a C compiler but <strong>no system HDF5</strong>. The
-same vendored, statically linked stack backs every channel, so the HDF5 version behind the on-disk
-format is pinned by infrastore rather than by the target environment.</p>
+<p>The Python wheels and the Julia binary artifact are prebuilt and self-contained. The Rust crates
+build HDF5 and zlib from vendored sources and link them statically, so they need <code>cmake</code> and a C
+compiler but <strong>no system HDF5</strong>. The same vendored, statically linked stack backs every channel, so
+the HDF5 version behind the on-disk format is pinned by infrastore rather than by the target
+environment.</p>
 <h2 id="the-infrastore-cli"><a class="header" href="#the-infrastore-cli">The <code>infrastore</code> CLI</a></h2>
 <h3 id="download-a-prebuilt-binary"><a class="header" href="#download-a-prebuilt-binary">Download a prebuilt binary</a></h3>
 <p>Each tagged release attaches archives to the
@@ -235,13 +236,19 @@ executable. Clear the quarantine flag with <code>xattr -d com.apple.quarantine .
 <p>This compiles HDF5 from vendored sources, so it needs <code>cmake</code> and a C compiler (see
 <a href="#build-prerequisites">Build Prerequisites</a>) and takes a few minutes on the first build.</p>
 <h2 id="julia"><a class="header" href="#julia">Julia</a></h2>
-<p><code>InfraStore.jl</code> is <strong>not yet registered in the Julia General registry</strong>, and neither is the
-<code>InfraStore_jll</code> binary package it will eventually load, so <code>Pkg.add("InfraStore")</code> does not work
-yet. Until both are registered, install the package from a checkout and point <code>INFRASTORE_LIB</code> at a
-cdylib — either <code>libinfrastore_ffi</code> from the release archives above, or one you build with
-<code>cargo build -p infrastore-ffi --release</code>. <a href="../how-to/integrate-julia.html">Integrate with Julia</a> has
-the full recipe, and <a href="../releasing.html#5-julia--general">Releasing</a> tracks what registration still
-needs.</p>
+<p><code>InfraStore.jl</code> is registered in the Julia General registry:</p>
+<pre><code class="language-julia">using Pkg
+Pkg.add("InfraStore")
+</code></pre>
+<p>The package does not link a system HDF5 or <code>HDF5_jll</code>. Its <code>Artifacts.toml</code> points at the
+<code>libinfrastore_ffi</code> tarball attached to the matching GitHub Release, so <code>Pkg.add</code> downloads a
+prebuilt, statically linked library for the platform — Linux x86_64 and aarch64 (glibc), macOS
+x86_64 and Apple Silicon, and Windows x86_64 — and nothing else needs installing. To run against a
+locally built library instead (a working tree, or a platform outside that list), set
+<code>INFRASTORE_LIB</code>; it takes precedence over the artifact.
+<a href="../how-to/integrate-julia.html">Integrate with Julia</a> has both recipes, and
+<a href="../releasing.html#5-julia--general">Releasing</a> explains why the binary is self-hosted rather than a
+JLL.</p>
 <p>The rest of this page covers building the workspace from a checkout.</p>
 <h2 id="build-prerequisites"><a class="header" href="#build-prerequisites">Build Prerequisites</a></h2>
 <p>A Rust toolchain, <code>cmake</code>, a C compiler, and <code>protobuf</code> for the gRPC codegen. The Python and Julia

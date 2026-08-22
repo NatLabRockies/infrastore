@@ -193,10 +193,17 @@ environment, see <a href="../how-to/integrate-python.html">Integrate with Python
 import numpy as np
 from infrastore import Store, SingleTimeSeries, OwnerCategory, TimeSeriesType
 </code></pre>
-<p>The module exposes <code>Store</code>; the static series classes <code>SingleTimeSeries</code> and
+<p>The module exposes <code>Store</code> and <code>Transaction</code>; the static series classes <code>SingleTimeSeries</code> and
 <code>NonSequentialTimeSeries</code>; the forecast classes <code>Deterministic</code>, <code>Probabilistic</code>, and <code>Scenarios</code>;
-<code>TimeSeriesKey</code>; the <code>TimeSeriesType</code> and <code>OwnerCategory</code> enums; the <code>init_tracing</code> function; and an
-exception hierarchy rooted at <code>TimeSeriesError</code>.</p>
+<code>TimeSeriesKey</code>; the readers <code>StaticReader</code> and <code>ForecastReader</code>; the association records
+<code>SupplementalAttributeAssociation</code> and <code>ParentChildAssociation</code>; the <code>TimeSeriesType</code> and
+<code>OwnerCategory</code> enums; the <code>init_tracing</code> and <code>decode_element_values</code> functions; <code>__version__</code>; and
+an exception hierarchy rooted at <code>TimeSeriesError</code>.</p>
+<p>If you are building a package on top of infrastore — the way
+<a href="https://github.com/NatLabRockies/infrasys">infrasys</a> does — read
+<a href="./embedding.html">Embedding in a Parent Package</a> alongside this guide: it covers the lifecycle
+(scratch store, <code>persist_to</code>, <code>open_copy</code>), id mapping, and lookup semantics that this page only
+shows the calls for.</p>
 <h2 id="open-or-create-a-store"><a class="header" href="#open-or-create-a-store">Open or Create a Store</a></h2>
 <pre><code class="language-python"># In-memory: no filesystem I/O.
 store = Store.create(in_memory=True)
@@ -219,12 +226,12 @@ and a NumPy array:</p>
 )
 </code></pre>
 <p>Use timezone-aware datetimes (UTC is stored). The binding is dtype-generic — it accepts and returns
-NumPy arrays of <code>float64</code>, <code>float32</code>, <code>int64</code>, <code>int32</code>, <code>uint64</code>, or <code>bool</code>, and whatever dtype you
-pass round-trips unchanged. The array may be multi-dimensional: shape <code>(length,)</code> for scalar steps,
-or <code>(length, k1, …)</code> to attach a per-step element shape (such as cost-curve coefficients). The
-required <code>name</code> is an association attribute carried on the object — the same array can be added
-under different names. Use <code>NonSequentialTimeSeries(timestamps, data, name)</code> for explicitly
-timestamped series.</p>
+NumPy arrays of <code>float64</code>, <code>float32</code>, <code>int64</code>, <code>int32</code>, <code>int16</code>, <code>int8</code>, <code>uint64</code>, <code>uint32</code>,
+<code>uint16</code>, <code>uint8</code>, or <code>bool</code>, and whatever dtype you pass round-trips unchanged. The array may be
+multi-dimensional: shape <code>(length,)</code> for scalar steps, or <code>(length, k1, …)</code> to attach a per-step
+element shape (such as cost-curve coefficients). The required <code>name</code> is an association attribute
+carried on the object — the same array can be added under different names. Use
+<code>NonSequentialTimeSeries(timestamps, data, name)</code> for explicitly timestamped series.</p>
 <h2 id="add-a-series"><a class="header" href="#add-a-series">Add a Series</a></h2>
 <pre><code class="language-python">key = store.add_time_series(
     owner_id=42,
@@ -240,6 +247,49 @@ timestamped series.</p>
 returned <code>key</code> exposes <code>owner_id</code>, <code>owner_category</code>, <code>time_series_type</code>, <code>name</code>, <code>resolution</code>,
 <code>interval</code>, and <code>features</code> as read-only properties (<code>resolution</code> and <code>interval</code> are ISO 8601
 duration strings or <code>None</code>).</p>
+<h3 id="descriptors"><a class="header" href="#descriptors">Descriptors</a></h3>
+<p>Beyond <code>units</code>, an association can carry <code>quantity_kind</code> (what the values measure — <code>"ActivePower"</code>;
+the one record of what per-unit values mean), <code>unit_system</code> (<code>"natural_units"</code> or
+<code>"component_base"</code>; unset means <em>unspecified</em>, not natural units), <code>component_field</code> (the field on
+the owning component these values vary — <code>"max_active_power"</code>; also a filter), and
+<code>application_data</code> (an opaque string the store returns verbatim — the package-owned slot):</p>
+<pre><code class="language-python">key = store.add_time_series(
+    owner_id=42, owner_type="Generator", owner_category=OwnerCategory.Component,
+    time_series=ts,
+    units="MW", quantity_kind="ActivePower", unit_system="natural_units",
+    component_field="max_active_power",
+    application_data='{"source": "weather_year_2012"}',
+)
+</code></pre>
+<p>None of them is part of the key or of either content hash, so two adds that differ only in a
+descriptor are a duplicate. See
+<a href="../explanation/data-model.html#optional-descriptors">Optional Descriptors</a>.</p>
+<h3 id="add-many-series-at-once"><a class="header" href="#add-many-series-at-once">Add many series at once</a></h3>
+<p><code>add_time_series_bulk</code> takes a list of dicts mirroring <code>add_time_series</code>'s keyword arguments and
+commits them in one catalog transaction, taking the block-sized HDF5 write path. It is the way to
+load a system: an order of magnitude faster than a loop of single adds, and same-shaped series land
+in the same packed dataset.</p>
+<pre><code class="language-python">keys = store.add_time_series_bulk([
+    {"owner_id": i, "owner_type": "Generator", "owner_category": OwnerCategory.Component,
+     "time_series": series[i], "units": "MW"}
+    for i in range(len(series))
+])   # keys in input order; all-or-nothing
+</code></pre>
+<h3 id="transactions"><a class="header" href="#transactions">Transactions</a></h3>
+<p>Several operations that must take effect together — replacing a series is an add plus a remove — go
+inside a transaction. Removals are reversible only there; outside one the array bytes are reclaimed
+immediately.</p>
+<pre><code class="language-python">with store.transaction():
+    new_key = store.add_time_series(owner_id=42, owner_type="Generator",
+                                    owner_category=OwnerCategory.Component,
+                                    time_series=updated)
+    store.remove_time_series(old_key)
+# committed on a clean exit, rolled back if the block raised
+</code></pre>
+<p>Blocks nest (each level is a savepoint), and the store holds the SQLite write lock until the
+outermost one ends. A transaction does not batch: use <code>add_time_series_bulk</code> inside it for the
+writes themselves. <code>begin_transaction</code> / <code>commit_transaction</code> / <code>rollback_transaction</code> are the
+explicit form.</p>
 <h2 id="read-a-series"><a class="header" href="#read-a-series">Read a Series</a></h2>
 <pre><code class="language-python">got = store.get_time_series(key)
 assert np.array_equal(np.asarray(got.data), np.asarray(ts.data))
@@ -258,7 +308,14 @@ print(got.length, got.initial_timestamp, got.resolution)
 list of keys and returns the typed series objects in the same order. Packed <code>SingleTimeSeries</code> are
 read in one decompress-once pass per dataset, which is much faster than a <code>get_time_series</code> per key:</p>
 <pre><code class="language-python">series = store.bulk_read(keys)   # keys: list[TimeSeriesKey]
+window = store.bulk_read(keys, time_range=(start, end))   # the same slice of every key
 </code></pre>
+<h3 id="datetimes-and-precision"><a class="header" href="#datetimes-and-precision">Datetimes and precision</a></h3>
+<p>Every <code>datetime</code> must be timezone-aware (any zone; converted to UTC on the way in, UTC on the way
+out), and a naive one raises <code>InvalidParameterError</code>. A <strong>stored</strong> instant — an initial timestamp, a
+<code>NonSequentialTimeSeries</code> timestamp — must also be a whole number of milliseconds, so quantize
+<code>datetime.now(timezone.utc)</code> before storing it; query bounds such as <code>time_range</code> are unconstrained.
+See <a href="../reference/python-api.html#datetimes">Datetimes</a>.</p>
 <h2 id="per-timestamp-reads-simulation-loop"><a class="header" href="#per-timestamp-reads-simulation-loop">Per-Timestamp Reads (Simulation Loop)</a></h2>
 <p><code>get_time_series</code> hands back a whole series or forecast. Simulations instead walk the timeline and,
 at each timestamp, want the value of <em>every</em> series at that instant. For that, build a <strong>reader</strong>
@@ -270,7 +327,7 @@ forecasts. (Full signatures: <a href="../reference/python-api.html#readers">Pyth
 <code>(num_columns, *element_shape)</code> array whose columns line up with that group's <code>keys</code>. All matched
 series must share one grid (<code>initial_timestamp</code> + <code>length</code>), validated at build.</p>
 <pre><code class="language-python">reader = store.build_static_reader(timedelta(hours=1))
-grid = reader.grid()               # {"initial_timestamp", "resolution", "length"}
+grid = reader.grid()               # {"initial_timestamp", "resolution", "length", "time_series_type"}
 groups = reader.groups()           # each: {"dtype", "element_type", "element_shape", "keys"}
 for ts in reader.timestamps():
     store.static_read(reader, ts)
@@ -322,7 +379,7 @@ counts = store.get_time_series_counts()        # dict
 <h2 id="remove-and-maintain"><a class="header" href="#remove-and-maintain">Remove and Maintain</a></h2>
 <pre><code class="language-python">store.remove_time_series(key)
 # The owner is the (owner_id, owner_category) pair.
-n = store.clear_time_series(42, OwnerCategory.Component)   # all series for one owner; returns count
+n = store.clear_time_series(owner_id=42, owner_category=OwnerCategory.Component)  # one owner; returns count
 store.clear_time_series()                                  # remove everything
 
 # Reassign every series from one owner to another; returns the number moved.
@@ -408,6 +465,13 @@ assert store.list_parents(child_id=7) == [43, 99]
 <pre><code class="language-python">store.flush()   # sync buffered writes; afterwards system.h5 + system.h5.sqlite can be copied
 </code></pre>
 <p>Keep the two files together — the <code>.h5</code> and <code>.h5.sqlite</code> pair is a single logical store.</p>
+<p>To change a store you did not build in this process, <strong>open a copy</strong>: <code>Store.open</code> defaults to
+read-write, and HDF5 has no journal, so an interrupted in-place write is unrecoverable.</p>
+<pre><code class="language-python">store = Store.open_copy(src, scratch / "time_series.h5")   # src is never opened for writing
+...
+store.persist_to(src)                                       # one atomic rename replaces it
+</code></pre>
+<p><code>Store.open(path, read_only=True)</code> is the right call when nothing will be written.</p>
 <h3 id="where-the-catalog-lives"><a class="header" href="#where-the-catalog-lives">Where the Catalog Lives</a></h3>
 <p>By default the catalog <em>is</em> <code>system.h5.sqlite</code>, and every commit is durable. Passing
 <code>catalog="memory"</code> keeps it in RAM instead, so it reaches disk only when you call <code>persist_to()</code>:</p>
@@ -415,6 +479,7 @@ assert store.list_parents(child_id=7) == [43, 99]
 store = Store.create(scratch / "time_series.h5", catalog="memory")
 store.add_time_series(...)
 store.persist_to(destination)     # writes both halves as a matched pair
+store.persist_catalog()           # or: land only the .sqlite half beside the arrays already at path
 </code></pre>
 <p>Arrays still stream to the HDF5 file, so this does not require the data to fit in memory. It suits
 building a store beside volatile in-process state — a crash loses that state anyway, so journaling
@@ -437,10 +502,10 @@ except DuplicateTimeSeriesError:
 except TimeSeriesError as e:
     ...                       # anything else from the store
 </code></pre>
-<p>Argument parsing is the exception to that rule: a period argument (<code>resolution</code>, <code>horizon</code>,
-<code>interval</code>) that is a malformed ISO 8601 duration string raises a plain <code>ValueError</code>, and one that
-is neither a <code>timedelta</code> nor a <code>str</code> raises a plain <code>TypeError</code>. Neither is a <code>TimeSeriesError</code>, so
-<code>except TimeSeriesError</code> will not catch them.</p>
+<p>Argument validation stays inside the hierarchy: a malformed ISO 8601 duration string, a naive
+<code>datetime</code>, a sub-millisecond stored timestamp, and an unsupported NumPy dtype all raise
+<code>InvalidParameterError</code>. The one exception is a period argument that is neither a <code>timedelta</code> nor a
+<code>str</code>, which raises a plain <code>TypeError</code> that <code>except TimeSeriesError</code> will not catch.</p>
 <p>One gotcha: because Python's <code>bool</code> is a subclass of <code>int</code>, the binding deliberately checks <code>bool</code>
 first, so <code>True</code>/<code>False</code> feature values are stored as booleans (not as <code>1</code>/<code>0</code> integers).</p>
 <h2 id="a-complete-round-trip"><a class="header" href="#a-complete-round-trip">A Complete Round-Trip</a></h2>
