@@ -292,3 +292,96 @@ class TestReaderAxis:
         assert reader.grid()["time_reference"] == "utc"
         assert len(reader.groups()[0]["keys"]) == 3
         assert reader.timestamps()[0] == instant
+
+
+class TestSubMinuteOffsets:
+    """`datetime` carries an offset to the microsecond; the store records minutes.
+
+    A sub-minute offset therefore cannot be stored faithfully, and the gap has
+    to be refused rather than rounded: the instant would survive the round trip
+    while the wall clock moved, which is the one failure this feature exists to
+    prevent.
+    """
+
+    @pytest.mark.parametrize(
+        "offset",
+        [
+            timedelta(seconds=60, microseconds=500000),
+            timedelta(seconds=30),
+            timedelta(hours=-7, microseconds=1),
+            timedelta(seconds=-90),
+        ],
+    )
+    def test_an_offset_that_is_not_whole_minutes_is_refused(self, offset):
+        with pytest.raises(InvalidParameterError, match="whole number of minutes"):
+            series(datetime(2024, 1, 1, tzinfo=timezone(offset)))
+
+    def test_the_check_happens_before_the_narrowing_to_minutes(self):
+        # 60.5s truncates to 60 -- a whole minute -- so a check applied after
+        # the cast accepted it and recorded "+00:01", storing the instant
+        # correctly and shifting the wall clock by 500 ms on the way back.
+        tz = timezone(timedelta(seconds=60, microseconds=500000))
+        with pytest.raises(InvalidParameterError):
+            series(datetime(2024, 1, 1, tzinfo=tz))
+
+    @pytest.mark.parametrize("minutes", [-1439, -420, 0, 330, 1439])
+    def test_whole_minute_offsets_still_pass(self, minutes):
+        s = series(datetime(2024, 1, 1, tzinfo=timezone(timedelta(minutes=minutes))))
+        assert s.time_reference is not None
+
+
+class TestPointReadSpelling:
+    """A point read is a query bound too, and obeys the same rule as a range.
+
+    `static_read`/`forecast_read` used to take only the instant, so a naive wall
+    clock could query an instant-bearing reader (and an aware datetime a
+    zoneless one) after being reinterpreted as UTC -- returning a *row* where
+    the identical mismatch on a ranged read raises.
+    """
+
+    def test_a_naive_point_cannot_query_an_instant_bearing_axis(self):
+        store = Store.create(in_memory=True)
+        add(store, 1, series(datetime(2024, 1, 1, tzinfo=timezone.utc)))
+        reader = store.build_static_reader(HOUR)
+        with pytest.raises(InvalidParameterError, match="zoneless|no zone"):
+            store.static_read(reader, datetime(2024, 1, 1, 1))
+
+    def test_an_aware_point_cannot_query_a_wall_clock_axis(self):
+        store = Store.create(in_memory=True)
+        add(store, 1, series(datetime(2024, 1, 1)))
+        reader = store.build_static_reader(HOUR)
+        with pytest.raises(InvalidParameterError, match="zoneless|no zone"):
+            store.static_read(reader, datetime(2024, 1, 1, 1, tzinfo=timezone.utc))
+
+    def test_a_matched_spelling_still_reads(self):
+        # Both directions, so the check cannot be passing by refusing everything.
+        store = Store.create(in_memory=True)
+        add(store, 1, series(datetime(2024, 1, 1, tzinfo=timezone.utc)))
+        reader = store.build_static_reader(HOUR)
+        store.static_read(reader, datetime(2024, 1, 1, 1, tzinfo=timezone.utc))
+        assert reader.group_values(0)[0] == 1.0
+
+        wall = Store.create(in_memory=True)
+        add(wall, 1, series(datetime(2024, 1, 1)))
+        wall_reader = wall.build_static_reader(HOUR)
+        wall.static_read(wall_reader, datetime(2024, 1, 1, 1))
+        assert wall_reader.group_values(0)[0] == 1.0
+
+    def test_an_aware_point_need_not_match_the_axis_offset(self):
+        # Slicing is instant arithmetic: any aware spelling names the same
+        # instant, so only the zoned/zoneless category has to agree.
+        store = Store.create(in_memory=True)
+        add(store, 1, series(datetime(2024, 1, 1, tzinfo=timezone.utc)))
+        reader = store.build_static_reader(HOUR)
+        denver = datetime(2024, 1, 1, 1, tzinfo=timezone.utc).astimezone(DENVER)
+        store.static_read(reader, denver)
+        assert reader.group_values(0)[0] == 1.0
+
+    def test_the_forecast_point_read_obeys_the_same_rule(self):
+        store = Store.create(in_memory=True)
+        add(store, 1, series(datetime(2024, 1, 1, tzinfo=timezone.utc), length=8))
+        store.transform_single_time_series(timedelta(hours=2), HOUR)
+        reader = store.build_forecast_reader("Deterministic", HOUR)
+        with pytest.raises(InvalidParameterError, match="zoneless|no zone"):
+            store.forecast_read(reader, datetime(2024, 1, 1, 1))
+        store.forecast_read(reader, datetime(2024, 1, 1, 1, tzinfo=timezone.utc))

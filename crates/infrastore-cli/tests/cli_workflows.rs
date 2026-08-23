@@ -3486,3 +3486,65 @@ fn a_csv_whose_rows_disagree_about_their_offset_says_so_and_names_the_fix() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// A calendar period steps on the UTC calendar whatever the series' spelling
+/// says, and that is warned about — but only where it can actually bite.
+///
+/// The gate used to be `is_zoned()`, which is true for `utc` as well, so every
+/// UTC series with a monthly period was warned about DST drift against the very
+/// calendar it steps on. A warning that cannot come true, on the most common
+/// spelling there is, is how a real one gets ignored.
+#[test]
+fn the_calendar_period_warning_fires_only_where_the_calendars_can_disagree() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("cal.h5");
+    write(dir.path(), "m.csv", "value\n1\n2\n3\n");
+
+    let add_monthly = |owner: i64, name: &str, reference: Option<&str>| {
+        let spelling = match reference {
+            Some(r) => format!(r#", "time_reference": "{r}""#),
+            None => String::new(),
+        };
+        let json = format!(
+            r#"{{"owner_id": {owner}, "owner_type": "G", "name": "{name}",
+                 "type": "SingleTimeSeries", "element_type": "f64", "csv": "m.csv",
+                 "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "P1M"{spelling}}}"#
+        );
+        let d = write(dir.path(), &format!("{name}.json"), &json);
+        let out = raw(
+            &store,
+            &[
+                "--log-level",
+                "warn",
+                "add",
+                "--descriptor",
+                d.to_str().unwrap(),
+            ],
+        );
+        assert!(out.status.success(), "{name} should still be stored");
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+
+    // UTC is the calendar the stepping already uses, so there is nothing to
+    // drift against. Same for a wall clock, which is held as if UTC.
+    assert!(
+        !add_monthly(1, "utc_monthly", Some("utc")).contains("calendar period"),
+        "a UTC series cannot drift from the UTC calendar"
+    );
+    assert!(
+        !add_monthly(2, "wall_monthly", Some("zoneless")).contains("calendar period"),
+        "a wall clock is held as if UTC, so it steps on its own calendar"
+    );
+
+    // A named zone genuinely can disagree -- both at a month boundary and at a
+    // DST transition -- so it is warned about, and the remedy is named.
+    let warned = add_monthly(3, "zone_monthly", Some("America/Denver"));
+    assert!(warned.contains("calendar period"), "{warned}");
+    assert!(warned.contains("NonSequentialTimeSeries"), "{warned}");
+
+    // So can a fixed offset, at a month boundary.
+    assert!(
+        add_monthly(4, "offset_monthly", Some("-07:00")).contains("calendar period"),
+        "a fixed offset can still disagree at a month boundary"
+    );
+}

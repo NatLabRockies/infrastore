@@ -213,7 +213,13 @@ boundary, which wants [`ZoneReference`](@ref) instead.
 struct FixedOffsetReference <: TimeReference
     minutes::Int
     function FixedOffsetReference(minutes::Integer)
-        abs(Int(minutes)) < 24 * 60 || throw(
+        # Compared as the integer that came in, before any conversion. `abs`
+        # cannot represent `-typemin(Int)`, so `abs(Int(typemin(Int)))` is
+        # `typemin(Int)` again -- negative, and therefore *below* the bound,
+        # which let the least plausible offset there is through. Bounding the
+        # original value also turns an oversized `BigInt` into this error rather
+        # than an `InexactError` from the conversion.
+        -24 * 60 < minutes < 24 * 60 || throw(
             InvalidParameterError(
                 "time reference offset $minutes minutes is not a real UTC offset; " *
                 "it must be strictly within a day of UTC",

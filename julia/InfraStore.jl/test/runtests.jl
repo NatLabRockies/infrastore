@@ -4429,6 +4429,23 @@ end
     @test only(list_time_series(again)).time_reference === nothing
 end
 
+@testset "every integer offset is judged without overflowing" begin
+    # `abs` cannot represent `-typemin(Int)`, so `abs(Int(typemin(Int)))` is
+    # `typemin(Int)` again -- negative, and therefore *below* the bound, which
+    # let the least plausible offset there is through as if it were valid. The
+    # same shape of bug the Rust core had.
+    for v in (typemin(Int), typemin(Int) + 1, typemax(Int), -24 * 60, 24 * 60)
+        @test_throws InfraStore.InvalidParameterError FixedOffsetReference(v)
+    end
+    # An oversized BigInt reports the documented error too, rather than an
+    # InexactError from the conversion.
+    @test_throws InfraStore.InvalidParameterError FixedOffsetReference(big(10)^30)
+    # The bound stays exclusive on both sides.
+    for v in (-1439, -420, 0, 330, 1439)
+        @test FixedOffsetReference(v).minutes == v
+    end
+end
+
 @testset "a reader reports the spelling of the axis it spans" begin
     # A reader spans one timeline, so it carries one spelling -- and without it
     # a Julia caller could read the axis but not say how it was written, unable

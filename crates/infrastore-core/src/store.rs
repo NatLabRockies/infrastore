@@ -4320,7 +4320,17 @@ fn validate_time_reference(data: &TimeSeriesData) -> Result<()> {
         return Ok(());
     };
     reference.validate()?;
-    if !reference.is_zoned() {
+    // Only a reference that can *disagree* with the UTC calendar is worth
+    // warning about. `is_zoned()` is true for `Utc` too, which made every UTC
+    // series with a monthly period warn about DST drift against the calendar it
+    // is already stepping on -- a warning that cannot come true, on the most
+    // common spelling there is, which teaches the reader to ignore the ones
+    // that can. `Zoneless` is wall clocks held as if UTC, so it steps on its own
+    // calendar as well.
+    if !matches!(
+        reference,
+        TimeReference::FixedOffset(_) | TimeReference::Zone(_)
+    ) {
         return Ok(());
     }
     let calendar_periods: [(&str, Option<Period>); 3] = match data {
@@ -4352,9 +4362,10 @@ fn validate_time_reference(data: &TimeSeriesData) -> Result<()> {
                 series = data.name(),
                 field,
                 time_reference = %reference,
-                "a calendar period on a zoned series steps on the UTC calendar, not the \
-                 reference's: the reference is a spelling, not a grid. Expect an hour of \
-                 drift at each DST transition and up to a day at a month boundary. For a \
+                "a calendar period on a series spelled at an offset or in a named zone \
+                 steps on the UTC calendar, not the reference's: the reference is a \
+                 spelling, not a grid. Expect up to a day of drift at a month boundary, \
+                 and -- for a named zone -- an hour at each DST transition. For a \
                  local-clock grid, use NonSequentialTimeSeries with explicit timestamps."
             );
         }

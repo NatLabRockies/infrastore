@@ -427,7 +427,12 @@ pub(crate) fn regular_timeline(rows: &[TimeSeriesMetadata]) -> Result<Timeline> 
 /// `Vec<TimeSeriesMetadata>` to call this deep-copied every name, feature map
 /// and element shape in the selection — on the path documented as the one you
 /// build once and sweep many times.
+///
+/// `what` names the reader being built, because both readers share this and a
+/// mixed forecast cohort was being told that a `StaticReader` had failed --
+/// pointing at an API the caller never invoked.
 fn cohort_time_reference<'a>(
+    what: &str,
     rows: impl IntoIterator<Item = &'a TimeSeriesMetadata>,
 ) -> Result<Option<TimeReference>> {
     let mut zoneless: Option<&TimeSeriesMetadata> = None;
@@ -448,7 +453,7 @@ fn cohort_time_reference<'a>(
     }
     if let (Some(a), Some(b)) = (zoneless, zoned) {
         return Err(TimeSeriesError::InvalidParameter(format!(
-            "StaticReader requires one spelling for its timestamp axis, and the matched \
+            "{what} requires one spelling for its timestamp axis, and the matched \
              series disagree: '{}' (owner {}) is zoneless while '{}' (owner {}) records \
              instants. Narrow the filter with ListFilter::zoneless.",
             a.name, a.owner_id, b.name, b.owner_id
@@ -503,7 +508,7 @@ pub(crate) fn build_groups(
         }
     }
 
-    let time_reference = cohort_time_reference(&rows)?;
+    let time_reference = cohort_time_reference("StaticReader", &rows)?;
 
     // Deterministic layout: order by element type, then element shape, then key
     // identity, so column positions are stable across processes. Grouping on the
@@ -1048,7 +1053,7 @@ pub(crate) fn build_forecast_entries(
 
     // One window timeline means one spelling for it, on the same terms as the
     // static reader's axis.
-    let time_reference = cohort_time_reference(items.iter().map(|(m, _)| m))?;
+    let time_reference = cohort_time_reference("ForecastReader", items.iter().map(|(m, _)| m))?;
 
     let timeline = forecast_timeline(&items[0].0)?;
     let (_, _, _, count) = timeline;

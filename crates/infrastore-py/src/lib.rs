@@ -193,18 +193,31 @@ fn infer_reference(
     if tzinfo.is(PyTzInfo::utc(tzinfo.py())?) {
         return Ok(core_lib::TimeReference::Utc);
     }
-    let seconds: i64 = offset
-        .call_method0("total_seconds")?
-        .extract::<f64>()
-        .map(|s| s as i64)?;
-    if seconds % 60 != 0 {
+    // Judged as the float Python hands over, *before* any narrowing. `datetime`
+    // has allowed sub-minute offsets since 3.7 and carries them to the
+    // microsecond, so `60.5` truncated to `60` first would satisfy the
+    // whole-minutes check below and be recorded as `+00:01` -- storing the
+    // instant correctly while moving the wall clock 500 ms, silently, which is
+    // the one failure this whole feature exists to prevent.
+    let seconds = offset.call_method0("total_seconds")?.extract::<f64>()?;
+    if !seconds.is_finite() || seconds.fract() != 0.0 || seconds % 60.0 != 0.0 {
         return Err(InvalidParameterError::new_err(format!(
             "the timestamp's UTC offset is {seconds} seconds, which is not a whole number of \
              minutes; the store records an offset in minutes, so this spelling cannot be \
              stored faithfully"
         )));
     }
-    Ok(core_lib::TimeReference::FixedOffset((seconds / 60) as i32))
+    // Python bounds an offset to strictly within a day, so this always fits;
+    // the guard is here so a future `datetime` that did not could never reach
+    // the cast.
+    let minutes = seconds / 60.0;
+    if minutes.abs() >= 24.0 * 60.0 {
+        return Err(InvalidParameterError::new_err(format!(
+            "the timestamp's UTC offset is {seconds} seconds, which is not a real UTC offset; \
+             it must be strictly within a day of UTC"
+        )));
+    }
+    Ok(core_lib::TimeReference::FixedOffset(minutes as i32))
 }
 
 /// Render `instant` in the spelling `reference` names.
@@ -337,6 +350,27 @@ fn range_to_core(r: Option<(PyInstant, PyInstant)>) -> PyResult<Option<core_lib:
         b.instant,
         a.is_zoneless(),
     )))
+}
+
+/// Refuse a point-read instant whose spelling the reader's axis cannot answer.
+///
+/// The ranged reads get this for free: they hand a `TimeRange` to the core,
+/// which applies the rule once. A point read passed only the instant, so the
+/// check was simply skipped -- a naive wall clock could query an
+/// instant-bearing reader (and an aware datetime a zoneless one), be
+/// reinterpreted as UTC, and return a *row* rather than the category-mismatch
+/// error the same mismatch earns on a ranged read.
+///
+/// A point is a degenerate range, so it goes through the very same check rather
+/// than a second copy of the rule, and reports it in the same words.
+fn check_point_spelling(
+    when: &PyInstant,
+    axis: Option<&core_lib::TimeReference>,
+    what: &str,
+) -> PyResult<()> {
+    core_lib::TimeRange::spelled(when.instant, when.instant, when.is_zoneless())
+        .check_against(axis, what)
+        .map_err(map_err)
 }
 
 /// Translate the Python-facing compression arguments into a core
@@ -2727,6 +2761,11 @@ impl PyStore {
     /// Fill `reader`'s buffers with every column's value at `when` (off-grid
     /// raises). Afterwards read a group with `reader.group_values(i)`.
     fn static_read(&self, reader: &mut PyStaticReader, when: PyInstant) -> PyResult<()> {
+        check_point_spelling(
+            &when,
+            reader.inner.time_reference(),
+            "this reader's timeline",
+        )?;
         self.store()?
             .static_read(&mut reader.inner, when.instant)
             .map_err(map_err)
@@ -2774,6 +2813,11 @@ impl PyStore {
     /// Fill `reader`'s buffers with every entry's forecast window at `when`
     /// (off-grid raises). Afterwards read an entry with `reader.entry_values(i)`.
     fn forecast_read(&self, reader: &mut PyForecastReader, when: PyInstant) -> PyResult<()> {
+        check_point_spelling(
+            &when,
+            reader.inner.time_reference(),
+            "this reader's timeline",
+        )?;
         self.store()?
             .forecast_read(&mut reader.inner, when.instant)
             .map_err(map_err)

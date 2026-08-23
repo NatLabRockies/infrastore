@@ -447,3 +447,73 @@ fn every_series_type_carries_its_reference() {
         Some(TimeReference::FixedOffset(330))
     );
 }
+
+/// A mixed cohort is refused for either reader — and the refusal names the one
+/// the caller actually asked for.
+///
+/// Both readers share the coherence check, whose message used to be hardcoded
+/// to `StaticReader`. A caller who built a *forecast* reader was told a
+/// `StaticReader` had failed: an API they never invoked, which sends them
+/// looking in the wrong place for a filter they did not write.
+#[test]
+fn the_cohort_refusal_names_the_reader_that_was_asked_for() {
+    let mut store = create_store(None, true).unwrap();
+
+    let det = |name: &str, reference: TimeReference| {
+        TimeSeriesData::Deterministic(
+            Deterministic::new(
+                t0(),
+                Duration::hours(1),
+                Duration::hours(2),
+                Duration::hours(1),
+                3,
+                TypedArray::from_f64(vec![2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+                name,
+            )
+            .unwrap()
+            .with_time_reference(reference),
+        )
+    };
+    add(&mut store, 1, det("fc", TimeReference::Utc));
+    add(&mut store, 2, det("fc", TimeReference::Zoneless));
+
+    let err = store
+        .build_forecast_reader(
+            ListFilter::new()
+                .resolution(Duration::hours(1))
+                .time_series_type(TimeSeriesType::Deterministic),
+        )
+        .unwrap_err();
+    let message = err.to_string();
+    assert!(
+        message.contains("ForecastReader requires one spelling"),
+        "the failing API is named: {message}"
+    );
+    assert!(
+        !message.contains("StaticReader"),
+        "and the one that did not fail is not: {message}"
+    );
+
+    // The static path still names itself.
+    let mut store = create_store(None, true).unwrap();
+    add(
+        &mut store,
+        1,
+        TimeSeriesData::SingleTimeSeries(sts("load", 8).with_time_reference(TimeReference::Utc)),
+    );
+    add(
+        &mut store,
+        2,
+        TimeSeriesData::SingleTimeSeries(
+            sts("load", 8).with_time_reference(TimeReference::Zoneless),
+        ),
+    );
+    let err = store
+        .build_static_reader(ListFilter::new().resolution(Duration::hours(1)))
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("StaticReader requires one spelling"),
+        "{err}"
+    );
+}

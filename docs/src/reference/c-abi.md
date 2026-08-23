@@ -585,6 +585,8 @@ int32_t infrastore_store_build_static_reader(const struct InfraStore *handle,
 int32_t infrastore_static_reader_grid(const struct InfraStoreStaticReaderHandle *reader,
                               int64_t *out_initial_ms, char **out_resolution,  /* null, or free with infrastore_string_free */
                               uint64_t *out_length);
+int32_t infrastore_static_reader_time_reference(const struct InfraStoreStaticReaderHandle *reader,
+                              char **out_time_reference);  /* null, or free with infrastore_string_free */
 int32_t infrastore_static_reader_timestamps(const struct InfraStoreStaticReaderHandle *reader,
                               int64_t *buf, uint64_t cap, uint64_t *out_len);  /* probe with buf=NULL, cap=0 */
 int32_t infrastore_static_reader_num_groups(const struct InfraStoreStaticReaderHandle *reader, uint64_t *out_n);
@@ -611,6 +613,16 @@ and `infrastore_static_reader_timestamps` is how the timeline is read. Any other
 rejected. Either way the build validates the uniformity and errors on divergence, so every column
 has a value at every valid timestamp (no presence mask).
 
+`infrastore_static_reader_time_reference` reports the one spelling the axis carries — `"utc"`,
+`"zoneless"`, a fixed offset such as `"-07:00"`, or an IANA zone name — as an owned string the
+caller frees with `infrastore_string_free`. It is **null** when the cohort records no spelling,
+which is not the same claim as `"zoneless"`: the second says the timestamps are wall clocks. A
+cohort whose columns agree reports their reference; one whose columns merely agree on naming
+instants reports `"utc"`; one mixing zoneless with the rest never builds at all. Reading the axis
+without it leaves a C consumer unable to tell a wall-clock timeline from an unspecified or a UTC
+one. `infrastore_forecast_reader_time_reference` is the window-timeline counterpart, on the same
+terms.
+
 ### ForecastReader
 
 Reads the forecast window at one timestamp for every matching forecast of one type. The build
@@ -634,6 +646,8 @@ int32_t infrastore_forecast_reader_timeline(const struct InfraStoreForecastReade
                                     int64_t *out_initial_ms,
                                     char **out_resolution, char **out_interval,  /* free each with infrastore_string_free */
                                     uint64_t *out_count);
+int32_t infrastore_forecast_reader_time_reference(const struct InfraStoreForecastReaderHandle *reader,
+                                    char **out_time_reference);  /* null, or free with infrastore_string_free */
 int32_t infrastore_forecast_reader_num_entries(const struct InfraStoreForecastReaderHandle *reader, uint64_t *out_n);
 int32_t infrastore_forecast_reader_num_slots(const struct InfraStoreForecastReaderHandle *reader, uint64_t *out_n);
 int32_t infrastore_forecast_reader_entry_slot(const struct InfraStoreForecastReaderHandle *reader,
