@@ -64,6 +64,16 @@ pub fn run(
     }
 
     let range = crate::parse::parse_time_range(time_range)?;
+    // Decision 8 again: a bound has to be spelled the way the thing it slices
+    // is. Every other ranged read gets this for free by handing the range to the
+    // core, which checks it once in `materialize_time_series`; `grid` filters the
+    // reader's own axis here instead, so without this the check is simply
+    // skipped — `get` refuses a wall-clock bound against an instant-bearing
+    // series while `grid` quietly answered it.
+    if let Some(r) = range {
+        r.check_against(reader.time_reference(), "this reader's timeline")
+            .map_err(|e| e.to_string())?;
+    }
     let all: Vec<DateTime<Utc>> = reader
         .timestamps()
         .filter(|t| match range {

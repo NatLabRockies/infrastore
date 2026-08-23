@@ -159,7 +159,12 @@ impl TimeReference {
         match self {
             TimeReference::Utc | TimeReference::Zoneless => Ok(()),
             TimeReference::FixedOffset(minutes) => {
-                if minutes.abs() >= 24 * 60 {
+                // `unsigned_abs`, not `abs`: `i32::MIN` has no positive
+                // counterpart, so `abs()` panics on it in debug and wraps back
+                // to `i32::MIN` in release -- where the comparison below then
+                // reads as *in range* and admits the one value furthest from
+                // being a real offset. A native caller can name it directly.
+                if minutes.unsigned_abs() >= 24 * 60 {
                     return invalid(format!(
                         "time reference offset {minutes} minutes is not a real UTC offset; \
                          it must be strictly within a day of UTC"
@@ -470,6 +475,31 @@ mod tests {
             // The same strings reach `parse_offset` a second time through
             // `validate`, which uses it to rule out a zone name in disguise.
             let _ = TimeReference::parse(s).map(|r| r.validate());
+        }
+    }
+
+    #[test]
+    fn every_i32_offset_is_judged_without_overflowing() {
+        // `i32::MIN` is the one value `abs()` cannot represent: it panics on it
+        // in debug and wraps back to itself in release, where a signed
+        // comparison then reads it as *within* a day of UTC and lets the least
+        // plausible offset there is through validation. A native caller can
+        // build this directly, so it has to be rejected like any other.
+        for minutes in [i32::MIN, i32::MIN + 1, i32::MAX, -1440, 1440] {
+            let err = TimeReference::FixedOffset(minutes)
+                .validate()
+                .expect_err("{minutes} is not within a day of UTC");
+            assert!(
+                err.to_string().contains("not a real UTC offset"),
+                "{minutes}: {err}"
+            );
+        }
+
+        // The boundary itself stays exclusive on both sides, unchanged.
+        for minutes in [-1439, -420, 0, 330, 1439] {
+            TimeReference::FixedOffset(minutes)
+                .validate()
+                .unwrap_or_else(|e| panic!("{minutes} should be a real offset: {e}"));
         }
     }
 

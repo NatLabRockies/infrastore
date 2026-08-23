@@ -3307,3 +3307,182 @@ fn grid_and_the_discovery_commands_render_in_every_format() {
     // The nonzero exit is the point: `infrastore exists ... && ...` in a shell.
     run_err(&store, &["exists", "--name", "nope"]);
 }
+
+/// A `grid` range is a query bound like any other, and has to be spelled the
+/// way the timeline it slices is.
+///
+/// `grid` filters the reader's own axis in the CLI rather than handing the
+/// range to the core, so it does not get the core's check for free the way
+/// every other ranged read does. It used to skip it entirely: `get` refused a
+/// mismatched bound while `grid` quietly answered one.
+#[test]
+fn a_grid_range_must_be_spelled_the_way_the_timeline_is() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("spell.h5");
+    write(dir.path(), "v.csv", "value\n1\n2\n3\n4\n");
+
+    // One zoneless series, one that records instants.
+    let zl = write(
+        dir.path(),
+        "zl.json",
+        r#"{"owner_id": 1, "owner_type": "G", "name": "wall",
+            "type": "SingleTimeSeries", "element_type": "f64", "csv": "v.csv",
+            "initial_timestamp": "2024-01-01T00:00:00", "resolution": "PT1H"}"#,
+    );
+    run(
+        &store,
+        &["--zoneless", "add", "--descriptor", zl.to_str().unwrap()],
+    );
+    let aware = write(
+        dir.path(),
+        "aw.json",
+        r#"{"owner_id": 2, "owner_type": "G", "name": "instant",
+            "type": "SingleTimeSeries", "element_type": "f64", "csv": "v.csv",
+            "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H"}"#,
+    );
+    run(&store, &["add", "--descriptor", aware.to_str().unwrap()]);
+
+    let zoned_bound = "2024-01-01T00:00:00Z..2024-01-01T02:00:00Z";
+    let wall_bound = "2024-01-01T00:00:00..2024-01-01T02:00:00";
+
+    // An instant against a wall-clock timeline has no defined mapping.
+    let err = run_err(
+        &store,
+        &[
+            "grid",
+            "--resolution",
+            "PT1H",
+            "--spelling",
+            "zoneless",
+            "--time-range",
+            zoned_bound,
+        ],
+    );
+    assert!(err.contains("is zoneless"), "{err}");
+
+    // And a wall clock against a timeline of instants names none.
+    let err = run_err(
+        &store,
+        &[
+            "--zoneless",
+            "grid",
+            "--resolution",
+            "PT1H",
+            "--spelling",
+            "zoned",
+            "--time-range",
+            wall_bound,
+        ],
+    );
+    assert!(err.contains("carry no zone"), "{err}");
+
+    // Matched both ways, the slice is taken as before.
+    let out = run(
+        &store,
+        &[
+            "--zoneless",
+            "-f",
+            "csv",
+            "grid",
+            "--resolution",
+            "PT1H",
+            "--spelling",
+            "zoneless",
+            "--time-range",
+            wall_bound,
+        ],
+    );
+    assert_eq!(data_lines(&out).len(), 2, "{out}");
+
+    let out = run(
+        &store,
+        &[
+            "-f",
+            "csv",
+            "grid",
+            "--resolution",
+            "PT1H",
+            "--spelling",
+            "zoned",
+            "--time-range",
+            zoned_bound,
+        ],
+    );
+    assert_eq!(data_lines(&out).len(), 2, "{out}");
+}
+
+/// A CSV whose rows disagree about their offset stores every instant exactly,
+/// but records one spelling — so a later row reads back at a different wall
+/// clock than it went in as. That is silent, and silently moving a wall clock
+/// is what this whole feature exists to stop, so the ingest says so and names
+/// the remedy.
+#[test]
+fn a_csv_whose_rows_disagree_about_their_offset_says_so_and_names_the_fix() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("mix.h5");
+    // Two rows either side of the US spring-forward, each written at the offset
+    // in force locally that day.
+    write(
+        dir.path(),
+        "m.csv",
+        "timestamp,value\n2024-03-09T12:00:00-07:00,1\n2024-03-11T12:00:00-06:00,2\n",
+    );
+    let mixed = write(
+        dir.path(),
+        "m.json",
+        r#"{"owner_id": 1, "owner_type": "G", "name": "mix",
+            "type": "NonSequentialTimeSeries", "element_type": "f64", "csv": "m.csv"}"#,
+    );
+
+    let out = raw(&store, &["add", "--descriptor", mixed.to_str().unwrap()]);
+    assert!(out.status.success(), "a mixed file is still ingested");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("warning"), "{stderr}");
+    assert!(stderr.contains("row 2"), "name the row: {stderr}");
+    assert!(
+        stderr.contains("time_reference"),
+        "name the remedy: {stderr}"
+    );
+
+    // The warning is true: the second row's wall clock did move.
+    let back = run(&store, &["-f", "csv", "get", "--name", "mix"]);
+    assert!(back.contains("2024-03-11T11:00:00-07:00"), "{back}");
+
+    // And the remedy works -- a named zone renders each instant in that zone,
+    // reproducing both wall clocks exactly.
+    let zoned = write(
+        dir.path(),
+        "z.json",
+        r#"{"owner_id": 2, "owner_type": "G", "name": "mixzone",
+            "type": "NonSequentialTimeSeries", "element_type": "f64", "csv": "m.csv",
+            "time_reference": "America/Denver"}"#,
+    );
+    let out = raw(&store, &["add", "--descriptor", zoned.to_str().unwrap()]);
+    assert!(out.status.success());
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("warning"),
+        "an explicit time_reference is the caller having decided; do not second-guess it"
+    );
+    let back = run(&store, &["-f", "csv", "get", "--name", "mixzone"]);
+    assert!(back.contains("2024-03-09T12:00:00-07:00"), "{back}");
+    assert!(back.contains("2024-03-11T12:00:00-06:00"), "{back}");
+
+    // A file that agrees with itself says nothing.
+    write(
+        dir.path(),
+        "s.csv",
+        "timestamp,value\n2024-03-09T12:00:00-07:00,1\n2024-03-11T12:00:00-07:00,2\n",
+    );
+    let same = write(
+        dir.path(),
+        "s.json",
+        r#"{"owner_id": 3, "owner_type": "G", "name": "same",
+            "type": "NonSequentialTimeSeries", "element_type": "f64", "csv": "s.csv"}"#,
+    );
+    let out = raw(&store, &["add", "--descriptor", same.to_str().unwrap()]);
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("warning"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

@@ -437,6 +437,58 @@ impl Descriptor {
         self.initial_timestamp.as_deref()
     }
 
+    /// Warn when the CSV's timestamps do not all agree on a spelling.
+    ///
+    /// A series records one reference, taken from its anchor, so a file whose
+    /// rows carry different offsets stores every instant correctly and renders
+    /// them all at the anchor's offset. Nothing is lost — the instants are
+    /// exact — but a row written `12:00-06:00` reads back `11:00-07:00`, and
+    /// silently changing a wall clock is the one thing this whole feature
+    /// exists to stop.
+    ///
+    /// The remedy is to name the zone (`"time_reference": "America/Denver"`),
+    /// which renders each instant in that zone and reproduces both wall clocks
+    /// exactly. So this warns and names it rather than refusing: the offsets in
+    /// the file are real and the instants they name are unambiguous, which is
+    /// not the caller error a hard failure would imply.
+    ///
+    /// Skipped when the descriptor states a `time_reference`, which is the
+    /// caller having already decided. Short-circuits on the first disagreement,
+    /// so an agreeing file pays one parse per row and a disagreeing one stops
+    /// early.
+    fn warn_on_mixed_spellings(&self, ts_type: TimeSeriesType, csv: &CsvData) {
+        if self.time_reference.is_some() || ts_type != TimeSeriesType::NonSequentialTimeSeries {
+            return;
+        }
+        let timestamps = csv.timestamps();
+        let Some(anchor_text) = timestamps.first() else {
+            return;
+        };
+        let Ok((_, anchor)) = parse::parse_timestamp_with_reference(anchor_text) else {
+            return;
+        };
+        let odd = timestamps.iter().enumerate().skip(1).find(|(_, raw)| {
+            matches!(parse::parse_timestamp_with_reference(raw), Ok((_, r)) if r != anchor)
+        });
+        if let Some((row, raw)) = odd {
+            eprintln!(
+                "{}",
+                crate::color::dim_err(&format!(
+                    "warning: series '{}': row {} is spelled {:?} but the series is anchored on \
+                     {:?}. Every instant is stored exactly, but the series records one spelling, \
+                     so that row reads back at {}. Set \"time_reference\" to the IANA zone (e.g. \
+                     \"America/Denver\") to render each instant in that zone and reproduce both \
+                     wall clocks.",
+                    self.name,
+                    row + 1,
+                    raw.trim(),
+                    anchor_text.trim(),
+                    anchor.as_storage_string(),
+                ))
+            );
+        }
+    }
+
     /// The timestamp spelling this series records.
     ///
     /// An explicit `time_reference` wins; otherwise it is read off the
@@ -550,6 +602,7 @@ impl Descriptor {
         // The descriptor's `element_type`, `units`, and `application_data` describe the
         // series, so they are set on it rather than on the request.
         data.set_descriptors(self.descriptors(element_type)?);
+        self.warn_on_mixed_spellings(ts_type, &csv);
         data.set_time_reference(self.time_reference(self.anchor_timestamp(ts_type, &csv))?);
 
         Ok(AddRequest {
@@ -667,6 +720,7 @@ impl Descriptor {
 
         // One anchor for the whole file: every column of a wide CSV shares the
         // timestamp column, so every series it yields shares one spelling.
+        self.warn_on_mixed_spellings(ts_type, &csv);
         let anchor = self.anchor_timestamp(ts_type, &csv);
         let time_reference = self.time_reference(anchor)?;
 

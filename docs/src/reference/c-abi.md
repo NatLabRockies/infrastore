@@ -457,6 +457,7 @@ int32_t infrastore_store_get_forecast(const struct InfraStore *handle,
                               const char *resolution, const char *interval,  /* ISO-8601 filters; NULL = none */
                               const char *features_json,
                               bool time_range_present,
+                              bool time_range_zoneless,         /* how the caller spelled the bounds */
                               int64_t time_range_start_ms, int64_t time_range_end_ms,
                               int64_t *out_initial_ts_unix_ms,
                               char **out_resolution, char **out_horizon, char **out_interval,  /* ISO-8601; infrastore_string_free */
@@ -487,6 +488,7 @@ there is no family to resolve: `*out_matched_type` is simply the key's type (a
 ```c
 int32_t infrastore_store_get_forecast_by_key(const struct InfraStore *handle, const struct InfraStoreKey *key,
                                      bool time_range_present,
+                                     bool time_range_zoneless,         /* how the caller spelled the bounds */
                                      int64_t time_range_start_ms, int64_t time_range_end_ms,
                                      int64_t *out_initial_ts_unix_ms,
                                      char **out_resolution, char **out_horizon, char **out_interval,  /* ISO-8601; infrastore_string_free */
