@@ -81,7 +81,7 @@ end
     store = Store(in_memory=true)
     timestamps = [DateTime(2024, 1, 1), DateTime(2024, 1, 1, 4), DateTime(2024, 1, 3)]
     series = NonSequentialTimeSeries(timestamps, Int64[10, 20, 30], "events")
-    key = add_time_series!(store, 7, "Generator", Component, series)
+    key = add_time_series!(store, 7, "Generator", Component, series; features=nothing)
     got = get_time_series(NonSequentialTimeSeries, store, key)
     @test got.timestamps == timestamps
     @test got.data == Int64[10, 20, 30]
@@ -89,10 +89,22 @@ end
     @test get_counts(store).static_time_series == 1
 
     # Attribute-addressed read returns the same series.
-    got_attr = get_time_series(NonSequentialTimeSeries, store, 7, Component, "events")
+    got_attr = get_time_series(
+        NonSequentialTimeSeries, store, 7, Component, "events"; features=nothing
+    )
     @test got_attr.timestamps == timestamps
     @test got_attr.data == Int64[10, 20, 30]
     @test got_attr.name == "events"
+    @test has_time_series(
+        NonSequentialTimeSeries,
+        store,
+        7,
+        Component,
+        "events";
+        resolution=nothing,
+        features=nothing,
+    )
+    @test length(list_keys(store; owner_id=7, features=nothing)) == 1
 end
 
 @testset "non-sequential N-D + application_data round-trip" begin

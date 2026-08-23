@@ -13,7 +13,7 @@
 """
     export_time_series_associations_openapi(store; owner_id=nothing,
         owner_category=nothing, time_series_type=nothing, name=nothing,
-        resolution=nothing, interval=nothing, features=Dict(),
+        resolution=nothing, interval=nothing, features=nothing,
         component_field=nothing) -> String
 
 Export `time_series_associations` matching the filter (the same filter
@@ -30,7 +30,7 @@ function export_time_series_associations_openapi(
     name=nothing,
     resolution=nothing,
     interval=nothing,
-    features=Dict{String, Any}(),
+    features::Union{Nothing, AbstractDict}=nothing,
     component_field=nothing,
 )
     (has_owner, owner_arg, has_category, category_arg, has_type, type_arg, name_arg, _name_glob_arg, resolution_iso, interval_iso, features_json, component_field_arg) = _filter_args(

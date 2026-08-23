@@ -11,7 +11,7 @@ const INFRASTORE_TYPE_DETERMINISTIC_SINGLE = 3
 const INFRASTORE_TYPE_PROBABILISTIC = 4
 const INFRASTORE_TYPE_SCENARIOS = 5
 
-_features_arg(features) = isempty(features) ? C_NULL : JSON.json(features)
+_features_arg(features) = (features === nothing || isempty(features)) ? C_NULL : JSON.json(features)
 _category_int(c::OwnerCategory) = Int32(Int(c))
 
 """
@@ -110,7 +110,7 @@ function transform_single_time_series!(
 end
 
 """
-    has_time_series(T, store, owner_id, owner_category, name; resolution, interval, features=Dict()) -> Bool
+    has_time_series(T, store, owner_id, owner_category, name; resolution, interval, features=nothing) -> Bool
 
 True iff a time series of type `T` with the given attributes exists. `T` is any
 stored time series type; the type-less form is the `SingleTimeSeries` shorthand.
@@ -125,7 +125,7 @@ function has_time_series(
     name::AbstractString;
     resolution::Union{Nothing, Period}=nothing,
     interval::Union{Nothing, Period}=nothing,
-    features::AbstractDict=Dict{String, Any}(),
+    features::Union{Nothing, AbstractDict}=nothing,
 ) where {T}
     resolution_iso = _period_to_cstr(resolution)
     interval_iso = _period_to_cstr(interval)
@@ -147,7 +147,7 @@ function has_time_series(
 end
 
 """
-    remove_time_series!(T, store, owner_id, owner_category, name; resolution, interval, features=Dict())
+    remove_time_series!(T, store, owner_id, owner_category, name; resolution, interval, features=nothing)
 
 Remove the time series of type `T` with the given attributes. `T` is any stored
 time series type; the type-less form is the `SingleTimeSeries` shorthand.
@@ -162,7 +162,7 @@ function remove_time_series!(
     name::AbstractString;
     resolution::Union{Nothing, Period}=nothing,
     interval::Union{Nothing, Period}=nothing,
-    features::AbstractDict=Dict{String, Any}(),
+    features::Union{Nothing, AbstractDict}=nothing,
 ) where {T}
     resolution_iso = _period_to_cstr(resolution)
     interval_iso = _period_to_cstr(interval)
@@ -184,7 +184,7 @@ end
 """
     copy_time_series!(T, store, owner_id, owner_category, name,
                       dst_owner_id, dst_owner_type; new_name=nothing,
-                      resolution=nothing, interval=nothing, features=Dict())
+                      resolution=nothing, interval=nothing, features=nothing)
 
 Copy the time series of type `T` identified by the source attributes onto
 `dst_owner_id`, optionally renaming it to `new_name`.
@@ -209,7 +209,7 @@ function copy_time_series!(
     new_name::Union{Nothing, AbstractString}=nothing,
     resolution::Union{Nothing, Period}=nothing,
     interval::Union{Nothing, Period}=nothing,
-    features::AbstractDict=Dict{String, Any}(),
+    features::Union{Nothing, AbstractDict}=nothing,
 ) where {T}
     resolution_iso = _period_to_cstr(resolution)
     interval_iso = _period_to_cstr(interval)
@@ -256,7 +256,7 @@ function _get_forecast_raw(
     ts_type::Integer;
     resolution::Union{Nothing, Period}=nothing,
     interval::Union{Nothing, Period}=nothing,
-    features::AbstractDict=Dict{String, Any}(),
+    features::Union{Nothing, AbstractDict}=nothing,
     time_range::TimeRangeArg=nothing,
 )
     resolution_iso = _period_to_cstr(resolution)
@@ -574,7 +574,7 @@ end
 
 """
     get_time_series(T, store, owner_id, owner_category, name;
-                    resolution, interval, features=Dict(), time_range)
+                    resolution, interval, features=nothing, time_range)
 
 Fetch a stored forecast of type `T`: `Deterministic`, `Probabilistic`, or
 `Scenarios`. `owner_category` is the owner's `OwnerCategory` (`Component` or
@@ -606,7 +606,7 @@ function get_time_series(
     name::AbstractString;
     resolution::Union{Nothing, Period}=nothing,
     interval::Union{Nothing, Period}=nothing,
-    features::AbstractDict=Dict{String, Any}(),
+    features::Union{Nothing, AbstractDict}=nothing,
     time_range::TimeRangeArg=nothing,
 ) where {T <: _ForecastRequest}
     r = _get_forecast_raw(
