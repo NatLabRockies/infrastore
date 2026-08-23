@@ -26,6 +26,14 @@ __pycache__/
 /yggdrasil/build/
 /yggdrasil/products/
 
+# Coverage instrumentation. `cargo llvm-cov` sets LLVM_PROFILE_FILE, and each
+# instrumented binary writes its .profraw relative to its own working directory
+# -- so a test binary run from a crate root drops them *there*, not under
+# target/, where they look like ordinary new source files to `git add -A`.
+# A single coverage run leaves well over a thousand of them.
+*.profraw
+*.profdata
+
 # macOS
 .DS_Store
 
