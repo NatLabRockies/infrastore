@@ -185,7 +185,7 @@ const _AddableTimeSeries = Union{
 
 """
     add_time_series!(store, owner_id, owner_type, owner_category, ts;
-                     features=Dict(), element_type=ts.element_type,
+                     features=nothing, element_type=ts.element_type,
                      units=ts.units, application_data=ts.application_data) -> TimeSeriesKey
 
 Add a time series (`SingleTimeSeries`, `NonSequentialTimeSeries`,
@@ -219,8 +219,8 @@ end
 
 """
     get_metadata(store, key) -> TimeSeriesMetadata
-    get_metadata(T, store, owner_id, owner_category, name; resolution, interval, features=Dict()) -> TimeSeriesMetadata
-    get_metadata(store, owner_id, owner_category, name; resolution, features=Dict()) -> TimeSeriesMetadata
+    get_metadata(T, store, owner_id, owner_category, name; resolution, interval, features=nothing) -> TimeSeriesMetadata
+    get_metadata(store, owner_id, owner_category, name; resolution, features=nothing) -> TimeSeriesMetadata
 
 The complete [`TimeSeriesMetadata`](@ref) of one stored association, addressed
 either by a `TimeSeriesKey` or by attributes.
@@ -264,7 +264,7 @@ function get_metadata(
     name::AbstractString;
     resolution::Union{Nothing, Period}=nothing,
     interval::Union{Nothing, Period}=nothing,
-    features::AbstractDict=Dict{String, Any}(),
+    features::Union{Nothing, AbstractDict}=nothing,
 ) where {T}
     code = _type_code(T)
     # A `Deterministic` request may be satisfied by a stored
@@ -301,7 +301,7 @@ function get_metadata(
     owner_category::OwnerCategory,
     name::AbstractString;
     resolution::Union{Nothing, Period}=nothing,
-    features::AbstractDict=Dict{String, Any}(),
+    features::Union{Nothing, AbstractDict}=nothing,
 )
     return get_metadata(
         SingleTimeSeries,
@@ -333,7 +333,7 @@ function rename_time_series!(store::Store, key::TimeSeriesKey, new_name::Abstrac
 end
 
 """
-    get_time_series_key(T, store, owner_id, owner_category, name; resolution, interval, features=Dict()) -> TimeSeriesKey
+    get_time_series_key(T, store, owner_id, owner_category, name; resolution, interval, features=nothing) -> TimeSeriesKey
 
 The [`TimeSeriesKey`](@ref) of the stored time series of type `T` with the given
 attributes — the attribute-addressed counterpart of
@@ -360,11 +360,11 @@ function get_time_series_key(
     name::AbstractString;
     resolution::Union{Nothing, Period}=nothing,
     interval::Union{Nothing, Period}=nothing,
-    features::AbstractDict=Dict{String, Any}(),
+    features::Union{Nothing, AbstractDict}=nothing,
 ) where {T}
     resolution_iso = _period_to_cstr(resolution)
     interval_iso = _period_to_cstr(interval)
-    features_json = isempty(features) ? C_NULL : JSON.json(features)
+    features_json = (features === nothing || isempty(features)) ? C_NULL : JSON.json(features)
     out_key = Ref{Ptr{Cvoid}}(C_NULL)
     code = @ccall lib_path().infrastore_store_resolve_forecast_key(
         store::Ptr{Cvoid},
@@ -464,7 +464,7 @@ function get_array_nd(store::Store, data_hash::Vector{UInt8}, ::Type{T}, dims) w
 end
 
 """
-    has_time_series(store, owner_id, owner_category, name; resolution, features=Dict()) -> Bool
+    has_time_series(store, owner_id, owner_category, name; resolution, features=nothing) -> Bool
 
 `owner_category` is the owner's `OwnerCategory` (`Component` or
 `SupplementalAttribute`).
@@ -475,10 +475,10 @@ function has_time_series(
     owner_category::OwnerCategory,
     name::AbstractString;
     resolution::Union{Nothing, Period}=nothing,
-    features::AbstractDict=Dict{String, Any}(),
+    features::Union{Nothing, AbstractDict}=nothing,
 )
     resolution_iso = _period_to_cstr(resolution)
-    features_json = isempty(features) ? C_NULL : JSON.json(features)
+    features_json = (features === nothing || isempty(features)) ? C_NULL : JSON.json(features)
     out = Ref{Bool}(false)
     code = @ccall lib_path().infrastore_store_has_by_attrs(
         store::Ptr{Cvoid},
@@ -522,7 +522,7 @@ function has_for_owner(
 end
 
 """
-    remove_time_series!(store, owner_id, owner_category, name; resolution, features=Dict())
+    remove_time_series!(store, owner_id, owner_category, name; resolution, features=nothing)
 
 `owner_category` is the owner's `OwnerCategory` (`Component` or
 `SupplementalAttribute`).
@@ -533,10 +533,10 @@ function remove_time_series!(
     owner_category::OwnerCategory,
     name::AbstractString;
     resolution::Union{Nothing, Period}=nothing,
-    features::AbstractDict=Dict{String, Any}(),
+    features::Union{Nothing, AbstractDict}=nothing,
 )
     resolution_iso = _period_to_cstr(resolution)
-    features_json = isempty(features) ? C_NULL : JSON.json(features)
+    features_json = (features === nothing || isempty(features)) ? C_NULL : JSON.json(features)
     code = @ccall lib_path().infrastore_store_remove_by_attrs(
         store::Ptr{Cvoid},
         Int64(owner_id)::Int64,

@@ -45,7 +45,7 @@ function add_time_series!(
     owner_type::AbstractString,
     owner_category::OwnerCategory,
     ts::SingleTimeSeries;
-    features::AbstractDict=Dict{String, Any}(),
+    features::Union{Nothing, AbstractDict}=nothing,
     units::Union{Nothing, AbstractString}=ts.units,
     quantity_kind::Union{Nothing, AbstractString}=ts.quantity_kind,
     unit_system::Union{Nothing, UnitSystem, AbstractString}=ts.unit_system,
@@ -87,7 +87,7 @@ function add_time_series!(
     owner_type::AbstractString,
     owner_category::OwnerCategory,
     ts::NonSequentialTimeSeries;
-    features::AbstractDict=Dict{String, Any}(),
+    features::Union{Nothing, AbstractDict}=nothing,
     units::Union{Nothing, AbstractString}=ts.units,
     quantity_kind::Union{Nothing, AbstractString}=ts.quantity_kind,
     unit_system::Union{Nothing, UnitSystem, AbstractString}=ts.unit_system,
@@ -130,7 +130,7 @@ function add_time_series!(
     owner_type::AbstractString,
     owner_category::OwnerCategory,
     ts::Deterministic;
-    features::AbstractDict=Dict{String, Any}(),
+    features::Union{Nothing, AbstractDict}=nothing,
     units::Union{Nothing, AbstractString}=ts.units,
     quantity_kind::Union{Nothing, AbstractString}=ts.quantity_kind,
     unit_system::Union{Nothing, UnitSystem, AbstractString}=ts.unit_system,
@@ -167,7 +167,7 @@ function add_time_series!(
     owner_type::AbstractString,
     owner_category::OwnerCategory,
     ts::Scenarios;
-    features::AbstractDict=Dict{String, Any}(),
+    features::Union{Nothing, AbstractDict}=nothing,
     units::Union{Nothing, AbstractString}=ts.units,
     quantity_kind::Union{Nothing, AbstractString}=ts.quantity_kind,
     unit_system::Union{Nothing, UnitSystem, AbstractString}=ts.unit_system,
@@ -211,7 +211,7 @@ function _batch_add_dense_forecast!(
     interval::Period,
     count::Integer,
     data::AbstractArray;
-    features::AbstractDict=Dict{String, Any}(),
+    features::Union{Nothing, AbstractDict}=nothing,
     units::Union{Nothing, AbstractString}=nothing,
     quantity_kind::Union{Nothing, AbstractString}=nothing,
     unit_system::Union{Nothing, UnitSystem, AbstractString}=nothing,
@@ -257,7 +257,7 @@ function add_time_series!(
     owner_type::AbstractString,
     owner_category::OwnerCategory,
     ts::Probabilistic;
-    features::AbstractDict=Dict{String, Any}(),
+    features::Union{Nothing, AbstractDict}=nothing,
     units::Union{Nothing, AbstractString}=ts.units,
     quantity_kind::Union{Nothing, AbstractString}=ts.quantity_kind,
     unit_system::Union{Nothing, UnitSystem, AbstractString}=ts.unit_system,

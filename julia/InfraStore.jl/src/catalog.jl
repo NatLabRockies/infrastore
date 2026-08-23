@@ -15,7 +15,7 @@ function _make_key(
     ts_type::Integer;
     resolution::Union{Nothing, Period}=nothing,
     interval::Union{Nothing, Period}=nothing,
-    features::AbstractDict=Dict{String, Any}(),
+    features::Union{Nothing, AbstractDict}=nothing,
 )
     resolution_iso = _period_to_cstr(resolution)
     interval_iso = _period_to_cstr(interval)
@@ -273,7 +273,7 @@ function _filter_args(
         name_glob === nothing ? C_NULL : String(name_glob),
         _period_to_cstr(resolution),
         _period_to_cstr(interval),
-        isempty(features) ? C_NULL : JSON.json(features),
+        (features === nothing || isempty(features)) ? C_NULL : JSON.json(features),
         component_field === nothing ? C_NULL : String(component_field),
     )
 end
@@ -294,7 +294,7 @@ function _filter_list_json(
     name=nothing,
     resolution=nothing,
     interval=nothing,
-    features=Dict{String, Any}(),
+    features::Union{Nothing, AbstractDict}=nothing,
     component_field=nothing,
     name_glob=nothing,
 )
@@ -326,7 +326,7 @@ end
 
 """
     list_keys(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
-              name=nothing, resolution=nothing, interval=nothing, features=Dict()) -> Vector{KeyRow}
+              name=nothing, resolution=nothing, interval=nothing, features=nothing) -> Vector{KeyRow}
 
 List the key of every stored time series matching the (all-optional, independent)
 filters, as [`KeyRow`](@ref)s. With no filter set the whole store is listed.
@@ -355,7 +355,7 @@ end
 """
     list_time_series(store; owner_id=nothing, owner_category=nothing,
                      time_series_type=nothing, name=nothing, resolution=nothing,
-                     interval=nothing, features=Dict()) -> Vector{TimeSeriesMetadata}
+                     interval=nothing, features=nothing) -> Vector{TimeSeriesMetadata}
 
 The full [`TimeSeriesMetadata`](@ref) of every association matching the filter
 (the same filters as [`list_keys`](@ref)) — the listing counterpart of
@@ -402,7 +402,7 @@ function remove_by_filter!(
     name::Union{Nothing, AbstractString}=nothing,
     resolution::Union{Nothing, Period}=nothing,
     interval::Union{Nothing, Period}=nothing,
-    features::AbstractDict=Dict{String, Any}(),
+    features::Union{Nothing, AbstractDict}=nothing,
     component_field::Union{Nothing, AbstractString}=nothing,
     name_glob::Union{Nothing, AbstractString}=nothing,
 )
@@ -434,7 +434,7 @@ end
 """
     list_array_groups(store; owner_id=nothing, owner_category=nothing,
                       time_series_type=nothing, name=nothing, resolution=nothing,
-                      interval=nothing, features=Dict()) -> Vector{ArrayGroupRow}
+                      interval=nothing, features=nothing) -> Vector{ArrayGroupRow}
 
 Like [`list_keys`](@ref) (same filters, same row fields), but each
 [`ArrayGroupRow`](@ref) additionally carries `data_hash`: the 32-byte content
@@ -542,7 +542,7 @@ function get_time_series(
     owner_category::OwnerCategory,
     name::AbstractString;
     resolution::Union{Nothing, Period}=nothing,
-    features::AbstractDict=Dict{String, Any}(),
+    features::Union{Nothing, AbstractDict}=nothing,
     time_range::TimeRangeArg=nothing,
 ) where {T <: SingleTimeSeries}
     _check_request_type(T)
@@ -572,7 +572,7 @@ function get_time_series(
     owner_category::OwnerCategory,
     name::AbstractString;
     resolution::Union{Nothing, Period}=nothing,
-    features::AbstractDict=Dict{String, Any}(),
+    features::Union{Nothing, AbstractDict}=nothing,
     time_range::TimeRangeArg=nothing,
 ) where {T <: NonSequentialTimeSeries}
     _check_request_type(T)
@@ -627,7 +627,7 @@ end
 """
     has_any_time_series(store; owner_id=nothing, owner_category=nothing,
                         time_series_type=nothing, name=nothing, resolution=nothing,
-                        interval=nothing, features=Dict()) -> Bool
+                        interval=nothing, features=nothing) -> Bool
 
 True iff at least one stored time series matches the filter — the existence
 probe over the same (all-optional, independent) filters as [`list_keys`](@ref),
@@ -647,7 +647,7 @@ function has_any_time_series(
     name=nothing,
     resolution=nothing,
     interval=nothing,
-    features=Dict{String, Any}(),
+    features::Union{Nothing, AbstractDict}=nothing,
     component_field=nothing,
     name_glob=nothing,
 )
