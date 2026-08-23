@@ -11,7 +11,9 @@ const INFRASTORE_TYPE_DETERMINISTIC_SINGLE = 3
 const INFRASTORE_TYPE_PROBABILISTIC = 4
 const INFRASTORE_TYPE_SCENARIOS = 5
 
-_features_arg(features) = (features === nothing || isempty(features)) ? C_NULL : JSON.json(features)
+function _features_arg(features)
+    return (features === nothing || isempty(features)) ? C_NULL : JSON.json(features)
+end
 _category_int(c::OwnerCategory) = Int32(Int(c))
 
 """

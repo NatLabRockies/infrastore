@@ -3353,13 +3353,20 @@ end
     @test only(forecast_summary(store)).owner_category == Component
 
     # One StaticGrid type for both the consistency check and a reader's grid.
+    # They differ in exactly one field: a reader knows the spelling of the axis
+    # it spans, where the consistency check reports grids and has no reader to
+    # ask, so it leaves the reference unset.
     grid = only(check_static_consistency(store))
-    @test grid == StaticGrid(t0, Millisecond(Hour(1)), 4)
-    @test static_grid(build_static_reader(store; resolution=Hour(1))) == grid
+    @test grid == StaticGrid(t0, Millisecond(Hour(1)), 4, nothing)
+    @test grid.time_reference === nothing
+    reader_grid = static_grid(build_static_reader(store; resolution=Hour(1)))
+    @test reader_grid == StaticGrid(t0, Millisecond(Hour(1)), 4, ZonelessReference())
 
     @test forecast_timeline(
         build_forecast_reader(store, Deterministic; resolution=Hour(1))
-    ) == ForecastTimeline(t0, Millisecond(Hour(1)), Millisecond(Hour(1)), 2)
+    ) == ForecastTimeline(
+        t0, Millisecond(Hour(1)), Millisecond(Hour(1)), 2, ZonelessReference()
+    )
 
     @test get_forecast_parameters(store) == ForecastParameters(
         Millisecond(Hour(2)), Millisecond(Hour(1)), 2, Millisecond(Hour(1)), t0
@@ -4420,6 +4427,68 @@ end
     again = Store(in_memory=true)
     add_time_series!(again, 1, "Generator", Component, read_back)
     @test only(list_time_series(again)).time_reference === nothing
+end
+
+@testset "a reader reports the spelling of the axis it spans" begin
+    # A reader spans one timeline, so it carries one spelling -- and without it
+    # a Julia caller could read the axis but not say how it was written, unable
+    # to tell a wall-clock axis from an unspecified or a UTC one. That is the
+    # distinction the axis exists to preserve, and every other binding reports
+    # it, so the Julia readers must too.
+    initial = DateTime(2024, 1, 1)
+    values = collect(1.0:4.0)
+
+    # A wall-clock cohort reports the positive claim, not an absence.
+    wall = Store(in_memory=true)
+    add_time_series!(
+        wall, 1, "Generator", Component,
+        SingleTimeSeries(initial, Hour(1), values, "load"),
+    )
+    grid = static_grid(build_static_reader(wall; resolution=Hour(1)))
+    @test grid.time_reference == ZonelessReference()
+
+    # A cohort that declared no spelling reports `nothing`, which is a
+    # different answer -- collapsing the two would let a read invent a claim
+    # the writer never made.
+    unspecified = Store(in_memory=true)
+    add_time_series!(
+        unspecified, 1, "Generator", Component,
+        SingleTimeSeries(initial, Hour(1), values, "load"; time_reference=nothing),
+    )
+    ugrid = static_grid(build_static_reader(unspecified; resolution=Hour(1)))
+    @test ugrid.time_reference === nothing
+
+    # And an instant-bearing cohort reports the spelling it was written in.
+    utc = Store(in_memory=true)
+    add_time_series!(
+        utc, 1, "Generator", Component,
+        SingleTimeSeries(initial, Hour(1), values, "load"; time_reference=UTCReference()),
+    )
+    @test static_grid(build_static_reader(utc; resolution=Hour(1))).time_reference ==
+        UTCReference()
+
+    zoned = Store(in_memory=true)
+    add_time_series!(
+        zoned, 1, "Generator", Component,
+        SingleTimeSeries(
+            initial, Hour(1), values, "load";
+            time_reference=ZoneReference("America/Denver"),
+        ),
+    )
+    @test static_grid(build_static_reader(zoned; resolution=Hour(1))).time_reference ==
+        ZoneReference("America/Denver")
+
+    # A forecast reader's window timeline carries it on the same terms.
+    fc = Store(in_memory=true)
+    add_time_series!(
+        fc, 1, "Generator", Component,
+        SingleTimeSeries(initial, Hour(1), values, "load"; time_reference=UTCReference()),
+    )
+    transform_single_time_series!(fc, Hour(2), Hour(1))
+    timeline = forecast_timeline(
+        build_forecast_reader(fc, Deterministic; resolution=Hour(1))
+    )
+    @test timeline.time_reference == UTCReference()
 end
 
 # The rest of the timestamp tests need the TimeZones weak dependency, and live in

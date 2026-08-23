@@ -276,11 +276,25 @@ present in the store.
 `resolution` is `nothing` only for a `NonSequentialTimeSeries` reader, whose
 timeline is an explicit list of instants rather than a grid — enumerate it with
 [`static_timestamps`](@ref).
+
+`time_reference` is the one spelling the axis carries: a cohort whose columns
+agree reports their reference, one whose columns merely agree on naming instants
+reports `UTCReference()`, and a cohort mixing zoneless with the rest never builds
+at all. `nothing` means the cohort records no spelling, which is distinct from
+`ZonelessReference()` — the positive claim that the timestamps are wall clocks.
+It is `nothing` from [`check_static_consistency`](@ref), which reports grids
+rather than readers.
 """
 struct StaticGrid
     initial_timestamp::DateTime
     resolution::Union{Nothing, Period}
     length::Int
+    time_reference::Union{Nothing, TimeReference}
+end
+
+"""Three-argument form: an axis with no recorded spelling."""
+function StaticGrid(initial_timestamp, resolution, length)
+    return StaticGrid(initial_timestamp, resolution, length, nothing)
 end
 
 """
@@ -288,12 +302,20 @@ end
 
 A [`ForecastReader`]'s window timeline, from [`forecast_timeline`](@ref): the
 valid timestamps are `initial_timestamp + k·interval` for `k in 0:count-1`.
+
+`time_reference` is the one spelling the timeline carries; see [`StaticGrid`](@ref).
 """
 struct ForecastTimeline
     initial_timestamp::DateTime
     resolution::Period
     interval::Period
     count::Int
+    time_reference::Union{Nothing, TimeReference}
+end
+
+"""Four-argument form: a timeline with no recorded spelling."""
+function ForecastTimeline(initial_timestamp, resolution, interval, count)
+    return ForecastTimeline(initial_timestamp, resolution, interval, count, nothing)
 end
 
 """

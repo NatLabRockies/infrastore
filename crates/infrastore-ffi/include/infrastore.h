@@ -2761,6 +2761,31 @@ int32_t infrastore_static_reader_grid(const struct InfraStoreStaticReaderHandle 
                                       uint64_t *out_length);
 
 /**
+ * The one spelling the reader's timeline carries, as an owned C string
+ * (`"utc"`, `"zoneless"`, `"-07:00"`, or an IANA zone name), or **null** when
+ * the cohort records no reference.
+ *
+ * A reader spans one timeline, so it carries one spelling: a cohort whose
+ * columns agree reports their reference, one whose columns merely agree on
+ * naming instants reports `"utc"`, and a cohort mixing zoneless with the rest
+ * never builds at all. Without this a caller can read the axis but not say how
+ * it was written -- it cannot tell a wall-clock axis from an unspecified or UTC
+ * one, which is exactly the distinction the axis exists to preserve.
+ *
+ * Separate from [`infrastore_static_reader_grid`] rather than another out
+ * parameter on it: adding one there would shift every following argument for
+ * callers already compiled against the existing declaration.
+ *
+ * # Safety
+ *
+ * `reader` must be a live static-reader handle. `out_time_reference` must be
+ * valid for writing one pointer. On success it is either null or an owned C
+ * string the caller must free exactly once with [`infrastore_string_free`].
+ */
+int32_t infrastore_static_reader_time_reference(const struct InfraStoreStaticReaderHandle *reader,
+                                                char **out_time_reference);
+
+/**
  * Every timestamp on the reader's timeline, in order, as unix milliseconds.
  *
  * Probe-then-fetch: call with `buf` null and `cap` 0 to learn the length
@@ -2894,6 +2919,20 @@ int32_t infrastore_store_build_forecast_reader(const struct InfraStore *handle,
                                                const char *component_field,
                                                int32_t zoneless,
                                                struct InfraStoreForecastReaderHandle **out_reader);
+
+/**
+ * The one spelling the forecast reader's window timeline carries, as an owned C
+ * string, or **null** when the cohort records no reference. The forecast
+ * counterpart of [`infrastore_static_reader_time_reference`]; same rules.
+ *
+ * # Safety
+ *
+ * `reader` must be a live forecast-reader handle. `out_time_reference` must be
+ * valid for writing one pointer. On success it is either null or an owned C
+ * string the caller must free exactly once with [`infrastore_string_free`].
+ */
+int32_t infrastore_forecast_reader_time_reference(const struct InfraStoreForecastReaderHandle *reader,
+                                                  char **out_time_reference);
 
 /**
  * Read the reader's window timeline: `initial_timestamp` (unix ms),

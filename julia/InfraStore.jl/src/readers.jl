@@ -160,7 +160,8 @@ function build_static_reader(
     name_arg = name === nothing ? C_NULL : String(name)
     name_glob_arg = name_glob === nothing ? C_NULL : String(name_glob)
     resolution_iso = resolution === nothing ? C_NULL : _period_to_iso(resolution)
-    features_arg = (features === nothing || isempty(features)) ? C_NULL : JSON.json(features)
+    features_arg =
+        (features === nothing || isempty(features)) ? C_NULL : JSON.json(features)
     component_field_arg = component_field === nothing ? C_NULL : String(component_field)
     # A reader materializes one timestamp axis, so it needs one spelling for it.
     # `-1` leaves the choice to the caller's other filters; the core refuses a
@@ -219,7 +220,26 @@ function static_grid(reader::StaticReader)
             out_len::Ref{UInt64},
         )::Int32
     )
-    return StaticGrid(_from_unix_ms(out_initial[]), _take_period(out_res[]), Int(out_len[]))
+    return StaticGrid(
+        _from_unix_ms(out_initial[]),
+        _take_period(out_res[]),
+        Int(out_len[]),
+        _static_reader_reference(reader),
+    )
+end
+
+# The one spelling the reader's axis carries, or `nothing` when the cohort
+# records none. A separate FFI call rather than another out parameter on
+# `infrastore_static_reader_grid`: adding one there would shift every following
+# argument for anything already compiled against that declaration.
+function _static_reader_reference(reader::StaticReader)
+    out_ref = Ref{Ptr{Cchar}}(C_NULL)
+    _check(
+        @ccall lib_path().infrastore_static_reader_time_reference(
+            reader::Ptr{Cvoid}, out_ref::Ref{Ptr{Cchar}}
+        )::Int32
+    )
+    return _take_time_reference(out_ref[])
 end
 
 """
@@ -421,7 +441,8 @@ function build_forecast_reader(
     name_arg = name === nothing ? C_NULL : String(name)
     name_glob_arg = name_glob === nothing ? C_NULL : String(name_glob)
     resolution_iso = _period_to_iso(resolution)
-    features_arg = (features === nothing || isempty(features)) ? C_NULL : JSON.json(features)
+    features_arg =
+        (features === nothing || isempty(features)) ? C_NULL : JSON.json(features)
     component_field_arg = component_field === nothing ? C_NULL : String(component_field)
     # A reader materializes one timestamp axis, so it needs one spelling for it.
     # `-1` leaves the choice to the caller's other filters; the core refuses a
@@ -480,11 +501,18 @@ function forecast_timeline(reader::ForecastReader)
             out_count::Ref{UInt64},
         )::Int32
     )
+    out_ref = Ref{Ptr{Cchar}}(C_NULL)
+    _check(
+        @ccall lib_path().infrastore_forecast_reader_time_reference(
+            reader::Ptr{Cvoid}, out_ref::Ref{Ptr{Cchar}}
+        )::Int32
+    )
     return ForecastTimeline(
         _from_unix_ms(out_initial[]),
         _take_period(out_res[]),
         _take_period(out_interval[]),
         Int(out_count[]),
+        _take_time_reference(out_ref[]),
     )
 end
 

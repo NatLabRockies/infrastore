@@ -210,6 +210,14 @@ function _take_period(ptr::Ptr{Cchar})
     return (s=_take_cstr(ptr); s === nothing ? nothing : _iso_to_period(s))
 end
 
+# Read + free an owned time-reference C string; `nothing` if null. Null is a
+# real answer here -- it is a cohort that records no spelling -- and is distinct
+# from `ZonelessReference()`, which is the positive claim that the axis is wall
+# clocks.
+function _take_time_reference(ptr::Ptr{Cchar})
+    return (s=_take_cstr(ptr); s === nothing ? nothing : _parse_time_reference(s))
+end
+
 # Read an owned C string WITHOUT freeing it (`nothing` for null). For the
 # multi-buffer decode paths, which release every FFI allocation in a single
 # `finally` block so that an exception mid-decode cannot leak the rest.
@@ -432,7 +440,8 @@ function get_time_series_key(
 ) where {T}
     resolution_iso = _period_to_cstr(resolution)
     interval_iso = _period_to_cstr(interval)
-    features_json = (features === nothing || isempty(features)) ? C_NULL : JSON.json(features)
+    features_json =
+        (features === nothing || isempty(features)) ? C_NULL : JSON.json(features)
     out_key = Ref{Ptr{Cvoid}}(C_NULL)
     code = @ccall lib_path().infrastore_store_resolve_forecast_key(
         store::Ptr{Cvoid},
@@ -546,7 +555,8 @@ function has_time_series(
     features::Union{Nothing, AbstractDict}=nothing,
 )
     resolution_iso = _period_to_cstr(resolution)
-    features_json = (features === nothing || isempty(features)) ? C_NULL : JSON.json(features)
+    features_json =
+        (features === nothing || isempty(features)) ? C_NULL : JSON.json(features)
     out = Ref{Bool}(false)
     code = @ccall lib_path().infrastore_store_has_by_attrs(
         store::Ptr{Cvoid},
@@ -604,7 +614,8 @@ function remove_time_series!(
     features::Union{Nothing, AbstractDict}=nothing,
 )
     resolution_iso = _period_to_cstr(resolution)
-    features_json = (features === nothing || isempty(features)) ? C_NULL : JSON.json(features)
+    features_json =
+        (features === nothing || isempty(features)) ? C_NULL : JSON.json(features)
     code = @ccall lib_path().infrastore_store_remove_by_attrs(
         store::Ptr{Cvoid},
         Int64(owner_id)::Int64,

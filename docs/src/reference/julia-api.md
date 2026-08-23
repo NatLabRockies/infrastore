@@ -308,8 +308,8 @@ than absent, so no field is silently dropped by the addressing path taken.
 | `SupplementalAttributeTypeCount`  | `supplemental_attribute_counts_by_type`   | `attribute_type`, `count`                                                                                                                                           |
 | `SupplementalAttributeSummaryRow` | `supplemental_attribute_summary`          | `component_type`, `attribute_type`, `count`                                                                                                                         |
 | `ForecastParameters`              | `get_forecast_parameters`                 | `horizon`, `interval`, `count`, `resolution`, `initial_timestamp` (all `nothing` when nothing matches)                                                              |
-| `StaticGrid`                      | `static_grid`, `check_static_consistency` | `initial_timestamp`, `resolution` (`nothing` for an irregular reader), `length`                                                                                     |
-| `ForecastTimeline`                | `forecast_timeline`                       | `initial_timestamp`, `resolution`, `interval`, `count`                                                                                                              |
+| `StaticGrid`                      | `static_grid`, `check_static_consistency` | `initial_timestamp`, `resolution` (`nothing` for an irregular reader), `length`, `time_reference`                                                                   |
+| `ForecastTimeline`                | `forecast_timeline`                       | `initial_timestamp`, `resolution`, `interval`, `count`, `time_reference`                                                                                            |
 | `CompressionSettings`             | `get_compression`                         | `compression` (`:deflate` / `:none`), `level`, `shuffle`                                                                                                            |
 | `CompactionReport`                | `compact!`                                | `slots_reclaimed`, `datasets_dropped`, `feature_sets_reclaimed`, `timestamp_sets_reclaimed`, `bytes_reclaimed`                                                      |
 
@@ -317,6 +317,14 @@ than absent, so no field is silently dropped by the addressing path taken.
 per resolution present) — the same concept, so the same type. Its `resolution` is `nothing` only for
 a `NonSequentialTimeSeries` reader, whose timeline is an explicit list of instants rather than a
 grid; enumerate it with `static_timestamps`.
+
+`time_reference` is the one spelling the axis carries — a reader spans one timeline, so a cohort
+whose columns agree reports their reference, one whose columns merely agree on naming instants
+reports `UTCReference()`, and a cohort mixing zoneless with the rest never builds at all. It is
+`nothing` when the cohort records no spelling, and from `check_static_consistency`, which reports
+grids rather than readers. `nothing` is not `ZonelessReference()`: the second is the positive claim
+that the timestamps are wall clocks. Three- and four-argument constructors (`StaticGrid` and
+`ForecastTimeline` respectively) leave it unset.
 
 ## Static Series
 
