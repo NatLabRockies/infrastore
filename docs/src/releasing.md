@@ -253,6 +253,27 @@ lands on:
    The Registrator GitHub app must be installed on the repository (an org owner approves that); the
    JuliaHub web interface is the fallback.
 
+   **Write the release notes into that same comment.** They are read from the trigger comment and
+   nowhere else — there is no TagBot here and the GitHub Release's own notes are not consulted, so
+   notes omitted at this point can only be restored by editing the registry PR body by hand, between
+   its `<!-- BEGIN RELEASE NOTES -->` markers, before AutoMerge closes it. Put a blank line after
+   the register line, then a `Release notes:` line, then the notes:
+
+   ```
+   @JuliaRegistrator register subdir=julia/InfraStore.jl
+
+   Release notes:
+
+   ## Breaking changes
+
+   - ...
+   ```
+
+   Write them for someone consuming the Julia package, not for someone reading this repository's
+   commits: what breaks, what is new, and what an existing artifact costs. A `DATA_FORMAT_VERSION`
+   bump belongs at the top of "Breaking changes" every time it happens — it rejects every store an
+   earlier version wrote, and the Julia user has no other channel that tells them so.
+
 General's AutoMerge requires a public repository, an OSI-approved license file in the package
 directory, and `[compat]` bounds for every non-stdlib dependency including `julia`. There is no
 initial-version requirement — only prerelease and build metadata are rejected — so a package may
