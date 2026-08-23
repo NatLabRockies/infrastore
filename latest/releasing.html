@@ -392,6 +392,23 @@ is required because the package is not at the repository root:</p>
 </code></pre>
 <p>The Registrator GitHub app must be installed on the repository (an org owner approves that); the
 JuliaHub web interface is the fallback.</p>
+<p><strong>Write the release notes into that same comment.</strong> They are read from the trigger comment and
+nowhere else — there is no TagBot here and the GitHub Release's own notes are not consulted, so
+notes omitted at this point can only be restored by editing the registry PR body by hand, between
+its <code>&lt;!-- BEGIN RELEASE NOTES --&gt;</code> markers, before AutoMerge closes it. Put a blank line after
+the register line, then a <code>Release notes:</code> line, then the notes:</p>
+<pre><code>@JuliaRegistrator register subdir=julia/InfraStore.jl
+
+Release notes:
+
+## Breaking changes
+
+- ...
+</code></pre>
+<p>Write them for someone consuming the Julia package, not for someone reading this repository's
+commits: what breaks, what is new, and what an existing artifact costs. A <code>DATA_FORMAT_VERSION</code>
+bump belongs at the top of "Breaking changes" every time it happens — it rejects every store an
+earlier version wrote, and the Julia user has no other channel that tells them so.</p>
 </li>
 </ol>
 <p>General's AutoMerge requires a public repository, an OSI-approved license file in the package
