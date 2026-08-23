@@ -153,6 +153,7 @@ async fn a_valid_key_works_across_several_rpcs() {
             key: Some(keys[0].clone()),
             start_rfc3339: None,
             end_rfc3339: None,
+            bounds_zoneless: None,
         })
         .await
         .unwrap()

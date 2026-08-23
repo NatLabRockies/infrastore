@@ -236,14 +236,15 @@ fn render_csv(meta: &TimeSeriesMetadata, data: &TimeSeriesData) -> Result<String
                 .map(|i| {
                     s.resolution
                         .add_to(s.initial_timestamp, i as i64)
-                        .map(|t| t.to_rfc3339())
+                        .map(|t| fields::render_timestamp(t, s.time_reference.as_ref()))
                         .ok_or_else(|| format!("timestamp overflow at grid index {i}"))
                 })
                 .collect::<Result<_, String>>()?;
             sequential_rows(&timestamps, &s.data)
         }
         TimeSeriesData::NonSequentialTimeSeries(ns) => {
-            let timestamps: Vec<String> = ns.timestamps.iter().map(|t| t.to_rfc3339()).collect();
+            let timestamps: Vec<String> =
+                fields::render_timestamps(&ns.timestamps, ns.time_reference.as_ref());
             sequential_rows(&timestamps, &ns.data)
         }
         _ => show::forecast_csv_rows(meta, data)?,
@@ -306,6 +307,14 @@ fn render_json(
         "unit_system".into(),
         json!(meta.unit_system.map(|u| u.as_str())),
     );
+    obj.insert(
+        "time_reference".into(),
+        json!(
+            meta.time_reference
+                .as_ref()
+                .map(infrastore_core::TimeReference::as_storage_string)
+        ),
+    );
     obj.insert("component_field".into(), json!(meta.component_field));
     obj.insert("application_data".into(), json!(meta.application_data));
     obj.insert("element_type".into(), json!(meta.element_type.to_string()));
@@ -318,7 +327,10 @@ fn render_json(
         TimeSeriesData::SingleTimeSeries(s) => {
             obj.insert(
                 "initial_timestamp".into(),
-                json!(s.initial_timestamp.to_rfc3339()),
+                json!(fields::render_timestamp(
+                    s.initial_timestamp,
+                    s.time_reference.as_ref()
+                )),
             );
             obj.insert("resolution".into(), json!(s.resolution.to_iso8601()));
             obj.insert("shape".into(), json!(s.data.shape));
@@ -328,7 +340,8 @@ fn render_json(
             );
         }
         TimeSeriesData::NonSequentialTimeSeries(ns) => {
-            let timestamps: Vec<String> = ns.timestamps.iter().map(|t| t.to_rfc3339()).collect();
+            let timestamps: Vec<String> =
+                fields::render_timestamps(&ns.timestamps, ns.time_reference.as_ref());
             obj.insert("timestamps".into(), json!(timestamps));
             obj.insert("shape".into(), json!(ns.data.shape));
             obj.insert(
@@ -344,7 +357,10 @@ fn render_json(
                 _ => unreachable!(),
             };
             if let Some(t) = meta.initial_timestamp {
-                obj.insert("initial_timestamp".into(), json!(t.to_rfc3339()));
+                obj.insert(
+                    "initial_timestamp".into(),
+                    json!(fields::render_timestamp(t, meta.time_reference.as_ref())),
+                );
             }
             if let Some(r) = meta.resolution {
                 obj.insert("resolution".into(), json!(r.to_iso8601()));

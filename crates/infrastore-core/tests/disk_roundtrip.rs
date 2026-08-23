@@ -514,7 +514,7 @@ fn time_range_slicing_through_disk() {
     let start = initial + Duration::hours(3);
     let end = initial + Duration::hours(7);
     let got = store
-        .get_time_series(key.identity(), Some((start, end)))
+        .get_time_series(key.identity(), Some((start, end).into()))
         .unwrap();
     let single = got.as_single().unwrap();
     assert_eq!(single.length, 4);

@@ -199,18 +199,38 @@ struct Cli {
     #[arg(short = 'y', long, global = true)]
     yes: bool,
 
-    /// Read timestamps that carry no time zone as being in this one: UTC, or a
-    /// fixed offset like -07:00.
+    /// Read timestamps that carry no time zone as being in this one: UTC, a
+    /// fixed offset like -07:00, or an IANA zone name like America/Denver.
     ///
-    /// Without it a zoneless timestamp is an error, because it names no
-    /// instant — which leaves the most ordinary CSV in this domain
+    /// Without it (or --zoneless) a zoneless timestamp is an error, because it
+    /// names no instant — which leaves the most ordinary CSV in this domain
     /// (`2024-01-01 00:00:00,...`) unloadable without rewriting the file. A
-    /// timestamp that carries its own offset is never overridden. Named zones
-    /// (`America/Denver`) are deliberately not accepted; see the flag's error.
+    /// timestamp that carries its own offset is never overridden.
+    ///
+    /// Prefer a named zone over a fixed offset for data that crosses a daylight
+    /// saving transition: a year of Denver data read as -07:00 renders every
+    /// timestamp after March an hour wrong, while America/Denver renders all of
+    /// them correctly. A row whose wall clock daylight saving skips or repeats
+    /// is refused by name rather than resolved to a guess.
     // `allow_hyphen_values` so a western offset can be written the obvious way,
     // `--assume-timezone -07:00`, rather than only as `--assume-timezone=-07:00`.
     #[arg(long, value_name = "ZONE", global = true, allow_hyphen_values = true)]
     assume_timezone: Option<String>,
+
+    /// Store timestamps that carry no time zone as the wall clocks they are,
+    /// naming no instant.
+    ///
+    /// The alternative to --assume-timezone, for data that has no time zone and
+    /// wants none — modeled profiles on 24-hour days, say. Nothing is converted:
+    /// the fields are stored as written and read back unlabelled, and the series
+    /// records `time_reference = zoneless`.
+    ///
+    /// The store then refuses to answer an instant-bearing query bound against
+    /// such a series, and refuses to put it in one reader or one ranged bulk
+    /// read alongside series that do record instants — there is no single
+    /// meaning a bound or a shared timestamp axis could carry for both.
+    #[arg(long, global = true, conflicts_with = "assume_timezone")]
+    zoneless: bool,
 
     #[command(subcommand)]
     command: Commands,
@@ -799,7 +819,7 @@ fn real_main() {
     confirm::set_assume_yes(cli.yes);
     // Before anything parses a timestamp, so an unusable zone is reported now
     // rather than part-way through a CSV.
-    if let Err(e) = parse::set_assumed_timezone(cli.assume_timezone.as_deref()) {
+    if let Err(e) = parse::set_assumed_timezone(cli.assume_timezone.as_deref(), cli.zoneless) {
         output::print_error(cli.format, &e);
         std::process::exit(1);
     }

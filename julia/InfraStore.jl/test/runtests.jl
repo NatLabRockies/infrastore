@@ -4351,16 +4351,19 @@ end
 # ZonedDateTime input (the InfraStoreTimeZonesExt weak-dependency extension)
 # ---------------------------------------------------------------------------
 
-@testset "a bare DateTime is read as UTC, and says so when it cannot be" begin
-    # The convention this package has always used, now stated rather than
-    # implied: a zoneless `DateTime` is the UTC wall clock.
+@testset "a bare DateTime is a wall clock, and says so when it cannot be" begin
+    # A bare `DateTime` names no instant, so it is recorded as a wall clock and
+    # comes back as one. The stored instant is its fields read as if UTC --
+    # unchanged from the old UTC-by-convention reading, which was never a fact
+    # about the value; what is new is that the store now records that it was a
+    # convention.
     store = Store(in_memory=true)
     initial = DateTime(2024, 1, 1, 12)
-    key = add_time_series!(
-        store, 1, "Generator", Component,
-        SingleTimeSeries(initial, Hour(1), collect(1.0:3.0), "load"),
-    )
+    series = SingleTimeSeries(initial, Hour(1), collect(1.0:3.0), "load")
+    @test series.time_reference == ZonelessReference()
+    key = add_time_series!(store, 1, "Generator", Component, series)
     @test get_time_series(store, key).initial_timestamp == initial
+    @test get_time_series(store, key).time_reference == ZonelessReference()
 
     # Anything that is neither a DateTime nor a ZonedDateTime is an
     # InvalidParameterError naming the fix, not a bare MethodError.
@@ -4380,6 +4383,43 @@ end
         SingleTimeSeries(Date(2024, 1, 1), Hour(1), collect(1.0:3.0), "load"),
     )
     @test get_time_series(store, date_key).initial_timestamp == DateTime(2024, 1, 1)
+end
+
+@testset "an unspecified reference is not a wall clock" begin
+    # `nothing` and `ZonelessReference()` are different claims: one says the
+    # spelling was never recorded, the other says the timestamps are wall
+    # clocks. Only the *absence* of the keyword infers. This is the shape a
+    # store written by another binding (or by a native Rust caller) that
+    # declared no reference arrives in, so a read must not invent one -- an
+    # invented `ZonelessReference()` would be written straight back by
+    # `add_time_series!`, whose default is the series' own reference.
+    store = Store(in_memory=true)
+    initial = DateTime(2024, 1, 1, 12)
+    series = SingleTimeSeries(
+        initial, Hour(1), collect(1.0:3.0), "load"; time_reference=nothing
+    )
+    @test series.time_reference === nothing
+    key = add_time_series!(store, 1, "Generator", Component, series)
+    read_back = get_time_series(store, key)
+    @test read_back.time_reference === nothing
+    @test read_back.initial_timestamp == initial
+    # And the catalog agrees with the series.
+    @test only(list_time_series(store)).time_reference === nothing
+
+    # The same for the vector-timestamped type, whose constructor reads its
+    # spelling off the vector rather than off one timestamp.
+    nsts = NonSequentialTimeSeries(
+        [initial, initial + Hour(1)], [1.0, 2.0], "irregular"; time_reference=nothing
+    )
+    @test nsts.time_reference === nothing
+    nkey = add_time_series!(store, 2, "Generator", Component, nsts)
+    @test get_time_series(NonSequentialTimeSeries, store, nkey).time_reference === nothing
+
+    # Re-adding what was read back records the same absence, rather than
+    # promoting it to a wall clock on the way through.
+    again = Store(in_memory=true)
+    add_time_series!(again, 1, "Generator", Component, read_back)
+    @test only(list_time_series(again)).time_reference === nothing
 end
 
 # The rest of the timestamp tests need the TimeZones weak dependency, and live in

@@ -12,20 +12,22 @@ in the consumer's object graph — which is why the association flags are bare i
 ## Synopsis
 
 ```text
-infrastore [--store <PATH.h5>] [-f <FORMAT>] [--log-level <FILTER>] [-y] [--assume-timezone <ZONE>] <COMMAND>
+infrastore [--store <PATH.h5>] [-f <FORMAT>] [--log-level <FILTER>] [-y]
+           [--assume-timezone <ZONE> | --zoneless] <COMMAND>
 ```
 
 Every global option is accepted after the command too (`infrastore add --store demo.h5 …`).
 
 ### Global options
 
-| Option                     | Description                                                                                                                      |
-| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `--store <PATH>`           | Path to the HDF5 store file. The `<PATH>.sqlite` catalog is implicit. Falls back to the `INFRASTORE_STORE` environment variable. |
-| `-f`, `--format`           | Output format: `table` (default), `json`, `jsonl`, or `csv`.                                                                     |
-| `--log-level`              | Tracing filter; also read from `RUST_LOG`. Defaults to `warn`.                                                                   |
-| `-y`, `--yes`              | Answer every confirmation prompt with yes.                                                                                       |
-| `--assume-timezone <ZONE>` | Read timestamps that carry no time zone as being in this one: `UTC` (or `Z`), or a fixed offset — `-07:00`, `-0700`, `-07`.      |
+| Option                     | Description                                                                                                                                                       |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--store <PATH>`           | Path to the HDF5 store file. The `<PATH>.sqlite` catalog is implicit. Falls back to the `INFRASTORE_STORE` environment variable.                                  |
+| `-f`, `--format`           | Output format: `table` (default), `json`, `jsonl`, or `csv`.                                                                                                      |
+| `--log-level`              | Tracing filter; also read from `RUST_LOG`. Defaults to `warn`.                                                                                                    |
+| `-y`, `--yes`              | Answer every confirmation prompt with yes.                                                                                                                        |
+| `--assume-timezone <ZONE>` | Read timestamps that carry no time zone as being in this one: `UTC` (or `Z`), a fixed offset (`-07:00`, `-0700`, `-07`), or an IANA zone name (`America/Denver`). |
+| `--zoneless`               | Store timestamps that carry no time zone as the wall clocks they are, naming no instant. Mutually exclusive with `--assume-timezone`.                             |
 
 `--store` (or `INFRASTORE_STORE`) is required by every command except `template` and `completions`.
 
@@ -79,21 +81,23 @@ for.
 ### Zoneless timestamps
 
 A timestamp with no offset — `2024-01-01T00:00:00`, or the `2024-01-01 00:00:00` that most CSV
-writers produce — names a wall-clock reading, not an instant, and the store records instants. Such a
-timestamp is therefore refused, and the error names the flag that resolves it:
+writers produce — names a wall-clock reading, not an instant. The CLI will not guess which of the
+two you mean, so such a timestamp is refused and the error names both flags that resolve it:
 
 ```console
 $ infrastore --store s.h5 add --csv load.csv ...
 Error: timestamp '2024-01-01 00:00:00' names no time zone, so it names no instant. Give it an
-offset (RFC3339, like 2024-01-01T00:00:00Z), or pass --assume-timezone UTC (or a fixed offset
-like -07:00) to read every zoneless timestamp with it.
+offset (RFC3339, like 2024-01-01T00:00:00Z), pass --assume-timezone UTC (a fixed offset like
+-07:00, or an IANA name like America/Denver) to read every zoneless timestamp with it, or pass
+--zoneless to store them as the wall clocks they are.
 ```
 
-`--assume-timezone` supplies the missing offset for the whole invocation:
+#### `--assume-timezone`: resolve them to instants
 
 ```console
-$ infrastore --store s.h5 --assume-timezone UTC     add --csv load.csv ...   # read as UTC
-$ infrastore --store s.h5 --assume-timezone -07:00  add --csv load.csv ...   # 00:00 becomes 07:00Z
+$ infrastore --store s.h5 --assume-timezone UTC             add --csv load.csv ...
+$ infrastore --store s.h5 --assume-timezone -07:00          add --csv load.csv ...
+$ infrastore --store s.h5 --assume-timezone America/Denver  add --csv load.csv ...
 ```
 
 Three things to know:
@@ -102,12 +106,53 @@ Three things to know:
   overridden, so a mixed file loads correctly and a fully-offset file is unaffected.
 - It is global, so it also covers `--time-range` bounds and `--issue-time`, which hit the same
   parser.
-- Named zones (`America/Denver`) are **not** accepted. A zoneless timestamp in a zone with daylight
-  saving is not always a single instant — the skipped hour names none and the repeated hour names
-  two — so the flag would have to fail part-way through an ingest or silently pick one. Data written
-  zoneless in this domain is nearly always local _standard_ time, which is a fixed offset
-  year-round; pass that offset. Data that really is civil time with daylight saving should carry its
-  offsets in the file, where each row can say which side of a transition it is on.
+- Whatever it resolves is also **recorded**, as the series' `time_reference` (see
+  [Time references](../explanation/data-model.md#time-references)) — so a read hands the same
+  spelling back rather than relabelling everything UTC. `--assume-timezone -07:00` over a midnight
+  column stores `07:00Z` and prints `2024-01-01T00:00:00-07:00`.
+
+**Prefer a named zone to a fixed offset** for anything that crosses a daylight-saving transition. A
+year of Denver data read as `-07:00` renders every timestamp after March an hour wrong; the same
+data read as `America/Denver` renders all of it correctly, because the zone is applied per instant
+rather than baked in once.
+
+A named zone is the one place in the system that runs local → instant, and it has two wall clocks it
+cannot resolve. Both are **errors naming the row**, not guesses:
+
+```console
+$ infrastore --store s.h5 --assume-timezone America/Denver add --csv fold.csv ...
+Error: timestamp '2024-11-03 01:30:00' is ambiguous in America/Denver: daylight saving repeats
+that wall clock, so it names two instants (2024-11-03T07:30:00+00:00 and
+2024-11-03T08:30:00+00:00). The file has to say which — give the row an explicit offset, or
+re-read the column with --assume-timezone -06:00 or -07:00.
+```
+
+#### `--zoneless`: keep them as wall clocks
+
+For data that has no time zone and wants none — modeled profiles on 24-hour days, say — `--zoneless`
+stores the fields as written, converts nothing, and reads them back unlabelled:
+
+```console
+$ infrastore --store s.h5 --zoneless add --csv profile.csv ...
+$ infrastore --store s.h5 get --owner-id 42 --name load -f csv
+2024-01-01T00:00:00,1
+```
+
+The store then holds the series to that claim. An instant-bearing `--time-range` bound against it is
+refused rather than coerced, and it cannot share one `grid` axis or one ranged bulk read with series
+that do record instants — there is no single meaning either could carry for both. `list --wide`,
+`info`, and `export -f json` all report the `time_reference`, and `store-info` lists the catalog's
+distinct spellings with any unrecognized zone name flagged:
+
+```console
+$ infrastore --store s.h5 store-info
+...
+time_references   ["America/Denver", "utc", "America/Dever (unrecognized zone?)"]
+```
+
+A zone the store has never heard of is _reported_, never refused: the store does not gate on zone
+existence, because that would refuse legitimate data whenever IANA moves ahead of this build's
+database.
 
 ## Commands
 
@@ -445,6 +490,14 @@ value:
 | `--type <T>`            | See the type spellings below.                                              |
 | `--resolution <DUR>`    | Resolution as an ISO-8601 duration, e.g. `PT1H`, `PT15M`, `P1M`.           |
 | `--feature key=value`   | Feature filter; repeatable. Values are inferred as int/float/bool/string.  |
+| `--spelling <S>`        | `zoned` or `zoneless`: which timestamp spelling to keep.                   |
+
+`--spelling` is the constructive half of the time-reference coherence rule. `zoneless` keeps the
+wall-clock series; `zoned` keeps the ones that record instants, including those that declare no
+reference at all. `grid` and the bulk reads span one timestamp axis, so they refuse a selection
+holding both groups — this is how a store containing both is split into one they can read. It is
+unrelated to the global `--zoneless`, which says how timestamps arriving on the _input_ side are to
+be read.
 
 `--component-field` selects every series that varies that field on its owner — the query the
 descriptor exists for. It is descriptive rather than identifying, so it narrows a selector but
@@ -505,7 +558,8 @@ another. The lowercase forms are a command-line shorthand, not a second vocabula
   _stored_ timestamp must be a whole number of milliseconds — a finer one is refused by `add` rather
   than truncated, and the epoch-millisecond form cannot express one at all. See
   [timestamp precision](../explanation/data-model.md#timestamp-precision). A timestamp with no
-  offset needs [`--assume-timezone`](#zoneless-timestamps).
+  offset needs [`--assume-timezone` or `--zoneless`](#zoneless-timestamps), and whichever one you
+  pass is also recorded as the series' `time_reference`.
 - **`--time-range`** is a pair of _timestamps_, not a duration: `START..END` (half-open — `START`
   inclusive, `END` exclusive), where each side is parsed as a timestamp. For example
   `--time-range 2024-01-01T01:00:00Z..2024-01-01T03:00:00Z`. A duration such as `--time-range 1h` is
@@ -519,30 +573,31 @@ A descriptor JSON file is either a single object (one series) or an array of obj
 The CSV holds only numbers, preceded by a mandatory header row (plus a leading timestamp column for
 `NonSequentialTimeSeries`).
 
-| Key                            | Required for             | Notes                                                         |
-| ------------------------------ | ------------------------ | ------------------------------------------------------------- |
-| `owner_id`                     | long layout              | Integer component identifier (`i64`). Rejected when wide.     |
-| `owner_type`                   | long layout              | Wide: the default for `owner_map` rows that name none.        |
-| `owner_category`               | optional                 | `Component` (default) or `SupplementalAttribute`.             |
-| `name`                         | all                      |                                                               |
-| `type`                         | all                      | One of the five writable types; spellings as for `--type`.    |
-| `element_type`                 | all                      | `f64`/`f32`/`i64`/…, `tuple(N,f64)`, or a function-data kind. |
-| `csv`                          | unless `--csv` is passed | Path relative to the descriptor; `--csv` overrides it.        |
-| `element_shape`                | optional                 | Trailing per-step dims; default scalar (`[]`).                |
-| `units`                        | optional                 | Free-form label.                                              |
-| `quantity_kind`                | optional                 | What the values measure, e.g. `ActivePower` (QUDT name).      |
-| `unit_system`                  | optional                 | `natural_units` or `component_base`; unset = unspecified.     |
-| `component_field`              | optional                 | Owning component's field these values vary over time.         |
-| `application_data`             | optional                 | Opaque package-owned payload (e.g. JSON), stored verbatim.    |
-| `features`                     | optional                 | JSON object; int/float/bool/string values. See below.         |
-| `initial_timestamp`            | all but non-sequential   |                                                               |
-| `resolution`                   | all but non-sequential   | ISO-8601 duration, e.g. `PT1H`.                               |
-| `horizon`, `interval`, `count` | forecasts                | The two durations are ISO-8601, e.g. `PT24H`.                 |
-| `percentiles`                  | `Probabilistic`          | Strictly increasing list of floats.                           |
-| `scenario_count`               | `Scenarios` (optional)   | Inferred from the data length if omitted.                     |
-| `layout`                       | optional                 | `long` (default) or `wide`. See below.                        |
-| `owner_map`                    | wide layout              | Sidecar CSV path, or an inline `{"column": owner_id}` object. |
-| `owner_id_from`                | wide layout              | `"header"` (the only value) when the headers are owner ids.   |
+| Key                            | Required for             | Notes                                                            |
+| ------------------------------ | ------------------------ | ---------------------------------------------------------------- |
+| `owner_id`                     | long layout              | Integer component identifier (`i64`). Rejected when wide.        |
+| `owner_type`                   | long layout              | Wide: the default for `owner_map` rows that name none.           |
+| `owner_category`               | optional                 | `Component` (default) or `SupplementalAttribute`.                |
+| `name`                         | all                      |                                                                  |
+| `type`                         | all                      | One of the five writable types; spellings as for `--type`.       |
+| `element_type`                 | all                      | `f64`/`f32`/`i64`/…, `tuple(N,f64)`, or a function-data kind.    |
+| `csv`                          | unless `--csv` is passed | Path relative to the descriptor; `--csv` overrides it.           |
+| `element_shape`                | optional                 | Trailing per-step dims; default scalar (`[]`).                   |
+| `units`                        | optional                 | Free-form label.                                                 |
+| `quantity_kind`                | optional                 | What the values measure, e.g. `ActivePower` (QUDT name).         |
+| `unit_system`                  | optional                 | `natural_units` or `component_base`; unset = unspecified.        |
+| `time_reference`               | optional                 | `utc` / `zoneless` / `-07:00` / an IANA name; normally inferred. |
+| `component_field`              | optional                 | Owning component's field these values vary over time.            |
+| `application_data`             | optional                 | Opaque package-owned payload (e.g. JSON), stored verbatim.       |
+| `features`                     | optional                 | JSON object; int/float/bool/string values. See below.            |
+| `initial_timestamp`            | all but non-sequential   | Also decides the series' `time_reference` unless declared.       |
+| `resolution`                   | all but non-sequential   | ISO-8601 duration, e.g. `PT1H`.                                  |
+| `horizon`, `interval`, `count` | forecasts                | The two durations are ISO-8601, e.g. `PT24H`.                    |
+| `percentiles`                  | `Probabilistic`          | Strictly increasing list of floats.                              |
+| `scenario_count`               | `Scenarios` (optional)   | Inferred from the data length if omitted.                        |
+| `layout`                       | optional                 | `long` (default) or `wide`. See below.                           |
+| `owner_map`                    | wide layout              | Sidecar CSV path, or an inline `{"column": owner_id}` object.    |
+| `owner_id_from`                | wide layout              | `"header"` (the only value) when the headers are owner ids.      |
 
 Unknown keys are rejected. Any key not in the table above — including a typo like `resolutionn` — is
 a hard parse error listing the accepted fields, so hand-edited templates fail loudly rather than

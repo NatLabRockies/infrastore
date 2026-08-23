@@ -249,9 +249,43 @@ pub fn store_info(store_path: &Path, format: Format) -> Result<(), String> {
             json!(infrastore_core::DATA_FORMAT_VERSION),
         ),
         ("compression".into(), json!(compression)),
+        (
+            "time_references".into(),
+            json!(time_reference_audit(&store)?),
+        ),
         ("cli_version".into(), json!(env!("CARGO_PKG_VERSION"))),
     ];
     render_kv("Store", pairs, format)
+}
+
+/// The distinct `time_reference` spellings the catalog holds, with any IANA zone
+/// name this build's tz database does not recognize flagged.
+///
+/// The store deliberately does not gate on zone existence — that would couple
+/// legitimate data to a release cadence (see `TimeReference::validate`) — so it
+/// is *audited* instead, and this is where the audit is readable. A typo like
+/// `America/Dever` is then findable in one command, rather than surfacing at
+/// some later read in some other language.
+///
+/// One `?` flag per unrecognized name rather than a separate list: the point is
+/// to make a wrong spelling jump out of the line it is on.
+fn time_reference_audit(store: &infrastore_core::Store) -> Result<Vec<String>, String> {
+    let (references, unspecified) = store.list_time_references().map_err(|e| e.to_string())?;
+    let mut out: Vec<String> = references
+        .iter()
+        .map(|reference| {
+            let spelling = reference.as_storage_string();
+            if crate::fields::zone_is_known(reference) {
+                spelling
+            } else {
+                format!("{spelling} (unrecognized zone?)")
+            }
+        })
+        .collect();
+    if unspecified {
+        out.push("(unspecified)".to_string());
+    }
+    Ok(out)
 }
 
 /// `verify`: run integrity verification; nonzero exit when errors are present.

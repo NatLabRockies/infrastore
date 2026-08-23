@@ -275,9 +275,15 @@ void infrastore_store_free(struct InfraStore *handle);
  * Add a SingleTimeSeries to the store.
  *
  * `features_json`, when non-null, is parsed as a JSON object whose values must be int, float,
- * bool, or string. `application_data`, `units`, `quantity_kind`, `unit_system`, and
- * `component_field` are optional; `component_field` names the field on the owning component
- * whose value these values are the time-varying form of.
+ * bool, or string. `application_data`, `units`, `quantity_kind`, `unit_system`,
+ * `time_reference`, and `component_field` are optional; `component_field` names the field on
+ * the owning component whose value these values are the time-varying form of, and
+ * `time_reference` records how the timestamps were spelled (`utc`, `zoneless`, a fixed
+ * offset such as `-07:00`, or an IANA zone name such as `America/Denver`).
+ *
+ * `time_range_zoneless` on the read side carries the same distinction for query bounds: a
+ * bound has to be spelled the way the series is, and a mismatch is refused rather than
+ * coerced.
  *
  * # Safety
  *
@@ -304,6 +310,7 @@ int32_t infrastore_store_add_single(struct InfraStore *handle,
                                     const char *units,
                                     const char *quantity_kind,
                                     const char *unit_system,
+                                    const char *time_reference,
                                     const char *component_field,
                                     struct InfraStoreKey **out_key);
 
@@ -335,6 +342,7 @@ int32_t infrastore_store_add_non_sequential(struct InfraStore *handle,
                                             const char *units,
                                             const char *quantity_kind,
                                             const char *unit_system,
+                                            const char *time_reference,
                                             const char *component_field,
                                             struct InfraStoreKey **out_key);
 
@@ -365,6 +373,8 @@ int32_t infrastore_store_add_non_sequential(struct InfraStore *handle,
  * width.
  *
  * `out_quantity_kind`, when non-null, receives the association's quantity kind,
+ * `out_time_reference` receives how the timestamps were spelled — null when unspecified,
+ * which is not a claim they were written as UTC —
  * and `out_unit_system` its basis as the `natural_units` / `component_base`
  * spelling — null when unspecified, which is not the same as natural units.
  * `out_component_field`, when non-null, receives the component field the values
@@ -393,6 +403,7 @@ int32_t infrastore_store_add_non_sequential(struct InfraStore *handle,
 int32_t infrastore_store_get_single(const struct InfraStore *handle,
                                     const struct InfraStoreKey *key,
                                     bool time_range_present,
+                                    bool time_range_zoneless,
                                     int64_t time_range_start_ms,
                                     int64_t time_range_end_ms,
                                     int64_t *out_initial_ts_unix_ms,
@@ -407,6 +418,7 @@ int32_t infrastore_store_get_single(const struct InfraStore *handle,
                                     char **out_units,
                                     char **out_quantity_kind,
                                     char **out_unit_system,
+                                    char **out_time_reference,
                                     char **out_component_field);
 
 /**
@@ -432,7 +444,8 @@ int32_t infrastore_store_get_single(const struct InfraStore *handle,
  *
  * `out_quantity_kind`, when non-null, receives the association's quantity kind, and
  * `out_unit_system` its basis as the `natural_units` / `component_base` spelling — null when
- * unspecified, which is not the same as natural units. `out_component_field`, when non-null,
+ * unspecified, which is not the same as natural units. `out_time_reference` receives how the
+ * timestamps were spelled, on the same terms. `out_component_field`, when non-null,
  * receives the component field the values vary over time. All three are owned C strings freed
  * with `infrastore_string_free`.
  *
@@ -456,6 +469,7 @@ int32_t infrastore_store_get_single(const struct InfraStore *handle,
 int32_t infrastore_store_get_non_sequential(const struct InfraStore *handle,
                                             const struct InfraStoreKey *key,
                                             bool time_range_present,
+                                            bool time_range_zoneless,
                                             int64_t time_range_start_ms,
                                             int64_t time_range_end_ms,
                                             int64_t **out_timestamps,
@@ -470,6 +484,7 @@ int32_t infrastore_store_get_non_sequential(const struct InfraStore *handle,
                                             char **out_units,
                                             char **out_quantity_kind,
                                             char **out_unit_system,
+                                            char **out_time_reference,
                                             char **out_component_field);
 
 /**
@@ -919,7 +934,7 @@ int32_t infrastore_store_persist_catalog(struct InfraStore *handle);
  * `owner_category`, `time_series_type`, `name`, `data_hash` (64-character hex),
  * `initial_timestamp_ms`, `resolution`, `horizon`, `interval`, `count`,
  * `length`, `percentiles`, `element_type`, `element_shape`, `features`,
- * `units`, `quantity_kind`, `unit_system`, `component_field`, and
+ * `units`, `quantity_kind`, `unit_system`, `time_reference`, `component_field`, and
  * `application_data`, with the fields that do not apply to the key's type set to `null`.
  * (There is no `dtype` field; `element_type` is what says how to read the
  * values.)
@@ -1010,6 +1025,7 @@ int32_t infrastore_store_has_any_by_filter(const struct InfraStore *handle,
                                            const char *interval,
                                            const char *features_json,
                                            const char *component_field,
+                                           int32_t zoneless,
                                            bool *out_present);
 
 /**
@@ -1101,6 +1117,7 @@ int32_t infrastore_store_add_forecast(struct InfraStore *handle,
                                       const char *units,
                                       const char *quantity_kind,
                                       const char *unit_system,
+                                      const char *time_reference,
                                       const char *component_field,
                                       struct InfraStoreKey **out_key);
 
@@ -1138,6 +1155,7 @@ int32_t infrastore_store_add_probabilistic(struct InfraStore *handle,
                                            const char *units,
                                            const char *quantity_kind,
                                            const char *unit_system,
+                                           const char *time_reference,
                                            const char *component_field,
                                            struct InfraStoreKey **out_key);
 
@@ -1191,6 +1209,7 @@ int32_t infrastore_batch_add_single(struct InfraStoreBatch *batch,
                                     const char *units,
                                     const char *quantity_kind,
                                     const char *unit_system,
+                                    const char *time_reference,
                                     const char *component_field);
 
 /**
@@ -1222,6 +1241,7 @@ int32_t infrastore_batch_add_non_sequential(struct InfraStoreBatch *batch,
                                             const char *units,
                                             const char *quantity_kind,
                                             const char *unit_system,
+                                            const char *time_reference,
                                             const char *component_field);
 
 /**
@@ -1257,6 +1277,7 @@ int32_t infrastore_batch_add_forecast(struct InfraStoreBatch *batch,
                                       const char *units,
                                       const char *quantity_kind,
                                       const char *unit_system,
+                                      const char *time_reference,
                                       const char *component_field);
 
 /**
@@ -1293,6 +1314,7 @@ int32_t infrastore_batch_add_probabilistic(struct InfraStoreBatch *batch,
                                            const char *units,
                                            const char *quantity_kind,
                                            const char *unit_system,
+                                           const char *time_reference,
                                            const char *component_field);
 
 /**
@@ -1388,6 +1410,7 @@ int32_t infrastore_bulk_result_get_single(const struct InfraStoreBulkReadHandle 
                                           char **out_units,
                                           char **out_quantity_kind,
                                           char **out_unit_system,
+                                          char **out_time_reference,
                                           char **out_component_field);
 
 /**
@@ -1410,6 +1433,7 @@ int32_t infrastore_store_bulk_read(const struct InfraStore *handle,
                                    const struct InfraStoreKey *const *keys,
                                    uint64_t n,
                                    bool time_range_present,
+                                   bool time_range_zoneless,
                                    int64_t time_range_start_ms,
                                    int64_t time_range_end_ms,
                                    struct InfraStoreBulkReadHandle **out_result);
@@ -1462,6 +1486,7 @@ int32_t infrastore_bulk_result_get_non_sequential(const struct InfraStoreBulkRea
                                                   char **out_units,
                                                   char **out_quantity_kind,
                                                   char **out_unit_system,
+                                                  char **out_time_reference,
                                                   char **out_component_field);
 
 /**
@@ -1505,6 +1530,7 @@ int32_t infrastore_bulk_result_get_forecast(const struct InfraStoreBulkReadHandl
                                             char **out_units,
                                             char **out_quantity_kind,
                                             char **out_unit_system,
+                                            char **out_time_reference,
                                             char **out_component_field);
 
 /**
@@ -1637,7 +1663,8 @@ int32_t infrastore_store_transform_single_time_series(struct InfraStore *handle,
  *   `element_type` string, which is how a caller reads the returned bytes as
  *   domain values (`out_dtype` gives only their physical width).
  * - `out_quantity_kind` follows the same rules and receives the association's
- *   quantity kind, and `out_unit_system` its basis as the `natural_units` /
+ *   quantity kind, `out_time_reference` how the timestamps were spelled, and
+ *   `out_unit_system` its basis as the `natural_units` /
  *   `component_base` spelling (null when unspecified).
  * - `out_component_field` follows the same rules and receives the component
  *   field the values vary over time (null when unset).
@@ -1655,6 +1682,7 @@ int32_t infrastore_store_get_forecast(const struct InfraStore *handle,
                                       const char *interval,
                                       const char *features_json,
                                       bool time_range_present,
+                                      bool time_range_zoneless,
                                       int64_t time_range_start_ms,
                                       int64_t time_range_end_ms,
                                       int64_t *out_initial_ts_unix_ms,
@@ -1676,6 +1704,7 @@ int32_t infrastore_store_get_forecast(const struct InfraStore *handle,
                                       char **out_units,
                                       char **out_quantity_kind,
                                       char **out_unit_system,
+                                      char **out_time_reference,
                                       char **out_component_field);
 
 /**
@@ -1715,7 +1744,8 @@ int32_t infrastore_store_get_forecast(const struct InfraStore *handle,
  *   `element_type` string, which is how a caller reads the returned bytes as
  *   domain values (`out_dtype` gives only their physical width).
  * - `out_quantity_kind` follows the same rules and receives the association's
- *   quantity kind, and `out_unit_system` its basis as the `natural_units` /
+ *   quantity kind, `out_time_reference` how the timestamps were spelled, and
+ *   `out_unit_system` its basis as the `natural_units` /
  *   `component_base` spelling (null when unspecified).
  * - `out_component_field` follows the same rules and receives the component
  *   field the values vary over time (null when unset).
@@ -1725,6 +1755,7 @@ int32_t infrastore_store_get_forecast(const struct InfraStore *handle,
 int32_t infrastore_store_get_forecast_by_key(const struct InfraStore *handle,
                                              const struct InfraStoreKey *key,
                                              bool time_range_present,
+                                             bool time_range_zoneless,
                                              int64_t time_range_start_ms,
                                              int64_t time_range_end_ms,
                                              int64_t *out_initial_ts_unix_ms,
@@ -1746,6 +1777,7 @@ int32_t infrastore_store_get_forecast_by_key(const struct InfraStore *handle,
                                              char **out_units,
                                              char **out_quantity_kind,
                                              char **out_unit_system,
+                                             char **out_time_reference,
                                              char **out_component_field);
 
 /**
@@ -1847,6 +1879,7 @@ int32_t infrastore_store_list_keys(const struct InfraStore *handle,
                                    const char *interval,
                                    const char *features_json,
                                    const char *component_field,
+                                   int32_t zoneless,
                                    char **out_json,
                                    uint64_t *out_len);
 
@@ -1879,6 +1912,7 @@ int32_t infrastore_store_list_time_series(const struct InfraStore *handle,
                                           const char *interval,
                                           const char *features_json,
                                           const char *component_field,
+                                          int32_t zoneless,
                                           char **out_json,
                                           uint64_t *out_len);
 
@@ -1904,6 +1938,7 @@ int32_t infrastore_store_list_names(const struct InfraStore *handle,
                                     const char *interval,
                                     const char *features_json,
                                     const char *component_field,
+                                    int32_t zoneless,
                                     char **out_json,
                                     uint64_t *out_len);
 
@@ -1929,6 +1964,7 @@ int32_t infrastore_store_list_owner_types(const struct InfraStore *handle,
                                           const char *interval,
                                           const char *features_json,
                                           const char *component_field,
+                                          int32_t zoneless,
                                           char **out_json,
                                           uint64_t *out_len);
 
@@ -1955,6 +1991,7 @@ int32_t infrastore_store_remove_by_filter(struct InfraStore *handle,
                                           const char *interval,
                                           const char *features_json,
                                           const char *component_field,
+                                          int32_t zoneless,
                                           uint64_t *out_removed);
 
 /**
@@ -2038,6 +2075,7 @@ int32_t infrastore_store_list_array_groups(const struct InfraStore *handle,
                                            const char *interval,
                                            const char *features_json,
                                            const char *component_field,
+                                           int32_t zoneless,
                                            char **out_json,
                                            uint64_t *out_len);
 
@@ -2546,6 +2584,7 @@ int32_t infrastore_store_export_time_series_associations_openapi(const struct In
                                                                  const char *interval,
                                                                  const char *features_json,
                                                                  const char *component_field,
+                                                                 int32_t zoneless,
                                                                  char **out_json,
                                                                  uint64_t *out_len);
 
@@ -2697,6 +2736,7 @@ int32_t infrastore_store_build_static_reader(const struct InfraStore *handle,
                                              const char *resolution,
                                              const char *features_json,
                                              const char *component_field,
+                                             int32_t zoneless,
                                              struct InfraStoreStaticReaderHandle **out_reader);
 
 /**
@@ -2852,6 +2892,7 @@ int32_t infrastore_store_build_forecast_reader(const struct InfraStore *handle,
                                                const char *resolution,
                                                const char *features_json,
                                                const char *component_field,
+                                               int32_t zoneless,
                                                struct InfraStoreForecastReaderHandle **out_reader);
 
 /**

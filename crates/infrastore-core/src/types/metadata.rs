@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use super::element_type::ElementType;
 use super::period::Period;
+use super::time_reference::TimeReference;
 use super::time_series::TimeSeriesType;
 use crate::error::{Result, TimeSeriesError};
 
@@ -299,6 +300,7 @@ pub const RESERVED_FEATURE_NAMES: &[&str] = &[
     "quantity_kind",
     "resolution",
     "scenario_count",
+    "time_reference",
     "time_series_type",
     "timestamps",
     "unit_system",
@@ -394,6 +396,18 @@ pub struct TimeSeriesMetadata {
     pub quantity_kind: Option<String>,
     /// Which basis the values are expressed in, or `None` for unspecified.
     pub unit_system: Option<UnitSystem>,
+    /// How this series' timestamps were spelled, or `None` for unspecified.
+    ///
+    /// The store records instants; this records what they were written *as*, so
+    /// a read can hand back the spelling a write arrived in. It changes nothing
+    /// about the stored instants, the grid, or either content hash — see
+    /// [`TimeReference`].
+    ///
+    /// `None` means *unspecified*, never [`TimeReference::Utc`]: it groups with
+    /// the zoned variants for query bounds (an aware bound is accepted, a naive
+    /// one refused) but it is not a claim that the timestamps were written as
+    /// UTC.
+    pub time_reference: Option<TimeReference>,
     /// The field on the owning component whose value this series varies over
     /// time (e.g. `"max_active_power"`, `"rating"`), or `None`.
     ///
@@ -515,6 +529,7 @@ mod tests {
             units: None,
             quantity_kind: None,
             unit_system: None,
+            time_reference: None,
             component_field: None,
             percentiles: None,
             element_type: ElementType::Scalar(single.data.dtype),

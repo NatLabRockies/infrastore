@@ -109,9 +109,16 @@ ts = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(100.0:123.0), "load
 key = add_time_series!(store, 42, "Generator", Component, ts)   # keeps all five
 ```
 
+A series also records a `time_reference` — how its timestamps were spelled — inferred from the
+timestamp it was built with. A bare `DateTime` is a wall clock (`ZonelessReference()`); a
+`ZonedDateTime` keeps its zone, so a Denver series renders correctly on both sides of every DST
+transition. Reads still return a `DateTime` holding the instant, with the reference beside it;
+`using TimeZones` adds `zoned_timestamp` to fuse them back together losslessly.
+
 None of them is part of the key or of either content hash, so two adds that differ only in a
 descriptor are a duplicate. See
-[Optional Descriptors](../explanation/data-model.md#optional-descriptors).
+[Optional Descriptors](../explanation/data-model.md#optional-descriptors) and
+[Time references](../explanation/data-model.md#time-references).
 
 ### Add many series at once
 

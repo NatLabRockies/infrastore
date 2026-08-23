@@ -178,6 +178,13 @@ _row_period(x) = x === nothing ? nothing : _iso_to_period(String(x))
 _row_int(x) = x === nothing ? nothing : Int(x)
 _row_timestamp(x) = x === nothing ? nothing : _from_unix_ms(Int64(x))
 
+# The row's `time_reference`, absent on a store written before the column
+# existed and `nothing` on a row that declared none.
+function _row_time_reference(r::AbstractDict)
+    value = get(r, "time_reference", nothing)
+    return value === nothing ? nothing : _time_reference(String(value))
+end
+
 # The owner category of a catalog row, which the core writes as its name.
 function _category_for_name(s::AbstractString)
     if s == "Component"
@@ -202,6 +209,7 @@ function _decode_key_row(r::AbstractDict)
         _row_period(r["interval"]),
         _row_int(r["count"]),
         Dict{String, Any}(r["features"]),
+        _row_time_reference(r),
     )
 end
 
@@ -222,6 +230,7 @@ function _decode_array_group_row(r::AbstractDict)
         k.interval,
         k.count,
         k.features,
+        k.time_reference,
         hex2bytes(String(r["data_hash"])),
     )
 end
@@ -248,6 +257,7 @@ function _decode_metadata(r::AbstractDict)
         r["units"] === nothing ? nothing : String(r["units"]),
         r["quantity_kind"] === nothing ? nothing : String(r["quantity_kind"]),
         _unit_system(r["unit_system"] === nothing ? nothing : String(r["unit_system"])),
+        _row_time_reference(r),
         r["component_field"] === nothing ? nothing : String(r["component_field"]),
         r["application_data"] === nothing ? nothing : String(r["application_data"]),
     )
@@ -257,7 +267,7 @@ end
 # `infrastore_store_remove_by_filter` FFI takes, as a tuple in argument order.
 function _filter_args(
     owner_id, owner_category, time_series_type, name, resolution, interval, features,
-    component_field=nothing, name_glob=nothing,
+    component_field=nothing, name_glob=nothing, zoneless=nothing,
 )
     has_owner = owner_id !== nothing
     has_category = owner_category !== nothing
@@ -275,6 +285,9 @@ function _filter_args(
         _period_to_cstr(interval),
         (features === nothing || isempty(features)) ? C_NULL : JSON.json(features),
         component_field === nothing ? C_NULL : String(component_field),
+        # Tri-state: negative is "no filter", which is what a caller that does
+        # not care passes. The two coherence groups are 0 and 1.
+        zoneless === nothing ? Int32(-1) : Int32(zoneless ? 1 : 0),
     )
 end
 
@@ -297,11 +310,12 @@ function _filter_list_json(
     features::Union{Nothing, AbstractDict}=nothing,
     component_field=nothing,
     name_glob=nothing,
+    zoneless=nothing,
 )
     fptr = _cached_dlsym(fname)
-    (has_owner, owner_arg, has_category, category_arg, has_type, type_arg, name_arg, name_glob_arg, resolution_iso, interval_iso, features_json, component_field_arg) = _filter_args(
+    (has_owner, owner_arg, has_category, category_arg, has_type, type_arg, name_arg, name_glob_arg, resolution_iso, interval_iso, features_json, component_field_arg, zoneless_arg) = _filter_args(
         owner_id, owner_category, time_series_type, name, resolution, interval, features,
-        component_field, name_glob,
+        component_field, name_glob, zoneless,
     )
     return _owned_str(
         (out_json, out_len) -> @ccall $fptr(
@@ -318,6 +332,7 @@ function _filter_list_json(
             interval_iso::Cstring,
             features_json::Cstring,
             component_field_arg::Cstring,
+            zoneless_arg::Int32,
             out_json::Ref{Ptr{Cchar}},
             out_len::Ref{UInt64},
         )::Int32
@@ -346,6 +361,12 @@ filters, as [`KeyRow`](@ref)s. With no filter set the whole store is listed.
 - `component_field` — exact, case-sensitive match on the owning component's
   field (e.g. `"max_active_power"`). A row that declares none matches no value,
   so this cannot select the rows that left it unset.
+- `zoneless` — `true` keeps only the rows whose timestamps are wall clocks;
+  `false` keeps everything that names an instant, including the rows that
+  recorded no [`TimeReference`](@ref) at all. A binary predicate rather than a
+  match on a specific spelling, because those two groups are what the store's
+  mixed-selection rules split on — one time bound, or one shared timestamp axis,
+  cannot serve both.
 """
 function list_keys(store::Store; kwargs...)
     json = _filter_list_json(:infrastore_store_list_keys, store; kwargs...)
@@ -405,10 +426,11 @@ function remove_by_filter!(
     features::Union{Nothing, AbstractDict}=nothing,
     component_field::Union{Nothing, AbstractString}=nothing,
     name_glob::Union{Nothing, AbstractString}=nothing,
+    zoneless::Union{Nothing, Bool}=nothing,
 )
-    (has_owner, owner_arg, has_category, category_arg, has_type, type_arg, name_arg, name_glob_arg, resolution_iso, interval_iso, features_json, component_field_arg) = _filter_args(
+    (has_owner, owner_arg, has_category, category_arg, has_type, type_arg, name_arg, name_glob_arg, resolution_iso, interval_iso, features_json, component_field_arg, zoneless_arg) = _filter_args(
         owner_id, owner_category, time_series_type, name, resolution, interval, features,
-        component_field, name_glob,
+        component_field, name_glob, zoneless,
     )
     out_removed = Ref{UInt64}(0)
     code = @ccall lib_path().infrastore_store_remove_by_filter(
@@ -425,6 +447,7 @@ function remove_by_filter!(
         interval_iso::Cstring,
         features_json::Cstring,
         component_field_arg::Cstring,
+        zoneless_arg::Int32,
         out_removed::Ref{UInt64},
     )::Int32
     _check(code)
@@ -650,10 +673,11 @@ function has_any_time_series(
     features::Union{Nothing, AbstractDict}=nothing,
     component_field=nothing,
     name_glob=nothing,
+    zoneless=nothing,
 )
-    (has_owner, owner_arg, has_category, category_arg, has_type, type_arg, name_arg, name_glob_arg, resolution_iso, interval_iso, features_json, component_field_arg) = _filter_args(
+    (has_owner, owner_arg, has_category, category_arg, has_type, type_arg, name_arg, name_glob_arg, resolution_iso, interval_iso, features_json, component_field_arg, zoneless_arg) = _filter_args(
         owner_id, owner_category, time_series_type, name, resolution, interval, features,
-        component_field, name_glob,
+        component_field, name_glob, zoneless,
     )
     out = Ref{Bool}(false)
     code = @ccall lib_path().infrastore_store_has_any_by_filter(
@@ -670,6 +694,7 @@ function has_any_time_series(
         interval_iso::Cstring,
         features_json::Cstring,
         component_field_arg::Cstring,
+        zoneless_arg::Int32,
         out::Ref{Bool},
     )::Int32
     _check(code)

@@ -3,8 +3,10 @@
 
 use std::sync::OnceLock;
 
-use chrono::{DateTime, Duration, FixedOffset, NaiveDate, NaiveDateTime, TimeZone, Utc};
-use infrastore_core::{ElementType, FeatureValue, OwnerCategory, Period, TimeSeriesType};
+use chrono::{DateTime, Duration, FixedOffset, NaiveDate, NaiveDateTime, Offset, TimeZone, Utc};
+use infrastore_core::{
+    ElementType, FeatureValue, OwnerCategory, Period, TimeReference, TimeSeriesType,
+};
 
 /// Representative ISO-8601 durations, for the error message a caller sees when
 /// theirs did not parse. Covers both kinds: fixed spans and calendar ones.
@@ -64,55 +66,73 @@ pub fn period_horizon_steps(horizon: Period, resolution: Period) -> Result<usize
     resolution.divide_into(&horizon).map_err(|e| e.to_string())
 }
 
-/// The offset a *zoneless* timestamp is read with, from the global
-/// `--assume-timezone`. Unset means a zoneless timestamp is an error.
+/// How the CLI reads a *zoneless* timestamp, from the global
+/// `--assume-timezone` / `--zoneless`. Unset means a zoneless timestamp is an
+/// error.
 ///
 /// A `OnceLock` set once from `main`, matching how the other global flags are
 /// held (`confirm::set_assume_yes`, `color`): one command per process, and the
 /// alternative is threading a parse setting through every command signature and
 /// the whole descriptor-resolution chain.
-static ASSUMED_OFFSET: OnceLock<Option<FixedOffset>> = OnceLock::new();
+static TIME_SPEC: OnceLock<Option<TimeSpec>> = OnceLock::new();
 
-/// Record the global `--assume-timezone`, validating it. Called once, from
-/// `main`, before anything parses a timestamp — so a bad zone fails immediately
-/// rather than part-way through a CSV.
+/// What `--assume-timezone` (or `--zoneless`) says a zoneless timestamp means.
 ///
-/// A second call is an error rather than a silent no-op. Discarding the failed
-/// `set` would leave the first zone in place while the caller believes it
-/// installed the second: in `main` that is unreachable, but the unit tests below
-/// run in this same process and assert on how a zoneless timestamp parses, so a
-/// swallowed second set is exactly the shape that turns them order-dependent
-/// with no visible cause.
-pub fn set_assumed_timezone(spec: Option<&str>) -> Result<(), String> {
-    let offset = match spec {
-        None => None,
-        Some(s) => Some(parse_utc_offset(s)?),
-    };
-    ASSUMED_OFFSET
-        .set(offset)
-        .map_err(|_| "the assumed timezone has already been set".to_string())?;
-    Ok(())
+/// The CLI is the one place in the system that runs the **local → instant**
+/// direction. Every other binding is handed an already-resolved datetime object
+/// by its own datetime library; the CLI is handed text, so it has to do the
+/// resolution itself — which is why it is also the only layer that needs a tz
+/// database.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeSpec {
+    /// `--zoneless`: the timestamps *are* wall clocks. No conversion at all —
+    /// the fields are read as they stand, and the series records
+    /// [`TimeReference::Zoneless`].
+    Zoneless,
+    /// `--assume-timezone UTC`.
+    Utc,
+    /// `--assume-timezone -07:00`: one offset for every row.
+    Offset(FixedOffset),
+    /// `--assume-timezone America/Denver`: resolved per row against the tz
+    /// database, which is what makes the two failure cases below reportable.
+    Zone(chrono_tz::Tz),
 }
 
-fn assumed_offset() -> Option<FixedOffset> {
-    ASSUMED_OFFSET.get().copied().flatten()
+impl TimeSpec {
+    /// The spelling a timestamp read under this spec records.
+    fn reference(self) -> TimeReference {
+        match self {
+            TimeSpec::Zoneless => TimeReference::Zoneless,
+            TimeSpec::Utc => TimeReference::Utc,
+            TimeSpec::Offset(offset) => TimeReference::FixedOffset(offset.local_minus_utc() / 60),
+            TimeSpec::Zone(tz) => TimeReference::Zone(tz.name().to_string()),
+        }
+    }
 }
 
-/// Parse the `--assume-timezone` value: `UTC` (or `Z`), or a fixed UTC offset
-/// spelled `+HH:MM`, `-HH:MM`, `+HHMM`, or `+HH`.
+fn assumed_spec() -> Option<TimeSpec> {
+    TIME_SPEC.get().copied().flatten()
+}
+
+/// Parse the `--assume-timezone` value, three ways: `UTC` (or `Z`), a fixed UTC
+/// offset spelled `+HH:MM` / `-HH:MM` / `+HHMM` / `+HH`, or an IANA zone name.
 ///
-/// Deliberately **not** an IANA zone name. A zoneless timestamp in a named zone
-/// is not always one instant: an hour that daylight saving skips names none, and
-/// the hour it repeats names two, so `America/Denver` would have to either
-/// reject rows in the middle of an ingest or silently pick one. Data written
-/// zoneless in this domain is almost always local *standard* time — a fixed
-/// offset year-round, which is exactly what this takes — and data that really is
-/// civil time with DST should carry its offsets in the file, where each row can
-/// say which side of the transition it is on.
-pub fn parse_utc_offset(s: &str) -> Result<FixedOffset, String> {
+/// A named zone used to be refused here, on the grounds that a zoneless
+/// timestamp in one is not always a single instant — daylight saving skips one
+/// hour and repeats another — so the CLI would have to "either reject rows in
+/// the middle of an ingest or silently pick one". Rejecting loudly, per row,
+/// with both candidates named, is the acceptable half of that pair; silently
+/// picking is still not, and [`parse_timestamp_with_reference`] does the former.
+/// So the rationale is superseded, and this is now a three-way parse.
+///
+/// Preferring a named zone over a fixed offset matters for any series that
+/// crosses a transition: a year of Denver data stamped `-07:00` renders every
+/// timestamp after March an hour wrong, while `America/Denver` renders all of
+/// them correctly.
+pub fn parse_time_spec(s: &str) -> Result<TimeSpec, String> {
     let t = s.trim();
     if t.eq_ignore_ascii_case("utc") || t.eq_ignore_ascii_case("z") {
-        return Ok(FixedOffset::east_opt(0).expect("zero is a valid offset"));
+        return Ok(TimeSpec::Utc);
     }
     // Reuse chrono's own offset grammar by parsing a timestamp that is nothing
     // but the offset -- after widening the two *basic* ISO-8601 spellings onto
@@ -128,60 +148,163 @@ pub fn parse_utc_offset(s: &str) -> Result<FixedOffset, String> {
         }
         _ => t.to_string(),
     };
-    DateTime::parse_from_rfc3339(&format!("1970-01-01T00:00:00{normalized}"))
-        .map(|dt| *dt.offset())
-        .map_err(|_| {
-            if t.contains('/') {
-                format!(
-                    "invalid --assume-timezone '{s}': named zones are not accepted, because a \
-                     zoneless timestamp in one is not always a single instant (daylight saving \
-                     skips one hour and repeats another). Pass the fixed offset the data uses, \
-                     e.g. -07:00 for Mountain Standard Time, or UTC."
-                )
-            } else {
-                format!(
-                    "invalid --assume-timezone '{s}' (use UTC, or a fixed offset like +05:30 or \
-                     -07:00)"
-                )
-            }
-        })
+    if normalized.starts_with(['+', '-'])
+        && let Ok(dt) = DateTime::parse_from_rfc3339(&format!("1970-01-01T00:00:00{normalized}"))
+    {
+        return Ok(TimeSpec::Offset(*dt.offset()));
+    }
+    t.parse::<chrono_tz::Tz>().map(TimeSpec::Zone).map_err(|_| {
+        format!(
+            "invalid --assume-timezone '{s}' (use UTC, a fixed offset like +05:30 or -07:00, or \
+             an IANA zone name like America/Denver)"
+        )
+    })
 }
 
-/// Parse an RFC3339 timestamp, or a bare integer of epoch milliseconds.
+/// Record the global `--assume-timezone` / `--zoneless`, validating it. Called
+/// once, from `main`, before anything parses a timestamp — so a bad zone fails
+/// immediately rather than part-way through a CSV.
 ///
-/// A *zoneless* timestamp (`2024-01-01T00:00:00`, or the `2024-01-01 00:00:00`
-/// that most CSV writers produce) names no instant on its own, so it is accepted
-/// only when `--assume-timezone` says which offset to read it with. An offset
-/// the input carries itself is never overridden — the flag fills a gap, it does
-/// not relabel data that already said what it meant.
+/// A second call is an error rather than a silent no-op. Discarding the failed
+/// `set` would leave the first spec in place while the caller believes it
+/// installed the second: in `main` that is unreachable, but the unit tests below
+/// run in this same process and assert on how a zoneless timestamp parses, so a
+/// swallowed second set is exactly the shape that turns them order-dependent
+/// with no visible cause.
+pub fn set_assumed_timezone(spec: Option<&str>, zoneless: bool) -> Result<(), String> {
+    let resolved = match (spec, zoneless) {
+        (Some(_), true) => {
+            return Err(
+                "--zoneless and --assume-timezone say different things about the same \
+                 timestamps: one records them as wall clocks naming no instant, the other \
+                 resolves them to instants. Pass one."
+                    .to_string(),
+            );
+        }
+        (Some(s), false) => Some(parse_time_spec(s)?),
+        (None, true) => Some(TimeSpec::Zoneless),
+        (None, false) => None,
+    };
+    TIME_SPEC
+        .set(resolved)
+        .map_err(|_| "the assumed timezone has already been set".to_string())?;
+    Ok(())
+}
+
+/// Parse an RFC3339 timestamp, or a bare integer of epoch milliseconds, keeping
+/// only the instant. See [`parse_timestamp_with_reference`], which is the same
+/// parse with the spelling retained.
 pub fn parse_timestamp(s: &str) -> Result<DateTime<Utc>, String> {
+    parse_timestamp_with_reference(s).map(|(instant, _)| instant)
+}
+
+/// Parse a timestamp, returning the instant it names **and how it was spelled**.
+///
+/// Four inputs, four spellings:
+///
+/// * RFC3339 with `Z` → [`TimeReference::Utc`];
+/// * RFC3339 with an offset → [`TimeReference::FixedOffset`], preserved rather
+///   than consumed — the offset was in the file, and the store now has somewhere
+///   to put it;
+/// * epoch milliseconds → [`TimeReference::Utc`] (an epoch count names an
+///   instant and nothing else);
+/// * a *zoneless* timestamp (`2024-01-01T00:00:00`, or the
+///   `2024-01-01 00:00:00` most CSV writers produce) → whatever
+///   `--assume-timezone` / `--zoneless` says, and an error when neither was
+///   given, because on its own it names no instant.
+///
+/// An offset the input carries itself is never overridden — the flag fills a
+/// gap, it does not relabel data that already said what it meant.
+///
+/// Under `--assume-timezone <IANA name>` this is where local → instant actually
+/// runs, and `chrono-tz` answers in three values. `Single` is ingested; the
+/// repeated fall-back hour and the skipped spring-forward hour are **errors**,
+/// naming the row's text and (for the fold) both candidate instants. Failing the
+/// row loudly is the acceptable half of "reject rows mid-ingest or silently pick
+/// one"; silently picking is not.
+pub fn parse_timestamp_with_reference(s: &str) -> Result<(DateTime<Utc>, TimeReference), String> {
     let s = s.trim();
     if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
-        return Ok(dt.with_timezone(&Utc));
+        let offset_minutes = dt.offset().local_minus_utc() / 60;
+        // `Z` and `+00:00` are the same instant and a different claim. chrono
+        // does not keep which one it read, so the text is asked directly.
+        let reference = if offset_minutes == 0 && s.ends_with(['Z', 'z']) {
+            TimeReference::Utc
+        } else {
+            TimeReference::FixedOffset(offset_minutes)
+        };
+        return Ok((dt.with_timezone(&Utc), reference));
     }
     if let Ok(ms) = s.parse::<i64>() {
         return Utc
             .timestamp_millis_opt(ms)
             .single()
+            .map(|dt| (dt, TimeReference::Utc))
             .ok_or_else(|| format!("invalid epoch-ms timestamp '{s}'"));
     }
     if let Some(naive) = parse_zoneless(s) {
-        let Some(offset) = assumed_offset() else {
+        let Some(spec) = assumed_spec() else {
             return Err(format!(
                 "timestamp '{s}' names no time zone, so it names no instant. Give it an offset \
-                 (RFC3339, like 2024-01-01T00:00:00Z), or pass --assume-timezone UTC (or a fixed \
-                 offset like -07:00) to read every zoneless timestamp with it."
+                 (RFC3339, like 2024-01-01T00:00:00Z), pass --assume-timezone UTC (a fixed \
+                 offset like -07:00, or an IANA name like America/Denver) to read every \
+                 zoneless timestamp with it, or pass --zoneless to store them as the wall \
+                 clocks they are."
             ));
         };
-        return naive
-            .and_local_timezone(offset)
-            .single()
-            .map(|dt| dt.with_timezone(&Utc))
-            .ok_or_else(|| format!("timestamp '{s}' is not a valid instant at offset {offset}"));
+        let reference = spec.reference();
+        let instant = match spec {
+            // No conversion: a wall clock is stored as its own fields, exactly
+            // as every other binding holds a zoneless timestamp. Reading it
+            // through the machine's local zone -- which is what any "convert"
+            // step would do -- would make the same file ingest differently in
+            // Denver than in CI.
+            TimeSpec::Zoneless => naive.and_utc(),
+            TimeSpec::Utc => naive.and_utc(),
+            TimeSpec::Offset(offset) => naive
+                .and_local_timezone(offset)
+                .single()
+                .map(|dt| dt.with_timezone(&Utc))
+                .ok_or_else(|| {
+                    format!("timestamp '{s}' is not a valid instant at offset {offset}")
+                })?,
+            TimeSpec::Zone(tz) => resolve_in_zone(naive, tz, s)?,
+        };
+        return Ok((instant, reference));
     }
     Err(format!(
         "invalid timestamp '{s}' (use RFC3339 like 2024-01-01T00:00:00Z or epoch milliseconds)"
     ))
+}
+
+/// The local → instant direction for a named zone, with both of its partial
+/// answers turned into errors that name the row.
+///
+/// This is the whole reason a named zone is accepted at all: `chrono-tz` reports
+/// the gap and the fold rather than guessing, so the CLI can refuse the row
+/// instead of storing one of two instants and never saying which.
+fn resolve_in_zone(
+    naive: NaiveDateTime,
+    tz: chrono_tz::Tz,
+    raw: &str,
+) -> Result<DateTime<Utc>, String> {
+    match tz.from_local_datetime(&naive) {
+        chrono::LocalResult::Single(dt) => Ok(dt.with_timezone(&Utc)),
+        chrono::LocalResult::Ambiguous(first, second) => Err(format!(
+            "timestamp '{raw}' is ambiguous in {tz}: daylight saving repeats that wall clock, \
+             so it names two instants ({} and {}). The file has to say which — give the row an \
+             explicit offset, or re-read the column with --assume-timezone {} or {}.",
+            first.with_timezone(&Utc).to_rfc3339(),
+            second.with_timezone(&Utc).to_rfc3339(),
+            first.offset().fix(),
+            second.offset().fix(),
+        )),
+        chrono::LocalResult::None => Err(format!(
+            "timestamp '{raw}' does not exist in {tz}: daylight saving skips that wall clock, so \
+             it names no instant. Check the row, or re-read the column with --assume-timezone \
+             set to the offset the data actually uses."
+        )),
+    }
 }
 
 /// The zoneless spellings [`parse_timestamp`] recognizes: ISO-8601 with a `T` or
@@ -207,9 +330,14 @@ fn parse_zoneless(s: &str) -> Option<NaiveDateTime> {
 }
 
 /// A half-open `START..END` time range, as `get`, `grid`, and `export` spell it.
-pub type TimeRange = (DateTime<Utc>, DateTime<Utc>);
+pub type TimeRange = infrastore_core::TimeRange;
 
 /// Parse a `START..END` time range, each end an RFC3339 timestamp or epoch-ms.
+///
+/// The bounds carry their *spelling* through, not just their instant: the store
+/// refuses a wall-clock bound against a series that records instants, and an
+/// instant bound against a zoneless one, rather than coercing either. Both ends
+/// have to agree — a range is one request.
 pub fn parse_time_range(spec: Option<&str>) -> Result<Option<TimeRange>, String> {
     let Some(spec) = spec else {
         return Ok(None);
@@ -217,7 +345,19 @@ pub fn parse_time_range(spec: Option<&str>) -> Result<Option<TimeRange>, String>
     let (start, end) = spec
         .split_once("..")
         .ok_or_else(|| format!("invalid --time-range '{spec}' (expected START..END)"))?;
-    Ok(Some((parse_timestamp(start)?, parse_timestamp(end)?)))
+    let (start_instant, start_reference) = parse_timestamp_with_reference(start)?;
+    let (end_instant, end_reference) = parse_timestamp_with_reference(end)?;
+    if start_reference.is_zoneless() != end_reference.is_zoneless() {
+        return Err(format!(
+            "the two ends of --time-range '{spec}' are spelled differently: one names an \
+             instant and the other is a bare wall clock. Spell both the way the series is."
+        ));
+    }
+    Ok(Some(TimeRange::spelled(
+        start_instant,
+        end_instant,
+        start_reference.is_zoneless(),
+    )))
 }
 
 /// Parse an owner category. `Component` / `SupplementalAttribute` are the
@@ -392,11 +532,12 @@ mod tests {
     /// of them.
     #[test]
     fn every_documented_offset_spelling_parses() {
-        let east = |h: i32, m: i32| FixedOffset::east_opt(h * 3600 + m * 60).unwrap();
+        let east =
+            |h: i32, m: i32| TimeSpec::Offset(FixedOffset::east_opt(h * 3600 + m * 60).unwrap());
         for (spec, want) in [
-            ("UTC", east(0, 0)),
-            ("utc", east(0, 0)),
-            ("Z", east(0, 0)),
+            ("UTC", TimeSpec::Utc),
+            ("utc", TimeSpec::Utc),
+            ("Z", TimeSpec::Utc),
             ("-07:00", east(-7, 0)),
             ("+05:30", east(5, 30)),
             ("-0700", east(-7, 0)),
@@ -406,26 +547,74 @@ mod tests {
             ("  -07:00  ", east(-7, 0)),
         ] {
             assert_eq!(
-                parse_utc_offset(spec).unwrap(),
+                parse_time_spec(spec).unwrap(),
                 want,
-                "{spec} did not parse to the offset it names"
+                "{spec} did not parse to what it names"
             );
         }
     }
 
     #[test]
-    fn a_named_zone_is_refused_with_the_ambiguity_as_the_reason() {
-        let err = parse_utc_offset("America/Denver").unwrap_err();
-        assert!(err.contains("named zones are not accepted"), "{err}");
-        assert!(err.contains("daylight saving"), "{err}");
+    fn a_named_zone_is_now_accepted_as_itself() {
+        // The refusal this replaced said a named zone would have to "either
+        // reject rows in the middle of an ingest or silently pick one".
+        // Rejecting loudly, per row, with both candidates named, is the
+        // acceptable half of that pair — see `resolve_in_zone` — so the zone is
+        // now taken as a zone rather than collapsed onto one offset.
+        assert_eq!(
+            parse_time_spec("America/Denver").unwrap(),
+            TimeSpec::Zone(chrono_tz::America::Denver)
+        );
+        assert_eq!(
+            TimeSpec::Zone(chrono_tz::America::Denver).reference(),
+            TimeReference::Zone("America/Denver".into())
+        );
 
-        // Nothing that merely looks offset-shaped slips through.
-        for bad in ["07:00", "-7:00", "-070", "-07:0", "+2400x", "", "-"] {
+        // Nothing that merely looks offset- or zone-shaped slips through.
+        for bad in [
+            "07:00",
+            "-7:00",
+            "-070",
+            "-07:0",
+            "+2400x",
+            "",
+            "-",
+            "Mars/Olympus",
+        ] {
             assert!(
-                parse_utc_offset(bad).is_err(),
-                "{bad:?} must not parse as an offset"
+                parse_time_spec(bad).is_err(),
+                "{bad:?} must not parse as a time zone"
             );
         }
+    }
+
+    #[test]
+    fn a_timestamps_own_spelling_is_preserved_not_consumed() {
+        // The offset was in the file; the store now has somewhere to put it.
+        let (instant, reference) = parse_timestamp_with_reference("2024-01-01T00:00:00-07:00")
+            .expect("an RFC3339 timestamp with an offset parses");
+        assert_eq!(instant.to_rfc3339(), "2024-01-01T07:00:00+00:00");
+        assert_eq!(reference, TimeReference::FixedOffset(-420));
+
+        // `Z` and `+00:00` are the same instant and a different claim.
+        assert_eq!(
+            parse_timestamp_with_reference("2024-01-01T00:00:00Z")
+                .unwrap()
+                .1,
+            TimeReference::Utc
+        );
+        assert_eq!(
+            parse_timestamp_with_reference("2024-01-01T00:00:00+00:00")
+                .unwrap()
+                .1,
+            TimeReference::FixedOffset(0)
+        );
+
+        // An epoch count names an instant and nothing else.
+        assert_eq!(
+            parse_timestamp_with_reference("0").unwrap().1,
+            TimeReference::Utc
+        );
     }
 
     #[test]

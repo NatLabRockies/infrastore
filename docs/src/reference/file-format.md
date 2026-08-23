@@ -57,15 +57,20 @@ Opening a store whose recorded version differs from the version this build reads
 the check is exact equality and there is no in-place upgrade path: regenerate the store with the
 matching build.
 
-(`0.16.0` added the metadata column `component_field`; `0.15.0` renamed the metadata column `ext` to
-`application_data` and added the `quantity_kind` and `unit_system` columns; unlike a new _table_,
-new _columns_ are not picked up by the idempotent `CREATE TABLE IF NOT EXISTS` DDL, so a store one
-version behind is rejected on open; `0.14.0` moved a `NonSequentialTimeSeries`'s timestamps out of
-the association row: the `timestamps_json` TEXT column became a `timestamps_hash` BLOB resolving
-into the new content-addressed [`timestamp_sets`](#timestamp_sets) table, and irregular arrays that
-share a time axis are now column-packed into `nsts_…` datasets keyed by that hash instead of one
-standalone `arr_…` dataset each; `0.13.0` replaced the `dtype` column with `element_type`, which
-names the _logical_ element type and derives the physical dtype from it — see
+(`0.17.0` added the metadata column `time_reference`, which records how a series' timestamps were
+_spelled_ — an instant in UTC, an instant at a fixed offset, an instant in a named IANA zone, or a
+wall clock naming no instant. It also changes how stored timestamps are _interpreted_: a row marked
+`zoneless` holds wall clocks the store keeps as if UTC, which an older reader would hand back as
+instants. See [Time references](../explanation/data-model.md#time-references); `0.16.0` added the
+metadata column `component_field`; `0.15.0` renamed the metadata column `ext` to `application_data`
+and added the `quantity_kind` and `unit_system` columns; unlike a new _table_, new _columns_ are not
+picked up by the idempotent `CREATE TABLE IF NOT EXISTS` DDL, so a store one version behind is
+rejected on open; `0.14.0` moved a `NonSequentialTimeSeries`'s timestamps out of the association
+row: the `timestamps_json` TEXT column became a `timestamps_hash` BLOB resolving into the new
+content-addressed [`timestamp_sets`](#timestamp_sets) table, and irregular arrays that share a time
+axis are now column-packed into `nsts_…` datasets keyed by that hash instead of one standalone
+`arr_…` dataset each; `0.13.0` replaced the `dtype` column with `element_type`, which names the
+_logical_ element type and derives the physical dtype from it — see
 [Element types](./element-types.md); `0.12.0` changed `owner_category` and `time_series_type` from
 TEXT names to small INTEGER codes — see [Discriminant encoding](#discriminant-encoding) below;
 `0.11.0` renamed the metadata column `logical_type` to `ext` — an opaque, package-owned extension
@@ -301,6 +306,7 @@ One row per association between an owner and a stored array.
 | `units`             | TEXT    | Free-form units label                                               |
 | `quantity_kind`     | TEXT    | What the values measure (QUDT `QuantityKind` name); `NULL` if unset |
 | `unit_system`       | TEXT    | `natural_units` or `component_base`; `NULL` means _unspecified_     |
+| `time_reference`    | TEXT    | How the timestamps were spelled (below); `NULL` means _unspecified_ |
 | `component_field`   | TEXT    | Owning component's field these values vary; `NULL` if unset         |
 | `percentiles_json`  | TEXT    | JSON array of percentiles for `Probabilistic`; `NULL` else          |
 | `element_type`      | TEXT    | Canonical element-type string (`NOT NULL DEFAULT 'f64'`)            |
@@ -311,6 +317,31 @@ One row per association between an owner and a stored array.
 
 The two content-address hashes are the last two columns. Column order is not load-bearing — every
 statement names its columns — so the layout is chosen for readability.
+
+#### `time_reference`
+
+One TEXT column holds all four spellings: `utc`, `zoneless`, a fixed offset (`-07:00`), or an IANA
+zone name (`America/Denver`). That is unambiguous rather than merely hoped for, because the core
+refuses a zone name that reads as an offset or as either literal — the `utc` literal is lowercase
+precisely so the IANA zone `UTC` stays a distinct value.
+
+`NULL` means _unspecified_, never `utc`. For query bounds it groups with the three zoned spellings
+(an instant bound is accepted, a wall-clock bound refused), but it is not a claim the timestamps
+were written as UTC.
+
+Deliberately **not** indexed, and that does not change now that `ListFilter::zoneless` exists. The
+`idx_component_field` partial-index pattern is wrong here twice over:
+`WHERE time_reference IS NOT
+NULL` would exclude exactly the `NULL` rows that filter has to return,
+and the column is low-cardinality — a handful of distinct values across a whole store — so it is not
+selective enough to earn an index. In practice it is combined with `owner_id` or `name`, which are
+indexed.
+
+The column does not reach storage. `array_hash` takes no timestamp input at all, the packed dataset
+names carry no timestamp, and `initial_timestamp` stays RFC 3339 **UTC** whatever the reference says
+— a `-07:00` series stores `2024-01-01T07:00:00Z` and the label `-07:00`, and the offset is applied
+on the way out. Two series with equal values therefore pool into the same dataset and share a
+`data_hash` regardless of their references, which is correct: they are the same numbers.
 
 ### `feature_sets`
 
@@ -569,7 +600,7 @@ SELECT id, owner_id, owner_type,
                              ELSE 'unknown(' || time_series_type || ')' END AS time_series_type,
        name,
        initial_timestamp, resolution, length, horizon, interval, count,
-       units, quantity_kind, unit_system, component_field,
+       units, quantity_kind, unit_system, time_reference, component_field,
        element_type, element_shape, application_data,
        lower(hex(data_hash))       AS data_hash,
        lower(hex(features_hash))   AS features_hash,

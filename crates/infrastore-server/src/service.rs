@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use infrastore_core::{
-    KeyIdentity, ListFilter, OwnerCategory, Period, Store, TimeSeriesError, TimeSeriesType,
+    KeyIdentity, ListFilter, OwnerCategory, Period, Store, TimeRange, TimeSeriesError,
+    TimeSeriesType,
 };
 
 /// Parse an ISO-8601 period from a request, mapping failures to an
@@ -40,6 +41,9 @@ fn filter_from_list_req(req: ListReq) -> Result<ListFilter, Status> {
     if let Some(field) = req.component_field {
         filter = filter.component_field(field);
     }
+    if let Some(zoneless) = req.zoneless {
+        filter = filter.zoneless(zoneless);
+    }
     if let Some(iso) = req.resolution {
         filter = filter.resolution(parse_period(&iso)?);
     }
@@ -52,14 +56,18 @@ fn filter_from_list_req(req: ListReq) -> Result<ListFilter, Status> {
     Ok(filter)
 }
 
-/// An inclusive-start, exclusive-end UTC time range.
-type TimeRange = (DateTime<Utc>, DateTime<Utc>);
-
 /// Parse an optional `(start, end)` RFC3339 range; both must be supplied
 /// together or neither. Shared by `GetTimeSeries` and `BulkRead`.
+///
+/// `zoneless` carries how the client *spelled* those bounds, which the core
+/// checks against the series' own reference. The wire form is RFC3339 either
+/// way — a zoneless client sends the wall clock read as if UTC, exactly as the
+/// store holds it — so the flag is the only thing that distinguishes them, and
+/// absent means zoned.
 fn parse_time_range(
     start: Option<String>,
     end: Option<String>,
+    zoneless: Option<bool>,
 ) -> Result<Option<TimeRange>, Status> {
     match (start, end) {
         (Some(s), Some(e)) => {
@@ -69,7 +77,11 @@ fn parse_time_range(
             let end = DateTime::parse_from_rfc3339(&e)
                 .map_err(|err| Status::invalid_argument(format!("end: {err}")))?
                 .with_timezone(&Utc);
-            Ok(Some((start, end)))
+            Ok(Some(TimeRange::spelled(
+                start,
+                end,
+                zoneless.unwrap_or(false),
+            )))
         }
         (None, None) => Ok(None),
         _ => Err(Status::invalid_argument(
@@ -189,7 +201,7 @@ impl CatalogStoreSvc for CatalogStoreService {
             .key
             .ok_or_else(|| Status::invalid_argument("missing key"))?;
         let key = key_from_pb(key).map_err(map_convert_err)?;
-        let time_range = parse_time_range(req.start_rfc3339, req.end_rfc3339)?;
+        let time_range = parse_time_range(req.start_rfc3339, req.end_rfc3339, req.bounds_zoneless)?;
         let store = self.store.lock().await;
         let data = store.get_time_series(&key, time_range).map_err(map_err)?;
         // The read already stamped the row's element type onto `data`, so the
@@ -356,7 +368,7 @@ impl CatalogStoreSvc for CatalogStoreService {
                 self.max_bulk_read_keys
             )));
         }
-        let time_range = parse_time_range(req.start_rfc3339, req.end_rfc3339)?;
+        let time_range = parse_time_range(req.start_rfc3339, req.end_rfc3339, req.bounds_zoneless)?;
         let keys = req
             .keys
             .into_iter()

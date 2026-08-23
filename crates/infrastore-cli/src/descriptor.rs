@@ -9,7 +9,8 @@ use std::path::Path;
 
 use infrastore_core::{
     AddRequest, Descriptors, Deterministic, ElementType, Features, NonSequentialTimeSeries,
-    Probabilistic, Scenarios, SingleTimeSeries, TimeSeriesData, TimeSeriesType, UnitSystem,
+    Probabilistic, Scenarios, SingleTimeSeries, TimeReference, TimeSeriesData, TimeSeriesType,
+    UnitSystem,
 };
 use serde::Deserialize;
 
@@ -76,6 +77,15 @@ pub struct Descriptor {
     pub quantity_kind: Option<String>,
     /// `"natural_units"` or `"component_base"`. Absent means unspecified.
     pub unit_system: Option<String>,
+    /// How this series' timestamps are spelled: `"utc"`, `"zoneless"`, a fixed
+    /// offset (`"-07:00"`), or an IANA zone name (`"America/Denver"`).
+    ///
+    /// Normally absent, and then *inferred* from the timestamps the ingest
+    /// actually reads — an offset in the CSV text is preserved, a `Z` records
+    /// UTC, and a zoneless column records whatever `--assume-timezone` /
+    /// `--zoneless` said. Set it only to declare a spelling the text cannot
+    /// carry; it overrides the inference for the whole series.
+    pub time_reference: Option<String>,
     /// The field on the owning component whose value these values are the
     /// time-varying form of (e.g. `"max_active_power"`). Free-form.
     pub component_field: Option<String>,
@@ -412,6 +422,50 @@ impl Descriptor {
         Ok(out)
     }
 
+    /// The raw text of the timestamp this series is anchored on: the
+    /// descriptor's `initial_timestamp` for a regular grid, or the first row of
+    /// the CSV's timestamp column for an irregular one (which has no
+    /// `initial_timestamp` to speak of).
+    fn anchor_timestamp<'a>(
+        &'a self,
+        ts_type: TimeSeriesType,
+        csv: &'a CsvData,
+    ) -> Option<&'a str> {
+        if ts_type == TimeSeriesType::NonSequentialTimeSeries {
+            return csv.first_timestamp();
+        }
+        self.initial_timestamp.as_deref()
+    }
+
+    /// The timestamp spelling this series records.
+    ///
+    /// An explicit `time_reference` wins; otherwise it is read off the
+    /// timestamps this ingest actually parsed, since the spelling is a property
+    /// of the *text* and the descriptor never sees it. `first_timestamp` is the
+    /// raw text of whichever timestamp the series is anchored on: the
+    /// descriptor's `initial_timestamp` for a regular grid, the first row of the
+    /// timestamp column for an irregular one.
+    ///
+    /// A series takes one spelling, so only the anchor is consulted. A file
+    /// whose offsets change part-way (local civil time across a DST boundary) is
+    /// exactly the case `--assume-timezone <IANA name>` exists for: the zone
+    /// renders every row correctly, where the offset of the first row would be
+    /// an hour wrong after the transition.
+    fn time_reference(
+        &self,
+        first_timestamp: Option<&str>,
+    ) -> Result<Option<TimeReference>, String> {
+        if let Some(spelling) = self.time_reference.as_deref() {
+            return TimeReference::parse(spelling)
+                .map(Some)
+                .map_err(|e| format!("series '{}': invalid time_reference: {e}", self.name));
+        }
+        match first_timestamp {
+            Some(raw) => Ok(Some(parse::parse_timestamp_with_reference(raw)?.1)),
+            None => Ok(None),
+        }
+    }
+
     /// The descriptive attributes this descriptor declares, which are set on
     /// the series rather than on the request.
     ///
@@ -430,6 +484,11 @@ impl Descriptor {
             units: self.units.clone(),
             quantity_kind: self.quantity_kind.clone(),
             unit_system,
+            // Filled in per series from the timestamps actually ingested, not
+            // from the descriptor: the spelling is a property of the text the
+            // CSV (or `initial_timestamp`) carried, and the descriptor never
+            // sees it. See `Descriptor::time_reference`.
+            time_reference: None,
             component_field: self.component_field.clone(),
             application_data: self.application_data.clone(),
         })
@@ -491,6 +550,7 @@ impl Descriptor {
         // The descriptor's `element_type`, `units`, and `application_data` describe the
         // series, so they are set on it rather than on the request.
         data.set_descriptors(self.descriptors(element_type)?);
+        data.set_time_reference(self.time_reference(self.anchor_timestamp(ts_type, &csv))?);
 
         Ok(AddRequest {
             owner_id,
@@ -605,6 +665,11 @@ impl Descriptor {
             check_regular_grid(&csv.timestamps(), initial, resolution, csv.rows, &self.name)?;
         }
 
+        // One anchor for the whole file: every column of a wide CSV shares the
+        // timestamp column, so every series it yields shares one spelling.
+        let anchor = self.anchor_timestamp(ts_type, &csv);
+        let time_reference = self.time_reference(anchor)?;
+
         let mut out = Vec::with_capacity(columns.len());
         for (j, (owner_id, owner_type)) in owners.into_iter().enumerate() {
             let cells: Vec<String> = (0..csv.rows)
@@ -625,6 +690,7 @@ impl Descriptor {
                 }
             };
             data.set_descriptors(self.descriptors(element_type)?);
+            data.set_time_reference(time_reference.clone());
             out.push(AddRequest {
                 owner_id,
                 owner_type,

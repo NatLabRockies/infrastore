@@ -129,6 +129,7 @@ fn good_key() -> pb::TimeSeriesKey {
         length: None,
         horizon: None,
         count: None,
+        time_reference: None,
     }
 }
 
@@ -146,6 +147,7 @@ async fn a_missing_key_is_invalid_argument_on_every_key_taking_rpc() {
             key: None,
             start_rfc3339: None,
             end_rfc3339: None,
+            bounds_zoneless: None,
         })
         .await
         .unwrap_err();
@@ -173,6 +175,7 @@ async fn a_one_sided_time_range_is_invalid_argument() {
             key: Some(good_key()),
             start_rfc3339: Some(t0().to_rfc3339()),
             end_rfc3339: None,
+            bounds_zoneless: None,
         })
         .await
         .unwrap_err();
@@ -184,6 +187,7 @@ async fn a_one_sided_time_range_is_invalid_argument() {
             key: Some(good_key()),
             start_rfc3339: None,
             end_rfc3339: Some(t0().to_rfc3339()),
+            bounds_zoneless: None,
         })
         .await
         .unwrap_err();
@@ -196,6 +200,7 @@ async fn a_one_sided_time_range_is_invalid_argument() {
                 key: Some(good_key()),
                 start_rfc3339: None,
                 end_rfc3339: None,
+                bounds_zoneless: None,
             })
             .await
             .is_ok()
@@ -206,6 +211,7 @@ async fn a_one_sided_time_range_is_invalid_argument() {
                 key: Some(good_key()),
                 start_rfc3339: Some(t0().to_rfc3339()),
                 end_rfc3339: Some((t0() + Duration::hours(2)).to_rfc3339()),
+                bounds_zoneless: None,
             })
             .await
             .is_ok()
@@ -233,6 +239,7 @@ async fn a_malformed_rfc3339_timestamp_is_invalid_argument() {
                 key: Some(good_key()),
                 start_rfc3339: start.clone(),
                 end_rfc3339: end.clone(),
+                bounds_zoneless: None,
             })
             .await
             .unwrap_err();
@@ -257,6 +264,7 @@ async fn an_unparseable_iso_period_is_invalid_argument() {
             key: Some(key),
             start_rfc3339: None,
             end_rfc3339: None,
+            bounds_zoneless: None,
         })
         .await
         .unwrap_err();
@@ -296,6 +304,7 @@ async fn an_unknown_owner_category_enum_int_is_invalid_argument() {
             key: Some(key),
             start_rfc3339: None,
             end_rfc3339: None,
+            bounds_zoneless: None,
         })
         .await
         .unwrap_err();
@@ -342,6 +351,7 @@ async fn an_unknown_time_series_type_enum_int_is_invalid_argument() {
             key: Some(key),
             start_rfc3339: None,
             end_rfc3339: None,
+            bounds_zoneless: None,
         })
         .await
         .unwrap_err();
@@ -404,14 +414,16 @@ async fn listing_an_empty_store_returns_empty_messages_not_errors() {
 
     assert!(
         client
-            .list_time_series(None, None, None, None, None, None, None, None, None)
+            .list_time_series(None, None, None, None, None, None, None, None, None, None)
             .await
             .unwrap()
             .is_empty()
     );
     assert!(
         client
-            .list_keys(None, None, None, None, None, None, None, None, None, false)
+            .list_keys(
+                None, None, None, None, None, None, None, None, None, None, false
+            )
             .await
             .unwrap()
             .is_empty()
@@ -458,7 +470,18 @@ async fn a_filter_matching_nothing_returns_an_empty_list() {
 
     assert!(
         client
-            .list_time_series(Some(999), None, None, None, None, None, None, None, None)
+            .list_time_series(
+                Some(999),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None
+            )
             .await
             .unwrap()
             .is_empty()
@@ -474,7 +497,8 @@ async fn a_filter_matching_nothing_returns_an_empty_list() {
                 None,
                 None,
                 None,
-                None
+                None,
+                None,
             )
             .await
             .unwrap()
@@ -550,6 +574,7 @@ async fn getting_a_missing_key_is_not_found() {
             key: Some(absent.clone()),
             start_rfc3339: None,
             end_rfc3339: None,
+            bounds_zoneless: None,
         })
         .await
         .unwrap_err();
@@ -575,6 +600,7 @@ async fn bulk_read_with_an_empty_key_list_returns_no_items() {
             keys: Vec::new(),
             start_rfc3339: None,
             end_rfc3339: None,
+            bounds_zoneless: None,
         })
         .await
         .unwrap()
@@ -615,6 +641,7 @@ async fn bulk_read_fails_the_whole_batch_on_one_missing_key() {
             keys: vec![present(1), present(2)],
             start_rfc3339: None,
             end_rfc3339: None,
+            bounds_zoneless: None,
         })
         .await
         .unwrap()
@@ -633,6 +660,7 @@ async fn bulk_read_fails_the_whole_batch_on_one_missing_key() {
                 keys,
                 start_rfc3339: None,
                 end_rfc3339: None,
+                bounds_zoneless: None,
             })
             .await
             .unwrap_err();
@@ -650,6 +678,7 @@ async fn bulk_read_returns_duplicate_keys_once_each() {
             keys: vec![good_key(), good_key(), good_key()],
             start_rfc3339: None,
             end_rfc3339: None,
+            bounds_zoneless: None,
         })
         .await
         .unwrap()
@@ -689,7 +718,10 @@ async fn a_time_range_applies_to_every_key_in_a_bulk_read() {
     let k2 = key(2);
     let range = (t0() + Duration::hours(2), t0() + Duration::hours(5));
 
-    let items = client.bulk_read(&[&k1, &k2], Some(range)).await.unwrap();
+    let items = client
+        .bulk_read(&[&k1, &k2], Some(range.into()))
+        .await
+        .unwrap();
     assert_eq!(items.len(), 2);
     for (i, base) in [(0usize, 100.0f64), (1, 200.0)] {
         let single = items[i].as_single().unwrap();
@@ -713,7 +745,7 @@ async fn a_time_range_applies_to_every_key_in_a_bulk_read() {
 
     // Apart from the name, the slice matches the per-key read.
     for (i, k) in [&k1, &k2].iter().enumerate() {
-        let per_key = client.get_time_series(k, Some(range)).await.unwrap();
+        let per_key = client.get_time_series(k, Some(range.into())).await.unwrap();
         let (bulk, single) = (items[i].as_single().unwrap(), per_key.as_single().unwrap());
         assert_eq!(bulk.data, single.data, "item {i}");
         assert_eq!(bulk.initial_timestamp, single.initial_timestamp, "item {i}");
@@ -781,7 +813,18 @@ async fn a_monthly_series_survives_the_wire_as_a_calendar_period() {
 
     // Metadata rows carry it.
     let metas = client
-        .list_time_series(Some(7), None, None, None, None, None, None, None, None)
+        .list_time_series(
+            Some(7),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(metas.len(), 1);
@@ -813,7 +856,7 @@ async fn a_monthly_series_survives_the_wire_as_a_calendar_period() {
     let feb = Utc.with_ymd_and_hms(2024, 2, 15, 0, 0, 0).unwrap();
     let mar = Utc.with_ymd_and_hms(2024, 3, 15, 0, 0, 0).unwrap();
     let sliced = client
-        .get_time_series(keys[0].identity(), Some((feb, mar)))
+        .get_time_series(keys[0].identity(), Some((feb, mar).into()))
         .await
         .unwrap();
     let det = sliced.as_deterministic().unwrap();
@@ -830,9 +873,10 @@ async fn a_monthly_series_survives_the_wire_as_a_calendar_period() {
                 None,
                 None,
                 None,
+                None,
                 Some(Period::Months(1)),
                 None,
-                None
+                None,
             )
             .await
             .unwrap()
@@ -848,9 +892,10 @@ async fn a_monthly_series_survives_the_wire_as_a_calendar_period() {
                 None,
                 None,
                 None,
+                None,
                 Some(Period::fixed(Duration::days(30))),
                 None,
-                None
+                None,
             )
             .await
             .unwrap()
@@ -885,7 +930,7 @@ async fn map_status_translates_not_found_and_invalid_argument() {
     let key = infrastore_proto::convert::key_from_pb(good_key()).unwrap();
     let backwards = (t0() + Duration::hours(5), t0());
     let err = client
-        .get_time_series(&key, Some(backwards))
+        .get_time_series(&key, Some(backwards.into()))
         .await
         .unwrap_err();
     match err {
@@ -1012,7 +1057,7 @@ async fn every_read_rpc_answers_on_a_populated_store() {
 
     assert_eq!(
         client
-            .list_time_series(None, None, None, None, None, None, None, None, None)
+            .list_time_series(None, None, None, None, None, None, None, None, None, None)
             .await
             .unwrap()
             .len(),
@@ -1020,7 +1065,9 @@ async fn every_read_rpc_answers_on_a_populated_store() {
     );
     assert_eq!(
         client
-            .list_keys(None, None, None, None, None, None, None, None, None, true)
+            .list_keys(
+                None, None, None, None, None, None, None, None, None, None, true
+            )
             .await
             .unwrap()
             .len(),
@@ -1092,6 +1139,7 @@ async fn bulk_read_refuses_more_keys_than_the_server_allows() {
             keys: vec![good_key(), good_key(), good_key()],
             start_rfc3339: None,
             end_rfc3339: None,
+            bounds_zoneless: None,
         })
         .await
         .unwrap()
@@ -1105,6 +1153,7 @@ async fn bulk_read_refuses_more_keys_than_the_server_allows() {
             keys: vec![good_key(), good_key(), good_key(), good_key()],
             start_rfc3339: None,
             end_rfc3339: None,
+            bounds_zoneless: None,
         })
         .await
         .unwrap_err();
@@ -1131,6 +1180,7 @@ async fn bulk_read_refuses_more_keys_than_the_server_allows() {
             ],
             start_rfc3339: None,
             end_rfc3339: None,
+            bounds_zoneless: None,
         })
         .await
         .unwrap_err();
@@ -1148,6 +1198,7 @@ async fn the_default_bulk_read_limit_admits_an_ordinary_batch() {
             keys,
             start_rfc3339: None,
             end_rfc3339: None,
+            bounds_zoneless: None,
         })
         .await
         .unwrap()

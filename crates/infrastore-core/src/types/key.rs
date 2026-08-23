@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use super::metadata::{Features, OwnerCategory, TimeSeriesMetadata};
 use super::period::Period;
+use super::time_reference::TimeReference;
 use super::time_series::TimeSeriesType;
 use crate::error::{Result, TimeSeriesError};
 
@@ -46,6 +47,10 @@ pub struct SingleTimeSeriesKey {
     pub identity: KeyIdentity,
     pub initial_timestamp: DateTime<Utc>,
     pub length: usize,
+    /// How [`Self::initial_timestamp`] was spelled, or `None` for unspecified.
+    /// A caller holding a key needs to know how to spell the timestamp the key
+    /// just handed them; it is descriptive, so it is outside [`KeyIdentity`].
+    pub time_reference: Option<TimeReference>,
 }
 
 /// Identifying key plus the descriptive snapshot for a
@@ -56,6 +61,9 @@ pub struct SingleTimeSeriesKey {
 pub struct NonSequentialTimeSeriesKey {
     pub identity: KeyIdentity,
     pub length: usize,
+    /// How the series' timestamp vector was spelled, or `None` for unspecified.
+    /// The vector itself is read from the data; this is how to render it.
+    pub time_reference: Option<TimeReference>,
 }
 
 /// Identifying key plus the descriptive snapshot for a forecast
@@ -71,6 +79,9 @@ pub struct ForecastTimeSeriesKey {
     pub initial_timestamp: DateTime<Utc>,
     pub horizon: Period,
     pub count: usize,
+    /// How [`Self::initial_timestamp`] and the window timestamps derived from it
+    /// were spelled, or `None` for unspecified.
+    pub time_reference: Option<TimeReference>,
 }
 
 /// Logical handle returned from `add_time_series`, `list_time_series_keys`, and
@@ -91,6 +102,7 @@ pub enum TimeSeriesKey {
 impl SingleTimeSeriesKey {
     /// Build a `SingleTimeSeries` key. `resolution` is required (not `Option`),
     /// enforcing the invariant that a `SingleTimeSeries` always has one.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         owner_id: i64,
         owner_category: OwnerCategory,
@@ -99,6 +111,7 @@ impl SingleTimeSeriesKey {
         features: Features,
         initial_timestamp: DateTime<Utc>,
         length: usize,
+        time_reference: Option<TimeReference>,
     ) -> Self {
         Self {
             identity: KeyIdentity {
@@ -112,6 +125,7 @@ impl SingleTimeSeriesKey {
             },
             initial_timestamp,
             length,
+            time_reference,
         }
     }
 }
@@ -125,6 +139,7 @@ impl NonSequentialTimeSeriesKey {
         name: String,
         features: Features,
         length: usize,
+        time_reference: Option<TimeReference>,
     ) -> Self {
         Self {
             identity: KeyIdentity {
@@ -137,6 +152,7 @@ impl NonSequentialTimeSeriesKey {
                 features,
             },
             length,
+            time_reference,
         }
     }
 }
@@ -156,6 +172,7 @@ impl ForecastTimeSeriesKey {
         horizon: impl Into<Period>,
         interval: impl Into<Period>,
         count: usize,
+        time_reference: Option<TimeReference>,
     ) -> Self {
         Self {
             identity: KeyIdentity {
@@ -170,6 +187,7 @@ impl ForecastTimeSeriesKey {
             initial_timestamp,
             horizon: horizon.into(),
             count,
+            time_reference,
         }
     }
 
@@ -224,6 +242,16 @@ impl TimeSeriesKey {
         &self.identity().features
     }
 
+    /// How this series' timestamps were spelled, or `None` for unspecified.
+    /// Descriptive, so it is part of the snapshot and never of key equality.
+    pub fn time_reference(&self) -> Option<&TimeReference> {
+        match self {
+            TimeSeriesKey::Single(k) => k.time_reference.as_ref(),
+            TimeSeriesKey::NonSequential(k) => k.time_reference.as_ref(),
+            TimeSeriesKey::Forecast(k) => k.time_reference.as_ref(),
+        }
+    }
+
     /// Reconstruct the descriptive key for a stored association from its
     /// metadata row. This is the canonical row → key builder used by the listing
     /// and resolution paths. Returns [`TimeSeriesError::IntegrityError`] if a
@@ -251,6 +279,7 @@ impl TimeSeriesKey {
                     m.initial_timestamp
                         .ok_or_else(|| missing("initial_timestamp"))?,
                     m.length.ok_or_else(|| missing("length"))?,
+                    m.time_reference.clone(),
                 )))
             }
             TimeSeriesType::NonSequentialTimeSeries => Ok(TimeSeriesKey::NonSequential(
@@ -260,6 +289,7 @@ impl TimeSeriesKey {
                     name,
                     features,
                     m.length.ok_or_else(|| missing("length"))?,
+                    m.time_reference.clone(),
                 ),
             )),
             TimeSeriesType::Deterministic
@@ -277,6 +307,7 @@ impl TimeSeriesKey {
                 m.horizon.ok_or_else(|| missing("horizon"))?,
                 m.interval.ok_or_else(|| missing("interval"))?,
                 m.count.ok_or_else(|| missing("count"))?,
+                m.time_reference.clone(),
             ))),
         }
     }
@@ -328,6 +359,7 @@ mod tests {
             Features::new(),
             Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
             4,
+            None,
         ));
         let b = TimeSeriesKey::Single(SingleTimeSeriesKey::new(
             2,
@@ -337,6 +369,7 @@ mod tests {
             Features::new(),
             Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
             4,
+            None,
         ));
         let mut set = HashSet::new();
         set.insert(a.clone());
@@ -358,6 +391,7 @@ mod tests {
                 Features::new(),
                 Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
                 length,
+                None,
             ))
         };
         let a = base(4);

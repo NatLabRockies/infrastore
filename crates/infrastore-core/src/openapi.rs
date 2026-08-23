@@ -29,6 +29,14 @@
 //! a different thing from natural units, so the two must stay distinguishable
 //! through the round trip.
 //!
+//! `time_reference` is deliberately **absent** from this wire form, unlike every
+//! other descriptor. The schema this exports against is vendored from
+//! SiennaSchemas (`conformance/sienna_schemas/`), which has no such field yet,
+//! and emitting one would ship a wire change ahead of the spec that defines it.
+//! The reference is available everywhere else — the catalog, the metadata
+//! getters, the proto, and every binding — so an exporter that needs it today
+//! reads it from there; add it here in the same change that lands it upstream.
+//!
 //! On top of the shared fields, each of the six [`TimeSeriesType`] values adds
 //! its own geometry fields — see [`ts_row_to_json`] — and every field that
 //! does not apply to a row's type is absent from that row's object, never

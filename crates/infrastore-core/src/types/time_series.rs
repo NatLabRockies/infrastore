@@ -7,6 +7,7 @@ use super::array::TypedArray;
 use super::element_type::ElementType;
 use super::metadata::UnitSystem;
 use super::period::Period;
+use super::time_reference::TimeReference;
 
 /// Discriminator for the six time series types defined in the spec.
 ///
@@ -211,6 +212,9 @@ pub struct SingleTimeSeries {
     /// Which basis the values are expressed in, or `None` for unspecified.
     /// See [`UnitSystem`].
     pub unit_system: Option<UnitSystem>,
+    /// How this series' timestamps were spelled, or `None` for unspecified.
+    /// See [`TimeReference`] and [`crate::TimeSeriesMetadata::time_reference`].
+    pub time_reference: Option<TimeReference>,
     /// The field on the owning component whose value varies over time here
     /// (e.g. `"max_active_power"`), or `None`.
     /// See [`crate::TimeSeriesMetadata::component_field`].
@@ -240,6 +244,7 @@ impl SingleTimeSeries {
             units: None,
             quantity_kind: None,
             unit_system: None,
+            time_reference: None,
             component_field: None,
             application_data: None,
         }
@@ -269,6 +274,13 @@ impl SingleTimeSeries {
     /// Declare which unit basis the values are expressed in.
     pub fn with_unit_system(mut self, unit_system: UnitSystem) -> Self {
         self.unit_system = Some(unit_system);
+        self
+    }
+
+    /// Declare how this series' timestamps were spelled. Validated on commit
+    /// (a zone name's *shape* only — see [`TimeReference::validate`]).
+    pub fn with_time_reference(mut self, time_reference: TimeReference) -> Self {
+        self.time_reference = Some(time_reference);
         self
     }
 
@@ -321,6 +333,9 @@ pub struct NonSequentialTimeSeries {
     /// Which basis the values are expressed in, or `None` for unspecified.
     /// See [`UnitSystem`].
     pub unit_system: Option<UnitSystem>,
+    /// How this series' timestamps were spelled, or `None` for unspecified.
+    /// See [`TimeReference`] and [`crate::TimeSeriesMetadata::time_reference`].
+    pub time_reference: Option<TimeReference>,
     /// The field on the owning component whose value varies over time here
     /// (e.g. `"max_active_power"`), or `None`.
     /// See [`crate::TimeSeriesMetadata::component_field`].
@@ -357,6 +372,7 @@ impl NonSequentialTimeSeries {
             units: None,
             quantity_kind: None,
             unit_system: None,
+            time_reference: None,
             component_field: None,
             application_data: None,
         })
@@ -386,6 +402,13 @@ impl NonSequentialTimeSeries {
     /// Declare which unit basis the values are expressed in.
     pub fn with_unit_system(mut self, unit_system: UnitSystem) -> Self {
         self.unit_system = Some(unit_system);
+        self
+    }
+
+    /// Declare how this series' timestamps were spelled. Validated on commit
+    /// (a zone name's *shape* only — see [`TimeReference::validate`]).
+    pub fn with_time_reference(mut self, time_reference: TimeReference) -> Self {
+        self.time_reference = Some(time_reference);
         self
     }
 
@@ -442,6 +465,9 @@ pub struct Deterministic {
     /// Which basis the values are expressed in, or `None` for unspecified.
     /// See [`UnitSystem`].
     pub unit_system: Option<UnitSystem>,
+    /// How this series' timestamps were spelled, or `None` for unspecified.
+    /// See [`TimeReference`] and [`crate::TimeSeriesMetadata::time_reference`].
+    pub time_reference: Option<TimeReference>,
     /// The field on the owning component whose value varies over time here
     /// (e.g. `"max_active_power"`), or `None`.
     /// See [`crate::TimeSeriesMetadata::component_field`].
@@ -480,6 +506,7 @@ impl Deterministic {
             units: None,
             quantity_kind: None,
             unit_system: None,
+            time_reference: None,
             component_field: None,
             application_data: None,
         };
@@ -560,6 +587,9 @@ pub struct Probabilistic {
     /// Which basis the values are expressed in, or `None` for unspecified.
     /// See [`UnitSystem`].
     pub unit_system: Option<UnitSystem>,
+    /// How this series' timestamps were spelled, or `None` for unspecified.
+    /// See [`TimeReference`] and [`crate::TimeSeriesMetadata::time_reference`].
+    pub time_reference: Option<TimeReference>,
     /// The field on the owning component whose value varies over time here
     /// (e.g. `"max_active_power"`), or `None`.
     /// See [`crate::TimeSeriesMetadata::component_field`].
@@ -593,6 +623,13 @@ impl Deterministic {
     /// Declare which unit basis the values are expressed in.
     pub fn with_unit_system(mut self, unit_system: UnitSystem) -> Self {
         self.unit_system = Some(unit_system);
+        self
+    }
+
+    /// Declare how this series' timestamps were spelled. Validated on commit
+    /// (a zone name's *shape* only — see [`TimeReference::validate`]).
+    pub fn with_time_reference(mut self, time_reference: TimeReference) -> Self {
+        self.time_reference = Some(time_reference);
         self
     }
 
@@ -640,6 +677,7 @@ impl Probabilistic {
             units: None,
             quantity_kind: None,
             unit_system: None,
+            time_reference: None,
             component_field: None,
             application_data: None,
         };
@@ -722,6 +760,9 @@ pub struct Scenarios {
     /// Which basis the values are expressed in, or `None` for unspecified.
     /// See [`UnitSystem`].
     pub unit_system: Option<UnitSystem>,
+    /// How this series' timestamps were spelled, or `None` for unspecified.
+    /// See [`TimeReference`] and [`crate::TimeSeriesMetadata::time_reference`].
+    pub time_reference: Option<TimeReference>,
     /// The field on the owning component whose value varies over time here
     /// (e.g. `"max_active_power"`), or `None`.
     /// See [`crate::TimeSeriesMetadata::component_field`].
@@ -755,6 +796,13 @@ impl Probabilistic {
     /// Declare which unit basis the values are expressed in.
     pub fn with_unit_system(mut self, unit_system: UnitSystem) -> Self {
         self.unit_system = Some(unit_system);
+        self
+    }
+
+    /// Declare how this series' timestamps were spelled. Validated on commit
+    /// (a zone name's *shape* only — see [`TimeReference::validate`]).
+    pub fn with_time_reference(mut self, time_reference: TimeReference) -> Self {
+        self.time_reference = Some(time_reference);
         self
     }
 
@@ -799,6 +847,7 @@ impl Scenarios {
             units: None,
             quantity_kind: None,
             unit_system: None,
+            time_reference: None,
             component_field: None,
             application_data: None,
         };
@@ -907,6 +956,13 @@ impl Scenarios {
         self
     }
 
+    /// Declare how this series' timestamps were spelled. Validated on commit
+    /// (a zone name's *shape* only — see [`TimeReference::validate`]).
+    pub fn with_time_reference(mut self, time_reference: TimeReference) -> Self {
+        self.time_reference = Some(time_reference);
+        self
+    }
+
     /// Name the component field these values vary over time (e.g.
     /// `"max_active_power"`).
     pub fn with_component_field(mut self, component_field: impl Into<String>) -> Self {
@@ -930,7 +986,7 @@ impl Scenarios {
 /// catalog row via [`TimeSeriesData::set_descriptors`].
 ///
 /// This is a struct rather than a positional argument list because four of the
-/// six fields are `Option<String>`: as bare parameters, `units`,
+/// seven fields are `Option<String>`: as bare parameters, `units`,
 /// `quantity_kind`, `component_field`, and `application_data` would be silently
 /// interchangeable at every call site.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -939,6 +995,7 @@ pub struct Descriptors {
     pub units: Option<String>,
     pub quantity_kind: Option<String>,
     pub unit_system: Option<UnitSystem>,
+    pub time_reference: Option<TimeReference>,
     pub component_field: Option<String>,
     pub application_data: Option<String>,
 }
@@ -951,6 +1008,7 @@ impl Descriptors {
             units: None,
             quantity_kind: None,
             unit_system: None,
+            time_reference: None,
             component_field: None,
             application_data: None,
         }
@@ -1036,6 +1094,17 @@ impl TimeSeriesData {
         }
     }
 
+    /// How the timestamps were spelled, or `None` if unspecified.
+    pub fn time_reference(&self) -> Option<&TimeReference> {
+        match self {
+            TimeSeriesData::SingleTimeSeries(s) => s.time_reference.as_ref(),
+            TimeSeriesData::NonSequentialTimeSeries(s) => s.time_reference.as_ref(),
+            TimeSeriesData::Deterministic(d) => d.time_reference.as_ref(),
+            TimeSeriesData::Probabilistic(p) => p.time_reference.as_ref(),
+            TimeSeriesData::Scenarios(s) => s.time_reference.as_ref(),
+        }
+    }
+
     /// The component field these values vary over time, or `None`.
     pub fn component_field(&self) -> Option<&str> {
         match self {
@@ -1079,6 +1148,12 @@ impl TimeSeriesData {
     /// Declare the unit basis on the wrapped series.
     pub fn with_unit_system(mut self, unit_system: UnitSystem) -> Self {
         self.set_unit_system(Some(unit_system));
+        self
+    }
+
+    /// Declare how the wrapped series' timestamps were spelled.
+    pub fn with_time_reference(mut self, time_reference: TimeReference) -> Self {
+        self.set_time_reference(Some(time_reference));
         self
     }
 
@@ -1138,6 +1213,17 @@ impl TimeSeriesData {
         }
     }
 
+    /// Set the timestamp spelling in place.
+    pub fn set_time_reference(&mut self, time_reference: Option<TimeReference>) {
+        match self {
+            TimeSeriesData::SingleTimeSeries(s) => s.time_reference = time_reference,
+            TimeSeriesData::NonSequentialTimeSeries(s) => s.time_reference = time_reference,
+            TimeSeriesData::Deterministic(d) => d.time_reference = time_reference,
+            TimeSeriesData::Probabilistic(p) => p.time_reference = time_reference,
+            TimeSeriesData::Scenarios(s) => s.time_reference = time_reference,
+        }
+    }
+
     /// Set the component field in place.
     pub fn set_component_field(&mut self, component_field: Option<String>) {
         match self {
@@ -1168,6 +1254,7 @@ impl TimeSeriesData {
             units,
             quantity_kind,
             unit_system,
+            time_reference,
             component_field,
             application_data,
         } = descriptors;
@@ -1175,6 +1262,7 @@ impl TimeSeriesData {
         self.set_units(units);
         self.set_quantity_kind(quantity_kind);
         self.set_unit_system(unit_system);
+        self.set_time_reference(time_reference);
         self.set_component_field(component_field);
         self.set_application_data(application_data);
     }

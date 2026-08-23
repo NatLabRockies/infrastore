@@ -120,7 +120,8 @@ end
 """
     build_static_reader(store; resolution=nothing, time_series_type=SingleTimeSeries,
                         owner_id=nothing, owner_category=nothing, name=nothing,
-                        name_glob=nothing, features=nothing, component_field=nothing)
+                        name_glob=nothing, features=nothing, component_field=nothing,
+                        zoneless=nothing)
 
 Build a [`StaticReader`] over the static series matching the filter.
 
@@ -144,6 +145,7 @@ function build_static_reader(
     name_glob::Union{Nothing, AbstractString}=nothing,
     features::Union{Nothing, AbstractDict}=nothing,
     component_field::Union{Nothing, AbstractString}=nothing,
+    zoneless::Union{Nothing, Bool}=nothing,
 )
     time_series_type in (SingleTimeSeries, NonSequentialTimeSeries) || throw(
         InvalidParameterError(
@@ -160,6 +162,11 @@ function build_static_reader(
     resolution_iso = resolution === nothing ? C_NULL : _period_to_iso(resolution)
     features_arg = (features === nothing || isempty(features)) ? C_NULL : JSON.json(features)
     component_field_arg = component_field === nothing ? C_NULL : String(component_field)
+    # A reader materializes one timestamp axis, so it needs one spelling for it.
+    # `-1` leaves the choice to the caller's other filters; the core refuses a
+    # cohort that spans both coherence groups either way, naming the series that
+    # disagree.
+    zoneless_arg = zoneless === nothing ? Int32(-1) : Int32(zoneless ? 1 : 0)
     out = Ref{Ptr{Cvoid}}(C_NULL)
     code = @ccall lib_path().infrastore_store_build_static_reader(
         store::Ptr{Cvoid},
@@ -173,6 +180,7 @@ function build_static_reader(
         resolution_iso::Cstring,
         features_arg::Cstring,
         component_field_arg::Cstring,
+        zoneless_arg::Int32,
         out::Ref{Ptr{Cvoid}},
     )::Int32
     _check(code)
@@ -381,7 +389,7 @@ end
 """
     build_forecast_reader(store, time_series_type; resolution, owner_id=nothing,
                           owner_category=nothing, name=nothing, name_glob=nothing,
-                          features=nothing, component_field=nothing)
+                          features=nothing, component_field=nothing, zoneless=nothing)
 
 Build a [`ForecastReader`] over forecasts of `time_series_type` (a Julia type:
 `Deterministic`, `Probabilistic`, `Scenarios`, or `DeterministicSingleTimeSeries`).
@@ -403,6 +411,7 @@ function build_forecast_reader(
     name_glob::Union{Nothing, AbstractString}=nothing,
     features::Union{Nothing, AbstractDict}=nothing,
     component_field::Union{Nothing, AbstractString}=nothing,
+    zoneless::Union{Nothing, Bool}=nothing,
 )
     type_code = _int_for_type(time_series_type)
     has_owner = owner_id !== nothing
@@ -414,6 +423,11 @@ function build_forecast_reader(
     resolution_iso = _period_to_iso(resolution)
     features_arg = (features === nothing || isempty(features)) ? C_NULL : JSON.json(features)
     component_field_arg = component_field === nothing ? C_NULL : String(component_field)
+    # A reader materializes one timestamp axis, so it needs one spelling for it.
+    # `-1` leaves the choice to the caller's other filters; the core refuses a
+    # cohort that spans both coherence groups either way, naming the series that
+    # disagree.
+    zoneless_arg = zoneless === nothing ? Int32(-1) : Int32(zoneless ? 1 : 0)
     out = Ref{Ptr{Cvoid}}(C_NULL)
     code = @ccall lib_path().infrastore_store_build_forecast_reader(
         store::Ptr{Cvoid},
@@ -427,6 +441,7 @@ function build_forecast_reader(
         resolution_iso::Cstring,
         features_arg::Cstring,
         component_field_arg::Cstring,
+        zoneless_arg::Int32,
         out::Ref{Ptr{Cvoid}},
     )::Int32
     _check(code)

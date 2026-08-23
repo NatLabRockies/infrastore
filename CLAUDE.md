@@ -54,10 +54,30 @@ component whose value these values are the time-varying form of, e.g. `max_activ
 records what the values are _for_, where `name` only says which series they are; it is the one
 descriptor that is also a filter, in every binding). All three are descriptive, so they sit outside
 `TimeSeriesKey` and outside both content hashes, alongside `application_data` — the opaque
-package-owned payload formerly spelled `ext`. Python ships type stubs (`infrastore.pyi` + a pytest
-drift guard), a full exception hierarchy, and keyword-only optional arguments; Julia returns its
-catalog/metadata/summary query results as structs (`TimeSeriesMetadata`, `KeyRow`, `StaticGrid`, … —
-see `docs/src/reference/julia-api.md#result-types`), overloads `Base`
+package-owned payload formerly spelled `ext`.
+
+Every series also carries a **`time_reference`** (`TimeReference`: `Utc` | `FixedOffset(minutes)` |
+`Zone(iana_name)` | `Zoneless`; `None` means unspecified), recording how its timestamps were
+_spelled_ so a read hands back what a write declared instead of relabelling everything UTC. Each
+binding **infers** it from the input type — Python from `tzinfo` (naive → `Zoneless`, a `key`-
+bearing `ZoneInfo` → `Zone`), Julia from `DateTime` vs `ZonedDateTime` (`FixedTimeZone` vs
+`VariableTimeZone` in `InfraStoreTimeZonesExt`), the CLI from the text plus `--assume-timezone` /
+`--zoneless`; a native Rust caller declares it. It is descriptive like the three above (outside the
+key and both hashes, so two series differing only in it are a duplicate), but it is _not_ inert:
+query bounds must match the series' spelling (`TimeRange` carries a `zoneless` flag and the core
+refuses a mismatch rather than coercing), and a selection spanning both coherence groups is refused
+by `bulk_read_range` and `build_static_reader`, with `ListFilter::zoneless`
+(`--spelling zoned|zoneless` in the CLI) as the constructive remedy. A reference is a **spelling,
+not a grid**: `Period::Months` still steps on the UTC calendar (warned about when it meets a zoned
+reference), and a local-clock grid belongs in `NonSequentialTimeSeries`. The core validates a zone
+name's _shape_ only and never resolves it — no tz database; existence is audited by the layers that
+have one (the CLI via `chrono-tz`, Python via `zoneinfo`, Julia via `TimeZones`) and reported by
+`store-info`. The CLI is the one place that runs local → instant, so `--assume-timezone <IANA name>`
+refuses the skipped and repeated wall clocks per row rather than guessing. Python ships type stubs
+(`infrastore.pyi` + a pytest drift guard), a full exception hierarchy, and keyword-only optional
+arguments; Julia returns its catalog/metadata/summary query results as structs
+(`TimeSeriesMetadata`, `KeyRow`, `StaticGrid`, … — see
+`docs/src/reference/julia-api.md#result-types`), overloads `Base`
 (`==`/`hash`/`show`/`length`/`iterate`), and offers do-block `Store`/`open_store` forms. A stored
 `DeterministicSingleTimeSeries` always reads back as a `Deterministic` (storage-level view, by
 design); the DST tag remains visible in catalog surfaces (keys, metadata, counts). The CLI
@@ -204,11 +224,14 @@ julia --project=julia/InfraStore.jl julia/InfraStore.jl/test/runtests.jl
 julia --project=julia/InfraStore.jl -e 'using Pkg; Pkg.test()'
 ```
 
-`julia/InfraStore.jl` interprets a bare `Dates.DateTime` as UTC (Julia's carries no zone) and also
-accepts a `TimeZones.ZonedDateTime` anywhere a timestamp goes, converting it to the instant it
-names. TimeZones is a **weak dependency**: the single conversion method lives in
-`ext/InfraStoreTimeZonesExt.jl` and loads with `using TimeZones`. Reads still return a `DateTime` —
-changing that would break `IS3.jl`, which destructures them.
+`julia/InfraStore.jl` reads a bare `Dates.DateTime` as a **wall clock** (Julia's carries no zone),
+recording `ZonelessReference()` — the stored instant is its own fields, unchanged from the old
+UTC-by-convention reading, but the store now records that it _was_ a convention. It also accepts a
+`TimeZones.ZonedDateTime` anywhere a timestamp goes, converting it to the instant it names and
+recording the spelling its zone names. TimeZones is a **weak dependency**: the conversion methods
+live in `ext/InfraStoreTimeZonesExt.jl` and load with `using TimeZones`. Reads still return a
+`DateTime` holding the instant, with the reference beside it — changing that would break `IS3.jl`,
+which destructures them; `zoned_timestamp` in the extension fuses the two back together.
 
 The FFI build script generates `crates/infrastore-ffi/include/infrastore.h` via `cbindgen`. Never
 hand-edit the header. Any change to an exported `extern "C"` function must:

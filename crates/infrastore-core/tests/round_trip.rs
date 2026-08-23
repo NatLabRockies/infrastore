@@ -409,7 +409,7 @@ fn time_range_slicing() {
     let start = initial + Duration::hours(2);
     let end = initial + Duration::hours(5);
     let got = store
-        .get_time_series(key.identity(), Some((start, end)))
+        .get_time_series(key.identity(), Some((start, end).into()))
         .unwrap();
     let single = got.as_single().unwrap();
     assert_eq!(single.length, 3);
@@ -554,7 +554,7 @@ fn non_sequential_round_trip_and_time_slice() {
     let got = store
         .get_time_series(
             key.identity(),
-            Some((initial + Duration::hours(2), initial + Duration::days(1))),
+            Some((initial + Duration::hours(2), initial + Duration::days(1)).into()),
         )
         .unwrap();
     let irregular = got.as_non_sequential().unwrap();

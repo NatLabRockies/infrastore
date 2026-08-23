@@ -44,19 +44,67 @@ function Base.show(io::IO, s::Store)
     return print(io, "Store(read_only=$(read_only(s)))")
 end
 
+# How a series' recorded spelling reads in a `show`. `"unspecified"` rather than
+# `nothing`, matching how the other descriptors read.
+_reference_label(::Nothing) = "unspecified"
+_reference_label(r::TimeReference) = _time_reference_str(r)
+
 function Base.show(io::IO, ts::SingleTimeSeries{T, N}) where {T, N}
     return print(
         io,
         "SingleTimeSeries{$T,$N}(name=$(repr(ts.name)) length=$(size(ts.data, 1)) " *
-        "initial_timestamp=$(ts.initial_timestamp) resolution=$(ts.resolution))",
+        "initial_timestamp=$(ts.initial_timestamp) resolution=$(ts.resolution) " *
+        "time_reference=$(_reference_label(ts.time_reference)))",
     )
 end
 
 function Base.show(io::IO, ts::NonSequentialTimeSeries{T, N}) where {T, N}
     return print(
         io,
-        "NonSequentialTimeSeries{$T,$N}(name=$(repr(ts.name)) length=$(size(ts.data, 1)))",
+        "NonSequentialTimeSeries{$T,$N}(name=$(repr(ts.name)) " *
+        "length=$(size(ts.data, 1)) " *
+        "time_reference=$(_reference_label(ts.time_reference)))",
     )
+end
+
+# ---- Fusing an instant back together with its spelling ---------------------
+#
+# The convenience forms of `zoned_timestamp`, which take the two halves off a
+# read result so a caller does not have to. The two-argument method they all
+# reach lives in `InfraStoreTimeZonesExt`; without `using TimeZones` the
+# fallback in `lib.jl` says so.
+
+function zoned_timestamp(ts::SingleTimeSeries)
+    return zoned_timestamp(ts.initial_timestamp, ts.time_reference)
+end
+function zoned_timestamp(ts::Deterministic)
+    return zoned_timestamp(ts.initial_timestamp, ts.time_reference)
+end
+function zoned_timestamp(ts::Probabilistic)
+    return zoned_timestamp(ts.initial_timestamp, ts.time_reference)
+end
+zoned_timestamp(ts::Scenarios) =
+    zoned_timestamp(ts.initial_timestamp, ts.time_reference)
+
+function zoned_timestamp(m::TimeSeriesMetadata)
+    m.initial_timestamp === nothing && throw(
+        InvalidParameterError(
+            "this metadata row has no initial_timestamp to render " *
+            "(a NonSequentialTimeSeries carries an explicit vector instead)",
+        ),
+    )
+    return zoned_timestamp(m.initial_timestamp, m.time_reference)
+end
+
+"""
+    zoned_timestamps(series) -> Vector{ZonedDateTime}
+
+Every timestamp of a [`NonSequentialTimeSeries`](@ref), fused with the spelling
+the series recorded. Requires `using TimeZones`; see
+[`zoned_timestamp`](@ref).
+"""
+function zoned_timestamps(ts::NonSequentialTimeSeries)
+    return [zoned_timestamp(t, ts.time_reference) for t in ts.timestamps]
 end
 
 for FT in (:Deterministic, :Probabilistic, :Scenarios)

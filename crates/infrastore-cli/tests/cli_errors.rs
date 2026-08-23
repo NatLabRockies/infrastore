@@ -2908,6 +2908,10 @@ fn assume_timezone_utc_reads_a_zoneless_csv() {
 
 /// A fixed offset shifts the instants, and is spelled the obvious way — the
 /// leading `-` must not be read as another flag.
+///
+/// The offset is now *preserved* rather than consumed: it was in the file, and
+/// the series records it, so the read hands back the same wall clock that went
+/// in instead of relabelling it UTC.
 #[test]
 fn assume_timezone_accepts_a_negative_fixed_offset() {
     let dir = tempfile::tempdir().unwrap();
@@ -2923,9 +2927,17 @@ fn assume_timezone_accepts_a_negative_fixed_offset() {
     );
     assert_eq!(
         data_lines(&out)[0],
-        "2024-01-01T07:00:00+00:00,1",
-        "midnight at -07:00 is 07:00 UTC"
+        "2024-01-01T00:00:00-07:00,1",
+        "midnight at -07:00 goes in and comes back out as midnight at -07:00"
     );
+
+    // The stored instant is still 07:00 UTC -- only the spelling came back.
+    let info = run(
+        &store,
+        &["info", "--owner-id", "42", "--name", "load", "-f", "json"],
+    );
+    assert!(info.contains("\"time_reference\""), "{info}");
+    assert!(info.contains("-07:00"), "{info}");
 }
 
 /// The flag fills a gap; it never relabels data that already said what it meant.
@@ -2953,24 +2965,140 @@ fn assume_timezone_does_not_override_an_offset_the_file_carries() {
     );
 }
 
-/// A named zone is refused, and the refusal explains why rather than looking
-/// like an unsupported-format complaint: a zoneless timestamp in a DST zone is
-/// not always one instant.
+/// A named zone is now accepted, and it is the *right* answer for data that
+/// crosses a daylight-saving transition: a fixed offset renders every timestamp
+/// after March an hour wrong, where the zone renders all of them correctly.
 #[test]
-fn assume_timezone_refuses_a_named_zone_and_says_why() {
+fn assume_timezone_accepts_a_named_zone() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("system.h5");
+    let csv = zoneless_csv(dir.path());
+
+    let args = add_non_sequential(&csv, &["--assume-timezone", "America/Denver"]);
+    run(&store, &args.iter().map(String::as_str).collect::<Vec<_>>());
+
+    let out = run(
+        &store,
+        &["get", "--owner-id", "42", "--name", "load", "-f", "csv"],
+    );
+    assert_eq!(
+        data_lines(&out)[0],
+        "2024-01-01T00:00:00-07:00,1",
+        "the wall clock is stored as the instant it names in Denver, and rendered back in Denver"
+    );
+
+    let info = run(
+        &store,
+        &["info", "--owner-id", "42", "--name", "load", "-f", "json"],
+    );
+    assert!(info.contains("America/Denver"), "{info}");
+
+    // A name no tz database has is still refused, before any work happens.
+    let err = run_err(&store, &["--assume-timezone", "not-a-zone", "list"]);
+    assert!(err.contains("--assume-timezone"), "{err}");
+}
+
+/// The two wall clocks a named zone cannot resolve are refused *per row*, by
+/// name, rather than silently resolved to one of two instants.
+///
+/// This is what supersedes the old blanket refusal of named zones: rejecting
+/// loudly with both candidates named is the acceptable half of "reject rows
+/// mid-ingest or silently pick one".
+#[test]
+fn a_named_zone_refuses_the_hours_it_cannot_resolve() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("system.h5");
+
+    // 2024-11-03 01:30 happens twice in Denver.
+    let ambiguous = write(
+        dir.path(),
+        "fold.csv",
+        "timestamp,value\n2024-11-03 01:30:00,1\n2024-11-03 03:30:00,2\n",
+    );
+    let args = add_non_sequential(&ambiguous, &["--assume-timezone", "America/Denver"]);
+    let err = run_err(&store, &args.iter().map(String::as_str).collect::<Vec<_>>());
+    assert!(err.contains("ambiguous"), "{err}");
+    assert!(
+        err.contains("2024-11-03 01:30:00"),
+        "the row must be named:\n{err}"
+    );
+    // Both candidate instants are named, so the caller can pick one deliberately.
+    assert!(
+        err.contains("08:30:00") && err.contains("07:30:00"),
+        "{err}"
+    );
+
+    // 2024-03-10 02:30 never happens in Denver.
+    let skipped = write(
+        dir.path(),
+        "gap.csv",
+        "timestamp,value\n2024-03-10 02:30:00,1\n2024-03-10 03:30:00,2\n",
+    );
+    let args = add_non_sequential(&skipped, &["--assume-timezone", "America/Denver"]);
+    let err = run_err(&store, &args.iter().map(String::as_str).collect::<Vec<_>>());
+    assert!(err.contains("does not exist"), "{err}");
+    assert!(err.contains("2024-03-10 02:30:00"), "{err}");
+}
+
+/// `--zoneless` is the other answer for a zoneless column: the timestamps *are*
+/// wall clocks, nothing is converted, and they read back unlabelled.
+#[test]
+fn zoneless_stores_wall_clocks_as_themselves() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("system.h5");
+    let csv = zoneless_csv(dir.path());
+
+    let args = add_non_sequential(&csv, &["--zoneless"]);
+    run(&store, &args.iter().map(String::as_str).collect::<Vec<_>>());
+
+    let out = run(
+        &store,
+        &["get", "--owner-id", "42", "--name", "load", "-f", "csv"],
+    );
+    assert_eq!(
+        data_lines(&out)[0],
+        "2024-01-01T00:00:00,1",
+        "a wall clock names no instant, so no offset is printed"
+    );
+
+    let info = run(
+        &store,
+        &["info", "--owner-id", "42", "--name", "load", "-f", "json"],
+    );
+    assert!(info.contains("zoneless"), "{info}");
+
+    // An instant-bearing bound has no defined mapping onto a wall-clock series,
+    // so it is refused rather than coerced.
+    let err = run_err(
+        &store,
+        &[
+            "get",
+            "--owner-id",
+            "42",
+            "--name",
+            "load",
+            "--time-range",
+            "2024-01-01T00:00:00Z..2024-01-01T02:00:00Z",
+        ],
+    );
+    assert!(err.contains("zoneless"), "{err}");
+}
+
+/// The two flags say different things about the same column, so passing both is
+/// a mistake rather than a precedence puzzle.
+#[test]
+fn zoneless_and_assume_timezone_are_mutually_exclusive() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("system.h5");
     seeded_store(dir.path(), &store, "load");
 
-    let err = run_err(&store, &["--assume-timezone", "America/Denver", "list"]);
+    // clap enforces this one, so the diagnostic is its usage message rather
+    // than the CLI's own `Error: ` prefix.
+    let (_, err) = run_fail(&store, &["--zoneless", "--assume-timezone", "UTC", "list"]);
     assert!(
-        err.contains("named zones are not accepted") && err.contains("daylight saving"),
-        "the refusal must explain the ambiguity:\n{err}"
+        err.contains("--zoneless") && err.contains("assume-timezone"),
+        "{err}"
     );
-
-    // And it is reported before any work happens, not part-way through.
-    let err = run_err(&store, &["--assume-timezone", "not-a-zone", "list"]);
-    assert!(err.contains("--assume-timezone"), "{err}");
 }
 
 /// The flag is global, so it reaches a read command's `--time-range` too — the

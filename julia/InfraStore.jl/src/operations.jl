@@ -30,6 +30,54 @@ function _utc_datetime(x)
     )
 end
 
+# Which spelling a timestamp argument arrived in -- the read-side inverse of
+# which this package deliberately does not have: reads keep returning a
+# `DateTime` holding the instant, with the reference beside it.
+#
+# A bare `DateTime` is a wall clock naming no instant, so it records
+# `ZonelessReference`. That is a change from the old UTC-by-convention reading,
+# and it is the honest one: the convention was never a fact about the value, and
+# the store now has somewhere to say so. The stored instant is unchanged either
+# way, so a series written before and after this reads back identically -- only
+# the recorded spelling differs.
+#
+# The `ZonedDateTime` method lives in `InfraStoreTimeZonesExt`, beside the
+# `_utc_datetime` one it mirrors.
+_time_reference_of(::DateTime) = ZonelessReference()
+
+# A `Date` is a wall-clock day, on the same terms.
+_time_reference_of(::Date) = ZonelessReference()
+
+# Anything else has already been rejected by `_utc_datetime`, which says what to
+# do about it; this exists so the two are never out of step.
+_time_reference_of(x) = (_utc_datetime(x); ZonelessReference())
+
+# The one spelling a vector of timestamps carries. A series records one
+# reference, so its timestamps have to agree on one -- and a vector mixing wall
+# clocks with instants is a mistake worth reporting at the door.
+function _vector_time_reference(timestamps)
+    isempty(timestamps) && return nothing
+    first_ref = _time_reference_of(first(timestamps))
+    for (index, t) in enumerate(timestamps)
+        ref = _time_reference_of(t)
+        ref == first_ref || throw(
+            InvalidParameterError(
+                "timestamps disagree about how they are spelled: element 1 is " *
+                "$(_time_reference_str(first_ref)) but element $index is " *
+                "$(_time_reference_str(ref)); one series records one spelling",
+            ),
+        )
+    end
+    return first_ref
+end
+
+# The `time_reference` a constructor records: the caller's declaration when it
+# made one, else the spelling inferred from the timestamp it was handed. An
+# explicit `nothing` is a declaration -- of *unspecified* -- and is recorded as
+# given; only the `INFERRED` default reads the timestamp.
+_resolved_time_reference(::_Inferred, timestamp) = _time_reference_of(timestamp)
+_resolved_time_reference(declared, _timestamp) = _time_reference(declared)
+
 # A `(start, end)` time range argument. The ends are `Any` rather than `DateTime`
 # so a `ZonedDateTime` can be passed when TimeZones is loaded; `_time_range_args`
 # normalizes both through `_utc_datetime`.
@@ -57,10 +105,30 @@ function _from_unix_ms(ms::Int64)
 end
 
 # Lower an optional `(start, end)` DateTime range to the FFI's
-# (present::Bool, start_ms::Int64, end_ms::Int64) triple. `nothing` -> no range.
+# (present::Bool, zoneless::Bool, start_ms::Int64, end_ms::Int64) tuple.
+# `nothing` -> no range.
+#
+# The bounds cross as Unix milliseconds either way -- a wall clock is sent as the
+# instant it would name read as UTC, exactly as the store holds one -- so
+# `zoneless` is the only thing that tells the two apart. The core refuses a bound
+# whose spelling the series cannot answer rather than coercing it.
 function _time_range_args(time_range::TimeRangeArg)
-    time_range === nothing && return (false, Int64(0), Int64(0))
-    return (true, _to_unix_ms(time_range[1]), _to_unix_ms(time_range[2]))
+    time_range === nothing && return (false, false, Int64(0), Int64(0))
+    start_ref = _time_reference_of(time_range[1])
+    end_ref = _time_reference_of(time_range[2])
+    is_zoneless(start_ref) == is_zoneless(end_ref) || throw(
+        InvalidParameterError(
+            "the two time_range bounds are spelled differently: one names an instant " *
+            "and the other is a bare wall clock. A range is one request; spell both " *
+            "bounds the way the series is.",
+        ),
+    )
+    return (
+        true,
+        is_zoneless(start_ref),
+        _to_unix_ms(time_range[1]),
+        _to_unix_ms(time_range[2]),
+    )
 end
 
 # Canonical fixed-span milliseconds -> ISO-8601 (the Rust core re-canonicalizes,
@@ -566,12 +634,14 @@ function get_time_series(
     out_units = Ref{Ptr{Cchar}}(C_NULL)
     out_quantity_kind = Ref{Ptr{Cchar}}(C_NULL)
     out_unit_system = Ref{Ptr{Cchar}}(C_NULL)
+    out_time_reference = Ref{Ptr{Cchar}}(C_NULL)
     out_component_field = Ref{Ptr{Cchar}}(C_NULL)
-    tr_present, tr_start, tr_end = _time_range_args(time_range)
+    tr_present, tr_zoneless, tr_start, tr_end = _time_range_args(time_range)
     code = @ccall lib_path().infrastore_store_get_single(
         store::Ptr{Cvoid},
         key::Ptr{Cvoid},
         tr_present::Bool,
+        tr_zoneless::Bool,
         tr_start::Int64,
         tr_end::Int64,
         out_initial::Ref{Int64},
@@ -586,6 +656,7 @@ function get_time_series(
         out_units::Ref{Ptr{Cchar}},
         out_quantity_kind::Ref{Ptr{Cchar}},
         out_unit_system::Ref{Ptr{Cchar}},
+        out_time_reference::Ref{Ptr{Cchar}},
         out_component_field::Ref{Ptr{Cchar}},
     )::Int32
     _check(code)
@@ -607,6 +678,7 @@ function get_time_series(
             units=_peek_cstr(out_units[]),
             quantity_kind=_peek_cstr(out_quantity_kind[]),
             unit_system=_unit_system(_peek_cstr(out_unit_system[])),
+            time_reference=_time_reference(_peek_cstr(out_time_reference[])),
             component_field=_peek_cstr(out_component_field[]),
         )
     finally
@@ -618,6 +690,7 @@ function get_time_series(
         _free_cstr(out_units[])
         _free_cstr(out_quantity_kind[])
         _free_cstr(out_unit_system[])
+        _free_cstr(out_time_reference[])
         _free_cstr(out_component_field[])
     end
 end
@@ -639,6 +712,7 @@ function _bulk_single(result::Ptr{Cvoid}, idx::Integer, name::AbstractString)
     out_units = Ref{Ptr{Cchar}}(C_NULL)
     out_quantity_kind = Ref{Ptr{Cchar}}(C_NULL)
     out_unit_system = Ref{Ptr{Cchar}}(C_NULL)
+    out_time_reference = Ref{Ptr{Cchar}}(C_NULL)
     out_component_field = Ref{Ptr{Cchar}}(C_NULL)
     _check(
         @ccall lib_path().infrastore_bulk_result_get_single(
@@ -656,6 +730,7 @@ function _bulk_single(result::Ptr{Cvoid}, idx::Integer, name::AbstractString)
             out_units::Ref{Ptr{Cchar}},
             out_quantity_kind::Ref{Ptr{Cchar}},
             out_unit_system::Ref{Ptr{Cchar}},
+            out_time_reference::Ref{Ptr{Cchar}},
             out_component_field::Ref{Ptr{Cchar}},
         )::Int32
     )
@@ -670,6 +745,7 @@ function _bulk_single(result::Ptr{Cvoid}, idx::Integer, name::AbstractString)
             units=_peek_cstr(out_units[]),
             quantity_kind=_peek_cstr(out_quantity_kind[]),
             unit_system=_unit_system(_peek_cstr(out_unit_system[])),
+            time_reference=_time_reference(_peek_cstr(out_time_reference[])),
             component_field=_peek_cstr(out_component_field[]),
         )
     finally
@@ -681,6 +757,7 @@ function _bulk_single(result::Ptr{Cvoid}, idx::Integer, name::AbstractString)
         _free_cstr(out_units[])
         _free_cstr(out_quantity_kind[])
         _free_cstr(out_unit_system[])
+        _free_cstr(out_time_reference[])
         _free_cstr(out_component_field[])
     end
 end
@@ -700,6 +777,7 @@ function _bulk_non_sequential(result::Ptr{Cvoid}, idx::Integer, name::AbstractSt
     out_units = Ref{Ptr{Cchar}}(C_NULL)
     out_quantity_kind = Ref{Ptr{Cchar}}(C_NULL)
     out_unit_system = Ref{Ptr{Cchar}}(C_NULL)
+    out_time_reference = Ref{Ptr{Cchar}}(C_NULL)
     out_component_field = Ref{Ptr{Cchar}}(C_NULL)
     _check(
         @ccall lib_path().infrastore_bulk_result_get_non_sequential(
@@ -717,6 +795,7 @@ function _bulk_non_sequential(result::Ptr{Cvoid}, idx::Integer, name::AbstractSt
             out_units::Ref{Ptr{Cchar}},
             out_quantity_kind::Ref{Ptr{Cchar}},
             out_unit_system::Ref{Ptr{Cchar}},
+            out_time_reference::Ref{Ptr{Cchar}},
             out_component_field::Ref{Ptr{Cchar}},
         )::Int32
     )
@@ -732,6 +811,7 @@ function _bulk_non_sequential(result::Ptr{Cvoid}, idx::Integer, name::AbstractSt
             units=_peek_cstr(out_units[]),
             quantity_kind=_peek_cstr(out_quantity_kind[]),
             unit_system=_unit_system(_peek_cstr(out_unit_system[])),
+            time_reference=_time_reference(_peek_cstr(out_time_reference[])),
             component_field=_peek_cstr(out_component_field[]),
         )
     finally
@@ -743,6 +823,7 @@ function _bulk_non_sequential(result::Ptr{Cvoid}, idx::Integer, name::AbstractSt
         _free_cstr(out_units[])
         _free_cstr(out_quantity_kind[])
         _free_cstr(out_unit_system[])
+        _free_cstr(out_time_reference[])
         _free_cstr(out_component_field[])
     end
 end
@@ -771,6 +852,7 @@ function _bulk_forecast(
     out_units = Ref{Ptr{Cchar}}(C_NULL)
     out_quantity_kind = Ref{Ptr{Cchar}}(C_NULL)
     out_unit_system = Ref{Ptr{Cchar}}(C_NULL)
+    out_time_reference = Ref{Ptr{Cchar}}(C_NULL)
     out_component_field = Ref{Ptr{Cchar}}(C_NULL)
     _check(
         @ccall lib_path().infrastore_bulk_result_get_forecast(
@@ -794,12 +876,13 @@ function _bulk_forecast(
             out_units::Ref{Ptr{Cchar}},
             out_quantity_kind::Ref{Ptr{Cchar}},
             out_unit_system::Ref{Ptr{Cchar}},
+            out_time_reference::Ref{Ptr{Cchar}},
             out_component_field::Ref{Ptr{Cchar}},
         )::Int32
     )
     local data, initial, resolution, horizon, interval, count, percentiles
     local application_data, element_type, units, quantity_kind, unit_system
-    local component_field
+    local time_reference, component_field
     try
         dims = Int.(unsafe_wrap(Array, out_dims[], Int(out_ndims[]); own=false))
         bytes = copy(unsafe_wrap(Array, out_data[], Int(out_byte_len[]); own=false))
@@ -819,6 +902,7 @@ function _bulk_forecast(
         units = _peek_cstr(out_units[])
         quantity_kind = _peek_cstr(out_quantity_kind[])
         unit_system = _unit_system(_peek_cstr(out_unit_system[]))
+        time_reference = _time_reference(_peek_cstr(out_time_reference[]))
         component_field = _peek_cstr(out_component_field[])
     finally
         _free_u64(out_dims[], out_ndims[])
@@ -832,6 +916,7 @@ function _bulk_forecast(
         _free_cstr(out_units[])
         _free_cstr(out_quantity_kind[])
         _free_cstr(out_unit_system[])
+        _free_cstr(out_time_reference[])
         _free_cstr(out_component_field[])
     end
     if type_code == INFRASTORE_TYPE_PROBABILISTIC
@@ -839,21 +924,21 @@ function _bulk_forecast(
             initial, resolution, horizon, interval, count, percentiles, data, name;
             application_data=application_data, element_type=element_type, units=units,
             quantity_kind=quantity_kind, unit_system=unit_system,
-            component_field=component_field,
+            time_reference=time_reference, component_field=component_field,
         )
     elseif type_code == INFRASTORE_TYPE_SCENARIOS
         return Scenarios(
             initial, resolution, horizon, interval, count, data, name;
             application_data=application_data, element_type=element_type, units=units,
             quantity_kind=quantity_kind, unit_system=unit_system,
-            component_field=component_field,
+            time_reference=time_reference, component_field=component_field,
         )
     else
         return Deterministic(
             initial, resolution, horizon, interval, count, data, name;
             application_data=application_data, element_type=element_type, units=units,
             quantity_kind=quantity_kind, unit_system=unit_system,
-            component_field=component_field,
+            time_reference=time_reference, component_field=component_field,
         )
     end
 end
@@ -878,12 +963,13 @@ function bulk_read(
 
     key_handles = Ptr{Cvoid}[k.handle for k in keys]
     out_result = Ref{Ptr{Cvoid}}(C_NULL)
-    tr_present, tr_start, tr_end = _time_range_args(time_range)
+    tr_present, tr_zoneless, tr_start, tr_end = _time_range_args(time_range)
     code = GC.@preserve keys key_handles @ccall lib_path().infrastore_store_bulk_read(
         store::Ptr{Cvoid},
         key_handles::Ptr{Ptr{Cvoid}},
         UInt64(n)::UInt64,
         tr_present::Bool,
+        tr_zoneless::Bool,
         tr_start::Int64,
         tr_end::Int64,
         out_result::Ref{Ptr{Cvoid}},
@@ -936,12 +1022,14 @@ function get_time_series(
     out_units = Ref{Ptr{Cchar}}(C_NULL)
     out_quantity_kind = Ref{Ptr{Cchar}}(C_NULL)
     out_unit_system = Ref{Ptr{Cchar}}(C_NULL)
+    out_time_reference = Ref{Ptr{Cchar}}(C_NULL)
     out_component_field = Ref{Ptr{Cchar}}(C_NULL)
-    tr_present, tr_start, tr_end = _time_range_args(time_range)
+    tr_present, tr_zoneless, tr_start, tr_end = _time_range_args(time_range)
     code = @ccall lib_path().infrastore_store_get_non_sequential(
         store::Ptr{Cvoid},
         key::Ptr{Cvoid},
         tr_present::Bool,
+        tr_zoneless::Bool,
         tr_start::Int64,
         tr_end::Int64,
         out_timestamps::Ref{Ptr{Int64}},
@@ -956,6 +1044,7 @@ function get_time_series(
         out_units::Ref{Ptr{Cchar}},
         out_quantity_kind::Ref{Ptr{Cchar}},
         out_unit_system::Ref{Ptr{Cchar}},
+        out_time_reference::Ref{Ptr{Cchar}},
         out_component_field::Ref{Ptr{Cchar}},
     )::Int32
     _check(code)
@@ -975,6 +1064,7 @@ function get_time_series(
             units=_peek_cstr(out_units[]),
             quantity_kind=_peek_cstr(out_quantity_kind[]),
             unit_system=_unit_system(_peek_cstr(out_unit_system[])),
+            time_reference=_time_reference(_peek_cstr(out_time_reference[])),
             component_field=_peek_cstr(out_component_field[]),
         )
     finally
@@ -986,6 +1076,7 @@ function get_time_series(
         _free_cstr(out_units[])
         _free_cstr(out_quantity_kind[])
         _free_cstr(out_unit_system[])
+        _free_cstr(out_time_reference[])
         _free_cstr(out_component_field[])
     end
 end

@@ -131,6 +131,8 @@ struct SingleTimeSeries{T, N}
     unit_system::Union{Nothing, UnitSystem}
     "The field on the owning component whose value these values are the time-varying form of (e.g. `\"max_active_power\"`), or `nothing`. Free-form and never interpreted by the store: it names a field in the consumer's own object model. Descriptive, so it is never part of a series' identity."
     component_field::Union{Nothing, String}
+    "How the timestamps were spelled (a [`TimeReference`](@ref)), or `nothing` for unspecified. Inferred from the timestamp the constructor was handed -- a bare `DateTime` is a wall clock and records `ZonelessReference()`, a `ZonedDateTime` records the spelling its zone names -- unless `time_reference=` overrides it. Passing `time_reference=nothing` explicitly declares *unspecified*, which is what a read hands back for a series that recorded no spelling, and is not the same as a wall clock. Descriptive: it changes nothing about the stored instants, the grid, or either content hash."
+    time_reference::Union{Nothing, TimeReference}
 end
 
 # Infer `{T,N}` from the value array; views/ranges are normalized to a concrete
@@ -146,6 +148,7 @@ function SingleTimeSeries(
     quantity_kind::Union{Nothing, AbstractString}=nothing,
     unit_system::Union{Nothing, UnitSystem, AbstractString}=nothing,
     component_field::Union{Nothing, AbstractString}=nothing,
+    time_reference::TimeReferenceArg=INFERRED,
 )
     return SingleTimeSeries{eltype(data), ndims(data)}(
         _utc_datetime(initial),
@@ -158,6 +161,7 @@ function SingleTimeSeries(
         _maybe_string(quantity_kind),
         _unit_system(unit_system),
         _maybe_string(component_field),
+        _resolved_time_reference(time_reference, initial),
     )
 end
 
@@ -181,6 +185,8 @@ struct NonSequentialTimeSeries{T, N}
     unit_system::Union{Nothing, UnitSystem}
     "The field on the owning component whose value these values are the time-varying form of (e.g. `\"max_active_power\"`), or `nothing`. Free-form and never interpreted by the store: it names a field in the consumer's own object model. Descriptive, so it is never part of a series' identity."
     component_field::Union{Nothing, String}
+    "How the timestamps were spelled (a [`TimeReference`](@ref)), or `nothing` for unspecified. Inferred from the timestamp the constructor was handed -- a bare `DateTime` is a wall clock and records `ZonelessReference()`, a `ZonedDateTime` records the spelling its zone names -- unless `time_reference=` overrides it. Passing `time_reference=nothing` explicitly declares *unspecified*, which is what a read hands back for a series that recorded no spelling, and is not the same as a wall clock. Descriptive: it changes nothing about the stored instants, the grid, or either content hash."
+    time_reference::Union{Nothing, TimeReference}
 end
 
 # Infer `{T,N}` from the value array; views/ranges are normalized to a concrete
@@ -196,9 +202,13 @@ function NonSequentialTimeSeries(
     quantity_kind::Union{Nothing, AbstractString}=nothing,
     unit_system::Union{Nothing, UnitSystem, AbstractString}=nothing,
     component_field::Union{Nothing, AbstractString}=nothing,
+    time_reference::TimeReferenceArg=INFERRED,
 )
     length(timestamps) == size(data, 1) ||
         throw(InvalidParameterError("timestamp count must match data length"))
+    # The spelling is read off the vector before it is normalized -- afterwards
+    # every element is a bare `DateTime` and the intent is gone.
+    reference = _vector_time_reference(timestamps)
     # Normalize first, then check: a vector mixing zones (or `ZonedDateTime`s
     # from different ones) is ordered by the instants it names, not by the wall
     # clocks it reads.
@@ -216,6 +226,7 @@ function NonSequentialTimeSeries(
         _maybe_string(quantity_kind),
         _unit_system(unit_system),
         _maybe_string(component_field),
+        time_reference isa _Inferred ? reference : _time_reference(time_reference),
     )
 end
 
@@ -251,6 +262,8 @@ struct Deterministic{T, N}
     unit_system::Union{Nothing, UnitSystem}
     "The field on the owning component whose value these values are the time-varying form of (e.g. `\"max_active_power\"`), or `nothing`. Free-form and never interpreted by the store: it names a field in the consumer's own object model. Descriptive, so it is never part of a series' identity."
     component_field::Union{Nothing, String}
+    "How the timestamps were spelled (a [`TimeReference`](@ref)), or `nothing` for unspecified. Inferred from the timestamp the constructor was handed -- a bare `DateTime` is a wall clock and records `ZonelessReference()`, a `ZonedDateTime` records the spelling its zone names -- unless `time_reference=` overrides it. Passing `time_reference=nothing` explicitly declares *unspecified*, which is what a read hands back for a series that recorded no spelling, and is not the same as a wall clock. Descriptive: it changes nothing about the stored instants, the grid, or either content hash."
+    time_reference::Union{Nothing, TimeReference}
 end
 
 function Deterministic(
@@ -267,6 +280,7 @@ function Deterministic(
     quantity_kind::Union{Nothing, AbstractString}=nothing,
     unit_system::Union{Nothing, UnitSystem, AbstractString}=nothing,
     component_field::Union{Nothing, AbstractString}=nothing,
+    time_reference::TimeReferenceArg=INFERRED,
 )
     return Deterministic{eltype(data), ndims(data)}(
         _utc_datetime(initial),
@@ -282,6 +296,7 @@ function Deterministic(
         _maybe_string(quantity_kind),
         _unit_system(unit_system),
         _maybe_string(component_field),
+        _resolved_time_reference(time_reference, initial),
     )
 end
 
@@ -308,6 +323,8 @@ struct Probabilistic{T, N}
     unit_system::Union{Nothing, UnitSystem}
     "The field on the owning component whose value these values are the time-varying form of (e.g. `\"max_active_power\"`), or `nothing`. Free-form and never interpreted by the store: it names a field in the consumer's own object model. Descriptive, so it is never part of a series' identity."
     component_field::Union{Nothing, String}
+    "How the timestamps were spelled (a [`TimeReference`](@ref)), or `nothing` for unspecified. Inferred from the timestamp the constructor was handed -- a bare `DateTime` is a wall clock and records `ZonelessReference()`, a `ZonedDateTime` records the spelling its zone names -- unless `time_reference=` overrides it. Passing `time_reference=nothing` explicitly declares *unspecified*, which is what a read hands back for a series that recorded no spelling, and is not the same as a wall clock. Descriptive: it changes nothing about the stored instants, the grid, or either content hash."
+    time_reference::Union{Nothing, TimeReference}
 end
 
 function Probabilistic(
@@ -325,6 +342,7 @@ function Probabilistic(
     quantity_kind::Union{Nothing, AbstractString}=nothing,
     unit_system::Union{Nothing, UnitSystem, AbstractString}=nothing,
     component_field::Union{Nothing, AbstractString}=nothing,
+    time_reference::TimeReferenceArg=INFERRED,
 )
     return Probabilistic{eltype(data), ndims(data)}(
         _utc_datetime(initial),
@@ -341,6 +359,7 @@ function Probabilistic(
         _maybe_string(quantity_kind),
         _unit_system(unit_system),
         _maybe_string(component_field),
+        _resolved_time_reference(time_reference, initial),
     )
 end
 
@@ -367,6 +386,8 @@ struct Scenarios{T, N}
     unit_system::Union{Nothing, UnitSystem}
     "The field on the owning component whose value these values are the time-varying form of (e.g. `\"max_active_power\"`), or `nothing`. Free-form and never interpreted by the store: it names a field in the consumer's own object model. Descriptive, so it is never part of a series' identity."
     component_field::Union{Nothing, String}
+    "How the timestamps were spelled (a [`TimeReference`](@ref)), or `nothing` for unspecified. Inferred from the timestamp the constructor was handed -- a bare `DateTime` is a wall clock and records `ZonelessReference()`, a `ZonedDateTime` records the spelling its zone names -- unless `time_reference=` overrides it. Passing `time_reference=nothing` explicitly declares *unspecified*, which is what a read hands back for a series that recorded no spelling, and is not the same as a wall clock. Descriptive: it changes nothing about the stored instants, the grid, or either content hash."
+    time_reference::Union{Nothing, TimeReference}
 end
 
 # `scenario_count` defaults to the leading axis of `data`.
@@ -384,6 +405,7 @@ function Scenarios(
     quantity_kind::Union{Nothing, AbstractString}=nothing,
     unit_system::Union{Nothing, UnitSystem, AbstractString}=nothing,
     component_field::Union{Nothing, AbstractString}=nothing,
+    time_reference::TimeReferenceArg=INFERRED,
 )
     return Scenarios{eltype(data), ndims(data)}(
         _utc_datetime(initial),
@@ -400,6 +422,7 @@ function Scenarios(
         _maybe_string(quantity_kind),
         _unit_system(unit_system),
         _maybe_string(component_field),
+        _resolved_time_reference(time_reference, initial),
     )
 end
 

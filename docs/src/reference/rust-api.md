@@ -760,6 +760,7 @@ pub struct SingleTimeSeries {
     pub units: Option<String>,
     pub quantity_kind: Option<String>,
     pub unit_system: Option<UnitSystem>,
+    pub time_reference: Option<TimeReference>,
     pub component_field: Option<String>,
     pub application_data: Option<String>,
 }
@@ -773,6 +774,7 @@ impl SingleTimeSeries {
     pub fn with_units(self, units: impl Into<String>) -> Self;
     pub fn with_quantity_kind(self, quantity_kind: impl Into<String>) -> Self;
     pub fn with_unit_system(self, unit_system: UnitSystem) -> Self;
+    pub fn with_time_reference(self, time_reference: TimeReference) -> Self;
     pub fn with_component_field(self, component_field: impl Into<String>) -> Self;
     pub fn with_application_data(self, application_data: impl Into<String>) -> Self;
 }
@@ -1091,10 +1093,10 @@ The full record returned by `list_time_series` and `get_metadata`: owner fields,
 `name`, `data_hash: [u8; 32]`, the optional temporal fields (`initial_timestamp`, `resolution`,
 `length`, `horizon`, `interval`, `count`, `timestamps`), `features`, the descriptors (`units`,
 `quantity_kind: Option<String>`, `unit_system: Option<UnitSystem>`,
-`component_field: Option<String>`, `application_data: Option<String>`),
-`percentiles: Option<Vec<f64>>` (set for `Probabilistic`), and the array typing: `dtype: Dtype`,
-`element_shape: Vec<usize>`. The span fields (`resolution`, `horizon`, `interval`) are
-`Option<Period>`.
+`time_reference: Option<TimeReference>`, `component_field: Option<String>`,
+`application_data: Option<String>`), `percentiles: Option<Vec<f64>>` (set for `Probabilistic`), and
+the array typing: `dtype: Dtype`, `element_shape: Vec<usize>`. The span fields (`resolution`,
+`horizon`, `interval`) are `Option<Period>`.
 
 ### `UnitSystem`
 
@@ -1110,6 +1112,57 @@ impl UnitSystem {
 `None` on a metadata row means _unspecified_, not `NaturalUnits`. See
 [Optional descriptors](../explanation/data-model.md#optional-descriptors).
 
+### `TimeReference` and `TimeRange`
+
+```rust
+pub enum TimeReference {
+    Utc,                  // an instant, written as UTC
+    FixedOffset(i32),     // an instant, written at a fixed offset — minutes east
+    Zone(String),         // an instant, written in a named IANA zone; held opaquely
+    Zoneless,             // a wall clock; names no instant
+}
+
+impl TimeReference {
+    pub fn is_zoned(&self) -> bool;
+    pub fn is_zoneless(&self) -> bool;
+    pub fn accepts_zoned_bound(reference: Option<&TimeReference>) -> bool;
+    pub fn as_storage_string(&self) -> String;   // "utc" / "-07:00" / "America/Denver" / "zoneless"
+    pub fn parse(s: &str) -> Result<Self>;
+    pub fn validate(&self) -> Result<()>;        // shape only; no tz database
+}
+```
+
+How a series' timestamps were **spelled**. `None` on a metadata row means _unspecified_, and groups
+with the three zoned variants for query bounds — it is not a claim the timestamps were written as
+UTC. Rust has no naive datetime type, so a native caller **declares** the spelling; the bindings
+infer it from theirs.
+
+`validate` checks shape only: a zone name must be non-empty, bounded, IANA-shaped, and unreadable as
+an offset or as either literal — which is what lets one catalog column hold all four spellings.
+Existence is deliberately not checked; see
+[Time references](../explanation/data-model.md#time-references).
+
+```rust
+pub struct TimeRange {
+    pub start: DateTime<Utc>,
+    pub end: DateTime<Utc>,
+    pub zoneless: bool,
+}
+
+impl TimeRange {
+    pub fn new(start: DateTime<Utc>, end: DateTime<Utc>) -> Self;        // zoned
+    pub fn zoneless(start: DateTime<Utc>, end: DateTime<Utc>) -> Self;
+    pub fn spelled(start: DateTime<Utc>, end: DateTime<Utc>, zoneless: bool) -> Self;
+    pub fn bounds(&self) -> (DateTime<Utc>, DateTime<Utc>);
+}
+impl From<(DateTime<Utc>, DateTime<Utc>)> for TimeRange;   // zoned
+```
+
+The `time_range` argument of `get_time_series` / `get_time_series_with_metadata` /
+`bulk_read_range`. The `zoneless` flag is what lets the core refuse a bound whose spelling the
+series cannot answer rather than coercing it; a `DateTime<Utc>` is zoned by construction, so
+`(start, end).into()` is the native spelling.
+
 ### `Descriptors`
 
 The descriptive attributes a series carries alongside its array, applied to a reconstructed series
@@ -1121,6 +1174,7 @@ pub struct Descriptors {
     pub units: Option<String>,
     pub quantity_kind: Option<String>,
     pub unit_system: Option<UnitSystem>,
+    pub time_reference: Option<TimeReference>,
     pub component_field: Option<String>,
     pub application_data: Option<String>,
 }
@@ -1130,7 +1184,7 @@ impl Descriptors {
 }
 ```
 
-It is a struct rather than a positional argument list because four of the six fields are
+It is a struct rather than a positional argument list because four of the seven fields are
 `Option<String>`: as bare parameters, `units`, `quantity_kind`, `component_field`, and
 `application_data` would be silently interchangeable at every call site.
 
@@ -1148,6 +1202,7 @@ ListFilter::new()
     .name("load")
     .name_glob("load_*")  // SQLite GLOB (case-sensitive, `*`/`?`); ANDed with .name
     .component_field("max_active_power")  // exact, case-sensitive; see below
+    .zoneless(false)      // coherence predicate on the timestamp spelling; see below
     .resolution(Duration::hours(1))   // impl Into<Period>
     .interval(Duration::hours(24))    // impl Into<Period>; forecasts only
     .features(features)   // subset match: rows must contain at least these pairs
@@ -1159,6 +1214,14 @@ row on its own — one component may carry several series for one field, disting
 features. A row that declares no `component_field` matches no value (SQL equality is never true
 against NULL), so the filter cannot select the rows that left it unset. It is served by the partial
 index `idx_component_field`, which costs a store that never sets the field nothing.
+
+`zoneless` is a **binary predicate**, not a match on a specific `TimeReference`: `Some(true)` keeps
+the wall-clock series, `Some(false)` keeps everything that accepts an instant bound — the three
+zoned spellings _and_ the rows that left the reference unset. An exact match could not name that
+second group at all (the trap `component_field` documents), and here those rows are a coherence
+group rather than an oversight. It is the constructive half of the rules that make `bulk_read_range`
+and `build_static_reader` refuse a selection spanning both groups; see
+[Time references](../explanation/data-model.md#time-references).
 
 ### `AddRequest`
 

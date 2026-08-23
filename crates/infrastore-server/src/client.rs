@@ -8,8 +8,8 @@
 use chrono::{DateTime, Utc};
 use infrastore_core::{
     ForecastSummaryRow, KeyIdentity, OwnerCategory, Period, Result as CoreResult,
-    StaticConsistency, StaticSummaryRow, TimeSeriesCountsDetailed, TimeSeriesData, TimeSeriesError,
-    TimeSeriesKey, TimeSeriesMetadata, TimeSeriesType,
+    StaticConsistency, StaticSummaryRow, TimeRange, TimeSeriesCountsDetailed, TimeSeriesData,
+    TimeSeriesError, TimeSeriesKey, TimeSeriesMetadata, TimeSeriesType,
 };
 
 /// Parse an ISO-8601 period received over the wire, mapping failures to a
@@ -45,6 +45,7 @@ fn build_list_req(
     time_series_type: Option<TimeSeriesType>,
     name: Option<String>,
     component_field: Option<String>,
+    zoneless: Option<bool>,
     resolution: Option<Period>,
     interval: Option<Period>,
     features: Option<&infrastore_core::Features>,
@@ -56,6 +57,7 @@ fn build_list_req(
         time_series_type: time_series_type.map(|t| pb::TimeSeriesType::from(t) as i32),
         name,
         component_field,
+        zoneless,
         resolution: resolution.map(|p| p.to_iso8601()),
         interval: interval.map(|p| p.to_iso8601()),
         features: features.map(features_to_pb),
@@ -120,6 +122,9 @@ impl RemoteClient {
         time_series_type: Option<TimeSeriesType>,
         name: Option<String>,
         component_field: Option<String>,
+        // Coherence predicate on the timestamp spelling; see
+        // `infrastore_core::ListFilter::zoneless`.
+        zoneless: Option<bool>,
         resolution: Option<Period>,
         interval: Option<Period>,
         features: Option<&infrastore_core::Features>,
@@ -131,6 +136,7 @@ impl RemoteClient {
             time_series_type,
             name,
             component_field,
+            zoneless,
             resolution,
             interval,
             features,
@@ -155,16 +161,20 @@ impl RemoteClient {
     pub async fn get_time_series(
         &self,
         key: &KeyIdentity,
-        time_range: Option<(DateTime<Utc>, DateTime<Utc>)>,
+        time_range: Option<TimeRange>,
     ) -> CoreResult<TimeSeriesData> {
         let (start, end) = match time_range {
-            Some((s, e)) => (Some(s.to_rfc3339()), Some(e.to_rfc3339())),
+            Some(r) => (Some(r.start.to_rfc3339()), Some(r.end.to_rfc3339())),
             None => (None, None),
         };
         let req = GetReq {
             key: Some(key_to_pb(key)),
             start_rfc3339: start,
             end_rfc3339: end,
+            // The wire form is RFC3339 either way; this is what carries the
+            // spelling, so the server can apply the same bound rule a local
+            // read would.
+            bounds_zoneless: time_range.map(|r| r.zoneless),
         };
         let mut inner = self.inner.lock().await;
         let resp = inner
@@ -291,6 +301,9 @@ impl RemoteClient {
         time_series_type: Option<TimeSeriesType>,
         name: Option<String>,
         component_field: Option<String>,
+        // Coherence predicate on the timestamp spelling; see
+        // `infrastore_core::ListFilter::zoneless`.
+        zoneless: Option<bool>,
         resolution: Option<Period>,
         interval: Option<Period>,
         features: Option<&infrastore_core::Features>,
@@ -303,6 +316,7 @@ impl RemoteClient {
             time_series_type,
             name,
             component_field,
+            zoneless,
             resolution,
             interval,
             features,
@@ -351,10 +365,10 @@ impl RemoteClient {
     pub async fn bulk_read(
         &self,
         keys: &[&KeyIdentity],
-        time_range: Option<(DateTime<Utc>, DateTime<Utc>)>,
+        time_range: Option<TimeRange>,
     ) -> CoreResult<Vec<TimeSeriesData>> {
         let (start_rfc3339, end_rfc3339) = match time_range {
-            Some((s, e)) => (Some(s.to_rfc3339()), Some(e.to_rfc3339())),
+            Some(r) => (Some(r.start.to_rfc3339()), Some(r.end.to_rfc3339())),
             None => (None, None),
         };
         let mut inner = self.inner.lock().await;
@@ -363,6 +377,7 @@ impl RemoteClient {
                 keys: keys.iter().map(|k| key_to_pb(k)).collect(),
                 start_rfc3339,
                 end_rfc3339,
+                bounds_zoneless: time_range.map(|r| r.zoneless),
             })
             .await
             .map_err(Self::map_status)?

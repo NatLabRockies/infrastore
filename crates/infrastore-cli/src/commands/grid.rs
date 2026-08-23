@@ -10,6 +10,10 @@
 //! resolution (so `--resolution` is required); for `NonSequentialTimeSeries` it
 //! means one shared timestamp vector. The core reports a divergent selection as
 //! an error rather than padding it, and that error is passed through unchanged.
+//!
+//! One timeline also means one *spelling* for it, so a selection mixing
+//! wall-clock series with instant-bearing ones is refused on the same terms.
+//! `--spelling zoned|zoneless` narrows it to one of the two groups.
 
 use std::path::Path;
 
@@ -63,7 +67,7 @@ pub fn run(
     let all: Vec<DateTime<Utc>> = reader
         .timestamps()
         .filter(|t| match range {
-            Some((start, end)) => *t >= start && *t < end,
+            Some(r) => *t >= r.start && *t < r.end,
             None => true,
         })
         .collect();
@@ -170,7 +174,11 @@ fn read_row(
     at: DateTime<Utc>,
 ) -> Result<Vec<String>, String> {
     store.static_read(reader, at).map_err(|e| e.to_string())?;
-    let mut row = vec![at.to_rfc3339()];
+    // The axis is spelled the way the cohort's own series are, so a `grid -f
+    // csv` pipe reads straight back into `add` under the same reference it came
+    // out under. A cohort that mixes zoneless with the rest never builds a
+    // reader at all, so there is always exactly one spelling here.
+    let mut row = vec![crate::fields::render_timestamp(at, reader.time_reference())];
     for group in reader.groups() {
         row.extend(csv_io::bytes_to_strings(group.dtype(), group.values()));
     }

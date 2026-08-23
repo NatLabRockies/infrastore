@@ -7,7 +7,8 @@ use infrastore_core::{
     Deterministic, ElementType, FeatureValue, Features, ForecastSummaryRow, ForecastTimeSeriesKey,
     KeyIdentity, NonSequentialTimeSeries, NonSequentialTimeSeriesKey, OwnerCategory, Period,
     Probabilistic, Scenarios, SingleTimeSeries, SingleTimeSeriesKey, StaticSummaryRow,
-    TimeSeriesData, TimeSeriesKey, TimeSeriesMetadata, TimeSeriesType, TypedArray, UnitSystem,
+    TimeReference, TimeSeriesData, TimeSeriesKey, TimeSeriesMetadata, TimeSeriesType, TypedArray,
+    UnitSystem,
 };
 
 use crate::pb;
@@ -138,6 +139,7 @@ pub fn key_to_pb(k: &KeyIdentity) -> pb::TimeSeriesKey {
         length: None,
         horizon: None,
         count: None,
+        time_reference: None,
     }
 }
 
@@ -146,6 +148,7 @@ pub fn key_to_pb(k: &KeyIdentity) -> pb::TimeSeriesKey {
 // keys to a caller (ListKeys, GetTimeSeriesKeys, ResolveForecastKey).
 pub fn full_key_to_pb(k: &TimeSeriesKey) -> pb::TimeSeriesKey {
     let mut pb = key_to_pb(k.identity());
+    pb.time_reference = k.time_reference().map(TimeReference::as_storage_string);
     match k {
         TimeSeriesKey::Single(s) => {
             pb.initial_timestamp_rfc3339 = Some(s.initial_timestamp.to_rfc3339());
@@ -179,6 +182,7 @@ pub fn full_key_from_pb(k: pb::TimeSeriesKey) -> Result<TimeSeriesKey, ConvertEr
     let horizon = &k.horizon;
     let count = k.count;
     let length = k.length;
+    let time_reference = parse_time_reference(k.time_reference.as_deref())?;
     let identity = key_from_pb(k.clone())?;
 
     let parse_initial = |s: &Option<String>| -> Result<DateTime<Utc>, ConvertError> {
@@ -194,11 +198,13 @@ pub fn full_key_from_pb(k: pb::TimeSeriesKey) -> Result<TimeSeriesKey, ConvertEr
             identity,
             initial_timestamp: parse_initial(initial_ts)?,
             length: require_length()? as usize,
+            time_reference,
         })),
         TimeSeriesType::NonSequentialTimeSeries => {
             Ok(TimeSeriesKey::NonSequential(NonSequentialTimeSeriesKey {
                 identity,
                 length: require_length()? as usize,
+                time_reference,
             }))
         }
         TimeSeriesType::Deterministic
@@ -210,6 +216,7 @@ pub fn full_key_from_pb(k: pb::TimeSeriesKey) -> Result<TimeSeriesKey, ConvertEr
             horizon: opt_period(horizon.as_deref())?
                 .ok_or(ConvertError::MissingField("TimeSeriesKey.horizon"))?,
             count: count.ok_or(ConvertError::MissingField("TimeSeriesKey.count"))? as usize,
+            time_reference,
         })),
     }
 }
@@ -266,6 +273,10 @@ pub fn metadata_to_pb(m: &TimeSeriesMetadata) -> pb::TimeSeriesMetadata {
         units: m.units.clone(),
         quantity_kind: m.quantity_kind.clone(),
         unit_system: m.unit_system.map(|u| u.as_str().to_owned()),
+        time_reference: m
+            .time_reference
+            .as_ref()
+            .map(TimeReference::as_storage_string),
         component_field: m.component_field.clone(),
         element_type: m.element_type.to_string(),
         element_shape: m.element_shape.iter().map(|d| *d as u64).collect(),
@@ -340,6 +351,7 @@ pub fn metadata_from_pb(m: pb::TimeSeriesMetadata) -> Result<TimeSeriesMetadata,
                 })
             })
             .transpose()?,
+        time_reference: parse_time_reference(m.time_reference.as_deref())?,
         component_field: m.component_field,
         percentiles: if m.percentiles.is_empty() {
             None
@@ -381,6 +393,7 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
     let units = data.units().map(str::to_owned);
     let quantity_kind = data.quantity_kind().map(str::to_owned);
     let unit_system = data.unit_system().map(|u| u.as_str().to_owned());
+    let time_reference = data.time_reference().map(TimeReference::as_storage_string);
     let component_field = data.component_field().map(str::to_owned);
     match data {
         TimeSeriesData::SingleTimeSeries(s) => pb::GetResp {
@@ -392,6 +405,7 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             units: units.clone(),
             quantity_kind: quantity_kind.clone(),
             unit_system: unit_system.clone(),
+            time_reference: time_reference.clone(),
             component_field: component_field.clone(),
             value_bytes: s.data.bytes.clone(),
             time_series_type: pb::TimeSeriesType::SingleTimeSeries as i32,
@@ -412,6 +426,7 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             units: units.clone(),
             quantity_kind: quantity_kind.clone(),
             unit_system: unit_system.clone(),
+            time_reference: time_reference.clone(),
             component_field: component_field.clone(),
             value_bytes: s.data.bytes.clone(),
             time_series_type: pb::TimeSeriesType::NonSequentialTimeSeries as i32,
@@ -432,6 +447,7 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             units: units.clone(),
             quantity_kind: quantity_kind.clone(),
             unit_system: unit_system.clone(),
+            time_reference: time_reference.clone(),
             component_field: component_field.clone(),
             value_bytes: d.data.bytes.clone(),
             time_series_type: pb::TimeSeriesType::Deterministic as i32,
@@ -452,6 +468,7 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             units: units.clone(),
             quantity_kind: quantity_kind.clone(),
             unit_system: unit_system.clone(),
+            time_reference: time_reference.clone(),
             component_field: component_field.clone(),
             value_bytes: p.data.bytes.clone(),
             time_series_type: pb::TimeSeriesType::Probabilistic as i32,
@@ -472,6 +489,7 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             units: units.clone(),
             quantity_kind: quantity_kind.clone(),
             unit_system: unit_system.clone(),
+            time_reference: time_reference.clone(),
             component_field: component_field.clone(),
             value_bytes: s.data.bytes.clone(),
             time_series_type: pb::TimeSeriesType::Scenarios as i32,
@@ -510,6 +528,7 @@ pub fn get_resp_to_time_series_data(
     let units = resp.units.take();
     let quantity_kind = resp.quantity_kind.take();
     let component_field = resp.component_field.take();
+    let time_reference = parse_time_reference(resp.time_reference.take().as_deref())?;
     let unit_system = resp
         .unit_system
         .take()
@@ -542,6 +561,7 @@ pub fn get_resp_to_time_series_data(
                 units: None,
                 quantity_kind: None,
                 unit_system: None,
+                time_reference: None,
                 component_field: None,
                 application_data: None,
             }))
@@ -629,11 +649,26 @@ pub fn get_resp_to_time_series_data(
     series.set_units(units);
     series.set_quantity_kind(quantity_kind);
     series.set_unit_system(unit_system);
+    series.set_time_reference(time_reference);
     series.set_component_field(component_field);
     Ok(series)
 }
 
 // ---- Helpers ----
+
+/// Decode a wire `time_reference` string. An unparseable one is an error rather
+/// than a silent `None`, for the same reason `unit_system` is: "unspecified" and
+/// "a spelling this build cannot read" must not look alike — the second would
+/// hand a caller an aware timestamp for a series that never claimed one.
+fn parse_time_reference(s: Option<&str>) -> Result<Option<TimeReference>, ConvertError> {
+    s.map(|s| {
+        TimeReference::parse(s).map_err(|e| ConvertError::InvalidValue {
+            field: "time_reference",
+            message: format!("unknown time_reference {s:?}: {e}"),
+        })
+    })
+    .transpose()
+}
 
 /// Encode an optional period as its ISO-8601 string; `None` -> empty string.
 fn period_to_iso(p: Option<Period>) -> String {
@@ -827,6 +862,7 @@ mod tests {
             quantity_kind: None,
             unit_system: None,
             component_field: None,
+            time_reference: None,
             element_type: "f64".into(),
             element_shape: Vec::new(),
             application_data: None,
@@ -1160,6 +1196,7 @@ mod convert_coverage_tests {
                 quantity_kind: None,
                 unit_system: None,
                 component_field: None,
+                time_reference: None,
                 percentiles: None,
                 element_type: ElementType::Scalar(dtype),
                 element_shape: vec![],
@@ -1307,6 +1344,7 @@ mod convert_coverage_tests {
             quantity_kind: None,
             unit_system: None,
             component_field: None,
+            time_reference: None,
             percentiles: None,
             element_type: ElementType::default(),
             element_shape: vec![],
@@ -1350,6 +1388,7 @@ mod convert_coverage_tests {
             quantity_kind: None,
             unit_system: None,
             component_field: None,
+            time_reference: None,
             percentiles: None,
             element_type: ElementType::default(),
             element_shape: vec![],
@@ -1379,6 +1418,7 @@ mod convert_coverage_tests {
             initial_timestamp: t0(),
             horizon: Period::Months(3),
             count: 4,
+            time_reference: None,
         });
 
         let pb = full_key_to_pb(&key);
@@ -1413,6 +1453,7 @@ mod convert_coverage_tests {
                 features: Features::new(),
             },
             length: 3,
+            time_reference: None,
         });
 
         let pb = full_key_to_pb(&key);
@@ -1523,6 +1564,7 @@ mod convert_coverage_tests {
             },
             initial_timestamp: t0(),
             length: 24,
+            time_reference: None,
         }))
     }
 
@@ -1559,6 +1601,7 @@ mod convert_coverage_tests {
                 features: Features::new(),
             },
             length: 3,
+            time_reference: None,
         }));
         assert!(pb.initial_timestamp_rfc3339.is_none());
         pb.length = None;
@@ -1583,6 +1626,7 @@ mod convert_coverage_tests {
             initial_timestamp: t0(),
             horizon: Period::fixed(Duration::hours(4)),
             count: 3,
+            time_reference: None,
         });
 
         let mut pb = full_key_to_pb(&forecast);
@@ -1669,6 +1713,7 @@ mod convert_coverage_tests {
             quantity_kind: None,
             unit_system: None,
             component_field: Some("max_active_power".into()),
+            time_reference: None,
             percentiles: None,
             element_type: ElementType::default(),
             element_shape: vec![],
@@ -1707,6 +1752,7 @@ mod convert_coverage_tests {
             initial_timestamp: t0(),
             horizon: Period::fixed(Duration::hours(4)),
             count: 3,
+            time_reference: None,
         });
         let pb = full_key_to_pb(&key);
         assert_eq!(
@@ -1869,6 +1915,7 @@ mod convert_coverage_tests {
             quantity_kind: None,
             unit_system: None,
             component_field: None,
+            time_reference: None,
             percentiles: None,
             element_type: ElementType::default(),
             element_shape: vec![],

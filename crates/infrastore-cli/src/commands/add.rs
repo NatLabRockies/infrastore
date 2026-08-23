@@ -59,6 +59,15 @@ pub struct InlineArgs {
     /// Unit basis: natural_units or component_base.
     #[arg(long, help_heading = "Inline descriptor")]
     pub unit_system: Option<String>,
+    /// Declare how the timestamps are spelled: utc, zoneless, a fixed offset
+    /// like -07:00, or an IANA zone name like America/Denver.
+    ///
+    /// Normally unnecessary — the spelling is read off the timestamps
+    /// themselves, with --assume-timezone / --zoneless deciding what a zoneless
+    /// column means. Set this only to declare a spelling the text cannot carry.
+    // `allow_hyphen_values` so a western offset can be written the obvious way.
+    #[arg(long, help_heading = "Inline descriptor", allow_hyphen_values = true)]
+    pub time_reference: Option<String>,
     /// Component field these values vary over time, e.g. max_active_power.
     #[arg(long, help_heading = "Inline descriptor")]
     pub component_field: Option<String>,
@@ -124,6 +133,7 @@ impl InlineArgs {
             || self.units.is_some()
             || self.quantity_kind.is_some()
             || self.unit_system.is_some()
+            || self.time_reference.is_some()
             || self.component_field.is_some()
             || self.application_data.is_some()
             || !self.element_shape.is_empty()
@@ -170,6 +180,7 @@ impl InlineArgs {
             units: self.units.clone(),
             quantity_kind: self.quantity_kind.clone(),
             unit_system: self.unit_system.clone(),
+            time_reference: self.time_reference.clone(),
             component_field: self.component_field.clone(),
             application_data: self.application_data.clone(),
             csv: Some(csv.display().to_string()),

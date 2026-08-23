@@ -22,6 +22,7 @@ use crate::types::key::{KeyIdentity, TimeSeriesKey};
 use crate::types::metadata::{
     FeatureValue, Features, OwnerCategory, TimeSeriesMetadata, UnitSystem,
 };
+use crate::types::time_reference::TimeReference;
 use crate::types::time_series::TimeSeriesType;
 
 /// The arrays the catalog references, paired with one diagnostic per row too
@@ -451,6 +452,18 @@ pub struct MetadataFilter {
     /// declares no `component_field` matches no value, since SQL equality is
     /// never true against NULL.
     pub component_field: Option<String>,
+    /// Coherence predicate on the timestamp spelling: `Some(true)` selects the
+    /// rows whose `time_reference` is `'zoneless'`, `Some(false)` selects
+    /// everything else — the three zoned spellings *and* the rows that left the
+    /// column NULL.
+    ///
+    /// A binary predicate rather than an exact match on purpose. The rows the
+    /// store rejects a mixed selection over are exactly these two groups, and
+    /// an exact-match filter cannot express the second one: an unset column
+    /// matches no value at all under SQL equality (the trap
+    /// [`Self::component_field`] documents). Here those rows are a coherence
+    /// group, not an oversight.
+    pub zoneless: Option<bool>,
     pub resolution: Option<Period>,
     /// Forecast window interval. When set, restricts to rows with exactly this
     /// interval (part of the identity); `None` does not filter on interval.
@@ -661,6 +674,15 @@ impl MetadataFilter {
         if let Some(ref component_field) = self.component_field {
             sql.push_str(" AND component_field = ?");
             params_vec.push(Box::new(component_field.clone()));
+        }
+        if let Some(zoneless) = self.zoneless {
+            // `<>` is never true against NULL, so the negative arm has to say
+            // "IS NULL OR" explicitly -- those rows belong to the zoned group.
+            sql.push_str(if zoneless {
+                " AND time_reference = 'zoneless'"
+            } else {
+                " AND (time_reference IS NULL OR time_reference <> 'zoneless')"
+            });
         }
         if let Some(resolution) = self.resolution {
             sql.push_str(" AND resolution = ?");
@@ -934,10 +956,11 @@ impl MetadataStore {
             "INSERT INTO time_series_associations
              (owner_id, owner_type, owner_category, time_series_type, name, data_hash,
               initial_timestamp, resolution, length, horizon, interval, count,
-              timestamps_hash, units, quantity_kind, unit_system, component_field,
-              percentiles_json, element_type, element_shape, application_data, features_hash)
+              timestamps_hash, units, quantity_kind, unit_system, time_reference,
+              component_field, percentiles_json, element_type, element_shape,
+              application_data, features_hash)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                     ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+                     ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
         )?;
         let result = insert_stmt.execute(params![
             meta.owner_id,
@@ -956,6 +979,9 @@ impl MetadataStore {
             meta.units,
             meta.quantity_kind,
             meta.unit_system.map(|u| u.as_str()),
+            meta.time_reference
+                .as_ref()
+                .map(TimeReference::as_storage_string),
             meta.component_field,
             percentiles_json,
             meta.element_type.to_string(),
@@ -1278,8 +1304,8 @@ impl MetadataStore {
             "SELECT features_hash, owner_id, owner_type, owner_category, time_series_type, name,
                     data_hash, initial_timestamp, resolution, length, horizon,
                     interval, count, timestamps_hash, units, quantity_kind, unit_system,
-                    component_field, percentiles_json, element_type, element_shape,
-                    application_data, id
+                    time_reference, component_field, percentiles_json, element_type,
+                    element_shape, application_data, id
              FROM time_series_associations {where_clause}"
         );
         let mut stmt = self.conn.prepare_cached(&sql)?;
@@ -1615,6 +1641,7 @@ impl MetadataStore {
             owner_type: None,
             name_glob: None,
             component_field: None,
+            zoneless: None,
         })?;
         matches.retain(|m| m.features == key.features);
         match matches.len() {
@@ -1687,6 +1714,36 @@ impl MetadataStore {
             .query_map(param_refs.as_slice(), |row| row.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         rows.into_iter().map(|s| iso_to_period(&s)).collect()
+    }
+
+    /// Every distinct timestamp spelling the catalog holds, sorted, plus whether
+    /// any row left the column NULL.
+    ///
+    /// One `SELECT DISTINCT` rather than a projection over a full listing: this
+    /// serves `store-info`, which is otherwise a constant-time report, and the
+    /// column is low-cardinality by nature — a handful of values across a whole
+    /// store. It is also the only surface that needs the *unspecified* rows
+    /// counted separately, which is why the flag rides along instead of being a
+    /// second query.
+    pub fn distinct_time_references(&self) -> Result<(Vec<TimeReference>, bool)> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT time_reference FROM time_series_associations ORDER BY 1")?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, Option<String>>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut unspecified = false;
+        let mut out = Vec::new();
+        for row in rows {
+            match row {
+                None => unspecified = true,
+                // An unparseable spelling is an integrity failure, on the same
+                // terms as the read path: "unspecified" and "a value this build
+                // cannot read" must not look alike.
+                Some(s) => out.push(TimeReference::parse(&s)?),
+            }
+        }
+        Ok((out, unspecified))
     }
 
     pub fn count_by_type(&self, ts_type: TimeSeriesType) -> Result<i64> {
@@ -2736,6 +2793,7 @@ struct MetaRow {
     units: Option<String>,
     quantity_kind: Option<String>,
     unit_system: Option<UnitSystem>,
+    time_reference: Option<TimeReference>,
     component_field: Option<String>,
     percentiles: Option<Vec<f64>>,
     element_type: crate::types::element_type::ElementType,
@@ -2767,6 +2825,7 @@ impl MetaRow {
             units: self.units,
             quantity_kind: self.quantity_kind,
             unit_system: self.unit_system,
+            time_reference: self.time_reference,
             component_field: self.component_field,
             percentiles: self.percentiles,
             element_type: self.element_type,
@@ -2797,12 +2856,13 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<([u8; 32], MetaRo
     let units: Option<String> = row.get(14)?;
     let quantity_kind: Option<String> = row.get(15)?;
     let unit_system_str: Option<String> = row.get(16)?;
-    let component_field: Option<String> = row.get(17)?;
-    let percentiles_json: Option<String> = row.get(18)?;
-    let element_type_str: String = row.get(19)?;
-    let element_shape_json: Option<String> = row.get(20)?;
-    let application_data: Option<String> = row.get(21)?;
-    let id: i64 = row.get(22)?;
+    let time_reference_str: Option<String> = row.get(17)?;
+    let component_field: Option<String> = row.get(18)?;
+    let percentiles_json: Option<String> = row.get(19)?;
+    let element_type_str: String = row.get(20)?;
+    let element_shape_json: Option<String> = row.get(21)?;
+    let application_data: Option<String> = row.get(22)?;
+    let id: i64 = row.get(23)?;
 
     // An unrecognized basis is an error, not a silent `None`. The column has no
     // CHECK precisely so a future basis can be added without a format bump,
@@ -2818,6 +2878,24 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<([u8; 32], MetaRo
                     Box::new(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         format!("invalid unit_system: {s:?}"),
+                    )),
+                )
+            })
+        })
+        .transpose()?;
+
+    // Same reasoning as `unit_system` above, and one degree sharper: reading an
+    // unparseable spelling as "unspecified" would hand a caller an aware
+    // timestamp for a series that never claimed one.
+    let time_reference = time_reference_str
+        .map(|s| {
+            TimeReference::parse(&s).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    17,
+                    rusqlite::types::Type::Text,
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("invalid time_reference: {s:?} ({e})"),
                     )),
                 )
             })
@@ -2955,6 +3033,7 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<([u8; 32], MetaRo
             units,
             quantity_kind,
             unit_system,
+            time_reference,
             component_field,
             percentiles,
             element_type,

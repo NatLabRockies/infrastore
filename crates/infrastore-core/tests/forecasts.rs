@@ -100,6 +100,7 @@ fn add_forecast(
                 horizon,
                 interval,
                 count,
+                None,
             ));
         }
         other => panic!("add_forecast helper: unsupported type {other:?}"),
@@ -372,7 +373,7 @@ fn window_selection_deterministic() {
             let start = initial + Duration::hours(6);
             let end = initial + Duration::hours(18);
             let got = store
-                .get_time_series(key.identity(), Some((start, end)))
+                .get_time_series(key.identity(), Some((start, end).into()))
                 .unwrap();
             let det = got.as_deterministic().unwrap();
             assert_eq!(det.count, 2, "{backend}: selected count");
@@ -434,7 +435,7 @@ fn window_selection_probabilistic() {
             let start = initial + Duration::hours(4);
             let end = initial + Duration::hours(12);
             let got = store
-                .get_time_series(key.identity(), Some((start, end)))
+                .get_time_series(key.identity(), Some((start, end).into()))
                 .unwrap();
             let prob = got.as_probabilistic().unwrap();
             assert_eq!(prob.count, 2, "{backend}: count");
@@ -495,7 +496,7 @@ fn window_selection_scenarios() {
             let start = initial + Duration::hours(8);
             let end = initial + Duration::hours(18);
             let got = store
-                .get_time_series(key.identity(), Some((start, end)))
+                .get_time_series(key.identity(), Some((start, end).into()))
                 .unwrap();
             let scen = got.as_scenarios().unwrap();
             assert_eq!(scen.count, 2, "{backend}: count");
@@ -555,7 +556,7 @@ fn window_selection_error_cases() {
             let start = initial + Duration::hours(4);
             let end = initial;
             let err = store
-                .get_time_series(key.identity(), Some((start, end)))
+                .get_time_series(key.identity(), Some((start, end).into()))
                 .unwrap_err();
             assert!(
                 err.to_string().contains("end < start"),
@@ -566,7 +567,7 @@ fn window_selection_error_cases() {
             let misaligned = initial + Duration::hours(3); // interval=4h, not aligned
             let far_end = initial + Duration::hours(20);
             let err = store
-                .get_time_series(key.identity(), Some((misaligned, far_end)))
+                .get_time_series(key.identity(), Some((misaligned, far_end).into()))
                 .unwrap_err();
             assert!(
                 err.to_string().contains("window boundary"),
@@ -576,7 +577,7 @@ fn window_selection_error_cases() {
             // Empty selection (aligned start with end == start) => count == 0.
             let aligned_start = initial + Duration::hours(4);
             let got = store
-                .get_time_series(key.identity(), Some((aligned_start, aligned_start)))
+                .get_time_series(key.identity(), Some((aligned_start, aligned_start).into()))
                 .unwrap();
             let det = got.as_deterministic().unwrap();
             assert_eq!(det.count, 0, "{backend}: empty count");
@@ -644,7 +645,7 @@ fn dst_synthesis_overlapping_windows() {
             let start = initial + interval;
             let end = initial + interval + interval; // exclusive
             let got2 = store
-                .get_time_series(key.identity(), Some((start, end)))
+                .get_time_series(key.identity(), Some((start, end).into()))
                 .unwrap();
             let det2 = got2.as_deterministic().unwrap();
             assert_eq!(det2.count, 1, "{backend}: selected count");
@@ -708,7 +709,7 @@ fn deterministic_i64_dtype_preserved() {
             let start = initial + Duration::hours(4);
             let end = initial + Duration::hours(8);
             let got2 = store
-                .get_time_series(key.identity(), Some((start, end)))
+                .get_time_series(key.identity(), Some((start, end).into()))
                 .unwrap();
             let det2 = got2.as_deterministic().unwrap();
             assert_eq!(det2.data.dtype, Dtype::I64, "{backend}: sliced dtype");
@@ -1451,7 +1452,7 @@ fn monthly_deterministic_window_selection_at_calendar_boundaries() {
         move |store, key, backend| {
             // Select windows 1..3 (Feb 15 and Mar 15).
             let got = store
-                .get_time_series(key.identity(), Some((w(2), w(4))))
+                .get_time_series(key.identity(), Some((w(2), w(4)).into()))
                 .unwrap();
             let det = got.as_deterministic().unwrap();
             assert_eq!(det.count, 2, "{backend}: two windows selected");
@@ -1469,14 +1470,14 @@ fn monthly_deterministic_window_selection_at_calendar_boundaries() {
 
             // The last window on its own boundary.
             let got = store
-                .get_time_series(key.identity(), Some((w(4), w(5))))
+                .get_time_series(key.identity(), Some((w(4), w(5)).into()))
                 .unwrap();
             assert_eq!(got.as_deterministic().unwrap().count, 1, "{backend}");
 
             // Off-grid start: the 20th is not a calendar step from the 15th.
             let off = Utc.with_ymd_and_hms(2024, 2, 20, 0, 0, 0).unwrap();
             let err = store
-                .get_time_series(key.identity(), Some((off, w(4))))
+                .get_time_series(key.identity(), Some((off, w(4)).into()))
                 .unwrap_err();
             assert!(
                 matches!(err, infrastore_core::TimeSeriesError::InvalidParameter(_)),
@@ -1487,7 +1488,10 @@ fn monthly_deterministic_window_selection_at_calendar_boundaries() {
             let past = Utc.with_ymd_and_hms(2024, 5, 15, 0, 0, 0).unwrap();
             assert!(
                 store
-                    .get_time_series(key.identity(), Some((past, past + Duration::days(31))))
+                    .get_time_series(
+                        key.identity(),
+                        Some((past, past + Duration::days(31)).into())
+                    )
                     .is_err(),
                 "{backend}: start past the last window must be rejected"
             );
@@ -1515,7 +1519,7 @@ fn monthly_deterministic_end_of_month_initial_timestamp() {
     let feb29 = Utc.with_ymd_and_hms(2024, 2, 29, 0, 0, 0).unwrap();
     let apr = Utc.with_ymd_and_hms(2024, 4, 30, 0, 0, 0).unwrap();
     let got = store
-        .get_time_series(key.identity(), Some((feb29, apr)))
+        .get_time_series(key.identity(), Some((feb29, apr).into()))
         .unwrap();
     let det = got.as_deterministic().unwrap();
     assert_eq!(det.initial_timestamp, feb29, "clamped boundary is window 1");
@@ -1525,7 +1529,7 @@ fn monthly_deterministic_end_of_month_initial_timestamp() {
     let mar29 = Utc.with_ymd_and_hms(2024, 3, 29, 0, 0, 0).unwrap();
     assert!(
         store
-            .get_time_series(key.identity(), Some((mar29, apr)))
+            .get_time_series(key.identity(), Some((mar29, apr).into()))
             .is_err(),
         "an unclamped day-of-month must not be treated as a window boundary"
     );
@@ -1600,7 +1604,7 @@ fn transform_single_time_series_on_a_monthly_grid() {
     let mar = Utc.with_ymd_and_hms(2024, 3, 15, 0, 0, 0).unwrap();
     let apr = Utc.with_ymd_and_hms(2024, 4, 15, 0, 0, 0).unwrap();
     let got = store
-        .get_time_series(dst_keys[0].identity(), Some((mar, apr)))
+        .get_time_series(dst_keys[0].identity(), Some((mar, apr).into()))
         .unwrap();
     let det = got.as_deterministic().unwrap();
     assert_eq!(det.count, 1);
@@ -1927,7 +1931,7 @@ fn zero_interval_single_window_forecast_round_trips() {
 
             // The only valid windowed read starts at `initial`.
             let sliced = store
-                .get_time_series(key.identity(), Some((initial, initial + horizon)))
+                .get_time_series(key.identity(), Some((initial, initial + horizon).into()))
                 .unwrap();
             assert_eq!(
                 sliced.as_deterministic().unwrap().count,
@@ -1938,7 +1942,7 @@ fn zero_interval_single_window_forecast_round_trips() {
                 store
                     .get_time_series(
                         key.identity(),
-                        Some((initial + Duration::hours(1), initial + horizon)),
+                        Some((initial + Duration::hours(1), initial + horizon).into()),
                     )
                     .is_err(),
                 "{backend}: an off-initial start is rejected"
@@ -2532,7 +2536,7 @@ fn a_zero_width_range_returns_an_empty_forecast_for_either_interval_encoding() {
 
     for (label, key) in [("zero interval", &single_key), ("positive", &many_key)] {
         let empty = store
-            .get_time_series(key.identity(), Some((initial, initial)))
+            .get_time_series(key.identity(), Some((initial, initial).into()))
             .unwrap_or_else(|e| panic!("{label}: zero-width range should select nothing, got {e}"));
         assert_eq!(
             empty.as_deterministic().unwrap().count,
@@ -2543,7 +2547,7 @@ fn a_zero_width_range_returns_an_empty_forecast_for_either_interval_encoding() {
 
     // And the ordinary queries on the zero-interval forecast still return its
     // one window.
-    for range in [None, Some((initial, initial + Duration::hours(4)))] {
+    for range in [None, Some((initial, initial + Duration::hours(4)).into())] {
         let got = store.get_time_series(single_key.identity(), range).unwrap();
         assert_eq!(got.as_deterministic().unwrap().count, 1, "{range:?}");
     }

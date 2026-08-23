@@ -32,8 +32,17 @@ do not hand-edit it. The [Julia binding](./julia-api.md) is the primary consumer
   verbatim to the add functions and stored uninterpreted. Element typing does not go here — that is
   `element_type`.
 - **Strings** are null-terminated UTF-8. Optional string arguments (`application_data`,
-  `features_json`, `units`, `quantity_kind`, `unit_system`, `component_field`, `name_glob`) accept
-  `NULL`.
+  `features_json`, `units`, `quantity_kind`, `unit_system`, `time_reference`, `component_field`,
+  `name_glob`) accept `NULL`.
+- **`time_reference`** records how a series' timestamps were _spelled_: `"utc"`, `"zoneless"`, a
+  fixed offset (`"-07:00"`), or an IANA zone name (`"America/Denver"`). An unparseable value fails
+  with `INFRASTORE_ERR_INVALID_PARAMETER` rather than degrading to unset. Zone _existence_ is not
+  checked here — the caller's own tz database is the one that should warn. Timestamps stay Unix
+  milliseconds either way, so `time_range_zoneless` is what tells a wall-clock bound from an instant
+  one, and the store refuses a bound whose spelling the series cannot answer rather than coercing
+  it. The `zoneless` filter argument on the list/filter exports is a tri-state `int32_t`: negative
+  means no filter, `0` selects the instant-bearing rows (including those with no reference), and `1`
+  selects the wall-clock rows. See [Time references](../explanation/data-model.md#time-references).
 - **Features** are passed as a JSON object string whose values are int / float / bool / string. An
   add call whose feature names shadow a time-series or key field (`name`, `resolution`, `owner_id`,
   …) fails with `INFRASTORE_ERR_INVALID_PARAMETER`; see
@@ -121,11 +130,13 @@ int32_t infrastore_store_add_single(struct InfraStore *handle,
                             const char *units,                /* optional */
                             const char *quantity_kind,        /* optional */
                             const char *unit_system,          /* optional: "natural_units" | "component_base" */
+                            const char *time_reference,       /* optional: "utc" | "zoneless" | "-07:00" | IANA name */
                             const char *component_field,      /* optional: e.g. "max_active_power" */
                             struct InfraStoreKey **out_key);          /* owned; infrastore_key_free */
 
 int32_t infrastore_store_get_single(const struct InfraStore *handle, const struct InfraStoreKey *key,
                             bool time_range_present,          /* false = whole series */
+                            bool time_range_zoneless,         /* how the caller spelled the bounds */
                             int64_t time_range_start_ms, int64_t time_range_end_ms,  /* start inclusive, end exclusive */
                             int64_t *out_initial_ts_unix_ms,
                             char **out_resolution,            /* ISO-8601; infrastore_string_free */
@@ -137,6 +148,7 @@ int32_t infrastore_store_get_single(const struct InfraStore *handle, const struc
                             char **out_units,          /* optional (NULL skips); owned, same free */
                             char **out_quantity_kind,  /* optional (NULL skips); owned, same free */
                             char **out_unit_system,    /* optional (NULL skips); owned, same free */
+                            char **out_time_reference, /* optional (NULL skips); owned, same free */
                             char **out_component_field); /* optional (NULL skips); owned, same free */
 
 int32_t infrastore_store_remove(struct InfraStore *handle, const struct InfraStoreKey *key);
@@ -176,11 +188,13 @@ int32_t infrastore_store_add_non_sequential(struct InfraStore *handle,
                                     const char *application_data, const char *features_json,
                                     const char *units,
                                     const char *quantity_kind, const char *unit_system,
+                                    const char *time_reference,
                                     const char *component_field,
                                     struct InfraStoreKey **out_key);
 
 int32_t infrastore_store_get_non_sequential(const struct InfraStore *handle, const struct InfraStoreKey *key,
                                     bool time_range_present,          /* false = every point */
+                                    bool time_range_zoneless,         /* how the caller spelled the bounds */
                                     int64_t time_range_start_ms, int64_t time_range_end_ms,  /* start inclusive, end exclusive */
                                     int64_t **out_timestamps, uint64_t *out_timestamps_len,
                                     int32_t *out_dtype,
@@ -191,6 +205,7 @@ int32_t infrastore_store_get_non_sequential(const struct InfraStore *handle, con
                                     char **out_units,         /* optional (NULL skips); owned, same free */
                                     char **out_quantity_kind, /* optional (NULL skips); owned, same free */
                                     char **out_unit_system,   /* optional (NULL skips); owned, same free */
+                                    char **out_time_reference, /* optional (NULL skips); owned, same free */
                                     char **out_component_field); /* optional (NULL skips); owned, same free */
 ```
 
@@ -222,7 +237,7 @@ int32_t infrastore_store_has_any_by_filter(const struct InfraStore *handle,
                                    bool has_time_series_type, int32_t time_series_type,
                                    const char *name, const char *name_glob,  /* GLOB pattern; NULL = unset */
                                    const char *resolution, const char *interval,  /* ISO-8601; NULL = unset */
-                                   const char *features_json, const char *component_field,
+                                   const char *features_json, const char *component_field, int32_t zoneless,
                                    bool *out_present);
 
 int32_t infrastore_store_remove_by_attrs(struct InfraStore *handle,
@@ -277,7 +292,7 @@ int32_t infrastore_key_attributes(const struct InfraStoreKey *key,
    infrastore_store_list_time_series element: owner_id, owner_type, owner_category,
    time_series_type, name, data_hash (64-char hex), initial_timestamp_ms, resolution,
    horizon, interval, count, length, percentiles, element_type, element_shape, features,
-   units, quantity_kind, unit_system, component_field, application_data — fields that do not apply
+   units, quantity_kind, unit_system, time_reference, component_field, application_data — fields that do not apply
    to the key's
    type are null. One export
    covers every time series type, static and forecast alike. Probe-then-fetch:
@@ -352,6 +367,7 @@ int32_t infrastore_store_add_forecast(struct InfraStore *handle,
                               const char *features_json, const char *units,
                               const char *quantity_kind,        /* optional */
                               const char *unit_system,          /* optional: "natural_units" | "component_base" */
+                            const char *time_reference,       /* optional: "utc" | "zoneless" | "-07:00" | IANA name */
                               const char *component_field,      /* optional: e.g. "max_active_power" */
                               struct InfraStoreKey **out_key);
 
@@ -369,6 +385,7 @@ int32_t infrastore_store_add_probabilistic(struct InfraStore *handle,
                                    const char *features_json, const char *units,
                                    const char *quantity_kind,        /* optional */
                                    const char *unit_system,          /* optional: "natural_units" | "component_base" */
+                            const char *time_reference,       /* optional: "utc" | "zoneless" | "-07:00" | IANA name */
                                    const char *component_field,      /* optional: e.g. "max_active_power" */
                                    struct InfraStoreKey **out_key);
 
@@ -454,6 +471,7 @@ int32_t infrastore_store_get_forecast(const struct InfraStore *handle,
                               char **out_units,          /* optional (NULL skips); owned, same free */
                               char **out_quantity_kind,  /* optional (NULL skips); owned, same free */
                               char **out_unit_system,    /* optional (NULL skips); owned, same free */
+                            char **out_time_reference, /* optional (NULL skips); owned, same free */
                               char **out_component_field); /* optional (NULL skips); owned, same free */
 ```
 
@@ -483,6 +501,7 @@ int32_t infrastore_store_get_forecast_by_key(const struct InfraStore *handle, co
                                      char **out_units,          /* optional (NULL skips); owned, same free */
                                      char **out_quantity_kind,  /* optional (NULL skips); owned, same free */
                                      char **out_unit_system,    /* optional (NULL skips); owned, same free */
+                            char **out_time_reference, /* optional (NULL skips); owned, same free */
                                      char **out_component_field); /* optional (NULL skips); owned, same free */
 ```
 
@@ -558,7 +577,7 @@ int32_t infrastore_store_build_static_reader(const struct InfraStore *handle,
                                      bool has_owner_category, int32_t owner_category,
                                      const char *name, const char *name_glob,
                                      const char *resolution,
-                                     const char *features_json, const char *component_field,
+                                     const char *features_json, const char *component_field, int32_t zoneless,
                                      struct InfraStoreStaticReaderHandle **out_reader);
 
 int32_t infrastore_static_reader_grid(const struct InfraStoreStaticReaderHandle *reader,
@@ -606,7 +625,7 @@ int32_t infrastore_store_build_forecast_reader(const struct InfraStore *handle,
                                        int32_t time_series_type,
                                        const char *name, const char *name_glob,
                                        const char *resolution,
-                                       const char *features_json, const char *component_field,
+                                       const char *features_json, const char *component_field, int32_t zoneless,
                                        struct InfraStoreForecastReaderHandle **out_reader);
 
 int32_t infrastore_forecast_reader_timeline(const struct InfraStoreForecastReaderHandle *reader,
@@ -795,7 +814,7 @@ int32_t infrastore_store_list_keys(const struct InfraStore *handle,
                            bool has_time_series_type, int32_t time_series_type,
                            const char *name, const char *name_glob,
                            const char *resolution, const char *interval,
-                           const char *features_json, const char *component_field,
+                           const char *features_json, const char *component_field, int32_t zoneless,
                            char **out_json, uint64_t *out_len);
 /* Like infrastore_store_list_keys, but each row is annotated with the hex content hash of
    the array it resolves to (keys_to_json's shape plus a `data_hash` field); rows
@@ -808,7 +827,7 @@ int32_t infrastore_store_list_array_groups(const struct InfraStore *handle,
                                    bool has_time_series_type, int32_t time_series_type,
                                    const char *name, const char *name_glob,
                                    const char *resolution, const char *interval,
-                                   const char *features_json, const char *component_field,
+                                   const char *features_json, const char *component_field, int32_t zoneless,
                                    char **out_json, uint64_t *out_len);
 ```
 
@@ -1034,7 +1053,7 @@ int32_t infrastore_store_export_time_series_associations_openapi(const struct In
                                                           bool has_time_series_type, int32_t time_series_type,
                                                           const char *name, const char *resolution,
                                                           const char *interval, const char *features_json,
-                                                          const char *component_field,
+                                                          const char *component_field, int32_t zoneless,
                                                           char **out_json, uint64_t *out_len);
 
 /* Export the whole supplemental_attribute_associations table as an OpenAPI-row

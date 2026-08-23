@@ -155,7 +155,7 @@ async fn deterministic_time_range_over_grpc() {
     let end = t0 + Duration::hours(10); // window index 5 (exclusive)
 
     let data = client
-        .get_time_series(keys[0].identity(), Some((start, end)))
+        .get_time_series(keys[0].identity(), Some((start, end).into()))
         .await
         .unwrap();
     let det = data.as_deterministic().expect("expected Deterministic");
@@ -217,7 +217,7 @@ async fn probabilistic_time_range_over_grpc() {
     let end = t0 + Duration::hours(6);
 
     let data = client
-        .get_time_series(keys[0].identity(), Some((start, end)))
+        .get_time_series(keys[0].identity(), Some((start, end).into()))
         .await
         .unwrap();
     let prob = data.as_probabilistic().expect("expected Probabilistic");
@@ -279,7 +279,7 @@ async fn scenarios_time_range_over_grpc() {
     let end = t0 + Duration::hours(4);
 
     let data = client
-        .get_time_series(keys[0].identity(), Some((start, end)))
+        .get_time_series(keys[0].identity(), Some((start, end).into()))
         .await
         .unwrap();
     let scen = data.as_scenarios().expect("expected Scenarios");
