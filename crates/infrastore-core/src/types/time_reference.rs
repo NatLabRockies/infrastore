@@ -151,9 +151,12 @@ impl TimeReference {
     /// core would need a tz database to catch it, and adding one would appoint a
     /// fourth database gatekeeper over the three the bindings already ship,
     /// coupling legitimate data (a zone IANA added last month) to this crate's
-    /// release cadence. Every layer that *has* a database — the CLI via
-    /// `chrono-tz`, Python via `zoneinfo`, Julia via `TimeZones` — warns on an
-    /// unrecognized name at write time and stores it anyway.
+    /// release cadence. The layers that *have* a database audit the name
+    /// instead — the CLI via `chrono-tz`, Python via `zoneinfo`, Julia via
+    /// `TimeZones` — and store it either way. The CLI warns when a descriptor
+    /// declares a name it does not recognize; `infrastore store-info` marks any
+    /// such name in an existing store, which is what makes a typo findable in
+    /// one command rather than at some later read in some other language.
     pub fn validate(&self) -> Result<()> {
         let invalid = |msg: String| Err(TimeSeriesError::InvalidParameter(msg));
         match self {

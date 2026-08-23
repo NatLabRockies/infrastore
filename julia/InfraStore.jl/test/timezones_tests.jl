@@ -50,15 +50,31 @@ end
     )
     @test sliced.timestamps == [DateTime(2024, 1, 1, 13)]
 
-    # And a reader reads at one.
+    # And a reader reads at one -- against an axis that records instants. The
+    # series is anchored on a ZonedDateTime, so its axis is spelled
+    # `ZoneReference("America/Denver")` and an instant-bearing point read is the
+    # matching spelling. (It used to be built from a bare `DateTime`, giving a
+    # *wall-clock* axis that an instant cannot be mapped onto -- the same
+    # category error the ranged reads refuse, which the point read simply was
+    # not checking.)
     sts_key = add_time_series!(
         store, 3, "Generator", Component,
-        SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(10.0:13.0), "load"),
+        SingleTimeSeries(
+            ZonedDateTime(DateTime(2024, 1, 1), denver),  # = 2024-01-01T07:00Z
+            Hour(1), collect(10.0:13.0), "load",
+        ),
     )
     reader = build_static_reader(store; resolution=Hour(1), owner_id=3)
-    static_read!(reader, ZonedDateTime(DateTime(2023, 12, 31, 19), denver))  # = 2024-01-01T02:00Z
+    @test static_grid(reader).time_reference == ZoneReference("America/Denver")
+    static_read!(reader, ZonedDateTime(DateTime(2024, 1, 1, 2), denver))  # = 09:00Z
     @test static_values(reader, 1)[1] == 12.0
     @test has_time_series(store, sts_key)
+
+    # A wall clock against that same instant-bearing axis is refused, as it is
+    # on a ranged read.
+    @test_throws InfraStore.InvalidParameterError static_read!(
+        reader, DateTime(2024, 1, 1, 9)
+    )
 end
 
 @testset "an irregular vector is ordered by instant, not by wall clock" begin

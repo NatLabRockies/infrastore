@@ -4446,6 +4446,59 @@ end
     end
 end
 
+@testset "a point read is a query bound too" begin
+    # The ranged reads carry the spelling and the core refuses a bound the
+    # series cannot answer; the point reads sent only the instant, so a bare
+    # DateTime (a wall clock) could read an instant-bearing axis and return a
+    # *row* where the same mismatch on a range raises.
+    values = collect(1.0:4.0)
+    initial = DateTime(2024, 1, 1)
+
+    instants = Store(in_memory=true)
+    add_time_series!(
+        instants, 1, "Generator", Component,
+        SingleTimeSeries(initial, Hour(1), values, "load"; time_reference=UTCReference()),
+    )
+    r = build_static_reader(instants; resolution=Hour(1))
+    @test_throws InfraStore.InvalidParameterError static_read!(r, DateTime(2024, 1, 1, 1))
+
+    # A wall-clock axis still reads a wall clock.
+    wall = Store(in_memory=true)
+    add_time_series!(
+        wall, 1, "Generator", Component,
+        SingleTimeSeries(initial, Hour(1), values, "load"),
+    )
+    rw = build_static_reader(wall; resolution=Hour(1))
+    static_read!(rw, DateTime(2024, 1, 1, 1))
+    @test static_values(rw, 1) == [2.0]
+
+    # An unspecified axis has nothing to disagree with, so it accepts either.
+    unspecified = Store(in_memory=true)
+    add_time_series!(
+        unspecified, 1, "Generator", Component,
+        SingleTimeSeries(initial, Hour(1), values, "load"; time_reference=nothing),
+    )
+    ru = build_static_reader(unspecified; resolution=Hour(1))
+    static_read!(ru, DateTime(2024, 1, 1, 1))
+    @test static_values(ru, 1) == [2.0]
+
+    # The forecast point read obeys the same rule.
+    fc = Store(in_memory=true)
+    add_time_series!(
+        fc, 1, "Generator", Component,
+        SingleTimeSeries(initial, Hour(1), values, "load"; time_reference=UTCReference()),
+    )
+    transform_single_time_series!(fc, Hour(2), Hour(1))
+    fr = build_forecast_reader(fc, Deterministic; resolution=Hour(1))
+    @test_throws InfraStore.InvalidParameterError forecast_read!(
+        fr, DateTime(2024, 1, 1, 1)
+    )
+
+    # The axis spelling is cached on the reader, not re-fetched per timestep.
+    @test r.time_reference == UTCReference()
+    @test fr.time_reference == UTCReference()
+end
+
 @testset "a reader reports the spelling of the axis it spans" begin
     # A reader spans one timeline, so it carries one spelling -- and without it
     # a Julia caller could read the axis but not say how it was written, unable

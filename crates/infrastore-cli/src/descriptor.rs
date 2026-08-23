@@ -508,9 +508,28 @@ impl Descriptor {
         first_timestamp: Option<&str>,
     ) -> Result<Option<TimeReference>, String> {
         if let Some(spelling) = self.time_reference.as_deref() {
-            return TimeReference::parse(spelling)
-                .map(Some)
-                .map_err(|e| format!("series '{}': invalid time_reference: {e}", self.name));
+            let reference = TimeReference::parse(spelling)
+                .map_err(|e| format!("series '{}': invalid time_reference: {e}", self.name))?;
+            // The core validates a zone name's *shape* and never resolves it,
+            // so `America/Dever` reaches storage intact. This is the layer with
+            // a tz database, and it was the only spelling the CLI let through
+            // in silence: the same typo passed to `--assume-timezone` is a hard
+            // error. Warn rather than refuse -- the store deliberately accepts
+            // a name its database has not heard of yet, which is what keeps a
+            // zone IANA added last month usable before this build catches up.
+            if !crate::fields::zone_is_known(&reference) {
+                eprintln!(
+                    "{}",
+                    crate::color::dim_err(&format!(
+                        "warning: series '{}': time_reference \"{spelling}\" is not a zone \
+                         this build's tz database recognizes. It is stored as given -- a real \
+                         name this build predates still works -- but a typo will only surface \
+                         when something tries to render it. `store-info` lists it the same way.",
+                        self.name
+                    ))
+                );
+            }
+            return Ok(Some(reference));
         }
         match first_timestamp {
             Some(raw) => Ok(Some(parse::parse_timestamp_with_reference(raw)?.1)),

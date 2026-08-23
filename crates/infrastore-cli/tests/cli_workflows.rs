@@ -3548,3 +3548,51 @@ fn the_calendar_period_warning_fires_only_where_the_calendars_can_disagree() {
         "a fixed offset can still disagree at a month boundary"
     );
 }
+
+/// A zone name the tz database does not recognize is stored, and said out loud.
+///
+/// The core validates a zone name's *shape* and never resolves it, so a typo
+/// reaches storage intact. The CLI is the layer with a database, and this was
+/// the one spelling it let through in silence — the same typo passed to
+/// `--assume-timezone` is a hard error. It warns rather than refuses, because
+/// the store deliberately accepts a name this build has not heard of yet.
+#[test]
+fn a_descriptor_zone_the_database_does_not_know_is_warned_about_and_stored() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("zone.h5");
+    write(dir.path(), "v.csv", "value\n1\n2\n3\n");
+
+    let add_with = |owner: i64, name: &str, zone: &str| {
+        let json = format!(
+            r#"{{"owner_id": {owner}, "owner_type": "G", "name": "{name}",
+                 "type": "SingleTimeSeries", "element_type": "f64", "csv": "v.csv",
+                 "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H",
+                 "time_reference": "{zone}"}}"#
+        );
+        let d = write(dir.path(), &format!("{name}.json"), &json);
+        let out = raw(&store, &["add", "--descriptor", d.to_str().unwrap()]);
+        assert!(out.status.success(), "{name} must still be stored");
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+
+    let warned = add_with(1, "typo", "America/Dever");
+    assert!(warned.contains("warning"), "{warned}");
+    assert!(warned.contains("America/Dever"), "name the zone: {warned}");
+    assert!(
+        warned.contains("store-info"),
+        "name where to see it: {warned}"
+    );
+
+    // Stored as given: the store records names its database predates.
+    let listed = run(&store, &["-f", "json", "info", "--name", "typo"]);
+    assert!(listed.contains("America/Dever"), "{listed}");
+
+    // A real zone says nothing, and neither do the non-zone spellings.
+    assert!(!add_with(2, "real", "America/Denver").contains("warning"));
+    assert!(!add_with(3, "offset", "-07:00").contains("warning"));
+    assert!(!add_with(4, "wall", "zoneless").contains("warning"));
+
+    // `store-info` still reports it, which is the pre-existing surface.
+    let info = run(&store, &["store-info"]);
+    assert!(info.contains("unrecognized"), "{info}");
+}

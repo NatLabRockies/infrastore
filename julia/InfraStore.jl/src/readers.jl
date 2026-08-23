@@ -58,8 +58,13 @@ mutable struct StaticReader
     handle::Ptr{Cvoid}
     store::Store
     groups::Vector{StaticGroup}
+    # The axis' spelling, read once at build time. A reader is the build-once,
+    # sweep-many path, so asking the FFI for it on every `static_read!` would
+    # put a string allocation and a round trip on every timestep of a
+    # simulation.
+    time_reference::Union{Nothing, TimeReference}
     function StaticReader(handle::Ptr{Cvoid}, store::Store, groups::Vector{StaticGroup})
-        r = new(handle, store, groups)
+        r = new(handle, store, groups, nothing)
         finalizer(_finalize_static_reader, r)
         return r
     end
@@ -197,6 +202,7 @@ function build_static_reader(
     append!(
         reader.groups, (_static_group_layout(reader, gi) for gi in 0:(Int(out_n[]) - 1))
     )
+    reader.time_reference = _static_reader_reference(reader)
     return reader
 end
 
@@ -224,7 +230,7 @@ function static_grid(reader::StaticReader)
         _from_unix_ms(out_initial[]),
         _take_period(out_res[]),
         Int(out_len[]),
-        _static_reader_reference(reader),
+        reader.time_reference,
     )
 end
 
@@ -285,7 +291,39 @@ Read the value of every series at `t`, filling the reader's buffers. Throws if
 
 `t` is a `DateTime` (read as UTC) or, with TimeZones loaded, a `ZonedDateTime`.
 """
+# Refuse a point read whose spelling the reader's axis cannot answer.
+#
+# A point is a query bound like any other. The ranged reads carry the spelling
+# through `_time_range_args`, and the core refuses a bound the series cannot
+# answer; a point read sent only the instant, so the check was skipped -- a bare
+# `DateTime` (a wall clock) could read an instant-bearing axis, and a
+# `ZonedDateTime` a zoneless one, each reinterpreted as UTC and returning a
+# *row* rather than the error the same mismatch earns on a range.
+function _check_point_spelling(axis::Union{Nothing, TimeReference}, t, what::AbstractString)
+    axis === nothing && return nothing
+    bound_zoneless = is_zoneless(_time_reference_of(t))
+    axis_zoneless = is_zoneless(axis)
+    bound_zoneless == axis_zoneless && return nothing
+    if bound_zoneless
+        throw(
+            InvalidParameterError(
+                "the read timestamp carries no zone, but $what records instants " *
+                "(time_reference \"$(_time_reference_str(axis))\"); a wall clock does not " *
+                "name one, and the store will not guess a zone for it",
+            ),
+        )
+    end
+    return throw(
+        InvalidParameterError(
+            "the read timestamp names an instant, but $what is zoneless; its " *
+            "timestamps are wall clocks, so there is no defined mapping from an " *
+            "instant onto them",
+        ),
+    )
+end
+
 function static_read!(reader::StaticReader, t)
+    _check_point_spelling(reader.time_reference, t, "this reader's timeline")
     _check(
         @ccall lib_path().infrastore_static_reader_read(
             reader::Ptr{Cvoid},
@@ -346,10 +384,12 @@ mutable struct ForecastReader
     handle::Ptr{Cvoid}
     store::Store
     entries::Vector{ForecastEntry}
+    # See `StaticReader.time_reference`.
+    time_reference::Union{Nothing, TimeReference}
     function ForecastReader(
         handle::Ptr{Cvoid}, store::Store, entries::Vector{ForecastEntry}
     )
-        r = new(handle, store, entries)
+        r = new(handle, store, entries, nothing)
         finalizer(_finalize_forecast_reader, r)
         return r
     end
@@ -478,7 +518,20 @@ function build_forecast_reader(
     append!(
         reader.entries, (_forecast_entry_layout(reader, ei) for ei in 0:(Int(out_n[]) - 1))
     )
+    reader.time_reference = _forecast_reader_reference(reader)
     return reader
+end
+
+# The window timeline's spelling; the forecast counterpart of
+# `_static_reader_reference`.
+function _forecast_reader_reference(reader::ForecastReader)
+    out_ref = Ref{Ptr{Cchar}}(C_NULL)
+    _check(
+        @ccall lib_path().infrastore_forecast_reader_time_reference(
+            reader::Ptr{Cvoid}, out_ref::Ref{Ptr{Cchar}}
+        )::Int32
+    )
+    return _take_time_reference(out_ref[])
 end
 
 """
@@ -501,18 +554,12 @@ function forecast_timeline(reader::ForecastReader)
             out_count::Ref{UInt64},
         )::Int32
     )
-    out_ref = Ref{Ptr{Cchar}}(C_NULL)
-    _check(
-        @ccall lib_path().infrastore_forecast_reader_time_reference(
-            reader::Ptr{Cvoid}, out_ref::Ref{Ptr{Cchar}}
-        )::Int32
-    )
     return ForecastTimeline(
         _from_unix_ms(out_initial[]),
         _take_period(out_res[]),
         _take_period(out_interval[]),
         Int(out_count[]),
-        _take_time_reference(out_ref[]),
+        reader.time_reference,
     )
 end
 
@@ -551,6 +598,7 @@ Throws if `t` is off the window timeline. Follow with [`forecast_values`].
 `t` is a `DateTime` (read as UTC) or, with TimeZones loaded, a `ZonedDateTime`.
 """
 function forecast_read!(reader::ForecastReader, t)
+    _check_point_spelling(reader.time_reference, t, "this reader's timeline")
     _check(
         @ccall lib_path().infrastore_forecast_reader_read(
             reader::Ptr{Cvoid},

@@ -124,7 +124,7 @@ struct SingleTimeSeries{T,N}
     time_reference    :: Union{Nothing,TimeReference}  # inferred from the timestamp; see below
 end
 SingleTimeSeries(initial_timestamp, resolution, data, name; application_data=nothing, element_type=nothing, units=nothing,
-    quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=nothing)
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=<inferred>)
 
 struct NonSequentialTimeSeries{T,N}
     timestamps   :: Vector{DateTime}     # strictly increasing; one per row of dim 1
@@ -139,7 +139,7 @@ struct NonSequentialTimeSeries{T,N}
     time_reference    :: Union{Nothing,TimeReference}  # inferred from the timestamp; see below
 end
 NonSequentialTimeSeries(timestamps, data, name; application_data=nothing, element_type=nothing, units=nothing,
-    quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=nothing)
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=<inferred>)
 
 struct Deterministic{T,N}
     initial_timestamp :: DateTime
@@ -158,7 +158,7 @@ struct Deterministic{T,N}
     time_reference    :: Union{Nothing,TimeReference}  # inferred from the timestamp; see below
 end
 Deterministic(initial_timestamp, resolution, horizon, interval, count, data, name; application_data=nothing, element_type=nothing, units=nothing,
-    quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=nothing)
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=<inferred>)
 
 struct Probabilistic{T,N}
     initial_timestamp :: DateTime
@@ -178,7 +178,7 @@ struct Probabilistic{T,N}
     time_reference    :: Union{Nothing,TimeReference}  # inferred from the timestamp; see below
 end
 Probabilistic(initial_timestamp, resolution, horizon, interval, count, percentiles, data, name; application_data=nothing, element_type=nothing, units=nothing,
-    quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=nothing)
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=<inferred>)
 
 struct Scenarios{T,N}
     initial_timestamp :: DateTime
@@ -198,10 +198,10 @@ struct Scenarios{T,N}
     time_reference    :: Union{Nothing,TimeReference}  # inferred from the timestamp; see below
 end
 Scenarios(initial_timestamp, resolution, horizon, interval, count, data, name; application_data=nothing, element_type=nothing, units=nothing,
-    quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=nothing)
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=<inferred>)
 # note: scenario_count is NOT a constructor argument
 
-# The six descriptors after `name` are carried on the struct and become the
+# The seven descriptors after `name` are carried on the struct and become the
 # add_time_series! defaults, so a series built with units="MW" keeps them on add.
 # `unit_system` is a `UnitSystem`: `NaturalUnits` (the units named by `units`)
 # or `ComponentBase` (per-unit against the owning component's own base). The
@@ -1179,6 +1179,11 @@ carry a payload. The constructors infer one for you:
 | `ZonedDateTime(..., tz"-07:00")`         | `FixedOffsetReference(-420)`      |
 | `ZonedDateTime(..., tz"America/Denver")` | `ZoneReference("America/Denver")` |
 | a bare `DateTime` or `Date`              | `ZonelessReference()`             |
+
+The constructor signatures above write this default as `time_reference=<inferred>` rather than
+naming a value, because there is no Julia literal for it: omitting the keyword infers the spelling
+from the timestamp handed in, per the table above. Copying a literal `nothing` out of a signature
+would _suppress_ that inference.
 
 Passing `time_reference=nothing` explicitly is a different claim from omitting the keyword: it
 records _unspecified_, which is also what a read hands back for a series that declared no spelling
