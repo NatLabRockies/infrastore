@@ -1,0 +1,35 @@
+# cargo-release configuration -- workspace-wide settings.
+#
+# Install: cargo install cargo-release
+# Usage:   cargo release patch --execute   (0.8.0 -> 0.8.1)
+#          cargo release minor --execute   (0.8.0 -> 0.9.0)
+#          cargo release major --execute   (0.8.0 -> 1.0.0)
+#
+# Dry run is the default; add --execute to apply. See docs/src/releasing.md.
+#
+# The cross-language version replacements (pyproject.toml, InfraStore.jl's
+# Project.toml, the docs download examples) live in
+# crates/infrastore-core/release.toml, NOT here: cargo-release resolves a
+# replacement's `file` relative to each *package* root and applies it once per
+# package, so a workspace-level replacement would be attempted seven times
+# against seven wrong paths.
+
+# Every crate inherits `version.workspace`, so they move together and share one
+# tag. cargo-release rewrites `[workspace.package] version` and the
+# `[workspace.dependencies]` pins on infrastore-core/-proto by itself.
+shared-version = true
+tag-prefix = ""
+tag-name = "v{{version}}"
+pre-release-commit-message = "Release v{{version}}"
+
+# Publishing is CI's job, not cargo-release's: crates-release.yml publishes to
+# crates.io and python-wheels.yml to PyPI, both on the pushed tag, both via
+# trusted publishing with no local credentials.
+publish = false
+
+# The tag drives all three release workflows, so it has to land on the commit
+# that is actually on main -- i.e. after the bump PR merges, not on the local
+# bump commit. Tag and push by hand once it is merged:
+#     git tag v0.9.0 && git push origin main --tags
+tag = false
+push = false

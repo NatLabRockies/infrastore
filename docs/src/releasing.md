@@ -18,18 +18,22 @@ wheel on PyPI rather than as a crate, and the second is an internal benchmarking
 The Rust crates, `InfraStore.jl`, and the Python package share the workspace version. Bump them
 together and tag the repo once per release, so every registry pins the same commit.
 
-The version lives in four places that must agree:
+The version lives in four places that must agree, and `cargo release` (below) writes all four:
 
-| File                                  | Field                                                         |
-| ------------------------------------- | ------------------------------------------------------------- |
-| `Cargo.toml`                          | `[workspace.package] version`                                 |
-| `Cargo.toml`                          | `[workspace.dependencies]` pins on `infrastore-core`/`-proto` |
-| `crates/infrastore-py/pyproject.toml` | `[project] version`                                           |
-| `julia/InfraStore.jl/Project.toml`    | `version`                                                     |
+| File                                  | Field                                                         | Written by                            |
+| ------------------------------------- | ------------------------------------------------------------- | ------------------------------------- |
+| `Cargo.toml`                          | `[workspace.package] version`                                 | cargo-release, natively               |
+| `Cargo.toml`                          | `[workspace.dependencies]` pins on `infrastore-core`/`-proto` | cargo-release, natively               |
+| `crates/infrastore-py/pyproject.toml` | `[project] version`                                           | `crates/infrastore-core/release.toml` |
+| `julia/InfraStore.jl/Project.toml`    | `version`                                                     | `crates/infrastore-core/release.toml` |
 
 The `[workspace.dependencies]` pins are easy to miss and fail late: `cargo publish` uploads
 `infrastore-core` at the new version, then rejects `infrastore-proto` because its requirement still
-names the old one. Run `cargo update --workspace` after the edits so `Cargo.lock` moves too.
+names the old one. cargo-release moves `Cargo.lock` in the same commit.
+
+Two more version strings ride along, neither load-bearing: the `VERSION=v0.8.0` download example in
+`docs/src/getting-started/installation.md` and in `docs/src/how-to/use-cli.md`, so a version's
+published docs point at that version's own binaries.
 
 Two workflows guard this. `crates-release` refuses to publish if the tag does not match the
 workspace version, and `python-wheels` opens with a `versions agree` job that parses all four files
@@ -92,17 +96,46 @@ un-skipping it is a separate change that needs its own CI run.
 
 ### 1. Bump and tag
 
-Update the version fields above, then:
+The bump is automated with [cargo-release](https://github.com/crate-ci/cargo-release)
+(`cargo install cargo-release`), configured by `release.toml` at the workspace root and
+`crates/infrastore-core/release.toml`. From a clean tree on a branch:
 
 ```sh
-cargo update --workspace              # moves Cargo.lock to the new version
-cargo publish --workspace --dry-run   # verifies every crate packages and builds
-git commit -am "Release v0.1.0"
-git tag v0.1.0
-git push origin main --tags
+cargo release minor            # dry run -- prints every edit, changes nothing
+cargo release minor --execute  # 0.8.0 -> 0.9.0, one commit
+```
+
+`patch` and `major` work the same way, and an explicit `cargo release 1.2.3 --execute` sets a
+version outright. That one command rewrites `[workspace.package] version`, the
+`[workspace.dependencies]` pins, `Cargo.lock`, `pyproject.toml`, `InfraStore.jl`'s `Project.toml`,
+and the two docs download examples, then commits them as `Release v0.9.0`. The pre-commit hook runs
+rustfmt, Clippy, dprint, and shellcheck on the way through.
+
+Three details of the configuration are deliberate:
+
+- **It does not publish.** `crates-release.yml` and `python-wheels.yml` own that, on the tag, with
+  trusted publishing and no local credentials. Rehearse packaging separately with
+  `cargo publish --workspace --dry-run`, which verifies every crate packages and builds.
+- **It does not tag or push.** The tag drives all three release workflows, so it has to name the
+  commit that ends up on `main` — not the local bump commit, which changes identity when the pull
+  request merges.
+- **It refuses to run on a dirty tree.** Untracked scratch files count; park them in
+  `.git/info/exclude` if you keep any.
+
+So open the bump as a pull request, and once it is merged:
+
+```sh
+git switch main && git pull
+git tag v0.9.0
+git push origin v0.9.0
 ```
 
 Pushing the tag triggers three workflows: `crates-release`, `python-wheels`, and `release`.
+
+When a version string moves to a new file, add a `[[pre-release-replacements]]` entry for it in
+`crates/infrastore-core/release.toml` — not in the root `release.toml`, where cargo-release would
+resolve it relative to each of the seven crate directories in turn. Every entry requires at least
+one match, so a file that gets renamed fails the release instead of quietly going stale.
 
 ### 2. Rust → crates.io
 

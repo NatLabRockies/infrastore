@@ -1,0 +1,35 @@
+# Version fields outside the Cargo manifests, kept in step by cargo-release.
+#
+# These live under infrastore-core rather than at the workspace root because
+# cargo-release applies pre-release-replacements once per package, resolving
+# `file` relative to that package's directory. Anchoring them to one crate runs
+# each replacement exactly once; the `../../` paths are the price. Every entry
+# defaults to min = 1, so a moved or renamed target fails the release loudly
+# instead of silently leaving a stale version behind.
+#
+# The matching table is in docs/src/releasing.md; update both together.
+
+# The Python package version. maturin lets this win over the Cargo workspace
+# version, so a stale value here builds and tests wheels at the old version and
+# only fails at upload -- burning the version number (see releasing.md).
+[[pre-release-replacements]]
+file = "../infrastore-py/pyproject.toml"
+search = '^version = "[^"]+"'
+replace = 'version = "{{version}}"'
+
+# InfraStore.jl ships from this repo at the same version.
+[[pre-release-replacements]]
+file = "../../julia/InfraStore.jl/Project.toml"
+search = '^version = "[^"]+"'
+replace = 'version = "{{version}}"'
+
+# Download examples in the docs, so a released page points at its own release.
+[[pre-release-replacements]]
+file = "../../docs/src/getting-started/installation.md"
+search = 'VERSION=v\d+\.\d+\.\d+'
+replace = 'VERSION=v{{version}}'
+
+[[pre-release-replacements]]
+file = "../../docs/src/how-to/use-cli.md"
+search = 'VERSION=v\d+\.\d+\.\d+'
+replace = 'VERSION=v{{version}}'
