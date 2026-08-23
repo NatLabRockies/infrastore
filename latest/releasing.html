@@ -199,17 +199,20 @@ wheel on PyPI rather than as a crate, and the second is an internal benchmarking
 <h2 id="versioning"><a class="header" href="#versioning">Versioning</a></h2>
 <p>The Rust crates, <code>InfraStore.jl</code>, and the Python package share the workspace version. Bump them
 together and tag the repo once per release, so every registry pins the same commit.</p>
-<p>The version lives in four places that must agree:</p>
-<div class="table-wrapper"><table><thead><tr><th>File</th><th>Field</th></tr></thead><tbody>
-<tr><td><code>Cargo.toml</code></td><td><code>[workspace.package] version</code></td></tr>
-<tr><td><code>Cargo.toml</code></td><td><code>[workspace.dependencies]</code> pins on <code>infrastore-core</code>/<code>-proto</code></td></tr>
-<tr><td><code>crates/infrastore-py/pyproject.toml</code></td><td><code>[project] version</code></td></tr>
-<tr><td><code>julia/InfraStore.jl/Project.toml</code></td><td><code>version</code></td></tr>
+<p>The version lives in four places that must agree, and <code>cargo release</code> (below) writes all four:</p>
+<div class="table-wrapper"><table><thead><tr><th>File</th><th>Field</th><th>Written by</th></tr></thead><tbody>
+<tr><td><code>Cargo.toml</code></td><td><code>[workspace.package] version</code></td><td>cargo-release, natively</td></tr>
+<tr><td><code>Cargo.toml</code></td><td><code>[workspace.dependencies]</code> pins on <code>infrastore-core</code>/<code>-proto</code></td><td>cargo-release, natively</td></tr>
+<tr><td><code>crates/infrastore-py/pyproject.toml</code></td><td><code>[project] version</code></td><td><code>crates/infrastore-core/release.toml</code></td></tr>
+<tr><td><code>julia/InfraStore.jl/Project.toml</code></td><td><code>version</code></td><td><code>crates/infrastore-core/release.toml</code></td></tr>
 </tbody></table>
 </div>
 <p>The <code>[workspace.dependencies]</code> pins are easy to miss and fail late: <code>cargo publish</code> uploads
 <code>infrastore-core</code> at the new version, then rejects <code>infrastore-proto</code> because its requirement still
-names the old one. Run <code>cargo update --workspace</code> after the edits so <code>Cargo.lock</code> moves too.</p>
+names the old one. cargo-release moves <code>Cargo.lock</code> in the same commit.</p>
+<p>Two more version strings ride along, neither load-bearing: the <code>VERSION=v0.8.0</code> download example in
+<code>docs/src/getting-started/installation.md</code> and in <code>docs/src/how-to/use-cli.md</code>, so a version's
+published docs point at that version's own binaries.</p>
 <p>Two workflows guard this. <code>crates-release</code> refuses to publish if the tag does not match the
 workspace version, and <code>python-wheels</code> opens with a <code>versions agree</code> job that parses all four files
 above and fails unless they agree with each other and with the tag.</p>
@@ -261,14 +264,38 @@ RPM-based <code>before-all</code> could not install HDF5 on musl), but the targe
 un-skipping it is a separate change that needs its own CI run.</p>
 <h2 id="cutting-a-release"><a class="header" href="#cutting-a-release">Cutting a release</a></h2>
 <h3 id="1-bump-and-tag"><a class="header" href="#1-bump-and-tag">1. Bump and tag</a></h3>
-<p>Update the version fields above, then:</p>
-<pre><code class="language-sh">cargo update --workspace              # moves Cargo.lock to the new version
-cargo publish --workspace --dry-run   # verifies every crate packages and builds
-git commit -am "Release v0.1.0"
-git tag v0.1.0
-git push origin main --tags
+<p>The bump is automated with <a href="https://github.com/crate-ci/cargo-release">cargo-release</a>
+(<code>cargo install cargo-release</code>), configured by <code>release.toml</code> at the workspace root and
+<code>crates/infrastore-core/release.toml</code>. From a clean tree on a branch:</p>
+<pre><code class="language-sh">cargo release minor            # dry run -- prints every edit, changes nothing
+cargo release minor --execute  # 0.8.0 -&gt; 0.9.0, one commit
+</code></pre>
+<p><code>patch</code> and <code>major</code> work the same way, and an explicit <code>cargo release 1.2.3 --execute</code> sets a
+version outright. That one command rewrites <code>[workspace.package] version</code>, the
+<code>[workspace.dependencies]</code> pins, <code>Cargo.lock</code>, <code>pyproject.toml</code>, <code>InfraStore.jl</code>'s <code>Project.toml</code>,
+and the two docs download examples, then commits them as <code>Release v0.9.0</code>. The pre-commit hook runs
+rustfmt, Clippy, dprint, and shellcheck on the way through.</p>
+<p>Three details of the configuration are deliberate:</p>
+<ul>
+<li><strong>It does not publish.</strong> <code>crates-release.yml</code> and <code>python-wheels.yml</code> own that, on the tag, with
+trusted publishing and no local credentials. Rehearse packaging separately with
+<code>cargo publish --workspace --dry-run</code>, which verifies every crate packages and builds.</li>
+<li><strong>It does not tag or push.</strong> The tag drives all three release workflows, so it has to name the
+commit that ends up on <code>main</code> — not the local bump commit, which changes identity when the pull
+request merges.</li>
+<li><strong>It refuses to run on a dirty tree.</strong> Untracked scratch files count; park them in
+<code>.git/info/exclude</code> if you keep any.</li>
+</ul>
+<p>So open the bump as a pull request, and once it is merged:</p>
+<pre><code class="language-sh">git switch main &amp;&amp; git pull
+git tag v0.9.0
+git push origin v0.9.0
 </code></pre>
 <p>Pushing the tag triggers three workflows: <code>crates-release</code>, <code>python-wheels</code>, and <code>release</code>.</p>
+<p>When a version string moves to a new file, add a <code>[[pre-release-replacements]]</code> entry for it in
+<code>crates/infrastore-core/release.toml</code> — not in the root <code>release.toml</code>, where cargo-release would
+resolve it relative to each of the seven crate directories in turn. Every entry requires at least
+one match, so a file that gets renamed fails the release instead of quietly going stale.</p>
 <h3 id="2-rust--cratesio"><a class="header" href="#2-rust--cratesio">2. Rust → crates.io</a></h3>
 <p>Handled by <code>.github/workflows/crates-release.yml</code> on the tag.</p>
 <p><code>cargo publish --workspace</code> resolves the intra-workspace order itself (<code>infrastore-core</code> →
