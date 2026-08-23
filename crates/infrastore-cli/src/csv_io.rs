@@ -31,6 +31,12 @@ impl CsvData {
             .filter_map(|row| row.first().cloned())
             .collect()
     }
+
+    /// The first timestamp's raw text, borrowed. The spelling a series records
+    /// is read off this, so it is wanted without cloning the whole column.
+    pub fn first_timestamp(&self) -> Option<&str> {
+        self.leading.first()?.first().map(String::as_str)
+    }
 }
 
 /// Read a data CSV's header row, so a caller can decide how many leading

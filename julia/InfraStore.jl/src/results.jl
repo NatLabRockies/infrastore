@@ -41,6 +41,10 @@ anything but a `Probabilistic`).
   value these values are the time-varying form of, e.g. `"max_active_power"`.
 - `unit_system` — a [`UnitSystem`](@ref), or `nothing` when unspecified (which
   is not the same as `NaturalUnits`).
+- `time_reference` — a [`TimeReference`](@ref) recording how `initial_timestamp`
+  and the row's timestamps were *spelled*, or `nothing` when unspecified (which
+  is not a claim they were written as UTC). `initial_timestamp` is still the
+  instant; `using TimeZones` adds [`zoned_timestamp`](@ref) to fuse the two.
 """
 struct TimeSeriesMetadata
     owner_id::Int64
@@ -62,6 +66,7 @@ struct TimeSeriesMetadata
     units::Union{Nothing, String}
     quantity_kind::Union{Nothing, String}
     unit_system::Union{Nothing, UnitSystem}
+    time_reference::Union{Nothing, TimeReference}
     component_field::Union{Nothing, String}
     application_data::Union{Nothing, String}
 end
@@ -88,7 +93,8 @@ end
 One row of [`list_keys`](@ref): a key's identity plus the descriptive snapshot
 recorded for it. `length` applies to static series, `horizon` / `interval` /
 `count` to forecasts; the fields that do not apply to a row's
-`time_series_type` are `nothing`.
+`time_series_type` are `nothing`. `time_reference` records how the row's
+timestamps were spelled.
 
 Physical storage detail (`data_hash`, `element_type`, `application_data`, `percentiles`) is not part
 of a key — read it with [`list_time_series`](@ref), [`list_array_groups`](@ref),
@@ -106,6 +112,8 @@ struct KeyRow
     interval::Union{Nothing, Period}
     count::Union{Nothing, Int}
     features::Dict{String, Any}
+    "How the row's timestamps were spelled (a [`TimeReference`](@ref)), or `nothing` for unspecified. Descriptive, so it is part of the snapshot and never of key equality."
+    time_reference::Union{Nothing, TimeReference}
 end
 
 """
@@ -129,6 +137,8 @@ struct ArrayGroupRow
     interval::Union{Nothing, Period}
     count::Union{Nothing, Int}
     features::Dict{String, Any}
+    "How the row's timestamps were spelled (a [`TimeReference`](@ref)), or `nothing` for unspecified."
+    time_reference::Union{Nothing, TimeReference}
     data_hash::Vector{UInt8}
 end
 
@@ -266,11 +276,25 @@ present in the store.
 `resolution` is `nothing` only for a `NonSequentialTimeSeries` reader, whose
 timeline is an explicit list of instants rather than a grid — enumerate it with
 [`static_timestamps`](@ref).
+
+`time_reference` is the one spelling the axis carries: a cohort whose columns
+agree reports their reference, one whose columns merely agree on naming instants
+reports `UTCReference()`, and a cohort mixing zoneless with the rest never builds
+at all. `nothing` means the cohort records no spelling, which is distinct from
+`ZonelessReference()` — the positive claim that the timestamps are wall clocks.
+It is `nothing` from [`check_static_consistency`](@ref), which reports grids
+rather than readers.
 """
 struct StaticGrid
     initial_timestamp::DateTime
     resolution::Union{Nothing, Period}
     length::Int
+    time_reference::Union{Nothing, TimeReference}
+end
+
+"""Three-argument form: an axis with no recorded spelling."""
+function StaticGrid(initial_timestamp, resolution, length)
+    return StaticGrid(initial_timestamp, resolution, length, nothing)
 end
 
 """
@@ -278,12 +302,20 @@ end
 
 A [`ForecastReader`]'s window timeline, from [`forecast_timeline`](@ref): the
 valid timestamps are `initial_timestamp + k·interval` for `k in 0:count-1`.
+
+`time_reference` is the one spelling the timeline carries; see [`StaticGrid`](@ref).
 """
 struct ForecastTimeline
     initial_timestamp::DateTime
     resolution::Period
     interval::Period
     count::Int
+    time_reference::Union{Nothing, TimeReference}
+end
+
+"""Four-argument form: a timeline with no recorded spelling."""
+function ForecastTimeline(initial_timestamp, resolution, interval, count)
+    return ForecastTimeline(initial_timestamp, resolution, interval, count, nothing)
 end
 
 """

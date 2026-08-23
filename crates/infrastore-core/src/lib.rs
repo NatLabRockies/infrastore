@@ -55,6 +55,7 @@ pub use types::{
         UnitSystem, is_reserved_feature_name, validate_features,
     },
     period::Period,
+    time_reference::{TimeRange, TimeReference},
     time_series::{
         Descriptors, Deterministic, NonSequentialTimeSeries, Probabilistic, Scenarios,
         SingleTimeSeries, TimeSeriesData, TimeSeriesType,

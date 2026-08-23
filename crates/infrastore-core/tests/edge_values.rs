@@ -321,7 +321,10 @@ fn single_element_series_round_trips_on_both_backends() {
             assert_eq!(single.data.to_f64_vec().unwrap(), vec![42.5], "{backend}");
             // A one-step window is the whole series.
             let sliced = store
-                .get_time_series(key.identity(), Some((t0(), t0() + Duration::hours(1))))
+                .get_time_series(
+                    key.identity(),
+                    Some((t0(), t0() + Duration::hours(1)).into()),
+                )
                 .unwrap();
             assert_eq!(
                 sliced.as_single().unwrap().data.to_f64_vec().unwrap(),
@@ -361,7 +364,10 @@ fn deterministic_with_count_one_round_trips_and_window_selects() {
 
             // Select the only window at its own start.
             let one = store
-                .get_time_series(key.identity(), Some((t0(), t0() + Duration::hours(6))))
+                .get_time_series(
+                    key.identity(),
+                    Some((t0(), t0() + Duration::hours(6)).into()),
+                )
                 .unwrap();
             let det = one.as_deterministic().unwrap();
             assert_eq!(det.count, 1, "{backend}: only window selected");

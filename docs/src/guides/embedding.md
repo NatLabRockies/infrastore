@@ -67,6 +67,14 @@ a base the owning component holds in _your_ object graph", and converting back i
 means _unspecified_, which is not the same as `natural_units`; do not read one as the other. See
 [Optional Descriptors](../explanation/data-model.md#optional-descriptors).
 
+**`time_reference` records how the timestamps were spelled** — an instant in UTC, an instant at a
+fixed offset, an instant in a named IANA zone, or a wall clock naming no instant. Each binding
+infers it from the input type, so nothing takes a new argument; a native Rust caller declares it,
+having no naive datetime type to infer from. It changes nothing about the stored instants, the grid,
+or either content hash — but the store does hold a series to its claim: a query bound must be
+spelled the way the series is, and a zoneless series cannot share one reader axis or one ranged bulk
+read with instant-bearing ones. See [Time references](../explanation/data-model.md#time-references).
+
 **`application_data` is yours.** It is an opaque payload stored and returned verbatim, so a parent
 package can carry whatever it needs per association (a serialized type tag, a provenance record)
 without the store knowing. Because the store never validates it, version it yourself if its shape

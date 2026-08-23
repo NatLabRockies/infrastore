@@ -44,6 +44,7 @@ use crate::types::element_type::ElementType;
 use crate::types::key::TimeSeriesKey;
 use crate::types::metadata::{Features, TimeSeriesMetadata};
 use crate::types::period::Period;
+use crate::types::time_reference::TimeReference;
 use crate::types::time_series::{TimeSeriesType, compute_h};
 
 /// A prepared reader returning the value of every matching static series at one
@@ -53,6 +54,10 @@ use crate::types::time_series::{TimeSeriesType, compute_h};
 pub struct StaticReader {
     /// The time axis every column in the reader shares.
     timeline: Timeline,
+    /// How that axis is spelled — the cohort's own reference when every column
+    /// agrees, and `Utc` when they merely agree on *being* instants. See
+    /// [`Self::time_reference`].
+    time_reference: Option<TimeReference>,
     /// Columnar groups, in a deterministic order (by dtype code then shape).
     groups: Vec<StaticGroup>,
     /// Timestamp of the last successful [`Store::static_read`], for diagnostics.
@@ -222,6 +227,19 @@ impl StaticReader {
     /// Number of timestamps on the timeline (`[0, length)`).
     pub fn length(&self) -> usize {
         self.timeline.length()
+    }
+
+    /// How the materialized timestamp axis is spelled.
+    ///
+    /// A reader has *one* axis, so it needs one spelling. Every column agreeing
+    /// on a reference gives that reference; a cohort mixing `Utc`,
+    /// `FixedOffset` and `Zone` still agrees on holding instants, so the axis is
+    /// reported as [`TimeReference::Utc`] — the spelling that is true of all of
+    /// them. A cohort mixing zoneless with the rest never gets this far:
+    /// [`Store::build_static_reader`] refuses to build it, because there is no
+    /// spelling that covers both.
+    pub fn time_reference(&self) -> Option<&TimeReference> {
+        self.time_reference.as_ref()
     }
 
     pub fn groups(&self) -> &[StaticGroup] {
@@ -395,6 +413,59 @@ pub(crate) fn regular_timeline(rows: &[TimeSeriesMetadata]) -> Result<Timeline> 
     })
 }
 
+/// The one spelling a reader's shared timestamp axis can carry.
+///
+/// Refuses a cohort spanning both coherence groups — there is no spelling that
+/// is true of a wall clock and an instant at once — and reports the disagreeing
+/// members, which is why this runs at build time rather than at read time,
+/// where the only thing left to say is that the bound is wrong. Within the
+/// zoned group a disagreement is not an error: all three spellings name
+/// instants, so the axis falls back to the one that is true of all of them.
+///
+/// Takes borrowed rows, in one pass. The forecast reader holds its rows beside
+/// their read plans rather than in a slice, and collecting them into a
+/// `Vec<TimeSeriesMetadata>` to call this deep-copied every name, feature map
+/// and element shape in the selection — on the path documented as the one you
+/// build once and sweep many times.
+///
+/// `what` names the reader being built, because both readers share this and a
+/// mixed forecast cohort was being told that a `StaticReader` had failed --
+/// pointing at an API the caller never invoked.
+fn cohort_time_reference<'a>(
+    what: &str,
+    rows: impl IntoIterator<Item = &'a TimeSeriesMetadata>,
+) -> Result<Option<TimeReference>> {
+    let mut zoneless: Option<&TimeSeriesMetadata> = None;
+    let mut zoned: Option<&TimeSeriesMetadata> = None;
+    let mut first: Option<&Option<TimeReference>> = None;
+    let mut uniform = true;
+    for r in rows {
+        let slot = if matches!(r.time_reference, Some(TimeReference::Zoneless)) {
+            &mut zoneless
+        } else {
+            &mut zoned
+        };
+        slot.get_or_insert(r);
+        match first {
+            None => first = Some(&r.time_reference),
+            Some(f) => uniform &= *f == r.time_reference,
+        }
+    }
+    if let (Some(a), Some(b)) = (zoneless, zoned) {
+        return Err(TimeSeriesError::InvalidParameter(format!(
+            "{what} requires one spelling for its timestamp axis, and the matched \
+             series disagree: '{}' (owner {}) is zoneless while '{}' (owner {}) records \
+             instants. Narrow the filter with ListFilter::zoneless.",
+            a.name, a.owner_id, b.name, b.owner_id
+        )));
+    }
+    let first = first.cloned().flatten();
+    if uniform {
+        return Ok(first);
+    }
+    Ok(Some(TimeReference::Utc))
+}
+
 /// Resolve metadata rows lying on `timeline` into a reader's
 /// `(dtype, element_shape)` groups.
 ///
@@ -436,6 +507,8 @@ pub(crate) fn build_groups(
             )));
         }
     }
+
+    let time_reference = cohort_time_reference("StaticReader", &rows)?;
 
     // Deterministic layout: order by element type, then element shape, then key
     // identity, so column positions are stable across processes. Grouping on the
@@ -480,6 +553,7 @@ pub(crate) fn build_groups(
 
     Ok(StaticReader {
         timeline,
+        time_reference,
         groups,
         last_read: None,
     })
@@ -501,6 +575,8 @@ pub(crate) fn build_groups(
 #[derive(Debug)]
 pub struct ForecastReader {
     time_series_type: TimeSeriesType,
+    /// How the window timeline is spelled — see [`Self::time_reference`].
+    time_reference: Option<TimeReference>,
     initial_timestamp: DateTime<Utc>,
     resolution: Period,
     interval: Period,
@@ -733,6 +809,14 @@ impl ForecastEntry {
 }
 
 impl ForecastReader {
+    /// How the window timeline is spelled: the cohort's own reference when every
+    /// forecast agrees, [`TimeReference::Utc`] when they merely agree on naming
+    /// instants, and `None` when none of them declares one. A cohort mixing
+    /// zoneless with the rest is refused at build time.
+    pub fn time_reference(&self) -> Option<&TimeReference> {
+        self.time_reference.as_ref()
+    }
+
     pub fn time_series_type(&self) -> TimeSeriesType {
         self.time_series_type
     }
@@ -816,8 +900,10 @@ impl ForecastReader {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_parts(
         time_series_type: TimeSeriesType,
+        time_reference: Option<TimeReference>,
         initial_timestamp: DateTime<Utc>,
         resolution: Period,
         interval: Period,
@@ -827,6 +913,7 @@ impl ForecastReader {
     ) -> Self {
         Self {
             time_series_type,
+            time_reference,
             initial_timestamp,
             resolution,
             interval,
@@ -964,6 +1051,10 @@ pub(crate) fn build_forecast_entries(
     // Deterministic entry order, by key identity.
     items.sort_by(|a, b| identity_sort_key(&a.0).cmp(&identity_sort_key(&b.0)));
 
+    // One window timeline means one spelling for it, on the same terms as the
+    // static reader's axis.
+    let time_reference = cohort_time_reference("ForecastReader", items.iter().map(|(m, _)| m))?;
+
     let timeline = forecast_timeline(&items[0].0)?;
     let (_, _, _, count) = timeline;
     let mut slots: Vec<WindowSlot> = Vec::new();
@@ -1036,7 +1127,14 @@ pub(crate) fn build_forecast_entries(
 
     let (initial, resolution, interval, count) = timeline;
     Ok(ForecastReader::from_parts(
-        reported, initial, resolution, interval, count, slots, entries,
+        reported,
+        time_reference,
+        initial,
+        resolution,
+        interval,
+        count,
+        slots,
+        entries,
     ))
 }
 
@@ -2154,7 +2252,7 @@ mod tests {
                 for i in 0..reader.entries().len() {
                     let key = reader.entries()[i].key();
                     let window = store
-                        .get_time_series(key.identity(), Some((t_w, t_w + ivl)))
+                        .get_time_series(key.identity(), Some((t_w, t_w + ivl).into()))
                         .unwrap();
                     assert_eq!(
                         reader.entry_slot(i).window(),

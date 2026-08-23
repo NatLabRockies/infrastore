@@ -98,9 +98,17 @@ key = store.add_time_series(
 )
 ```
 
+A series also records a `time_reference` — how its timestamps were spelled — inferred from the
+`datetime` it was built with: `timezone.utc` gives `"utc"`, a fixed-offset `tzinfo` gives
+`"-07:00"`, a `ZoneInfo` gives its name, and a **naive** datetime gives `"zoneless"`. A naive
+datetime is accepted (it names a wall clock, not an instant) precisely because the read hands one
+back — naive and aware datetimes are never equal in Python, so returning the other kind would break
+every `==` a caller writes.
+
 None of them is part of the key or of either content hash, so two adds that differ only in a
 descriptor are a duplicate. See
-[Optional Descriptors](../explanation/data-model.md#optional-descriptors).
+[Optional Descriptors](../explanation/data-model.md#optional-descriptors) and
+[Time references](../explanation/data-model.md#time-references).
 
 ### Add many series at once
 

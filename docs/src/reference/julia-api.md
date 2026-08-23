@@ -121,9 +121,10 @@ struct SingleTimeSeries{T,N}
     quantity_kind     :: Union{Nothing,String}
     unit_system       :: Union{Nothing,UnitSystem}   # nothing = unspecified, not NaturalUnits
     component_field   :: Union{Nothing,String}
+    time_reference    :: Union{Nothing,TimeReference}  # inferred from the timestamp; see below
 end
 SingleTimeSeries(initial_timestamp, resolution, data, name; application_data=nothing, element_type=nothing, units=nothing,
-    quantity_kind=nothing, unit_system=nothing, component_field=nothing)
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=<inferred>)
 
 struct NonSequentialTimeSeries{T,N}
     timestamps   :: Vector{DateTime}     # strictly increasing; one per row of dim 1
@@ -135,9 +136,10 @@ struct NonSequentialTimeSeries{T,N}
     quantity_kind     :: Union{Nothing,String}
     unit_system       :: Union{Nothing,UnitSystem}   # nothing = unspecified, not NaturalUnits
     component_field   :: Union{Nothing,String}
+    time_reference    :: Union{Nothing,TimeReference}  # inferred from the timestamp; see below
 end
 NonSequentialTimeSeries(timestamps, data, name; application_data=nothing, element_type=nothing, units=nothing,
-    quantity_kind=nothing, unit_system=nothing, component_field=nothing)
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=<inferred>)
 
 struct Deterministic{T,N}
     initial_timestamp :: DateTime
@@ -153,9 +155,10 @@ struct Deterministic{T,N}
     quantity_kind     :: Union{Nothing,String}
     unit_system       :: Union{Nothing,UnitSystem}   # nothing = unspecified, not NaturalUnits
     component_field   :: Union{Nothing,String}
+    time_reference    :: Union{Nothing,TimeReference}  # inferred from the timestamp; see below
 end
 Deterministic(initial_timestamp, resolution, horizon, interval, count, data, name; application_data=nothing, element_type=nothing, units=nothing,
-    quantity_kind=nothing, unit_system=nothing, component_field=nothing)
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=<inferred>)
 
 struct Probabilistic{T,N}
     initial_timestamp :: DateTime
@@ -172,9 +175,10 @@ struct Probabilistic{T,N}
     quantity_kind     :: Union{Nothing,String}
     unit_system       :: Union{Nothing,UnitSystem}   # nothing = unspecified, not NaturalUnits
     component_field   :: Union{Nothing,String}
+    time_reference    :: Union{Nothing,TimeReference}  # inferred from the timestamp; see below
 end
 Probabilistic(initial_timestamp, resolution, horizon, interval, count, percentiles, data, name; application_data=nothing, element_type=nothing, units=nothing,
-    quantity_kind=nothing, unit_system=nothing, component_field=nothing)
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=<inferred>)
 
 struct Scenarios{T,N}
     initial_timestamp :: DateTime
@@ -191,17 +195,20 @@ struct Scenarios{T,N}
     quantity_kind     :: Union{Nothing,String}
     unit_system       :: Union{Nothing,UnitSystem}   # nothing = unspecified, not NaturalUnits
     component_field   :: Union{Nothing,String}
+    time_reference    :: Union{Nothing,TimeReference}  # inferred from the timestamp; see below
 end
 Scenarios(initial_timestamp, resolution, horizon, interval, count, data, name; application_data=nothing, element_type=nothing, units=nothing,
-    quantity_kind=nothing, unit_system=nothing, component_field=nothing)
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=<inferred>)
 # note: scenario_count is NOT a constructor argument
 
-# The five descriptors after `name` are carried on the struct and become the
+# The seven descriptors after `name` are carried on the struct and become the
 # add_time_series! defaults, so a series built with units="MW" keeps them on add.
 # `unit_system` is a `UnitSystem`: `NaturalUnits` (the units named by `units`)
 # or `ComponentBase` (per-unit against the owning component's own base). The
 # store records the declaration only — it holds no base and rescales nothing —
 # and `nothing` means unspecified, which is deliberately not `NaturalUnits`.
+# `time_reference` is normally left to the constructor, which infers it from the
+# timestamp it was handed — see "Time references" below.
 
 # Marker type; never constructed and with no materialized struct. Derived via
 # transform_single_time_series! and read back as a Deterministic. You normally
@@ -275,6 +282,7 @@ struct TimeSeriesMetadata                    # get_metadata / list_time_series
     units             :: Union{Nothing,String}
     quantity_kind     :: Union{Nothing,String}
     unit_system       :: Union{Nothing,UnitSystem}   # NaturalUnits | ComponentBase
+    time_reference    :: Union{Nothing,TimeReference}   # how the timestamps were spelled
     component_field   :: Union{Nothing,String}       # e.g. "max_active_power"
     application_data  :: Union{Nothing,String}
 end
@@ -286,29 +294,37 @@ end
 [`list_time_series`](#store-wide-operations). The fields a type does not use are `nothing` rather
 than absent, so no field is silently dropped by the addressing path taken.
 
-| Struct                            | Returned by                               | Fields                                                                                                                                            |
-| --------------------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `KeyInfo`                         | `key_info`                                | `owner_id`, `owner_category`, `name`, `time_series_type`, `resolution`, `features`                                                                |
-| `KeyRow`                          | `list_keys`                               | `owner_id`, `owner_category`, `time_series_type`, `name`, `initial_timestamp`, `resolution`, `length`, `horizon`, `interval`, `count`, `features` |
-| `ArrayGroupRow`                   | `list_array_groups`                       | every `KeyRow` field, plus `data_hash` (the 32 bytes)                                                                                             |
-| `TimeSeriesCounts`                | `get_counts`                              | `components_with_time_series`, `static_time_series`, `forecasts`                                                                                  |
-| `TimeSeriesCountsDetailed`        | `time_series_counts`                      | `components_with_time_series`, `supplemental_attributes_with_time_series`, `static_time_series_count`, `forecast_count`                           |
-| `TimeSeriesTypeCount`             | `counts_by_type`                          | `time_series_type`, `count`                                                                                                                       |
-| `ArrayReferenceCounts`            | `count_array_references`                  | `sts`, `dst`                                                                                                                                      |
-| `StaticSummaryRow`                | `static_summary`                          | `owner_type`, `owner_category`, `time_series_type`, `name`, `initial_timestamp`, `resolution`, `time_step_count`, `count`                         |
-| `ForecastSummaryRow`              | `forecast_summary`                        | `owner_type`, `owner_category`, `time_series_type`, `name`, `initial_timestamp`, `resolution`, `horizon`, `interval`, `window_count`, `count`     |
-| `SupplementalAttributeTypeCount`  | `supplemental_attribute_counts_by_type`   | `attribute_type`, `count`                                                                                                                         |
-| `SupplementalAttributeSummaryRow` | `supplemental_attribute_summary`          | `component_type`, `attribute_type`, `count`                                                                                                       |
-| `ForecastParameters`              | `get_forecast_parameters`                 | `horizon`, `interval`, `count`, `resolution`, `initial_timestamp` (all `nothing` when nothing matches)                                            |
-| `StaticGrid`                      | `static_grid`, `check_static_consistency` | `initial_timestamp`, `resolution` (`nothing` for an irregular reader), `length`                                                                   |
-| `ForecastTimeline`                | `forecast_timeline`                       | `initial_timestamp`, `resolution`, `interval`, `count`                                                                                            |
-| `CompressionSettings`             | `get_compression`                         | `compression` (`:deflate` / `:none`), `level`, `shuffle`                                                                                          |
-| `CompactionReport`                | `compact!`                                | `slots_reclaimed`, `datasets_dropped`, `feature_sets_reclaimed`, `timestamp_sets_reclaimed`, `bytes_reclaimed`                                    |
+| Struct                            | Returned by                               | Fields                                                                                                                                                              |
+| --------------------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `KeyInfo`                         | `key_info`                                | `owner_id`, `owner_category`, `name`, `time_series_type`, `resolution`, `features`                                                                                  |
+| `KeyRow`                          | `list_keys`                               | `owner_id`, `owner_category`, `time_series_type`, `name`, `initial_timestamp`, `resolution`, `length`, `horizon`, `interval`, `count`, `features`, `time_reference` |
+| `ArrayGroupRow`                   | `list_array_groups`                       | every `KeyRow` field, plus `data_hash` (the 32 bytes)                                                                                                               |
+| `TimeSeriesCounts`                | `get_counts`                              | `components_with_time_series`, `static_time_series`, `forecasts`                                                                                                    |
+| `TimeSeriesCountsDetailed`        | `time_series_counts`                      | `components_with_time_series`, `supplemental_attributes_with_time_series`, `static_time_series_count`, `forecast_count`                                             |
+| `TimeSeriesTypeCount`             | `counts_by_type`                          | `time_series_type`, `count`                                                                                                                                         |
+| `ArrayReferenceCounts`            | `count_array_references`                  | `sts`, `dst`                                                                                                                                                        |
+| `StaticSummaryRow`                | `static_summary`                          | `owner_type`, `owner_category`, `time_series_type`, `name`, `initial_timestamp`, `resolution`, `time_step_count`, `count`                                           |
+| `ForecastSummaryRow`              | `forecast_summary`                        | `owner_type`, `owner_category`, `time_series_type`, `name`, `initial_timestamp`, `resolution`, `horizon`, `interval`, `window_count`, `count`                       |
+| `SupplementalAttributeTypeCount`  | `supplemental_attribute_counts_by_type`   | `attribute_type`, `count`                                                                                                                                           |
+| `SupplementalAttributeSummaryRow` | `supplemental_attribute_summary`          | `component_type`, `attribute_type`, `count`                                                                                                                         |
+| `ForecastParameters`              | `get_forecast_parameters`                 | `horizon`, `interval`, `count`, `resolution`, `initial_timestamp` (all `nothing` when nothing matches)                                                              |
+| `StaticGrid`                      | `static_grid`, `check_static_consistency` | `initial_timestamp`, `resolution` (`nothing` for an irregular reader), `length`, `time_reference`                                                                   |
+| `ForecastTimeline`                | `forecast_timeline`                       | `initial_timestamp`, `resolution`, `interval`, `count`, `time_reference`                                                                                            |
+| `CompressionSettings`             | `get_compression`                         | `compression` (`:deflate` / `:none`), `level`, `shuffle`                                                                                                            |
+| `CompactionReport`                | `compact!`                                | `slots_reclaimed`, `datasets_dropped`, `feature_sets_reclaimed`, `timestamp_sets_reclaimed`, `bytes_reclaimed`                                                      |
 
 `StaticGrid` is shared by `static_grid` (a reader's timeline) and `check_static_consistency` (one
 per resolution present) — the same concept, so the same type. Its `resolution` is `nothing` only for
 a `NonSequentialTimeSeries` reader, whose timeline is an explicit list of instants rather than a
 grid; enumerate it with `static_timestamps`.
+
+`time_reference` is the one spelling the axis carries — a reader spans one timeline, so a cohort
+whose columns agree reports their reference, one whose columns merely agree on naming instants
+reports `UTCReference()`, and a cohort mixing zoneless with the rest never builds at all. It is
+`nothing` when the cohort records no spelling, and from `check_static_consistency`, which reports
+grids rather than readers. `nothing` is not `ZonelessReference()`: the second is the positive claim
+that the timestamps are wall clocks. Three- and four-argument constructors (`StaticGrid` and
+`ForecastTimeline` respectively) leave it unset.
 
 ## Static Series
 
@@ -1118,25 +1134,120 @@ end
 
 ## Time and Resolution Conversions
 
-- `DateTime` is converted to/from Unix milliseconds at the boundary, and is interpreted as **UTC** —
-  Julia's `DateTime` carries no zone, so the wrapper has to pick a reading, and UTC is the one under
-  which a value written here comes back as itself.
+- `DateTime` is converted to/from Unix milliseconds at the boundary. A bare `DateTime` carries no
+  zone, so it names a **wall clock**, not an instant: it is stored as its own fields and recorded as
+  `ZonelessReference()`. The stored instant is unchanged from the old UTC-by-convention reading —
+  what is new is that the store now records that it _was_ a convention.
 - A **`TimeZones.ZonedDateTime` is accepted wherever a `DateTime` is** — an initial timestamp, a
-  timestamp vector, a `time_range` bound, a reader's `t` — and is converted to the instant it names.
-  It needs no convention, so prefer it when your data is genuinely zoned. TimeZones is a **weak
-  dependency**: the conversion lives in the `InfraStoreTimeZonesExt` extension, which loads when you
-  `using TimeZones`, so nobody else pays for the tz database. Passing one without loading TimeZones
-  raises an `InvalidParameterError` saying so.
-- **Reads always return a `DateTime`**, in UTC, whichever kind went in. Returning a `ZonedDateTime`
-  would mean inventing a zone the store never recorded — it stores instants, not civil time.
+  timestamp vector, a `time_range` bound, a reader's `t` — and is converted to the instant it names,
+  recording the spelling its zone names. TimeZones is a **weak dependency**: the conversion lives in
+  the `InfraStoreTimeZonesExt` extension, which loads when you `using TimeZones`, so nobody else
+  pays for the tz database. Passing one without loading TimeZones raises an `InvalidParameterError`
+  saying so.
+- **Reads always return a `DateTime`** holding the instant, whichever kind went in, with the
+  spelling beside it as a `time_reference`. Widening the return type was rejected: it would make the
+  type depend on package load order, and `zdt == dt` raises in Julia, so it would turn working
+  comparisons against a `DateTime` literal into runtime errors.
 - A vector of `ZonedDateTime`s is ordered by the **instants** it names, not by its local wall
-  clocks, so the strictly-increasing rule is checked after conversion.
+  clocks, so the strictly-increasing rule is checked after conversion. It must also agree on one
+  spelling — one series records one reference.
 - Milliseconds are lossless in both directions: the store records every instant to the millisecond
   and refuses a finer one on write, so this boundary cannot truncate a series written under that
   rule. See [timestamp precision](../explanation/data-model.md#timestamp-precision). (An artifact
   written before the rule may hold finer instants; those still truncate here.)
 - `resolution` is passed as a `Period` and converted to an ISO-8601 duration string; reads return
   resolution as a `Period` (`Millisecond` for fixed durations).
+
+### Time references
+
+```julia
+abstract type TimeReference end
+struct UTCReference         <: TimeReference end          # an instant, written as UTC
+struct FixedOffsetReference <: TimeReference; minutes::Int end   # minutes east
+struct ZoneReference        <: TimeReference; name::String end   # an IANA zone name
+struct ZonelessReference    <: TimeReference end          # a wall clock, naming no instant
+
+is_zoneless(reference) -> Bool     # false for `nothing`: unset groups with the zoned ones
+```
+
+An abstract type with subtypes rather than an `@enum` like `UnitSystem`, because two of the four
+carry a payload. The constructors infer one for you:
+
+| Input                                    | `time_reference`                  |
+| ---------------------------------------- | --------------------------------- |
+| `ZonedDateTime(..., tz"UTC")`            | `UTCReference()`                  |
+| `ZonedDateTime(..., tz"-07:00")`         | `FixedOffsetReference(-420)`      |
+| `ZonedDateTime(..., tz"America/Denver")` | `ZoneReference("America/Denver")` |
+| a bare `DateTime` or `Date`              | `ZonelessReference()`             |
+
+The constructor signatures above write this default as `time_reference=<inferred>` rather than
+naming a value, because there is no Julia literal for it: omitting the keyword infers the spelling
+from the timestamp handed in, per the table above. Copying a literal `nothing` out of a signature
+would _suppress_ that inference.
+
+Passing `time_reference=nothing` explicitly is a different claim from omitting the keyword: it
+records _unspecified_, which is also what a read hands back for a series that declared no spelling
+(one written by a native Rust caller, say). The two are never collapsed — a read that invented
+`ZonelessReference()` for an unspecified series would have `add_time_series!` write that invention
+back, since its default is the series' own reference.
+
+The two `FixedTimeZone` cases split on the zone's _name_, not its offset: `tz"UTC"` and `tz"+00:00"`
+place every instant identically forever, and telling them apart is the point of recording a spelling
+at all.
+
+```julia
+zoned_timestamp(instant::DateTime, reference::TimeReference) -> ZonedDateTime
+zoned_timestamp(series) -> ZonedDateTime          # SingleTimeSeries / the three forecasts
+zoned_timestamp(metadata::TimeSeriesMetadata) -> ZonedDateTime
+zoned_timestamps(series::NonSequentialTimeSeries) -> Vector{ZonedDateTime}
+```
+
+Fuses a read instant back together with the spelling it was written in. Requires `using TimeZones`
+(the methods live in the extension), and it is **lossless** — the instant plus the zone name
+reconstructs the exact value written, including which side of a fall-back hour it was on:
+
+```julia
+using TimeZones
+series = get_time_series(SingleTimeSeries, store, key)
+zoned_timestamp(series)   # 2024-01-01T00:00:00-07:00
+```
+
+Throws for a `ZonelessReference()` series, whose timestamps name no instant, and for one that
+recorded no reference at all.
+
+A **query bound must be spelled the way the series is**: a bare `DateTime` bound against a series
+that records instants, or a `ZonedDateTime` bound against a zoneless one, raises
+`InvalidParameterError` rather than being coerced, and so does a `time_range` whose two ends
+disagree. `list_keys`, `list_time_series`, `build_static_reader`, and the other filter-taking
+functions accept `zoneless=true|false` for building a coherent selection. See
+[Time references](../explanation/data-model.md#time-references) for the full rules, including why a
+calendar `Month`/`Year` resolution still steps on the UTC calendar.
+
+Because a read always hands back a bare `DateTime`, the obvious round trip does **not** close on a
+series that records instants — the returned timestamp holds the instant, but its Julia type says
+wall clock:
+
+```julia
+t = series.initial_timestamp                                # a DateTime: a wall clock
+get_time_series(store, key; time_range=(t, t + Hour(3)))    # InvalidParameterError
+```
+
+Fuse the instant back together with the spelling that came with it, and the bound matches the
+series:
+
+```julia
+using TimeZones
+t = zoned_timestamp(series)                                 # or zoned_timestamp(metadata)
+get_time_series(store, key; time_range=(t, t + Hour(3)))    # reads
+```
+
+A Julia-only workflow never meets this, because a bare `DateTime` writes a zoneless series and a
+`DateTime` bound then matches it. It is a store written by Python, the CLI, or a native Rust caller
+— which record instants — that needs the zoned bound, and therefore `using TimeZones`.
+
+`KeyInfo` deliberately carries **no** `time_reference`: a key handle is an identity handle and
+carries no descriptive snapshot fields at all (no `length`, no `initial_timestamp`). Read the
+spelling from `KeyRow` (`list_keys`), `TimeSeriesMetadata`, or the series itself.
 
 ## Tracing
 

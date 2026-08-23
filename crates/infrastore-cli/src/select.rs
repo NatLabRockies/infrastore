@@ -10,6 +10,24 @@ use crate::parse;
 /// of stderr on a store with 5000 series, which buries the message that matters.
 const AMBIGUITY_LIST_MAX: usize = 10;
 
+/// Which coherence group a selection is narrowed to.
+///
+/// The two groups never mix in one grid or one bulk read — there is no
+/// timestamp axis that is true of a wall clock and an instant at once — so the
+/// core refuses a selection spanning both. This is the constructive half of
+/// that rule, and the CLI surface for `ListFilter::zoneless`.
+///
+/// Unrelated to the global `--zoneless`, which says how *incoming* timestamps
+/// are to be read; this filters what is already stored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Spelling {
+    /// Series that record instants: `utc`, a fixed offset, a named zone, or no
+    /// declared reference at all.
+    Zoned,
+    /// Series whose timestamps are wall clocks (`time_reference = zoneless`).
+    Zoneless,
+}
+
 /// Flags that narrow a query down to (ideally) a single stored series.
 #[derive(Debug, Clone, clap::Args)]
 pub struct SelectorArgs {
@@ -52,6 +70,12 @@ pub struct SelectorArgs {
     /// Feature filter, repeatable: key=value.
     #[arg(long = "feature", value_name = "KEY=VALUE")]
     pub feature: Vec<String>,
+    /// How the stored timestamps are spelled: `zoned` (they name instants) or
+    /// `zoneless` (wall clocks). Splits a store holding both into a selection
+    /// `grid` and the bulk reads can act on, which they refuse for a mix.
+    /// Nothing to do with the global --zoneless, which is about input.
+    #[arg(long, value_name = "SPELLING")]
+    pub spelling: Option<Spelling>,
 }
 
 impl SelectorArgs {
@@ -78,6 +102,9 @@ impl SelectorArgs {
         }
         if let Some(r) = &self.resolution {
             filter = filter.resolution(parse::parse_period(r)?);
+        }
+        if let Some(s) = self.spelling {
+            filter = filter.zoneless(s == Spelling::Zoneless);
         }
         if !self.feature.is_empty() {
             let mut features = Features::new();

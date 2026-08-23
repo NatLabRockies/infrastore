@@ -2303,3 +2303,1296 @@ fn plot_refuses_a_canvas_an_svg_cannot_express() {
     assert!(svg.contains(r#"viewBox="0 0 800 400""#), "{svg}");
     assert!(!svg.contains("NaN"), "{svg}");
 }
+
+// ---------------------------------------------------------------------------
+// plot: the forecast kinds, and the shapes a heatmap refuses
+//
+// `plot_writes_one_self_contained_document_for_every_kind` covers the three
+// static kinds and the *error* a `fan` gives without a forecast. The drawing
+// paths behind `fan` and `overlay` -- the percentile bands, the scenario
+// traces, and the actuals a Deterministic is drawn against -- were reached by
+// nothing, which is most of this module.
+// ---------------------------------------------------------------------------
+
+/// A Probabilistic with an *odd* number of percentiles: the outer pair nests
+/// into a band and the median is left over as its own emphasized line, which
+/// is the branch a symmetric pair alone never reaches. Two legend entries also
+/// earn a legend, where a lone band renders none.
+fn seed_probabilistic(dir: &Path, store: &Path, name: &str) {
+    let mut body = String::from("value\n");
+    for v in 0..12 {
+        body.push_str(&format!("{v}\n"));
+    }
+    write(dir, "fan.csv", &body);
+    let json = format!(
+        r#"{{"owner_id": 7, "owner_type": "Generator", "name": "{name}", "units": "MW",
+             "type": "Probabilistic", "element_type": "f64", "csv": "fan.csv",
+             "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H",
+             "horizon": "PT2H", "interval": "PT1H", "count": 2,
+             "percentiles": [10.0, 50.0, 90.0]}}"#
+    );
+    let d = write(dir, "fan.json", &json);
+    run(store, &["add", "--descriptor", d.to_str().unwrap()]);
+}
+
+/// Every plot document is self-contained: no script, no external reference,
+/// and both themes. Asserted for each kind rather than once, because each is
+/// assembled by a different function.
+fn assert_self_contained(kind: &str, svg: &str) {
+    assert!(svg.starts_with("<svg "), "{kind}: {svg}");
+    assert!(
+        svg.contains("prefers-color-scheme"),
+        "{kind} needs both themes"
+    );
+    assert!(!svg.contains("<script"), "{kind} must carry no script");
+    assert!(!svg.contains("xlink:href"), "{kind} must reference nothing");
+}
+
+#[test]
+fn a_fan_draws_a_probabilistics_percentile_bands() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("fan.h5");
+    seed_probabilistic(dir.path(), &store, "load_prob");
+
+    let svg = run(
+        &store,
+        &["plot", "--name", "load_prob", "--kind", "fan", "--out", "-"],
+    );
+    assert_self_contained("fan", &svg);
+    // The outer pair nests into one band, labelled by the bounds it spans --
+    // a band is a filled area, not two separate strokes.
+    assert!(
+        svg.contains(r#"class="band"#),
+        "expected a filled band: {svg}"
+    );
+    assert!(
+        svg.contains("p10\u{2013}p90"),
+        "the band is labelled by its bounds: {svg}"
+    );
+    // The median has no partner to pair with, so it stays a line of its own.
+    assert!(svg.contains("p50"), "the median is drawn and named: {svg}");
+    // The series carries units, and the chart says so rather than leaving the
+    // axis bare.
+    assert!(svg.contains("MW"), "the unit belongs on the axis: {svg}");
+    // The subtitle names which window was drawn: a forecast holds several and
+    // the chart shows one.
+    assert!(svg.contains("window 0"), "{svg}");
+}
+
+#[test]
+fn a_fan_draws_one_trace_per_scenario() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("scen.h5");
+    // 3 scenarios x 2 horizon steps x 2 windows.
+    let mut body = String::from("value\n");
+    for v in 0..12 {
+        body.push_str(&format!("{v}\n"));
+    }
+    write(dir.path(), "s.csv", &body);
+    let d = write(
+        dir.path(),
+        "s.json",
+        r#"{"owner_id": 7, "owner_type": "Generator", "name": "load_scen",
+            "type": "Scenarios", "element_type": "f64", "csv": "s.csv",
+            "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H",
+            "horizon": "PT2H", "interval": "PT1H", "count": 2,
+            "scenario_count": 3}"#,
+    );
+    run(&store, &["add", "--descriptor", d.to_str().unwrap()]);
+
+    let svg = run(
+        &store,
+        &["plot", "--name", "load_scen", "--kind", "fan", "--out", "-"],
+    );
+    assert_self_contained("fan/scenarios", &svg);
+    // Scenarios are unordered alternatives, not confidence bounds, so each is
+    // its own labelled trace -- there is no pair to nest into a band.
+    for label in ["s0", "s1", "s2"] {
+        assert!(svg.contains(label), "{label} missing from: {svg}");
+    }
+}
+
+#[test]
+fn an_overlay_draws_a_deterministic_against_the_actuals_it_came_from() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("ov.h5");
+    seed_one(dir.path(), &store);
+    // `transform` derives the Deterministic from the stored SingleTimeSeries,
+    // which is exactly the pairing an overlay is for.
+    run(
+        &store,
+        &["transform", "--horizon", "PT2H", "--interval", "PT1H"],
+    );
+
+    let svg = run(
+        &store,
+        &[
+            "plot",
+            "--name",
+            "load",
+            "--kind",
+            "overlay",
+            "--type",
+            "DeterministicSingleTimeSeries",
+            "--out",
+            "-",
+        ],
+    );
+    assert_self_contained("overlay", &svg);
+    // The point of the kind: the source series is drawn under the windows, and
+    // named so the two are tellable apart.
+    assert!(
+        svg.contains("actual"),
+        "the source series must be labelled: {svg}"
+    );
+}
+
+#[test]
+fn each_forecast_kind_refuses_the_other_ones_shape_and_names_the_remedy() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("wrong.h5");
+    seed_one(dir.path(), &store);
+    seed_probabilistic(dir.path(), &store, "load_prob");
+    run(
+        &store,
+        &["transform", "--horizon", "PT2H", "--interval", "PT1H"],
+    );
+
+    // A fan over a Deterministic has no spread to draw, and the message points
+    // at the kind that does rather than just refusing.
+    let err = run_err(
+        &store,
+        &[
+            "plot",
+            "--name",
+            "load",
+            "--kind",
+            "fan",
+            "--type",
+            "DeterministicSingleTimeSeries",
+            "--out",
+            "-",
+        ],
+    );
+    assert!(err.contains("overlay"), "name the remedy: {err}");
+
+    // An overlay needs a Deterministic; a Probabilistic is refused by name.
+    let err = run_err(
+        &store,
+        &[
+            "plot",
+            "--name",
+            "load_prob",
+            "--kind",
+            "overlay",
+            "--out",
+            "-",
+        ],
+    );
+    assert!(err.contains("Probabilistic"), "name what was found: {err}");
+
+    // And an overlay over a plain static series is refused the same way.
+    let err = run_err(
+        &store,
+        &[
+            "plot",
+            "--name",
+            "load",
+            "--kind",
+            "overlay",
+            "--type",
+            "SingleTimeSeries",
+            "--out",
+            "-",
+        ],
+    );
+    assert!(
+        err.contains("SingleTimeSeries"),
+        "name what was found: {err}"
+    );
+}
+
+#[test]
+fn a_heatmap_refuses_a_resolution_it_cannot_lay_out_against_a_day() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("hm.h5");
+
+    // PT7H divides neither a day nor anything else useful: a time-of-day axis
+    // would not close.
+    write(dir.path(), "v.csv", "value\n1\n2\n3\n4\n");
+    let d = write(
+        dir.path(),
+        "s.json",
+        r#"{"owner_id": 1, "owner_type": "G", "name": "odd",
+            "type": "SingleTimeSeries", "element_type": "f64", "csv": "v.csv",
+            "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT7H"}"#,
+    );
+    run(&store, &["add", "--descriptor", d.to_str().unwrap()]);
+    let err = run_err(
+        &store,
+        &["plot", "--name", "odd", "--kind", "heatmap", "--out", "-"],
+    );
+    assert!(err.contains("divides a day"), "{err}");
+
+    // A calendar resolution has no time-of-day at all -- a month is not a
+    // number of hours -- so it is refused with its own reason.
+    write(dir.path(), "m.csv", "value\n1\n2\n3\n");
+    let d = write(
+        dir.path(),
+        "m.json",
+        r#"{"owner_id": 2, "owner_type": "G", "name": "monthly",
+            "type": "SingleTimeSeries", "element_type": "f64", "csv": "m.csv",
+            "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "P1M"}"#,
+    );
+    run(&store, &["add", "--descriptor", d.to_str().unwrap()]);
+    let err = run_err(
+        &store,
+        &[
+            "plot", "--name", "monthly", "--kind", "heatmap", "--out", "-",
+        ],
+    );
+    assert!(err.contains("calendar resolution"), "{err}");
+}
+
+#[test]
+fn a_heatmap_draws_one_series_and_says_so_when_the_selector_matched_more() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("many.h5");
+    let mut body = String::from("value\n");
+    for v in 0..24 {
+        body.push_str(&format!("{v}\n"));
+    }
+    write(dir.path(), "v.csv", &body);
+    for owner in [1, 2] {
+        let json = format!(
+            r#"{{"owner_id": {owner}, "owner_type": "G", "name": "load",
+                 "type": "SingleTimeSeries", "element_type": "f64", "csv": "v.csv",
+                 "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H"}}"#
+        );
+        let d = write(dir.path(), &format!("s{owner}.json"), &json);
+        run(&store, &["add", "--descriptor", d.to_str().unwrap()]);
+    }
+
+    // Two owners share the name, so the selector matches both. The message has
+    // to say how to narrow it, not just that it failed.
+    let err = run_err(
+        &store,
+        &["plot", "--name", "load", "--kind", "heatmap", "--out", "-"],
+    );
+    assert!(err.contains("--owner-id"), "name the remedy: {err}");
+
+    // Narrowed, it draws.
+    let svg = run(
+        &store,
+        &[
+            "plot",
+            "--name",
+            "load",
+            "--owner-id",
+            "1",
+            "--kind",
+            "heatmap",
+            "--out",
+            "-",
+        ],
+    );
+    assert_self_contained("heatmap", &svg);
+}
+
+// ---------------------------------------------------------------------------
+// The maintenance commands' non-JSON output and their --dry-run previews
+//
+// `compact`, `remove`, `remove-all` and `clear` were each driven only through
+// `-f json`, or only in the form that does the work. The preview a `--dry-run`
+// prints and the table a human sees are separate code paths from the JSON, and
+// a `--dry-run` that quietly modified the store would be the worst kind of bug
+// for a flag whose whole purpose is that it does not.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn compact_reports_what_it_reclaimed_in_every_format() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("c.h5");
+    seed_one(dir.path(), &store);
+    // Something to actually reclaim, so the numbers are not all trivially zero.
+    write(dir.path(), "w.csv", "value\n9\n8\n7\n");
+    let d = write(
+        dir.path(),
+        "two.json",
+        r#"{"owner_id": 43, "owner_type": "Generator", "name": "spill",
+            "type": "SingleTimeSeries", "element_type": "f64", "csv": "w.csv",
+            "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H"}"#,
+    );
+    run(&store, &["add", "--descriptor", d.to_str().unwrap()]);
+    run(
+        &store,
+        &["remove", "--owner-id", "43", "--name", "spill", "--force"],
+    );
+
+    // The default table names every metric, so a human can read the result
+    // without knowing the JSON key names.
+    let table = run(&store, &["compact", "--force"]);
+    for metric in [
+        "slots_reclaimed",
+        "datasets_dropped",
+        "feature_sets_reclaimed",
+        "timestamp_sets_reclaimed",
+        "bytes_reclaimed",
+    ] {
+        assert!(table.contains(metric), "{metric} missing from: {table}");
+    }
+
+    // CSV carries the same rows under a Metric/Value header, for a script that
+    // would rather not parse JSON.
+    let csv = run(&store, &["-f", "csv", "compact", "--force"]);
+    let header = csv.lines().next().unwrap_or_default();
+    assert!(
+        header.contains("Metric") && header.contains("Value"),
+        "{csv}"
+    );
+    assert!(csv.contains("bytes_reclaimed"), "{csv}");
+
+    // The store still reads after being rewritten -- compaction is not a
+    // destructive operation on live data.
+    assert!(run(&store, &["list"]).contains("load"));
+}
+
+#[test]
+fn a_dry_run_previews_each_destructive_command_without_touching_the_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("dry.h5");
+    seed_one(dir.path(), &store);
+    write(dir.path(), "b.csv", "value\n4\n5\n6\n");
+    let d = write(
+        dir.path(),
+        "b.json",
+        r#"{"owner_id": 42, "owner_type": "Generator", "name": "wind",
+            "type": "SingleTimeSeries", "element_type": "f64", "csv": "b.csv",
+            "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H"}"#,
+    );
+    run(&store, &["add", "--descriptor", d.to_str().unwrap()]);
+
+    // `remove` names the one series it would delete.
+    let out = run(
+        &store,
+        &["remove", "--owner-id", "42", "--name", "load", "--dry-run"],
+    );
+    assert!(out.contains("Would remove"), "{out}");
+    assert!(out.contains("load"), "{out}");
+
+    // `remove --all` lists them, so the selector can be checked before it runs.
+    let out = run(
+        &store,
+        &["remove", "--all", "--owner-id", "42", "--dry-run"],
+    );
+    assert!(out.contains("Would remove 2 time series"), "{out}");
+    assert!(
+        out.contains("name=load") && out.contains("name=wind"),
+        "{out}"
+    );
+
+    // `clear` counts the whole store.
+    let out = run(&store, &["clear", "--dry-run"]);
+    assert!(out.contains("Would clear 2"), "{out}");
+
+    // None of the three touched anything.
+    let listed = run(&store, &["list"]);
+    assert!(
+        listed.contains("load") && listed.contains("wind"),
+        "a --dry-run must not remove anything: {listed}"
+    );
+}
+
+#[test]
+fn remove_all_reports_a_zero_rather_than_an_empty_document() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("none.h5");
+    seed_one(dir.path(), &store);
+
+    // A selector that matches nothing is not an error -- a script looping over
+    // owners should not have to special-case the empty one.
+    let out = run(&store, &["remove", "--all", "--owner-id", "999", "--force"]);
+    assert!(out.contains("No time series matched"), "{out}");
+
+    let json = run(
+        &store,
+        &[
+            "-f",
+            "json",
+            "remove",
+            "--all",
+            "--owner-id",
+            "999",
+            "--force",
+        ],
+    );
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["removed"], 0, "{json}");
+}
+
+#[test]
+fn clear_requires_its_owner_flags_together_or_not_at_all() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("half.h5");
+    seed_one(dir.path(), &store);
+
+    // Half a selector is ambiguous: clearing "owner 42, any category" is a
+    // different operation from clearing the store, so it is refused rather
+    // than guessed.
+    let err = run_err(&store, &["clear", "--owner-id", "42", "--force"]);
+    assert!(err.contains("--owner-category"), "{err}");
+
+    // Both together scope the clear to that owner.
+    let out = run(
+        &store,
+        &[
+            "-f",
+            "json",
+            "clear",
+            "--owner-id",
+            "42",
+            "--owner-category",
+            "Component",
+            "--force",
+        ],
+    );
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["cleared"], 1, "{out}");
+}
+
+// ---------------------------------------------------------------------------
+// Every dtype, through the CSV encode and both decode paths
+//
+// `csv_io` matches on `Dtype` in four places -- text encode, text decode, JSON
+// decode, and the lossy f64 decode `stats` uses. The suites only ever drove
+// f64, so the narrow integer arms were the widest untested surface in the
+// module. A dtype that encodes but decodes wrong is a silent data bug, so each
+// one goes in as text and has to come back out as the same text.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn every_element_type_survives_csv_in_and_csv_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("dtypes.h5");
+
+    // Values chosen to be exactly representable in each type and to exercise
+    // the sign bit where the type has one.
+    let cases: &[(&str, &str, &[&str])] = &[
+        ("f64", "1.5\n-2.25\n3\n", &["1.5", "-2.25", "3"]),
+        ("f32", "1.5\n-2.25\n3\n", &["1.5", "-2.25", "3"]),
+        ("i64", "1\n-2\n3\n", &["1", "-2", "3"]),
+        ("i32", "1\n-2\n3\n", &["1", "-2", "3"]),
+        ("i16", "1\n-2\n32767\n", &["1", "-2", "32767"]),
+        ("i8", "1\n-2\n127\n", &["1", "-2", "127"]),
+        ("u64", "1\n2\n3\n", &["1", "2", "3"]),
+        ("u32", "1\n2\n3\n", &["1", "2", "3"]),
+        ("u16", "1\n2\n65535\n", &["1", "2", "65535"]),
+        ("u8", "1\n2\n255\n", &["1", "2", "255"]),
+        ("bool", "true\nfalse\ntrue\n", &["true", "false", "true"]),
+    ];
+
+    for (dtype, body, expected) in cases {
+        let csv_name = format!("{dtype}.csv");
+        write(dir.path(), &csv_name, &format!("value\n{body}"));
+        let json = format!(
+            r#"{{"owner_id": 1, "owner_type": "Generator", "name": "{dtype}_series",
+                 "type": "SingleTimeSeries", "element_type": "{dtype}", "csv": "{csv_name}",
+                 "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H"}}"#
+        );
+        let d = write(dir.path(), &format!("{dtype}.json"), &json);
+        run(&store, &["add", "--descriptor", d.to_str().unwrap()]);
+
+        // Text decode.
+        let out = run(
+            &store,
+            &["-f", "csv", "get", "--name", &format!("{dtype}_series")],
+        );
+        let got: Vec<String> = data_lines(&out)
+            .iter()
+            .map(|l| l.rsplit(',').next().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(
+            got, *expected,
+            "{dtype} did not survive the text round trip"
+        );
+
+        // JSON decode is a separate match: a number must come back a JSON
+        // number and a bool a JSON bool, not a string of either.
+        let out = run(
+            &store,
+            &["-f", "json", "get", "--name", &format!("{dtype}_series")],
+        );
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let values = v["values"]
+            .as_array()
+            .unwrap_or_else(|| panic!("no values array in {out}"));
+        assert_eq!(values.len(), 3, "{dtype}: {out}");
+        if *dtype == "bool" {
+            assert!(
+                values[0].is_boolean(),
+                "{dtype} must decode to JSON bools: {out}"
+            );
+        } else {
+            assert!(
+                values[0].is_number(),
+                "{dtype} must decode to JSON numbers: {out}"
+            );
+        }
+
+        // And the lossy f64 decode behind the per-series summary, which is a
+        // fourth match on the same dtype.
+        let info = run(&store, &["info", "--name", &format!("{dtype}_series")]);
+        assert!(info.contains(dtype), "{dtype} missing from: {info}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The two confirmation policies, without a terminal
+//
+// Every other test passes `--force`, so neither `confirm::ask` nor
+// `confirm::ask_strict` was ever reached. They differ in exactly one way, and
+// it is the interesting one: with no terminal to answer, `ask` proceeds and
+// `ask_strict` refuses. Getting that backwards would either break every script
+// that already works or silently overwrite an artifact nobody confirmed.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_recoverable_prompt_proceeds_when_there_is_nobody_to_answer_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("noprompt.h5");
+    seed_one(dir.path(), &store);
+
+    // No --force, no terminal: `remove` is an operation the invocation named
+    // out loud, and there is nobody to confirm it to, so it runs.
+    run(&store, &["remove", "--owner-id", "42", "--name", "load"]);
+    let listed = run(&store, &["list"]);
+    assert!(
+        !listed.contains("load"),
+        "a non-interactive remove should proceed: {listed}"
+    );
+}
+
+#[test]
+fn an_unrecoverable_prompt_refuses_instead_and_names_the_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("src.h5");
+    seed_one(dir.path(), &store);
+    let dest = dir.path().join("dest.h5");
+
+    // The first save has nothing to replace, so nothing is asked.
+    run(&store, &["persist", "--dest", dest.to_str().unwrap()]);
+
+    // The second would overwrite it. A failed `persist_to` can leave neither
+    // the old nor the new pair on disk, so with no terminal this stops rather
+    // than proceeding -- and says which flag would allow it.
+    let err = run_err(&store, &["persist", "--dest", dest.to_str().unwrap()]);
+    assert!(err.contains("--force"), "name the flag: {err}");
+    assert!(err.contains("already exist"), "say what is at risk: {err}");
+
+    // The destination is untouched by the refusal.
+    assert!(dest.exists(), "the refusal must not delete the target");
+
+    // Said out loud, it goes through -- by either spelling.
+    run(
+        &store,
+        &["persist", "--dest", dest.to_str().unwrap(), "--force"],
+    );
+    run(
+        &store,
+        &["--yes", "persist", "--dest", dest.to_str().unwrap()],
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The association writes: previews, empty filters, and what a bad batch says
+//
+// `detach`/`unlink`/`reassign` already have `--dry-run` cover; `attach` and
+// `link` did not, and neither did the zero-match replies or the row-level
+// complaints `--from` makes about a malformed batch. A batch that reports the
+// wrong row number is worse than one that fails, so each message is asserted
+// to name the row it choked on.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn attach_and_link_preview_what_they_would_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("prev.h5");
+    run(&store, &["init"]);
+
+    let out = run(
+        &store,
+        &[
+            "attach",
+            "--component-id",
+            "42",
+            "--component-type",
+            "Generator",
+            "--attribute-id",
+            "7",
+            "--attribute-type",
+            "GeographicInfo",
+            "--dry-run",
+        ],
+    );
+    assert!(out.contains("Would attach 1"), "{out}");
+
+    let out = run(
+        &store,
+        &[
+            "link",
+            "--parent-id",
+            "42",
+            "--parent-type",
+            "Generator",
+            "--child-id",
+            "9",
+            "--child-type",
+            "Bus",
+            "--dry-run",
+        ],
+    );
+    assert!(out.contains("Would add 1"), "{out}");
+
+    // A preview writes nothing.
+    assert!(data_lines(&run(&store, &["-f", "csv", "attributes"])).is_empty());
+    assert!(data_lines(&run(&store, &["-f", "csv", "links"])).is_empty());
+
+    // The JSON preview carries the rows themselves, so a script can check them
+    // before committing.
+    let out = run(
+        &store,
+        &[
+            "-f",
+            "json",
+            "attach",
+            "--component-id",
+            "42",
+            "--component-type",
+            "Generator",
+            "--attribute-id",
+            "7",
+            "--attribute-type",
+            "GeographicInfo",
+            "--dry-run",
+        ],
+    );
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["would_attach"], 1, "{out}");
+    assert_eq!(v["attachments"][0]["component_id"], 42, "{out}");
+}
+
+#[test]
+fn detach_and_unlink_report_a_zero_when_nothing_matched() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("empty.h5");
+    run(&store, &["init"]);
+
+    // Nothing is attached, so nothing matches. That is a zero, not an error:
+    // a cleanup script should be able to run twice.
+    let out = run(&store, &["detach", "--component-id", "42", "--force"]);
+    assert!(out.contains("No attachments matched"), "{out}");
+
+    let out = run(&store, &["unlink", "--all", "--force"]);
+    assert!(out.to_lowercase().contains("no "), "{out}");
+}
+
+#[test]
+fn a_malformed_association_batch_names_the_row_it_choked_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("batch.h5");
+    run(&store, &["init"]);
+
+    // A header with no rows under it is a mistake, not an empty batch: the
+    // caller meant to attach something.
+    let empty = write(
+        dir.path(),
+        "empty.csv",
+        "component_id,component_type,attribute_id,attribute_type\n",
+    );
+    let err = run_err(&store, &["attach", "--from", empty.to_str().unwrap()]);
+    assert!(err.contains("no rows"), "{err}");
+
+    // A non-integer id names the row and the column, not just the file.
+    let bad_id = write(
+        dir.path(),
+        "bad_id.csv",
+        "component_id,component_type,attribute_id,attribute_type\n\
+         43,Generator,8,GeographicInfo\nnope,Bus,9,GeographicInfo\n",
+    );
+    let err = run_err(&store, &["attach", "--from", bad_id.to_str().unwrap()]);
+    assert!(err.contains("row 2"), "name the row: {err}");
+    assert!(err.contains("not an integer"), "{err}");
+
+    // So does an empty type, which would otherwise attach a nameless thing.
+    let blank = write(
+        dir.path(),
+        "blank.csv",
+        "component_id,component_type,attribute_id,attribute_type\n43,,8,GeographicInfo\n",
+    );
+    let err = run_err(&store, &["attach", "--from", blank.to_str().unwrap()]);
+    assert!(err.contains("row 1"), "name the row: {err}");
+    assert!(err.contains("component_type"), "name the column: {err}");
+
+    // `link` reads the same shape under its own column names, and rejects the
+    // attach header rather than silently reading the pairs in the wrong order.
+    let links = write(
+        dir.path(),
+        "links.csv",
+        "parent_id,parent_type,child_id,child_type\n1,Generator,2,Bus\n3,Generator,4,Bus\n",
+    );
+    run(&store, &["link", "--from", links.to_str().unwrap()]);
+    assert_eq!(data_lines(&run(&store, &["-f", "csv", "links"])).len(), 2);
+
+    let err = run_err(&store, &["link", "--from", empty.to_str().unwrap()]);
+    assert!(err.contains("parent_id,parent_type"), "{err}");
+}
+
+// ---------------------------------------------------------------------------
+// The JSON half of every preview, and the read commands' non-default formats
+//
+// A `--dry-run` renders twice -- once as a table for a human, once as JSON for
+// a script -- and the suites only ever read one of them per command. The same
+// is true of `grid` and the discovery commands, whose CSV and JSON forms are
+// separate `match` arms from the table they all default to.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn every_preview_says_the_same_thing_in_json_as_it_does_in_a_table() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("prev.h5");
+    seed_one(dir.path(), &store);
+
+    let json = |args: &[&str]| -> serde_json::Value {
+        let out = run(&store, args);
+        serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}\n{out}"))
+    };
+
+    let v = json(&[
+        "-f",
+        "json",
+        "remove",
+        "--owner-id",
+        "42",
+        "--name",
+        "load",
+        "--dry-run",
+    ]);
+    assert_eq!(v["dry_run"], true);
+    assert_eq!(v["would_remove"], 1, "{v}");
+
+    let v = json(&[
+        "-f",
+        "json",
+        "remove",
+        "--all",
+        "--owner-id",
+        "42",
+        "--dry-run",
+    ]);
+    assert_eq!(v["would_remove"], 1, "{v}");
+    // The matches carry the identifying triple, so a caller can see *which*
+    // series a filter caught rather than only how many.
+    assert_eq!(v["matches"][0]["name"], "load", "{v}");
+    assert_eq!(v["matches"][0]["owner_id"], 42, "{v}");
+
+    let v = json(&["-f", "json", "clear", "--dry-run"]);
+    assert_eq!(v["would_clear"], 1, "{v}");
+
+    let v = json(&[
+        "-f",
+        "json",
+        "copy",
+        "--owner-id",
+        "42",
+        "--name",
+        "load",
+        "--dst-owner-id",
+        "99",
+        "--dst-owner-type",
+        "Generator",
+        "--new-name",
+        "copied",
+        "--dry-run",
+    ]);
+    assert_eq!(v["would_copy"], 1, "{v}");
+    assert_eq!(v["dst_owner_id"], 99, "{v}");
+    assert_eq!(v["dst_name"], "copied", "{v}");
+
+    // A `persist` preview names both halves of the artifact: they are one
+    // logical thing and a caller checking only the .h5 would miss the catalog.
+    let dest = dir.path().join("out.h5");
+    let v = json(&[
+        "-f",
+        "json",
+        "persist",
+        "--dest",
+        dest.to_str().unwrap(),
+        "--dry-run",
+    ]);
+    let would: Vec<String> = v["would_write"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(would.len(), 2, "{v}");
+    assert!(would.iter().any(|p| p.ends_with(".h5")), "{v}");
+    assert!(would.iter().any(|p| p.ends_with(".sqlite")), "{v}");
+    assert!(v["overwriting"].as_array().unwrap().is_empty(), "{v}");
+    assert!(!dest.exists(), "a preview must not write");
+
+    // Once it exists, the preview says what it would replace.
+    run(&store, &["persist", "--dest", dest.to_str().unwrap()]);
+    let v = json(&[
+        "-f",
+        "json",
+        "persist",
+        "--dest",
+        dest.to_str().unwrap(),
+        "--dry-run",
+    ]);
+    assert_eq!(v["overwriting"].as_array().unwrap().len(), 2, "{v}");
+}
+
+#[test]
+fn merge_previews_and_declines_the_two_degenerate_cases() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("dest.h5");
+    let source = dir.path().join("source.h5");
+    seed_one(dir.path(), &dest);
+    write(dir.path(), "s.csv", "value\n7\n8\n9\n");
+    let d = write(
+        dir.path(),
+        "s.json",
+        r#"{"owner_id": 77, "owner_type": "Generator", "name": "hydro",
+            "type": "SingleTimeSeries", "element_type": "f64", "csv": "s.csv",
+            "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H"}"#,
+    );
+    run(&source, &["add", "--descriptor", d.to_str().unwrap()]);
+
+    // Merging a store into itself would read and write the same file at once.
+    let err = run_err(&dest, &["merge", "--from", dest.to_str().unwrap()]);
+    assert!(err.contains("destination store itself"), "{err}");
+
+    // A selector matching nothing in the source is a zero, not a failure.
+    let out = run(
+        &dest,
+        &[
+            "-f",
+            "json",
+            "merge",
+            "--from",
+            source.to_str().unwrap(),
+            "--owner-id",
+            "999",
+        ],
+    );
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["merged"], 0, "{out}");
+
+    // The preview lists what would come across, and moves nothing.
+    let out = run(
+        &dest,
+        &[
+            "-f",
+            "json",
+            "merge",
+            "--from",
+            source.to_str().unwrap(),
+            "--dry-run",
+        ],
+    );
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["would_merge"], 1, "{out}");
+    assert_eq!(v["matches"][0]["name"], "hydro", "{out}");
+    assert!(
+        !run(&dest, &["list"]).contains("hydro"),
+        "a preview must not merge"
+    );
+
+    // The table preview names them for a human.
+    let out = run(
+        &dest,
+        &["merge", "--from", source.to_str().unwrap(), "--dry-run"],
+    );
+    assert!(out.contains("Would merge 1"), "{out}");
+    assert!(out.contains("hydro"), "{out}");
+}
+
+#[test]
+fn grid_and_the_discovery_commands_render_in_every_format() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("g.h5");
+    seed_one(dir.path(), &store);
+
+    // `grid` is a matrix, so each format lays it out differently: CSV gets a
+    // header row, JSON gets the columns beside the rows.
+    let csv = run(&store, &["-f", "csv", "grid", "--resolution", "PT1H"]);
+    let header = csv.lines().next().unwrap_or_default();
+    assert!(header.starts_with("timestamp"), "{csv}");
+    assert_eq!(data_lines(&csv).len(), 3, "{csv}");
+
+    let out = run(&store, &["-f", "json", "grid", "--resolution", "PT1H"]);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["columns"].as_array().unwrap().len(), 1, "{out}");
+    assert_eq!(v["rows"].as_array().unwrap().len(), 3, "{out}");
+
+    // `--label full` spells name@owner instead of the bare owner id, which is
+    // what a single-name grid falls back to.
+    let csv = run(
+        &store,
+        &[
+            "-f",
+            "csv",
+            "grid",
+            "--resolution",
+            "PT1H",
+            "--label",
+            "full",
+        ],
+    );
+    assert!(csv.lines().next().unwrap().contains("load@42"), "{csv}");
+    let csv = run(
+        &store,
+        &[
+            "-f",
+            "csv",
+            "grid",
+            "--resolution",
+            "PT1H",
+            "--label",
+            "owner",
+        ],
+    );
+    assert!(csv.lines().next().unwrap().contains("42"), "{csv}");
+
+    // A selector that matches nothing has no grid to lay out. The reader
+    // refuses before the command gets as far as laying out columns, so the
+    // message comes from the core and names the type it looked for.
+    let err = run_err(
+        &store,
+        &["grid", "--resolution", "PT1H", "--owner-id", "999"],
+    );
+    assert!(
+        err.contains("no SingleTimeSeries match the filter"),
+        "{err}"
+    );
+
+    // The discovery commands are single columns, and each format renders that
+    // column its own way.
+    for cmd in ["names", "owner-types"] {
+        let csv = run(&store, &["-f", "csv", cmd]);
+        assert!(!data_lines(&csv).is_empty(), "{cmd}: {csv}");
+        let out = run(&store, &["-f", "json", cmd]);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let items = v["items"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{cmd}: no items array in {out}"));
+        assert!(!items.is_empty(), "{cmd}: {out}");
+    }
+
+    // An empty result prints a note rather than a bare blank table.
+    let out = run(&store, &["names", "--owner-id", "999"]);
+    assert!(out.contains("no results"), "{out}");
+
+    // `exists` answers in each format, and exits nonzero when it does not.
+    assert!(run(&store, &["exists", "--name", "load"]).contains("true"));
+    let out = run(&store, &["-f", "csv", "exists", "--name", "load"]);
+    assert!(out.contains("exists") && out.contains("true"), "{out}");
+    let out = run(&store, &["-f", "json", "exists", "--name", "load"]);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&out).unwrap()["exists"],
+        true
+    );
+    // The nonzero exit is the point: `infrastore exists ... && ...` in a shell.
+    run_err(&store, &["exists", "--name", "nope"]);
+}
+
+/// A `grid` range is a query bound like any other, and has to be spelled the
+/// way the timeline it slices is.
+///
+/// `grid` filters the reader's own axis in the CLI rather than handing the
+/// range to the core, so it does not get the core's check for free the way
+/// every other ranged read does. It used to skip it entirely: `get` refused a
+/// mismatched bound while `grid` quietly answered one.
+#[test]
+fn a_grid_range_must_be_spelled_the_way_the_timeline_is() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("spell.h5");
+    write(dir.path(), "v.csv", "value\n1\n2\n3\n4\n");
+
+    // One zoneless series, one that records instants.
+    let zl = write(
+        dir.path(),
+        "zl.json",
+        r#"{"owner_id": 1, "owner_type": "G", "name": "wall",
+            "type": "SingleTimeSeries", "element_type": "f64", "csv": "v.csv",
+            "initial_timestamp": "2024-01-01T00:00:00", "resolution": "PT1H"}"#,
+    );
+    run(
+        &store,
+        &["--zoneless", "add", "--descriptor", zl.to_str().unwrap()],
+    );
+    let aware = write(
+        dir.path(),
+        "aw.json",
+        r#"{"owner_id": 2, "owner_type": "G", "name": "instant",
+            "type": "SingleTimeSeries", "element_type": "f64", "csv": "v.csv",
+            "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H"}"#,
+    );
+    run(&store, &["add", "--descriptor", aware.to_str().unwrap()]);
+
+    let zoned_bound = "2024-01-01T00:00:00Z..2024-01-01T02:00:00Z";
+    let wall_bound = "2024-01-01T00:00:00..2024-01-01T02:00:00";
+
+    // An instant against a wall-clock timeline has no defined mapping.
+    let err = run_err(
+        &store,
+        &[
+            "grid",
+            "--resolution",
+            "PT1H",
+            "--spelling",
+            "zoneless",
+            "--time-range",
+            zoned_bound,
+        ],
+    );
+    assert!(err.contains("is zoneless"), "{err}");
+
+    // And a wall clock against a timeline of instants names none.
+    let err = run_err(
+        &store,
+        &[
+            "--zoneless",
+            "grid",
+            "--resolution",
+            "PT1H",
+            "--spelling",
+            "zoned",
+            "--time-range",
+            wall_bound,
+        ],
+    );
+    assert!(err.contains("carry no zone"), "{err}");
+
+    // Matched both ways, the slice is taken as before.
+    let out = run(
+        &store,
+        &[
+            "--zoneless",
+            "-f",
+            "csv",
+            "grid",
+            "--resolution",
+            "PT1H",
+            "--spelling",
+            "zoneless",
+            "--time-range",
+            wall_bound,
+        ],
+    );
+    assert_eq!(data_lines(&out).len(), 2, "{out}");
+
+    let out = run(
+        &store,
+        &[
+            "-f",
+            "csv",
+            "grid",
+            "--resolution",
+            "PT1H",
+            "--spelling",
+            "zoned",
+            "--time-range",
+            zoned_bound,
+        ],
+    );
+    assert_eq!(data_lines(&out).len(), 2, "{out}");
+}
+
+/// A CSV whose rows disagree about their offset stores every instant exactly,
+/// but records one spelling — so a later row reads back at a different wall
+/// clock than it went in as. That is silent, and silently moving a wall clock
+/// is what this whole feature exists to stop, so the ingest says so and names
+/// the remedy.
+#[test]
+fn a_csv_whose_rows_disagree_about_their_offset_says_so_and_names_the_fix() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("mix.h5");
+    // Two rows either side of the US spring-forward, each written at the offset
+    // in force locally that day.
+    write(
+        dir.path(),
+        "m.csv",
+        "timestamp,value\n2024-03-09T12:00:00-07:00,1\n2024-03-11T12:00:00-06:00,2\n",
+    );
+    let mixed = write(
+        dir.path(),
+        "m.json",
+        r#"{"owner_id": 1, "owner_type": "G", "name": "mix",
+            "type": "NonSequentialTimeSeries", "element_type": "f64", "csv": "m.csv"}"#,
+    );
+
+    let out = raw(&store, &["add", "--descriptor", mixed.to_str().unwrap()]);
+    assert!(out.status.success(), "a mixed file is still ingested");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("warning"), "{stderr}");
+    assert!(stderr.contains("row 2"), "name the row: {stderr}");
+    assert!(
+        stderr.contains("time_reference"),
+        "name the remedy: {stderr}"
+    );
+
+    // The warning is true: the second row's wall clock did move.
+    let back = run(&store, &["-f", "csv", "get", "--name", "mix"]);
+    assert!(back.contains("2024-03-11T11:00:00-07:00"), "{back}");
+
+    // And the remedy works -- a named zone renders each instant in that zone,
+    // reproducing both wall clocks exactly.
+    let zoned = write(
+        dir.path(),
+        "z.json",
+        r#"{"owner_id": 2, "owner_type": "G", "name": "mixzone",
+            "type": "NonSequentialTimeSeries", "element_type": "f64", "csv": "m.csv",
+            "time_reference": "America/Denver"}"#,
+    );
+    let out = raw(&store, &["add", "--descriptor", zoned.to_str().unwrap()]);
+    assert!(out.status.success());
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("warning"),
+        "an explicit time_reference is the caller having decided; do not second-guess it"
+    );
+    let back = run(&store, &["-f", "csv", "get", "--name", "mixzone"]);
+    assert!(back.contains("2024-03-09T12:00:00-07:00"), "{back}");
+    assert!(back.contains("2024-03-11T12:00:00-06:00"), "{back}");
+
+    // A file that agrees with itself says nothing.
+    write(
+        dir.path(),
+        "s.csv",
+        "timestamp,value\n2024-03-09T12:00:00-07:00,1\n2024-03-11T12:00:00-07:00,2\n",
+    );
+    let same = write(
+        dir.path(),
+        "s.json",
+        r#"{"owner_id": 3, "owner_type": "G", "name": "same",
+            "type": "NonSequentialTimeSeries", "element_type": "f64", "csv": "s.csv"}"#,
+    );
+    let out = raw(&store, &["add", "--descriptor", same.to_str().unwrap()]);
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("warning"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A calendar period steps on the UTC calendar whatever the series' spelling
+/// says, and that is warned about — but only where it can actually bite.
+///
+/// The gate used to be `is_zoned()`, which is true for `utc` as well, so every
+/// UTC series with a monthly period was warned about DST drift against the very
+/// calendar it steps on. A warning that cannot come true, on the most common
+/// spelling there is, is how a real one gets ignored.
+#[test]
+fn the_calendar_period_warning_fires_only_where_the_calendars_can_disagree() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("cal.h5");
+    write(dir.path(), "m.csv", "value\n1\n2\n3\n");
+
+    let add_monthly = |owner: i64, name: &str, reference: Option<&str>| {
+        let spelling = match reference {
+            Some(r) => format!(r#", "time_reference": "{r}""#),
+            None => String::new(),
+        };
+        let json = format!(
+            r#"{{"owner_id": {owner}, "owner_type": "G", "name": "{name}",
+                 "type": "SingleTimeSeries", "element_type": "f64", "csv": "m.csv",
+                 "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "P1M"{spelling}}}"#
+        );
+        let d = write(dir.path(), &format!("{name}.json"), &json);
+        let out = raw(
+            &store,
+            &[
+                "--log-level",
+                "warn",
+                "add",
+                "--descriptor",
+                d.to_str().unwrap(),
+            ],
+        );
+        assert!(out.status.success(), "{name} should still be stored");
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+
+    // UTC is the calendar the stepping already uses, so there is nothing to
+    // drift against. Same for a wall clock, which is held as if UTC.
+    assert!(
+        !add_monthly(1, "utc_monthly", Some("utc")).contains("calendar period"),
+        "a UTC series cannot drift from the UTC calendar"
+    );
+    assert!(
+        !add_monthly(2, "wall_monthly", Some("zoneless")).contains("calendar period"),
+        "a wall clock is held as if UTC, so it steps on its own calendar"
+    );
+
+    // A named zone genuinely can disagree -- both at a month boundary and at a
+    // DST transition -- so it is warned about, and the remedy is named.
+    let warned = add_monthly(3, "zone_monthly", Some("America/Denver"));
+    assert!(warned.contains("calendar period"), "{warned}");
+    assert!(warned.contains("NonSequentialTimeSeries"), "{warned}");
+
+    // So can a fixed offset, at a month boundary.
+    assert!(
+        add_monthly(4, "offset_monthly", Some("-07:00")).contains("calendar period"),
+        "a fixed offset can still disagree at a month boundary"
+    );
+}
+
+/// A zone name the tz database does not recognize is stored, and said out loud.
+///
+/// The core validates a zone name's *shape* and never resolves it, so a typo
+/// reaches storage intact. The CLI is the layer with a database, and this was
+/// the one spelling it let through in silence — the same typo passed to
+/// `--assume-timezone` is a hard error. It warns rather than refuses, because
+/// the store deliberately accepts a name this build has not heard of yet.
+#[test]
+fn a_descriptor_zone_the_database_does_not_know_is_warned_about_and_stored() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("zone.h5");
+    write(dir.path(), "v.csv", "value\n1\n2\n3\n");
+
+    let add_with = |owner: i64, name: &str, zone: &str| {
+        let json = format!(
+            r#"{{"owner_id": {owner}, "owner_type": "G", "name": "{name}",
+                 "type": "SingleTimeSeries", "element_type": "f64", "csv": "v.csv",
+                 "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H",
+                 "time_reference": "{zone}"}}"#
+        );
+        let d = write(dir.path(), &format!("{name}.json"), &json);
+        let out = raw(&store, &["add", "--descriptor", d.to_str().unwrap()]);
+        assert!(out.status.success(), "{name} must still be stored");
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+
+    let warned = add_with(1, "typo", "America/Dever");
+    assert!(warned.contains("warning"), "{warned}");
+    assert!(warned.contains("America/Dever"), "name the zone: {warned}");
+    assert!(
+        warned.contains("store-info"),
+        "name where to see it: {warned}"
+    );
+
+    // Stored as given: the store records names its database predates.
+    let listed = run(&store, &["-f", "json", "info", "--name", "typo"]);
+    assert!(listed.contains("America/Dever"), "{listed}");
+
+    // A real zone says nothing, and neither do the non-zone spellings.
+    assert!(!add_with(2, "real", "America/Denver").contains("warning"));
+    assert!(!add_with(3, "offset", "-07:00").contains("warning"));
+    assert!(!add_with(4, "wall", "zoneless").contains("warning"));
+
+    // `store-info` still reports it, which is the pre-existing surface.
+    let info = run(&store, &["store-info"]);
+    assert!(info.contains("unrecognized"), "{info}");
+}

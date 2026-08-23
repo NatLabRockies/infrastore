@@ -10,6 +10,10 @@
 //! resolution (so `--resolution` is required); for `NonSequentialTimeSeries` it
 //! means one shared timestamp vector. The core reports a divergent selection as
 //! an error rather than padding it, and that error is passed through unchanged.
+//!
+//! One timeline also means one *spelling* for it, so a selection mixing
+//! wall-clock series with instant-bearing ones is refused on the same terms.
+//! `--spelling zoned|zoneless` narrows it to one of the two groups.
 
 use std::path::Path;
 
@@ -60,10 +64,20 @@ pub fn run(
     }
 
     let range = crate::parse::parse_time_range(time_range)?;
+    // Decision 8 again: a bound has to be spelled the way the thing it slices
+    // is. Every other ranged read gets this for free by handing the range to the
+    // core, which checks it once in `materialize_time_series`; `grid` filters the
+    // reader's own axis here instead, so without this the check is simply
+    // skipped — `get` refuses a wall-clock bound against an instant-bearing
+    // series while `grid` quietly answered it.
+    if let Some(r) = range {
+        r.check_against(reader.time_reference(), "this reader's timeline")
+            .map_err(|e| e.to_string())?;
+    }
     let all: Vec<DateTime<Utc>> = reader
         .timestamps()
         .filter(|t| match range {
-            Some((start, end)) => *t >= start && *t < end,
+            Some(r) => *t >= r.start && *t < r.end,
             None => true,
         })
         .collect();
@@ -170,7 +184,11 @@ fn read_row(
     at: DateTime<Utc>,
 ) -> Result<Vec<String>, String> {
     store.static_read(reader, at).map_err(|e| e.to_string())?;
-    let mut row = vec![at.to_rfc3339()];
+    // The axis is spelled the way the cohort's own series are, so a `grid -f
+    // csv` pipe reads straight back into `add` under the same reference it came
+    // out under. A cohort that mixes zoneless with the rest never builds a
+    // reader at all, so there is always exactly one spelling here.
+    let mut row = vec![crate::fields::render_timestamp(at, reader.time_reference())];
     for group in reader.groups() {
         row.extend(csv_io::bytes_to_strings(group.dtype(), group.values()));
     }

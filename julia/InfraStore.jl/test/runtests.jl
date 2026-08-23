@@ -3353,13 +3353,20 @@ end
     @test only(forecast_summary(store)).owner_category == Component
 
     # One StaticGrid type for both the consistency check and a reader's grid.
+    # They differ in exactly one field: a reader knows the spelling of the axis
+    # it spans, where the consistency check reports grids and has no reader to
+    # ask, so it leaves the reference unset.
     grid = only(check_static_consistency(store))
-    @test grid == StaticGrid(t0, Millisecond(Hour(1)), 4)
-    @test static_grid(build_static_reader(store; resolution=Hour(1))) == grid
+    @test grid == StaticGrid(t0, Millisecond(Hour(1)), 4, nothing)
+    @test grid.time_reference === nothing
+    reader_grid = static_grid(build_static_reader(store; resolution=Hour(1)))
+    @test reader_grid == StaticGrid(t0, Millisecond(Hour(1)), 4, ZonelessReference())
 
     @test forecast_timeline(
         build_forecast_reader(store, Deterministic; resolution=Hour(1))
-    ) == ForecastTimeline(t0, Millisecond(Hour(1)), Millisecond(Hour(1)), 2)
+    ) == ForecastTimeline(
+        t0, Millisecond(Hour(1)), Millisecond(Hour(1)), 2, ZonelessReference()
+    )
 
     @test get_forecast_parameters(store) == ForecastParameters(
         Millisecond(Hour(2)), Millisecond(Hour(1)), 2, Millisecond(Hour(1)), t0
@@ -4351,16 +4358,19 @@ end
 # ZonedDateTime input (the InfraStoreTimeZonesExt weak-dependency extension)
 # ---------------------------------------------------------------------------
 
-@testset "a bare DateTime is read as UTC, and says so when it cannot be" begin
-    # The convention this package has always used, now stated rather than
-    # implied: a zoneless `DateTime` is the UTC wall clock.
+@testset "a bare DateTime is a wall clock, and says so when it cannot be" begin
+    # A bare `DateTime` names no instant, so it is recorded as a wall clock and
+    # comes back as one. The stored instant is its fields read as if UTC --
+    # unchanged from the old UTC-by-convention reading, which was never a fact
+    # about the value; what is new is that the store now records that it was a
+    # convention.
     store = Store(in_memory=true)
     initial = DateTime(2024, 1, 1, 12)
-    key = add_time_series!(
-        store, 1, "Generator", Component,
-        SingleTimeSeries(initial, Hour(1), collect(1.0:3.0), "load"),
-    )
+    series = SingleTimeSeries(initial, Hour(1), collect(1.0:3.0), "load")
+    @test series.time_reference == ZonelessReference()
+    key = add_time_series!(store, 1, "Generator", Component, series)
     @test get_time_series(store, key).initial_timestamp == initial
+    @test get_time_series(store, key).time_reference == ZonelessReference()
 
     # Anything that is neither a DateTime nor a ZonedDateTime is an
     # InvalidParameterError naming the fix, not a bare MethodError.
@@ -4380,6 +4390,175 @@ end
         SingleTimeSeries(Date(2024, 1, 1), Hour(1), collect(1.0:3.0), "load"),
     )
     @test get_time_series(store, date_key).initial_timestamp == DateTime(2024, 1, 1)
+end
+
+@testset "an unspecified reference is not a wall clock" begin
+    # `nothing` and `ZonelessReference()` are different claims: one says the
+    # spelling was never recorded, the other says the timestamps are wall
+    # clocks. Only the *absence* of the keyword infers. This is the shape a
+    # store written by another binding (or by a native Rust caller) that
+    # declared no reference arrives in, so a read must not invent one -- an
+    # invented `ZonelessReference()` would be written straight back by
+    # `add_time_series!`, whose default is the series' own reference.
+    store = Store(in_memory=true)
+    initial = DateTime(2024, 1, 1, 12)
+    series = SingleTimeSeries(
+        initial, Hour(1), collect(1.0:3.0), "load"; time_reference=nothing
+    )
+    @test series.time_reference === nothing
+    key = add_time_series!(store, 1, "Generator", Component, series)
+    read_back = get_time_series(store, key)
+    @test read_back.time_reference === nothing
+    @test read_back.initial_timestamp == initial
+    # And the catalog agrees with the series.
+    @test only(list_time_series(store)).time_reference === nothing
+
+    # The same for the vector-timestamped type, whose constructor reads its
+    # spelling off the vector rather than off one timestamp.
+    nsts = NonSequentialTimeSeries(
+        [initial, initial + Hour(1)], [1.0, 2.0], "irregular"; time_reference=nothing
+    )
+    @test nsts.time_reference === nothing
+    nkey = add_time_series!(store, 2, "Generator", Component, nsts)
+    @test get_time_series(NonSequentialTimeSeries, store, nkey).time_reference === nothing
+
+    # Re-adding what was read back records the same absence, rather than
+    # promoting it to a wall clock on the way through.
+    again = Store(in_memory=true)
+    add_time_series!(again, 1, "Generator", Component, read_back)
+    @test only(list_time_series(again)).time_reference === nothing
+end
+
+@testset "every integer offset is judged without overflowing" begin
+    # `abs` cannot represent `-typemin(Int)`, so `abs(Int(typemin(Int)))` is
+    # `typemin(Int)` again -- negative, and therefore *below* the bound, which
+    # let the least plausible offset there is through as if it were valid. The
+    # same shape of bug the Rust core had.
+    for v in (typemin(Int), typemin(Int) + 1, typemax(Int), -24 * 60, 24 * 60)
+        @test_throws InfraStore.InvalidParameterError FixedOffsetReference(v)
+    end
+    # An oversized BigInt reports the documented error too, rather than an
+    # InexactError from the conversion.
+    @test_throws InfraStore.InvalidParameterError FixedOffsetReference(big(10)^30)
+    # The bound stays exclusive on both sides.
+    for v in (-1439, -420, 0, 330, 1439)
+        @test FixedOffsetReference(v).minutes == v
+    end
+end
+
+@testset "a point read is a query bound too" begin
+    # The ranged reads carry the spelling and the core refuses a bound the
+    # series cannot answer; the point reads sent only the instant, so a bare
+    # DateTime (a wall clock) could read an instant-bearing axis and return a
+    # *row* where the same mismatch on a range raises.
+    values = collect(1.0:4.0)
+    initial = DateTime(2024, 1, 1)
+
+    instants = Store(in_memory=true)
+    add_time_series!(
+        instants, 1, "Generator", Component,
+        SingleTimeSeries(initial, Hour(1), values, "load"; time_reference=UTCReference()),
+    )
+    r = build_static_reader(instants; resolution=Hour(1))
+    @test_throws InfraStore.InvalidParameterError static_read!(r, DateTime(2024, 1, 1, 1))
+
+    # A wall-clock axis still reads a wall clock.
+    wall = Store(in_memory=true)
+    add_time_series!(
+        wall, 1, "Generator", Component,
+        SingleTimeSeries(initial, Hour(1), values, "load"),
+    )
+    rw = build_static_reader(wall; resolution=Hour(1))
+    static_read!(rw, DateTime(2024, 1, 1, 1))
+    @test static_values(rw, 1) == [2.0]
+
+    # An unspecified axis has nothing to disagree with, so it accepts either.
+    unspecified = Store(in_memory=true)
+    add_time_series!(
+        unspecified, 1, "Generator", Component,
+        SingleTimeSeries(initial, Hour(1), values, "load"; time_reference=nothing),
+    )
+    ru = build_static_reader(unspecified; resolution=Hour(1))
+    static_read!(ru, DateTime(2024, 1, 1, 1))
+    @test static_values(ru, 1) == [2.0]
+
+    # The forecast point read obeys the same rule.
+    fc = Store(in_memory=true)
+    add_time_series!(
+        fc, 1, "Generator", Component,
+        SingleTimeSeries(initial, Hour(1), values, "load"; time_reference=UTCReference()),
+    )
+    transform_single_time_series!(fc, Hour(2), Hour(1))
+    fr = build_forecast_reader(fc, Deterministic; resolution=Hour(1))
+    @test_throws InfraStore.InvalidParameterError forecast_read!(
+        fr, DateTime(2024, 1, 1, 1)
+    )
+
+    # The axis spelling is cached on the reader, not re-fetched per timestep.
+    @test r.time_reference == UTCReference()
+    @test fr.time_reference == UTCReference()
+end
+
+@testset "a reader reports the spelling of the axis it spans" begin
+    # A reader spans one timeline, so it carries one spelling -- and without it
+    # a Julia caller could read the axis but not say how it was written, unable
+    # to tell a wall-clock axis from an unspecified or a UTC one. That is the
+    # distinction the axis exists to preserve, and every other binding reports
+    # it, so the Julia readers must too.
+    initial = DateTime(2024, 1, 1)
+    values = collect(1.0:4.0)
+
+    # A wall-clock cohort reports the positive claim, not an absence.
+    wall = Store(in_memory=true)
+    add_time_series!(
+        wall, 1, "Generator", Component,
+        SingleTimeSeries(initial, Hour(1), values, "load"),
+    )
+    grid = static_grid(build_static_reader(wall; resolution=Hour(1)))
+    @test grid.time_reference == ZonelessReference()
+
+    # A cohort that declared no spelling reports `nothing`, which is a
+    # different answer -- collapsing the two would let a read invent a claim
+    # the writer never made.
+    unspecified = Store(in_memory=true)
+    add_time_series!(
+        unspecified, 1, "Generator", Component,
+        SingleTimeSeries(initial, Hour(1), values, "load"; time_reference=nothing),
+    )
+    ugrid = static_grid(build_static_reader(unspecified; resolution=Hour(1)))
+    @test ugrid.time_reference === nothing
+
+    # And an instant-bearing cohort reports the spelling it was written in.
+    utc = Store(in_memory=true)
+    add_time_series!(
+        utc, 1, "Generator", Component,
+        SingleTimeSeries(initial, Hour(1), values, "load"; time_reference=UTCReference()),
+    )
+    @test static_grid(build_static_reader(utc; resolution=Hour(1))).time_reference ==
+        UTCReference()
+
+    zoned = Store(in_memory=true)
+    add_time_series!(
+        zoned, 1, "Generator", Component,
+        SingleTimeSeries(
+            initial, Hour(1), values, "load";
+            time_reference=ZoneReference("America/Denver"),
+        ),
+    )
+    @test static_grid(build_static_reader(zoned; resolution=Hour(1))).time_reference ==
+        ZoneReference("America/Denver")
+
+    # A forecast reader's window timeline carries it on the same terms.
+    fc = Store(in_memory=true)
+    add_time_series!(
+        fc, 1, "Generator", Component,
+        SingleTimeSeries(initial, Hour(1), values, "load"; time_reference=UTCReference()),
+    )
+    transform_single_time_series!(fc, Hour(2), Hour(1))
+    timeline = forecast_timeline(
+        build_forecast_reader(fc, Deterministic; resolution=Hour(1))
+    )
+    @test timeline.time_reference == UTCReference()
 end
 
 # The rest of the timestamp tests need the TimeZones weak dependency, and live in

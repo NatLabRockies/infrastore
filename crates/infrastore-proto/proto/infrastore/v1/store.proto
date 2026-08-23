@@ -79,6 +79,11 @@ message TimeSeriesKey {
   optional uint64 length                     = 9;
   optional string horizon                    = 10;      // ISO-8601 duration
   optional uint64 count                      = 11;
+  // How the snapshot's timestamps were spelled: "utc", "zoneless", a fixed
+  // offset ("-07:00"), or an IANA zone name ("America/Denver"). Descriptive,
+  // so it is NOT part of the identity. Absent means unspecified, which is not
+  // a claim the timestamps were written as UTC.
+  optional string time_reference             = 12;
 }
 
 message TimeSeriesMetadata {
@@ -122,6 +127,9 @@ message TimeSeriesMetadata {
   // these values are the time-varying form of, e.g. "max_active_power".
   // Free-form and never interpreted by the store.
   optional string component_field                = 24;
+  // `TimeReference::as_storage_string`: how this series' timestamps were
+  // spelled. See TimeSeriesKey.time_reference.
+  optional string time_reference                 = 25;
 }
 
 // ---- ListTimeSeries ----
@@ -139,6 +147,12 @@ message ListReq {
   // declares none matches no value, so this cannot select rows that left it
   // unset.
   optional string          component_field   = 9;
+  // Coherence predicate on the timestamp spelling: true selects the zoneless
+  // series, false selects everything that accepts a zoned bound — the three
+  // zoned spellings AND the rows that left the reference unset. A binary
+  // predicate rather than an exact match, because an exact match cannot name
+  // that second group.
+  optional bool            zoneless          = 10;
 }
 message ListResp {
   repeated TimeSeriesMetadata metadata = 1;
@@ -151,6 +165,11 @@ message GetReq {
   // Optional time-range slicing on the time axis.
   optional string start_rfc3339            = 2;
   optional string end_rfc3339              = 3;
+  // Whether the client spelled those bounds without a zone. A bound has to be
+  // spelled the way the series is: a wall-clock bound against a series that
+  // records instants, or an instant bound against a zoneless one, is refused
+  // rather than coerced. Absent means zoned, which is what an RFC3339 bound is.
+  optional bool   bounds_zoneless          = 4;
 }
 message GetResp {
   string             initial_timestamp_rfc3339  = 1;
@@ -192,6 +211,7 @@ message GetResp {
   optional string    quantity_kind               = 18;
   optional string    unit_system                 = 19;
   optional string    component_field             = 20;
+  optional string    time_reference              = 21;
 }
 
 // ---- GetTimeSeriesKeys ----
@@ -282,6 +302,10 @@ message BulkReadReq {
   repeated TimeSeriesKey keys          = 1;
   optional string        start_rfc3339 = 2;
   optional string        end_rfc3339   = 3;
+  // See GetReq.bounds_zoneless. A ranged bulk read is additionally refused when
+  // the selection mixes zoneless series with series that record instants: one
+  // bound cannot be valid for both.
+  optional bool          bounds_zoneless = 4;
 }
 message BulkReadResp {
   repeated GetResp items = 1;   // aligned with the request keys

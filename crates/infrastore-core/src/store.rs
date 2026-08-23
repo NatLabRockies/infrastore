@@ -25,6 +25,7 @@ use crate::types::key::{
 };
 use crate::types::metadata::{Features, OwnerCategory, TimeSeriesMetadata, validate_features};
 use crate::types::period::Period;
+use crate::types::time_reference::{TimeRange, TimeReference};
 use crate::types::time_series::{
     Descriptors, Deterministic, NonSequentialTimeSeries, Probabilistic, Scenarios,
     SingleTimeSeries, TimeSeriesData, TimeSeriesType, compute_h,
@@ -55,6 +56,20 @@ pub struct ListFilter {
     /// A row that declares no `component_field` matches no value at all, so
     /// this cannot be used to find the rows that left it unset.
     pub component_field: Option<String>,
+    /// Coherence predicate on the timestamp spelling: `Some(true)` keeps only
+    /// the [`TimeReference::Zoneless`] series, `Some(false)` keeps everything
+    /// that accepts a zoned query bound — the three zoned spellings *and* the
+    /// rows that left the reference unset.
+    ///
+    /// This is the constructive half of the mixed-selection rules. A selection
+    /// that spans both groups has no single valid time bound and no single
+    /// spelling for a shared timestamp axis, so [`Store::bulk_read`] and
+    /// [`Store::build_static_reader`] reject it; this is how a caller builds a
+    /// coherent one instead. It is deliberately a binary predicate rather than
+    /// an exact match on a reference: the unset rows are part of the zoned
+    /// group, and an exact match cannot express that (see
+    /// [`Self::component_field`] for the same trap).
+    pub zoneless: Option<bool>,
     pub resolution: Option<Period>,
     pub interval: Option<Period>,
     pub features: Option<Features>,
@@ -92,6 +107,12 @@ impl ListFilter {
         self.component_field = Some(field.into());
         self
     }
+    /// Keep only the zoneless series (`true`) or only those that accept a zoned
+    /// bound (`false`). See [`Self::zoneless`].
+    pub fn zoneless(mut self, zoneless: bool) -> Self {
+        self.zoneless = Some(zoneless);
+        self
+    }
     pub fn resolution(mut self, r: impl Into<Period>) -> Self {
         self.resolution = Some(r.into());
         self
@@ -116,6 +137,7 @@ impl From<ListFilter> for MetadataFilter {
             name: value.name,
             name_glob: value.name_glob,
             component_field: value.component_field,
+            zoneless: value.zoneless,
             resolution: value.resolution,
             interval: value.interval,
             features: value.features,
@@ -1544,11 +1566,19 @@ impl Store {
         TimeSeriesKey::from_metadata(&meta)
     }
 
+    /// Read one series, optionally sliced to `time_range`.
+    ///
+    /// A range does not have to be grid-aligned — `start` is floored and `end`
+    /// ceil-ed onto the series' own grid — but it does have to be *spelled* the
+    /// way the series is. A zoneless bound against a series that records
+    /// instants, or an instant bound against a zoneless one, is a category error
+    /// with no defined mapping, so it is refused rather than coerced. See
+    /// [`TimeRange`].
     #[tracing::instrument(skip(self, key, time_range), fields(owner = key.owner_id, name = %key.name, has_time_range = time_range.is_some()))]
     pub fn get_time_series(
         &self,
         key: &KeyIdentity,
-        time_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+        time_range: Option<TimeRange>,
     ) -> Result<TimeSeriesData> {
         let meta = self.metadata.get_by_key(key)?;
         self.materialize_time_series(&meta, time_range)
@@ -1564,7 +1594,7 @@ impl Store {
     pub fn get_time_series_with_metadata(
         &self,
         key: &KeyIdentity,
-        time_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+        time_range: Option<TimeRange>,
     ) -> Result<(TimeSeriesData, TimeSeriesMetadata)> {
         let meta = self.metadata.get_by_key(key)?;
         let data = self.materialize_time_series(&meta, time_range)?;
@@ -1576,20 +1606,13 @@ impl Store {
     fn materialize_time_series(
         &self,
         meta: &TimeSeriesMetadata,
-        time_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+        time_range: Option<TimeRange>,
     ) -> Result<TimeSeriesData> {
         // The descriptors describe the series but live on the catalog row, not
         // in the array bytes. Filling them in here — once, for every variant —
         // is what makes a read round-trip what a write declared.
         let mut data = self.materialize_array(meta, time_range)?;
-        data.set_descriptors(Descriptors {
-            element_type: meta.element_type,
-            units: meta.units.clone(),
-            quantity_kind: meta.quantity_kind.clone(),
-            unit_system: meta.unit_system,
-            component_field: meta.component_field.clone(),
-            application_data: meta.application_data.clone(),
-        });
+        data.set_descriptors(descriptors_of(meta));
         Ok(data)
     }
 
@@ -1599,9 +1622,22 @@ impl Store {
     fn materialize_array(
         &self,
         meta: &TimeSeriesMetadata,
-        time_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+        time_range: Option<TimeRange>,
     ) -> Result<TimeSeriesData> {
         tracing::debug!(ts_type = ?meta.time_series_type, "metadata loaded");
+        // Decision 8: the bound has to be spelled the way the series is, and a
+        // mismatch is refused rather than coerced. Checked once here, before any
+        // arithmetic, so every type and every entry point gets the same rule.
+        let time_range = match time_range {
+            Some(range) => {
+                range.check_against(
+                    meta.time_reference.as_ref(),
+                    &format!("{:?} on owner {}", meta.name, meta.owner_id),
+                )?;
+                Some(range.bounds())
+            }
+            None => None,
+        };
         match meta.time_series_type {
             TimeSeriesType::SingleTimeSeries => {
                 let initial = meta.initial_timestamp.ok_or_else(|| {
@@ -1671,6 +1707,7 @@ impl Store {
                     units: None,
                     quantity_kind: None,
                     unit_system: None,
+                    time_reference: None,
                     component_field: None,
                     application_data: None,
                 }))
@@ -2183,6 +2220,7 @@ impl Store {
                     units: meta.units.clone(),
                     quantity_kind: meta.quantity_kind.clone(),
                     unit_system: meta.unit_system,
+                    time_reference: meta.time_reference.clone(),
                     component_field: meta.component_field.clone(),
                     application_data: meta.application_data.clone(),
                 }));
@@ -2207,14 +2245,30 @@ impl Store {
     pub fn bulk_read_range(
         &self,
         keys: &[&KeyIdentity],
-        time_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+        time_range: Option<TimeRange>,
     ) -> Result<Vec<TimeSeriesData>> {
         match time_range {
             None => self.bulk_read(keys),
-            Some(range) => keys
-                .iter()
-                .map(|k| self.get_time_series(k, Some(range)))
-                .collect(),
+            Some(range) => {
+                // One bound for many series, so the selection has to agree on
+                // what a bound *means*. A mix of zoneless and instant-bearing
+                // series has no single valid one, and the per-key check would
+                // only report whichever series it reached first — this names
+                // both groups instead. Unranged `bulk_read` is unaffected:
+                // without a bound there is nothing for the two groups to
+                // disagree about, and each series carries its own spelling back.
+                let metas: Vec<TimeSeriesMetadata> = keys
+                    .iter()
+                    .map(|k| self.metadata.get_by_key(k))
+                    .collect::<Result<_>>()?;
+                reject_mixed_zoning(&metas, "bulk_read_range")?;
+                // Materialize from the rows already in hand; going back through
+                // `get_time_series` would look every key up a second time.
+                metas
+                    .iter()
+                    .map(|m| self.materialize_time_series(m, Some(range)))
+                    .collect()
+            }
         }
     }
 
@@ -2615,6 +2669,7 @@ impl Store {
             owner_type: None,
             name_glob: None,
             component_field: None,
+            zoneless: None,
         })
     }
 
@@ -2658,6 +2713,19 @@ impl Store {
     /// types have no interval, so they return an empty list.
     pub fn get_intervals(&self, time_series_type: Option<TimeSeriesType>) -> Result<Vec<Period>> {
         self.metadata.distinct_intervals(time_series_type)
+    }
+
+    /// Every distinct [`TimeReference`] the catalog holds, sorted, plus whether
+    /// any row left it unspecified.
+    ///
+    /// The audit surface for zone names: the store never gates on a zone
+    /// existing (see [`TimeReference::validate`]), so a layer that *has* a tz
+    /// database uses this to report a name it does not recognize — which makes
+    /// a typo findable in one command rather than at some later read in some
+    /// other language. One catalog query; the column is low-cardinality by
+    /// nature.
+    pub fn list_time_references(&self) -> Result<(Vec<TimeReference>, bool)> {
+        self.metadata.distinct_time_references()
     }
 
     /// Distinct series names matching `filter`, sorted. A discovery projection
@@ -3806,6 +3874,7 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
     // to hold.
     validate_features(&item.features)?;
     let element_type = resolve_element_type(item)?;
+    validate_time_reference(&item.data)?;
     validate_data(&item.data)?;
     let (hash, group, layout, meta, key) = match &item.data {
         TimeSeriesData::SingleTimeSeries(single) => {
@@ -3832,6 +3901,7 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
                     units: item.data.units().map(str::to_owned),
                     quantity_kind: item.data.quantity_kind().map(str::to_owned),
                     unit_system: item.data.unit_system(),
+                    time_reference: item.data.time_reference().cloned(),
                     component_field: item.data.component_field().map(str::to_owned),
                     percentiles: None,
                     element_type,
@@ -3846,6 +3916,7 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
                     item.features.clone(),
                     single.initial_timestamp,
                     single.length,
+                    single.time_reference.clone(),
                 )),
             )
         }
@@ -3876,6 +3947,7 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
                     units: item.data.units().map(str::to_owned),
                     quantity_kind: item.data.quantity_kind().map(str::to_owned),
                     unit_system: item.data.unit_system(),
+                    time_reference: item.data.time_reference().cloned(),
                     component_field: item.data.component_field().map(str::to_owned),
                     percentiles: None,
                     element_type,
@@ -3888,6 +3960,7 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
                     non_sequential.name.clone(),
                     item.features.clone(),
                     non_sequential.length,
+                    non_sequential.time_reference.clone(),
                 )),
             )
         }
@@ -4180,6 +4253,126 @@ fn check_forecast_family_free(
 /// period checks via the constructors (which is how a genuinely corrupt row is
 /// still caught, as an `IntegrityError`), but they do not apply the millisecond
 /// rule, so an artifact written before it keeps reading back exactly.
+/// The descriptive attributes of a stored row, as the read path hands them back
+/// to a reconstructed series. One place, so a new descriptor cannot be filled in
+/// on some read paths and not others.
+fn descriptors_of(meta: &TimeSeriesMetadata) -> Descriptors {
+    Descriptors {
+        element_type: meta.element_type,
+        units: meta.units.clone(),
+        quantity_kind: meta.quantity_kind.clone(),
+        unit_system: meta.unit_system,
+        time_reference: meta.time_reference.clone(),
+        component_field: meta.component_field.clone(),
+        application_data: meta.application_data.clone(),
+    }
+}
+
+/// Refuse a selection that spans both coherence groups.
+///
+/// The partition is [`TimeReference::Zoneless`] versus everything else — three
+/// named states, two groups, with the rows that left the reference unset in the
+/// second one. Mixing `Utc`, `FixedOffset` and `Zone` in one selection is fine:
+/// all three name instants, and a bound or a shared axis is instants.
+fn reject_mixed_zoning(metas: &[TimeSeriesMetadata], what: &str) -> Result<()> {
+    let mut zoneless: Option<&TimeSeriesMetadata> = None;
+    let mut zoned: Option<&TimeSeriesMetadata> = None;
+    for meta in metas {
+        let slot = if matches!(meta.time_reference, Some(TimeReference::Zoneless)) {
+            &mut zoneless
+        } else {
+            &mut zoned
+        };
+        slot.get_or_insert(meta);
+        if let (Some(a), Some(b)) = (zoneless, zoned) {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "{what}: the selection mixes zoneless series with series that record \
+                 instants, and the two cannot share one time bound. {:?} on owner {} is \
+                 zoneless; {:?} on owner {} is not. Split the call, or narrow it with \
+                 ListFilter::zoneless.",
+                a.name, a.owner_id, b.name, b.owner_id
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Validate the declared timestamp spelling, and warn where a spelling and a
+/// calendar period disagree about which calendar they mean.
+///
+/// The validation is shape only — see [`TimeReference::validate`]. It runs here
+/// rather than in a constructor because the native Rust path has no binding to
+/// catch a hand-built reference, and this is the funnel every write passes
+/// through.
+///
+/// The warning covers [`Period::Months`] on a zoned series. A month period is
+/// calendar arithmetic and the store steps it on the *UTC* calendar
+/// ([`Period::add_to`] via chrono's `checked_add_months`), which a caller who
+/// spelled their timestamps in `America/Denver` will read as an hour of drift at
+/// every DST transition and a day at a month boundary. Local-frame stepping is
+/// refused — it is the local → instant direction the core never runs, and it
+/// would let a spelling decide which instants a series contains — so this is
+/// documented behavior plus a warning that makes it findable before it is filed
+/// as a bug. A caller who wants months on a local calendar wants an explicit
+/// instant per value: [`NonSequentialTimeSeries`].
+fn validate_time_reference(data: &TimeSeriesData) -> Result<()> {
+    let Some(reference) = data.time_reference() else {
+        return Ok(());
+    };
+    reference.validate()?;
+    // Only a reference that can *disagree* with the UTC calendar is worth
+    // warning about. `is_zoned()` is true for `Utc` too, which made every UTC
+    // series with a monthly period warn about DST drift against the calendar it
+    // is already stepping on -- a warning that cannot come true, on the most
+    // common spelling there is, which teaches the reader to ignore the ones
+    // that can. `Zoneless` is wall clocks held as if UTC, so it steps on its own
+    // calendar as well.
+    if !matches!(
+        reference,
+        TimeReference::FixedOffset(_) | TimeReference::Zone(_)
+    ) {
+        return Ok(());
+    }
+    let calendar_periods: [(&str, Option<Period>); 3] = match data {
+        TimeSeriesData::SingleTimeSeries(single) => [
+            ("resolution", Some(single.resolution)),
+            ("", None),
+            ("", None),
+        ],
+        TimeSeriesData::NonSequentialTimeSeries(_) => [("", None), ("", None), ("", None)],
+        TimeSeriesData::Deterministic(d) => [
+            ("resolution", Some(d.resolution)),
+            ("horizon", Some(d.horizon)),
+            ("interval", Some(d.interval)),
+        ],
+        TimeSeriesData::Probabilistic(p) => [
+            ("resolution", Some(p.resolution)),
+            ("horizon", Some(p.horizon)),
+            ("interval", Some(p.interval)),
+        ],
+        TimeSeriesData::Scenarios(sc) => [
+            ("resolution", Some(sc.resolution)),
+            ("horizon", Some(sc.horizon)),
+            ("interval", Some(sc.interval)),
+        ],
+    };
+    for (field, period) in calendar_periods {
+        if period.is_some_and(|p| p.is_irregular()) {
+            tracing::warn!(
+                series = data.name(),
+                field,
+                time_reference = %reference,
+                "a calendar period on a series spelled at an offset or in a named zone \
+                 steps on the UTC calendar, not the reference's: the reference is a \
+                 spelling, not a grid. Expect up to a day of drift at a month boundary, \
+                 and -- for a named zone -- an hour at each DST transition. For a \
+                 local-clock grid, use NonSequentialTimeSeries with explicit timestamps."
+            );
+        }
+    }
+    Ok(())
+}
+
 fn validate_data(data: &TimeSeriesData) -> Result<()> {
     let invalid = TimeSeriesError::InvalidParameter;
     match data {
@@ -4363,6 +4556,7 @@ fn forecast_metadata(
         units: item.data.units().map(str::to_owned),
         quantity_kind: item.data.quantity_kind().map(str::to_owned),
         unit_system: item.data.unit_system(),
+        time_reference: item.data.time_reference().cloned(),
         component_field: item.data.component_field().map(str::to_owned),
         percentiles,
         element_type,
@@ -4412,6 +4606,7 @@ fn forecast_key(
         horizon,
         interval,
         count,
+        item.data.time_reference().cloned(),
     ))
 }
 
@@ -4420,27 +4615,49 @@ fn forecast_key(
 /// (including stores written by the removed netcdf backend) are rejected with
 /// an actionable error instead of being misread.
 ///
-/// Reachability is checked first, and separately. `is_hdf5_backend_file` cannot
-/// tell "this file is not an infrastore store" from "there is no file here" —
-/// it answers `false` either way — so without this a typo'd path or an
-/// unreadable directory would be reported as a netcdf-era store needing
-/// migration, which is advice about a file that does not exist. The `io::Error`
-/// kind is carried through, so a missing path and a permission-denied one stay
-/// distinguishable.
+/// Reachability is checked first, and separately, so a typo'd path or an
+/// unreadable directory is reported as the missing file it is rather than as a
+/// store of the wrong kind. The `io::Error` kind is carried through, so a
+/// missing path and a permission-denied one stay distinguishable.
+///
+/// Past that, the sniff is three-way rather than a boolean, because "this is
+/// not one of our files" and "this file would not open" call for opposite
+/// advice. Only the first can be a netcdf-era store — netcdf4 is HDF5
+/// underneath, so such a file *opens* and merely lacks our attribute. A file
+/// that will not open at all is something else entirely, and the most common
+/// something else is a store another process is holding: HDF5 takes an
+/// exclusive lock and does not set `O_CLOEXEC`, so even an unrelated forked
+/// child can keep one alive. Telling that user to re-create the store is advice
+/// to destroy a healthy artifact, so libhdf5's own complaint is passed through
+/// instead of being overwritten by a guess.
 fn open_backend(path: &Path, read_only: bool) -> Result<Box<dyn StorageBackend>> {
+    use crate::storage::hdf5::BackendSniff;
+
     if let Err(e) = std::fs::metadata(path) {
         return Err(TimeSeriesError::Io(std::io::Error::new(
             e.kind(),
             format!("cannot open store {}: {e}", path.display()),
         )));
     }
-    if !crate::storage::hdf5::is_hdf5_backend_file(path) {
-        return Err(TimeSeriesError::InvalidParameter(format!(
-            "{} is not an infrastore hdf5 store (stores written by the removed \
-             netcdf backend are no longer supported; re-create the store to \
-             migrate)",
-            path.display()
-        )));
+    match crate::storage::hdf5::sniff_hdf5_backend_file(path) {
+        BackendSniff::Ours => {}
+        BackendSniff::NotOurs => {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "{} is not an infrastore hdf5 store (stores written by the removed \
+                 netcdf backend are no longer supported; re-create the store to \
+                 migrate)",
+                path.display()
+            )));
+        }
+        BackendSniff::Unopenable(why) => {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "{} could not be opened as an HDF5 file, so whether it is an infrastore \
+                 store is unknown. If another process has it open for writing, close that \
+                 one first — HDF5 takes an exclusive lock on a store it is writing. \
+                 libhdf5 reported: {why}",
+                path.display()
+            )));
+        }
     }
     Ok(Box::new(Hdf5Backend::open(path, read_only)?))
 }

@@ -432,7 +432,9 @@ fn run_read(args: &ReadArgs) -> Result<(), Error> {
         let t_end = initial + chrono::Duration::milliseconds((step + 1) as i64 * HOUR_MS);
         let t0 = Instant::now();
         for key in &keys {
-            let _ = handle.store.get_time_series(key, Some((t_start, t_end)))?;
+            let _ = handle
+                .store
+                .get_time_series(key, Some((t_start, t_end).into()))?;
         }
         step_times.push(t0.elapsed());
     }
@@ -477,7 +479,9 @@ fn run_read(args: &ReadArgs) -> Result<(), Error> {
         let t_end = initial + chrono::Duration::milliseconds((step + 1) as i64 * HOUR_MS);
         let t0 = Instant::now();
         for key in &keys {
-            let _ = handle.store.get_time_series(key, Some((t_start, t_end)))?;
+            let _ = handle
+                .store
+                .get_time_series(key, Some((t_start, t_end).into()))?;
         }
         step_times.push(t0.elapsed());
     }

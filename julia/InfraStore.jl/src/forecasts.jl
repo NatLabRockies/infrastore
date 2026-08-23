@@ -11,7 +11,9 @@ const INFRASTORE_TYPE_DETERMINISTIC_SINGLE = 3
 const INFRASTORE_TYPE_PROBABILISTIC = 4
 const INFRASTORE_TYPE_SCENARIOS = 5
 
-_features_arg(features) = (features === nothing || isempty(features)) ? C_NULL : JSON.json(features)
+function _features_arg(features)
+    return (features === nothing || isempty(features)) ? C_NULL : JSON.json(features)
+end
 _category_int(c::OwnerCategory) = Int32(Int(c))
 
 """
@@ -263,9 +265,9 @@ function _get_forecast_raw(
     interval_iso = _period_to_cstr(interval)
     features_json = _features_arg(features)
 
-    time_range_present = time_range !== nothing
-    range_start_ms = time_range_present ? _to_unix_ms(time_range[1]) : Int64(0)
-    range_end_ms = time_range_present ? _to_unix_ms(time_range[2]) : Int64(0)
+    time_range_present, time_range_zoneless, range_start_ms, range_end_ms = _time_range_args(
+        time_range
+    )
 
     out_initial = Ref{Int64}(0)
     out_res = Ref{Ptr{Cchar}}(C_NULL)
@@ -286,6 +288,7 @@ function _get_forecast_raw(
     out_units = Ref{Ptr{Cchar}}(C_NULL)
     out_quantity_kind = Ref{Ptr{Cchar}}(C_NULL)
     out_unit_system = Ref{Ptr{Cchar}}(C_NULL)
+    out_time_reference = Ref{Ptr{Cchar}}(C_NULL)
     out_component_field = Ref{Ptr{Cchar}}(C_NULL)
 
     _check(
@@ -299,6 +302,7 @@ function _get_forecast_raw(
             interval_iso::Cstring,
             features_json::Cstring,
             time_range_present::Bool,
+            time_range_zoneless::Bool,
             range_start_ms::Int64,
             range_end_ms::Int64,
             out_initial::Ref{Int64},
@@ -320,6 +324,7 @@ function _get_forecast_raw(
             out_units::Ref{Ptr{Cchar}},
             out_quantity_kind::Ref{Ptr{Cchar}},
             out_unit_system::Ref{Ptr{Cchar}},
+            out_time_reference::Ref{Ptr{Cchar}},
             out_component_field::Ref{Ptr{Cchar}},
         )::Int32
     )
@@ -344,6 +349,7 @@ function _get_forecast_raw(
         out_units,
         out_quantity_kind,
         out_unit_system,
+        out_time_reference,
         out_component_field,
     )
 end
@@ -371,6 +377,7 @@ function _decode_forecast_outputs(
     out_units,
     out_quantity_kind,
     out_unit_system,
+    out_time_reference,
     out_component_field,
 )
     # Copy everything inside try/finally: every FFI allocation is released
@@ -402,6 +409,7 @@ function _decode_forecast_outputs(
             units=_peek_cstr(out_units[]),
             quantity_kind=_peek_cstr(out_quantity_kind[]),
             unit_system=_unit_system(_peek_cstr(out_unit_system[])),
+            time_reference=_time_reference(_peek_cstr(out_time_reference[])),
             component_field=_peek_cstr(out_component_field[]),
         )
     finally
@@ -416,6 +424,7 @@ function _decode_forecast_outputs(
         _free_cstr(out_units[])
         _free_cstr(out_quantity_kind[])
         _free_cstr(out_unit_system[])
+        _free_cstr(out_time_reference[])
         _free_cstr(out_component_field[])
     end
 end
@@ -427,9 +436,9 @@ function _get_forecast_raw(
     key::TimeSeriesKey;
     time_range::TimeRangeArg=nothing,
 )
-    time_range_present = time_range !== nothing
-    range_start_ms = time_range_present ? _to_unix_ms(time_range[1]) : Int64(0)
-    range_end_ms = time_range_present ? _to_unix_ms(time_range[2]) : Int64(0)
+    time_range_present, time_range_zoneless, range_start_ms, range_end_ms = _time_range_args(
+        time_range
+    )
 
     out_initial = Ref{Int64}(0)
     out_res = Ref{Ptr{Cchar}}(C_NULL)
@@ -450,6 +459,7 @@ function _get_forecast_raw(
     out_units = Ref{Ptr{Cchar}}(C_NULL)
     out_quantity_kind = Ref{Ptr{Cchar}}(C_NULL)
     out_unit_system = Ref{Ptr{Cchar}}(C_NULL)
+    out_time_reference = Ref{Ptr{Cchar}}(C_NULL)
     out_component_field = Ref{Ptr{Cchar}}(C_NULL)
 
     _check(
@@ -457,6 +467,7 @@ function _get_forecast_raw(
             store::Ptr{Cvoid},
             key::Ptr{Cvoid},
             time_range_present::Bool,
+            time_range_zoneless::Bool,
             range_start_ms::Int64,
             range_end_ms::Int64,
             out_initial::Ref{Int64},
@@ -478,6 +489,7 @@ function _get_forecast_raw(
             out_units::Ref{Ptr{Cchar}},
             out_quantity_kind::Ref{Ptr{Cchar}},
             out_unit_system::Ref{Ptr{Cchar}},
+            out_time_reference::Ref{Ptr{Cchar}},
             out_component_field::Ref{Ptr{Cchar}},
         )::Int32
     )
@@ -502,6 +514,7 @@ function _get_forecast_raw(
         out_units,
         out_quantity_kind,
         out_unit_system,
+        out_time_reference,
         out_component_field,
     )
 end
@@ -530,6 +543,7 @@ function _forecast_from_raw(::Type{Deterministic}, r, name::AbstractString)
         units=r.units,
         quantity_kind=r.quantity_kind,
         unit_system=r.unit_system,
+        time_reference=r.time_reference,
         component_field=r.component_field,
     )
 end
@@ -549,6 +563,7 @@ function _forecast_from_raw(::Type{Probabilistic}, r, name::AbstractString)
         units=r.units,
         quantity_kind=r.quantity_kind,
         unit_system=r.unit_system,
+        time_reference=r.time_reference,
         component_field=r.component_field,
     )
 end
@@ -568,6 +583,7 @@ function _forecast_from_raw(::Type{Scenarios}, r, name::AbstractString)
         units=r.units,
         quantity_kind=r.quantity_kind,
         unit_system=r.unit_system,
+        time_reference=r.time_reference,
         component_field=r.component_field,
     )
 end

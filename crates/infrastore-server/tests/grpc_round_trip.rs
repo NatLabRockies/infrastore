@@ -73,7 +73,7 @@ async fn list_and_get_round_trip() {
     let client = RemoteClient::connect(addr).await.unwrap();
 
     let metas = client
-        .list_time_series(None, None, None, None, None, None, None, None, None)
+        .list_time_series(None, None, None, None, None, None, None, None, None, None)
         .await
         .unwrap();
     assert_eq!(metas.len(), 2);
@@ -107,7 +107,7 @@ async fn time_range_slicing_over_grpc() {
     let start = initial + Duration::hours(2);
     let end = initial + Duration::hours(5);
     let data = client
-        .get_time_series(keys[0].identity(), Some((start, end)))
+        .get_time_series(keys[0].identity(), Some((start, end).into()))
         .await
         .unwrap();
     let single = data.as_single().unwrap();
@@ -125,6 +125,7 @@ async fn list_filter_by_features_subset() {
     filter.insert("model_year".into(), FeatureValue::Int(2030));
     let metas = client
         .list_time_series(
+            None,
             None,
             None,
             None,
@@ -223,7 +224,7 @@ async fn non_sequential_round_trip_over_grpc() {
     let got = client
         .get_time_series(
             keys[0].identity(),
-            Some((initial + Duration::hours(1), initial + Duration::days(3))),
+            Some((initial + Duration::hours(1), initial + Duration::days(3)).into()),
         )
         .await
         .unwrap();
@@ -360,13 +361,17 @@ async fn additive_read_rpcs() {
 
     // ListKeys with and without hash.
     let rows = client
-        .list_keys(None, None, None, None, None, None, None, None, None, false)
+        .list_keys(
+            None, None, None, None, None, None, None, None, None, None, false,
+        )
         .await
         .unwrap();
     assert_eq!(rows.len(), 2);
     assert!(rows.iter().all(|(_, h)| h.is_none()));
     let with_hash = client
-        .list_keys(None, None, None, None, None, None, None, None, None, true)
+        .list_keys(
+            None, None, None, None, None, None, None, None, None, None, true,
+        )
         .await
         .unwrap();
     assert!(with_hash.iter().all(|(_, h)| h.is_some()));
@@ -377,7 +382,9 @@ async fn additive_read_rpcs() {
 
     // BulkRead the two series.
     let all_keys = client
-        .list_keys(None, None, None, None, None, None, None, None, None, false)
+        .list_keys(
+            None, None, None, None, None, None, None, None, None, None, false,
+        )
         .await
         .unwrap();
     let ids: Vec<_> = all_keys.iter().map(|(k, _)| k.identity().clone()).collect();
@@ -454,6 +461,7 @@ async fn component_field_filters_and_round_trips_over_the_wire() {
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -473,6 +481,7 @@ async fn component_field_filters_and_round_trips_over_the_wire() {
             None,
             None,
             Some("rating".into()),
+            None,
             None,
             None,
             None,
@@ -496,14 +505,26 @@ async fn component_field_filters_and_round_trips_over_the_wire() {
                 Some("nothing".into()),
                 None,
                 None,
-                None
+                None,
+                None,
             )
             .await
             .unwrap()
             .is_empty()
     );
     let all = client
-        .list_time_series(Some(3), None, None, None, None, None, None, None, None)
+        .list_time_series(
+            Some(3),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(all.len(), 1);

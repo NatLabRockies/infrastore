@@ -286,9 +286,9 @@ fn bulk_read_range_matches_per_key_get_time_series() {
     let range = (t0() + Duration::hours(2), t0() + Duration::hours(5));
     let keys = [k1.identity(), k2.identity()];
 
-    let sliced = store.bulk_read_range(&keys, Some(range)).unwrap();
+    let sliced = store.bulk_read_range(&keys, Some(range.into())).unwrap();
     for (i, k) in keys.iter().enumerate() {
-        let per_key = store.get_time_series(k, Some(range)).unwrap();
+        let per_key = store.get_time_series(k, Some(range.into())).unwrap();
         assert_eq!(
             sliced[i], per_key,
             "sliced bulk differs from per-key at {i}"
@@ -781,7 +781,7 @@ fn reading_a_missing_key_is_not_found() {
     ));
     // A time_range does not change the classification.
     assert!(matches!(
-        store.get_time_series(&missing, Some((t0(), t0() + Duration::hours(2)))),
+        store.get_time_series(&missing, Some((t0(), t0() + Duration::hours(2)).into())),
         Err(TimeSeriesError::NotFound)
     ));
     assert!(matches!(
@@ -1033,7 +1033,7 @@ fn empty_key_lists_are_no_ops_not_errors() {
     assert!(store.bulk_read_range(&[], None).unwrap().is_empty());
     assert!(
         store
-            .bulk_read_range(&[], Some((t0(), t0() + Duration::hours(2))))
+            .bulk_read_range(&[], Some((t0(), t0() + Duration::hours(2)).into()))
             .unwrap()
             .is_empty()
     );
@@ -1358,7 +1358,10 @@ fn series_descriptors_round_trip_on_the_struct() {
 
             // A slice is the same values over a shorter window, so it keeps them.
             let sliced = store
-                .get_time_series(labeled.identity(), Some((t0(), t0() + Duration::hours(2))))
+                .get_time_series(
+                    labeled.identity(),
+                    Some((t0(), t0() + Duration::hours(2)).into()),
+                )
                 .unwrap();
             assert_eq!(sliced.units(), Some("MW"), "{backend}");
             assert_eq!(sliced.quantity_kind(), Some("ActivePower"), "{backend}");

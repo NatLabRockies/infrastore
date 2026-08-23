@@ -26,10 +26,47 @@ from infrastore import (
 ## Datetimes
 
 Every `datetime` argument — an initial timestamp, a `NonSequentialTimeSeries` timestamp vector, a
-`time_range` bound, a reader's `when` — must be **timezone-aware**, and any zone will do:
-`datetime.timezone.utc`, a `ZoneInfo`, or a fixed offset. It is converted to UTC on the way in, so
-two aware datetimes naming the same instant are the same instant to the store, and every `datetime`
-read back is UTC. A naive datetime names no instant and raises `InvalidParameterError`.
+`time_range` bound, a reader's `when` — may be aware or naive, and the store records **which**.
+
+An **aware** datetime names an instant, and any zone will do: `datetime.timezone.utc`, a `ZoneInfo`,
+or a fixed offset. It is converted to UTC on the way in, so two aware datetimes naming the same
+instant are the same instant to the store — and the spelling it arrived in is recorded, so it is the
+spelling that comes back.
+
+A **naive** datetime names a wall clock and no instant. It is accepted and recorded as
+`time_reference = "zoneless"`; its fields are read as they stand (never through `astimezone`, which
+would apply the machine's local zone), and a read hands back a naive datetime again. That round-trip
+is the whole reason accepting one is safe:
+
+```python
+datetime(2024, 1, 1) == datetime(2024, 1, 1, tzinfo=timezone.utc)   # False
+datetime(2024, 1, 1) <  datetime(2024, 1, 1, tzinfo=timezone.utc)   # TypeError
+```
+
+A store that took a naive datetime and returned an aware one would be worse than one that refused.
+
+### Time references
+
+Every series carries a `time_reference` recording how its timestamps were spelled, inferred from the
+`datetime` it was built with:
+
+| Input                        | `time_reference`   |
+| ---------------------------- | ------------------ |
+| `tzinfo=timezone.utc`        | `"utc"`            |
+| a fixed-offset `tzinfo`      | `"-07:00"`         |
+| `ZoneInfo("America/Denver")` | `"America/Denver"` |
+| naive                        | `"zoneless"`       |
+
+`ZoneInfo("UTC")` records the _zone_ `"UTC"`, not the literal `"utc"`: the two render identically
+forever, and the difference is only in what the catalog reports back.
+
+Reads spell the timestamp back the same way — a `ZoneInfo` series returns datetimes carrying that
+`ZoneInfo`, including the correct side of a fall-back hour. A **query bound must match**: a naive
+bound against a series that records instants, or an aware bound against a zoneless one, raises
+`InvalidParameterError` rather than being coerced, and so does a `time_range` whose two ends
+disagree. `list_time_series(zoneless=...)`, `build_static_reader(..., zoneless=...)`, and the other
+filter-taking methods take a `zoneless` predicate for building a coherent selection. See
+[Time references](../explanation/data-model.md#time-references) for the full rules.
 
 A `datetime` that is **stored** — an initial timestamp, or an entry of a `NonSequentialTimeSeries`
 timestamp vector — must also be a whole number of milliseconds; `microsecond` must be a multiple of
@@ -130,8 +167,11 @@ def add_time_series(
     application_data: str | None = None,
     quantity_kind: str | None = None,
     unit_system: str | None = None,   # "natural_units" | "component_base"
+    time_reference: str | None = None,   # "utc" | "zoneless" | "-07:00" | "America/Denver"
     component_field: str | None = None,  # e.g. "max_active_power"
 ) -> TimeSeriesKey: ...
+# `time_reference` is normally omitted: it is inferred from the datetime the
+# series was built with (see "Time references" below). Pass it to override.
 # An unrecognized `unit_system` raises InvalidParameterError rather than
 # degrading to unspecified; omitting it leaves the basis unspecified, which is
 # not the same as declaring natural units.
@@ -144,7 +184,7 @@ def add_time_series_bulk(self, items: list[dict]) -> list[TimeSeriesKey]: ...
 # Each item dict mirrors add_time_series's parameters: required `owner_id`,
 # `owner_type`, `owner_category`, `time_series`; optional `features`, `units`,
 # `element_type`, `application_data`, `quantity_kind`, `unit_system`,
-# `component_field`.
+# `time_reference`, `component_field`.
 # All items commit in ONE metadata transaction (all-or-nothing), which is much
 # faster than looping over add_time_series. Keys are returned in input order.
 
@@ -354,10 +394,11 @@ with store.transaction():
   series), `length`, `resolution` (ISO 8601 duration string, e.g. `PT1H`, or `None`), `timestamps`,
   `horizon`, `interval`, `count`, `percentiles`, `element_type`, `element_shape`, `features`,
   `units`, `quantity_kind`, `unit_system` (`"natural_units"` / `"component_base"` / `None`),
-  `component_field`, `application_data`. `timestamps` is a list of RFC 3339 strings for
-  non-sequential series and `None` otherwise; `horizon` / `interval` / `count` are set for forecasts
-  and `percentiles` for `Probabilistic` only. The `features` filter is a **subset** match — rows
-  must contain at least the given pairs — whereas a `TimeSeriesKey` matches its feature map exactly.
+  `time_reference`, `component_field`, `application_data`. `timestamps` is a list of RFC 3339
+  strings for non-sequential series and `None` otherwise; `horizon` / `interval` / `count` are set
+  for forecasts and `percentiles` for `Probabilistic` only. The `features` filter is a **subset**
+  match — rows must contain at least the given pairs — whereas a `TimeSeriesKey` matches its feature
+  map exactly.
 - **`list_array_groups`** accepts the same filters as `list_time_series` and groups the matching
   series by their underlying stored array. It returns a list of dicts, each with `data_hash` (hex
   string) and `keys` (a list of `TimeSeriesKey`s that resolve to that array). Keys sharing one dict
@@ -404,11 +445,13 @@ SingleTimeSeries(
 ```
 
 Read-only properties: `initial_timestamp -> datetime`, `resolution -> str` (ISO 8601 duration, e.g.
-`PT1H`), `length -> int`, `data -> numpy.ndarray`, `name -> str`. The constructor accepts either a
-`timedelta` or an ISO 8601 duration string for `resolution`; the getter always returns the ISO
-string. `name` is a required association attribute (the same array may be stored under different
-names). It is read off the object by `add_time_series` and populated on `get_time_series`. The
-array's `element_type` and per-step element shape are preserved through a round-trip.
+`PT1H`), `length -> int`, `data -> numpy.ndarray`, `name -> str`, `time_reference -> str | None`.
+`initial_timestamp` comes back spelled the way it was written — see
+[Time references](#time-references). The constructor accepts either a `timedelta` or an ISO 8601
+duration string for `resolution`; the getter always returns the ISO string. `name` is a required
+association attribute (the same array may be stored under different names). It is read off the
+object by `add_time_series` and populated on `get_time_series`. The array's `element_type` and
+per-step element shape are preserved through a round-trip.
 
 ## `NonSequentialTimeSeries`
 
@@ -420,9 +463,10 @@ NonSequentialTimeSeries(
 )
 ```
 
-Read-only properties: `timestamps`, `length`, `data`, and `name`. Timestamps must be timezone-aware,
-strictly increasing, and match the first data dimension. `get_time_series` returns this class for a
-non-sequential key.
+Read-only properties: `timestamps`, `length`, `data`, `name`, and `time_reference`. Timestamps must
+be strictly increasing, match the first data dimension, and agree on one spelling — a vector mixing
+naive and aware values raises `InvalidParameterError`, since one series records one reference.
+`get_time_series` returns this class for a non-sequential key.
 
 ## `TimeSeriesKey`
 

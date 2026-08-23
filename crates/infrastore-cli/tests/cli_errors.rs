@@ -22,14 +22,36 @@ use std::process::Command;
 
 const BIN: &str = env!("CARGO_BIN_EXE_infrastore");
 
+/// Serializes subprocess spawns against the one test that opens a store
+/// *in this process*.
+///
+/// HDF5 opens its files without `O_CLOEXEC`, so every child forked while a
+/// store is open here inherits that descriptor -- and on Linux the advisory
+/// lock HDF5 takes with it, since the lock lives on the open file description
+/// and survives `exec`. The unrelated child then holds the store locked until
+/// it exits, and an `infrastore` invocation in between cannot open the file at
+/// all: it reports "is not an infrastore hdf5 store", which looks nothing like
+/// a locking problem. That is a real CI failure, not a hypothetical -- it made
+/// `verify_exits_one_on_a_corrupt_store` flaky on the Linux runner while macOS
+/// and Windows stayed green.
+///
+/// Every spawn takes the read guard; the one test that opens a store takes the
+/// write guard for exactly as long as its handle lives, so no fork can overlap
+/// the window. Reads are uncontended in the normal case, so this costs nothing.
+static SPAWN_GATE: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+/// Run a prepared `infrastore` command with the fork gate held.
+fn spawn(cmd: &mut Command) -> std::process::Output {
+    // A test that panics while holding the guard poisons the lock. Recovering
+    // the inner value keeps that one failure readable instead of burying it
+    // under a cascade of poison panics from every other test.
+    let _gate = SPAWN_GATE.read().unwrap_or_else(|e| e.into_inner());
+    cmd.output().expect("failed to spawn infrastore")
+}
+
 /// Run `infrastore --store <store> <args...>`, asserting success; returns stdout.
 fn run(store: &Path, args: &[&str]) -> String {
-    let output = Command::new(BIN)
-        .arg("--store")
-        .arg(store)
-        .args(args)
-        .output()
-        .expect("failed to spawn infrastore");
+    let output = spawn(Command::new(BIN).arg("--store").arg(store).args(args));
     assert!(
         output.status.success(),
         "infrastore {args:?} failed:\nstdout: {}\nstderr: {}",
@@ -43,12 +65,7 @@ fn run(store: &Path, args: &[&str]) -> String {
 /// `main` writes; returns stderr. The prefix is part of the CLI's contract with
 /// a shell caller: it is how a user tells a diagnostic from log noise.
 fn run_err(store: &Path, args: &[&str]) -> String {
-    let output = Command::new(BIN)
-        .arg("--store")
-        .arg(store)
-        .args(args)
-        .output()
-        .expect("failed to spawn infrastore");
+    let output = spawn(Command::new(BIN).arg("--store").arg(store).args(args));
     assert!(
         !output.status.success(),
         "infrastore {args:?} unexpectedly succeeded:\nstdout: {}",
@@ -66,12 +83,7 @@ fn run_err(store: &Path, args: &[&str]) -> String {
 /// `verify` reports through its normal output and then exits 1, so it fails
 /// without writing a diagnostic; returns `(stdout, stderr)`.
 fn run_fail(store: &Path, args: &[&str]) -> (String, String) {
-    let output = Command::new(BIN)
-        .arg("--store")
-        .arg(store)
-        .args(args)
-        .output()
-        .expect("failed to spawn infrastore");
+    let output = spawn(Command::new(BIN).arg("--store").arg(store).args(args));
     assert!(
         !output.status.success(),
         "infrastore {args:?} unexpectedly succeeded:\nstdout: {}",
@@ -85,12 +97,7 @@ fn run_fail(store: &Path, args: &[&str]) -> (String, String) {
 
 /// Exit code of a `infrastore` invocation.
 fn exit_code(store: &Path, args: &[&str]) -> i32 {
-    Command::new(BIN)
-        .arg("--store")
-        .arg(store)
-        .args(args)
-        .output()
-        .expect("failed to spawn infrastore")
+    spawn(Command::new(BIN).arg("--store").arg(store).args(args))
         .status
         .code()
         .expect("the process was killed by a signal")
@@ -1819,11 +1826,15 @@ fn the_infrastore_store_env_var_is_used_when_no_flag_is_given() {
     let store = dir.path().join("store.h5");
     seed(dir.path(), &store);
 
-    let output = Command::new(BIN)
-        .env("INFRASTORE_STORE", &store)
-        .args(["-f", "csv", "get", "--owner-id", "42", "--name", "load"])
-        .output()
-        .unwrap();
+    let output = spawn(Command::new(BIN).env("INFRASTORE_STORE", &store).args([
+        "-f",
+        "csv",
+        "get",
+        "--owner-id",
+        "42",
+        "--name",
+        "load",
+    ]));
     assert!(
         output.status.success(),
         "INFRASTORE_STORE was not honored:\nstderr: {}",
@@ -1851,13 +1862,13 @@ fn the_store_flag_beats_the_env_var() {
     );
     add_ok(&env_store, &d);
 
-    let output = Command::new(BIN)
-        .env("INFRASTORE_STORE", &env_store)
-        .arg("--store")
-        .arg(&flagged)
-        .args(["-f", "csv", "get", "--owner-id", "42", "--name", "load"])
-        .output()
-        .unwrap();
+    let output = spawn(
+        Command::new(BIN)
+            .env("INFRASTORE_STORE", &env_store)
+            .arg("--store")
+            .arg(&flagged)
+            .args(["-f", "csv", "get", "--owner-id", "42", "--name", "load"]),
+    );
     assert!(output.status.success());
     assert_eq!(
         value_lines(&String::from_utf8_lossy(&output.stdout)),
@@ -1868,11 +1879,11 @@ fn the_store_flag_beats_the_env_var() {
 
 #[test]
 fn no_store_at_all_is_an_error() {
-    let output = Command::new(BIN)
-        .env_remove("INFRASTORE_STORE")
-        .args(["list"])
-        .output()
-        .unwrap();
+    let output = spawn(
+        Command::new(BIN)
+            .env_remove("INFRASTORE_STORE")
+            .args(["list"]),
+    );
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -1911,6 +1922,10 @@ fn verify_exits_one_on_a_corrupt_store() {
     assert_eq!(exit_code(&store, &["verify"]), 0, "a healthy store exits 0");
 
     {
+        // The write guard must cover the whole handle lifetime, not just the
+        // open: see SPAWN_GATE. Taking it here and dropping it with the block
+        // is what keeps a sibling test's fork out of the window.
+        let _gate = SPAWN_GATE.write().unwrap_or_else(|e| e.into_inner());
         let f = hdf5_metno::File::open_rw(&store).unwrap();
         let single = f.group("time_series/single").expect("single group");
         // Find the packed data dataset (not its `_h` companion).
@@ -2675,7 +2690,7 @@ fn stats_separates_association_counts_from_distinct_array_counts() {
 
 #[test]
 fn top_level_help_groups_the_commands_without_renaming_them() {
-    let output = Command::new(BIN).arg("--help").output().unwrap();
+    let output = spawn(Command::new(BIN).arg("--help"));
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
 
@@ -2728,13 +2743,11 @@ fn grouping_the_help_did_not_change_how_commands_are_invoked() {
     assert!(run(&store, &["store-info"]).contains("data_format_version"));
 
     // A usage error still exits 2, not 1.
-    let code = Command::new(BIN)
-        .args(["--store", store.to_str().unwrap(), "list", "--nonsense"])
-        .output()
-        .unwrap()
-        .status
-        .code()
-        .unwrap();
+    let code =
+        spawn(Command::new(BIN).args(["--store", store.to_str().unwrap(), "list", "--nonsense"]))
+            .status
+            .code()
+            .unwrap();
     assert_eq!(code, 2, "argument-parse failures keep clap's exit code");
 }
 
@@ -2742,10 +2755,7 @@ fn grouping_the_help_did_not_change_how_commands_are_invoked() {
 fn shell_completions_cover_the_grouped_commands() {
     // Completions are generated from the same `Command` the binary parses with,
     // so a command missing from one would be missing from the other.
-    let output = Command::new(BIN)
-        .args(["completions", "bash"])
-        .output()
-        .unwrap();
+    let output = spawn(Command::new(BIN).args(["completions", "bash"]));
     assert!(output.status.success());
     let script = String::from_utf8_lossy(&output.stdout);
     for name in ["arrays", "store-info", "attributes", "links", "list", "get"] {
@@ -2908,6 +2918,10 @@ fn assume_timezone_utc_reads_a_zoneless_csv() {
 
 /// A fixed offset shifts the instants, and is spelled the obvious way — the
 /// leading `-` must not be read as another flag.
+///
+/// The offset is now *preserved* rather than consumed: it was in the file, and
+/// the series records it, so the read hands back the same wall clock that went
+/// in instead of relabelling it UTC.
 #[test]
 fn assume_timezone_accepts_a_negative_fixed_offset() {
     let dir = tempfile::tempdir().unwrap();
@@ -2923,9 +2937,17 @@ fn assume_timezone_accepts_a_negative_fixed_offset() {
     );
     assert_eq!(
         data_lines(&out)[0],
-        "2024-01-01T07:00:00+00:00,1",
-        "midnight at -07:00 is 07:00 UTC"
+        "2024-01-01T00:00:00-07:00,1",
+        "midnight at -07:00 goes in and comes back out as midnight at -07:00"
     );
+
+    // The stored instant is still 07:00 UTC -- only the spelling came back.
+    let info = run(
+        &store,
+        &["info", "--owner-id", "42", "--name", "load", "-f", "json"],
+    );
+    assert!(info.contains("\"time_reference\""), "{info}");
+    assert!(info.contains("-07:00"), "{info}");
 }
 
 /// The flag fills a gap; it never relabels data that already said what it meant.
@@ -2953,24 +2975,140 @@ fn assume_timezone_does_not_override_an_offset_the_file_carries() {
     );
 }
 
-/// A named zone is refused, and the refusal explains why rather than looking
-/// like an unsupported-format complaint: a zoneless timestamp in a DST zone is
-/// not always one instant.
+/// A named zone is now accepted, and it is the *right* answer for data that
+/// crosses a daylight-saving transition: a fixed offset renders every timestamp
+/// after March an hour wrong, where the zone renders all of them correctly.
 #[test]
-fn assume_timezone_refuses_a_named_zone_and_says_why() {
+fn assume_timezone_accepts_a_named_zone() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("system.h5");
+    let csv = zoneless_csv(dir.path());
+
+    let args = add_non_sequential(&csv, &["--assume-timezone", "America/Denver"]);
+    run(&store, &args.iter().map(String::as_str).collect::<Vec<_>>());
+
+    let out = run(
+        &store,
+        &["get", "--owner-id", "42", "--name", "load", "-f", "csv"],
+    );
+    assert_eq!(
+        data_lines(&out)[0],
+        "2024-01-01T00:00:00-07:00,1",
+        "the wall clock is stored as the instant it names in Denver, and rendered back in Denver"
+    );
+
+    let info = run(
+        &store,
+        &["info", "--owner-id", "42", "--name", "load", "-f", "json"],
+    );
+    assert!(info.contains("America/Denver"), "{info}");
+
+    // A name no tz database has is still refused, before any work happens.
+    let err = run_err(&store, &["--assume-timezone", "not-a-zone", "list"]);
+    assert!(err.contains("--assume-timezone"), "{err}");
+}
+
+/// The two wall clocks a named zone cannot resolve are refused *per row*, by
+/// name, rather than silently resolved to one of two instants.
+///
+/// This is what supersedes the old blanket refusal of named zones: rejecting
+/// loudly with both candidates named is the acceptable half of "reject rows
+/// mid-ingest or silently pick one".
+#[test]
+fn a_named_zone_refuses_the_hours_it_cannot_resolve() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("system.h5");
+
+    // 2024-11-03 01:30 happens twice in Denver.
+    let ambiguous = write(
+        dir.path(),
+        "fold.csv",
+        "timestamp,value\n2024-11-03 01:30:00,1\n2024-11-03 03:30:00,2\n",
+    );
+    let args = add_non_sequential(&ambiguous, &["--assume-timezone", "America/Denver"]);
+    let err = run_err(&store, &args.iter().map(String::as_str).collect::<Vec<_>>());
+    assert!(err.contains("ambiguous"), "{err}");
+    assert!(
+        err.contains("2024-11-03 01:30:00"),
+        "the row must be named:\n{err}"
+    );
+    // Both candidate instants are named, so the caller can pick one deliberately.
+    assert!(
+        err.contains("08:30:00") && err.contains("07:30:00"),
+        "{err}"
+    );
+
+    // 2024-03-10 02:30 never happens in Denver.
+    let skipped = write(
+        dir.path(),
+        "gap.csv",
+        "timestamp,value\n2024-03-10 02:30:00,1\n2024-03-10 03:30:00,2\n",
+    );
+    let args = add_non_sequential(&skipped, &["--assume-timezone", "America/Denver"]);
+    let err = run_err(&store, &args.iter().map(String::as_str).collect::<Vec<_>>());
+    assert!(err.contains("does not exist"), "{err}");
+    assert!(err.contains("2024-03-10 02:30:00"), "{err}");
+}
+
+/// `--zoneless` is the other answer for a zoneless column: the timestamps *are*
+/// wall clocks, nothing is converted, and they read back unlabelled.
+#[test]
+fn zoneless_stores_wall_clocks_as_themselves() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("system.h5");
+    let csv = zoneless_csv(dir.path());
+
+    let args = add_non_sequential(&csv, &["--zoneless"]);
+    run(&store, &args.iter().map(String::as_str).collect::<Vec<_>>());
+
+    let out = run(
+        &store,
+        &["get", "--owner-id", "42", "--name", "load", "-f", "csv"],
+    );
+    assert_eq!(
+        data_lines(&out)[0],
+        "2024-01-01T00:00:00,1",
+        "a wall clock names no instant, so no offset is printed"
+    );
+
+    let info = run(
+        &store,
+        &["info", "--owner-id", "42", "--name", "load", "-f", "json"],
+    );
+    assert!(info.contains("zoneless"), "{info}");
+
+    // An instant-bearing bound has no defined mapping onto a wall-clock series,
+    // so it is refused rather than coerced.
+    let err = run_err(
+        &store,
+        &[
+            "get",
+            "--owner-id",
+            "42",
+            "--name",
+            "load",
+            "--time-range",
+            "2024-01-01T00:00:00Z..2024-01-01T02:00:00Z",
+        ],
+    );
+    assert!(err.contains("zoneless"), "{err}");
+}
+
+/// The two flags say different things about the same column, so passing both is
+/// a mistake rather than a precedence puzzle.
+#[test]
+fn zoneless_and_assume_timezone_are_mutually_exclusive() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("system.h5");
     seeded_store(dir.path(), &store, "load");
 
-    let err = run_err(&store, &["--assume-timezone", "America/Denver", "list"]);
+    // clap enforces this one, so the diagnostic is its usage message rather
+    // than the CLI's own `Error: ` prefix.
+    let (_, err) = run_fail(&store, &["--zoneless", "--assume-timezone", "UTC", "list"]);
     assert!(
-        err.contains("named zones are not accepted") && err.contains("daylight saving"),
-        "the refusal must explain the ambiguity:\n{err}"
+        err.contains("--zoneless") && err.contains("assume-timezone"),
+        "{err}"
     );
-
-    // And it is reported before any work happens, not part-way through.
-    let err = run_err(&store, &["--assume-timezone", "not-a-zone", "list"]);
-    assert!(err.contains("--assume-timezone"), "{err}");
 }
 
 /// The flag is global, so it reaches a read command's `--time-range` too — the

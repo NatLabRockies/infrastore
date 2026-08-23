@@ -889,3 +889,177 @@ fn component_field_selector() {
         "after remove: {after}"
     );
 }
+
+/// A descriptor's `initial_timestamp` decides the series' spelling, and `export`
+/// / `grid` hand it back — so a `grid -f csv` pipe reads back into `add` under
+/// the same reference it came out under.
+#[test]
+fn a_descriptors_own_offset_survives_export_and_grid() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("offset.h5");
+    write_csv(dir.path(), "data.csv", "1.0\n2.0\n3.0\n");
+    let descriptor = write(
+        dir.path(),
+        "s.json",
+        r#"{
+  "owner_id": 42,
+  "owner_type": "Generator",
+  "name": "load",
+  "type": "single",
+  "element_type": "f64",
+  "csv": "data.csv",
+  "initial_timestamp": "2024-01-01T00:00:00-07:00",
+  "resolution": "PT1H"
+}"#,
+    );
+    run(
+        &store,
+        &["add", "--descriptor", descriptor.to_str().unwrap()],
+    );
+
+    // The offset was in the descriptor; the store now has somewhere to put it,
+    // so it comes back rather than being consumed into a UTC relabelling.
+    let listed = run(&store, &["list", "-f", "json"]);
+    assert!(
+        listed.contains("\"time_reference\": \"-07:00\""),
+        "{listed}"
+    );
+
+    let out = run(
+        &store,
+        &["get", "--owner-id", "42", "--name", "load", "-f", "csv"],
+    );
+    assert_eq!(data_lines(&out)[0], "2024-01-01T00:00:00-07:00,1");
+
+    // `grid` spells its shared axis the same way, since a reader carries one
+    // spelling for the cohort it swept.
+    let grid = run(&store, &["grid", "--resolution", "PT1H", "-f", "csv"]);
+    assert_eq!(data_lines(&grid)[0], "2024-01-01T00:00:00-07:00,1");
+
+    // And `export -f json` reports the reference beside the timestamp.
+    let exported = run(
+        &store,
+        &["export", "--owner-id", "42", "--name", "load", "-f", "json"],
+    );
+    assert!(
+        exported.contains("\"time_reference\": \"-07:00\""),
+        "{exported}"
+    );
+}
+
+/// A grid spans one timestamp axis, so a store holding both coherence groups
+/// has no single grid — and `--spelling` is how the CLI picks one of them.
+/// Without a flag the refusal would name a Rust API the CLI cannot reach.
+#[test]
+fn spelling_narrows_a_grid_to_one_coherence_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("mixed.h5");
+    write_csv(dir.path(), "data.csv", "1.0\n2.0\n3.0\n");
+    for (owner, initial, extra) in [
+        (42, "2024-01-01T00:00:00-07:00", &[][..]),
+        // A bare wall clock is only readable with the flag that says to keep it
+        // one, which is also what records the `zoneless` spelling. Its fields
+        // are held as if UTC, so this is the same *instant* grid as the row
+        // above — the reader refuses it over the spelling, not the timeline.
+        (43, "2024-01-01T07:00:00", &["--zoneless"][..]),
+    ] {
+        let descriptor = write(
+            dir.path(),
+            &format!("s{owner}.json"),
+            &format!(
+                r#"{{
+  "owner_id": {owner},
+  "owner_type": "Generator",
+  "name": "load",
+  "type": "single",
+  "element_type": "f64",
+  "csv": "data.csv",
+  "initial_timestamp": "{initial}",
+  "resolution": "PT1H"
+}}"#
+            ),
+        );
+        let mut args = extra.to_vec();
+        args.extend_from_slice(&["add", "--descriptor", descriptor.to_str().unwrap()]);
+        run(&store, &args);
+    }
+
+    let err = run_err(&store, &["grid", "--resolution", "PT1H", "-f", "csv"]);
+    assert!(
+        err.contains("one spelling") && err.contains("zoneless"),
+        "a mixed cohort must be refused, not padded:\n{err}"
+    );
+
+    let zoned = run(
+        &store,
+        &[
+            "grid",
+            "--resolution",
+            "PT1H",
+            "--spelling",
+            "zoned",
+            "-f",
+            "csv",
+        ],
+    );
+    assert_eq!(data_lines(&zoned)[0], "2024-01-01T00:00:00-07:00,1");
+
+    let zoneless = run(
+        &store,
+        &[
+            "grid",
+            "--resolution",
+            "PT1H",
+            "--spelling",
+            "zoneless",
+            "-f",
+            "csv",
+        ],
+    );
+    assert_eq!(data_lines(&zoneless)[0], "2024-01-01T07:00:00,1");
+}
+
+/// A descriptor may also *declare* a spelling the text cannot carry, and the
+/// declaration wins over the inference.
+#[test]
+fn a_descriptor_can_declare_its_time_reference() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("declared.h5");
+    write_csv(dir.path(), "data.csv", "1.0\n2.0\n3.0\n");
+    let descriptor = write(
+        dir.path(),
+        "s.json",
+        r#"{
+  "owner_id": 7,
+  "owner_type": "Generator",
+  "name": "load",
+  "type": "single",
+  "element_type": "f64",
+  "csv": "data.csv",
+  "initial_timestamp": "2024-01-01T07:00:00Z",
+  "time_reference": "America/Denver",
+  "resolution": "PT1H"
+}"#,
+    );
+    run(
+        &store,
+        &["add", "--descriptor", descriptor.to_str().unwrap()],
+    );
+
+    // 07:00Z is midnight in Denver's winter offset, and the zone is applied per
+    // instant rather than baked in once.
+    let out = run(
+        &store,
+        &["get", "--owner-id", "7", "--name", "load", "-f", "csv"],
+    );
+    assert_eq!(data_lines(&out)[0], "2024-01-01T00:00:00-07:00,1");
+
+    // A zone name no tz database has is reported, never refused: the store does
+    // not gate on existence.
+    let info = run(&store, &["store-info", "-f", "json"]);
+    assert!(info.contains("America/Denver"), "{info}");
+    assert!(
+        !info.contains("unrecognized"),
+        "a real zone is not flagged: {info}"
+    );
+}

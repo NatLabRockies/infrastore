@@ -58,8 +58,13 @@ mutable struct StaticReader
     handle::Ptr{Cvoid}
     store::Store
     groups::Vector{StaticGroup}
+    # The axis' spelling, read once at build time. A reader is the build-once,
+    # sweep-many path, so asking the FFI for it on every `static_read!` would
+    # put a string allocation and a round trip on every timestep of a
+    # simulation.
+    time_reference::Union{Nothing, TimeReference}
     function StaticReader(handle::Ptr{Cvoid}, store::Store, groups::Vector{StaticGroup})
-        r = new(handle, store, groups)
+        r = new(handle, store, groups, nothing)
         finalizer(_finalize_static_reader, r)
         return r
     end
@@ -120,7 +125,8 @@ end
 """
     build_static_reader(store; resolution=nothing, time_series_type=SingleTimeSeries,
                         owner_id=nothing, owner_category=nothing, name=nothing,
-                        name_glob=nothing, features=nothing, component_field=nothing)
+                        name_glob=nothing, features=nothing, component_field=nothing,
+                        zoneless=nothing)
 
 Build a [`StaticReader`] over the static series matching the filter.
 
@@ -144,6 +150,7 @@ function build_static_reader(
     name_glob::Union{Nothing, AbstractString}=nothing,
     features::Union{Nothing, AbstractDict}=nothing,
     component_field::Union{Nothing, AbstractString}=nothing,
+    zoneless::Union{Nothing, Bool}=nothing,
 )
     time_series_type in (SingleTimeSeries, NonSequentialTimeSeries) || throw(
         InvalidParameterError(
@@ -158,8 +165,14 @@ function build_static_reader(
     name_arg = name === nothing ? C_NULL : String(name)
     name_glob_arg = name_glob === nothing ? C_NULL : String(name_glob)
     resolution_iso = resolution === nothing ? C_NULL : _period_to_iso(resolution)
-    features_arg = (features === nothing || isempty(features)) ? C_NULL : JSON.json(features)
+    features_arg =
+        (features === nothing || isempty(features)) ? C_NULL : JSON.json(features)
     component_field_arg = component_field === nothing ? C_NULL : String(component_field)
+    # A reader materializes one timestamp axis, so it needs one spelling for it.
+    # `-1` leaves the choice to the caller's other filters; the core refuses a
+    # cohort that spans both coherence groups either way, naming the series that
+    # disagree.
+    zoneless_arg = zoneless === nothing ? Int32(-1) : Int32(zoneless ? 1 : 0)
     out = Ref{Ptr{Cvoid}}(C_NULL)
     code = @ccall lib_path().infrastore_store_build_static_reader(
         store::Ptr{Cvoid},
@@ -173,6 +186,7 @@ function build_static_reader(
         resolution_iso::Cstring,
         features_arg::Cstring,
         component_field_arg::Cstring,
+        zoneless_arg::Int32,
         out::Ref{Ptr{Cvoid}},
     )::Int32
     _check(code)
@@ -188,6 +202,7 @@ function build_static_reader(
     append!(
         reader.groups, (_static_group_layout(reader, gi) for gi in 0:(Int(out_n[]) - 1))
     )
+    reader.time_reference = _static_reader_reference(reader)
     return reader
 end
 
@@ -211,7 +226,26 @@ function static_grid(reader::StaticReader)
             out_len::Ref{UInt64},
         )::Int32
     )
-    return StaticGrid(_from_unix_ms(out_initial[]), _take_period(out_res[]), Int(out_len[]))
+    return StaticGrid(
+        _from_unix_ms(out_initial[]),
+        _take_period(out_res[]),
+        Int(out_len[]),
+        reader.time_reference,
+    )
+end
+
+# The one spelling the reader's axis carries, or `nothing` when the cohort
+# records none. A separate FFI call rather than another out parameter on
+# `infrastore_static_reader_grid`: adding one there would shift every following
+# argument for anything already compiled against that declaration.
+function _static_reader_reference(reader::StaticReader)
+    out_ref = Ref{Ptr{Cchar}}(C_NULL)
+    _check(
+        @ccall lib_path().infrastore_static_reader_time_reference(
+            reader::Ptr{Cvoid}, out_ref::Ref{Ptr{Cchar}}
+        )::Int32
+    )
+    return _take_time_reference(out_ref[])
 end
 
 """
@@ -257,7 +291,39 @@ Read the value of every series at `t`, filling the reader's buffers. Throws if
 
 `t` is a `DateTime` (read as UTC) or, with TimeZones loaded, a `ZonedDateTime`.
 """
+# Refuse a point read whose spelling the reader's axis cannot answer.
+#
+# A point is a query bound like any other. The ranged reads carry the spelling
+# through `_time_range_args`, and the core refuses a bound the series cannot
+# answer; a point read sent only the instant, so the check was skipped -- a bare
+# `DateTime` (a wall clock) could read an instant-bearing axis, and a
+# `ZonedDateTime` a zoneless one, each reinterpreted as UTC and returning a
+# *row* rather than the error the same mismatch earns on a range.
+function _check_point_spelling(axis::Union{Nothing, TimeReference}, t, what::AbstractString)
+    axis === nothing && return nothing
+    bound_zoneless = is_zoneless(_time_reference_of(t))
+    axis_zoneless = is_zoneless(axis)
+    bound_zoneless == axis_zoneless && return nothing
+    if bound_zoneless
+        throw(
+            InvalidParameterError(
+                "the read timestamp carries no zone, but $what records instants " *
+                "(time_reference \"$(_time_reference_str(axis))\"); a wall clock does not " *
+                "name one, and the store will not guess a zone for it",
+            ),
+        )
+    end
+    return throw(
+        InvalidParameterError(
+            "the read timestamp names an instant, but $what is zoneless; its " *
+            "timestamps are wall clocks, so there is no defined mapping from an " *
+            "instant onto them",
+        ),
+    )
+end
+
 function static_read!(reader::StaticReader, t)
+    _check_point_spelling(reader.time_reference, t, "this reader's timeline")
     _check(
         @ccall lib_path().infrastore_static_reader_read(
             reader::Ptr{Cvoid},
@@ -318,10 +384,12 @@ mutable struct ForecastReader
     handle::Ptr{Cvoid}
     store::Store
     entries::Vector{ForecastEntry}
+    # See `StaticReader.time_reference`.
+    time_reference::Union{Nothing, TimeReference}
     function ForecastReader(
         handle::Ptr{Cvoid}, store::Store, entries::Vector{ForecastEntry}
     )
-        r = new(handle, store, entries)
+        r = new(handle, store, entries, nothing)
         finalizer(_finalize_forecast_reader, r)
         return r
     end
@@ -381,7 +449,7 @@ end
 """
     build_forecast_reader(store, time_series_type; resolution, owner_id=nothing,
                           owner_category=nothing, name=nothing, name_glob=nothing,
-                          features=nothing, component_field=nothing)
+                          features=nothing, component_field=nothing, zoneless=nothing)
 
 Build a [`ForecastReader`] over forecasts of `time_series_type` (a Julia type:
 `Deterministic`, `Probabilistic`, `Scenarios`, or `DeterministicSingleTimeSeries`).
@@ -403,6 +471,7 @@ function build_forecast_reader(
     name_glob::Union{Nothing, AbstractString}=nothing,
     features::Union{Nothing, AbstractDict}=nothing,
     component_field::Union{Nothing, AbstractString}=nothing,
+    zoneless::Union{Nothing, Bool}=nothing,
 )
     type_code = _int_for_type(time_series_type)
     has_owner = owner_id !== nothing
@@ -412,8 +481,14 @@ function build_forecast_reader(
     name_arg = name === nothing ? C_NULL : String(name)
     name_glob_arg = name_glob === nothing ? C_NULL : String(name_glob)
     resolution_iso = _period_to_iso(resolution)
-    features_arg = (features === nothing || isempty(features)) ? C_NULL : JSON.json(features)
+    features_arg =
+        (features === nothing || isempty(features)) ? C_NULL : JSON.json(features)
     component_field_arg = component_field === nothing ? C_NULL : String(component_field)
+    # A reader materializes one timestamp axis, so it needs one spelling for it.
+    # `-1` leaves the choice to the caller's other filters; the core refuses a
+    # cohort that spans both coherence groups either way, naming the series that
+    # disagree.
+    zoneless_arg = zoneless === nothing ? Int32(-1) : Int32(zoneless ? 1 : 0)
     out = Ref{Ptr{Cvoid}}(C_NULL)
     code = @ccall lib_path().infrastore_store_build_forecast_reader(
         store::Ptr{Cvoid},
@@ -427,6 +502,7 @@ function build_forecast_reader(
         resolution_iso::Cstring,
         features_arg::Cstring,
         component_field_arg::Cstring,
+        zoneless_arg::Int32,
         out::Ref{Ptr{Cvoid}},
     )::Int32
     _check(code)
@@ -442,7 +518,20 @@ function build_forecast_reader(
     append!(
         reader.entries, (_forecast_entry_layout(reader, ei) for ei in 0:(Int(out_n[]) - 1))
     )
+    reader.time_reference = _forecast_reader_reference(reader)
     return reader
+end
+
+# The window timeline's spelling; the forecast counterpart of
+# `_static_reader_reference`.
+function _forecast_reader_reference(reader::ForecastReader)
+    out_ref = Ref{Ptr{Cchar}}(C_NULL)
+    _check(
+        @ccall lib_path().infrastore_forecast_reader_time_reference(
+            reader::Ptr{Cvoid}, out_ref::Ref{Ptr{Cchar}}
+        )::Int32
+    )
+    return _take_time_reference(out_ref[])
 end
 
 """
@@ -470,6 +559,7 @@ function forecast_timeline(reader::ForecastReader)
         _take_period(out_res[]),
         _take_period(out_interval[]),
         Int(out_count[]),
+        reader.time_reference,
     )
 end
 
@@ -508,6 +598,7 @@ Throws if `t` is off the window timeline. Follow with [`forecast_values`].
 `t` is a `DateTime` (read as UTC) or, with TimeZones loaded, a `ZonedDateTime`.
 """
 function forecast_read!(reader::ForecastReader, t)
+    _check_point_spelling(reader.time_reference, t, "this reader's timeline")
     _check(
         @ccall lib_path().infrastore_forecast_reader_read(
             reader::Ptr{Cvoid},

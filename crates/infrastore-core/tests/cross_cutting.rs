@@ -73,7 +73,7 @@ fn sub_second_resolutions_round_trip() {
         let start = resolution;
         let end = resolution * 3;
         let sliced = store
-            .get_time_series(key.identity(), Some((t0() + start, t0() + end)))
+            .get_time_series(key.identity(), Some((t0() + start, t0() + end).into()))
             .unwrap();
         assert_eq!(
             sliced.as_single().unwrap().data.to_f64_vec().unwrap(),
@@ -280,7 +280,7 @@ fn a_sub_millisecond_offset_from_a_forecast_window_boundary_is_rejected() {
     let sliced = store
         .get_time_series(
             static_key.identity(),
-            Some((nudged, t0() + Duration::hours(3))),
+            Some((nudged, t0() + Duration::hours(3)).into()),
         )
         .unwrap();
     assert_eq!(
@@ -311,7 +311,10 @@ fn a_sub_millisecond_offset_from_a_forecast_window_boundary_is_rejected() {
     ] {
         let start = t0() + Duration::hours(1) + offset;
         let err = store
-            .get_time_series(fc_key.identity(), Some((start, t0() + Duration::hours(3))))
+            .get_time_series(
+                fc_key.identity(),
+                Some((start, t0() + Duration::hours(3)).into()),
+            )
             .unwrap_err();
         assert!(
             matches!(err, infrastore_core::TimeSeriesError::InvalidParameter(_)),
@@ -323,7 +326,7 @@ fn a_sub_millisecond_offset_from_a_forecast_window_boundary_is_rejected() {
     let exact = store
         .get_time_series(
             fc_key.identity(),
-            Some((t0() + Duration::hours(1), t0() + Duration::hours(3))),
+            Some((t0() + Duration::hours(1), t0() + Duration::hours(3)).into()),
         )
         .unwrap();
     let exact = exact.as_deterministic().unwrap();
@@ -356,7 +359,7 @@ fn a_forecast_on_a_millisecond_offset_grid_reads_at_its_own_boundaries() {
     let got = store
         .get_time_series(
             key.identity(),
-            Some((boundary, boundary + Duration::hours(2))),
+            Some((boundary, boundary + Duration::hours(2)).into()),
         )
         .unwrap();
     let fc = got.as_deterministic().unwrap();
@@ -369,7 +372,7 @@ fn a_forecast_on_a_millisecond_offset_grid_reads_at_its_own_boundaries() {
             store
                 .get_time_series(
                     key.identity(),
-                    Some((rounded, rounded + Duration::hours(2)))
+                    Some((rounded, rounded + Duration::hours(2)).into())
                 )
                 .is_err(),
             "a second-rounded bound is off a millisecond-offset grid"
@@ -501,10 +504,13 @@ fn pre_1970_initial_timestamps_round_trip() {
         let sliced = store
             .get_time_series(
                 key.identity(),
-                Some((
-                    *expected + Duration::hours(1),
-                    *expected + Duration::hours(3),
-                )),
+                Some(
+                    (
+                        *expected + Duration::hours(1),
+                        *expected + Duration::hours(3),
+                    )
+                        .into(),
+                ),
             )
             .unwrap();
         assert_eq!(
@@ -536,7 +542,10 @@ fn a_series_spanning_the_epoch_boundary_reads_correctly() {
     let epoch = Utc.timestamp_opt(0, 0).single().unwrap();
     assert_eq!(initial + Duration::hours(2), epoch);
     let sliced = store
-        .get_time_series(key.identity(), Some((epoch, epoch + Duration::hours(2))))
+        .get_time_series(
+            key.identity(),
+            Some((epoch, epoch + Duration::hours(2)).into()),
+        )
         .unwrap();
     let single = sliced.as_single().unwrap();
     assert_eq!(single.initial_timestamp, epoch);
@@ -585,10 +594,13 @@ fn a_century_spanning_non_sequential_series_round_trips() {
     let sliced = store
         .get_time_series(
             key.identity(),
-            Some((
-                Utc.with_ymd_and_hms(1969, 1, 1, 0, 0, 0).unwrap(),
-                Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
-            )),
+            Some(
+                (
+                    Utc.with_ymd_and_hms(1969, 1, 1, 0, 0, 0).unwrap(),
+                    Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+                )
+                    .into(),
+            ),
         )
         .unwrap();
     let ns = sliced.as_non_sequential().unwrap();

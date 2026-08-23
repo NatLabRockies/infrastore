@@ -209,6 +209,52 @@ unsafe fn cstr_to_optional_path(p: *const c_char) -> Result<Option<PathBuf>, i32
     Ok(unsafe { cstr_to_optional_string(p)? }.map(PathBuf::from))
 }
 
+/// Parse a time reference from a C string. `null`/empty -> `None`
+/// (unspecified); an unparseable spelling sets the error and returns
+/// `INFRASTORE_ERR_INVALID_PARAMETER` rather than degrading to `None`, for the
+/// same reason the unit system does — and one sharper: a series whose spelling
+/// was silently dropped reads back as instants it never claimed.
+///
+/// Accepts all four spellings: `utc`, `zoneless`, a fixed offset (`-07:00`), or
+/// an IANA zone name (`America/Denver`). Zone *existence* is not checked here;
+/// the Julia wrapper, which has a tz database, warns on a name it does not
+/// recognize and passes it through.
+unsafe fn cstr_to_optional_time_reference(
+    p: *const c_char,
+) -> Result<Option<core_lib::TimeReference>, i32> {
+    match unsafe { cstr_to_optional_string(p)? } {
+        None => Ok(None),
+        Some(s) if s.is_empty() => Ok(None),
+        Some(s) => match core_lib::TimeReference::parse(&s) {
+            Ok(r) => Ok(Some(r)),
+            Err(e) => {
+                set_error(format!("invalid time_reference {s:?}: {e}"));
+                Err(INFRASTORE_ERR_INVALID_PARAMETER)
+            }
+        },
+    }
+}
+
+/// Turn the FFI tri-state `zoneless` filter argument into
+/// [`core_lib::ListFilter::zoneless`]. Negative means *no filter*, which is the
+/// default a caller that does not care passes; 0 and 1 are the two coherence
+/// groups. A tri-state int rather than a `bool` + `has_` pair because the
+/// predicate itself is already a boolean, and two booleans at adjacent argument
+/// positions is exactly the swap this file avoids elsewhere.
+fn zoneless_filter(zoneless: i32) -> Result<Option<bool>, i32> {
+    match zoneless {
+        n if n < 0 => Ok(None),
+        0 => Ok(Some(false)),
+        1 => Ok(Some(true)),
+        other => {
+            set_error(format!(
+                "invalid zoneless filter {other}; expected -1 (no filter), 0, or 1"
+            ));
+            Err(INFRASTORE_ERR_INVALID_PARAMETER)
+        }
+    }
+}
+
 /// Parse a unit system from a C string. `null`/empty -> `None` (unspecified);
 /// an unrecognized spelling sets the error and returns
 /// `INFRASTORE_ERR_INVALID_PARAMETER` rather than degrading to `None`, so a
@@ -856,6 +902,7 @@ unsafe fn build_single_request(
     units: *const c_char,
     quantity_kind: *const c_char,
     unit_system: *const c_char,
+    time_reference: *const c_char,
     component_field: *const c_char,
 ) -> Result<core_lib::AddRequest, i32> {
     if data_ptr.is_null() {
@@ -887,6 +934,7 @@ unsafe fn build_single_request(
     let units = unsafe { cstr_to_optional_string(units) }?;
     let quantity_kind = unsafe { cstr_to_optional_string(quantity_kind) }?;
     let unit_system = unsafe { cstr_to_optional_unit_system(unit_system) }?;
+    let time_reference = unsafe { cstr_to_optional_time_reference(time_reference) }?;
     let component_field = unsafe { cstr_to_optional_string(component_field) }?;
     let application_data = unsafe { cstr_to_optional_string(application_data) }?;
     let features = unsafe { parse_features_json(features_json) }?;
@@ -912,6 +960,7 @@ unsafe fn build_single_request(
         units,
         quantity_kind,
         unit_system,
+        time_reference,
         component_field,
         application_data,
     });
@@ -927,9 +976,15 @@ unsafe fn build_single_request(
 /// Add a SingleTimeSeries to the store.
 ///
 /// `features_json`, when non-null, is parsed as a JSON object whose values must be int, float,
-/// bool, or string. `application_data`, `units`, `quantity_kind`, `unit_system`, and
-/// `component_field` are optional; `component_field` names the field on the owning component
-/// whose value these values are the time-varying form of.
+/// bool, or string. `application_data`, `units`, `quantity_kind`, `unit_system`,
+/// `time_reference`, and `component_field` are optional; `component_field` names the field on
+/// the owning component whose value these values are the time-varying form of, and
+/// `time_reference` records how the timestamps were spelled (`utc`, `zoneless`, a fixed
+/// offset such as `-07:00`, or an IANA zone name such as `America/Denver`).
+///
+/// `time_range_zoneless` on the read side carries the same distinction for query bounds: a
+/// bound has to be spelled the way the series is, and a mismatch is refused rather than
+/// coerced.
 ///
 /// # Safety
 ///
@@ -958,6 +1013,7 @@ pub unsafe extern "C" fn infrastore_store_add_single(
     units: *const c_char,
     quantity_kind: *const c_char,
     unit_system: *const c_char,
+    time_reference: *const c_char,
     component_field: *const c_char,
     out_key: *mut *mut InfraStoreKeyHandle,
 ) -> i32 {
@@ -991,6 +1047,7 @@ pub unsafe extern "C" fn infrastore_store_add_single(
             units,
             quantity_kind,
             unit_system,
+            time_reference,
             component_field,
         )
     } {
@@ -1031,6 +1088,7 @@ unsafe fn build_non_sequential_request(
     units: *const c_char,
     quantity_kind: *const c_char,
     unit_system: *const c_char,
+    time_reference: *const c_char,
     component_field: *const c_char,
 ) -> Result<core_lib::AddRequest, i32> {
     if timestamps_unix_ms.is_null() || data_ptr.is_null() {
@@ -1073,6 +1131,7 @@ unsafe fn build_non_sequential_request(
     let units = unsafe { cstr_to_optional_string(units) }?;
     let quantity_kind = unsafe { cstr_to_optional_string(quantity_kind) }?;
     let unit_system = unsafe { cstr_to_optional_unit_system(unit_system) }?;
+    let time_reference = unsafe { cstr_to_optional_time_reference(time_reference) }?;
     let component_field = unsafe { cstr_to_optional_string(component_field) }?;
     let application_data = unsafe { cstr_to_optional_string(application_data) }?;
     let mut data = core_lib::TimeSeriesData::NonSequentialTimeSeries(series);
@@ -1083,6 +1142,7 @@ unsafe fn build_non_sequential_request(
         units,
         quantity_kind,
         unit_system,
+        time_reference,
         component_field,
         application_data,
     });
@@ -1124,6 +1184,7 @@ pub unsafe extern "C" fn infrastore_store_add_non_sequential(
     units: *const c_char,
     quantity_kind: *const c_char,
     unit_system: *const c_char,
+    time_reference: *const c_char,
     component_field: *const c_char,
     out_key: *mut *mut InfraStoreKeyHandle,
 ) -> i32 {
@@ -1157,6 +1218,7 @@ pub unsafe extern "C" fn infrastore_store_add_non_sequential(
             units,
             quantity_kind,
             unit_system,
+            time_reference,
             component_field,
         )
     } {
@@ -1204,6 +1266,8 @@ pub unsafe extern "C" fn infrastore_store_add_non_sequential(
 /// width.
 ///
 /// `out_quantity_kind`, when non-null, receives the association's quantity kind,
+/// `out_time_reference` receives how the timestamps were spelled — null when unspecified,
+/// which is not a claim they were written as UTC —
 /// and `out_unit_system` its basis as the `natural_units` / `component_base`
 /// spelling — null when unspecified, which is not the same as natural units.
 /// `out_component_field`, when non-null, receives the component field the values
@@ -1234,6 +1298,7 @@ pub unsafe extern "C" fn infrastore_store_get_single(
     handle: *const InfraStoreHandle,
     key: *const InfraStoreKeyHandle,
     time_range_present: bool,
+    time_range_zoneless: bool,
     time_range_start_ms: i64,
     time_range_end_ms: i64,
     out_initial_ts_unix_ms: *mut i64,
@@ -1248,6 +1313,7 @@ pub unsafe extern "C" fn infrastore_store_get_single(
     out_units: *mut *mut c_char,
     out_quantity_kind: *mut *mut c_char,
     out_unit_system: *mut *mut c_char,
+    out_time_reference: *mut *mut c_char,
     out_component_field: *mut *mut c_char,
 ) -> i32 {
     clear_error();
@@ -1276,11 +1342,15 @@ pub unsafe extern "C" fn infrastore_store_get_single(
         set_error("an out pointer is null");
         return INFRASTORE_ERR_NULL_POINTER;
     }
-    let time_range =
-        match build_time_range(time_range_present, time_range_start_ms, time_range_end_ms) {
-            Ok(r) => r,
-            Err(c) => return c,
-        };
+    let time_range = match build_time_range(
+        time_range_present,
+        time_range_zoneless,
+        time_range_start_ms,
+        time_range_end_ms,
+    ) {
+        Ok(r) => r,
+        Err(c) => return c,
+    };
     let (data, meta) = match store
         .inner
         .get_time_series_with_metadata(&key.inner, time_range)
@@ -1349,6 +1419,16 @@ pub unsafe extern "C" fn infrastore_store_get_single(
             .map(|u| owned_cstr(u.as_str()))
             .unwrap_or(std::ptr::null_mut())
     };
+    // Same reasoning: every `TimeReference` spelling is a literal, a formatted
+    // offset, or an IANA-shaped zone name.
+    let time_reference_cstr = if out_time_reference.is_null() {
+        std::ptr::null_mut()
+    } else {
+        meta.time_reference
+            .as_ref()
+            .map(|r| owned_cstr(&r.as_storage_string()))
+            .unwrap_or(std::ptr::null_mut())
+    };
     let element_type_cstr = if out_element_type.is_null() {
         std::ptr::null_mut()
     } else {
@@ -1387,6 +1467,9 @@ pub unsafe extern "C" fn infrastore_store_get_single(
         if !out_unit_system.is_null() {
             *out_unit_system = unit_system_cstr;
         }
+        if !out_time_reference.is_null() {
+            *out_time_reference = time_reference_cstr;
+        }
     }
     INFRASTORE_OK
 }
@@ -1413,7 +1496,8 @@ pub unsafe extern "C" fn infrastore_store_get_single(
 ///
 /// `out_quantity_kind`, when non-null, receives the association's quantity kind, and
 /// `out_unit_system` its basis as the `natural_units` / `component_base` spelling — null when
-/// unspecified, which is not the same as natural units. `out_component_field`, when non-null,
+/// unspecified, which is not the same as natural units. `out_time_reference` receives how the
+/// timestamps were spelled, on the same terms. `out_component_field`, when non-null,
 /// receives the component field the values vary over time. All three are owned C strings freed
 /// with `infrastore_string_free`.
 ///
@@ -1439,6 +1523,7 @@ pub unsafe extern "C" fn infrastore_store_get_non_sequential(
     handle: *const InfraStoreHandle,
     key: *const InfraStoreKeyHandle,
     time_range_present: bool,
+    time_range_zoneless: bool,
     time_range_start_ms: i64,
     time_range_end_ms: i64,
     out_timestamps: *mut *mut i64,
@@ -1453,6 +1538,7 @@ pub unsafe extern "C" fn infrastore_store_get_non_sequential(
     out_units: *mut *mut c_char,
     out_quantity_kind: *mut *mut c_char,
     out_unit_system: *mut *mut c_char,
+    out_time_reference: *mut *mut c_char,
     out_component_field: *mut *mut c_char,
 ) -> i32 {
     clear_error();
@@ -1468,11 +1554,15 @@ pub unsafe extern "C" fn infrastore_store_get_non_sequential(
     {
         return INFRASTORE_ERR_NULL_POINTER;
     }
-    let time_range =
-        match build_time_range(time_range_present, time_range_start_ms, time_range_end_ms) {
-            Ok(r) => r,
-            Err(c) => return c,
-        };
+    let time_range = match build_time_range(
+        time_range_present,
+        time_range_zoneless,
+        time_range_start_ms,
+        time_range_end_ms,
+    ) {
+        Ok(r) => r,
+        Err(c) => return c,
+    };
     let (data, meta) = match store
         .inner
         .get_time_series_with_metadata(&key.inner, time_range)
@@ -1540,6 +1630,16 @@ pub unsafe extern "C" fn infrastore_store_get_non_sequential(
             .map(|u| owned_cstr(u.as_str()))
             .unwrap_or(std::ptr::null_mut())
     };
+    // Same reasoning: every `TimeReference` spelling is a literal, a formatted
+    // offset, or an IANA-shaped zone name.
+    let time_reference_cstr = if out_time_reference.is_null() {
+        std::ptr::null_mut()
+    } else {
+        meta.time_reference
+            .as_ref()
+            .map(|r| owned_cstr(&r.as_storage_string()))
+            .unwrap_or(std::ptr::null_mut())
+    };
     let element_type_cstr = if out_element_type.is_null() {
         std::ptr::null_mut()
     } else {
@@ -1583,6 +1683,9 @@ pub unsafe extern "C" fn infrastore_store_get_non_sequential(
         }
         if !out_unit_system.is_null() {
             *out_unit_system = unit_system_cstr;
+        }
+        if !out_time_reference.is_null() {
+            *out_time_reference = time_reference_cstr;
         }
     }
     INFRASTORE_OK
@@ -2634,7 +2737,7 @@ unsafe fn build_key_from_attrs(
 /// `owner_category`, `time_series_type`, `name`, `data_hash` (64-character hex),
 /// `initial_timestamp_ms`, `resolution`, `horizon`, `interval`, `count`,
 /// `length`, `percentiles`, `element_type`, `element_shape`, `features`,
-/// `units`, `quantity_kind`, `unit_system`, `component_field`, and
+/// `units`, `quantity_kind`, `unit_system`, `time_reference`, `component_field`, and
 /// `application_data`, with the fields that do not apply to the key's type set to `null`.
 /// (There is no `dtype` field; `element_type` is what says how to read the
 /// values.)
@@ -2804,6 +2907,7 @@ pub unsafe extern "C" fn infrastore_store_has_any_by_filter(
     interval: *const c_char,
     features_json: *const c_char,
     component_field: *const c_char,
+    zoneless: i32,
     out_present: *mut bool,
 ) -> i32 {
     clear_error();
@@ -2825,6 +2929,7 @@ pub unsafe extern "C" fn infrastore_store_has_any_by_filter(
             interval,
             features_json,
             component_field,
+            zoneless,
         )
     } {
         Ok(f) => f,
@@ -3099,6 +3204,7 @@ pub unsafe extern "C" fn infrastore_store_add_forecast(
     units: *const c_char,
     quantity_kind: *const c_char,
     unit_system: *const c_char,
+    time_reference: *const c_char,
     component_field: *const c_char,
     out_key: *mut *mut InfraStoreKeyHandle,
 ) -> i32 {
@@ -3130,6 +3236,7 @@ pub unsafe extern "C" fn infrastore_store_add_forecast(
             units,
             quantity_kind,
             unit_system,
+            time_reference,
             component_field,
         )
     } {
@@ -3172,6 +3279,7 @@ unsafe fn build_forecast_request(
     units: *const c_char,
     quantity_kind: *const c_char,
     unit_system: *const c_char,
+    time_reference: *const c_char,
     component_field: *const c_char,
 ) -> Result<core_lib::AddRequest, i32> {
     if data_ptr.is_null() {
@@ -3198,6 +3306,7 @@ unsafe fn build_forecast_request(
     let units = unsafe { cstr_to_optional_string(units) }?;
     let quantity_kind = unsafe { cstr_to_optional_string(quantity_kind) }?;
     let unit_system = unsafe { cstr_to_optional_unit_system(unit_system) }?;
+    let time_reference = unsafe { cstr_to_optional_time_reference(time_reference) }?;
     let component_field = unsafe { cstr_to_optional_string(component_field) }?;
     let features = unsafe { parse_features_json(features_json) }?;
     let initial_timestamp = match unix_ms_to_datetime(initial_ts_unix_ms) {
@@ -3268,6 +3377,7 @@ unsafe fn build_forecast_request(
         units,
         quantity_kind,
         unit_system,
+        time_reference,
         component_field,
         application_data,
     });
@@ -3315,6 +3425,7 @@ pub unsafe extern "C" fn infrastore_store_add_probabilistic(
     units: *const c_char,
     quantity_kind: *const c_char,
     unit_system: *const c_char,
+    time_reference: *const c_char,
     component_field: *const c_char,
     out_key: *mut *mut InfraStoreKeyHandle,
 ) -> i32 {
@@ -3347,6 +3458,7 @@ pub unsafe extern "C" fn infrastore_store_add_probabilistic(
             units,
             quantity_kind,
             unit_system,
+            time_reference,
             component_field,
         )
     } {
@@ -3390,6 +3502,7 @@ unsafe fn build_probabilistic_request(
     units: *const c_char,
     quantity_kind: *const c_char,
     unit_system: *const c_char,
+    time_reference: *const c_char,
     component_field: *const c_char,
 ) -> Result<core_lib::AddRequest, i32> {
     if data_ptr.is_null() || percentiles_ptr.is_null() {
@@ -3409,6 +3522,7 @@ unsafe fn build_probabilistic_request(
     let units = unsafe { cstr_to_optional_string(units) }?;
     let quantity_kind = unsafe { cstr_to_optional_string(quantity_kind) }?;
     let unit_system = unsafe { cstr_to_optional_unit_system(unit_system) }?;
+    let time_reference = unsafe { cstr_to_optional_time_reference(time_reference) }?;
     let component_field = unsafe { cstr_to_optional_string(component_field) }?;
     let features = unsafe { parse_features_json(features_json) }?;
     let initial_timestamp = match unix_ms_to_datetime(initial_ts_unix_ms) {
@@ -3449,6 +3563,7 @@ unsafe fn build_probabilistic_request(
         units,
         quantity_kind,
         unit_system,
+        time_reference,
         component_field,
         application_data,
     });
@@ -3523,6 +3638,7 @@ pub unsafe extern "C" fn infrastore_batch_add_single(
     units: *const c_char,
     quantity_kind: *const c_char,
     unit_system: *const c_char,
+    time_reference: *const c_char,
     component_field: *const c_char,
 ) -> i32 {
     clear_error();
@@ -3551,6 +3667,7 @@ pub unsafe extern "C" fn infrastore_batch_add_single(
             units,
             quantity_kind,
             unit_system,
+            time_reference,
             component_field,
         )
     } {
@@ -3592,6 +3709,7 @@ pub unsafe extern "C" fn infrastore_batch_add_non_sequential(
     units: *const c_char,
     quantity_kind: *const c_char,
     unit_system: *const c_char,
+    time_reference: *const c_char,
     component_field: *const c_char,
 ) -> i32 {
     clear_error();
@@ -3620,6 +3738,7 @@ pub unsafe extern "C" fn infrastore_batch_add_non_sequential(
             units,
             quantity_kind,
             unit_system,
+            time_reference,
             component_field,
         )
     } {
@@ -3665,6 +3784,7 @@ pub unsafe extern "C" fn infrastore_batch_add_forecast(
     units: *const c_char,
     quantity_kind: *const c_char,
     unit_system: *const c_char,
+    time_reference: *const c_char,
     component_field: *const c_char,
 ) -> i32 {
     clear_error();
@@ -3697,6 +3817,7 @@ pub unsafe extern "C" fn infrastore_batch_add_forecast(
             units,
             quantity_kind,
             unit_system,
+            time_reference,
             component_field,
         )
     } {
@@ -3743,6 +3864,7 @@ pub unsafe extern "C" fn infrastore_batch_add_probabilistic(
     units: *const c_char,
     quantity_kind: *const c_char,
     unit_system: *const c_char,
+    time_reference: *const c_char,
     component_field: *const c_char,
 ) -> i32 {
     clear_error();
@@ -3776,6 +3898,7 @@ pub unsafe extern "C" fn infrastore_batch_add_probabilistic(
             units,
             quantity_kind,
             unit_system,
+            time_reference,
             component_field,
         )
     } {
@@ -3939,8 +4062,8 @@ pub unsafe extern "C" fn infrastore_store_bulk_read_single(
 }
 
 /// Write a series' descriptive attributes (`application_data`, `element_type`,
-/// `units`, `quantity_kind`, `unit_system`, `component_field`) into six optional
-/// out-params.
+/// `units`, `quantity_kind`, `unit_system`, `time_reference`, `component_field`)
+/// into seven optional out-params.
 ///
 /// Each pointer may be null to skip that attribute. A non-null target receives
 /// either null (the attribute is unset on this series) or an owned C string the
@@ -3948,7 +4071,7 @@ pub unsafe extern "C" fn infrastore_store_bulk_read_single(
 /// is emitted as its `natural_units` / `component_base` spelling rather than a
 /// code, so an added basis reaches an older caller as a name it can report.
 ///
-/// All six live on the series itself, so a bulk-read result carries them just
+/// All seven live on the series itself, so a bulk-read result carries them just
 /// as a per-key read does — the two paths must not disagree.
 ///
 /// All-or-nothing: every attribute string is built first (an interior NUL in
@@ -3966,12 +4089,14 @@ unsafe fn emit_descriptors(
     units: Option<&str>,
     quantity_kind: Option<&str>,
     unit_system: Option<core_lib::UnitSystem>,
+    time_reference: Option<&core_lib::TimeReference>,
     component_field: Option<&str>,
     out_application_data: *mut *mut c_char,
     out_element_type: *mut *mut c_char,
     out_units: *mut *mut c_char,
     out_quantity_kind: *mut *mut c_char,
     out_unit_system: *mut *mut c_char,
+    out_time_reference: *mut *mut c_char,
     out_component_field: *mut *mut c_char,
 ) -> i32 {
     let application_data_c = if out_application_data.is_null() {
@@ -4013,6 +4138,14 @@ unsafe fn emit_descriptors(
     } else {
         unit_system.map(|u| owned_cstr(u.as_str()))
     };
+    // Same reasoning: every `TimeReference` spelling is either a fixed literal,
+    // a formatted offset, or a zone name the core already refused unless it
+    // matched the IANA grammar — none of which can hold an interior NUL.
+    let time_reference_c = if out_time_reference.is_null() {
+        None
+    } else {
+        time_reference.map(|r| owned_cstr(&r.as_storage_string()))
+    };
     unsafe {
         if !out_application_data.is_null() {
             *out_application_data = into_raw_or_null(application_data_c);
@@ -4030,6 +4163,9 @@ unsafe fn emit_descriptors(
         }
         if !out_unit_system.is_null() {
             *out_unit_system = unit_system_c.unwrap_or(std::ptr::null_mut());
+        }
+        if !out_time_reference.is_null() {
+            *out_time_reference = time_reference_c.unwrap_or(std::ptr::null_mut());
         }
         if !out_component_field.is_null() {
             *out_component_field = into_raw_or_null(component_field_c);
@@ -4094,6 +4230,7 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_single(
     out_units: *mut *mut c_char,
     out_quantity_kind: *mut *mut c_char,
     out_unit_system: *mut *mut c_char,
+    out_time_reference: *mut *mut c_char,
     out_component_field: *mut *mut c_char,
 ) -> i32 {
     clear_error();
@@ -4138,12 +4275,14 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_single(
             single.units.as_deref(),
             single.quantity_kind.as_deref(),
             single.unit_system,
+            single.time_reference.as_ref(),
             single.component_field.as_deref(),
             out_application_data,
             out_element_type,
             out_units,
             out_quantity_kind,
             out_unit_system,
+            out_time_reference,
             out_component_field,
         )
     };
@@ -4189,6 +4328,7 @@ pub unsafe extern "C" fn infrastore_store_bulk_read(
     keys: *const *const InfraStoreKeyHandle,
     n: u64,
     time_range_present: bool,
+    time_range_zoneless: bool,
     time_range_start_ms: i64,
     time_range_end_ms: i64,
     out_result: *mut *mut InfraStoreBulkReadHandle,
@@ -4225,11 +4365,15 @@ pub unsafe extern "C" fn infrastore_store_bulk_read(
             }
         }
     }
-    let time_range =
-        match build_time_range(time_range_present, time_range_start_ms, time_range_end_ms) {
-            Ok(r) => r,
-            Err(c) => return c,
-        };
+    let time_range = match build_time_range(
+        time_range_present,
+        time_range_zoneless,
+        time_range_start_ms,
+        time_range_end_ms,
+    ) {
+        Ok(r) => r,
+        Err(c) => return c,
+    };
     let items = match store.inner.bulk_read_range(&identities, time_range) {
         Ok(d) => d,
         Err(e) => return map_core_error(e),
@@ -4310,6 +4454,7 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_non_sequential(
     out_units: *mut *mut c_char,
     out_quantity_kind: *mut *mut c_char,
     out_unit_system: *mut *mut c_char,
+    out_time_reference: *mut *mut c_char,
     out_component_field: *mut *mut c_char,
 ) -> i32 {
     clear_error();
@@ -4354,12 +4499,14 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_non_sequential(
             series.units.as_deref(),
             series.quantity_kind.as_deref(),
             series.unit_system,
+            series.time_reference.as_ref(),
             series.component_field.as_deref(),
             out_application_data,
             out_element_type,
             out_units,
             out_quantity_kind,
             out_unit_system,
+            out_time_reference,
             out_component_field,
         )
     };
@@ -4430,6 +4577,7 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_forecast(
     out_units: *mut *mut c_char,
     out_quantity_kind: *mut *mut c_char,
     out_unit_system: *mut *mut c_char,
+    out_time_reference: *mut *mut c_char,
     out_component_field: *mut *mut c_char,
 ) -> i32 {
     clear_error();
@@ -4486,12 +4634,14 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_forecast(
             data.units(),
             data.quantity_kind(),
             data.unit_system(),
+            data.time_reference(),
             data.component_field(),
             out_application_data,
             out_element_type,
             out_units,
             out_quantity_kind,
             out_unit_system,
+            out_time_reference,
             out_component_field,
         )
     };
@@ -4719,7 +4869,8 @@ pub unsafe extern "C" fn infrastore_store_transform_single_time_series(
 ///   `element_type` string, which is how a caller reads the returned bytes as
 ///   domain values (`out_dtype` gives only their physical width).
 /// - `out_quantity_kind` follows the same rules and receives the association's
-///   quantity kind, and `out_unit_system` its basis as the `natural_units` /
+///   quantity kind, `out_time_reference` how the timestamps were spelled, and
+///   `out_unit_system` its basis as the `natural_units` /
 ///   `component_base` spelling (null when unspecified).
 /// - `out_component_field` follows the same rules and receives the component
 ///   field the values vary over time (null when unset).
@@ -4739,6 +4890,7 @@ pub unsafe extern "C" fn infrastore_store_get_forecast(
     interval: *const c_char,
     features_json: *const c_char,
     time_range_present: bool,
+    time_range_zoneless: bool,
     time_range_start_ms: i64,
     time_range_end_ms: i64,
     // scalar metadata outputs
@@ -4773,6 +4925,7 @@ pub unsafe extern "C" fn infrastore_store_get_forecast(
     out_units: *mut *mut c_char,
     out_quantity_kind: *mut *mut c_char,
     out_unit_system: *mut *mut c_char,
+    out_time_reference: *mut *mut c_char,
     out_component_field: *mut *mut c_char,
 ) -> i32 {
     clear_error();
@@ -4834,26 +4987,14 @@ pub unsafe extern "C" fn infrastore_store_get_forecast(
         Err(e) => return map_core_error(e),
     };
     let matched_type = time_series_type_to_int(key.time_series_type());
-    let time_range = if time_range_present {
-        let start = match unix_ms_to_datetime(time_range_start_ms) {
-            Some(d) => d,
-            None => {
-                set_error(format!(
-                    "invalid time_range_start_ms: {time_range_start_ms}"
-                ));
-                return INFRASTORE_ERR_INVALID_PARAMETER;
-            }
-        };
-        let end = match unix_ms_to_datetime(time_range_end_ms) {
-            Some(d) => d,
-            None => {
-                set_error(format!("invalid time_range_end_ms: {time_range_end_ms}"));
-                return INFRASTORE_ERR_INVALID_PARAMETER;
-            }
-        };
-        Some((start, end))
-    } else {
-        None
+    let time_range = match build_time_range(
+        time_range_present,
+        time_range_zoneless,
+        time_range_start_ms,
+        time_range_end_ms,
+    ) {
+        Ok(r) => r,
+        Err(code) => return code,
     };
     let (data, meta) = match store
         .inner
@@ -4888,12 +5029,14 @@ pub unsafe extern "C" fn infrastore_store_get_forecast(
             meta.units.as_deref(),
             meta.quantity_kind.as_deref(),
             meta.unit_system,
+            meta.time_reference.as_ref(),
             meta.component_field.as_deref(),
             out_application_data,
             out_element_type,
             out_units,
             out_quantity_kind,
             out_unit_system,
+            out_time_reference,
             out_component_field,
         )
     };
@@ -5072,7 +5215,8 @@ unsafe fn emit_forecast_data(
 ///   `element_type` string, which is how a caller reads the returned bytes as
 ///   domain values (`out_dtype` gives only their physical width).
 /// - `out_quantity_kind` follows the same rules and receives the association's
-///   quantity kind, and `out_unit_system` its basis as the `natural_units` /
+///   quantity kind, `out_time_reference` how the timestamps were spelled, and
+///   `out_unit_system` its basis as the `natural_units` /
 ///   `component_base` spelling (null when unspecified).
 /// - `out_component_field` follows the same rules and receives the component
 ///   field the values vary over time (null when unset).
@@ -5084,6 +5228,7 @@ pub unsafe extern "C" fn infrastore_store_get_forecast_by_key(
     handle: *const InfraStoreHandle,
     key: *const InfraStoreKeyHandle,
     time_range_present: bool,
+    time_range_zoneless: bool,
     time_range_start_ms: i64,
     time_range_end_ms: i64,
     out_initial_ts_unix_ms: *mut i64,
@@ -5114,6 +5259,7 @@ pub unsafe extern "C" fn infrastore_store_get_forecast_by_key(
     out_units: *mut *mut c_char,
     out_quantity_kind: *mut *mut c_char,
     out_unit_system: *mut *mut c_char,
+    out_time_reference: *mut *mut c_char,
     out_component_field: *mut *mut c_char,
 ) -> i32 {
     clear_error();
@@ -5150,26 +5296,14 @@ pub unsafe extern "C" fn infrastore_store_get_forecast_by_key(
         return INFRASTORE_ERR_NULL_POINTER;
     }
     let matched_type = time_series_type_to_int(key.inner.time_series_type);
-    let time_range = if time_range_present {
-        let start = match unix_ms_to_datetime(time_range_start_ms) {
-            Some(d) => d,
-            None => {
-                set_error(format!(
-                    "invalid time_range_start_ms: {time_range_start_ms}"
-                ));
-                return INFRASTORE_ERR_INVALID_PARAMETER;
-            }
-        };
-        let end = match unix_ms_to_datetime(time_range_end_ms) {
-            Some(d) => d,
-            None => {
-                set_error(format!("invalid time_range_end_ms: {time_range_end_ms}"));
-                return INFRASTORE_ERR_INVALID_PARAMETER;
-            }
-        };
-        Some((start, end))
-    } else {
-        None
+    let time_range = match build_time_range(
+        time_range_present,
+        time_range_zoneless,
+        time_range_start_ms,
+        time_range_end_ms,
+    ) {
+        Ok(r) => r,
+        Err(code) => return code,
     };
     let (data, meta) = match store
         .inner
@@ -5204,12 +5338,14 @@ pub unsafe extern "C" fn infrastore_store_get_forecast_by_key(
             meta.units.as_deref(),
             meta.quantity_kind.as_deref(),
             meta.unit_system,
+            meta.time_reference.as_ref(),
             meta.component_field.as_deref(),
             out_application_data,
             out_element_type,
             out_units,
             out_quantity_kind,
             out_unit_system,
+            out_time_reference,
             out_component_field,
         )
     };
@@ -5430,6 +5566,14 @@ fn key_to_map(k: &core_lib::TimeSeriesKey) -> serde_json::Map<String, Value> {
         "count".into(),
         count.map(|c| Value::from(c as u64)).unwrap_or(Value::Null),
     );
+    // Descriptive, like the snapshot fields above: a caller holding a key needs
+    // to know how to spell the timestamp the key just handed them.
+    o.insert(
+        "time_reference".into(),
+        k.time_reference()
+            .map(|r| Value::from(r.as_storage_string()))
+            .unwrap_or(Value::Null),
+    );
     o
 }
 
@@ -5549,6 +5693,13 @@ fn metadata_to_map(m: &core_lib::TimeSeriesMetadata) -> serde_json::Map<String, 
             .unwrap_or(Value::Null),
     );
     o.insert(
+        "time_reference".into(),
+        m.time_reference
+            .as_ref()
+            .map(|r| Value::from(r.as_storage_string()))
+            .unwrap_or(Value::Null),
+    );
+    o.insert(
         "component_field".into(),
         m.component_field
             .clone()
@@ -5613,6 +5764,7 @@ pub unsafe extern "C" fn infrastore_store_list_keys(
     interval: *const c_char,
     features_json: *const c_char,
     component_field: *const c_char,
+    zoneless: i32,
     out_json: *mut *mut c_char,
     out_len: *mut u64,
 ) -> i32 {
@@ -5636,6 +5788,7 @@ pub unsafe extern "C" fn infrastore_store_list_keys(
             interval,
             features_json,
             component_field,
+            zoneless,
         )
     } {
         Ok(f) => f,
@@ -5679,6 +5832,7 @@ pub unsafe extern "C" fn infrastore_store_list_time_series(
     interval: *const c_char,
     features_json: *const c_char,
     component_field: *const c_char,
+    zoneless: i32,
     out_json: *mut *mut c_char,
     out_len: *mut u64,
 ) -> i32 {
@@ -5702,6 +5856,7 @@ pub unsafe extern "C" fn infrastore_store_list_time_series(
             interval,
             features_json,
             component_field,
+            zoneless,
         )
     } {
         Ok(f) => f,
@@ -5742,6 +5897,7 @@ pub unsafe extern "C" fn infrastore_store_list_names(
     interval: *const c_char,
     features_json: *const c_char,
     component_field: *const c_char,
+    zoneless: i32,
     out_json: *mut *mut c_char,
     out_len: *mut u64,
 ) -> i32 {
@@ -5765,6 +5921,7 @@ pub unsafe extern "C" fn infrastore_store_list_names(
             interval,
             features_json,
             component_field,
+            zoneless,
         )
     } {
         Ok(f) => f,
@@ -5801,6 +5958,7 @@ pub unsafe extern "C" fn infrastore_store_list_owner_types(
     interval: *const c_char,
     features_json: *const c_char,
     component_field: *const c_char,
+    zoneless: i32,
     out_json: *mut *mut c_char,
     out_len: *mut u64,
 ) -> i32 {
@@ -5824,6 +5982,7 @@ pub unsafe extern "C" fn infrastore_store_list_owner_types(
             interval,
             features_json,
             component_field,
+            zoneless,
         )
     } {
         Ok(f) => f,
@@ -5861,6 +6020,7 @@ pub unsafe extern "C" fn infrastore_store_remove_by_filter(
     interval: *const c_char,
     features_json: *const c_char,
     component_field: *const c_char,
+    zoneless: i32,
     out_removed: *mut u64,
 ) -> i32 {
     clear_error();
@@ -5883,6 +6043,7 @@ pub unsafe extern "C" fn infrastore_store_remove_by_filter(
             interval,
             features_json,
             component_field,
+            zoneless,
         )
     } {
         Ok(f) => f,
@@ -6056,6 +6217,7 @@ unsafe fn build_list_filter(
     interval: *const c_char,
     features_json: *const c_char,
     component_field: *const c_char,
+    zoneless: i32,
 ) -> std::result::Result<core_lib::ListFilter, i32> {
     let mut filter = core_lib::ListFilter::new();
     if has_owner {
@@ -6115,6 +6277,9 @@ unsafe fn build_list_filter(
             return Err(c);
         }
     }
+    if let Some(zoneless) = zoneless_filter(zoneless)? {
+        filter = filter.zoneless(zoneless);
+    }
     let features = unsafe { parse_features_json(features_json) }?;
     if !features.is_empty() {
         filter = filter.features(features);
@@ -6154,6 +6319,7 @@ pub unsafe extern "C" fn infrastore_store_list_array_groups(
     interval: *const c_char,
     features_json: *const c_char,
     component_field: *const c_char,
+    zoneless: i32,
     out_json: *mut *mut c_char,
     out_len: *mut u64,
 ) -> i32 {
@@ -6177,6 +6343,7 @@ pub unsafe extern "C" fn infrastore_store_list_array_groups(
             interval,
             features_json,
             component_field,
+            zoneless,
         )
     } {
         Ok(f) => f,
@@ -7350,6 +7517,7 @@ pub unsafe extern "C" fn infrastore_store_export_time_series_associations_openap
     interval: *const c_char,
     features_json: *const c_char,
     component_field: *const c_char,
+    zoneless: i32,
     out_json: *mut *mut c_char,
     out_len: *mut u64,
 ) -> i32 {
@@ -7373,6 +7541,7 @@ pub unsafe extern "C" fn infrastore_store_export_time_series_associations_openap
             interval,
             features_json,
             component_field,
+            zoneless,
         )
     } {
         Ok(f) => f,
@@ -7661,14 +7830,22 @@ fn unix_ms_to_datetime(ms: i64) -> Option<DateTime<Utc>> {
     Utc.timestamp_millis_opt(ms).single()
 }
 
-/// An inclusive-start, exclusive-end UTC time range for the get paths.
-type TimeRange = (DateTime<Utc>, DateTime<Utc>);
-
 /// Build an optional `(start, end)` time range from the FFI convention shared by
 /// the get paths: `present = false` yields `None`; otherwise both millisecond
 /// bounds are converted to UTC. Returns `Err(code)` (after setting the
 /// thread-local error) if either bound is out of range.
-fn build_time_range(present: bool, start_ms: i64, end_ms: i64) -> Result<Option<TimeRange>, i32> {
+///
+/// `zoneless` carries how the caller *spelled* those bounds. The wire form is
+/// Unix milliseconds either way — a zoneless caller sends its wall clock read as
+/// if UTC, exactly as the store holds one — so this flag is the only thing that
+/// tells the two apart, and the core refuses a bound whose spelling the series
+/// cannot answer.
+fn build_time_range(
+    present: bool,
+    zoneless: bool,
+    start_ms: i64,
+    end_ms: i64,
+) -> Result<Option<core_lib::TimeRange>, i32> {
     if !present {
         return Ok(None);
     }
@@ -7680,7 +7857,7 @@ fn build_time_range(present: bool, start_ms: i64, end_ms: i64) -> Result<Option<
         set_error(format!("invalid time_range_end_ms: {end_ms}"));
         INFRASTORE_ERR_INVALID_PARAMETER
     })?;
-    Ok(Some((start, end)))
+    Ok(Some(core_lib::TimeRange::spelled(start, end, zoneless)))
 }
 
 /// Unix milliseconds for a UTC datetime. Infallible: chrono's `DateTime<Utc>`
@@ -7731,6 +7908,7 @@ unsafe fn reader_filter(
     resolution: *const c_char,
     features_json: *const c_char,
     component_field: *const c_char,
+    zoneless: i32,
 ) -> Result<core_lib::ListFilter, i32> {
     let mut filter = core_lib::ListFilter::new();
     if has_owner {
@@ -7773,6 +7951,9 @@ unsafe fn reader_filter(
             set_error("component_field is not valid UTF-8");
             return Err(c);
         }
+    }
+    if let Some(zoneless) = zoneless_filter(zoneless)? {
+        filter = filter.zoneless(zoneless);
     }
     let features = unsafe { parse_features_json(features_json) }?;
     if !features.is_empty() {
@@ -7839,6 +8020,7 @@ pub unsafe extern "C" fn infrastore_store_build_static_reader(
     resolution: *const c_char,
     features_json: *const c_char,
     component_field: *const c_char,
+    zoneless: i32,
     out_reader: *mut *mut InfraStoreStaticReaderHandle,
 ) -> i32 {
     clear_error();
@@ -7871,6 +8053,7 @@ pub unsafe extern "C" fn infrastore_store_build_static_reader(
             resolution,
             features_json,
             component_field,
+            zoneless,
         )
     } {
         Ok(f) => f,
@@ -7924,6 +8107,53 @@ pub unsafe extern "C" fn infrastore_static_reader_grid(
         *out_initial_ms = datetime_to_unix_ms(reader.inner.initial_timestamp());
         *out_resolution = opt_period_cstr(reader.inner.resolution());
         *out_length = reader.inner.length() as u64;
+    }
+    INFRASTORE_OK
+}
+
+/// The one spelling the reader's timeline carries, as an owned C string
+/// (`"utc"`, `"zoneless"`, `"-07:00"`, or an IANA zone name), or **null** when
+/// the cohort records no reference.
+///
+/// A reader spans one timeline, so it carries one spelling: a cohort whose
+/// columns agree reports their reference, one whose columns merely agree on
+/// naming instants reports `"utc"`, and a cohort mixing zoneless with the rest
+/// never builds at all. Without this a caller can read the axis but not say how
+/// it was written -- it cannot tell a wall-clock axis from an unspecified or UTC
+/// one, which is exactly the distinction the axis exists to preserve.
+///
+/// Separate from [`infrastore_static_reader_grid`] rather than another out
+/// parameter on it: adding one there would shift every following argument for
+/// callers already compiled against the existing declaration.
+///
+/// # Safety
+///
+/// `reader` must be a live static-reader handle. `out_time_reference` must be
+/// valid for writing one pointer. On success it is either null or an owned C
+/// string the caller must free exactly once with [`infrastore_string_free`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_static_reader_time_reference(
+    reader: *const InfraStoreStaticReaderHandle,
+    out_time_reference: *mut *mut c_char,
+) -> i32 {
+    clear_error();
+    let reader = match unsafe { reader.as_ref() } {
+        Some(r) => r,
+        None => {
+            set_error("reader handle is null");
+            return INFRASTORE_ERR_NULL_POINTER;
+        }
+    };
+    if out_time_reference.is_null() {
+        set_error("an out pointer is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    unsafe {
+        *out_time_reference = reader
+            .inner
+            .time_reference()
+            .map(|r| owned_cstr(&r.as_storage_string()))
+            .unwrap_or(std::ptr::null_mut());
     }
     INFRASTORE_OK
 }
@@ -8215,6 +8445,7 @@ pub unsafe extern "C" fn infrastore_store_build_forecast_reader(
     resolution: *const c_char,
     features_json: *const c_char,
     component_field: *const c_char,
+    zoneless: i32,
     out_reader: *mut *mut InfraStoreForecastReaderHandle,
 ) -> i32 {
     clear_error();
@@ -8247,6 +8478,7 @@ pub unsafe extern "C" fn infrastore_store_build_forecast_reader(
             resolution,
             features_json,
             component_field,
+            zoneless,
         )
     } {
         Ok(f) => f,
@@ -8260,6 +8492,42 @@ pub unsafe extern "C" fn infrastore_store_build_forecast_reader(
     unsafe {
         *out_reader = Box::into_raw(Box::new(InfraStoreForecastReaderHandle { inner: reader }))
     };
+    INFRASTORE_OK
+}
+
+/// The one spelling the forecast reader's window timeline carries, as an owned C
+/// string, or **null** when the cohort records no reference. The forecast
+/// counterpart of [`infrastore_static_reader_time_reference`]; same rules.
+///
+/// # Safety
+///
+/// `reader` must be a live forecast-reader handle. `out_time_reference` must be
+/// valid for writing one pointer. On success it is either null or an owned C
+/// string the caller must free exactly once with [`infrastore_string_free`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_forecast_reader_time_reference(
+    reader: *const InfraStoreForecastReaderHandle,
+    out_time_reference: *mut *mut c_char,
+) -> i32 {
+    clear_error();
+    let reader = match unsafe { reader.as_ref() } {
+        Some(r) => r,
+        None => {
+            set_error("reader handle is null");
+            return INFRASTORE_ERR_NULL_POINTER;
+        }
+    };
+    if out_time_reference.is_null() {
+        set_error("an out pointer is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    unsafe {
+        *out_time_reference = reader
+            .inner
+            .time_reference()
+            .map(|r| owned_cstr(&r.as_storage_string()))
+            .unwrap_or(std::ptr::null_mut());
+    }
     INFRASTORE_OK
 }
 
@@ -8614,16 +8882,19 @@ mod reader_ffi_tests {
         let rc = unsafe {
             infrastore_store_build_static_reader(
                 &handle,
-                0, // SingleTimeSeries
+                0,
+                // SingleTimeSeries
                 false,
                 0,
                 false,
                 0,
                 ptr::null(),
-                ptr::null(), // name_glob
+                ptr::null(),
+                // name_glob
                 hour.as_ptr(),
                 ptr::null(),
                 ptr::null(),
+                -1,
                 &mut reader,
             )
         };
@@ -8736,12 +9007,15 @@ mod reader_ffi_tests {
                 0,
                 false,
                 0,
-                2, // Deterministic
+                2,
+                // Deterministic
                 ptr::null(),
-                ptr::null(), // name_glob
+                ptr::null(),
+                // name_glob
                 hour.as_ptr(),
                 ptr::null(),
                 ptr::null(),
+                -1,
                 &mut reader,
             )
         };
@@ -8885,6 +9159,7 @@ mod reader_ffi_tests {
                     &handle,
                     key,
                     false,
+                    false,
                     0,
                     0,
                     &mut initial,
@@ -8894,6 +9169,7 @@ mod reader_ffi_tests {
                     &mut shape_len,
                     &mut data_ptr,
                     &mut data_len,
+                    ptr::null_mut(),
                     ptr::null_mut(),
                     ptr::null_mut(),
                     ptr::null_mut(),
@@ -9032,6 +9308,7 @@ mod abi_tests {
                 ptr::null(),
                 ptr::null(),
                 ptr::null(),
+                ptr::null(),
                 &mut key,
             )
         };
@@ -9087,6 +9364,7 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     ptr::null(),
+                    ptr::null(),
                     &mut key,
                 )
             },
@@ -9108,6 +9386,7 @@ mod abi_tests {
                     store,
                     key,
                     false,
+                    false,
                     0,
                     0,
                     &mut ts_ptr,
@@ -9118,8 +9397,10 @@ mod abi_tests {
                     &mut data_ptr,
                     &mut data_len,
                     &mut application_data_out,
-                    ptr::null_mut(), // skip element_type
+                    ptr::null_mut(),
+                    // skip element_type
                     &mut units_out,
+                    ptr::null_mut(),
                     ptr::null_mut(),
                     ptr::null_mut(),
                     ptr::null_mut(),
@@ -9290,6 +9571,7 @@ mod abi_tests {
                 store,
                 key,
                 false,
+                false,
                 0,
                 0,
                 &mut initial,
@@ -9299,6 +9581,7 @@ mod abi_tests {
                 &mut shape_len,
                 &mut data_ptr,
                 &mut data_len,
+                ptr::null_mut(),
                 ptr::null_mut(),
                 ptr::null_mut(),
                 ptr::null_mut(),
@@ -9439,16 +9722,19 @@ mod abi_tests {
             unsafe {
                 infrastore_store_build_static_reader(
                     ptr::null(),
-                    0, // SingleTimeSeries
+                    0,
+                    // SingleTimeSeries
                     false,
                     0,
                     false,
                     0,
                     ptr::null(),
-                    ptr::null(), // name_glob
+                    ptr::null(),
+                    // name_glob
                     res.as_ptr(),
                     ptr::null(),
                     ptr::null(),
+                    -1,
                     &mut reader,
                 )
             },
@@ -9464,16 +9750,19 @@ mod abi_tests {
             unsafe {
                 infrastore_store_build_static_reader(
                     store,
-                    0, // SingleTimeSeries
+                    0,
+                    // SingleTimeSeries
                     false,
                     0,
                     false,
                     0,
                     ptr::null(),
-                    ptr::null(), // name_glob
+                    ptr::null(),
+                    // name_glob
                     res.as_ptr(),
                     ptr::null(),
                     ptr::null(),
+                    -1,
                     &mut reader,
                 )
             },
@@ -9562,11 +9851,13 @@ mod abi_tests {
                     false,
                     0,
                     ptr::null(),
-                    ptr::null(), // name_glob
+                    ptr::null(),
+                    // name_glob
                     ptr::null(),
                     ptr::null(),
                     ptr::null(),
                     ptr::null(),
+                    -1,
                     ptr::null_mut(),
                     ptr::null_mut(),
                 )
@@ -9651,6 +9942,7 @@ mod abi_tests {
             *const c_char,
             *const c_char,
             *const c_char,
+            i32,
             *mut *mut c_char,
             *mut u64,
         ) -> i32;
@@ -9679,6 +9971,7 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     ptr::null(),
+                    -1,
                     &mut out,
                     &mut len,
                 )
@@ -9738,6 +10031,7 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     ptr::null(),
+                    -1,
                     &mut present,
                 )
             },
@@ -9753,7 +10047,8 @@ mod abi_tests {
             unsafe {
                 infrastore_store_build_static_reader(
                     store,
-                    0, // SingleTimeSeries
+                    0,
+                    // SingleTimeSeries
                     false,
                     0,
                     false,
@@ -9763,6 +10058,7 @@ mod abi_tests {
                     hour.as_ptr(),
                     ptr::null(),
                     ptr::null(),
+                    -1,
                     &mut reader,
                 )
             },
@@ -9814,6 +10110,7 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     ptr::null(),
+                    -1,
                     &mut removed,
                 )
             },
@@ -9935,6 +10232,7 @@ mod abi_tests {
                 ptr::null(),
                 ptr::null(),
                 ptr::null(),
+                -1,
                 &mut out,
                 &mut len,
             )
@@ -9952,7 +10250,8 @@ mod abi_tests {
         let rc = unsafe {
             infrastore_store_build_static_reader(
                 store,
-                0, // SingleTimeSeries
+                0,
+                // SingleTimeSeries
                 false,
                 0,
                 false,
@@ -9962,6 +10261,7 @@ mod abi_tests {
                 res.as_ptr(),
                 ptr::null(),
                 ptr::null(),
+                -1,
                 &mut reader,
             )
         };
@@ -9990,6 +10290,7 @@ mod abi_tests {
                 ptr::null(),
                 ptr::null(),
                 ptr::null(),
+                -1,
                 &mut out,
                 &mut len,
             )
@@ -10033,6 +10334,7 @@ mod abi_tests {
                 dims.as_ptr(),
                 bytes.as_ptr(),
                 bytes.len() as u64,
+                ptr::null(),
                 ptr::null(),
                 ptr::null(),
                 ptr::null(),
@@ -10094,6 +10396,7 @@ mod abi_tests {
                 dims.as_ptr(),
                 bytes.as_ptr(),
                 bytes.len() as u64,
+                ptr::null(),
                 ptr::null(),
                 ptr::null(),
                 ptr::null(),
@@ -10256,6 +10559,7 @@ mod abi_tests {
                 store,
                 key,
                 false,
+                false,
                 0,
                 0,
                 &mut initial,
@@ -10265,6 +10569,7 @@ mod abi_tests {
                 &mut shape_len,
                 &mut data_ptr,
                 &mut data_len,
+                ptr::null_mut(),
                 ptr::null_mut(),
                 ptr::null_mut(),
                 ptr::null_mut(),
@@ -10424,6 +10729,7 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     ptr::null(),
+                    ptr::null(),
                     &mut key,
                 )
             },
@@ -10435,16 +10741,19 @@ mod abi_tests {
             unsafe {
                 infrastore_store_build_static_reader(
                     store,
-                    0, // SingleTimeSeries
+                    0,
+                    // SingleTimeSeries
                     false,
                     0,
                     false,
                     0,
                     ptr::null(),
-                    ptr::null(), // name_glob
+                    ptr::null(),
+                    // name_glob
                     res.as_ptr(),
                     ptr::null(),
                     ptr::null(),
+                    -1,
                     &mut reader,
                 )
             },
@@ -10507,16 +10816,19 @@ mod abi_tests {
             unsafe {
                 infrastore_store_build_static_reader(
                     store,
-                    0, // SingleTimeSeries
+                    0,
+                    // SingleTimeSeries
                     false,
                     0,
                     false,
                     0,
                     ptr::null(),
-                    ptr::null(), // name_glob
+                    ptr::null(),
+                    // name_glob
                     res.as_ptr(),
                     ptr::null(),
                     ptr::null(),
+                    -1,
                     &mut reader,
                 )
             },
@@ -10579,12 +10891,15 @@ mod abi_tests {
                     0,
                     false,
                     0,
-                    2, // Deterministic
+                    2,
+                    // Deterministic
                     ptr::null(),
-                    ptr::null(), // name_glob
+                    ptr::null(),
+                    // name_glob
                     res.as_ptr(),
                     ptr::null(),
                     ptr::null(),
+                    -1,
                     &mut freader,
                 )
             },
@@ -10763,11 +11078,13 @@ mod abi_tests {
                     false,
                     0,
                     ptr::null(),
-                    ptr::null(), // name_glob
+                    ptr::null(),
+                    // name_glob
                     ptr::null(),
                     ptr::null(),
                     ptr::null(),
                     ptr::null(),
+                    -1,
                     &mut out,
                     &mut len,
                 )

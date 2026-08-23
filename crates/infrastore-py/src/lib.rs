@@ -70,7 +70,7 @@ fn map_err(e: core_lib::TimeSeriesError) -> PyErr {
     }
 }
 
-/// An instant taken from Python, normalised to UTC.
+/// A timestamp taken from Python: the instant it names, plus how it was spelled.
 ///
 /// PyO3's own `DateTime<Utc>` extraction requires the `tzinfo` to *be*
 /// `datetime.timezone.utc`, and its `DateTime<FixedOffset>` extraction asks the
@@ -83,11 +83,33 @@ fn map_err(e: core_lib::TimeSeriesError) -> PyErr {
 ///
 /// The conversion belongs to Python, which is the only party that knows what a
 /// named zone's offset is at a given instant: an aware datetime is converted
-/// with `astimezone(timezone.utc)` and extracted from there. The store's rule is
-/// the one this enforces — an instant must be unambiguous, so a naive datetime
-/// is refused, and everything aware is accepted.
-#[derive(Clone, Copy, Debug)]
-struct PyInstant(DateTime<Utc>);
+/// with `astimezone(timezone.utc)` and extracted from there.
+///
+/// A **naive** datetime is now accepted rather than refused, and recorded as
+/// [`TimeReference::Zoneless`] — a wall clock naming no instant, held as if UTC.
+/// Accepting it is only defensible because the read path can hand the same
+/// spelling back ([`spell_instant`]): naive and aware datetimes are not equal in
+/// Python and are not even comparable, so a store that took one and returned the
+/// other would be worse than one that refused.
+///
+/// The conversion for a naive value never goes through `astimezone`, which
+/// assumes *system local time* — the same script would otherwise write a
+/// different instant on a laptop in Denver than in CI on UTC. The fields are
+/// read as they stand, which is `replace(tzinfo=utc)` semantics.
+#[derive(Clone, Debug)]
+struct PyInstant {
+    instant: DateTime<Utc>,
+    /// The spelling this datetime arrived in. Always concrete: naive is
+    /// `Zoneless`, and every aware value falls into one of the three zoned
+    /// spellings.
+    reference: core_lib::TimeReference,
+}
+
+impl PyInstant {
+    fn is_zoneless(&self) -> bool {
+        self.reference.is_zoneless()
+    }
+}
 
 impl<'py> FromPyObject<'_, 'py> for PyInstant {
     type Error = PyErr;
@@ -102,17 +124,25 @@ impl<'py> FromPyObject<'_, 'py> for PyInstant {
                     .unwrap_or_else(|_| "?".into())
             ))
         })?;
+        let py = obj.py();
+        let utc = PyTzInfo::utc(py)?;
         // `utcoffset()` is None for a naive datetime *and* for an aware one
-        // whose tzinfo declines to place it, which is the same ambiguity.
+        // whose tzinfo declines to place it. The two are the same thing here:
+        // neither names an instant, so both are read as wall clocks.
         let offset = dt.call_method0("utcoffset")?;
         if offset.is_none() {
-            return Err(InvalidParameterError::new_err(concat!(
-                "datetime must be timezone-aware; the store records instants, ",
-                "and a naive datetime does not name one ",
-                "(attach datetime.timezone.utc, or any zone)"
-            )));
+            // Not `astimezone`: that would apply the machine's local zone. The
+            // wall clock is taken as it stands, which is what `Zoneless` means.
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("tzinfo", utc)?;
+            let as_utc = dt.call_method("replace", (), Some(&kwargs))?;
+            return Ok(PyInstant {
+                instant: as_utc.extract::<DateTime<Utc>>()?,
+                reference: core_lib::TimeReference::Zoneless,
+            });
         }
-        let utc = PyTzInfo::utc(obj.py())?;
+        let tzinfo = dt.getattr("tzinfo")?;
+        let reference = infer_reference(&tzinfo, &offset)?;
         // Already `datetime.timezone.utc`: the wall clock is the instant, so
         // skip the round trip through Python's conversion.
         //
@@ -124,23 +154,223 @@ impl<'py> FromPyObject<'_, 'py> for PyInstant {
         // `timezone(timedelta(0))` returns, so this still covers the common
         // case; every other zone, UTC-equivalent or not, goes through
         // `astimezone`, which asks `utcoffset` rather than taking its word.
-        let in_utc = if dt.getattr("tzinfo")?.is(utc) {
+        let in_utc = if tzinfo.is(utc) {
             dt.as_any().clone()
         } else {
             dt.call_method1("astimezone", (&utc,))?
         };
-        Ok(PyInstant(in_utc.extract::<DateTime<Utc>>()?))
+        Ok(PyInstant {
+            instant: in_utc.extract::<DateTime<Utc>>()?,
+            reference,
+        })
     }
 }
 
-/// [`PyInstant`] over a sequence, for the timestamp vectors.
-fn instants_to_utc(v: Vec<PyInstant>) -> Vec<DateTime<Utc>> {
-    v.into_iter().map(|i| i.0).collect()
+/// Which spelling an *aware* datetime's `tzinfo` records.
+///
+/// The `key` case is tested first on purpose: `ZoneInfo("UTC")` records
+/// `Zone("UTC")`, not `Utc`. The two render identically forever, so the
+/// distinction shows up only in what the catalog reports back — which is the
+/// point of recording a spelling at all.
+fn infer_reference(
+    tzinfo: &Bound<'_, PyAny>,
+    offset: &Bound<'_, PyAny>,
+) -> PyResult<core_lib::TimeReference> {
+    // `zoneinfo.ZoneInfo` exposes the IANA name as `key`; so does `pytz`'s
+    // `zone`-carrying tzinfo under a different name, which is deliberately not
+    // probed -- one attribute, one contract.
+    if let Ok(key) = tzinfo.getattr("key")
+        && let Ok(name) = key.extract::<String>()
+    {
+        let zone = core_lib::TimeReference::Zone(name);
+        // Shape only. A tzinfo that carries a `key` the core cannot spell (an
+        // exotic custom class) falls back to its offset rather than failing the
+        // write.
+        if zone.validate().is_ok() {
+            return Ok(zone);
+        }
+    }
+    if tzinfo.is(PyTzInfo::utc(tzinfo.py())?) {
+        return Ok(core_lib::TimeReference::Utc);
+    }
+    // Judged as the float Python hands over, *before* any narrowing. `datetime`
+    // has allowed sub-minute offsets since 3.7 and carries them to the
+    // microsecond, so `60.5` truncated to `60` first would satisfy the
+    // whole-minutes check below and be recorded as `+00:01` -- storing the
+    // instant correctly while moving the wall clock 500 ms, silently, which is
+    // the one failure this whole feature exists to prevent.
+    let seconds = offset.call_method0("total_seconds")?.extract::<f64>()?;
+    if !seconds.is_finite() || seconds.fract() != 0.0 || seconds % 60.0 != 0.0 {
+        return Err(InvalidParameterError::new_err(format!(
+            "the timestamp's UTC offset is {seconds} seconds, which is not a whole number of \
+             minutes; the store records an offset in minutes, so this spelling cannot be \
+             stored faithfully"
+        )));
+    }
+    // Python bounds an offset to strictly within a day, so this always fits;
+    // the guard is here so a future `datetime` that did not could never reach
+    // the cast.
+    let minutes = seconds / 60.0;
+    if minutes.abs() >= 24.0 * 60.0 {
+        return Err(InvalidParameterError::new_err(format!(
+            "the timestamp's UTC offset is {seconds} seconds, which is not a real UTC offset; \
+             it must be strictly within a day of UTC"
+        )));
+    }
+    Ok(core_lib::TimeReference::FixedOffset(minutes as i32))
 }
 
-/// [`PyInstant`] over the optional `(start, end)` pairs.
-fn range_to_utc(r: Option<(PyInstant, PyInstant)>) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
-    r.map(|(a, b)| (a.0, b.0))
+/// Render `instant` in the spelling `reference` names.
+///
+/// The read-side inverse of [`PyInstant`], and the reason accepting a naive
+/// datetime is defensible at all. `None` and `Utc` both give an aware UTC
+/// datetime — an unspecified reference is not a claim, but it is also not a
+/// reason to hand back a naive value the caller cannot compare against one.
+fn spell_instant<'py>(
+    py: Python<'py>,
+    instant: DateTime<Utc>,
+    reference: Option<&core_lib::TimeReference>,
+) -> PyResult<Bound<'py, PyAny>> {
+    use pyo3::IntoPyObject;
+    let utc_obj = instant.into_pyobject(py)?.into_any();
+    match reference {
+        None | Some(core_lib::TimeReference::Utc) => Ok(utc_obj),
+        Some(core_lib::TimeReference::Zoneless) => {
+            // A wall clock: the stored instant's UTC fields, unlabelled.
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("tzinfo", py.None())?;
+            Ok(utc_obj.call_method("replace", (), Some(&kwargs))?)
+        }
+        Some(core_lib::TimeReference::FixedOffset(minutes)) => {
+            let offset = chrono::FixedOffset::east_opt(minutes * 60).ok_or_else(|| {
+                InvalidParameterError::new_err(format!("unrepresentable UTC offset {minutes}"))
+            })?;
+            Ok(instant.with_timezone(&offset).into_pyobject(py)?.into_any())
+        }
+        Some(core_lib::TimeReference::Zone(name)) => {
+            // instant -> local is total and single-valued, so this direction
+            // never has to choose between two candidates. It needs a tz
+            // database, which is why it lives here and not in the core.
+            match zone_info(py, name) {
+                Ok(zone) => Ok(utc_obj.call_method1("astimezone", (zone,))?),
+                Err(_) => {
+                    // The instant is still right; only the label cannot be
+                    // resolved by *this* interpreter's database. Reporting UTC
+                    // beats failing a read of data that is perfectly intact.
+                    warn_unknown_zone(py, name)?;
+                    Ok(utc_obj)
+                }
+            }
+        }
+    }
+}
+
+/// How a reference reads in a `__repr__`. `"unspecified"` rather than `None` so
+/// the field always says something, matching the other descriptors' spelling.
+fn reference_label(reference: Option<&core_lib::TimeReference>) -> String {
+    reference
+        .map(core_lib::TimeReference::as_storage_string)
+        .unwrap_or_else(|| "unspecified".to_string())
+}
+
+/// `spell_instant` over a vector, for the timestamp axes.
+fn spell_instants<'py>(
+    py: Python<'py>,
+    instants: &[DateTime<Utc>],
+    reference: Option<&core_lib::TimeReference>,
+) -> PyResult<Vec<Bound<'py, PyAny>>> {
+    instants
+        .iter()
+        .map(|t| spell_instant(py, *t, reference))
+        .collect()
+}
+
+/// `zoneinfo.ZoneInfo(name)`, or the interpreter's own error if it has no such
+/// zone.
+fn zone_info<'py>(py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyAny>> {
+    py.import("zoneinfo")?.getattr("ZoneInfo")?.call1((name,))
+}
+
+/// Warn that this interpreter's tz database does not know `name`.
+///
+/// A warning, never an error: the store does not gate on zone existence (see
+/// `TimeReference::validate`), because doing so would couple legitimate data to
+/// the release cadence of whichever database happened to be asked. Every layer
+/// that *has* a database audits instead.
+fn warn_unknown_zone(py: Python<'_>, name: &str) -> PyResult<()> {
+    let message = format!(
+        "time_reference names the IANA zone {name:?}, which this interpreter's tz database \
+         does not have; the instants are stored either way, but rendering them in that zone \
+         needs a database that knows it (try installing or updating the tzdata package)"
+    );
+    let message = std::ffi::CString::new(message)
+        .map_err(|_| InvalidParameterError::new_err("zone name contains an interior NUL"))?;
+    let category = py.get_type::<pyo3::exceptions::PyUserWarning>();
+    PyErr::warn(py, &category, &message, 2)
+}
+
+/// The one spelling a vector of timestamps carries.
+///
+/// A series has one reference, so its timestamps have to agree on one. Mixing
+/// naive and aware values in a single vector is already an error in Python the
+/// moment anything compares them, so this reports it at the door instead.
+fn vector_reference(timestamps: &[PyInstant]) -> PyResult<Option<core_lib::TimeReference>> {
+    let Some(first) = timestamps.first() else {
+        return Ok(None);
+    };
+    for (index, t) in timestamps.iter().enumerate() {
+        if t.reference != first.reference {
+            return Err(InvalidParameterError::new_err(format!(
+                "timestamps disagree about how they are spelled: element 0 is {} but element \
+                 {index} is {}; one series records one spelling",
+                first.reference, t.reference
+            )));
+        }
+    }
+    Ok(Some(first.reference.clone()))
+}
+
+/// [`PyInstant`] over a sequence, for the timestamp vectors.
+fn instants_to_utc(v: &[PyInstant]) -> Vec<DateTime<Utc>> {
+    v.iter().map(|i| i.instant).collect()
+}
+
+/// [`PyInstant`] over the optional `(start, end)` pairs, carrying the spelling
+/// through so the core can apply the bound rule.
+fn range_to_core(r: Option<(PyInstant, PyInstant)>) -> PyResult<Option<core_lib::TimeRange>> {
+    let Some((a, b)) = r else { return Ok(None) };
+    if a.is_zoneless() != b.is_zoneless() {
+        return Err(InvalidParameterError::new_err(
+            "the two time_range bounds are spelled differently: one is timezone-aware and the \
+             other is naive. A range is one request; spell both bounds the way the series is.",
+        ));
+    }
+    Ok(Some(core_lib::TimeRange::spelled(
+        a.instant,
+        b.instant,
+        a.is_zoneless(),
+    )))
+}
+
+/// Refuse a point-read instant whose spelling the reader's axis cannot answer.
+///
+/// The ranged reads get this for free: they hand a `TimeRange` to the core,
+/// which applies the rule once. A point read passed only the instant, so the
+/// check was simply skipped -- a naive wall clock could query an
+/// instant-bearing reader (and an aware datetime a zoneless one), be
+/// reinterpreted as UTC, and return a *row* rather than the category-mismatch
+/// error the same mismatch earns on a ranged read.
+///
+/// A point is a degenerate range, so it goes through the very same check rather
+/// than a second copy of the rule, and reports it in the same words.
+fn check_point_spelling(
+    when: &PyInstant,
+    axis: Option<&core_lib::TimeReference>,
+    what: &str,
+) -> PyResult<()> {
+    core_lib::TimeRange::spelled(when.instant, when.instant, when.is_zoneless())
+        .check_against(axis, what)
+        .map_err(map_err)
 }
 
 /// Translate the Python-facing compression arguments into a core
@@ -334,6 +564,24 @@ fn parse_element_type(s: &str) -> PyResult<core_lib::ElementType> {
         .map_err(|e| InvalidParameterError::new_err(e.to_string()))
 }
 
+/// Parse an explicit `time_reference` argument, auditing a zone name against
+/// this interpreter's tz database.
+///
+/// The audit is a warning, never a gate: the store does not check zone
+/// existence, because gating would refuse legitimate data whenever IANA's
+/// database moves ahead of whichever copy happened to be asked. A typo still
+/// gets said out loud at the moment it is written, which is the only moment a
+/// caller can fix it cheaply.
+fn parse_time_reference(py: Python<'_>, spelling: &str) -> PyResult<core_lib::TimeReference> {
+    let reference = core_lib::TimeReference::parse(spelling).map_err(map_err)?;
+    if let core_lib::TimeReference::Zone(name) = &reference
+        && zone_info(py, name).is_err()
+    {
+        warn_unknown_zone(py, name)?;
+    }
+    Ok(reference)
+}
+
 /// `None` (the argument was omitted) means *unspecified*, which is deliberately
 /// not the same as `"natural_units"`. An unrecognized spelling raises rather
 /// than degrading to unspecified: silently dropping a declared basis would make
@@ -465,7 +713,7 @@ impl PyDeterministic {
         let interval = pyany_to_period(&interval)?;
         let typed = typed_array_from_numpy(data)?;
         let inner = core_lib::Deterministic::new(
-            initial_timestamp.0,
+            initial_timestamp.instant,
             resolution,
             horizon,
             interval,
@@ -474,6 +722,11 @@ impl PyDeterministic {
             name,
         )
         .map_err(InvalidParameterError::new_err)?;
+        // The spelling is inferred from the timestamp the caller handed us, not
+        // asked for separately: the intent is in the object, and it is erased
+        // the moment the instant reaches the core.
+        let mut inner = inner;
+        inner.time_reference = Some(initial_timestamp.reference);
         Ok(Self { inner })
     }
 
@@ -482,9 +735,24 @@ impl PyDeterministic {
         self.inner.name.clone()
     }
 
+    /// The first window's timestamp, spelled the way it was written.
     #[getter]
-    fn initial_timestamp(&self) -> DateTime<Utc> {
-        self.inner.initial_timestamp
+    fn initial_timestamp<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        spell_instant(
+            py,
+            self.inner.initial_timestamp,
+            self.inner.time_reference.as_ref(),
+        )
+    }
+
+    /// How this series' timestamps were spelled: `"utc"`, `"zoneless"`, a fixed
+    /// offset (`"-07:00"`), an IANA zone name, or `None` for unspecified.
+    #[getter]
+    fn time_reference(&self) -> Option<String> {
+        self.inner
+            .time_reference
+            .as_ref()
+            .map(core_lib::TimeReference::as_storage_string)
     }
 
     #[getter]
@@ -524,7 +792,7 @@ impl PyDeterministic {
 
     fn __repr__(&self) -> String {
         format!(
-            "Deterministic(name={:?}, initial_timestamp={}, count={}, horizon={}, interval={}, resolution={}, shape={:?})",
+            "Deterministic(name={:?}, initial_timestamp={}, count={}, horizon={}, interval={}, resolution={}, shape={:?}, time_reference={})",
             self.inner.name,
             self.inner.initial_timestamp,
             self.inner.count,
@@ -532,6 +800,7 @@ impl PyDeterministic {
             self.inner.interval.to_iso8601(),
             self.inner.resolution.to_iso8601(),
             self.inner.data.shape,
+            reference_label(self.inner.time_reference.as_ref()),
         )
     }
 }
@@ -568,7 +837,7 @@ impl PyProbabilistic {
         let interval = pyany_to_period(&interval)?;
         let typed = typed_array_from_numpy(data)?;
         let inner = core_lib::Probabilistic::new(
-            initial_timestamp.0,
+            initial_timestamp.instant,
             resolution,
             horizon,
             interval,
@@ -578,6 +847,11 @@ impl PyProbabilistic {
             name,
         )
         .map_err(InvalidParameterError::new_err)?;
+        // The spelling is inferred from the timestamp the caller handed us, not
+        // asked for separately: the intent is in the object, and it is erased
+        // the moment the instant reaches the core.
+        let mut inner = inner;
+        inner.time_reference = Some(initial_timestamp.reference);
         Ok(Self { inner })
     }
 
@@ -586,9 +860,24 @@ impl PyProbabilistic {
         self.inner.name.clone()
     }
 
+    /// The first window's timestamp, spelled the way it was written.
     #[getter]
-    fn initial_timestamp(&self) -> DateTime<Utc> {
-        self.inner.initial_timestamp
+    fn initial_timestamp<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        spell_instant(
+            py,
+            self.inner.initial_timestamp,
+            self.inner.time_reference.as_ref(),
+        )
+    }
+
+    /// How this series' timestamps were spelled: `"utc"`, `"zoneless"`, a fixed
+    /// offset (`"-07:00"`), an IANA zone name, or `None` for unspecified.
+    #[getter]
+    fn time_reference(&self) -> Option<String> {
+        self.inner
+            .time_reference
+            .as_ref()
+            .map(core_lib::TimeReference::as_storage_string)
     }
 
     #[getter]
@@ -633,7 +922,7 @@ impl PyProbabilistic {
 
     fn __repr__(&self) -> String {
         format!(
-            "Probabilistic(name={:?}, initial_timestamp={}, count={}, horizon={}, interval={}, resolution={}, percentiles={:?}, shape={:?})",
+            "Probabilistic(name={:?}, initial_timestamp={}, count={}, horizon={}, interval={}, resolution={}, percentiles={:?}, shape={:?}, time_reference={})",
             self.inner.name,
             self.inner.initial_timestamp,
             self.inner.count,
@@ -642,6 +931,7 @@ impl PyProbabilistic {
             self.inner.resolution.to_iso8601(),
             self.inner.percentiles,
             self.inner.data.shape,
+            reference_label(self.inner.time_reference.as_ref()),
         )
     }
 }
@@ -681,7 +971,7 @@ impl PyScenarios {
             InvalidParameterError::new_err("Scenarios: data must have at least one axis")
         })?;
         let inner = core_lib::Scenarios::new(
-            initial_timestamp.0,
+            initial_timestamp.instant,
             resolution,
             horizon,
             interval,
@@ -691,6 +981,11 @@ impl PyScenarios {
             name,
         )
         .map_err(InvalidParameterError::new_err)?;
+        // The spelling is inferred from the timestamp the caller handed us, not
+        // asked for separately: the intent is in the object, and it is erased
+        // the moment the instant reaches the core.
+        let mut inner = inner;
+        inner.time_reference = Some(initial_timestamp.reference);
         Ok(Self { inner })
     }
 
@@ -699,9 +994,24 @@ impl PyScenarios {
         self.inner.name.clone()
     }
 
+    /// The first window's timestamp, spelled the way it was written.
     #[getter]
-    fn initial_timestamp(&self) -> DateTime<Utc> {
-        self.inner.initial_timestamp
+    fn initial_timestamp<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        spell_instant(
+            py,
+            self.inner.initial_timestamp,
+            self.inner.time_reference.as_ref(),
+        )
+    }
+
+    /// How this series' timestamps were spelled: `"utc"`, `"zoneless"`, a fixed
+    /// offset (`"-07:00"`), an IANA zone name, or `None` for unspecified.
+    #[getter]
+    fn time_reference(&self) -> Option<String> {
+        self.inner
+            .time_reference
+            .as_ref()
+            .map(core_lib::TimeReference::as_storage_string)
     }
 
     #[getter]
@@ -746,7 +1056,7 @@ impl PyScenarios {
 
     fn __repr__(&self) -> String {
         format!(
-            "Scenarios(name={:?}, initial_timestamp={}, count={}, horizon={}, interval={}, resolution={}, scenario_count={}, shape={:?})",
+            "Scenarios(name={:?}, initial_timestamp={}, count={}, horizon={}, interval={}, resolution={}, scenario_count={}, shape={:?}, time_reference={})",
             self.inner.name,
             self.inner.initial_timestamp,
             self.inner.count,
@@ -755,6 +1065,7 @@ impl PyScenarios {
             self.inner.resolution.to_iso8601(),
             self.inner.scenario_count,
             self.inner.data.shape,
+            reference_label(self.inner.time_reference.as_ref()),
         )
     }
 }
@@ -780,9 +1091,11 @@ impl PySingleTimeSeries {
     ) -> PyResult<Self> {
         let resolution = pyany_to_period(&resolution)?;
         let typed = typed_array_from_numpy(data)?;
-        Ok(Self {
-            inner: core_lib::SingleTimeSeries::new(initial_timestamp.0, resolution, typed, name),
-        })
+        let mut inner =
+            core_lib::SingleTimeSeries::new(initial_timestamp.instant, resolution, typed, name);
+        // See the forecast constructors: the spelling rides in on the timestamp.
+        inner.time_reference = Some(initial_timestamp.reference);
+        Ok(Self { inner })
     }
 
     #[getter]
@@ -790,9 +1103,24 @@ impl PySingleTimeSeries {
         self.inner.name.clone()
     }
 
+    /// The grid's first timestamp, spelled the way it was written.
     #[getter]
-    fn initial_timestamp(&self) -> DateTime<Utc> {
-        self.inner.initial_timestamp
+    fn initial_timestamp<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        spell_instant(
+            py,
+            self.inner.initial_timestamp,
+            self.inner.time_reference.as_ref(),
+        )
+    }
+
+    /// How this series' timestamps were spelled: `"utc"`, `"zoneless"`, a fixed
+    /// offset (`"-07:00"`), an IANA zone name, or `None` for unspecified.
+    #[getter]
+    fn time_reference(&self) -> Option<String> {
+        self.inner
+            .time_reference
+            .as_ref()
+            .map(core_lib::TimeReference::as_storage_string)
     }
 
     #[getter]
@@ -822,12 +1150,13 @@ impl PySingleTimeSeries {
 
     fn __repr__(&self) -> String {
         format!(
-            "SingleTimeSeries(name={:?}, initial_timestamp={}, length={}, resolution={}, shape={:?})",
+            "SingleTimeSeries(name={:?}, initial_timestamp={}, length={}, resolution={}, shape={:?}, time_reference={})",
             self.inner.name,
             self.inner.initial_timestamp,
             self.inner.length,
             self.inner.resolution.to_iso8601(),
             self.inner.data.shape,
+            reference_label(self.inner.time_reference.as_ref()),
         )
     }
 }
@@ -851,9 +1180,12 @@ impl PyNonSequentialTimeSeries {
     #[pyo3(signature = (timestamps, data, name))]
     fn new(timestamps: Vec<PyInstant>, data: &Bound<'_, PyAny>, name: String) -> PyResult<Self> {
         let typed = typed_array_from_numpy(data)?;
-        let inner =
-            core_lib::NonSequentialTimeSeries::new(instants_to_utc(timestamps), typed, name)
+        // One series records one spelling, so the vector has to agree on one.
+        let reference = vector_reference(&timestamps)?;
+        let mut inner =
+            core_lib::NonSequentialTimeSeries::new(instants_to_utc(&timestamps), typed, name)
                 .map_err(InvalidParameterError::new_err)?;
+        inner.time_reference = reference;
         Ok(Self { inner })
     }
 
@@ -862,9 +1194,24 @@ impl PyNonSequentialTimeSeries {
         self.inner.name.clone()
     }
 
+    /// The explicit timestamp vector, spelled the way it was written.
     #[getter]
-    fn timestamps(&self) -> Vec<DateTime<Utc>> {
-        self.inner.timestamps.clone()
+    fn timestamps<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyAny>>> {
+        spell_instants(
+            py,
+            &self.inner.timestamps,
+            self.inner.time_reference.as_ref(),
+        )
+    }
+
+    /// How this series' timestamps were spelled: `"utc"`, `"zoneless"`, a fixed
+    /// offset (`"-07:00"`), an IANA zone name, or `None` for unspecified.
+    #[getter]
+    fn time_reference(&self) -> Option<String> {
+        self.inner
+            .time_reference
+            .as_ref()
+            .map(core_lib::TimeReference::as_storage_string)
     }
 
     #[getter]
@@ -889,8 +1236,11 @@ impl PyNonSequentialTimeSeries {
 
     fn __repr__(&self) -> String {
         format!(
-            "NonSequentialTimeSeries(name={:?}, length={}, shape={:?})",
-            self.inner.name, self.inner.length, self.inner.data.shape,
+            "NonSequentialTimeSeries(name={:?}, length={}, shape={:?}, time_reference={})",
+            self.inner.name,
+            self.inner.length,
+            self.inner.data.shape,
+            reference_label(self.inner.time_reference.as_ref()),
         )
     }
 }
@@ -1224,22 +1574,33 @@ pub struct PyStaticReader {
 impl PyStaticReader {
     /// The reader's shared timeline: `{"time_series_type": str,
     /// "initial_timestamp": rfc3339 str, "resolution": ISO-8601 str | None,
-    /// "length": int}`.
+    /// "length": int, "time_reference": str | None}`.
     ///
     /// `resolution` is `None` for a `NonSequentialTimeSeries` reader: an
     /// irregular timeline has no constant step, so walk `timestamps()` instead.
+    ///
+    /// `time_reference` is the one spelling the axis carries. A reader whose
+    /// columns all agree reports their reference; one whose columns merely agree
+    /// on naming instants reports `"utc"`. A cohort mixing zoneless with the
+    /// rest never builds at all.
     fn grid<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let d = PyDict::new(py);
         d.set_item("time_series_type", self.inner.time_series_type().as_str())?;
         d.set_item(
             "initial_timestamp",
-            self.inner.initial_timestamp().to_rfc3339(),
+            render_catalog_timestamp(self.inner.initial_timestamp(), self.inner.time_reference()),
         )?;
         d.set_item(
             "resolution",
             self.inner.resolution().map(|r| r.to_iso8601()),
         )?;
         d.set_item("length", self.inner.length())?;
+        d.set_item(
+            "time_reference",
+            self.inner
+                .time_reference()
+                .map(core_lib::TimeReference::as_storage_string),
+        )?;
         Ok(d)
     }
 
@@ -1267,9 +1628,11 @@ impl PyStaticReader {
             .collect()
     }
 
-    /// Every timestamp on the reader's timeline, in order.
-    fn timestamps(&self) -> Vec<DateTime<Utc>> {
-        self.inner.timestamps().collect()
+    /// Every timestamp on the reader's timeline, in order, spelled the way the
+    /// cohort's own series are.
+    fn timestamps<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyAny>>> {
+        let axis: Vec<DateTime<Utc>> = self.inner.timestamps().collect();
+        spell_instants(py, &axis, self.inner.time_reference())
     }
 
     fn __repr__(&self) -> String {
@@ -1315,17 +1678,24 @@ pub struct PyForecastReader {
 #[pymethods]
 impl PyForecastReader {
     /// The window timeline: `{"initial_timestamp": rfc3339 str, "resolution":
-    /// ISO str, "interval": ISO str, "count": int, "time_series_type": str}`.
+    /// ISO str, "interval": ISO str, "count": int, "time_series_type": str,
+    /// "time_reference": str | None}`.
     fn timeline<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let d = PyDict::new(py);
         d.set_item(
             "initial_timestamp",
-            self.inner.initial_timestamp().to_rfc3339(),
+            render_catalog_timestamp(self.inner.initial_timestamp(), self.inner.time_reference()),
         )?;
         d.set_item("resolution", self.inner.resolution().to_iso8601())?;
         d.set_item("interval", self.inner.interval().to_iso8601())?;
         d.set_item("count", self.inner.count())?;
         d.set_item("time_series_type", self.inner.time_series_type().as_str())?;
+        d.set_item(
+            "time_reference",
+            self.inner
+                .time_reference()
+                .map(core_lib::TimeReference::as_storage_string),
+        )?;
         Ok(d)
     }
 
@@ -1361,8 +1731,9 @@ impl PyForecastReader {
     }
 
     /// Every window start timestamp, in order.
-    fn timestamps(&self) -> Vec<DateTime<Utc>> {
-        self.inner.timestamps().collect()
+    fn timestamps<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyAny>>> {
+        let axis: Vec<DateTime<Utc>> = self.inner.timestamps().collect();
+        spell_instants(py, &axis, self.inner.time_reference())
     }
 
     fn __repr__(&self) -> String {
@@ -1667,7 +2038,7 @@ impl PyStore {
     /// `element_type` declares what the array's elements mean in the store's own
     /// vocabulary (`"tuple(3,f64)"`, `"piecewise_linear"`, …). Omit it for plain
     /// numbers, where it defaults to the array's own dtype spelling.
-    #[pyo3(signature = (owner_id, owner_type, owner_category, time_series, *, features=None, units=None, element_type=None, application_data=None, quantity_kind=None, unit_system=None, component_field=None))]
+    #[pyo3(signature = (owner_id, owner_type, owner_category, time_series, *, features=None, units=None, element_type=None, application_data=None, quantity_kind=None, unit_system=None, time_reference=None, component_field=None))]
     #[allow(clippy::too_many_arguments)]
     fn add_time_series(
         &mut self,
@@ -1681,6 +2052,7 @@ impl PyStore {
         application_data: Option<String>,
         quantity_kind: Option<String>,
         unit_system: Option<String>,
+        time_reference: Option<String>,
         component_field: Option<String>,
     ) -> PyResult<PyTimeSeriesKey> {
         let features = features_from_dict(features)?;
@@ -1704,6 +2076,12 @@ impl PyStore {
         }
         if let Some(unit_system) = unit_system {
             data.set_unit_system(parse_unit_system(Some(unit_system.as_str()))?);
+        }
+        if let Some(time_reference) = time_reference {
+            data.set_time_reference(Some(parse_time_reference(
+                time_series.py(),
+                &time_reference,
+            )?));
         }
         if let Some(component_field) = component_field {
             data.set_component_field(Some(component_field));
@@ -1773,6 +2151,10 @@ impl PyStore {
                 Some(u) if !u.is_none() => Some(u.extract()?),
                 _ => None,
             };
+            let time_reference: Option<String> = match item.get_item("time_reference")? {
+                Some(t) if !t.is_none() => Some(t.extract()?),
+                _ => None,
+            };
             let component_field: Option<String> = match item.get_item("component_field")? {
                 Some(c) if !c.is_none() => Some(c.extract()?),
                 _ => None,
@@ -1795,6 +2177,9 @@ impl PyStore {
             }
             if let Some(unit_system) = unit_system {
                 data.set_unit_system(parse_unit_system(Some(unit_system.as_str()))?);
+            }
+            if let Some(time_reference) = time_reference {
+                data.set_time_reference(Some(parse_time_reference(item.py(), &time_reference)?));
             }
             if let Some(component_field) = component_field {
                 data.set_component_field(Some(component_field));
@@ -1904,7 +2289,7 @@ impl PyStore {
     ) -> PyResult<Py<PyAny>> {
         let data = self
             .store()?
-            .get_time_series(&key.inner, range_to_utc(time_range))
+            .get_time_series(&key.inner, range_to_core(time_range)?)
             .map_err(map_err)?;
         time_series_data_to_py(py, data)
     }
@@ -1925,7 +2310,7 @@ impl PyStore {
         let identities: Vec<&core_lib::KeyIdentity> = keys.iter().map(|k| &k.inner).collect();
         let datas = self
             .store()?
-            .bulk_read_range(&identities, range_to_utc(time_range))
+            .bulk_read_range(&identities, range_to_core(time_range)?)
             .map_err(map_err)?;
         datas
             .into_iter()
@@ -1979,7 +2364,8 @@ impl PyStore {
     /// method taking these filter kwargs reads the type the same way.
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
-        name=None, name_glob=None, component_field=None, resolution=None, interval=None, features=None
+        name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
+        interval=None, features=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn list_time_series<'py>(
@@ -1992,6 +2378,7 @@ impl PyStore {
         name: Option<String>,
         name_glob: Option<String>,
         component_field: Option<String>,
+        zoneless: Option<bool>,
         resolution: Option<Bound<'_, PyAny>>,
         interval: Option<Bound<'_, PyAny>>,
         features: Option<&Bound<'_, PyDict>>,
@@ -2004,6 +2391,7 @@ impl PyStore {
             name,
             name_glob,
             component_field,
+            zoneless,
             resolution,
             interval,
             features,
@@ -2023,7 +2411,8 @@ impl PyStore {
     /// `list_time_series`. Wraps the core `list_keys_with_hash`.
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
-        name=None, name_glob=None, component_field=None, resolution=None, interval=None, features=None
+        name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
+        interval=None, features=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn list_array_groups<'py>(
@@ -2036,6 +2425,7 @@ impl PyStore {
         name: Option<String>,
         name_glob: Option<String>,
         component_field: Option<String>,
+        zoneless: Option<bool>,
         resolution: Option<Bound<'_, PyAny>>,
         interval: Option<Bound<'_, PyAny>>,
         features: Option<&Bound<'_, PyDict>>,
@@ -2048,6 +2438,7 @@ impl PyStore {
             name,
             name_glob,
             component_field,
+            zoneless,
             resolution,
             interval,
             features,
@@ -2100,7 +2491,8 @@ impl PyStore {
     /// included — so it is safe to call in hot loops.
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
-        name=None, name_glob=None, component_field=None, resolution=None, interval=None, features=None
+        name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
+        interval=None, features=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn has_any_time_series(
@@ -2112,6 +2504,7 @@ impl PyStore {
         name: Option<String>,
         name_glob: Option<String>,
         component_field: Option<String>,
+        zoneless: Option<bool>,
         resolution: Option<Bound<'_, PyAny>>,
         interval: Option<Bound<'_, PyAny>>,
         features: Option<&Bound<'_, PyDict>>,
@@ -2124,6 +2517,7 @@ impl PyStore {
             name,
             name_glob,
             component_field,
+            zoneless,
             resolution,
             interval,
             features,
@@ -2332,7 +2726,7 @@ impl PyStore {
     /// irregular series has none): all matched series must instead lie on one
     /// timestamp vector, which is also what pools their arrays on disk. Drive it
     /// with `static_read`.
-    #[pyo3(signature = (resolution=None, *, time_series_type=None, owner_id=None, owner_category=None, owner_type=None, name=None, name_glob=None, component_field=None, features=None))]
+    #[pyo3(signature = (resolution=None, *, time_series_type=None, owner_id=None, owner_category=None, owner_type=None, name=None, name_glob=None, component_field=None, zoneless=None, features=None))]
     #[allow(clippy::too_many_arguments)]
     fn build_static_reader(
         &self,
@@ -2344,6 +2738,7 @@ impl PyStore {
         name: Option<String>,
         name_glob: Option<String>,
         component_field: Option<String>,
+        zoneless: Option<bool>,
         features: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyStaticReader> {
         let filter = build_list_filter(
@@ -2354,6 +2749,7 @@ impl PyStore {
             name,
             name_glob,
             component_field,
+            zoneless,
             resolution,
             None,
             features,
@@ -2365,8 +2761,13 @@ impl PyStore {
     /// Fill `reader`'s buffers with every column's value at `when` (off-grid
     /// raises). Afterwards read a group with `reader.group_values(i)`.
     fn static_read(&self, reader: &mut PyStaticReader, when: PyInstant) -> PyResult<()> {
+        check_point_spelling(
+            &when,
+            reader.inner.time_reference(),
+            "this reader's timeline",
+        )?;
         self.store()?
-            .static_read(&mut reader.inner, when.0)
+            .static_read(&mut reader.inner, when.instant)
             .map_err(map_err)
     }
 
@@ -2374,7 +2775,7 @@ impl PyStore {
     /// the filter. A `resolution` is required; a `Deterministic` reader also
     /// includes `DeterministicSingleTimeSeries`, matching the read request rule.
     /// Drive it with `forecast_read`.
-    #[pyo3(signature = (time_series_type, resolution, *, owner_id=None, owner_category=None, owner_type=None, name=None, name_glob=None, component_field=None, features=None))]
+    #[pyo3(signature = (time_series_type, resolution, *, owner_id=None, owner_category=None, owner_type=None, name=None, name_glob=None, component_field=None, zoneless=None, features=None))]
     #[allow(clippy::too_many_arguments)]
     fn build_forecast_reader(
         &self,
@@ -2386,6 +2787,7 @@ impl PyStore {
         name: Option<String>,
         name_glob: Option<String>,
         component_field: Option<String>,
+        zoneless: Option<bool>,
         features: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyForecastReader> {
         let filter = build_list_filter(
@@ -2396,6 +2798,7 @@ impl PyStore {
             name,
             name_glob,
             component_field,
+            zoneless,
             Some(resolution),
             None,
             features,
@@ -2410,8 +2813,13 @@ impl PyStore {
     /// Fill `reader`'s buffers with every entry's forecast window at `when`
     /// (off-grid raises). Afterwards read an entry with `reader.entry_values(i)`.
     fn forecast_read(&self, reader: &mut PyForecastReader, when: PyInstant) -> PyResult<()> {
+        check_point_spelling(
+            &when,
+            reader.inner.time_reference(),
+            "this reader's timeline",
+        )?;
         self.store()?
-            .forecast_read(&mut reader.inner, when.0)
+            .forecast_read(&mut reader.inner, when.instant)
             .map_err(map_err)
     }
 
@@ -2430,7 +2838,8 @@ impl PyStore {
     /// List the `TimeSeriesKey`s matching the filter.
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
-        name=None, name_glob=None, component_field=None, resolution=None, interval=None, features=None
+        name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
+        interval=None, features=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn list_keys(
@@ -2442,6 +2851,7 @@ impl PyStore {
         name: Option<String>,
         name_glob: Option<String>,
         component_field: Option<String>,
+        zoneless: Option<bool>,
         resolution: Option<Bound<'_, PyAny>>,
         interval: Option<Bound<'_, PyAny>>,
         features: Option<&Bound<'_, PyDict>>,
@@ -2454,6 +2864,7 @@ impl PyStore {
             name,
             name_glob,
             component_field,
+            zoneless,
             resolution,
             interval,
             features,
@@ -2486,7 +2897,8 @@ impl PyStore {
     /// Distinct series names matching the filter, sorted.
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
-        name=None, name_glob=None, component_field=None, resolution=None, interval=None, features=None
+        name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
+        interval=None, features=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn list_names(
@@ -2498,6 +2910,7 @@ impl PyStore {
         name: Option<String>,
         name_glob: Option<String>,
         component_field: Option<String>,
+        zoneless: Option<bool>,
         resolution: Option<Bound<'_, PyAny>>,
         interval: Option<Bound<'_, PyAny>>,
         features: Option<&Bound<'_, PyDict>>,
@@ -2510,6 +2923,7 @@ impl PyStore {
             name,
             name_glob,
             component_field,
+            zoneless,
             resolution,
             interval,
             features,
@@ -2520,7 +2934,8 @@ impl PyStore {
     /// Distinct owner types matching the filter, sorted.
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
-        name=None, name_glob=None, component_field=None, resolution=None, interval=None, features=None
+        name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
+        interval=None, features=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn list_owner_types(
@@ -2532,6 +2947,7 @@ impl PyStore {
         name: Option<String>,
         name_glob: Option<String>,
         component_field: Option<String>,
+        zoneless: Option<bool>,
         resolution: Option<Bound<'_, PyAny>>,
         interval: Option<Bound<'_, PyAny>>,
         features: Option<&Bound<'_, PyDict>>,
@@ -2544,6 +2960,7 @@ impl PyStore {
             name,
             name_glob,
             component_field,
+            zoneless,
             resolution,
             interval,
             features,
@@ -2555,7 +2972,8 @@ impl PyStore {
     /// transaction. Returns the number of associations removed.
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
-        name=None, name_glob=None, component_field=None, resolution=None, interval=None, features=None
+        name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
+        interval=None, features=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn remove_by_filter(
@@ -2567,6 +2985,7 @@ impl PyStore {
         name: Option<String>,
         name_glob: Option<String>,
         component_field: Option<String>,
+        zoneless: Option<bool>,
         resolution: Option<Bound<'_, PyAny>>,
         interval: Option<Bound<'_, PyAny>>,
         features: Option<&Bound<'_, PyDict>>,
@@ -2579,6 +2998,7 @@ impl PyStore {
             name,
             name_glob,
             component_field,
+            zoneless,
             resolution,
             interval,
             features,
@@ -3227,7 +3647,8 @@ impl PyStore {
     /// With no filter this exports the whole catalog.
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
-        name=None, name_glob=None, component_field=None, resolution=None, interval=None, features=None
+        name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
+        interval=None, features=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn export_time_series_associations_openapi(
@@ -3239,6 +3660,7 @@ impl PyStore {
         name: Option<String>,
         name_glob: Option<String>,
         component_field: Option<String>,
+        zoneless: Option<bool>,
         resolution: Option<Bound<'_, PyAny>>,
         interval: Option<Bound<'_, PyAny>>,
         features: Option<&Bound<'_, PyDict>>,
@@ -3251,6 +3673,7 @@ impl PyStore {
             name,
             name_glob,
             component_field,
+            zoneless,
             resolution,
             interval,
             features,
@@ -3366,7 +3789,7 @@ fn pyany_to_requested_type_opt(
 
 /// Decode a 64-character lowercase-or-uppercase hex string into a 32-byte hash.
 /// Every key `add_time_series_bulk` reads out of one item dict.
-const BULK_ITEM_KEYS: [&str; 11] = [
+const BULK_ITEM_KEYS: [&str; 12] = [
     "owner_id",
     "owner_type",
     "owner_category",
@@ -3377,6 +3800,7 @@ const BULK_ITEM_KEYS: [&str; 11] = [
     "application_data",
     "quantity_kind",
     "unit_system",
+    "time_reference",
     "component_field",
 ];
 
@@ -3444,6 +3868,7 @@ fn build_list_filter(
     name: Option<String>,
     name_glob: Option<String>,
     component_field: Option<String>,
+    zoneless: Option<bool>,
     resolution: Option<Bound<'_, PyAny>>,
     interval: Option<Bound<'_, PyAny>>,
     features: Option<&Bound<'_, PyDict>>,
@@ -3469,6 +3894,9 @@ fn build_list_filter(
     }
     if let Some(f) = component_field {
         filter = filter.component_field(f);
+    }
+    if let Some(z) = zoneless {
+        filter = filter.zoneless(z);
     }
     if let Some(r) = resolution {
         filter = filter.resolution(pyany_to_period(&r)?);
@@ -3549,7 +3977,8 @@ fn metadata_to_dict<'py>(
     d.set_item("data_hash", core_lib::hash_hex(&m.data_hash))?;
     d.set_item(
         "initial_timestamp",
-        m.initial_timestamp.map(|t| t.to_rfc3339()),
+        m.initial_timestamp
+            .map(|t| render_catalog_timestamp(t, m.time_reference.as_ref())),
     )?;
     d.set_item("length", m.length)?;
     d.set_item("resolution", iso(m.resolution))?;
@@ -3561,17 +3990,49 @@ fn metadata_to_dict<'py>(
     d.set_item("element_shape", m.element_shape.clone())?;
     d.set_item(
         "timestamps",
-        m.timestamps
-            .as_ref()
-            .map(|ts| ts.iter().map(DateTime::to_rfc3339).collect::<Vec<_>>()),
+        m.timestamps.as_ref().map(|ts| {
+            ts.iter()
+                .map(|t| render_catalog_timestamp(*t, m.time_reference.as_ref()))
+                .collect::<Vec<_>>()
+        }),
     )?;
     d.set_item("features", features_to_dict(py, &m.features)?)?;
     d.set_item("units", m.units.clone())?;
     d.set_item("quantity_kind", m.quantity_kind.clone())?;
     d.set_item("unit_system", m.unit_system.map(|u| u.as_str()))?;
+    d.set_item(
+        "time_reference",
+        m.time_reference
+            .as_ref()
+            .map(core_lib::TimeReference::as_storage_string),
+    )?;
     d.set_item("component_field", m.component_field.clone())?;
     d.set_item("application_data", m.application_data.clone())?;
     Ok(d)
+}
+
+/// Render a catalog timestamp as a string for the metadata dict.
+///
+/// The instant, spelled honestly rather than converted. Everything that names an
+/// instant — including an unset reference — stays RFC 3339 UTC; a caller wanting
+/// it rendered at the row's own offset or zone has `time_reference` beside it
+/// and a datetime library to do it with, which is more than this function has
+/// (rendering a named zone needs a tz database, and the row's own spelling is
+/// what says whether that is even the right question).
+///
+/// A **zoneless** row is the exception, and the reason this is not just
+/// `to_rfc3339`: its timestamps are wall clocks, so a trailing `Z` would assert
+/// an instant the row explicitly does not name.
+fn render_catalog_timestamp(
+    t: DateTime<Utc>,
+    reference: Option<&core_lib::TimeReference>,
+) -> String {
+    match reference {
+        Some(core_lib::TimeReference::Zoneless) => {
+            t.naive_utc().format("%Y-%m-%dT%H:%M:%S%.f").to_string()
+        }
+        _ => t.to_rfc3339(),
+    }
 }
 
 #[allow(dead_code)]

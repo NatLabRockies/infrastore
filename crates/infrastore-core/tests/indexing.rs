@@ -41,7 +41,7 @@ fn sliced(
     end: DateTime<Utc>,
 ) -> (usize, DateTime<Utc>, Vec<f64>) {
     let got = store
-        .get_time_series(key.identity(), Some((start, end)))
+        .get_time_series(key.identity(), Some((start, end).into()))
         .unwrap();
     let single = got.as_single().unwrap();
     (
@@ -176,7 +176,7 @@ fn multidim_slice_at_nonzero_column() {
             let sub = store
                 .get_time_series(
                     kb.identity(),
-                    Some((initial + Duration::hours(1), initial + Duration::hours(3))),
+                    Some((initial + Duration::hours(1), initial + Duration::hours(3)).into()),
                 )
                 .unwrap();
             let sub = sub.as_single().unwrap();
@@ -285,7 +285,7 @@ fn slice_preserves_all_dtypes() {
                 let sub = store
                     .get_time_series(
                         key.identity(),
-                        Some((initial + Duration::hours(2), initial + Duration::hours(5))),
+                        Some((initial + Duration::hours(2), initial + Duration::hours(5)).into()),
                     )
                     .unwrap();
                 let sub = sub.as_single().unwrap();
@@ -424,7 +424,7 @@ fn far_future_end_does_not_overflow() {
         |store, key, backend| {
             let end = initial + Duration::nanoseconds(i64::MAX);
             let got = store
-                .get_time_series(key.identity(), Some((initial, end)))
+                .get_time_series(key.identity(), Some((initial, end).into()))
                 .unwrap();
             assert_eq!(
                 got.as_single().unwrap().data.to_f64_vec().unwrap(),
@@ -472,7 +472,9 @@ fn non_sequential_boundary_semantics() {
         },
         |store, key, backend| {
             let ns = |s: DateTime<Utc>, e: DateTime<Utc>| {
-                let got = store.get_time_series(key.identity(), Some((s, e))).unwrap();
+                let got = store
+                    .get_time_series(key.identity(), Some((s, e).into()))
+                    .unwrap();
                 let series = got.as_non_sequential().unwrap();
                 (series.timestamps.clone(), series.data.to_f64_vec().unwrap())
             };

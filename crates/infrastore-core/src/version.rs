@@ -38,4 +38,13 @@
 /// the additive case, because `CREATE TABLE IF NOT EXISTS` leaves a 0.15.0
 /// store's column set alone and every statement naming the new column would
 /// then fail. Stores written by 0.15.0 and earlier are rejected on open.
-pub const DATA_FORMAT_VERSION: &str = "0.16.0";
+///
+/// 0.17.0 added the `time_reference` column to `time_series_associations`,
+/// recording how a series' timestamps were *spelled* — an instant in UTC, an
+/// instant at a fixed offset, an instant in a named IANA zone, or a wall clock
+/// naming no instant. Same reasoning as 0.16.0 for why a new column is not the
+/// additive case. It also changes how stored timestamps are *interpreted*: a
+/// row marked `zoneless` holds wall clocks the store keeps as if UTC, which an
+/// older reader would hand back as instants. Stores written by 0.16.0 and
+/// earlier are rejected on open.
+pub const DATA_FORMAT_VERSION: &str = "0.17.0";

@@ -9,7 +9,8 @@ use std::path::Path;
 
 use infrastore_core::{
     AddRequest, Descriptors, Deterministic, ElementType, Features, NonSequentialTimeSeries,
-    Probabilistic, Scenarios, SingleTimeSeries, TimeSeriesData, TimeSeriesType, UnitSystem,
+    Probabilistic, Scenarios, SingleTimeSeries, TimeReference, TimeSeriesData, TimeSeriesType,
+    UnitSystem,
 };
 use serde::Deserialize;
 
@@ -76,6 +77,15 @@ pub struct Descriptor {
     pub quantity_kind: Option<String>,
     /// `"natural_units"` or `"component_base"`. Absent means unspecified.
     pub unit_system: Option<String>,
+    /// How this series' timestamps are spelled: `"utc"`, `"zoneless"`, a fixed
+    /// offset (`"-07:00"`), or an IANA zone name (`"America/Denver"`).
+    ///
+    /// Normally absent, and then *inferred* from the timestamps the ingest
+    /// actually reads — an offset in the CSV text is preserved, a `Z` records
+    /// UTC, and a zoneless column records whatever `--assume-timezone` /
+    /// `--zoneless` said. Set it only to declare a spelling the text cannot
+    /// carry; it overrides the inference for the whole series.
+    pub time_reference: Option<String>,
     /// The field on the owning component whose value these values are the
     /// time-varying form of (e.g. `"max_active_power"`). Free-form.
     pub component_field: Option<String>,
@@ -412,6 +422,121 @@ impl Descriptor {
         Ok(out)
     }
 
+    /// The raw text of the timestamp this series is anchored on: the
+    /// descriptor's `initial_timestamp` for a regular grid, or the first row of
+    /// the CSV's timestamp column for an irregular one (which has no
+    /// `initial_timestamp` to speak of).
+    fn anchor_timestamp<'a>(
+        &'a self,
+        ts_type: TimeSeriesType,
+        csv: &'a CsvData,
+    ) -> Option<&'a str> {
+        if ts_type == TimeSeriesType::NonSequentialTimeSeries {
+            return csv.first_timestamp();
+        }
+        self.initial_timestamp.as_deref()
+    }
+
+    /// Warn when the CSV's timestamps do not all agree on a spelling.
+    ///
+    /// A series records one reference, taken from its anchor, so a file whose
+    /// rows carry different offsets stores every instant correctly and renders
+    /// them all at the anchor's offset. Nothing is lost — the instants are
+    /// exact — but a row written `12:00-06:00` reads back `11:00-07:00`, and
+    /// silently changing a wall clock is the one thing this whole feature
+    /// exists to stop.
+    ///
+    /// The remedy is to name the zone (`"time_reference": "America/Denver"`),
+    /// which renders each instant in that zone and reproduces both wall clocks
+    /// exactly. So this warns and names it rather than refusing: the offsets in
+    /// the file are real and the instants they name are unambiguous, which is
+    /// not the caller error a hard failure would imply.
+    ///
+    /// Skipped when the descriptor states a `time_reference`, which is the
+    /// caller having already decided. Short-circuits on the first disagreement,
+    /// so an agreeing file pays one parse per row and a disagreeing one stops
+    /// early.
+    fn warn_on_mixed_spellings(&self, ts_type: TimeSeriesType, csv: &CsvData) {
+        if self.time_reference.is_some() || ts_type != TimeSeriesType::NonSequentialTimeSeries {
+            return;
+        }
+        let timestamps = csv.timestamps();
+        let Some(anchor_text) = timestamps.first() else {
+            return;
+        };
+        let Ok((_, anchor)) = parse::parse_timestamp_with_reference(anchor_text) else {
+            return;
+        };
+        let odd = timestamps.iter().enumerate().skip(1).find(|(_, raw)| {
+            matches!(parse::parse_timestamp_with_reference(raw), Ok((_, r)) if r != anchor)
+        });
+        if let Some((row, raw)) = odd {
+            eprintln!(
+                "{}",
+                crate::color::dim_err(&format!(
+                    "warning: series '{}': row {} is spelled {:?} but the series is anchored on \
+                     {:?}. Every instant is stored exactly, but the series records one spelling, \
+                     so that row reads back at {}. Set \"time_reference\" to the IANA zone (e.g. \
+                     \"America/Denver\") to render each instant in that zone and reproduce both \
+                     wall clocks.",
+                    self.name,
+                    row + 1,
+                    raw.trim(),
+                    anchor_text.trim(),
+                    anchor.as_storage_string(),
+                ))
+            );
+        }
+    }
+
+    /// The timestamp spelling this series records.
+    ///
+    /// An explicit `time_reference` wins; otherwise it is read off the
+    /// timestamps this ingest actually parsed, since the spelling is a property
+    /// of the *text* and the descriptor never sees it. `first_timestamp` is the
+    /// raw text of whichever timestamp the series is anchored on: the
+    /// descriptor's `initial_timestamp` for a regular grid, the first row of the
+    /// timestamp column for an irregular one.
+    ///
+    /// A series takes one spelling, so only the anchor is consulted. A file
+    /// whose offsets change part-way (local civil time across a DST boundary) is
+    /// exactly the case `--assume-timezone <IANA name>` exists for: the zone
+    /// renders every row correctly, where the offset of the first row would be
+    /// an hour wrong after the transition.
+    fn time_reference(
+        &self,
+        first_timestamp: Option<&str>,
+    ) -> Result<Option<TimeReference>, String> {
+        if let Some(spelling) = self.time_reference.as_deref() {
+            let reference = TimeReference::parse(spelling)
+                .map_err(|e| format!("series '{}': invalid time_reference: {e}", self.name))?;
+            // The core validates a zone name's *shape* and never resolves it,
+            // so `America/Dever` reaches storage intact. This is the layer with
+            // a tz database, and it was the only spelling the CLI let through
+            // in silence: the same typo passed to `--assume-timezone` is a hard
+            // error. Warn rather than refuse -- the store deliberately accepts
+            // a name its database has not heard of yet, which is what keeps a
+            // zone IANA added last month usable before this build catches up.
+            if !crate::fields::zone_is_known(&reference) {
+                eprintln!(
+                    "{}",
+                    crate::color::dim_err(&format!(
+                        "warning: series '{}': time_reference \"{spelling}\" is not a zone \
+                         this build's tz database recognizes. It is stored as given -- a real \
+                         name this build predates still works -- but a typo will only surface \
+                         when something tries to render it. `store-info` lists it the same way.",
+                        self.name
+                    ))
+                );
+            }
+            return Ok(Some(reference));
+        }
+        match first_timestamp {
+            Some(raw) => Ok(Some(parse::parse_timestamp_with_reference(raw)?.1)),
+            None => Ok(None),
+        }
+    }
+
     /// The descriptive attributes this descriptor declares, which are set on
     /// the series rather than on the request.
     ///
@@ -430,6 +555,11 @@ impl Descriptor {
             units: self.units.clone(),
             quantity_kind: self.quantity_kind.clone(),
             unit_system,
+            // Filled in per series from the timestamps actually ingested, not
+            // from the descriptor: the spelling is a property of the text the
+            // CSV (or `initial_timestamp`) carried, and the descriptor never
+            // sees it. See `Descriptor::time_reference`.
+            time_reference: None,
             component_field: self.component_field.clone(),
             application_data: self.application_data.clone(),
         })
@@ -491,6 +621,8 @@ impl Descriptor {
         // The descriptor's `element_type`, `units`, and `application_data` describe the
         // series, so they are set on it rather than on the request.
         data.set_descriptors(self.descriptors(element_type)?);
+        self.warn_on_mixed_spellings(ts_type, &csv);
+        data.set_time_reference(self.time_reference(self.anchor_timestamp(ts_type, &csv))?);
 
         Ok(AddRequest {
             owner_id,
@@ -605,6 +737,12 @@ impl Descriptor {
             check_regular_grid(&csv.timestamps(), initial, resolution, csv.rows, &self.name)?;
         }
 
+        // One anchor for the whole file: every column of a wide CSV shares the
+        // timestamp column, so every series it yields shares one spelling.
+        self.warn_on_mixed_spellings(ts_type, &csv);
+        let anchor = self.anchor_timestamp(ts_type, &csv);
+        let time_reference = self.time_reference(anchor)?;
+
         let mut out = Vec::with_capacity(columns.len());
         for (j, (owner_id, owner_type)) in owners.into_iter().enumerate() {
             let cells: Vec<String> = (0..csv.rows)
@@ -625,6 +763,7 @@ impl Descriptor {
                 }
             };
             data.set_descriptors(self.descriptors(element_type)?);
+            data.set_time_reference(time_reference.clone());
             out.push(AddRequest {
                 owner_id,
                 owner_type,

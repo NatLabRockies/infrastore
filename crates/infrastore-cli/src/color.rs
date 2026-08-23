@@ -67,3 +67,46 @@ pub fn dim_err(s: &str) -> String {
 pub fn literal(s: &str) -> String {
     paint(CYAN_BOLD, s)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The painted form wraps the text and always closes the sequence -- a
+    /// missing reset bleeds the color into everything printed after it.
+    #[test]
+    fn painting_wraps_the_text_and_resets_afterwards() {
+        let out = paint_if(true, GREEN_BOLD, "done");
+        assert_eq!(out, format!("{GREEN_BOLD}done{RESET}"));
+        assert!(out.ends_with(RESET));
+    }
+
+    /// Off, the text passes through byte for byte: this is what keeps escape
+    /// codes out of `-f json`, out of a redirected file, and out of the string
+    /// widths the table layout measures.
+    #[test]
+    fn unpainted_text_is_untouched() {
+        for s in ["done", "", "already \x1b[36mcolored\x1b[0m"] {
+            assert_eq!(paint_if(false, GREEN_BOLD, s), s);
+        }
+    }
+
+    /// Under `cargo test` neither stream is a terminal, so every public helper
+    /// must be a passthrough. A helper that colored unconditionally would put
+    /// escape codes into the output the other tests parse.
+    #[test]
+    fn no_helper_colors_when_the_stream_is_not_a_terminal() {
+        for painted in [
+            header("h"),
+            label("l"),
+            dim("d"),
+            dim_err("e"),
+            literal("c"),
+        ] {
+            assert!(
+                !painted.contains('\x1b'),
+                "escape code leaked into {painted:?}"
+            );
+        }
+    }
+}

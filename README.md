@@ -38,6 +38,14 @@ Under development, unstable API, integrating with parent packages
   attribute) and `parent_child_associations` (directed component ↔ component edges) record
   relationships independently of time series, so consumers need not keep a SQLite database of their
   own.
+- **Timestamps that round-trip as written** — every series records a `time_reference`: an instant in
+  UTC, an instant at a fixed offset, an instant in a named IANA zone, or a wall clock naming no
+  instant at all. Each binding infers it from the input type — a naive `datetime` or a bare
+  `DateTime` is a wall clock, a `ZoneInfo`/`ZonedDateTime` keeps its zone — and gives the spelling
+  back on read instead of relabelling everything UTC at the boundary. Python returns the timestamp
+  already in that spelling; Julia returns the instant as a `DateTime` with the reference beside it,
+  which `zoned_timestamp` fuses back into a `ZonedDateTime` (a `DateTime` is what its consumers
+  destructure today).
 - **Discovery and maintenance** — `get_intervals`, `list_names`, `list_owner_types`, glob name
   filters, filtered and bulk delete, rename, time-sliced `bulk_read`, and serde on the core types.
 - **Read-only gRPC service** — serve a store to remote readers, with optional API-key auth. Writes

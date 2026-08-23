@@ -134,6 +134,292 @@ function _unit_system(s::AbstractString)
     )
 end
 
+# ---- Time reference --------------------------------------------------------
+
+"""
+    TimeReference
+
+How a time series' timestamps were *spelled*. The store records instants; this
+records what they were written **as**, so a series comes back the way it went in
+instead of being relabelled UTC at the boundary.
+
+Four subtypes, and most rules split on a binary rather than on all four:
+[`UTCReference`](@ref), [`FixedOffsetReference`](@ref) and [`ZoneReference`](@ref)
+are *zoned* — they name an instant — while [`ZonelessReference`](@ref) does not.
+A series that declares nothing leaves `time_reference === nothing`, which means
+*unspecified*; for query bounds that groups with the zoned spellings, but it is
+not a claim the timestamps were written as UTC.
+
+An abstract type with subtypes rather than an `@enum` like [`UnitSystem`](@ref),
+because two of the four carry a payload.
+
+# A spelling, not a grid
+
+A reference does not change how the grid is *stepped*: `resolution` and
+`interval` are durations, so an hourly series has hourly **instants** whatever
+its reference says. Rendering an hourly `America/Denver` series across the
+November fall-back gives `01:00-06:00`, `01:00-07:00`, `02:00-07:00` — two
+identical wall clocks, two distinct instants, correctly ordered.
+
+A *local-clock* grid — hourly by the clock, so a 23-hour day in March and a
+25-hour one in November — is a different thing and is inexpressible in
+[`SingleTimeSeries`](@ref) and the dense forecasts, whose grid is a fixed count
+of milliseconds. Use [`NonSequentialTimeSeries`](@ref), which carries an explicit
+instant per value.
+
+For the same reason a calendar `Month`/`Year` period steps on the **UTC**
+calendar, not the reference's — TimeZones.jl steps the local clock, so the two
+disagree by an hour at each DST transition. The store warns when a calendar
+period meets a zoned reference.
+
+# Inference
+
+You do not normally construct these. A bare `Dates.DateTime` is a wall clock and
+records [`ZonelessReference`](@ref); a `TimeZones.ZonedDateTime` records the
+spelling its zone names — `UTC` as [`UTCReference`](@ref), any other
+`FixedTimeZone` as [`FixedOffsetReference`](@ref), and a `VariableTimeZone` as
+[`ZoneReference`](@ref) carrying its IANA name. Pass `time_reference=` to a
+constructor to override.
+
+# Reading
+
+Reads keep returning a `DateTime` holding the **instant**, unchanged, with the
+reference beside it on the series and on [`TimeSeriesMetadata`](@ref). Returning
+a `ZonedDateTime` instead would make the return type depend on whether the caller
+had loaded TimeZones, and `zdt == dt` throws in Julia — so the two pieces stay
+separate, and `using TimeZones` adds a fusing helper
+([`zoned_timestamp`](@ref)) that puts them back together losslessly.
+"""
+abstract type TimeReference end
+
+"""
+    UTCReference()
+
+An instant, written as UTC. Distinct from `ZoneReference("UTC")`: the two render
+identically forever, and the difference is only in what the catalog reports back
+— which is the point of recording a spelling at all.
+"""
+struct UTCReference <: TimeReference end
+
+"""
+    FixedOffsetReference(minutes)
+
+An instant, written at a fixed offset from UTC, in **minutes east**.
+
+One offset applies to the whole series, transitions included — right for data
+genuinely written that way, and wrong for a local series that crosses a DST
+boundary, which wants [`ZoneReference`](@ref) instead.
+"""
+struct FixedOffsetReference <: TimeReference
+    minutes::Int
+    function FixedOffsetReference(minutes::Integer)
+        # Compared as the integer that came in, before any conversion. `abs`
+        # cannot represent `-typemin(Int)`, so `abs(Int(typemin(Int)))` is
+        # `typemin(Int)` again -- negative, and therefore *below* the bound,
+        # which let the least plausible offset there is through. Bounding the
+        # original value also turns an oversized `BigInt` into this error rather
+        # than an `InexactError` from the conversion.
+        -24 * 60 < minutes < 24 * 60 || throw(
+            InvalidParameterError(
+                "time reference offset $minutes minutes is not a real UTC offset; " *
+                "it must be strictly within a day of UTC",
+            ),
+        )
+        return new(Int(minutes))
+    end
+end
+
+"""
+    ZoneReference(name)
+
+An instant, written in a named IANA zone (`"America/Denver"`). The name is held
+opaquely: the store records it and never resolves it.
+
+Rendering a stored instant in a named zone depends on the tz database version, so
+a retroactive rule change moves the displayed local time. The store records the
+instant; the label is a rendering hint.
+"""
+struct ZoneReference <: TimeReference
+    name::String
+    function ZoneReference(name::AbstractString)
+        s = String(name)
+        # Shape only, mirroring `TimeReference::validate` in the Rust core.
+        # Existence is deliberately *not* checked here: `add_time_series!` audits
+        # the name against TimeZones' database and warns, because gating would
+        # refuse legitimate data whenever IANA moves ahead of whichever copy
+        # happened to be asked.
+        isempty(s) && throw(InvalidParameterError("time reference zone name is empty"))
+        ncodeunits(s) <= 64 || throw(
+            InvalidParameterError(
+                "time reference zone name is $(ncodeunits(s)) bytes, over the 64-byte " *
+                "limit; no IANA name is anywhere near that long",
+            ),
+        )
+        # The load-bearing check: one catalog column holds all four spellings, so
+        # a zone name must not read as either literal or as an offset.
+        (s == "utc" || s == "zoneless" || _offset_minutes(s) !== nothing) && throw(
+            InvalidParameterError(
+                "$(repr(s)) is the spelling of a non-zone time reference, so it cannot " *
+                "also be a zone name (the IANA zone is spelled \"UTC\")",
+            ),
+        )
+        occursin(r"^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z][A-Za-z0-9_+-]*){0,2}$", s) || throw(
+            InvalidParameterError(
+                "time reference zone name $(repr(s)) is not shaped like an IANA name " *
+                "(slash-separated components of letters, digits, '_', '+' or '-', each " *
+                "starting with a letter), e.g. \"America/Denver\"",
+            ),
+        )
+        return new(s)
+    end
+end
+
+"""
+    ZonelessReference()
+
+A wall clock. Names no instant; the store holds it as if UTC and hands it back
+unlabelled.
+"""
+struct ZonelessReference <: TimeReference end
+
+# The catalog / ABI spelling of a reference -- `TimeReference::as_storage_string`
+# in the Rust core. One string carries all four unambiguously because the core
+# refuses a zone name that reads as an offset or as either literal.
+_time_reference_str(::Nothing) = nothing
+_time_reference_str(::UTCReference) = "utc"
+_time_reference_str(::ZonelessReference) = "zoneless"
+_time_reference_str(r::ZoneReference) = r.name
+function _time_reference_str(r::FixedOffsetReference)
+    sign = r.minutes < 0 ? "-" : "+"
+    total = abs(r.minutes)
+    return string(sign, lpad(total ÷ 60, 2, '0'), ":", lpad(total % 60, 2, '0'))
+end
+
+# Minutes east for an offset spelling (`-07:00`, `-0700`, `-07`), or `nothing`
+# if the string is not an offset at all -- which is also how `ZoneReference`
+# proves a zone name is not one in disguise.
+function _offset_minutes(s::AbstractString)
+    m = match(r"^([+-])(\d{2}):?(\d{2})?$", String(s))
+    m === nothing && return nothing
+    hours = parse(Int, m.captures[2])
+    minutes = m.captures[3] === nothing ? 0 : parse(Int, m.captures[3])
+    (hours <= 23 && minutes <= 59) || return nothing
+    total = hours * 60 + minutes
+    return m.captures[1] == "-" ? -total : total
+end
+
+# Inverse of `_time_reference_str`. The literals and the offset grammar are tried
+# before the zone name, in the same order `ZoneReference` rules out, so parsing
+# and validation cannot disagree about which spelling a string names.
+function _parse_time_reference(s::AbstractString)
+    str = String(s)
+    str == "utc" && return UTCReference()
+    str == "zoneless" && return ZonelessReference()
+    offset = _offset_minutes(str)
+    offset === nothing || return FixedOffsetReference(offset)
+    return ZoneReference(str)
+end
+
+_time_reference(::Nothing) = nothing
+_time_reference(r::TimeReference) = r
+_time_reference(s::AbstractString) = _parse_time_reference(s)
+
+# The default of every constructor's `time_reference=`: the caller said nothing,
+# so the spelling is inferred from the timestamp handed in. Distinct from
+# `nothing`, which is a *declaration* that the spelling is unspecified -- which
+# is what a read passes back when the catalog column is NULL. Collapsing the two
+# would make a series written by any other binding without a reference read back
+# in Julia as a wall clock, and `add_time_series!` would then write that
+# invention back to the store.
+struct _Inferred end
+const INFERRED = _Inferred()
+
+# What a constructor's `time_reference=` accepts. `_Inferred` is in the union so
+# the default is admissible; it is internal and nobody constructs one.
+const TimeReferenceArg = Union{Nothing, TimeReference, AbstractString, _Inferred}
+
+"""
+    is_zoneless(reference) -> Bool
+
+Whether `reference` is a wall clock rather than an instant. `false` for
+`nothing`: an unspecified spelling groups with the zoned ones, which is what the
+query-bound and mixed-selection rules split on.
+"""
+is_zoneless(::Nothing) = false
+is_zoneless(r::TimeReference) = r isa ZonelessReference
+
+"""
+    zoned_timestamp(instant, reference) -> ZonedDateTime
+    zoned_timestamp(series) -> ZonedDateTime
+    zoned_timestamp(metadata) -> ZonedDateTime
+
+Fuse a read instant back together with the spelling it was written in.
+
+Reads return a `DateTime` holding the instant and a [`TimeReference`](@ref)
+beside it, because widening the return type would make it depend on package load
+order and would break every comparison against a `DateTime` literal. This is the
+opt-in way to put the two halves back together, and it is **lossless**: the
+instant plus the zone name reconstructs the exact value written, including which
+side of a fall-back hour it was on.
+
+Requires `using TimeZones` — the method lives in the package extension, so the tz
+database is a cost only for callers who want this. Throws for a
+[`ZonelessReference`](@ref) series, whose timestamps name no instant, and for a
+series that recorded no reference at all.
+
+```julia
+using TimeZones
+series = get_time_series(SingleTimeSeries, store, key)
+zoned_timestamp(series)   # 2024-01-01T00:00:00-07:00
+```
+"""
+function zoned_timestamp end
+
+function zoned_timestamp(::DateTime, ::TimeReference)
+    return throw(
+        InvalidParameterError(
+            "building a ZonedDateTime needs the TimeZones package and the tz database " *
+            "it installs; run `using TimeZones` first, which loads the conversion.",
+        ),
+    )
+end
+
+function zoned_timestamp(instant::DateTime, ::Nothing)
+    return throw(
+        InvalidParameterError(
+            "this series recorded no time_reference, so there is no spelling to render " *
+            "$instant in. It is still the instant that was stored; label it yourself if " *
+            "you know what it was written as.",
+        ),
+    )
+end
+
+# Whether this session's tz database knows `name`. `true` without one: the audit
+# is a warning, and a layer with no database has nothing to warn about.
+#
+# Untyped on purpose. `InfraStoreTimeZonesExt` adds the real check on
+# `::AbstractString`, and an extension may only add methods *more specific* than
+# the ones it finds -- a same-signature definition is a method overwrite, which
+# precompilation refuses outright.
+_zone_is_known(_name) = true
+
+# Warn about a zone name the loaded database does not have, on the write path.
+#
+# A warning, never a gate. Gating would refuse legitimate data whenever IANA's
+# database moves ahead of whichever copy happened to be asked -- a caller whose
+# TimeZones artifact already has `America/Coyhaique` would be blocked by a store
+# whose own copy is a release behind. The instants are stored either way.
+function _audit_zone(reference)
+    reference isa ZoneReference || return reference
+    _zone_is_known(reference.name) || @warn(
+        "time_reference names an IANA zone this session's tz database does not have; " *
+            "the instants are stored either way, but rendering them in that zone needs a " *
+            "database that knows it",
+        zone = reference.name,
+    )
+    return reference
+end
+
 # ---- Errors ---------------------------------------------------------------
 
 abstract type TimeSeriesException <: Exception end

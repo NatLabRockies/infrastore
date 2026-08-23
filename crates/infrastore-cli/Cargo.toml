@@ -25,6 +25,15 @@ vendored = ["infrastore-core/vendored"]
 
 [dependencies]
 chrono = { workspace = true }
+# The one place in the system that runs the *local -> instant* direction: the
+# CLI is handed text where every other binding is handed an already-resolved
+# datetime, so `--assume-timezone America/Denver` has to resolve a wall clock
+# itself. Deliberately confined here -- it stays out of `infrastore-core`, and
+# therefore out of the Python wheel and the FFI cdylib, whose host languages
+# already ship a tz database. `filter-by-regex` would shrink the bundled
+# database and is wrong for a general-purpose CLI, which cannot know which zones
+# its users have.
+chrono-tz = "0.10"
 clap = { workspace = true, features = ["env", "color"] }
 clap_complete = "4"
 csv = { workspace = true }

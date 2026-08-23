@@ -1,7 +1,8 @@
 //! Shared rendering of metadata fields, so every command spells a feature map,
 //! a period, or a content hash the same way.
 
-use infrastore_core::{FeatureValue, Features, TimeSeriesMetadata};
+use chrono::{DateTime, FixedOffset, Utc};
+use infrastore_core::{FeatureValue, Features, TimeReference, TimeSeriesMetadata};
 use serde_json::{Map, Value, json};
 
 use crate::parse;
@@ -101,4 +102,66 @@ pub fn identity_line(m: &TimeSeriesMetadata) -> String {
         features_str(&m.features),
         short_hash(&m.data_hash),
     )
+}
+
+/// Render a stored instant the way the series' own [`TimeReference`] spells it.
+///
+/// The store holds instants; this is the one place the CLI turns one back into
+/// the spelling it arrived in, so a value printed by `get`, `list`, `info`, or
+/// `export` reads as it was written rather than being relabelled UTC.
+///
+/// * `Utc` and an unset reference → RFC 3339 with `Z`.
+/// * `FixedOffset` → RFC 3339 at that offset — the offset the file carried,
+///   given back rather than consumed.
+/// * `Zone` → RFC 3339 at the zone's offset *for that instant*, so a series
+///   crossing a daylight-saving transition renders both sides correctly. An
+///   unknown zone name falls back to `Z`: the instant is still right, and only
+///   this build's tz database cannot place it.
+/// * `Zoneless` → no offset at all, because a wall clock names no instant and a
+///   trailing `Z` would claim one.
+pub fn render_timestamp(t: DateTime<Utc>, reference: Option<&TimeReference>) -> String {
+    match reference {
+        None | Some(TimeReference::Utc) => t.to_rfc3339(),
+        Some(TimeReference::Zoneless) => t.naive_utc().format("%Y-%m-%dT%H:%M:%S%.f").to_string(),
+        Some(TimeReference::FixedOffset(minutes)) => match FixedOffset::east_opt(minutes * 60) {
+            Some(offset) => t.with_timezone(&offset).to_rfc3339(),
+            None => t.to_rfc3339(),
+        },
+        Some(TimeReference::Zone(name)) => match name.parse::<chrono_tz::Tz>() {
+            Ok(tz) => t.with_timezone(&tz).to_rfc3339(),
+            Err(_) => t.to_rfc3339(),
+        },
+    }
+}
+
+/// [`render_timestamp`] over a vector.
+pub fn render_timestamps(
+    timestamps: &[DateTime<Utc>],
+    reference: Option<&TimeReference>,
+) -> Vec<String> {
+    timestamps
+        .iter()
+        .map(|t| render_timestamp(*t, reference))
+        .collect()
+}
+
+/// The catalog spelling of a reference, or `"-"` for unspecified — the table
+/// cell, matching how the other optional descriptors render.
+pub fn reference_cell(reference: Option<&TimeReference>) -> String {
+    reference
+        .map(TimeReference::as_storage_string)
+        .unwrap_or_else(|| "-".to_string())
+}
+
+/// Whether this build's tz database recognizes a reference's zone name.
+///
+/// `true` for every non-zone spelling, and for a zone the database knows. The
+/// store deliberately does not gate on this — see `TimeReference::validate` —
+/// so `store-info` reports it instead, which is what makes a typo findable in
+/// one command rather than at some later read in some other language.
+pub fn zone_is_known(reference: &TimeReference) -> bool {
+    match reference {
+        TimeReference::Zone(name) => name.parse::<chrono_tz::Tz>().is_ok(),
+        _ => true,
+    }
 }

@@ -740,10 +740,14 @@ def test_a_zone_is_read_by_its_offset_not_by_what_it_claims_to_equal():
     ).initial_timestamp == datetime(2024, 6, 1, 12, tzinfo=timezone.utc)
 
 
-def test_naive_datetime_is_refused_inside_the_exception_hierarchy():
+def test_naive_datetime_is_accepted_and_returned_naive():
     naive = datetime(2024, 6, 1, 12)
-    with pytest.raises(InvalidParameterError, match="timezone-aware"):
-        SingleTimeSeries(naive, timedelta(hours=1), np.array([1.0]), "load")
+    series = SingleTimeSeries(naive, timedelta(hours=1), np.array([1.0]), "load")
+    assert series.time_reference == "zoneless"
+    # The round-trip rule this whole feature rests on: what comes out equals what
+    # went in. Naive and aware datetimes are never equal in Python, so returning
+    # an aware value here would silently break every `==` a caller writes.
+    assert series.initial_timestamp == naive
 
 
 def test_a_non_datetime_is_refused_inside_the_exception_hierarchy():

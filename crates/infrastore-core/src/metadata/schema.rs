@@ -50,6 +50,25 @@ CREATE TABLE IF NOT EXISTS time_series_associations (
     -- left without a CHECK so a third basis can land without bumping
     -- `DATA_FORMAT_VERSION`.
     unit_system       TEXT,
+    -- `TimeReference::as_storage_string`: 'utc', 'zoneless', a fixed offset
+    -- ('-07:00'), or an IANA zone name ('America/Denver'). NULL means
+    -- unspecified, which groups with the zoned spellings for query bounds but
+    -- is not a claim the timestamps were written as UTC.
+    --
+    -- One TEXT column holds all four spellings unambiguously because
+    -- `TimeReference::validate` refuses a zone name that reads as an offset or
+    -- as either literal -- shape validation in the core is what makes that true
+    -- rather than merely hoped for. Existence of a zone is deliberately not
+    -- checked anywhere: see `TimeReference::validate`.
+    --
+    -- Deliberately NOT indexed, and this does not change now that
+    -- `ListFilter::zoneless` exists. The `idx_component_field` partial-index
+    -- pattern is wrong here twice over: `WHERE time_reference IS NOT NULL` would
+    -- exclude exactly the NULL rows that filter has to return, and the column is
+    -- low-cardinality -- a handful of distinct values across a whole store -- so
+    -- it is not selective enough to earn an index. In practice it is combined
+    -- with `owner_id` or `name`, which are indexed.
+    time_reference    TEXT,
     -- The field on the owning component (or supplemental attribute) whose value
     -- these values are the time-varying form of, e.g. 'max_active_power'. Free
     -- form and never interpreted here: it names a field in the consumer's own
@@ -390,7 +409,7 @@ SELECT id, owner_id, owner_type,
                              ELSE 'unknown(' || time_series_type || ')' END AS time_series_type,
        name,
        initial_timestamp, resolution, length, horizon, interval, count,
-       units, quantity_kind, unit_system, component_field,
+       units, quantity_kind, unit_system, time_reference, component_field,
        element_type, element_shape, application_data,
        lower(hex(data_hash))       AS data_hash,
        lower(hex(features_hash))   AS features_hash,

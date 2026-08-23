@@ -92,6 +92,7 @@ const LIST_HEADERS_WIDE: &[&str] = &[
     "Element Shape",
     "Quantity Kind",
     "Unit System",
+    "Time Reference",
     "Component Field",
     "Application Data",
 ];
@@ -121,7 +122,10 @@ fn list_row(m: &TimeSeriesMetadata, wide: bool) -> Vec<String> {
     ];
     if wide {
         row.extend([
-            fields::opt(m.initial_timestamp.map(|t| t.to_rfc3339())),
+            fields::opt(
+                m.initial_timestamp
+                    .map(|t| fields::render_timestamp(t, m.time_reference.as_ref())),
+            ),
             fields::opt_period(m.horizon),
             fields::opt(m.count),
             format!("{:?}", m.element_shape),
@@ -129,6 +133,7 @@ fn list_row(m: &TimeSeriesMetadata, wide: bool) -> Vec<String> {
             m.unit_system
                 .map(|u| u.as_str().to_string())
                 .unwrap_or_else(|| "-".to_string()),
+            fields::reference_cell(m.time_reference.as_ref()),
             m.component_field.clone().unwrap_or_else(|| "-".to_string()),
             m.application_data
                 .clone()
@@ -158,7 +163,10 @@ fn list_json(m: &TimeSeriesMetadata) -> Value {
     );
     obj.insert(
         "initial_timestamp".into(),
-        json!(m.initial_timestamp.map(|t| t.to_rfc3339())),
+        json!(
+            m.initial_timestamp
+                .map(|t| fields::render_timestamp(t, m.time_reference.as_ref()))
+        ),
     );
     obj.insert("length".into(), json!(m.length));
     obj.insert("horizon".into(), json!(m.horizon.map(parse::format_period)));
@@ -173,6 +181,14 @@ fn list_json(m: &TimeSeriesMetadata) -> Value {
     obj.insert(
         "unit_system".into(),
         json!(m.unit_system.map(|u| u.as_str())),
+    );
+    obj.insert(
+        "time_reference".into(),
+        json!(
+            m.time_reference
+                .as_ref()
+                .map(infrastore_core::TimeReference::as_storage_string)
+        ),
     );
     obj.insert("component_field".into(), json!(m.component_field));
     obj.insert("application_data".into(), json!(m.application_data));
@@ -300,7 +316,7 @@ pub fn get(
                 .map(|i| {
                     s.resolution
                         .add_to(s.initial_timestamp, i as i64)
-                        .map(|t| t.to_rfc3339())
+                        .map(|t| fields::render_timestamp(t, s.time_reference.as_ref()))
                         .ok_or_else(|| {
                             format!(
                                 "timestamp overflow at grid index {i} (initial {}, \
@@ -314,7 +330,8 @@ pub fn get(
             render_sequential(&meta, &ts, &s.data, format, opts.rows)
         }
         TimeSeriesData::NonSequentialTimeSeries(ns) => {
-            let ts: Vec<String> = ns.timestamps.iter().map(|t| t.to_rfc3339()).collect();
+            let ts: Vec<String> =
+                fields::render_timestamps(&ns.timestamps, ns.time_reference.as_ref());
             reject_forecast_flags(opts, &meta)?;
             render_sequential(&meta, &ts, &ns.data, format, opts.rows)
         }
@@ -404,7 +421,10 @@ pub fn info(
         rows.push(("resolution".into(), json!(parse::format_period(r))));
     }
     if let Some(t) = meta.initial_timestamp {
-        rows.push(("initial_timestamp".into(), json!(t.to_rfc3339())));
+        rows.push((
+            "initial_timestamp".into(),
+            json!(fields::render_timestamp(t, meta.time_reference.as_ref())),
+        ));
     }
     if let Some(l) = meta.length {
         rows.push(("length".into(), json!(l)));
@@ -429,6 +449,9 @@ pub fn info(
     }
     if let Some(u) = meta.unit_system {
         rows.push(("unit_system".into(), json!(u.as_str())));
+    }
+    if let Some(r) = &meta.time_reference {
+        rows.push(("time_reference".into(), json!(r.as_storage_string())));
     }
     if let Some(c) = &meta.component_field {
         rows.push(("component_field".into(), json!(c)));
@@ -835,7 +858,10 @@ pub fn forecast_csv_rows(
             let target = resolution
                 .add_to(issue, h as i64)
                 .ok_or_else(|| format!("timestamp overflow at window {c} step {h}"))?;
-            let mut row = vec![issue.to_rfc3339(), target.to_rfc3339()];
+            let mut row = vec![
+                fields::render_timestamp(issue, meta.time_reference.as_ref()),
+                fields::render_timestamp(target, meta.time_reference.as_ref()),
+            ];
             for s in 0..num_series {
                 for j in 0..per_step {
                     let idx = (((s * horizon_len + h) * count) + c) * per_step + j;
@@ -876,6 +902,9 @@ fn meta_fields(meta: &TimeSeriesMetadata, arr: &TypedArray, obj: &mut Map<String
     if let Some(u) = meta.unit_system {
         obj.insert("unit_system".into(), json!(u.as_str()));
     }
+    if let Some(r) = &meta.time_reference {
+        obj.insert("time_reference".into(), json!(r.as_storage_string()));
+    }
     if let Some(c) = &meta.component_field {
         obj.insert("component_field".into(), json!(c));
     }
@@ -886,7 +915,10 @@ fn meta_fields(meta: &TimeSeriesMetadata, arr: &TypedArray, obj: &mut Map<String
         obj.insert("resolution".into(), json!(parse::format_period(r)));
     }
     if let Some(t) = meta.initial_timestamp {
-        obj.insert("initial_timestamp".into(), json!(t.to_rfc3339()));
+        obj.insert(
+            "initial_timestamp".into(),
+            json!(fields::render_timestamp(t, meta.time_reference.as_ref())),
+        );
     }
     if let Some(h) = meta.horizon {
         obj.insert("horizon".into(), json!(parse::format_period(h)));

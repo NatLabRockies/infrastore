@@ -78,6 +78,7 @@ message TimeSeriesKey {
   optional uint64 length                     = 9;
   optional string horizon                    = 10;  // ISO-8601 duration
   optional uint64 count                      = 11;
+  optional string time_reference             = 12;  // how the timestamps were spelled
 }
 
 message TimeSeriesMetadata {
@@ -108,6 +109,9 @@ message TimeSeriesMetadata {
   optional string component_field           = 24;  // owning component's field, free-form
   //   `ListReq.component_field` filters on this. A row that declares none
   //   matches no value, so it cannot select the rows that left it unset.
+  optional string time_reference            = 25;  // "utc" | "zoneless" | "-07:00" | IANA name
+  //   How this series' timestamps were spelled. Absent means unspecified,
+  //   which is NOT a claim they were written as UTC.
 }
 ```
 
@@ -124,13 +128,15 @@ message ListReq {
   optional OwnerCategory  owner_category   = 7;
   optional string         interval         = 8;   // ISO-8601 duration
   optional string         component_field  = 9;   // exact, case-sensitive
+  optional bool           zoneless         = 10;  // coherence predicate; see below
 }
 message ListResp { repeated TimeSeriesMetadata metadata = 1; }
 
 message GetReq {
-  TimeSeriesKey   key           = 1;
-  optional string start_rfc3339 = 2;   // optional time-axis slice; all-or-nothing with end
-  optional string end_rfc3339   = 3;
+  TimeSeriesKey   key             = 1;
+  optional string start_rfc3339   = 2;   // optional time-axis slice; all-or-nothing with end
+  optional string end_rfc3339     = 3;
+  optional bool   bounds_zoneless = 4;   // how the client spelled those bounds; see below
 }
 message GetResp {
   string          initial_timestamp_rfc3339 = 1;
@@ -150,6 +156,7 @@ message GetResp {
   uint64          count                     = 13;
   repeated double percentiles               = 14;  // Probabilistic only
   uint64          scenario_count            = 15;  // Scenarios only
+  optional string time_reference            = 21;  // how the timestamps were spelled
 }
 
 message KeysReq  { int64 owner_id = 1; OwnerCategory owner_category = 2; }
@@ -190,6 +197,26 @@ message VerifyResp { repeated string errors = 1; }
 or neither to fetch the whole series. Setting exactly one is rejected with `InvalidArgument`
 (`"start_rfc3339 and end_rfc3339 must be supplied together"`). Each value must parse as RFC 3339; a
 malformed timestamp is also `InvalidArgument`.
+
+## Time References
+
+Every metadata and key message carries an optional `time_reference` recording how a series'
+timestamps were **spelled**: `"utc"`, `"zoneless"`, a fixed offset (`"-07:00"`), or an IANA zone
+name (`"America/Denver"`). Absent means _unspecified_, which is not a claim they were written as
+UTC. It is descriptive, so it is not part of a key's identity. An unparseable value is a convert
+error rather than a silent absence: "unspecified" and "a spelling this build cannot read" must not
+look alike.
+
+Timestamps stay RFC 3339 UTC on the wire whatever the reference says — the reference is the label,
+applied by the client. `GetReq.bounds_zoneless` and `BulkReadReq.bounds_zoneless` carry how the
+client spelled its slice bounds, because the wire form is identical either way: a zoneless client
+sends the wall clock read as if UTC, exactly as the store holds one. The server refuses a bound
+whose spelling the series cannot answer (`InvalidArgument`) rather than coercing it, and refuses a
+ranged bulk read whose selection mixes zoneless series with instant-bearing ones. `ListReq.zoneless`
+is the constructive half — `true` selects the wall-clock series, `false` selects everything that
+accepts an instant bound, including the rows that recorded no reference.
+
+See [Time references](../explanation/data-model.md#time-references) for the full rules.
 
 ## Forecasts Over gRPC
 
