@@ -1,0 +1,508 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Embedding in a Parent Package - infrastore Documentation</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Time-series storage for power-systems and energy simulations, with Rust, Python, and Julia bindings">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../custom.css">
+        <link rel="stylesheet" href="../pagetoc.css">
+        <link rel="stylesheet" href="../version-selector.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">infrastore Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/NatLabRockies/infrastore" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/NatLabRockies/infrastore/tree/v0.9.0/docs/src/guides/embedding.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="embedding-in-a-parent-package"><a class="header" href="#embedding-in-a-parent-package">Embedding in a Parent Package</a></h1>
+<p>This guide is for developers of a package that uses infrastore as the time-series layer behind its
+own component model — the shipped examples are <a href="https://github.com/NatLabRockies/infrasys">infrasys</a>
+(Python) and <a href="https://github.com/Sienna-Platform/InfrastructureSystems.jl">InfrastructureSystems.jl</a>
+(Julia). It collects the contracts such a package has to honor and the patterns both consumers
+already use, in one place. The per-language guides (<a href="./python.html">Python</a>, <a href="./julia.html">Julia</a>,
+<a href="./rust.html">Rust</a>) show each call; this page says which calls to reach for and why. The reasoning
+behind the trade-offs is in <a href="../explanation/design-choices.html">Design Choices</a>.</p>
+<h2 id="what-the-store-owns-and-what-you-do"><a class="header" href="#what-the-store-owns-and-what-you-do">What the Store Owns, and What You Do</a></h2>
+<p>infrastore is deliberately narrow. It stores arrays, associates each one with an owner, and records
+a few relationships between owners. Everything that makes those owners <em>mean</em> something lives in the
+parent package.</p>
+<div class="table-wrapper"><table><thead><tr><th>Concern</th><th>Owner</th></tr></thead><tbody>
+<tr><td>Array bytes, dedup, hashing, compression</td><td>infrastore</td></tr>
+<tr><td>Which series belongs to which owner, under what key</td><td>infrastore</td></tr>
+<tr><td>Component ↔ attribute and parent ↔ child edges</td><td>infrastore</td></tr>
+<tr><td>The components and attributes themselves</td><td><strong>parent package</strong></td></tr>
+<tr><td>The type hierarchy (abstract types, subtypes)</td><td><strong>parent package</strong></td></tr>
+<tr><td>Mapping your object identities to integer ids</td><td><strong>parent package</strong></td></tr>
+<tr><td>Unit conversion, per-unit bases</td><td><strong>parent package</strong></td></tr>
+<tr><td>Partial / fuzzy lookups over features</td><td><strong>parent package</strong></td></tr>
+</tbody></table>
+</div>
+<p>The store never parses a component, never walks a type tree, and never rescales a value. Every
+filter it offers takes concrete strings and exact scalars; a parent package that exposes anything
+richer builds it on top.</p>
+<h2 id="map-your-model-onto-the-catalog"><a class="header" href="#map-your-model-onto-the-catalog">Map Your Model Onto the Catalog</a></h2>
+<p>A series is addressed by an <strong>owner</strong> plus a <strong>key</strong>
+(<a href="../explanation/data-model.html#keys">Data Model § Keys</a>). Deciding how your objects project onto
+those fields is the first integration decision, and the one hardest to change later because it is
+written into every user's artifact.</p>
+<p><strong><code>owner_id</code> is a stable <code>i64</code>.</strong> The store keys on it and never sees your object identities. If
+your components are identified by UUIDs (both shipped consumers are), you allocate an integer per
+component, persist that mapping alongside the store, and keep it stable across save/load — the store
+cannot reconstruct it. Component ids and supplemental-attribute ids are independent streams, so the
+same integer may name one of each; the <strong><code>owner_category</code></strong> (<code>Component</code> / <code>SupplementalAttribute</code>)
+is part of the owner identity and every owner-scoped call takes it.</p>
+<p><strong><code>owner_type</code> is the concrete type name and nothing more.</strong> It is descriptive (not part of the
+uniqueness constraint) and the store has no view of subtyping, so a query for "every <code>Generator</code>"
+must expand the abstract type into its concrete subtypes yourself and pass each one — this is what
+<code>get_all_subtype_names</code> does on the InfrastructureSystems.jl side. An empty type list is a
+deliberate "none of these" and matches nothing.</p>
+<p><strong><code>name</code> identifies, <code>component_field</code> describes.</strong> <code>name</code> is part of the key; <code>component_field</code>
+names the field on the owning component whose time-varying form these values are
+(<code>"max_active_power"</code>). They often coincide by convention, but a component may carry several series
+for one field — an actual and a forecast, several weather years — and only <code>name</code> plus <code>features</code>
+distinguishes them. Set <code>component_field</code> whenever your model knows it: it is the one descriptor
+that is also a filter, and a parent package that wants "every series that varies <code>rating</code>" gets it
+for free.</p>
+<p><strong><code>features</code> are typed scalars</strong> (<code>int</code> / <code>float</code> / <code>bool</code> / <code>str</code>) and part of the key. A handful
+of names are <a href="../explanation/data-model.html#reserved-feature-names">reserved</a> because consumers
+spread feature maps into keyword queries; the store refuses them on write.</p>
+<p><strong><code>units</code>, <code>quantity_kind</code>, <code>unit_system</code></strong> describe the values and affect neither identity nor
+storage. <code>unit_system</code> is a label the store never acts on — <code>component_base</code> means "per-unit against
+a base the owning component holds in <em>your</em> object graph", and converting back is your job. Unset
+means <em>unspecified</em>, which is not the same as <code>natural_units</code>; do not read one as the other. See
+<a href="../explanation/data-model.html#optional-descriptors">Optional Descriptors</a>.</p>
+<p><strong><code>time_reference</code> records how the timestamps were spelled</strong> — an instant in UTC, an instant at a
+fixed offset, an instant in a named IANA zone, or a wall clock naming no instant. Each binding
+infers it from the input type, so nothing takes a new argument; a native Rust caller declares it,
+having no naive datetime type to infer from. It changes nothing about the stored instants, the grid,
+or either content hash — but the store does hold a series to its claim: a query bound must be
+spelled the way the series is, and a zoneless series cannot share one reader axis or one ranged bulk
+read with instant-bearing ones. See <a href="../explanation/data-model.html#time-references">Time references</a>.</p>
+<p><strong><code>application_data</code> is yours.</strong> It is an opaque payload stored and returned verbatim, so a parent
+package can carry whatever it needs per association (a serialized type tag, a provenance record)
+without the store knowing. Because the store never validates it, version it yourself if its shape
+may change.</p>
+<h2 id="exact-keys-subset-filters"><a class="header" href="#exact-keys-subset-filters">Exact Keys, Subset Filters</a></h2>
+<p>The two lookup families match features differently, and a parent package that offers its own key
+resolution must know which it is calling:</p>
+<ul>
+<li>A <strong><code>TimeSeriesKey</code></strong> — whether built from attributes or returned by an add — is matched
+<strong>exactly</strong>: every field including the full feature map. <code>get_time_series(key)</code>,
+<code>has_time_series(key)</code>, <code>remove_time_series(key)</code> and the attribute-based getters behind them find
+one row or none.</li>
+<li>A <strong>list filter</strong> (<code>list_time_series</code>, <code>list_keys</code>, <code>has_any_time_series</code>, <code>remove_by_filter</code>,
+<code>list_names</code>, …) matches <code>features</code> as a <strong>subset</strong>: a series matches when it carries every
+requested pair, whatever else it carries.</li>
+</ul>
+<p>InfrastructureSystems.jl resolves user queries by subset, so it cannot delegate that resolution to a
+keyed lookup; it lists with the filter and then decides what more than one match means. A parent
+package that inherits the same semantics should do the same, and treat ambiguity as its own error to
+raise — the store will happily return two rows.</p>
+<p>Two more identity facts that surface in parent-package code:</p>
+<ul>
+<li>A <code>DeterministicSingleTimeSeries</code> is derived from a stored <code>SingleTimeSeries</code> with
+<code>transform_single_time_series</code> and <strong>reads back as a <code>Deterministic</code></strong>. The tag stays visible in
+keys, metadata, and counts, and a <code>Deterministic</code> filter matches both. Your reads should not
+special-case it; your catalog displays may.</li>
+<li>Descriptors are outside the key, so two adds that differ only in <code>units</code> or <code>application_data</code> are
+a duplicate. Changing a descriptor means remove and re-add.</li>
+</ul>
+<h2 id="the-store-lifecycle-inside-a-system-object"><a class="header" href="#the-store-lifecycle-inside-a-system-object">The Store Lifecycle Inside a System Object</a></h2>
+<p>Both consumers follow the same shape, and the API was shaped around it. The arrays are never held in
+RAM — a system with hundreds of thousands of series does not fit — so the working store is on-disk
+from the start, in a scratch directory that lives as long as the system object.</p>
+<h3 id="build-scratch-directory-in-memory-catalog"><a class="header" href="#build-scratch-directory-in-memory-catalog">Build: scratch directory, in-memory catalog</a></h3>
+<pre><code class="language-python"># Python
+store = Store.create(scratch / "time_series.h5", catalog="memory")
+</code></pre>
+<pre><code class="language-julia"># Julia
+store = Store(; path=joinpath(scratch, "time_series.h5"), catalog=:memory)
+</code></pre>
+<p><code>catalog="memory"</code> keeps the SQLite half in RAM and skips the per-commit journaling an attached
+catalog pays. That is the right trade for a store beside volatile in-process state: a crash loses
+the system under construction regardless, so durability of the scratch catalog buys nothing. Arrays
+still stream to the HDF5 file, so memory use does not grow with the data. The scratch directory
+holds <strong>no <code>.sqlite</code></strong> until the first save — a half-artifact by design, and one the store refuses
+to open as attached later, because arrays without a catalog naming them are not a store. See
+<a href="../explanation/storage-model.html#where-the-catalog-lives">Where the Catalog Lives</a>.</p>
+<p>Use <code>in_memory=True</code> (no file at all) for unit tests and for stores you know are small. It is not a
+substitute for the scratch-directory store in a real system.</p>
+<h3 id="save-one-call-atomic-pair"><a class="header" href="#save-one-call-atomic-pair">Save: one call, atomic pair</a></h3>
+<pre><code class="language-python">store.persist_to(dest)          # Python
+</code></pre>
+<pre><code class="language-julia">persist!(store, dest)           # Julia
+</code></pre>
+<p><code>persist_to</code> writes both halves to uniquely named temporaries, fsyncs, and renames them into place,
+stamping the pair with a fresh generation so a save interrupted between the two renames is detected
+on the next open (<code>MismatchedArtifact</code>) rather than read as a valid store. This replaced the
+copy-both-files-by-hand dance both consumers once carried, including the close/reopen needed for
+HDF5's Windows file lock. Two things to carry into your own save path:</p>
+<ul>
+<li><strong>A failed save may have destroyed the destination.</strong> The renames replace whatever was there.
+Retry from the still-live store rather than assuming the old artifact survived.</li>
+<li><strong>Saving an attached store onto its own path is a no-op</strong>, while the in-memory-catalog case is the
+real work — the arrays are already at <code>path</code> and the save is what writes the catalog beside them.
+<code>persist_catalog</code> does only that half when the arrays are already where they belong, and is a
+checkpoint rather than a mode switch: the catalog stays in RAM afterwards.</li>
+</ul>
+<h3 id="load-for-editing-always-a-copy"><a class="header" href="#load-for-editing-always-a-copy">Load for editing: always a copy</a></h3>
+<pre><code class="language-python">store = Store.open_copy(src, scratch / "time_series.h5", catalog="memory")   # Python
+</code></pre>
+<pre><code class="language-julia">store = open_copy(src, joinpath(scratch, "time_series.h5"); catalog=:memory)  # Julia
+</code></pre>
+<p><code>open</code> defaults to read-write in every binding, and a read-write open on a user's artifact is the
+one way this library will damage a file they care about: HDF5 has no journal and no repair tool, so
+an interrupted in-place write is unrecoverable. <code>open_copy</code> copies both halves and opens the copy;
+the original is only replaced by the final atomic rename of the next <code>persist_to</code>. Both consumers
+did this by hand before the call existed, and a test in infrasys asserts the loaded directory
+differs from the source — keep an assertion like that, because the copy is load-bearing.</p>
+<p>For a read-only load (a viewer, a reporting script), <code>open(path, read_only=True)</code> is the right call:
+nothing is copied and any mutation raises <code>ReadOnlyStoreError</code>.</p>
+<h3 id="create-refuse-to-clobber"><a class="header" href="#create-refuse-to-clobber">Create: refuse to clobber</a></h3>
+<p><code>Store.create</code> on a path that already holds either half raises <code>StoreExists</code>. The failure mode it
+prevents is a re-run build script producing an empty array file paired with last week's catalog — a
+store that opens cleanly and has nothing behind any row. Pass <code>overwrite=True</code> (<code>overwrite=true</code> in
+Julia) only on a path your package owns and means to discard. See
+<a href="../explanation/storage-model.html#protecting-a-saved-artifact">Protecting a Saved Artifact</a>.</p>
+<h3 id="close-and-move-the-pair-together"><a class="header" href="#close-and-move-the-pair-together">Close, and move the pair together</a></h3>
+<p>Close the store explicitly when the system object is done (both bindings offer a context-manager /
+do-block form). The <code>.h5</code> and <code>.h5.sqlite</code> files are one artifact: move, copy, and delete them
+together, and never ship one without the other — the paired generation stamp makes a lone half a
+<code>MismatchedArtifact</code> on open.</p>
+<h3 id="one-writer-local-disk"><a class="header" href="#one-writer-local-disk">One writer, local disk</a></h3>
+<p>A <code>Store</code> handle is not thread-safe. The Python class is <code>unsendable</code> — touching it from a thread
+other than the one that created it raises — and the Julia one is unsynchronized, so concurrent calls
+from two tasks are undefined behavior; confine a store (and any reader built from it) to one thread
+or task, or guard every call with your own lock. On disk, assume a single writer, and keep a live
+store off network filesystems — HDF5's file lock is best-effort and silently absent on Lustre, GPFS,
+and NFS, and SQLite's WAL is unsafe there too. Build locally, then copy the finished artifact to
+shared storage. See
+<a href="../explanation/storage-model.html#one-writer-and-not-on-a-network-filesystem">One writer, and not on a network filesystem</a>.</p>
+<h2 id="writing-batch-and-make-multi-step-changes-atomic"><a class="header" href="#writing-batch-and-make-multi-step-changes-atomic">Writing: Batch, and Make Multi-Step Changes Atomic</a></h2>
+<p>Two mechanisms compose, and neither substitutes for the other:</p>
+<ul>
+<li><strong>Bulk add</strong> (<code>add_time_series_bulk</code> / <code>AddBatch</code> + <code>add_time_series_bulk!</code>) commits a whole batch
+in one catalog transaction and takes the block-sized HDF5 write path. Series sharing a
+<code>(dtype, element_shape, length, resolution)</code> pack into one dataset whose chunks hold one timestamp
+across every column, which is what makes the simulation read below fast — so land same-shaped
+series in the same batch. A loop of single adds is an order of magnitude slower and fills chunks
+one column at a time.</li>
+<li><strong>Transactions</strong> (<code>with store.transaction():</code> / <code>transaction(store) do … end</code>) make several
+operations succeed or fail together. Inside one, a removal is reversible; outside one it is not,
+because the array bytes are reclaimed immediately. A transaction holds the SQLite write lock until
+it ends, and does not batch anything by itself.</li>
+</ul>
+<p>Values are <strong>immutable</strong>: there is no API to edit a value, slice, or column in place, in any
+binding. "Update this series" in a parent package is <em>add the new array, remove the old one</em> —
+inside a transaction if the user must never observe the gap. Content addressing makes the add cheap
+when the data did not actually change. See
+<a href="../explanation/design-choices.html#data-orientation-optimize-for-reading-every-component-at-one-timestamp">Design Choices</a>.</p>
+<h2 id="reading-in-a-simulation-loop"><a class="header" href="#reading-in-a-simulation-loop">Reading in a Simulation Loop</a></h2>
+<p>The layout is optimized for "every component at one timestamp", and the readers are the API for that
+access: build a <code>StaticReader</code> or <code>ForecastReader</code> once, then step it. A <code>ForecastReader</code> reads each
+distinct backing array once per step and fans it out to every component referencing it, so a
+forecast shared by a hundred components costs one decompression; <code>entry_slot</code> lets your own
+per-component work dedup the same way. The inverse access — one component's full history — is the
+slow direction, and <code>bulk_read</code> over many keys is the right call when you need it, not a loop of
+<code>get_time_series</code>. See the per-language sections:
+<a href="./python.html#per-timestamp-reads-simulation-loop">Python</a>,
+<a href="./julia.html#per-timestamp-reads-simulation-loop">Julia</a>, <a href="./rust.html">Rust</a>.</p>
+<h2 id="time"><a class="header" href="#time">Time</a></h2>
+<ul>
+<li>Every stored instant is a whole number of <strong>milliseconds</strong>; the write path raises
+<code>InvalidParameter</code> rather than truncating, because the C ABI exchanges instants as Unix
+milliseconds while Python's <code>datetime</code> is microsecond. Quantize <code>now()</code> before storing it. Query
+bounds are unconstrained.</li>
+<li><strong>Python</strong> requires timezone-aware <code>datetime</code>s everywhere and returns UTC; a naive value raises.</li>
+<li><strong>Julia</strong> treats a bare <code>DateTime</code> as UTC and returns <code>DateTime</code>; with <code>using TimeZones</code> a
+<code>ZonedDateTime</code> is accepted anywhere a timestamp goes and converted to the instant it names. Reads
+still return <code>DateTime</code>, because InfrastructureSystems.jl destructures them.</li>
+</ul>
+<p>A parent package that has a notion of local time therefore converts at its own boundary and stores
+instants. See <a href="../explanation/data-model.html#timestamp-precision">Timestamp precision</a>.</p>
+<h2 id="associations-beyond-time-series"><a class="header" href="#associations-beyond-time-series">Associations Beyond Time Series</a></h2>
+<p>The catalog records two relationship tables that have nothing to do with time series:
+supplemental-attribute attachments (component ↔ attribute, with counts and grouped summaries) and
+parent/child edges (directed component ↔ component). Both hold <strong>only the relationship</strong> — bare ids
+and type names — so a parent package keeps the objects in its own graph and uses the store as the
+index. <code>replace_owner</code> / <code>reassign</code> renumbers a component in every catalog at once. Bulk inserts are
+all-or-nothing, removals return a count (matching nothing is <code>0</code>, not an error), and the <code>*_types</code>
+filters take concrete type names, exactly like <code>owner_type</code> above. See
+<a href="../explanation/data-model.html#associations-between-entities">Associations Between Entities</a>.</p>
+<h2 id="versions-and-errors"><a class="header" href="#versions-and-errors">Versions and Errors</a></h2>
+<p><strong>Pin a minor range.</strong> The on-disk format is governed by <code>DATA_FORMAT_VERSION</code>; opening an artifact
+written by an incompatible version raises <code>IncompatibleFormat</code> rather than misreading it. The
+bindings track the workspace version, so a parent package depends on a compatible range
+(<code>infrastore&gt;=0.8,&lt;0.9</code> in <code>pyproject.toml</code>; a <code>[compat]</code> entry in <code>Project.toml</code>) and bumps it
+deliberately. Do not cite core source line numbers in your own docs — they move.</p>
+<p><strong>Map the error taxonomy, do not flatten it.</strong> Every binding exposes the core's <code>TimeSeriesError</code>
+variants as distinct types (<code>NotFound</code>, <code>DuplicateTimeSeries</code>, <code>DuplicateAssociation</code>,
+<code>InvalidParameter</code>, <code>ReadOnlyStore</code>, <code>StoreExists</code>, <code>MismatchedArtifact</code>, <code>IncompatibleFormat</code>,
+<code>Integrity</code>, …). The ones a parent package typically translates into its own exceptions are
+<code>NotFound</code> and <code>DuplicateTimeSeries</code> (user-facing), and <code>StoreExists</code> / <code>MismatchedArtifact</code> /
+<code>IncompatibleFormat</code> (artifact-level, usually re-raised with the path). See
+<a href="../reference/python-api.html#exceptions">Python exceptions</a> and
+<a href="../reference/julia-api.html#errors">Julia errors</a>.</p>
+<h2 id="testing-an-integration"><a class="header" href="#testing-an-integration">Testing an Integration</a></h2>
+<ul>
+<li>Use <code>in_memory=True</code> stores in unit tests; they exercise the same core.</li>
+<li><code>verify_integrity</code> re-hashes every array; <code>is_empty</code> is the cheap "nothing here" probe.</li>
+<li>The <code>infrastore</code> CLI reads any artifact your package writes. <code>infrastore list</code> and
+<code>infrastore info</code> are the fastest way to see what a consumer actually stored, and
+<code>infrastore diff --against</code> compares two artifacts by hash without reading arrays — a usable CI
+gate for "the rewrite produced the same store". See
+<a href="../how-to/use-cli.html">Use the <code>infrastore</code> CLI</a>.</li>
+<li>To test unreleased core changes from a consumer checkout, install the binding into the consumer's
+environment (<code>maturin develop --manifest-path crates/infrastore-py/Cargo.toml</code> with the consumer's
+venv active; <code>Pkg.develop(path=...)</code> plus <code>INFRASTORE_LIB</code> for Julia).</li>
+</ul>
+<h2 id="checklist"><a class="header" href="#checklist">Checklist</a></h2>
+<ul>
+<li><input disabled="" type="checkbox"/>
+Integer owner ids are allocated by the package, persisted with the system, and stable across
+save/load.</li>
+<li><input disabled="" type="checkbox"/>
+Abstract-type queries expand to concrete <code>owner_type</code> names before reaching the store.</li>
+<li><input disabled="" type="checkbox"/>
+Feature resolution knows whether it wants exact-key or subset semantics, and ambiguity is the
+package's error.</li>
+<li><input disabled="" type="checkbox"/>
+The working store is on disk in a scratch directory with an in-memory catalog; <code>in_memory</code>
+stores are for tests.</li>
+<li><input disabled="" type="checkbox"/>
+Save goes through <code>persist_to</code>; load-for-edit goes through <code>open_copy</code>; read-only loads pass
+<code>read_only</code>.</li>
+<li><input disabled="" type="checkbox"/>
+Multi-series writes use bulk add; multi-step changes that must be atomic use a transaction.</li>
+<li><input disabled="" type="checkbox"/>
+Timestamps are instants at millisecond precision, converted at the package boundary.</li>
+<li><input disabled="" type="checkbox"/>
+The dependency pins a compatible minor range of infrastore.</li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../guides/index.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../guides/rust.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../guides/index.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../guides/rust.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="../mermaid.min.js"></script>
+        <script src="../mermaid-init.js"></script>
+        <script src="../pagetoc.js"></script>
+        <script src="../version-selector.js"></script>
+
+
+
+    </div>
+    </body>
+</html>
