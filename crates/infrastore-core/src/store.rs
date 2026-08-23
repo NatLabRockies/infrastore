@@ -4615,27 +4615,49 @@ fn forecast_key(
 /// (including stores written by the removed netcdf backend) are rejected with
 /// an actionable error instead of being misread.
 ///
-/// Reachability is checked first, and separately. `is_hdf5_backend_file` cannot
-/// tell "this file is not an infrastore store" from "there is no file here" —
-/// it answers `false` either way — so without this a typo'd path or an
-/// unreadable directory would be reported as a netcdf-era store needing
-/// migration, which is advice about a file that does not exist. The `io::Error`
-/// kind is carried through, so a missing path and a permission-denied one stay
-/// distinguishable.
+/// Reachability is checked first, and separately, so a typo'd path or an
+/// unreadable directory is reported as the missing file it is rather than as a
+/// store of the wrong kind. The `io::Error` kind is carried through, so a
+/// missing path and a permission-denied one stay distinguishable.
+///
+/// Past that, the sniff is three-way rather than a boolean, because "this is
+/// not one of our files" and "this file would not open" call for opposite
+/// advice. Only the first can be a netcdf-era store — netcdf4 is HDF5
+/// underneath, so such a file *opens* and merely lacks our attribute. A file
+/// that will not open at all is something else entirely, and the most common
+/// something else is a store another process is holding: HDF5 takes an
+/// exclusive lock and does not set `O_CLOEXEC`, so even an unrelated forked
+/// child can keep one alive. Telling that user to re-create the store is advice
+/// to destroy a healthy artifact, so libhdf5's own complaint is passed through
+/// instead of being overwritten by a guess.
 fn open_backend(path: &Path, read_only: bool) -> Result<Box<dyn StorageBackend>> {
+    use crate::storage::hdf5::BackendSniff;
+
     if let Err(e) = std::fs::metadata(path) {
         return Err(TimeSeriesError::Io(std::io::Error::new(
             e.kind(),
             format!("cannot open store {}: {e}", path.display()),
         )));
     }
-    if !crate::storage::hdf5::is_hdf5_backend_file(path) {
-        return Err(TimeSeriesError::InvalidParameter(format!(
-            "{} is not an infrastore hdf5 store (stores written by the removed \
-             netcdf backend are no longer supported; re-create the store to \
-             migrate)",
-            path.display()
-        )));
+    match crate::storage::hdf5::sniff_hdf5_backend_file(path) {
+        BackendSniff::Ours => {}
+        BackendSniff::NotOurs => {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "{} is not an infrastore hdf5 store (stores written by the removed \
+                 netcdf backend are no longer supported; re-create the store to \
+                 migrate)",
+                path.display()
+            )));
+        }
+        BackendSniff::Unopenable(why) => {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "{} could not be opened as an HDF5 file, so whether it is an infrastore \
+                 store is unknown. If another process has it open for writing, close that \
+                 one first — HDF5 takes an exclusive lock on a store it is writing. \
+                 libhdf5 reported: {why}",
+                path.display()
+            )));
+        }
     }
     Ok(Box::new(Hdf5Backend::open(path, read_only)?))
 }

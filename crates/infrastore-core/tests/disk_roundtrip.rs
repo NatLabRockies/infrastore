@@ -1904,3 +1904,59 @@ fn compact_drops_a_dataset_the_catalog_does_not_reference() {
         "unreferenced dataset survived the rewrite: {names:?}"
     );
 }
+
+/// A file that will not open is not the same complaint as a file of the wrong
+/// kind, and only one of them warrants "re-create the store".
+///
+/// Both used to arrive as `false` from a boolean sniff, so a store another
+/// process was holding — HDF5 takes an exclusive lock on one it is writing, and
+/// does not set `O_CLOEXEC`, so even an unrelated forked child can keep one
+/// alive — was reported as a netcdf-era artifact needing migration. That is
+/// advice to destroy a perfectly healthy store, given for a condition that
+/// clears on its own.
+#[test]
+fn a_file_that_will_not_open_is_not_reported_as_a_store_needing_migration() {
+    let dir = tempfile::tempdir().unwrap();
+    let rubbish = dir.path().join("rubbish.h5");
+    std::fs::write(&rubbish, b"certainly not hdf5").unwrap();
+
+    let Err(err) = open_store(rubbish.as_path(), true) else {
+        panic!("a non-HDF5 file is not a store");
+    };
+    let message = err.to_string();
+    assert!(
+        message.contains("could not be opened as an HDF5 file"),
+        "say what actually happened: {message}"
+    );
+    assert!(
+        !message.contains("re-create the store"),
+        "and do not tell the user to destroy it: {message}"
+    );
+    // libhdf5's own diagnostic is carried through, which is what names the real
+    // cause -- a lock, a truncation, a permission problem.
+    assert!(
+        message.contains("libhdf5 reported:"),
+        "the underlying reason must survive: {message}"
+    );
+    // The lock case is the one worth naming outright, since it is both the most
+    // common and the most alarming to be told to re-create over.
+    assert!(
+        message.contains("exclusive lock"),
+        "point at the likely cause: {message}"
+    );
+
+    // The migration advice still reaches the case it belongs to: a real HDF5
+    // file without our root attribute, which is the shape a netcdf-era store
+    // has.
+    let foreign = dir.path().join("foreign.h5");
+    hdf5_metno::File::create(&foreign).unwrap();
+    let Err(err) = open_store(foreign.as_path(), true) else {
+        panic!("a foreign HDF5 file is not a store");
+    };
+    let message = err.to_string();
+    assert!(
+        message.contains("is not an infrastore hdf5 store"),
+        "{message}"
+    );
+    assert!(message.contains("netcdf"), "{message}");
+}

@@ -1642,13 +1642,46 @@ pub(crate) fn stamp_generation(path: &Path, generation: &str) -> Result<()> {
     file.flush().map_err(map_h5)
 }
 
-/// True iff the file at `path` was written by this backend (sniffed from the
-/// `storage_backend` root attribute; netcdf-written stores lack it).
+/// What a sniff of `path` found.
+///
+/// Three outcomes, not two. "Opened as HDF5 but is not ours" and "could not be
+/// opened at all" are different problems with different remedies, and
+/// collapsing them into `false` made the caller give the wrong advice for the
+/// second: a store held open read-write by another process (HDF5 takes an
+/// exclusive lock, and does not set `O_CLOEXEC`, so a forked child can hold one
+/// too) was reported as a netcdf-era artifact needing migration — telling the
+/// user to re-create a perfectly healthy store.
+pub(crate) enum BackendSniff {
+    /// Written by this backend: the `storage_backend` root attribute is ours.
+    Ours,
+    /// A readable HDF5 file without our attribute. A netcdf-written store lands
+    /// here, since netcdf4 *is* HDF5 underneath — which is what makes the
+    /// migration advice right on this branch and only this one.
+    NotOurs,
+    /// libhdf5 could not open it. Carries its own complaint, which names the
+    /// real cause (a lock held elsewhere, a truncated file, a permission
+    /// problem) far better than any guess made here.
+    Unopenable(String),
+}
+
+/// Sniff the file at `path` for this backend's `storage_backend` root attribute.
+pub(crate) fn sniff_hdf5_backend_file(path: &Path) -> BackendSniff {
+    match h5::File::open(path) {
+        Ok(file) => {
+            if read_str_attr(&file, BACKEND_ATTR).as_deref() == Some(BACKEND_NAME) {
+                BackendSniff::Ours
+            } else {
+                BackendSniff::NotOurs
+            }
+        }
+        Err(e) => BackendSniff::Unopenable(e.to_string()),
+    }
+}
+
+/// True iff the file at `path` was written by this backend.
+#[cfg(test)]
 pub(crate) fn is_hdf5_backend_file(path: &Path) -> bool {
-    let Ok(file) = h5::File::open(path) else {
-        return false;
-    };
-    read_str_attr(&file, BACKEND_ATTR).as_deref() == Some(BACKEND_NAME)
+    matches!(sniff_hdf5_backend_file(path), BackendSniff::Ours)
 }
 
 #[cfg(test)]
@@ -2102,6 +2135,44 @@ mod tests {
         h5::File::create(&plain_path).unwrap();
         assert!(is_hdf5_backend_file(&h5_path));
         assert!(!is_hdf5_backend_file(&plain_path));
+    }
+
+    /// The sniff has three answers, and the two failing ones are different
+    /// problems: one file is not ours, the other could not be read at all.
+    /// Collapsing them sent "re-create the store to migrate" — advice to
+    /// destroy the artifact — to whoever merely had it open elsewhere.
+    #[test]
+    fn the_sniff_separates_not_ours_from_could_not_open() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let ours = dir.path().join("ours.h5");
+        Hdf5Backend::create(&ours, Compression::default()).unwrap();
+        assert!(matches!(sniff_hdf5_backend_file(&ours), BackendSniff::Ours));
+
+        // Opens as HDF5, lacks our attribute. This is the shape a netcdf-era
+        // store has — netcdf4 is HDF5 underneath — so it is the one case where
+        // the migration advice is right.
+        let foreign = dir.path().join("foreign.h5");
+        h5::File::create(&foreign).unwrap();
+        assert!(matches!(
+            sniff_hdf5_backend_file(&foreign),
+            BackendSniff::NotOurs
+        ));
+
+        // Not an HDF5 file at all: libhdf5's own complaint is carried out, so
+        // the caller can say what actually went wrong instead of guessing.
+        let rubbish = dir.path().join("rubbish.h5");
+        std::fs::write(&rubbish, b"certainly not hdf5").unwrap();
+        match sniff_hdf5_backend_file(&rubbish) {
+            BackendSniff::Unopenable(why) => {
+                assert!(!why.is_empty(), "the reason must survive");
+                assert!(
+                    why.contains("signature") || why.to_lowercase().contains("open"),
+                    "expected libhdf5's own diagnostic, got: {why}"
+                );
+            }
+            _ => panic!("a non-HDF5 file must not read as ours or as merely foreign"),
+        }
     }
 
     #[test]
