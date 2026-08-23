@@ -22,14 +22,36 @@ use std::process::Command;
 
 const BIN: &str = env!("CARGO_BIN_EXE_infrastore");
 
+/// Serializes subprocess spawns against the one test that opens a store
+/// *in this process*.
+///
+/// HDF5 opens its files without `O_CLOEXEC`, so every child forked while a
+/// store is open here inherits that descriptor -- and on Linux the advisory
+/// lock HDF5 takes with it, since the lock lives on the open file description
+/// and survives `exec`. The unrelated child then holds the store locked until
+/// it exits, and an `infrastore` invocation in between cannot open the file at
+/// all: it reports "is not an infrastore hdf5 store", which looks nothing like
+/// a locking problem. That is a real CI failure, not a hypothetical -- it made
+/// `verify_exits_one_on_a_corrupt_store` flaky on the Linux runner while macOS
+/// and Windows stayed green.
+///
+/// Every spawn takes the read guard; the one test that opens a store takes the
+/// write guard for exactly as long as its handle lives, so no fork can overlap
+/// the window. Reads are uncontended in the normal case, so this costs nothing.
+static SPAWN_GATE: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+/// Run a prepared `infrastore` command with the fork gate held.
+fn spawn(cmd: &mut Command) -> std::process::Output {
+    // A test that panics while holding the guard poisons the lock. Recovering
+    // the inner value keeps that one failure readable instead of burying it
+    // under a cascade of poison panics from every other test.
+    let _gate = SPAWN_GATE.read().unwrap_or_else(|e| e.into_inner());
+    cmd.output().expect("failed to spawn infrastore")
+}
+
 /// Run `infrastore --store <store> <args...>`, asserting success; returns stdout.
 fn run(store: &Path, args: &[&str]) -> String {
-    let output = Command::new(BIN)
-        .arg("--store")
-        .arg(store)
-        .args(args)
-        .output()
-        .expect("failed to spawn infrastore");
+    let output = spawn(Command::new(BIN).arg("--store").arg(store).args(args));
     assert!(
         output.status.success(),
         "infrastore {args:?} failed:\nstdout: {}\nstderr: {}",
@@ -43,12 +65,7 @@ fn run(store: &Path, args: &[&str]) -> String {
 /// `main` writes; returns stderr. The prefix is part of the CLI's contract with
 /// a shell caller: it is how a user tells a diagnostic from log noise.
 fn run_err(store: &Path, args: &[&str]) -> String {
-    let output = Command::new(BIN)
-        .arg("--store")
-        .arg(store)
-        .args(args)
-        .output()
-        .expect("failed to spawn infrastore");
+    let output = spawn(Command::new(BIN).arg("--store").arg(store).args(args));
     assert!(
         !output.status.success(),
         "infrastore {args:?} unexpectedly succeeded:\nstdout: {}",
@@ -66,12 +83,7 @@ fn run_err(store: &Path, args: &[&str]) -> String {
 /// `verify` reports through its normal output and then exits 1, so it fails
 /// without writing a diagnostic; returns `(stdout, stderr)`.
 fn run_fail(store: &Path, args: &[&str]) -> (String, String) {
-    let output = Command::new(BIN)
-        .arg("--store")
-        .arg(store)
-        .args(args)
-        .output()
-        .expect("failed to spawn infrastore");
+    let output = spawn(Command::new(BIN).arg("--store").arg(store).args(args));
     assert!(
         !output.status.success(),
         "infrastore {args:?} unexpectedly succeeded:\nstdout: {}",
@@ -85,12 +97,7 @@ fn run_fail(store: &Path, args: &[&str]) -> (String, String) {
 
 /// Exit code of a `infrastore` invocation.
 fn exit_code(store: &Path, args: &[&str]) -> i32 {
-    Command::new(BIN)
-        .arg("--store")
-        .arg(store)
-        .args(args)
-        .output()
-        .expect("failed to spawn infrastore")
+    spawn(Command::new(BIN).arg("--store").arg(store).args(args))
         .status
         .code()
         .expect("the process was killed by a signal")
@@ -1819,11 +1826,15 @@ fn the_infrastore_store_env_var_is_used_when_no_flag_is_given() {
     let store = dir.path().join("store.h5");
     seed(dir.path(), &store);
 
-    let output = Command::new(BIN)
-        .env("INFRASTORE_STORE", &store)
-        .args(["-f", "csv", "get", "--owner-id", "42", "--name", "load"])
-        .output()
-        .unwrap();
+    let output = spawn(Command::new(BIN).env("INFRASTORE_STORE", &store).args([
+        "-f",
+        "csv",
+        "get",
+        "--owner-id",
+        "42",
+        "--name",
+        "load",
+    ]));
     assert!(
         output.status.success(),
         "INFRASTORE_STORE was not honored:\nstderr: {}",
@@ -1851,13 +1862,13 @@ fn the_store_flag_beats_the_env_var() {
     );
     add_ok(&env_store, &d);
 
-    let output = Command::new(BIN)
-        .env("INFRASTORE_STORE", &env_store)
-        .arg("--store")
-        .arg(&flagged)
-        .args(["-f", "csv", "get", "--owner-id", "42", "--name", "load"])
-        .output()
-        .unwrap();
+    let output = spawn(
+        Command::new(BIN)
+            .env("INFRASTORE_STORE", &env_store)
+            .arg("--store")
+            .arg(&flagged)
+            .args(["-f", "csv", "get", "--owner-id", "42", "--name", "load"]),
+    );
     assert!(output.status.success());
     assert_eq!(
         value_lines(&String::from_utf8_lossy(&output.stdout)),
@@ -1868,11 +1879,11 @@ fn the_store_flag_beats_the_env_var() {
 
 #[test]
 fn no_store_at_all_is_an_error() {
-    let output = Command::new(BIN)
-        .env_remove("INFRASTORE_STORE")
-        .args(["list"])
-        .output()
-        .unwrap();
+    let output = spawn(
+        Command::new(BIN)
+            .env_remove("INFRASTORE_STORE")
+            .args(["list"]),
+    );
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -1911,6 +1922,10 @@ fn verify_exits_one_on_a_corrupt_store() {
     assert_eq!(exit_code(&store, &["verify"]), 0, "a healthy store exits 0");
 
     {
+        // The write guard must cover the whole handle lifetime, not just the
+        // open: see SPAWN_GATE. Taking it here and dropping it with the block
+        // is what keeps a sibling test's fork out of the window.
+        let _gate = SPAWN_GATE.write().unwrap_or_else(|e| e.into_inner());
         let f = hdf5_metno::File::open_rw(&store).unwrap();
         let single = f.group("time_series/single").expect("single group");
         // Find the packed data dataset (not its `_h` companion).
@@ -2675,7 +2690,7 @@ fn stats_separates_association_counts_from_distinct_array_counts() {
 
 #[test]
 fn top_level_help_groups_the_commands_without_renaming_them() {
-    let output = Command::new(BIN).arg("--help").output().unwrap();
+    let output = spawn(Command::new(BIN).arg("--help"));
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
 
@@ -2728,13 +2743,11 @@ fn grouping_the_help_did_not_change_how_commands_are_invoked() {
     assert!(run(&store, &["store-info"]).contains("data_format_version"));
 
     // A usage error still exits 2, not 1.
-    let code = Command::new(BIN)
-        .args(["--store", store.to_str().unwrap(), "list", "--nonsense"])
-        .output()
-        .unwrap()
-        .status
-        .code()
-        .unwrap();
+    let code =
+        spawn(Command::new(BIN).args(["--store", store.to_str().unwrap(), "list", "--nonsense"]))
+            .status
+            .code()
+            .unwrap();
     assert_eq!(code, 2, "argument-parse failures keep clap's exit code");
 }
 
@@ -2742,10 +2755,7 @@ fn grouping_the_help_did_not_change_how_commands_are_invoked() {
 fn shell_completions_cover_the_grouped_commands() {
     // Completions are generated from the same `Command` the binary parses with,
     // so a command missing from one would be missing from the other.
-    let output = Command::new(BIN)
-        .args(["completions", "bash"])
-        .output()
-        .unwrap();
+    let output = spawn(Command::new(BIN).args(["completions", "bash"]));
     assert!(output.status.success());
     let script = String::from_utf8_lossy(&output.stdout);
     for name in ["arrays", "store-info", "attributes", "links", "list", "get"] {
