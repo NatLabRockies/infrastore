@@ -266,9 +266,15 @@ the struct, where they become the <code>add_time_series!</code> defaults, or pas
                       application_data = "{\"source\": \"weather_year_2012\"}")
 key = add_time_series!(store, 42, "Generator", Component, ts)   # keeps all five
 </code></pre>
+<p>A series also records a <code>time_reference</code> — how its timestamps were spelled — inferred from the
+timestamp it was built with. A bare <code>DateTime</code> is a wall clock (<code>ZonelessReference()</code>); a
+<code>ZonedDateTime</code> keeps its zone, so a Denver series renders correctly on both sides of every DST
+transition. Reads still return a <code>DateTime</code> holding the instant, with the reference beside it;
+<code>using TimeZones</code> adds <code>zoned_timestamp</code> to fuse them back together losslessly.</p>
 <p>None of them is part of the key or of either content hash, so two adds that differ only in a
 descriptor are a duplicate. See
-<a href="../explanation/data-model.html#optional-descriptors">Optional Descriptors</a>.</p>
+<a href="../explanation/data-model.html#optional-descriptors">Optional Descriptors</a> and
+<a href="../explanation/data-model.html#time-references">Time references</a>.</p>
 <h3 id="add-many-series-at-once"><a class="header" href="#add-many-series-at-once">Add many series at once</a></h3>
 <p><code>AddBatch</code> accepts the same <code>add_time_series!</code> calls as a <code>Store</code> but only accumulates them;
 <code>add_time_series_bulk!</code> commits the whole batch in one catalog transaction and takes the block-sized

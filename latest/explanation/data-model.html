@@ -353,8 +353,8 @@ one. Consumers routinely spread a feature map into a keyword-argument query — 
 time series with one of these names raises <code>InvalidParameter</code>:</p>
 <pre><code class="language-text">application_data, component_field, count, data, data_hash, dtype, element_shape, element_type, ext,
 features, horizon, initial_timestamp, interval, length, name, owner_category, owner_id, owner_type,
-percentiles, quantity_kind, resolution, scenario_count, time_series_type, timestamps, unit_system,
-units
+percentiles, quantity_kind, resolution, scenario_count, time_reference, time_series_type,
+timestamps, unit_system, units
 </code></pre>
 <p><code>dtype</code> and <code>ext</code> no longer name metadata fields — <code>element_type</code> and <code>application_data</code> replaced
 them — but both stay reserved. <code>dtype</code> is still how every binding spells a <code>TypedArray</code>'s physical
@@ -427,6 +427,9 @@ convention in many models but are not the same thing, since one component may ca
 for one field (a forecast and an actual, a set of weather years) and <code>name</code> is part of a series'
 identity where this is not. Named for the common case; when the owner is a supplemental attribute
 it names a field on that attribute.</li>
+<li><strong><code>time_reference</code></strong> — how this series' timestamps were <em>spelled</em>: <code>utc</code>, <code>zoneless</code>, a fixed
+offset (<code>-07:00</code>), or an IANA zone name (<code>America/Denver</code>). See
+<a href="#time-references">Time references</a> below, which this one deserves a section of its own for.</li>
 <li><strong><code>application_data</code></strong> — an opaque, <strong>package-owned</strong> extension payload stored verbatim (typically
 JSON) that a binding writes and reads for its own purposes. The store never parses or interprets
 it, and end users are not expected to set it. Element typing does <em>not</em> live here: that is
@@ -439,15 +442,136 @@ derived from it. Unlike <code>units</code> and <code>application_data</code> it 
 validates the array's dtype and per-step shape against it. See
 <a href="../reference/element-types.html">Element types</a>.</li>
 </ul>
-<p><code>units</code>, <code>quantity_kind</code>, <code>unit_system</code>, <code>component_field</code>, and <code>application_data</code> are recorded in
-metadata and returned on read, but they do not affect identity or storage: they are absent from the
-key and from both content hashes, so two series differing only in a descriptor are a duplicate.</p>
+<p><code>units</code>, <code>quantity_kind</code>, <code>unit_system</code>, <code>time_reference</code>, <code>component_field</code>, and <code>application_data</code>
+are recorded in metadata and returned on read, but they do not affect identity or storage: they are
+absent from the key and from both content hashes, so two series differing only in a descriptor are a
+duplicate.</p>
 <p><code>component_field</code> is the one descriptor that is also a <strong>filter</strong> (<code>ListFilter::component_field</code>,
 and its equivalent in every binding): "every series that varies this field", alone or scoped to one
 owner. Being descriptive rather than identifying, it narrows a listing but never addresses a single
 row on its own — one component may carry several series for one field, distinguished by name or
 features. It matches exactly and case-sensitively, and a series that declares no <code>component_field</code>
 matches no value, so the filter cannot select the rows that left it unset.</p>
+<h2 id="time-references"><a class="header" href="#time-references">Time References</a></h2>
+<p>The store records <strong>instants</strong>. A <code>time_reference</code> records what those instants were <em>written as</em>, so
+a series comes back the way it went in instead of being relabelled UTC at every boundary.</p>
+<div class="table-wrapper"><table><thead><tr><th>Spelling</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>utc</code></td><td>An instant, written as UTC.</td></tr>
+<tr><td><code>-07:00</code></td><td>An instant, written at a fixed offset from UTC.</td></tr>
+<tr><td><code>America/Denver</code></td><td>An instant, written in a named IANA zone. Held opaquely.</td></tr>
+<tr><td><code>zoneless</code></td><td>A wall clock. Names no instant; the store holds it as if UTC.</td></tr>
+<tr><td><em>unset</em></td><td>Unspecified — <strong>not</strong> a claim the timestamps were written as UTC.</td></tr>
+</tbody></table>
+</div>
+<p>Three of the four name an instant; <code>zoneless</code> does not, and most rules below split on that binary
+rather than on the four spellings. An unset reference groups with the zoned ones.</p>
+<p>Each binding <strong>infers</strong> the spelling from the input type, so nothing takes a new required argument:</p>
+<div class="table-wrapper"><table><thead><tr><th>Binding</th><th><code>utc</code></th><th>fixed offset</th><th>named zone</th><th><code>zoneless</code></th></tr></thead><tbody>
+<tr><td>Python</td><td><code>timezone.utc</code></td><td>fixed-offset <code>tzinfo</code></td><td><code>tzinfo</code> exposing a <code>key</code> (<code>ZoneInfo</code>)</td><td>naive <code>datetime</code></td></tr>
+<tr><td>Julia</td><td>UTC <code>ZonedDateTime</code></td><td><code>FixedTimeZone</code></td><td><code>VariableTimeZone</code>, by its name</td><td>bare <code>DateTime</code></td></tr>
+<tr><td>CLI</td><td><code>Z</code> in text, or the flag</td><td><code>-07:00</code> in text or flag</td><td><code>--assume-timezone America/Denver</code></td><td>bare timestamp, <code>--zoneless</code></td></tr>
+<tr><td>Rust</td><td><code>DateTime&lt;Utc&gt;</code></td><td>declare it</td><td>declare it</td><td><strong>declare it</strong> — no naive type</td></tr>
+</tbody></table>
+</div>
+<p><code>ZoneInfo("UTC")</code> records the <em>zone</em> <code>UTC</code>, not the literal <code>utc</code>. The two render identically
+forever; the difference shows up only in what the catalog reports back, which is the point of
+recording a spelling at all.</p>
+<h3 id="a-spelling-is-not-a-grid"><a class="header" href="#a-spelling-is-not-a-grid">A spelling is not a grid</a></h3>
+<p>A reference records how timestamps were <em>written</em>. It does not change how the grid is <em>stepped</em>:
+<code>resolution</code> and <code>interval</code> are durations, so an hourly series has hourly <strong>instants</strong> whatever its
+reference says. Rendering an hourly <code>America/Denver</code> series across the November fall-back gives
+<code>01:00-06:00</code>, <code>01:00-07:00</code>, <code>02:00-07:00</code> — two identical wall clocks, two distinct instants,
+correctly ordered.</p>
+<p>That is the difference between two things "store this in Denver time" can mean:</p>
+<ul>
+<li><strong>Instants, displayed in Denver.</strong> Storage is untouched — UTC instants plus a label. <strong>This is
+what a named zone means here.</strong></li>
+<li><strong>A local-clock grid</strong> — hourly <em>by the clock</em>, so a 23-hour day in March and a 25-hour one in
+November. This is inexpressible in <code>SingleTimeSeries</code> and the dense forecasts, whose grid is a
+<code>Period</code>: a fixed count of milliseconds. Use <code>NonSequentialTimeSeries</code>, which carries an explicit
+instant per value, so the caller derives those days and the data records them rather than
+arithmetic implying them.</li>
+</ul>
+<p>Someone with 8760 naive Denver timestamps who localizes only the first and passes <code>resolution = 1h</code>
+gets labels shifted by an hour after each transition, and nothing in the data distinguishes that
+from a correct series. The store cannot detect it; the split above is the thing to know.</p>
+<h3 id="months-step-on-the-utc-calendar"><a class="header" href="#months-step-on-the-utc-calendar">Months step on the UTC calendar</a></h3>
+<p><code>Period::Months</code> is calendar arithmetic, so unlike a fixed period it has to be told <em>which</em>
+calendar. It uses the stored <strong>UTC</strong> one, and the reference does not redirect it. TimeZones.jl steps
+the <em>local</em> clock instead, so the two disagree by an hour at every DST transition and by up to a day
+at a month boundary.</p>
+<p>Local-frame stepping is refused for two independent reasons: it is the local → instant direction the
+store deliberately never runs (below), and it would let a spelling decide <em>which instants</em> a series
+contains. A calendar period on a zoned series is warned about on write, so the disagreement is
+findable before it is filed as a bug. A caller who wants months on a local calendar wants a
+local-clock grid, and the answer is the one above: <code>NonSequentialTimeSeries</code>.</p>
+<h3 id="why-a-named-zone-is-safe"><a class="header" href="#why-a-named-zone-is-safe">Why a named zone is safe</a></h3>
+<p>The ambiguity a named zone is feared for lives in the <strong>local → instant</strong> direction, and the core
+never runs it.</p>
+<ul>
+<li><strong>On input</strong> that direction has already happened, in the caller's own datetime library. Julia
+refuses an ambiguous local time outright; Python resolves it through <code>fold</code>. Either way the
+binding is handed a value that already names one definite instant. The CLI is the exception,
+because it is handed <em>text</em> — see below.</li>
+<li><strong>On output</strong> the store runs only <strong>instant → local</strong>, which is total and single-valued: one
+instant maps to exactly one wall clock in a named zone, and converting it back yields the same
+instant.</li>
+</ul>
+<p>So a year-long Denver series stamped <code>-07:00</code> renders every timestamp after the March transition an
+hour wrong, while the same series stamped <code>America/Denver</code> renders all of them correctly. Recording
+"the offset in effect at <code>initial_timestamp</code>" is the one option that is quietly incorrect, which is
+why it is not among the four spellings.</p>
+<p>Two caveats belong here rather than in the type. Rendering a named zone is
+<strong>tz-database-dependent</strong>, so a retroactive rule change moves the displayed local time of an
+already-stored instant — the store records the instant, and the label is a rendering hint. And a
+zone name's <strong>existence is audited, never gated</strong>: the core checks only that a name is shaped like
+an IANA name and cannot be read as an offset or as either literal. Every layer that <em>has</em> a database
+— the CLI via <code>chrono-tz</code>, Python via <code>zoneinfo</code>, Julia via <code>TimeZones</code> — warns on a name it does
+not recognize and stores it anyway, and <code>infrastore store-info</code> reports the catalog's distinct
+spellings with unrecognized zones flagged. Gating would turn a rare read-time error into a
+write-time error coupled to <em>our</em> release cadence: when IANA adds a zone, a caller whose own
+database already has it would be refused until they upgraded.</p>
+<h3 id="the-cli-is-where-local--instant-actually-happens"><a class="header" href="#the-cli-is-where-local--instant-actually-happens">The CLI is where local → instant actually happens</a></h3>
+<p>Every other binding is handed an already-resolved datetime. The CLI is handed text, so
+<code>--assume-timezone America/Denver</code> over a zoneless column is the one place in the system that runs
+local → instant itself, and <code>chrono-tz</code> answers in three values — each with its own behavior, per
+row:</p>
+<div class="table-wrapper"><table><thead><tr><th>Result</th><th>Meaning</th><th>CLI behavior</th></tr></thead><tbody>
+<tr><td>a single instant</td><td>the ordinary case</td><td>ingest it</td></tr>
+<tr><td>two candidates</td><td>the repeated fall-back hour</td><td><strong>error</strong>, naming the row and both candidates</td></tr>
+<tr><td>none</td><td>the skipped spring-forward hour</td><td><strong>error</strong>, naming the row</td></tr>
+</tbody></table>
+</div>
+<p>Rejecting loudly, per row, with both candidates named is what makes a named zone acceptable here;
+silently picking one is not. Reading is unaffected: rendering a stored instant in a named zone is
+the total direction, so <code>--assume-timezone</code> plays no part in it.</p>
+<h3 id="query-bounds-and-mixed-selections"><a class="header" href="#query-bounds-and-mixed-selections">Query bounds and mixed selections</a></h3>
+<p>A bound must be spelled the way the series is, and a mismatch is refused rather than coerced:</p>
+<div class="table-wrapper"><table><thead><tr><th>Series reference</th><th>Wall-clock bound</th><th>Instant bound</th></tr></thead><tbody>
+<tr><td><code>utc</code> / offset / zone</td><td><strong>error</strong></td><td>accept — any offset names the same instant</td></tr>
+<tr><td><code>zoneless</code></td><td>accept</td><td><strong>error</strong></td></tr>
+<tr><td><em>unset</em></td><td><strong>error</strong></td><td>accept</td></tr>
+</tbody></table>
+</div>
+<p>An off-grid bound still names an unambiguous instant, so flooring it is well-defined — that is why
+<code>time_range</code> snaps. A wall-clock bound against a series that records instants is a <strong>category
+error</strong>: there is no defined mapping to fall back on. Bounds stay unconstrained in <em>precision</em>,
+though: a sub-millisecond bound names a real instant even though a stored one may not.</p>
+<p>The same partition drives two rejections and one filter:</p>
+<ol>
+<li>A <strong>ranged bulk read</strong> over a selection spanning both groups is refused — no single bound is
+valid for all of it. An unranged one is unaffected: without a bound there is nothing to disagree
+about, and each series carries its own spelling back.</li>
+<li>A <strong><code>StaticReader</code></strong> materializes one timestamp axis, so a mixed cohort is refused at <em>build</em>
+time, where the error can name the series that disagree. Mixing <code>utc</code>, an offset, and a named
+zone in one cohort is fine — all three name instants, and the axis is spelled with the cohort's
+reference when every member agrees and <code>utc</code> when they merely agree on naming instants.</li>
+<li><strong><code>ListFilter::zoneless</code></strong> is the constructive half: <code>true</code> selects the wall-clock series,
+<code>false</code> selects everything that accepts an instant bound — the three zoned spellings <em>and</em> the
+rows that left the reference unset. It is a binary predicate rather than a match on a specific
+spelling because an exact match cannot name that second group at all (the trap <code>component_field</code>
+documents), and here those rows are a coherence group rather than an oversight.</li>
+</ol>
 <h2 id="associations-between-entities"><a class="header" href="#associations-between-entities">Associations Between Entities</a></h2>
 <p>Beyond owning time series, catalog entities can be related to each other. The catalog records two
 such relationships, in two separate tables, because they are not the same kind of thing: attaching

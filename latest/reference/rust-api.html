@@ -910,6 +910,7 @@ forecast type, <code>None</code> for the static types); <code>resolution</code> 
     pub units: Option&lt;String&gt;,
     pub quantity_kind: Option&lt;String&gt;,
     pub unit_system: Option&lt;UnitSystem&gt;,
+    pub time_reference: Option&lt;TimeReference&gt;,
     pub component_field: Option&lt;String&gt;,
     pub application_data: Option&lt;String&gt;,
 }
@@ -923,6 +924,7 @@ impl SingleTimeSeries {
     pub fn with_units(self, units: impl Into&lt;String&gt;) -&gt; Self;
     pub fn with_quantity_kind(self, quantity_kind: impl Into&lt;String&gt;) -&gt; Self;
     pub fn with_unit_system(self, unit_system: UnitSystem) -&gt; Self;
+    pub fn with_time_reference(self, time_reference: TimeReference) -&gt; Self;
     pub fn with_component_field(self, component_field: impl Into&lt;String&gt;) -&gt; Self;
     pub fn with_application_data(self, application_data: impl Into&lt;String&gt;) -&gt; Self;
 }
@@ -1210,10 +1212,10 @@ pub fn validate_features(features: &amp;Features) -&gt; Result&lt;()&gt;;
 <code>name</code>, <code>data_hash: [u8; 32]</code>, the optional temporal fields (<code>initial_timestamp</code>, <code>resolution</code>,
 <code>length</code>, <code>horizon</code>, <code>interval</code>, <code>count</code>, <code>timestamps</code>), <code>features</code>, the descriptors (<code>units</code>,
 <code>quantity_kind: Option&lt;String&gt;</code>, <code>unit_system: Option&lt;UnitSystem&gt;</code>,
-<code>component_field: Option&lt;String&gt;</code>, <code>application_data: Option&lt;String&gt;</code>),
-<code>percentiles: Option&lt;Vec&lt;f64&gt;&gt;</code> (set for <code>Probabilistic</code>), and the array typing: <code>dtype: Dtype</code>,
-<code>element_shape: Vec&lt;usize&gt;</code>. The span fields (<code>resolution</code>, <code>horizon</code>, <code>interval</code>) are
-<code>Option&lt;Period&gt;</code>.</p>
+<code>time_reference: Option&lt;TimeReference&gt;</code>, <code>component_field: Option&lt;String&gt;</code>,
+<code>application_data: Option&lt;String&gt;</code>), <code>percentiles: Option&lt;Vec&lt;f64&gt;&gt;</code> (set for <code>Probabilistic</code>), and
+the array typing: <code>dtype: Dtype</code>, <code>element_shape: Vec&lt;usize&gt;</code>. The span fields (<code>resolution</code>,
+<code>horizon</code>, <code>interval</code>) are <code>Option&lt;Period&gt;</code>.</p>
 <h3 id="unitsystem"><a class="header" href="#unitsystem"><code>UnitSystem</code></a></h3>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
@@ -1226,6 +1228,53 @@ impl UnitSystem {
 <span class="boring">}</span></code></pre></pre>
 <p><code>None</code> on a metadata row means <em>unspecified</em>, not <code>NaturalUnits</code>. See
 <a href="../explanation/data-model.html#optional-descriptors">Optional descriptors</a>.</p>
+<h3 id="timereference-and-timerange"><a class="header" href="#timereference-and-timerange"><code>TimeReference</code> and <code>TimeRange</code></a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub enum TimeReference {
+    Utc,                  // an instant, written as UTC
+    FixedOffset(i32),     // an instant, written at a fixed offset — minutes east
+    Zone(String),         // an instant, written in a named IANA zone; held opaquely
+    Zoneless,             // a wall clock; names no instant
+}
+
+impl TimeReference {
+    pub fn is_zoned(&amp;self) -&gt; bool;
+    pub fn is_zoneless(&amp;self) -&gt; bool;
+    pub fn accepts_zoned_bound(reference: Option&lt;&amp;TimeReference&gt;) -&gt; bool;
+    pub fn as_storage_string(&amp;self) -&gt; String;   // "utc" / "-07:00" / "America/Denver" / "zoneless"
+    pub fn parse(s: &amp;str) -&gt; Result&lt;Self&gt;;
+    pub fn validate(&amp;self) -&gt; Result&lt;()&gt;;        // shape only; no tz database
+}
+<span class="boring">}</span></code></pre></pre>
+<p>How a series' timestamps were <strong>spelled</strong>. <code>None</code> on a metadata row means <em>unspecified</em>, and groups
+with the three zoned variants for query bounds — it is not a claim the timestamps were written as
+UTC. Rust has no naive datetime type, so a native caller <strong>declares</strong> the spelling; the bindings
+infer it from theirs.</p>
+<p><code>validate</code> checks shape only: a zone name must be non-empty, bounded, IANA-shaped, and unreadable as
+an offset or as either literal — which is what lets one catalog column hold all four spellings.
+Existence is deliberately not checked; see
+<a href="../explanation/data-model.html#time-references">Time references</a>.</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub struct TimeRange {
+    pub start: DateTime&lt;Utc&gt;,
+    pub end: DateTime&lt;Utc&gt;,
+    pub zoneless: bool,
+}
+
+impl TimeRange {
+    pub fn new(start: DateTime&lt;Utc&gt;, end: DateTime&lt;Utc&gt;) -&gt; Self;        // zoned
+    pub fn zoneless(start: DateTime&lt;Utc&gt;, end: DateTime&lt;Utc&gt;) -&gt; Self;
+    pub fn spelled(start: DateTime&lt;Utc&gt;, end: DateTime&lt;Utc&gt;, zoneless: bool) -&gt; Self;
+    pub fn bounds(&amp;self) -&gt; (DateTime&lt;Utc&gt;, DateTime&lt;Utc&gt;);
+}
+impl From&lt;(DateTime&lt;Utc&gt;, DateTime&lt;Utc&gt;)&gt; for TimeRange;   // zoned
+<span class="boring">}</span></code></pre></pre>
+<p>The <code>time_range</code> argument of <code>get_time_series</code> / <code>get_time_series_with_metadata</code> /
+<code>bulk_read_range</code>. The <code>zoneless</code> flag is what lets the core refuse a bound whose spelling the
+series cannot answer rather than coercing it; a <code>DateTime&lt;Utc&gt;</code> is zoned by construction, so
+<code>(start, end).into()</code> is the native spelling.</p>
 <h3 id="descriptors"><a class="header" href="#descriptors"><code>Descriptors</code></a></h3>
 <p>The descriptive attributes a series carries alongside its array, applied to a reconstructed series
 by <code>TimeSeriesData::set_descriptors</code>:</p>
@@ -1236,6 +1285,7 @@ by <code>TimeSeriesData::set_descriptors</code>:</p>
     pub units: Option&lt;String&gt;,
     pub quantity_kind: Option&lt;String&gt;,
     pub unit_system: Option&lt;UnitSystem&gt;,
+    pub time_reference: Option&lt;TimeReference&gt;,
     pub component_field: Option&lt;String&gt;,
     pub application_data: Option&lt;String&gt;,
 }
@@ -1244,7 +1294,7 @@ impl Descriptors {
     pub fn new(element_type: ElementType) -&gt; Self;   // everything else unset
 }
 <span class="boring">}</span></code></pre></pre>
-<p>It is a struct rather than a positional argument list because four of the six fields are
+<p>It is a struct rather than a positional argument list because four of the seven fields are
 <code>Option&lt;String&gt;</code>: as bare parameters, <code>units</code>, <code>quantity_kind</code>, <code>component_field</code>, and
 <code>application_data</code> would be silently interchangeable at every call site.</p>
 <h3 id="listfilter"><a class="header" href="#listfilter"><code>ListFilter</code></a></h3>
@@ -1260,6 +1310,7 @@ impl Descriptors {
     .name("load")
     .name_glob("load_*")  // SQLite GLOB (case-sensitive, `*`/`?`); ANDed with .name
     .component_field("max_active_power")  // exact, case-sensitive; see below
+    .zoneless(false)      // coherence predicate on the timestamp spelling; see below
     .resolution(Duration::hours(1))   // impl Into&lt;Period&gt;
     .interval(Duration::hours(24))    // impl Into&lt;Period&gt;; forecasts only
     .features(features)   // subset match: rows must contain at least these pairs
@@ -1270,6 +1321,13 @@ row on its own — one component may carry several series for one field, disting
 features. A row that declares no <code>component_field</code> matches no value (SQL equality is never true
 against NULL), so the filter cannot select the rows that left it unset. It is served by the partial
 index <code>idx_component_field</code>, which costs a store that never sets the field nothing.</p>
+<p><code>zoneless</code> is a <strong>binary predicate</strong>, not a match on a specific <code>TimeReference</code>: <code>Some(true)</code> keeps
+the wall-clock series, <code>Some(false)</code> keeps everything that accepts an instant bound — the three
+zoned spellings <em>and</em> the rows that left the reference unset. An exact match could not name that
+second group at all (the trap <code>component_field</code> documents), and here those rows are a coherence
+group rather than an oversight. It is the constructive half of the rules that make <code>bulk_read_range</code>
+and <code>build_static_reader</code> refuse a selection spanning both groups; see
+<a href="../explanation/data-model.html#time-references">Time references</a>.</p>
 <h3 id="addrequest"><a class="header" href="#addrequest"><code>AddRequest</code></a></h3>
 <p>The element type of <code>add_time_series_bulk</code> (and of <code>BulkAdd::push</code>), mirroring the <code>add_time_series</code>
 arguments plus an optional <code>application_data</code> — an opaque, package-owned payload (typically JSON)

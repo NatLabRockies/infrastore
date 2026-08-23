@@ -228,15 +228,20 @@ existing value rather than minting a new one, since it rewrites only the HDF5 ha
 <code>IncompatibleFormat</code>, naming both versions. Every bump is backward-incompatible by definition, so
 the check is exact equality and there is no in-place upgrade path: regenerate the store with the
 matching build.</p>
-<p>(<code>0.16.0</code> added the metadata column <code>component_field</code>; <code>0.15.0</code> renamed the metadata column <code>ext</code> to
-<code>application_data</code> and added the <code>quantity_kind</code> and <code>unit_system</code> columns; unlike a new <em>table</em>,
-new <em>columns</em> are not picked up by the idempotent <code>CREATE TABLE IF NOT EXISTS</code> DDL, so a store one
-version behind is rejected on open; <code>0.14.0</code> moved a <code>NonSequentialTimeSeries</code>'s timestamps out of
-the association row: the <code>timestamps_json</code> TEXT column became a <code>timestamps_hash</code> BLOB resolving
-into the new content-addressed <a href="#timestamp_sets"><code>timestamp_sets</code></a> table, and irregular arrays that
-share a time axis are now column-packed into <code>nsts_…</code> datasets keyed by that hash instead of one
-standalone <code>arr_…</code> dataset each; <code>0.13.0</code> replaced the <code>dtype</code> column with <code>element_type</code>, which
-names the <em>logical</em> element type and derives the physical dtype from it — see
+<p>(<code>0.17.0</code> added the metadata column <code>time_reference</code>, which records how a series' timestamps were
+<em>spelled</em> — an instant in UTC, an instant at a fixed offset, an instant in a named IANA zone, or a
+wall clock naming no instant. It also changes how stored timestamps are <em>interpreted</em>: a row marked
+<code>zoneless</code> holds wall clocks the store keeps as if UTC, which an older reader would hand back as
+instants. See <a href="../explanation/data-model.html#time-references">Time references</a>; <code>0.16.0</code> added the
+metadata column <code>component_field</code>; <code>0.15.0</code> renamed the metadata column <code>ext</code> to <code>application_data</code>
+and added the <code>quantity_kind</code> and <code>unit_system</code> columns; unlike a new <em>table</em>, new <em>columns</em> are not
+picked up by the idempotent <code>CREATE TABLE IF NOT EXISTS</code> DDL, so a store one version behind is
+rejected on open; <code>0.14.0</code> moved a <code>NonSequentialTimeSeries</code>'s timestamps out of the association
+row: the <code>timestamps_json</code> TEXT column became a <code>timestamps_hash</code> BLOB resolving into the new
+content-addressed <a href="#timestamp_sets"><code>timestamp_sets</code></a> table, and irregular arrays that share a time
+axis are now column-packed into <code>nsts_…</code> datasets keyed by that hash instead of one standalone
+<code>arr_…</code> dataset each; <code>0.13.0</code> replaced the <code>dtype</code> column with <code>element_type</code>, which names the
+<em>logical</em> element type and derives the physical dtype from it — see
 <a href="./element-types.html">Element types</a>; <code>0.12.0</code> changed <code>owner_category</code> and <code>time_series_type</code> from
 TEXT names to small INTEGER codes — see <a href="#discriminant-encoding">Discriminant encoding</a> below;
 <code>0.11.0</code> renamed the metadata column <code>logical_type</code> to <code>ext</code> — an opaque, package-owned extension
@@ -446,6 +451,7 @@ the error surfaces with the compacting store still open on the original file.</p
 <tr><td><code>units</code></td><td>TEXT</td><td>Free-form units label</td></tr>
 <tr><td><code>quantity_kind</code></td><td>TEXT</td><td>What the values measure (QUDT <code>QuantityKind</code> name); <code>NULL</code> if unset</td></tr>
 <tr><td><code>unit_system</code></td><td>TEXT</td><td><code>natural_units</code> or <code>component_base</code>; <code>NULL</code> means <em>unspecified</em></td></tr>
+<tr><td><code>time_reference</code></td><td>TEXT</td><td>How the timestamps were spelled (below); <code>NULL</code> means <em>unspecified</em></td></tr>
 <tr><td><code>component_field</code></td><td>TEXT</td><td>Owning component's field these values vary; <code>NULL</code> if unset</td></tr>
 <tr><td><code>percentiles_json</code></td><td>TEXT</td><td>JSON array of percentiles for <code>Probabilistic</code>; <code>NULL</code> else</td></tr>
 <tr><td><code>element_type</code></td><td>TEXT</td><td>Canonical element-type string (<code>NOT NULL DEFAULT 'f64'</code>)</td></tr>
@@ -457,6 +463,25 @@ the error surfaces with the compacting store still open on the original file.</p
 </div>
 <p>The two content-address hashes are the last two columns. Column order is not load-bearing — every
 statement names its columns — so the layout is chosen for readability.</p>
+<h4 id="time_reference"><a class="header" href="#time_reference"><code>time_reference</code></a></h4>
+<p>One TEXT column holds all four spellings: <code>utc</code>, <code>zoneless</code>, a fixed offset (<code>-07:00</code>), or an IANA
+zone name (<code>America/Denver</code>). That is unambiguous rather than merely hoped for, because the core
+refuses a zone name that reads as an offset or as either literal — the <code>utc</code> literal is lowercase
+precisely so the IANA zone <code>UTC</code> stays a distinct value.</p>
+<p><code>NULL</code> means <em>unspecified</em>, never <code>utc</code>. For query bounds it groups with the three zoned spellings
+(an instant bound is accepted, a wall-clock bound refused), but it is not a claim the timestamps
+were written as UTC.</p>
+<p>Deliberately <strong>not</strong> indexed, and that does not change now that <code>ListFilter::zoneless</code> exists. The
+<code>idx_component_field</code> partial-index pattern is wrong here twice over:
+<code>WHERE time_reference IS NOT NULL</code> would exclude exactly the <code>NULL</code> rows that filter has to return,
+and the column is low-cardinality — a handful of distinct values across a whole store — so it is not
+selective enough to earn an index. In practice it is combined with <code>owner_id</code> or <code>name</code>, which are
+indexed.</p>
+<p>The column does not reach storage. <code>array_hash</code> takes no timestamp input at all, the packed dataset
+names carry no timestamp, and <code>initial_timestamp</code> stays RFC 3339 <strong>UTC</strong> whatever the reference says
+— a <code>-07:00</code> series stores <code>2024-01-01T07:00:00Z</code> and the label <code>-07:00</code>, and the offset is applied
+on the way out. Two series with equal values therefore pool into the same dataset and share a
+<code>data_hash</code> regardless of their references, which is correct: they are the same numbers.</p>
 <h3 id="feature_sets"><a class="header" href="#feature_sets"><code>feature_sets</code></a></h3>
 <p>The expanded feature map, one row per key. The typed columns are populated according to
 <code>value_kind</code>.</p>
@@ -668,7 +693,7 @@ SELECT id, owner_id, owner_type,
                              ELSE 'unknown(' || time_series_type || ')' END AS time_series_type,
        name,
        initial_timestamp, resolution, length, horizon, interval, count,
-       units, quantity_kind, unit_system, component_field,
+       units, quantity_kind, unit_system, time_reference, component_field,
        element_type, element_shape, application_data,
        lower(hex(data_hash))       AS data_hash,
        lower(hex(features_hash))   AS features_hash,

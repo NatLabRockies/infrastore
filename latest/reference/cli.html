@@ -193,7 +193,8 @@
 The store holds only the <em>relationship</em> — the components and supplemental attributes themselves live
 in the consumer's object graph — which is why the association flags are bare ids and type names.</p>
 <h2 id="synopsis"><a class="header" href="#synopsis">Synopsis</a></h2>
-<pre><code class="language-text">infrastore [--store &lt;PATH.h5&gt;] [-f &lt;FORMAT&gt;] [--log-level &lt;FILTER&gt;] [-y] [--assume-timezone &lt;ZONE&gt;] &lt;COMMAND&gt;
+<pre><code class="language-text">infrastore [--store &lt;PATH.h5&gt;] [-f &lt;FORMAT&gt;] [--log-level &lt;FILTER&gt;] [-y]
+           [--assume-timezone &lt;ZONE&gt; | --zoneless] &lt;COMMAND&gt;
 </code></pre>
 <p>Every global option is accepted after the command too (<code>infrastore add --store demo.h5 …</code>).</p>
 <h3 id="global-options"><a class="header" href="#global-options">Global options</a></h3>
@@ -202,7 +203,8 @@ in the consumer's object graph — which is why the association flags are bare i
 <tr><td><code>-f</code>, <code>--format</code></td><td>Output format: <code>table</code> (default), <code>json</code>, <code>jsonl</code>, or <code>csv</code>.</td></tr>
 <tr><td><code>--log-level</code></td><td>Tracing filter; also read from <code>RUST_LOG</code>. Defaults to <code>warn</code>.</td></tr>
 <tr><td><code>-y</code>, <code>--yes</code></td><td>Answer every confirmation prompt with yes.</td></tr>
-<tr><td><code>--assume-timezone &lt;ZONE&gt;</code></td><td>Read timestamps that carry no time zone as being in this one: <code>UTC</code> (or <code>Z</code>), or a fixed offset — <code>-07:00</code>, <code>-0700</code>, <code>-07</code>.</td></tr>
+<tr><td><code>--assume-timezone &lt;ZONE&gt;</code></td><td>Read timestamps that carry no time zone as being in this one: <code>UTC</code> (or <code>Z</code>), a fixed offset (<code>-07:00</code>, <code>-0700</code>, <code>-07</code>), or an IANA zone name (<code>America/Denver</code>).</td></tr>
+<tr><td><code>--zoneless</code></td><td>Store timestamps that carry no time zone as the wall clocks they are, naming no instant. Mutually exclusive with <code>--assume-timezone</code>.</td></tr>
 </tbody></table>
 </div>
 <p><code>--store</code> (or <code>INFRASTORE_STORE</code>) is required by every command except <code>template</code> and <code>completions</code>.</p>
@@ -244,16 +246,18 @@ flag each spells it with. The per-command <code>--force</code> flags still work 
 for.</p>
 <h3 id="zoneless-timestamps"><a class="header" href="#zoneless-timestamps">Zoneless timestamps</a></h3>
 <p>A timestamp with no offset — <code>2024-01-01T00:00:00</code>, or the <code>2024-01-01 00:00:00</code> that most CSV
-writers produce — names a wall-clock reading, not an instant, and the store records instants. Such a
-timestamp is therefore refused, and the error names the flag that resolves it:</p>
+writers produce — names a wall-clock reading, not an instant. The CLI will not guess which of the
+two you mean, so such a timestamp is refused and the error names both flags that resolve it:</p>
 <pre><code class="language-console">$ infrastore --store s.h5 add --csv load.csv ...
 Error: timestamp '2024-01-01 00:00:00' names no time zone, so it names no instant. Give it an
-offset (RFC3339, like 2024-01-01T00:00:00Z), or pass --assume-timezone UTC (or a fixed offset
-like -07:00) to read every zoneless timestamp with it.
+offset (RFC3339, like 2024-01-01T00:00:00Z), pass --assume-timezone UTC (a fixed offset like
+-07:00, or an IANA name like America/Denver) to read every zoneless timestamp with it, or pass
+--zoneless to store them as the wall clocks they are.
 </code></pre>
-<p><code>--assume-timezone</code> supplies the missing offset for the whole invocation:</p>
-<pre><code class="language-console">$ infrastore --store s.h5 --assume-timezone UTC     add --csv load.csv ...   # read as UTC
-$ infrastore --store s.h5 --assume-timezone -07:00  add --csv load.csv ...   # 00:00 becomes 07:00Z
+<h4 id="--assume-timezone-resolve-them-to-instants"><a class="header" href="#--assume-timezone-resolve-them-to-instants"><code>--assume-timezone</code>: resolve them to instants</a></h4>
+<pre><code class="language-console">$ infrastore --store s.h5 --assume-timezone UTC             add --csv load.csv ...
+$ infrastore --store s.h5 --assume-timezone -07:00          add --csv load.csv ...
+$ infrastore --store s.h5 --assume-timezone America/Denver  add --csv load.csv ...
 </code></pre>
 <p>Three things to know:</p>
 <ul>
@@ -261,13 +265,42 @@ $ infrastore --store s.h5 --assume-timezone -07:00  add --csv load.csv ...   # 0
 overridden, so a mixed file loads correctly and a fully-offset file is unaffected.</li>
 <li>It is global, so it also covers <code>--time-range</code> bounds and <code>--issue-time</code>, which hit the same
 parser.</li>
-<li>Named zones (<code>America/Denver</code>) are <strong>not</strong> accepted. A zoneless timestamp in a zone with daylight
-saving is not always a single instant — the skipped hour names none and the repeated hour names
-two — so the flag would have to fail part-way through an ingest or silently pick one. Data written
-zoneless in this domain is nearly always local <em>standard</em> time, which is a fixed offset
-year-round; pass that offset. Data that really is civil time with daylight saving should carry its
-offsets in the file, where each row can say which side of a transition it is on.</li>
+<li>Whatever it resolves is also <strong>recorded</strong>, as the series' <code>time_reference</code> (see
+<a href="../explanation/data-model.html#time-references">Time references</a>) — so a read hands the same
+spelling back rather than relabelling everything UTC. <code>--assume-timezone -07:00</code> over a midnight
+column stores <code>07:00Z</code> and prints <code>2024-01-01T00:00:00-07:00</code>.</li>
 </ul>
+<p><strong>Prefer a named zone to a fixed offset</strong> for anything that crosses a daylight-saving transition. A
+year of Denver data read as <code>-07:00</code> renders every timestamp after March an hour wrong; the same
+data read as <code>America/Denver</code> renders all of it correctly, because the zone is applied per instant
+rather than baked in once.</p>
+<p>A named zone is the one place in the system that runs local → instant, and it has two wall clocks it
+cannot resolve. Both are <strong>errors naming the row</strong>, not guesses:</p>
+<pre><code class="language-console">$ infrastore --store s.h5 --assume-timezone America/Denver add --csv fold.csv ...
+Error: timestamp '2024-11-03 01:30:00' is ambiguous in America/Denver: daylight saving repeats
+that wall clock, so it names two instants (2024-11-03T07:30:00+00:00 and
+2024-11-03T08:30:00+00:00). The file has to say which — give the row an explicit offset, or
+re-read the column with --assume-timezone -06:00 or -07:00.
+</code></pre>
+<h4 id="--zoneless-keep-them-as-wall-clocks"><a class="header" href="#--zoneless-keep-them-as-wall-clocks"><code>--zoneless</code>: keep them as wall clocks</a></h4>
+<p>For data that has no time zone and wants none — modeled profiles on 24-hour days, say — <code>--zoneless</code>
+stores the fields as written, converts nothing, and reads them back unlabelled:</p>
+<pre><code class="language-console">$ infrastore --store s.h5 --zoneless add --csv profile.csv ...
+$ infrastore --store s.h5 get --owner-id 42 --name load -f csv
+2024-01-01T00:00:00,1
+</code></pre>
+<p>The store then holds the series to that claim. An instant-bearing <code>--time-range</code> bound against it is
+refused rather than coerced, and it cannot share one <code>grid</code> axis or one ranged bulk read with series
+that do record instants — there is no single meaning either could carry for both. <code>list --wide</code>,
+<code>info</code>, and <code>export -f json</code> all report the <code>time_reference</code>, and <code>store-info</code> lists the catalog's
+distinct spellings with any unrecognized zone name flagged:</p>
+<pre><code class="language-console">$ infrastore --store s.h5 store-info
+...
+time_references   ["America/Denver", "utc", "America/Dever (unrecognized zone?)"]
+</code></pre>
+<p>A zone the store has never heard of is <em>reported</em>, never refused: the store does not gate on zone
+existence, because that would refuse legitimate data whenever IANA moves ahead of this build's
+database.</p>
 <h2 id="commands"><a class="header" href="#commands">Commands</a></h2>
 <p><code>infrastore --help</code> lists these under the same eight headings used below. The grouping is a display
 aid only — every command is invoked flat, as <code>infrastore &lt;command&gt;</code>; there are no subcommand
@@ -550,8 +583,15 @@ value:</p>
 <tr><td><code>--type &lt;T&gt;</code></td><td>See the type spellings below.</td></tr>
 <tr><td><code>--resolution &lt;DUR&gt;</code></td><td>Resolution as an ISO-8601 duration, e.g. <code>PT1H</code>, <code>PT15M</code>, <code>P1M</code>.</td></tr>
 <tr><td><code>--feature key=value</code></td><td>Feature filter; repeatable. Values are inferred as int/float/bool/string.</td></tr>
+<tr><td><code>--spelling &lt;S&gt;</code></td><td><code>zoned</code> or <code>zoneless</code>: which timestamp spelling to keep.</td></tr>
 </tbody></table>
 </div>
+<p><code>--spelling</code> is the constructive half of the time-reference coherence rule. <code>zoneless</code> keeps the
+wall-clock series; <code>zoned</code> keeps the ones that record instants, including those that declare no
+reference at all. <code>grid</code> and the bulk reads span one timestamp axis, so they refuse a selection
+holding both groups — this is how a store containing both is split into one they can read. It is
+unrelated to the global <code>--zoneless</code>, which says how timestamps arriving on the <em>input</em> side are to
+be read.</p>
 <p><code>--component-field</code> selects every series that varies that field on its owner — the query the
 descriptor exists for. It is descriptive rather than identifying, so it narrows a selector but
 rarely resolves one on its own; and a series that declares no <code>component_field</code> matches no value, so
@@ -606,7 +646,8 @@ calendar ones. This is also the spelling every command <em>prints</em>, so a dur
 <em>stored</em> timestamp must be a whole number of milliseconds — a finer one is refused by <code>add</code> rather
 than truncated, and the epoch-millisecond form cannot express one at all. See
 <a href="../explanation/data-model.html#timestamp-precision">timestamp precision</a>. A timestamp with no
-offset needs <a href="#zoneless-timestamps"><code>--assume-timezone</code></a>.</p>
+offset needs <a href="#zoneless-timestamps"><code>--assume-timezone</code> or <code>--zoneless</code></a>, and whichever one you
+pass is also recorded as the series' <code>time_reference</code>.</p>
 </li>
 <li>
 <p><strong><code>--time-range</code></strong> is a pair of <em>timestamps</em>, not a duration: <code>START..END</code> (half-open — <code>START</code>
@@ -633,10 +674,11 @@ The CSV holds only numbers, preceded by a mandatory header row (plus a leading t
 <tr><td><code>units</code></td><td>optional</td><td>Free-form label.</td></tr>
 <tr><td><code>quantity_kind</code></td><td>optional</td><td>What the values measure, e.g. <code>ActivePower</code> (QUDT name).</td></tr>
 <tr><td><code>unit_system</code></td><td>optional</td><td><code>natural_units</code> or <code>component_base</code>; unset = unspecified.</td></tr>
+<tr><td><code>time_reference</code></td><td>optional</td><td><code>utc</code> / <code>zoneless</code> / <code>-07:00</code> / an IANA name; normally inferred.</td></tr>
 <tr><td><code>component_field</code></td><td>optional</td><td>Owning component's field these values vary over time.</td></tr>
 <tr><td><code>application_data</code></td><td>optional</td><td>Opaque package-owned payload (e.g. JSON), stored verbatim.</td></tr>
 <tr><td><code>features</code></td><td>optional</td><td>JSON object; int/float/bool/string values. See below.</td></tr>
-<tr><td><code>initial_timestamp</code></td><td>all but non-sequential</td><td></td></tr>
+<tr><td><code>initial_timestamp</code></td><td>all but non-sequential</td><td>Also decides the series' <code>time_reference</code> unless declared.</td></tr>
 <tr><td><code>resolution</code></td><td>all but non-sequential</td><td>ISO-8601 duration, e.g. <code>PT1H</code>.</td></tr>
 <tr><td><code>horizon</code>, <code>interval</code>, <code>count</code></td><td>forecasts</td><td>The two durations are ISO-8601, e.g. <code>PT24H</code>.</td></tr>
 <tr><td><code>percentiles</code></td><td><code>Probabilistic</code></td><td>Strictly increasing list of floats.</td></tr>

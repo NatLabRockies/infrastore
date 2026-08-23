@@ -279,8 +279,8 @@ between catalog entities and have nothing to do with time series at all.</p>
 including the <code>data_hash</code> that links it to a packed column or standalone variable, the array
 typing (<code>dtype</code>, <code>element_shape</code>), the opaque package-owned <code>application_data</code> payload, plus
 temporal fields, forecast parameters (<code>horizon</code>, <code>interval</code>, <code>count</code>, <code>percentiles</code>), the unit
-descriptors (<code>units</code>, <code>quantity_kind</code>, <code>unit_system</code>), the <code>component_field</code> the values vary over
-time, and the <code>features_hash</code>.</li>
+descriptors (<code>units</code>, <code>quantity_kind</code>, <code>unit_system</code>), the <code>time_reference</code> recording how the
+timestamps were spelled, the <code>component_field</code> the values vary over time, and the <code>features_hash</code>.</li>
 <li><strong><code>feature_sets</code></strong> — the expanded key/value pairs of a feature map, one row per key, typed by a
 <code>value_kind</code> discriminator. The table is <strong>content-addressed</strong>, exactly as arrays are: its primary
 key is <code>(features_hash, key)</code> — the same hash the association row already carries, so no join

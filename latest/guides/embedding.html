@@ -241,6 +241,13 @@ storage. <code>unit_system</code> is a label the store never acts on — <code>c
 a base the owning component holds in <em>your</em> object graph", and converting back is your job. Unset
 means <em>unspecified</em>, which is not the same as <code>natural_units</code>; do not read one as the other. See
 <a href="../explanation/data-model.html#optional-descriptors">Optional Descriptors</a>.</p>
+<p><strong><code>time_reference</code> records how the timestamps were spelled</strong> — an instant in UTC, an instant at a
+fixed offset, an instant in a named IANA zone, or a wall clock naming no instant. Each binding
+infers it from the input type, so nothing takes a new argument; a native Rust caller declares it,
+having no naive datetime type to infer from. It changes nothing about the stored instants, the grid,
+or either content hash — but the store does hold a series to its claim: a query bound must be
+spelled the way the series is, and a zoneless series cannot share one reader axis or one ranged bulk
+read with instant-bearing ones. See <a href="../explanation/data-model.html#time-references">Time references</a>.</p>
 <p><strong><code>application_data</code> is yours.</strong> It is an opaque payload stored and returned verbatim, so a parent
 package can carry whatever it needs per association (a serialized type tag, a provenance record)
 without the store knowing. Because the store never validates it, version it yourself if its shape

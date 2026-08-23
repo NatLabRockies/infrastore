@@ -207,10 +207,38 @@ Multi-dimensional arrays (a per-step element shape) are supported via the NumPy 
 </blockquote>
 <h2 id="datetimes"><a class="header" href="#datetimes">Datetimes</a></h2>
 <p>Every <code>datetime</code> argument — an initial timestamp, a <code>NonSequentialTimeSeries</code> timestamp vector, a
-<code>time_range</code> bound, a reader's <code>when</code> — must be <strong>timezone-aware</strong>, and any zone will do:
-<code>datetime.timezone.utc</code>, a <code>ZoneInfo</code>, or a fixed offset. It is converted to UTC on the way in, so
-two aware datetimes naming the same instant are the same instant to the store, and every <code>datetime</code>
-read back is UTC. A naive datetime names no instant and raises <code>InvalidParameterError</code>.</p>
+<code>time_range</code> bound, a reader's <code>when</code> — may be aware or naive, and the store records <strong>which</strong>.</p>
+<p>An <strong>aware</strong> datetime names an instant, and any zone will do: <code>datetime.timezone.utc</code>, a <code>ZoneInfo</code>,
+or a fixed offset. It is converted to UTC on the way in, so two aware datetimes naming the same
+instant are the same instant to the store — and the spelling it arrived in is recorded, so it is the
+spelling that comes back.</p>
+<p>A <strong>naive</strong> datetime names a wall clock and no instant. It is accepted and recorded as
+<code>time_reference = "zoneless"</code>; its fields are read as they stand (never through <code>astimezone</code>, which
+would apply the machine's local zone), and a read hands back a naive datetime again. That round-trip
+is the whole reason accepting one is safe:</p>
+<pre><code class="language-python">datetime(2024, 1, 1) == datetime(2024, 1, 1, tzinfo=timezone.utc)   # False
+datetime(2024, 1, 1) &lt;  datetime(2024, 1, 1, tzinfo=timezone.utc)   # TypeError
+</code></pre>
+<p>A store that took a naive datetime and returned an aware one would be worse than one that refused.</p>
+<h3 id="time-references"><a class="header" href="#time-references">Time references</a></h3>
+<p>Every series carries a <code>time_reference</code> recording how its timestamps were spelled, inferred from the
+<code>datetime</code> it was built with:</p>
+<div class="table-wrapper"><table><thead><tr><th>Input</th><th><code>time_reference</code></th></tr></thead><tbody>
+<tr><td><code>tzinfo=timezone.utc</code></td><td><code>"utc"</code></td></tr>
+<tr><td>a fixed-offset <code>tzinfo</code></td><td><code>"-07:00"</code></td></tr>
+<tr><td><code>ZoneInfo("America/Denver")</code></td><td><code>"America/Denver"</code></td></tr>
+<tr><td>naive</td><td><code>"zoneless"</code></td></tr>
+</tbody></table>
+</div>
+<p><code>ZoneInfo("UTC")</code> records the <em>zone</em> <code>"UTC"</code>, not the literal <code>"utc"</code>: the two render identically
+forever, and the difference is only in what the catalog reports back.</p>
+<p>Reads spell the timestamp back the same way — a <code>ZoneInfo</code> series returns datetimes carrying that
+<code>ZoneInfo</code>, including the correct side of a fall-back hour. A <strong>query bound must match</strong>: a naive
+bound against a series that records instants, or an aware bound against a zoneless one, raises
+<code>InvalidParameterError</code> rather than being coerced, and so does a <code>time_range</code> whose two ends
+disagree. <code>list_time_series(zoneless=...)</code>, <code>build_static_reader(..., zoneless=...)</code>, and the other
+filter-taking methods take a <code>zoneless</code> predicate for building a coherent selection. See
+<a href="../explanation/data-model.html#time-references">Time references</a> for the full rules.</p>
 <p>A <code>datetime</code> that is <strong>stored</strong> — an initial timestamp, or an entry of a <code>NonSequentialTimeSeries</code>
 timestamp vector — must also be a whole number of milliseconds; <code>microsecond</code> must be a multiple of
 1000. A finer instant raises <code>InvalidParameterError</code> rather than being silently truncated, because
@@ -299,8 +327,11 @@ store.in_transaction -&gt; bool
     application_data: str | None = None,
     quantity_kind: str | None = None,
     unit_system: str | None = None,   # "natural_units" | "component_base"
+    time_reference: str | None = None,   # "utc" | "zoneless" | "-07:00" | "America/Denver"
     component_field: str | None = None,  # e.g. "max_active_power"
 ) -&gt; TimeSeriesKey: ...
+# `time_reference` is normally omitted: it is inferred from the datetime the
+# series was built with (see "Time references" below). Pass it to override.
 # An unrecognized `unit_system` raises InvalidParameterError rather than
 # degrading to unspecified; omitting it leaves the basis unspecified, which is
 # not the same as declaring natural units.
@@ -313,7 +344,7 @@ def add_time_series_bulk(self, items: list[dict]) -&gt; list[TimeSeriesKey]: ...
 # Each item dict mirrors add_time_series's parameters: required `owner_id`,
 # `owner_type`, `owner_category`, `time_series`; optional `features`, `units`,
 # `element_type`, `application_data`, `quantity_kind`, `unit_system`,
-# `component_field`.
+# `time_reference`, `component_field`.
 # All items commit in ONE metadata transaction (all-or-nothing), which is much
 # faster than looping over add_time_series. Keys are returned in input order.
 
@@ -521,10 +552,11 @@ key), each with the keys: <code>owner_id</code>, <code>owner_type</code>, <code>
 series), <code>length</code>, <code>resolution</code> (ISO 8601 duration string, e.g. <code>PT1H</code>, or <code>None</code>), <code>timestamps</code>,
 <code>horizon</code>, <code>interval</code>, <code>count</code>, <code>percentiles</code>, <code>element_type</code>, <code>element_shape</code>, <code>features</code>,
 <code>units</code>, <code>quantity_kind</code>, <code>unit_system</code> (<code>"natural_units"</code> / <code>"component_base"</code> / <code>None</code>),
-<code>component_field</code>, <code>application_data</code>. <code>timestamps</code> is a list of RFC 3339 strings for
-non-sequential series and <code>None</code> otherwise; <code>horizon</code> / <code>interval</code> / <code>count</code> are set for forecasts
-and <code>percentiles</code> for <code>Probabilistic</code> only. The <code>features</code> filter is a <strong>subset</strong> match — rows
-must contain at least the given pairs — whereas a <code>TimeSeriesKey</code> matches its feature map exactly.</li>
+<code>time_reference</code>, <code>component_field</code>, <code>application_data</code>. <code>timestamps</code> is a list of RFC 3339
+strings for non-sequential series and <code>None</code> otherwise; <code>horizon</code> / <code>interval</code> / <code>count</code> are set
+for forecasts and <code>percentiles</code> for <code>Probabilistic</code> only. The <code>features</code> filter is a <strong>subset</strong>
+match — rows must contain at least the given pairs — whereas a <code>TimeSeriesKey</code> matches its feature
+map exactly.</li>
 <li><strong><code>list_array_groups</code></strong> accepts the same filters as <code>list_time_series</code> and groups the matching
 series by their underlying stored array. It returns a list of dicts, each with <code>data_hash</code> (hex
 string) and <code>keys</code> (a list of <code>TimeSeriesKey</code>s that resolve to that array). Keys sharing one dict
@@ -566,11 +598,13 @@ SQLite catalog, so <code>ok</code> is not a statement about the store as a whole
 )
 </code></pre>
 <p>Read-only properties: <code>initial_timestamp -&gt; datetime</code>, <code>resolution -&gt; str</code> (ISO 8601 duration, e.g.
-<code>PT1H</code>), <code>length -&gt; int</code>, <code>data -&gt; numpy.ndarray</code>, <code>name -&gt; str</code>. The constructor accepts either a
-<code>timedelta</code> or an ISO 8601 duration string for <code>resolution</code>; the getter always returns the ISO
-string. <code>name</code> is a required association attribute (the same array may be stored under different
-names). It is read off the object by <code>add_time_series</code> and populated on <code>get_time_series</code>. The
-array's <code>element_type</code> and per-step element shape are preserved through a round-trip.</p>
+<code>PT1H</code>), <code>length -&gt; int</code>, <code>data -&gt; numpy.ndarray</code>, <code>name -&gt; str</code>, <code>time_reference -&gt; str | None</code>.
+<code>initial_timestamp</code> comes back spelled the way it was written — see
+<a href="#time-references">Time references</a>. The constructor accepts either a <code>timedelta</code> or an ISO 8601
+duration string for <code>resolution</code>; the getter always returns the ISO string. <code>name</code> is a required
+association attribute (the same array may be stored under different names). It is read off the
+object by <code>add_time_series</code> and populated on <code>get_time_series</code>. The array's <code>element_type</code> and
+per-step element shape are preserved through a round-trip.</p>
 <h2 id="nonsequentialtimeseries"><a class="header" href="#nonsequentialtimeseries"><code>NonSequentialTimeSeries</code></a></h2>
 <pre><code class="language-python">NonSequentialTimeSeries(
     timestamps: list[datetime],
@@ -578,9 +612,10 @@ array's <code>element_type</code> and per-step element shape are preserved throu
     name: str,
 )
 </code></pre>
-<p>Read-only properties: <code>timestamps</code>, <code>length</code>, <code>data</code>, and <code>name</code>. Timestamps must be timezone-aware,
-strictly increasing, and match the first data dimension. <code>get_time_series</code> returns this class for a
-non-sequential key.</p>
+<p>Read-only properties: <code>timestamps</code>, <code>length</code>, <code>data</code>, <code>name</code>, and <code>time_reference</code>. Timestamps must
+be strictly increasing, match the first data dimension, and agree on one spelling — a vector mixing
+naive and aware values raises <code>InvalidParameterError</code>, since one series records one reference.
+<code>get_time_series</code> returns this class for a non-sequential key.</p>
 <h2 id="timeserieskey"><a class="header" href="#timeserieskey"><code>TimeSeriesKey</code></a></h2>
 <p>Returned by <code>add_time_series</code>, <code>add_time_series_bulk</code>, and <code>get_time_series_keys</code>, and in the <code>keys</code>
 list of every <code>list_array_groups</code> row; not constructed directly. Read-only properties:</p>

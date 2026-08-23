@@ -261,9 +261,16 @@ the owning component these values vary — <code>"max_active_power"</code>; also
     application_data='{"source": "weather_year_2012"}',
 )
 </code></pre>
+<p>A series also records a <code>time_reference</code> — how its timestamps were spelled — inferred from the
+<code>datetime</code> it was built with: <code>timezone.utc</code> gives <code>"utc"</code>, a fixed-offset <code>tzinfo</code> gives
+<code>"-07:00"</code>, a <code>ZoneInfo</code> gives its name, and a <strong>naive</strong> datetime gives <code>"zoneless"</code>. A naive
+datetime is accepted (it names a wall clock, not an instant) precisely because the read hands one
+back — naive and aware datetimes are never equal in Python, so returning the other kind would break
+every <code>==</code> a caller writes.</p>
 <p>None of them is part of the key or of either content hash, so two adds that differ only in a
 descriptor are a duplicate. See
-<a href="../explanation/data-model.html#optional-descriptors">Optional Descriptors</a>.</p>
+<a href="../explanation/data-model.html#optional-descriptors">Optional Descriptors</a> and
+<a href="../explanation/data-model.html#time-references">Time references</a>.</p>
 <h3 id="add-many-series-at-once"><a class="header" href="#add-many-series-at-once">Add many series at once</a></h3>
 <p><code>add_time_series_bulk</code> takes a list of dicts mirroring <code>add_time_series</code>'s keyword arguments and
 commits them in one catalog transaction, taking the block-sized HDF5 write path. It is the way to

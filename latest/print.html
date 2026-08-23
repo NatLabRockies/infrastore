@@ -1001,8 +1001,8 @@ one. Consumers routinely spread a feature map into a keyword-argument query — 
 time series with one of these names raises <code>InvalidParameter</code>:</p>
 <pre><code class="language-text">application_data, component_field, count, data, data_hash, dtype, element_shape, element_type, ext,
 features, horizon, initial_timestamp, interval, length, name, owner_category, owner_id, owner_type,
-percentiles, quantity_kind, resolution, scenario_count, time_series_type, timestamps, unit_system,
-units
+percentiles, quantity_kind, resolution, scenario_count, time_reference, time_series_type,
+timestamps, unit_system, units
 </code></pre>
 <p><code>dtype</code> and <code>ext</code> no longer name metadata fields — <code>element_type</code> and <code>application_data</code> replaced
 them — but both stay reserved. <code>dtype</code> is still how every binding spells a <code>TypedArray</code>'s physical
@@ -1075,6 +1075,9 @@ convention in many models but are not the same thing, since one component may ca
 for one field (a forecast and an actual, a set of weather years) and <code>name</code> is part of a series'
 identity where this is not. Named for the common case; when the owner is a supplemental attribute
 it names a field on that attribute.</li>
+<li><strong><code>time_reference</code></strong> — how this series' timestamps were <em>spelled</em>: <code>utc</code>, <code>zoneless</code>, a fixed
+offset (<code>-07:00</code>), or an IANA zone name (<code>America/Denver</code>). See
+<a href="explanation/data-model.html#time-references">Time references</a> below, which this one deserves a section of its own for.</li>
 <li><strong><code>application_data</code></strong> — an opaque, <strong>package-owned</strong> extension payload stored verbatim (typically
 JSON) that a binding writes and reads for its own purposes. The store never parses or interprets
 it, and end users are not expected to set it. Element typing does <em>not</em> live here: that is
@@ -1087,15 +1090,136 @@ derived from it. Unlike <code>units</code> and <code>application_data</code> it 
 validates the array's dtype and per-step shape against it. See
 <a href="explanation/../reference/element-types.html">Element types</a>.</li>
 </ul>
-<p><code>units</code>, <code>quantity_kind</code>, <code>unit_system</code>, <code>component_field</code>, and <code>application_data</code> are recorded in
-metadata and returned on read, but they do not affect identity or storage: they are absent from the
-key and from both content hashes, so two series differing only in a descriptor are a duplicate.</p>
+<p><code>units</code>, <code>quantity_kind</code>, <code>unit_system</code>, <code>time_reference</code>, <code>component_field</code>, and <code>application_data</code>
+are recorded in metadata and returned on read, but they do not affect identity or storage: they are
+absent from the key and from both content hashes, so two series differing only in a descriptor are a
+duplicate.</p>
 <p><code>component_field</code> is the one descriptor that is also a <strong>filter</strong> (<code>ListFilter::component_field</code>,
 and its equivalent in every binding): "every series that varies this field", alone or scoped to one
 owner. Being descriptive rather than identifying, it narrows a listing but never addresses a single
 row on its own — one component may carry several series for one field, distinguished by name or
 features. It matches exactly and case-sensitively, and a series that declares no <code>component_field</code>
 matches no value, so the filter cannot select the rows that left it unset.</p>
+<h2 id="time-references"><a class="header" href="#time-references">Time References</a></h2>
+<p>The store records <strong>instants</strong>. A <code>time_reference</code> records what those instants were <em>written as</em>, so
+a series comes back the way it went in instead of being relabelled UTC at every boundary.</p>
+<div class="table-wrapper"><table><thead><tr><th>Spelling</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>utc</code></td><td>An instant, written as UTC.</td></tr>
+<tr><td><code>-07:00</code></td><td>An instant, written at a fixed offset from UTC.</td></tr>
+<tr><td><code>America/Denver</code></td><td>An instant, written in a named IANA zone. Held opaquely.</td></tr>
+<tr><td><code>zoneless</code></td><td>A wall clock. Names no instant; the store holds it as if UTC.</td></tr>
+<tr><td><em>unset</em></td><td>Unspecified — <strong>not</strong> a claim the timestamps were written as UTC.</td></tr>
+</tbody></table>
+</div>
+<p>Three of the four name an instant; <code>zoneless</code> does not, and most rules below split on that binary
+rather than on the four spellings. An unset reference groups with the zoned ones.</p>
+<p>Each binding <strong>infers</strong> the spelling from the input type, so nothing takes a new required argument:</p>
+<div class="table-wrapper"><table><thead><tr><th>Binding</th><th><code>utc</code></th><th>fixed offset</th><th>named zone</th><th><code>zoneless</code></th></tr></thead><tbody>
+<tr><td>Python</td><td><code>timezone.utc</code></td><td>fixed-offset <code>tzinfo</code></td><td><code>tzinfo</code> exposing a <code>key</code> (<code>ZoneInfo</code>)</td><td>naive <code>datetime</code></td></tr>
+<tr><td>Julia</td><td>UTC <code>ZonedDateTime</code></td><td><code>FixedTimeZone</code></td><td><code>VariableTimeZone</code>, by its name</td><td>bare <code>DateTime</code></td></tr>
+<tr><td>CLI</td><td><code>Z</code> in text, or the flag</td><td><code>-07:00</code> in text or flag</td><td><code>--assume-timezone America/Denver</code></td><td>bare timestamp, <code>--zoneless</code></td></tr>
+<tr><td>Rust</td><td><code>DateTime&lt;Utc&gt;</code></td><td>declare it</td><td>declare it</td><td><strong>declare it</strong> — no naive type</td></tr>
+</tbody></table>
+</div>
+<p><code>ZoneInfo("UTC")</code> records the <em>zone</em> <code>UTC</code>, not the literal <code>utc</code>. The two render identically
+forever; the difference shows up only in what the catalog reports back, which is the point of
+recording a spelling at all.</p>
+<h3 id="a-spelling-is-not-a-grid"><a class="header" href="#a-spelling-is-not-a-grid">A spelling is not a grid</a></h3>
+<p>A reference records how timestamps were <em>written</em>. It does not change how the grid is <em>stepped</em>:
+<code>resolution</code> and <code>interval</code> are durations, so an hourly series has hourly <strong>instants</strong> whatever its
+reference says. Rendering an hourly <code>America/Denver</code> series across the November fall-back gives
+<code>01:00-06:00</code>, <code>01:00-07:00</code>, <code>02:00-07:00</code> — two identical wall clocks, two distinct instants,
+correctly ordered.</p>
+<p>That is the difference between two things "store this in Denver time" can mean:</p>
+<ul>
+<li><strong>Instants, displayed in Denver.</strong> Storage is untouched — UTC instants plus a label. <strong>This is
+what a named zone means here.</strong></li>
+<li><strong>A local-clock grid</strong> — hourly <em>by the clock</em>, so a 23-hour day in March and a 25-hour one in
+November. This is inexpressible in <code>SingleTimeSeries</code> and the dense forecasts, whose grid is a
+<code>Period</code>: a fixed count of milliseconds. Use <code>NonSequentialTimeSeries</code>, which carries an explicit
+instant per value, so the caller derives those days and the data records them rather than
+arithmetic implying them.</li>
+</ul>
+<p>Someone with 8760 naive Denver timestamps who localizes only the first and passes <code>resolution = 1h</code>
+gets labels shifted by an hour after each transition, and nothing in the data distinguishes that
+from a correct series. The store cannot detect it; the split above is the thing to know.</p>
+<h3 id="months-step-on-the-utc-calendar"><a class="header" href="#months-step-on-the-utc-calendar">Months step on the UTC calendar</a></h3>
+<p><code>Period::Months</code> is calendar arithmetic, so unlike a fixed period it has to be told <em>which</em>
+calendar. It uses the stored <strong>UTC</strong> one, and the reference does not redirect it. TimeZones.jl steps
+the <em>local</em> clock instead, so the two disagree by an hour at every DST transition and by up to a day
+at a month boundary.</p>
+<p>Local-frame stepping is refused for two independent reasons: it is the local → instant direction the
+store deliberately never runs (below), and it would let a spelling decide <em>which instants</em> a series
+contains. A calendar period on a zoned series is warned about on write, so the disagreement is
+findable before it is filed as a bug. A caller who wants months on a local calendar wants a
+local-clock grid, and the answer is the one above: <code>NonSequentialTimeSeries</code>.</p>
+<h3 id="why-a-named-zone-is-safe"><a class="header" href="#why-a-named-zone-is-safe">Why a named zone is safe</a></h3>
+<p>The ambiguity a named zone is feared for lives in the <strong>local → instant</strong> direction, and the core
+never runs it.</p>
+<ul>
+<li><strong>On input</strong> that direction has already happened, in the caller's own datetime library. Julia
+refuses an ambiguous local time outright; Python resolves it through <code>fold</code>. Either way the
+binding is handed a value that already names one definite instant. The CLI is the exception,
+because it is handed <em>text</em> — see below.</li>
+<li><strong>On output</strong> the store runs only <strong>instant → local</strong>, which is total and single-valued: one
+instant maps to exactly one wall clock in a named zone, and converting it back yields the same
+instant.</li>
+</ul>
+<p>So a year-long Denver series stamped <code>-07:00</code> renders every timestamp after the March transition an
+hour wrong, while the same series stamped <code>America/Denver</code> renders all of them correctly. Recording
+"the offset in effect at <code>initial_timestamp</code>" is the one option that is quietly incorrect, which is
+why it is not among the four spellings.</p>
+<p>Two caveats belong here rather than in the type. Rendering a named zone is
+<strong>tz-database-dependent</strong>, so a retroactive rule change moves the displayed local time of an
+already-stored instant — the store records the instant, and the label is a rendering hint. And a
+zone name's <strong>existence is audited, never gated</strong>: the core checks only that a name is shaped like
+an IANA name and cannot be read as an offset or as either literal. Every layer that <em>has</em> a database
+— the CLI via <code>chrono-tz</code>, Python via <code>zoneinfo</code>, Julia via <code>TimeZones</code> — warns on a name it does
+not recognize and stores it anyway, and <code>infrastore store-info</code> reports the catalog's distinct
+spellings with unrecognized zones flagged. Gating would turn a rare read-time error into a
+write-time error coupled to <em>our</em> release cadence: when IANA adds a zone, a caller whose own
+database already has it would be refused until they upgraded.</p>
+<h3 id="the-cli-is-where-local--instant-actually-happens"><a class="header" href="#the-cli-is-where-local--instant-actually-happens">The CLI is where local → instant actually happens</a></h3>
+<p>Every other binding is handed an already-resolved datetime. The CLI is handed text, so
+<code>--assume-timezone America/Denver</code> over a zoneless column is the one place in the system that runs
+local → instant itself, and <code>chrono-tz</code> answers in three values — each with its own behavior, per
+row:</p>
+<div class="table-wrapper"><table><thead><tr><th>Result</th><th>Meaning</th><th>CLI behavior</th></tr></thead><tbody>
+<tr><td>a single instant</td><td>the ordinary case</td><td>ingest it</td></tr>
+<tr><td>two candidates</td><td>the repeated fall-back hour</td><td><strong>error</strong>, naming the row and both candidates</td></tr>
+<tr><td>none</td><td>the skipped spring-forward hour</td><td><strong>error</strong>, naming the row</td></tr>
+</tbody></table>
+</div>
+<p>Rejecting loudly, per row, with both candidates named is what makes a named zone acceptable here;
+silently picking one is not. Reading is unaffected: rendering a stored instant in a named zone is
+the total direction, so <code>--assume-timezone</code> plays no part in it.</p>
+<h3 id="query-bounds-and-mixed-selections"><a class="header" href="#query-bounds-and-mixed-selections">Query bounds and mixed selections</a></h3>
+<p>A bound must be spelled the way the series is, and a mismatch is refused rather than coerced:</p>
+<div class="table-wrapper"><table><thead><tr><th>Series reference</th><th>Wall-clock bound</th><th>Instant bound</th></tr></thead><tbody>
+<tr><td><code>utc</code> / offset / zone</td><td><strong>error</strong></td><td>accept — any offset names the same instant</td></tr>
+<tr><td><code>zoneless</code></td><td>accept</td><td><strong>error</strong></td></tr>
+<tr><td><em>unset</em></td><td><strong>error</strong></td><td>accept</td></tr>
+</tbody></table>
+</div>
+<p>An off-grid bound still names an unambiguous instant, so flooring it is well-defined — that is why
+<code>time_range</code> snaps. A wall-clock bound against a series that records instants is a <strong>category
+error</strong>: there is no defined mapping to fall back on. Bounds stay unconstrained in <em>precision</em>,
+though: a sub-millisecond bound names a real instant even though a stored one may not.</p>
+<p>The same partition drives two rejections and one filter:</p>
+<ol>
+<li>A <strong>ranged bulk read</strong> over a selection spanning both groups is refused — no single bound is
+valid for all of it. An unranged one is unaffected: without a bound there is nothing to disagree
+about, and each series carries its own spelling back.</li>
+<li>A <strong><code>StaticReader</code></strong> materializes one timestamp axis, so a mixed cohort is refused at <em>build</em>
+time, where the error can name the series that disagree. Mixing <code>utc</code>, an offset, and a named
+zone in one cohort is fine — all three name instants, and the axis is spelled with the cohort's
+reference when every member agrees and <code>utc</code> when they merely agree on naming instants.</li>
+<li><strong><code>ListFilter::zoneless</code></strong> is the constructive half: <code>true</code> selects the wall-clock series,
+<code>false</code> selects everything that accepts an instant bound — the three zoned spellings <em>and</em> the
+rows that left the reference unset. It is a binary predicate rather than a match on a specific
+spelling because an exact match cannot name that second group at all (the trap <code>component_field</code>
+documents), and here those rows are a coherence group rather than an oversight.</li>
+</ol>
 <h2 id="associations-between-entities"><a class="header" href="#associations-between-entities">Associations Between Entities</a></h2>
 <p>Beyond owning time series, catalog entities can be related to each other. The catalog records two
 such relationships, in two separate tables, because they are not the same kind of thing: attaching
@@ -1236,8 +1360,8 @@ between catalog entities and have nothing to do with time series at all.</p>
 including the <code>data_hash</code> that links it to a packed column or standalone variable, the array
 typing (<code>dtype</code>, <code>element_shape</code>), the opaque package-owned <code>application_data</code> payload, plus
 temporal fields, forecast parameters (<code>horizon</code>, <code>interval</code>, <code>count</code>, <code>percentiles</code>), the unit
-descriptors (<code>units</code>, <code>quantity_kind</code>, <code>unit_system</code>), the <code>component_field</code> the values vary over
-time, and the <code>features_hash</code>.</li>
+descriptors (<code>units</code>, <code>quantity_kind</code>, <code>unit_system</code>), the <code>time_reference</code> recording how the
+timestamps were spelled, the <code>component_field</code> the values vary over time, and the <code>features_hash</code>.</li>
 <li><strong><code>feature_sets</code></strong> — the expanded key/value pairs of a feature map, one row per key, typed by a
 <code>value_kind</code> discriminator. The table is <strong>content-addressed</strong>, exactly as arrays are: its primary
 key is <code>(features_hash, key)</code> — the same hash the association row already carries, so no join
@@ -1833,6 +1957,13 @@ storage. <code>unit_system</code> is a label the store never acts on — <code>c
 a base the owning component holds in <em>your</em> object graph", and converting back is your job. Unset
 means <em>unspecified</em>, which is not the same as <code>natural_units</code>; do not read one as the other. See
 <a href="guides/../explanation/data-model.html#optional-descriptors">Optional Descriptors</a>.</p>
+<p><strong><code>time_reference</code> records how the timestamps were spelled</strong> — an instant in UTC, an instant at a
+fixed offset, an instant in a named IANA zone, or a wall clock naming no instant. Each binding
+infers it from the input type, so nothing takes a new argument; a native Rust caller declares it,
+having no naive datetime type to infer from. It changes nothing about the stored instants, the grid,
+or either content hash — but the store does hold a series to its claim: a query bound must be
+spelled the way the series is, and a zoneless series cannot share one reader axis or one ranged bulk
+read with instant-bearing ones. See <a href="guides/../explanation/data-model.html#time-references">Time references</a>.</p>
 <p><strong><code>application_data</code> is yours.</strong> It is an opaque payload stored and returned verbatim, so a parent
 package can carry whatever it needs per association (a serialized type tag, a provenance record)
 without the store knowing. Because the store never validates it, version it yourself if its shape
@@ -2521,9 +2652,16 @@ the owning component these values vary — <code>"max_active_power"</code>; also
     application_data='{"source": "weather_year_2012"}',
 )
 </code></pre>
+<p>A series also records a <code>time_reference</code> — how its timestamps were spelled — inferred from the
+<code>datetime</code> it was built with: <code>timezone.utc</code> gives <code>"utc"</code>, a fixed-offset <code>tzinfo</code> gives
+<code>"-07:00"</code>, a <code>ZoneInfo</code> gives its name, and a <strong>naive</strong> datetime gives <code>"zoneless"</code>. A naive
+datetime is accepted (it names a wall clock, not an instant) precisely because the read hands one
+back — naive and aware datetimes are never equal in Python, so returning the other kind would break
+every <code>==</code> a caller writes.</p>
 <p>None of them is part of the key or of either content hash, so two adds that differ only in a
 descriptor are a duplicate. See
-<a href="guides/../explanation/data-model.html#optional-descriptors">Optional Descriptors</a>.</p>
+<a href="guides/../explanation/data-model.html#optional-descriptors">Optional Descriptors</a> and
+<a href="guides/../explanation/data-model.html#time-references">Time references</a>.</p>
 <h3 id="add-many-series-at-once"><a class="header" href="#add-many-series-at-once">Add many series at once</a></h3>
 <p><code>add_time_series_bulk</code> takes a list of dicts mirroring <code>add_time_series</code>'s keyword arguments and
 commits them in one catalog transaction, taking the block-sized HDF5 write path. It is the way to
@@ -2895,9 +3033,15 @@ the struct, where they become the <code>add_time_series!</code> defaults, or pas
                       application_data = "{\"source\": \"weather_year_2012\"}")
 key = add_time_series!(store, 42, "Generator", Component, ts)   # keeps all five
 </code></pre>
+<p>A series also records a <code>time_reference</code> — how its timestamps were spelled — inferred from the
+timestamp it was built with. A bare <code>DateTime</code> is a wall clock (<code>ZonelessReference()</code>); a
+<code>ZonedDateTime</code> keeps its zone, so a Denver series renders correctly on both sides of every DST
+transition. Reads still return a <code>DateTime</code> holding the instant, with the reference beside it;
+<code>using TimeZones</code> adds <code>zoned_timestamp</code> to fuse them back together losslessly.</p>
 <p>None of them is part of the key or of either content hash, so two adds that differ only in a
 descriptor are a duplicate. See
-<a href="guides/../explanation/data-model.html#optional-descriptors">Optional Descriptors</a>.</p>
+<a href="guides/../explanation/data-model.html#optional-descriptors">Optional Descriptors</a> and
+<a href="guides/../explanation/data-model.html#time-references">Time references</a>.</p>
 <h3 id="add-many-series-at-once-1"><a class="header" href="#add-many-series-at-once-1">Add many series at once</a></h3>
 <p><code>AddBatch</code> accepts the same <code>add_time_series!</code> calls as a <code>Store</code> but only accumulates them;
 <code>add_time_series_bulk!</code> commits the whole batch in one catalog transaction and takes the block-sized
@@ -4138,15 +4282,20 @@ existing value rather than minting a new one, since it rewrites only the HDF5 ha
 <code>IncompatibleFormat</code>, naming both versions. Every bump is backward-incompatible by definition, so
 the check is exact equality and there is no in-place upgrade path: regenerate the store with the
 matching build.</p>
-<p>(<code>0.16.0</code> added the metadata column <code>component_field</code>; <code>0.15.0</code> renamed the metadata column <code>ext</code> to
-<code>application_data</code> and added the <code>quantity_kind</code> and <code>unit_system</code> columns; unlike a new <em>table</em>,
-new <em>columns</em> are not picked up by the idempotent <code>CREATE TABLE IF NOT EXISTS</code> DDL, so a store one
-version behind is rejected on open; <code>0.14.0</code> moved a <code>NonSequentialTimeSeries</code>'s timestamps out of
-the association row: the <code>timestamps_json</code> TEXT column became a <code>timestamps_hash</code> BLOB resolving
-into the new content-addressed <a href="reference/file-format.html#timestamp_sets"><code>timestamp_sets</code></a> table, and irregular arrays that
-share a time axis are now column-packed into <code>nsts_…</code> datasets keyed by that hash instead of one
-standalone <code>arr_…</code> dataset each; <code>0.13.0</code> replaced the <code>dtype</code> column with <code>element_type</code>, which
-names the <em>logical</em> element type and derives the physical dtype from it — see
+<p>(<code>0.17.0</code> added the metadata column <code>time_reference</code>, which records how a series' timestamps were
+<em>spelled</em> — an instant in UTC, an instant at a fixed offset, an instant in a named IANA zone, or a
+wall clock naming no instant. It also changes how stored timestamps are <em>interpreted</em>: a row marked
+<code>zoneless</code> holds wall clocks the store keeps as if UTC, which an older reader would hand back as
+instants. See <a href="reference/../explanation/data-model.html#time-references">Time references</a>; <code>0.16.0</code> added the
+metadata column <code>component_field</code>; <code>0.15.0</code> renamed the metadata column <code>ext</code> to <code>application_data</code>
+and added the <code>quantity_kind</code> and <code>unit_system</code> columns; unlike a new <em>table</em>, new <em>columns</em> are not
+picked up by the idempotent <code>CREATE TABLE IF NOT EXISTS</code> DDL, so a store one version behind is
+rejected on open; <code>0.14.0</code> moved a <code>NonSequentialTimeSeries</code>'s timestamps out of the association
+row: the <code>timestamps_json</code> TEXT column became a <code>timestamps_hash</code> BLOB resolving into the new
+content-addressed <a href="reference/file-format.html#timestamp_sets"><code>timestamp_sets</code></a> table, and irregular arrays that share a time
+axis are now column-packed into <code>nsts_…</code> datasets keyed by that hash instead of one standalone
+<code>arr_…</code> dataset each; <code>0.13.0</code> replaced the <code>dtype</code> column with <code>element_type</code>, which names the
+<em>logical</em> element type and derives the physical dtype from it — see
 <a href="reference/./element-types.html">Element types</a>; <code>0.12.0</code> changed <code>owner_category</code> and <code>time_series_type</code> from
 TEXT names to small INTEGER codes — see <a href="reference/file-format.html#discriminant-encoding">Discriminant encoding</a> below;
 <code>0.11.0</code> renamed the metadata column <code>logical_type</code> to <code>ext</code> — an opaque, package-owned extension
@@ -4356,6 +4505,7 @@ the error surfaces with the compacting store still open on the original file.</p
 <tr><td><code>units</code></td><td>TEXT</td><td>Free-form units label</td></tr>
 <tr><td><code>quantity_kind</code></td><td>TEXT</td><td>What the values measure (QUDT <code>QuantityKind</code> name); <code>NULL</code> if unset</td></tr>
 <tr><td><code>unit_system</code></td><td>TEXT</td><td><code>natural_units</code> or <code>component_base</code>; <code>NULL</code> means <em>unspecified</em></td></tr>
+<tr><td><code>time_reference</code></td><td>TEXT</td><td>How the timestamps were spelled (below); <code>NULL</code> means <em>unspecified</em></td></tr>
 <tr><td><code>component_field</code></td><td>TEXT</td><td>Owning component's field these values vary; <code>NULL</code> if unset</td></tr>
 <tr><td><code>percentiles_json</code></td><td>TEXT</td><td>JSON array of percentiles for <code>Probabilistic</code>; <code>NULL</code> else</td></tr>
 <tr><td><code>element_type</code></td><td>TEXT</td><td>Canonical element-type string (<code>NOT NULL DEFAULT 'f64'</code>)</td></tr>
@@ -4367,6 +4517,25 @@ the error surfaces with the compacting store still open on the original file.</p
 </div>
 <p>The two content-address hashes are the last two columns. Column order is not load-bearing — every
 statement names its columns — so the layout is chosen for readability.</p>
+<h4 id="time_reference"><a class="header" href="#time_reference"><code>time_reference</code></a></h4>
+<p>One TEXT column holds all four spellings: <code>utc</code>, <code>zoneless</code>, a fixed offset (<code>-07:00</code>), or an IANA
+zone name (<code>America/Denver</code>). That is unambiguous rather than merely hoped for, because the core
+refuses a zone name that reads as an offset or as either literal — the <code>utc</code> literal is lowercase
+precisely so the IANA zone <code>UTC</code> stays a distinct value.</p>
+<p><code>NULL</code> means <em>unspecified</em>, never <code>utc</code>. For query bounds it groups with the three zoned spellings
+(an instant bound is accepted, a wall-clock bound refused), but it is not a claim the timestamps
+were written as UTC.</p>
+<p>Deliberately <strong>not</strong> indexed, and that does not change now that <code>ListFilter::zoneless</code> exists. The
+<code>idx_component_field</code> partial-index pattern is wrong here twice over:
+<code>WHERE time_reference IS NOT NULL</code> would exclude exactly the <code>NULL</code> rows that filter has to return,
+and the column is low-cardinality — a handful of distinct values across a whole store — so it is not
+selective enough to earn an index. In practice it is combined with <code>owner_id</code> or <code>name</code>, which are
+indexed.</p>
+<p>The column does not reach storage. <code>array_hash</code> takes no timestamp input at all, the packed dataset
+names carry no timestamp, and <code>initial_timestamp</code> stays RFC 3339 <strong>UTC</strong> whatever the reference says
+— a <code>-07:00</code> series stores <code>2024-01-01T07:00:00Z</code> and the label <code>-07:00</code>, and the offset is applied
+on the way out. Two series with equal values therefore pool into the same dataset and share a
+<code>data_hash</code> regardless of their references, which is correct: they are the same numbers.</p>
 <h3 id="feature_sets"><a class="header" href="#feature_sets"><code>feature_sets</code></a></h3>
 <p>The expanded feature map, one row per key. The typed columns are populated according to
 <code>value_kind</code>.</p>
@@ -4578,7 +4747,7 @@ SELECT id, owner_id, owner_type,
                              ELSE 'unknown(' || time_series_type || ')' END AS time_series_type,
        name,
        initial_timestamp, resolution, length, horizon, interval, count,
-       units, quantity_kind, unit_system, component_field,
+       units, quantity_kind, unit_system, time_reference, component_field,
        element_type, element_shape, application_data,
        lower(hex(data_hash))       AS data_hash,
        lower(hex(features_hash))   AS features_hash,
@@ -5487,6 +5656,7 @@ forecast type, <code>None</code> for the static types); <code>resolution</code> 
     pub units: Option&lt;String&gt;,
     pub quantity_kind: Option&lt;String&gt;,
     pub unit_system: Option&lt;UnitSystem&gt;,
+    pub time_reference: Option&lt;TimeReference&gt;,
     pub component_field: Option&lt;String&gt;,
     pub application_data: Option&lt;String&gt;,
 }
@@ -5500,6 +5670,7 @@ impl SingleTimeSeries {
     pub fn with_units(self, units: impl Into&lt;String&gt;) -&gt; Self;
     pub fn with_quantity_kind(self, quantity_kind: impl Into&lt;String&gt;) -&gt; Self;
     pub fn with_unit_system(self, unit_system: UnitSystem) -&gt; Self;
+    pub fn with_time_reference(self, time_reference: TimeReference) -&gt; Self;
     pub fn with_component_field(self, component_field: impl Into&lt;String&gt;) -&gt; Self;
     pub fn with_application_data(self, application_data: impl Into&lt;String&gt;) -&gt; Self;
 }
@@ -5787,10 +5958,10 @@ pub fn validate_features(features: &amp;Features) -&gt; Result&lt;()&gt;;
 <code>name</code>, <code>data_hash: [u8; 32]</code>, the optional temporal fields (<code>initial_timestamp</code>, <code>resolution</code>,
 <code>length</code>, <code>horizon</code>, <code>interval</code>, <code>count</code>, <code>timestamps</code>), <code>features</code>, the descriptors (<code>units</code>,
 <code>quantity_kind: Option&lt;String&gt;</code>, <code>unit_system: Option&lt;UnitSystem&gt;</code>,
-<code>component_field: Option&lt;String&gt;</code>, <code>application_data: Option&lt;String&gt;</code>),
-<code>percentiles: Option&lt;Vec&lt;f64&gt;&gt;</code> (set for <code>Probabilistic</code>), and the array typing: <code>dtype: Dtype</code>,
-<code>element_shape: Vec&lt;usize&gt;</code>. The span fields (<code>resolution</code>, <code>horizon</code>, <code>interval</code>) are
-<code>Option&lt;Period&gt;</code>.</p>
+<code>time_reference: Option&lt;TimeReference&gt;</code>, <code>component_field: Option&lt;String&gt;</code>,
+<code>application_data: Option&lt;String&gt;</code>), <code>percentiles: Option&lt;Vec&lt;f64&gt;&gt;</code> (set for <code>Probabilistic</code>), and
+the array typing: <code>dtype: Dtype</code>, <code>element_shape: Vec&lt;usize&gt;</code>. The span fields (<code>resolution</code>,
+<code>horizon</code>, <code>interval</code>) are <code>Option&lt;Period&gt;</code>.</p>
 <h3 id="unitsystem"><a class="header" href="#unitsystem"><code>UnitSystem</code></a></h3>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
@@ -5803,6 +5974,53 @@ impl UnitSystem {
 <span class="boring">}</span></code></pre></pre>
 <p><code>None</code> on a metadata row means <em>unspecified</em>, not <code>NaturalUnits</code>. See
 <a href="reference/../explanation/data-model.html#optional-descriptors">Optional descriptors</a>.</p>
+<h3 id="timereference-and-timerange"><a class="header" href="#timereference-and-timerange"><code>TimeReference</code> and <code>TimeRange</code></a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub enum TimeReference {
+    Utc,                  // an instant, written as UTC
+    FixedOffset(i32),     // an instant, written at a fixed offset — minutes east
+    Zone(String),         // an instant, written in a named IANA zone; held opaquely
+    Zoneless,             // a wall clock; names no instant
+}
+
+impl TimeReference {
+    pub fn is_zoned(&amp;self) -&gt; bool;
+    pub fn is_zoneless(&amp;self) -&gt; bool;
+    pub fn accepts_zoned_bound(reference: Option&lt;&amp;TimeReference&gt;) -&gt; bool;
+    pub fn as_storage_string(&amp;self) -&gt; String;   // "utc" / "-07:00" / "America/Denver" / "zoneless"
+    pub fn parse(s: &amp;str) -&gt; Result&lt;Self&gt;;
+    pub fn validate(&amp;self) -&gt; Result&lt;()&gt;;        // shape only; no tz database
+}
+<span class="boring">}</span></code></pre></pre>
+<p>How a series' timestamps were <strong>spelled</strong>. <code>None</code> on a metadata row means <em>unspecified</em>, and groups
+with the three zoned variants for query bounds — it is not a claim the timestamps were written as
+UTC. Rust has no naive datetime type, so a native caller <strong>declares</strong> the spelling; the bindings
+infer it from theirs.</p>
+<p><code>validate</code> checks shape only: a zone name must be non-empty, bounded, IANA-shaped, and unreadable as
+an offset or as either literal — which is what lets one catalog column hold all four spellings.
+Existence is deliberately not checked; see
+<a href="reference/../explanation/data-model.html#time-references">Time references</a>.</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub struct TimeRange {
+    pub start: DateTime&lt;Utc&gt;,
+    pub end: DateTime&lt;Utc&gt;,
+    pub zoneless: bool,
+}
+
+impl TimeRange {
+    pub fn new(start: DateTime&lt;Utc&gt;, end: DateTime&lt;Utc&gt;) -&gt; Self;        // zoned
+    pub fn zoneless(start: DateTime&lt;Utc&gt;, end: DateTime&lt;Utc&gt;) -&gt; Self;
+    pub fn spelled(start: DateTime&lt;Utc&gt;, end: DateTime&lt;Utc&gt;, zoneless: bool) -&gt; Self;
+    pub fn bounds(&amp;self) -&gt; (DateTime&lt;Utc&gt;, DateTime&lt;Utc&gt;);
+}
+impl From&lt;(DateTime&lt;Utc&gt;, DateTime&lt;Utc&gt;)&gt; for TimeRange;   // zoned
+<span class="boring">}</span></code></pre></pre>
+<p>The <code>time_range</code> argument of <code>get_time_series</code> / <code>get_time_series_with_metadata</code> /
+<code>bulk_read_range</code>. The <code>zoneless</code> flag is what lets the core refuse a bound whose spelling the
+series cannot answer rather than coercing it; a <code>DateTime&lt;Utc&gt;</code> is zoned by construction, so
+<code>(start, end).into()</code> is the native spelling.</p>
 <h3 id="descriptors-2"><a class="header" href="#descriptors-2"><code>Descriptors</code></a></h3>
 <p>The descriptive attributes a series carries alongside its array, applied to a reconstructed series
 by <code>TimeSeriesData::set_descriptors</code>:</p>
@@ -5813,6 +6031,7 @@ by <code>TimeSeriesData::set_descriptors</code>:</p>
     pub units: Option&lt;String&gt;,
     pub quantity_kind: Option&lt;String&gt;,
     pub unit_system: Option&lt;UnitSystem&gt;,
+    pub time_reference: Option&lt;TimeReference&gt;,
     pub component_field: Option&lt;String&gt;,
     pub application_data: Option&lt;String&gt;,
 }
@@ -5821,7 +6040,7 @@ impl Descriptors {
     pub fn new(element_type: ElementType) -&gt; Self;   // everything else unset
 }
 <span class="boring">}</span></code></pre></pre>
-<p>It is a struct rather than a positional argument list because four of the six fields are
+<p>It is a struct rather than a positional argument list because four of the seven fields are
 <code>Option&lt;String&gt;</code>: as bare parameters, <code>units</code>, <code>quantity_kind</code>, <code>component_field</code>, and
 <code>application_data</code> would be silently interchangeable at every call site.</p>
 <h3 id="listfilter"><a class="header" href="#listfilter"><code>ListFilter</code></a></h3>
@@ -5837,6 +6056,7 @@ impl Descriptors {
     .name("load")
     .name_glob("load_*")  // SQLite GLOB (case-sensitive, `*`/`?`); ANDed with .name
     .component_field("max_active_power")  // exact, case-sensitive; see below
+    .zoneless(false)      // coherence predicate on the timestamp spelling; see below
     .resolution(Duration::hours(1))   // impl Into&lt;Period&gt;
     .interval(Duration::hours(24))    // impl Into&lt;Period&gt;; forecasts only
     .features(features)   // subset match: rows must contain at least these pairs
@@ -5847,6 +6067,13 @@ row on its own — one component may carry several series for one field, disting
 features. A row that declares no <code>component_field</code> matches no value (SQL equality is never true
 against NULL), so the filter cannot select the rows that left it unset. It is served by the partial
 index <code>idx_component_field</code>, which costs a store that never sets the field nothing.</p>
+<p><code>zoneless</code> is a <strong>binary predicate</strong>, not a match on a specific <code>TimeReference</code>: <code>Some(true)</code> keeps
+the wall-clock series, <code>Some(false)</code> keeps everything that accepts an instant bound — the three
+zoned spellings <em>and</em> the rows that left the reference unset. An exact match could not name that
+second group at all (the trap <code>component_field</code> documents), and here those rows are a coherence
+group rather than an oversight. It is the constructive half of the rules that make <code>bulk_read_range</code>
+and <code>build_static_reader</code> refuse a selection spanning both groups; see
+<a href="reference/../explanation/data-model.html#time-references">Time references</a>.</p>
 <h3 id="addrequest"><a class="header" href="#addrequest"><code>AddRequest</code></a></h3>
 <p>The element type of <code>add_time_series_bulk</code> (and of <code>BulkAdd::push</code>), mirroring the <code>add_time_series</code>
 arguments plus an optional <code>application_data</code> — an opaque, package-owned payload (typically JSON)
@@ -6177,10 +6404,38 @@ Multi-dimensional arrays (a per-step element shape) are supported via the NumPy 
 </blockquote>
 <h2 id="datetimes"><a class="header" href="#datetimes">Datetimes</a></h2>
 <p>Every <code>datetime</code> argument — an initial timestamp, a <code>NonSequentialTimeSeries</code> timestamp vector, a
-<code>time_range</code> bound, a reader's <code>when</code> — must be <strong>timezone-aware</strong>, and any zone will do:
-<code>datetime.timezone.utc</code>, a <code>ZoneInfo</code>, or a fixed offset. It is converted to UTC on the way in, so
-two aware datetimes naming the same instant are the same instant to the store, and every <code>datetime</code>
-read back is UTC. A naive datetime names no instant and raises <code>InvalidParameterError</code>.</p>
+<code>time_range</code> bound, a reader's <code>when</code> — may be aware or naive, and the store records <strong>which</strong>.</p>
+<p>An <strong>aware</strong> datetime names an instant, and any zone will do: <code>datetime.timezone.utc</code>, a <code>ZoneInfo</code>,
+or a fixed offset. It is converted to UTC on the way in, so two aware datetimes naming the same
+instant are the same instant to the store — and the spelling it arrived in is recorded, so it is the
+spelling that comes back.</p>
+<p>A <strong>naive</strong> datetime names a wall clock and no instant. It is accepted and recorded as
+<code>time_reference = "zoneless"</code>; its fields are read as they stand (never through <code>astimezone</code>, which
+would apply the machine's local zone), and a read hands back a naive datetime again. That round-trip
+is the whole reason accepting one is safe:</p>
+<pre><code class="language-python">datetime(2024, 1, 1) == datetime(2024, 1, 1, tzinfo=timezone.utc)   # False
+datetime(2024, 1, 1) &lt;  datetime(2024, 1, 1, tzinfo=timezone.utc)   # TypeError
+</code></pre>
+<p>A store that took a naive datetime and returned an aware one would be worse than one that refused.</p>
+<h3 id="time-references-1"><a class="header" href="#time-references-1">Time references</a></h3>
+<p>Every series carries a <code>time_reference</code> recording how its timestamps were spelled, inferred from the
+<code>datetime</code> it was built with:</p>
+<div class="table-wrapper"><table><thead><tr><th>Input</th><th><code>time_reference</code></th></tr></thead><tbody>
+<tr><td><code>tzinfo=timezone.utc</code></td><td><code>"utc"</code></td></tr>
+<tr><td>a fixed-offset <code>tzinfo</code></td><td><code>"-07:00"</code></td></tr>
+<tr><td><code>ZoneInfo("America/Denver")</code></td><td><code>"America/Denver"</code></td></tr>
+<tr><td>naive</td><td><code>"zoneless"</code></td></tr>
+</tbody></table>
+</div>
+<p><code>ZoneInfo("UTC")</code> records the <em>zone</em> <code>"UTC"</code>, not the literal <code>"utc"</code>: the two render identically
+forever, and the difference is only in what the catalog reports back.</p>
+<p>Reads spell the timestamp back the same way — a <code>ZoneInfo</code> series returns datetimes carrying that
+<code>ZoneInfo</code>, including the correct side of a fall-back hour. A <strong>query bound must match</strong>: a naive
+bound against a series that records instants, or an aware bound against a zoneless one, raises
+<code>InvalidParameterError</code> rather than being coerced, and so does a <code>time_range</code> whose two ends
+disagree. <code>list_time_series(zoneless=...)</code>, <code>build_static_reader(..., zoneless=...)</code>, and the other
+filter-taking methods take a <code>zoneless</code> predicate for building a coherent selection. See
+<a href="reference/../explanation/data-model.html#time-references">Time references</a> for the full rules.</p>
 <p>A <code>datetime</code> that is <strong>stored</strong> — an initial timestamp, or an entry of a <code>NonSequentialTimeSeries</code>
 timestamp vector — must also be a whole number of milliseconds; <code>microsecond</code> must be a multiple of
 1000. A finer instant raises <code>InvalidParameterError</code> rather than being silently truncated, because
@@ -6269,8 +6524,11 @@ store.in_transaction -&gt; bool
     application_data: str | None = None,
     quantity_kind: str | None = None,
     unit_system: str | None = None,   # "natural_units" | "component_base"
+    time_reference: str | None = None,   # "utc" | "zoneless" | "-07:00" | "America/Denver"
     component_field: str | None = None,  # e.g. "max_active_power"
 ) -&gt; TimeSeriesKey: ...
+# `time_reference` is normally omitted: it is inferred from the datetime the
+# series was built with (see "Time references" below). Pass it to override.
 # An unrecognized `unit_system` raises InvalidParameterError rather than
 # degrading to unspecified; omitting it leaves the basis unspecified, which is
 # not the same as declaring natural units.
@@ -6283,7 +6541,7 @@ def add_time_series_bulk(self, items: list[dict]) -&gt; list[TimeSeriesKey]: ...
 # Each item dict mirrors add_time_series's parameters: required `owner_id`,
 # `owner_type`, `owner_category`, `time_series`; optional `features`, `units`,
 # `element_type`, `application_data`, `quantity_kind`, `unit_system`,
-# `component_field`.
+# `time_reference`, `component_field`.
 # All items commit in ONE metadata transaction (all-or-nothing), which is much
 # faster than looping over add_time_series. Keys are returned in input order.
 
@@ -6491,10 +6749,11 @@ key), each with the keys: <code>owner_id</code>, <code>owner_type</code>, <code>
 series), <code>length</code>, <code>resolution</code> (ISO 8601 duration string, e.g. <code>PT1H</code>, or <code>None</code>), <code>timestamps</code>,
 <code>horizon</code>, <code>interval</code>, <code>count</code>, <code>percentiles</code>, <code>element_type</code>, <code>element_shape</code>, <code>features</code>,
 <code>units</code>, <code>quantity_kind</code>, <code>unit_system</code> (<code>"natural_units"</code> / <code>"component_base"</code> / <code>None</code>),
-<code>component_field</code>, <code>application_data</code>. <code>timestamps</code> is a list of RFC 3339 strings for
-non-sequential series and <code>None</code> otherwise; <code>horizon</code> / <code>interval</code> / <code>count</code> are set for forecasts
-and <code>percentiles</code> for <code>Probabilistic</code> only. The <code>features</code> filter is a <strong>subset</strong> match — rows
-must contain at least the given pairs — whereas a <code>TimeSeriesKey</code> matches its feature map exactly.</li>
+<code>time_reference</code>, <code>component_field</code>, <code>application_data</code>. <code>timestamps</code> is a list of RFC 3339
+strings for non-sequential series and <code>None</code> otherwise; <code>horizon</code> / <code>interval</code> / <code>count</code> are set
+for forecasts and <code>percentiles</code> for <code>Probabilistic</code> only. The <code>features</code> filter is a <strong>subset</strong>
+match — rows must contain at least the given pairs — whereas a <code>TimeSeriesKey</code> matches its feature
+map exactly.</li>
 <li><strong><code>list_array_groups</code></strong> accepts the same filters as <code>list_time_series</code> and groups the matching
 series by their underlying stored array. It returns a list of dicts, each with <code>data_hash</code> (hex
 string) and <code>keys</code> (a list of <code>TimeSeriesKey</code>s that resolve to that array). Keys sharing one dict
@@ -6536,11 +6795,13 @@ SQLite catalog, so <code>ok</code> is not a statement about the store as a whole
 )
 </code></pre>
 <p>Read-only properties: <code>initial_timestamp -&gt; datetime</code>, <code>resolution -&gt; str</code> (ISO 8601 duration, e.g.
-<code>PT1H</code>), <code>length -&gt; int</code>, <code>data -&gt; numpy.ndarray</code>, <code>name -&gt; str</code>. The constructor accepts either a
-<code>timedelta</code> or an ISO 8601 duration string for <code>resolution</code>; the getter always returns the ISO
-string. <code>name</code> is a required association attribute (the same array may be stored under different
-names). It is read off the object by <code>add_time_series</code> and populated on <code>get_time_series</code>. The
-array's <code>element_type</code> and per-step element shape are preserved through a round-trip.</p>
+<code>PT1H</code>), <code>length -&gt; int</code>, <code>data -&gt; numpy.ndarray</code>, <code>name -&gt; str</code>, <code>time_reference -&gt; str | None</code>.
+<code>initial_timestamp</code> comes back spelled the way it was written — see
+<a href="reference/python-api.html#time-references">Time references</a>. The constructor accepts either a <code>timedelta</code> or an ISO 8601
+duration string for <code>resolution</code>; the getter always returns the ISO string. <code>name</code> is a required
+association attribute (the same array may be stored under different names). It is read off the
+object by <code>add_time_series</code> and populated on <code>get_time_series</code>. The array's <code>element_type</code> and
+per-step element shape are preserved through a round-trip.</p>
 <h2 id="nonsequentialtimeseries-2"><a class="header" href="#nonsequentialtimeseries-2"><code>NonSequentialTimeSeries</code></a></h2>
 <pre><code class="language-python">NonSequentialTimeSeries(
     timestamps: list[datetime],
@@ -6548,9 +6809,10 @@ array's <code>element_type</code> and per-step element shape are preserved throu
     name: str,
 )
 </code></pre>
-<p>Read-only properties: <code>timestamps</code>, <code>length</code>, <code>data</code>, and <code>name</code>. Timestamps must be timezone-aware,
-strictly increasing, and match the first data dimension. <code>get_time_series</code> returns this class for a
-non-sequential key.</p>
+<p>Read-only properties: <code>timestamps</code>, <code>length</code>, <code>data</code>, <code>name</code>, and <code>time_reference</code>. Timestamps must
+be strictly increasing, match the first data dimension, and agree on one spelling — a vector mixing
+naive and aware values raises <code>InvalidParameterError</code>, since one series records one reference.
+<code>get_time_series</code> returns this class for a non-sequential key.</p>
 <h2 id="timeserieskey"><a class="header" href="#timeserieskey"><code>TimeSeriesKey</code></a></h2>
 <p>Returned by <code>add_time_series</code>, <code>add_time_series_bulk</code>, and <code>get_time_series_keys</code>, and in the <code>keys</code>
 list of every <code>list_array_groups</code> row; not constructed directly. Read-only properties:</p>
@@ -7111,9 +7373,10 @@ view or a range — is normalized to a concrete <code>Array{T,N}</code>).</p>
     quantity_kind     :: Union{Nothing,String}
     unit_system       :: Union{Nothing,UnitSystem}   # nothing = unspecified, not NaturalUnits
     component_field   :: Union{Nothing,String}
+    time_reference    :: Union{Nothing,TimeReference}  # inferred from the timestamp; see below
 end
 SingleTimeSeries(initial_timestamp, resolution, data, name; application_data=nothing, element_type=nothing, units=nothing,
-    quantity_kind=nothing, unit_system=nothing, component_field=nothing)
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=&lt;inferred&gt;)
 
 struct NonSequentialTimeSeries{T,N}
     timestamps   :: Vector{DateTime}     # strictly increasing; one per row of dim 1
@@ -7125,9 +7388,10 @@ struct NonSequentialTimeSeries{T,N}
     quantity_kind     :: Union{Nothing,String}
     unit_system       :: Union{Nothing,UnitSystem}   # nothing = unspecified, not NaturalUnits
     component_field   :: Union{Nothing,String}
+    time_reference    :: Union{Nothing,TimeReference}  # inferred from the timestamp; see below
 end
 NonSequentialTimeSeries(timestamps, data, name; application_data=nothing, element_type=nothing, units=nothing,
-    quantity_kind=nothing, unit_system=nothing, component_field=nothing)
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=&lt;inferred&gt;)
 
 struct Deterministic{T,N}
     initial_timestamp :: DateTime
@@ -7143,9 +7407,10 @@ struct Deterministic{T,N}
     quantity_kind     :: Union{Nothing,String}
     unit_system       :: Union{Nothing,UnitSystem}   # nothing = unspecified, not NaturalUnits
     component_field   :: Union{Nothing,String}
+    time_reference    :: Union{Nothing,TimeReference}  # inferred from the timestamp; see below
 end
 Deterministic(initial_timestamp, resolution, horizon, interval, count, data, name; application_data=nothing, element_type=nothing, units=nothing,
-    quantity_kind=nothing, unit_system=nothing, component_field=nothing)
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=&lt;inferred&gt;)
 
 struct Probabilistic{T,N}
     initial_timestamp :: DateTime
@@ -7162,9 +7427,10 @@ struct Probabilistic{T,N}
     quantity_kind     :: Union{Nothing,String}
     unit_system       :: Union{Nothing,UnitSystem}   # nothing = unspecified, not NaturalUnits
     component_field   :: Union{Nothing,String}
+    time_reference    :: Union{Nothing,TimeReference}  # inferred from the timestamp; see below
 end
 Probabilistic(initial_timestamp, resolution, horizon, interval, count, percentiles, data, name; application_data=nothing, element_type=nothing, units=nothing,
-    quantity_kind=nothing, unit_system=nothing, component_field=nothing)
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=&lt;inferred&gt;)
 
 struct Scenarios{T,N}
     initial_timestamp :: DateTime
@@ -7181,17 +7447,20 @@ struct Scenarios{T,N}
     quantity_kind     :: Union{Nothing,String}
     unit_system       :: Union{Nothing,UnitSystem}   # nothing = unspecified, not NaturalUnits
     component_field   :: Union{Nothing,String}
+    time_reference    :: Union{Nothing,TimeReference}  # inferred from the timestamp; see below
 end
 Scenarios(initial_timestamp, resolution, horizon, interval, count, data, name; application_data=nothing, element_type=nothing, units=nothing,
-    quantity_kind=nothing, unit_system=nothing, component_field=nothing)
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=&lt;inferred&gt;)
 # note: scenario_count is NOT a constructor argument
 
-# The five descriptors after `name` are carried on the struct and become the
+# The seven descriptors after `name` are carried on the struct and become the
 # add_time_series! defaults, so a series built with units="MW" keeps them on add.
 # `unit_system` is a `UnitSystem`: `NaturalUnits` (the units named by `units`)
 # or `ComponentBase` (per-unit against the owning component's own base). The
 # store records the declaration only — it holds no base and rescales nothing —
 # and `nothing` means unspecified, which is deliberately not `NaturalUnits`.
+# `time_reference` is normally left to the constructor, which infers it from the
+# timestamp it was handed — see "Time references" below.
 
 # Marker type; never constructed and with no materialized struct. Derived via
 # transform_single_time_series! and read back as a Deterministic. You normally
@@ -7258,6 +7527,7 @@ on the result instead, in its own <code>{T,N}</code> and in a reader group's <co
     units             :: Union{Nothing,String}
     quantity_kind     :: Union{Nothing,String}
     unit_system       :: Union{Nothing,UnitSystem}   # NaturalUnits | ComponentBase
+    time_reference    :: Union{Nothing,TimeReference}   # how the timestamps were spelled
     component_field   :: Union{Nothing,String}       # e.g. "max_active_power"
     application_data  :: Union{Nothing,String}
 end
@@ -7269,7 +7539,7 @@ end
 than absent, so no field is silently dropped by the addressing path taken.</p>
 <div class="table-wrapper"><table><thead><tr><th>Struct</th><th>Returned by</th><th>Fields</th></tr></thead><tbody>
 <tr><td><code>KeyInfo</code></td><td><code>key_info</code></td><td><code>owner_id</code>, <code>owner_category</code>, <code>name</code>, <code>time_series_type</code>, <code>resolution</code>, <code>features</code></td></tr>
-<tr><td><code>KeyRow</code></td><td><code>list_keys</code></td><td><code>owner_id</code>, <code>owner_category</code>, <code>time_series_type</code>, <code>name</code>, <code>initial_timestamp</code>, <code>resolution</code>, <code>length</code>, <code>horizon</code>, <code>interval</code>, <code>count</code>, <code>features</code></td></tr>
+<tr><td><code>KeyRow</code></td><td><code>list_keys</code></td><td><code>owner_id</code>, <code>owner_category</code>, <code>time_series_type</code>, <code>name</code>, <code>initial_timestamp</code>, <code>resolution</code>, <code>length</code>, <code>horizon</code>, <code>interval</code>, <code>count</code>, <code>features</code>, <code>time_reference</code></td></tr>
 <tr><td><code>ArrayGroupRow</code></td><td><code>list_array_groups</code></td><td>every <code>KeyRow</code> field, plus <code>data_hash</code> (the 32 bytes)</td></tr>
 <tr><td><code>TimeSeriesCounts</code></td><td><code>get_counts</code></td><td><code>components_with_time_series</code>, <code>static_time_series</code>, <code>forecasts</code></td></tr>
 <tr><td><code>TimeSeriesCountsDetailed</code></td><td><code>time_series_counts</code></td><td><code>components_with_time_series</code>, <code>supplemental_attributes_with_time_series</code>, <code>static_time_series_count</code>, <code>forecast_count</code></td></tr>
@@ -7280,8 +7550,8 @@ than absent, so no field is silently dropped by the addressing path taken.</p>
 <tr><td><code>SupplementalAttributeTypeCount</code></td><td><code>supplemental_attribute_counts_by_type</code></td><td><code>attribute_type</code>, <code>count</code></td></tr>
 <tr><td><code>SupplementalAttributeSummaryRow</code></td><td><code>supplemental_attribute_summary</code></td><td><code>component_type</code>, <code>attribute_type</code>, <code>count</code></td></tr>
 <tr><td><code>ForecastParameters</code></td><td><code>get_forecast_parameters</code></td><td><code>horizon</code>, <code>interval</code>, <code>count</code>, <code>resolution</code>, <code>initial_timestamp</code> (all <code>nothing</code> when nothing matches)</td></tr>
-<tr><td><code>StaticGrid</code></td><td><code>static_grid</code>, <code>check_static_consistency</code></td><td><code>initial_timestamp</code>, <code>resolution</code> (<code>nothing</code> for an irregular reader), <code>length</code></td></tr>
-<tr><td><code>ForecastTimeline</code></td><td><code>forecast_timeline</code></td><td><code>initial_timestamp</code>, <code>resolution</code>, <code>interval</code>, <code>count</code></td></tr>
+<tr><td><code>StaticGrid</code></td><td><code>static_grid</code>, <code>check_static_consistency</code></td><td><code>initial_timestamp</code>, <code>resolution</code> (<code>nothing</code> for an irregular reader), <code>length</code>, <code>time_reference</code></td></tr>
+<tr><td><code>ForecastTimeline</code></td><td><code>forecast_timeline</code></td><td><code>initial_timestamp</code>, <code>resolution</code>, <code>interval</code>, <code>count</code>, <code>time_reference</code></td></tr>
 <tr><td><code>CompressionSettings</code></td><td><code>get_compression</code></td><td><code>compression</code> (<code>:deflate</code> / <code>:none</code>), <code>level</code>, <code>shuffle</code></td></tr>
 <tr><td><code>CompactionReport</code></td><td><code>compact!</code></td><td><code>slots_reclaimed</code>, <code>datasets_dropped</code>, <code>feature_sets_reclaimed</code>, <code>timestamp_sets_reclaimed</code>, <code>bytes_reclaimed</code></td></tr>
 </tbody></table>
@@ -7290,6 +7560,13 @@ than absent, so no field is silently dropped by the addressing path taken.</p>
 per resolution present) — the same concept, so the same type. Its <code>resolution</code> is <code>nothing</code> only for
 a <code>NonSequentialTimeSeries</code> reader, whose timeline is an explicit list of instants rather than a
 grid; enumerate it with <code>static_timestamps</code>.</p>
+<p><code>time_reference</code> is the one spelling the axis carries — a reader spans one timeline, so a cohort
+whose columns agree reports their reference, one whose columns merely agree on naming instants
+reports <code>UTCReference()</code>, and a cohort mixing zoneless with the rest never builds at all. It is
+<code>nothing</code> when the cohort records no spelling, and from <code>check_static_consistency</code>, which reports
+grids rather than readers. <code>nothing</code> is not <code>ZonelessReference()</code>: the second is the positive claim
+that the timestamps are wall clocks. Three- and four-argument constructors (<code>StaticGrid</code> and
+<code>ForecastTimeline</code> respectively) leave it unset.</p>
 <h2 id="static-series-2"><a class="header" href="#static-series-2">Static Series</a></h2>
 <pre><code class="language-julia">add_time_series!(
     store::Store, owner_id, owner_type, owner_category::OwnerCategory,
@@ -7940,19 +8217,23 @@ end
 </code></pre>
 <h2 id="time-and-resolution-conversions"><a class="header" href="#time-and-resolution-conversions">Time and Resolution Conversions</a></h2>
 <ul>
-<li><code>DateTime</code> is converted to/from Unix milliseconds at the boundary, and is interpreted as <strong>UTC</strong> —
-Julia's <code>DateTime</code> carries no zone, so the wrapper has to pick a reading, and UTC is the one under
-which a value written here comes back as itself.</li>
+<li><code>DateTime</code> is converted to/from Unix milliseconds at the boundary. A bare <code>DateTime</code> carries no
+zone, so it names a <strong>wall clock</strong>, not an instant: it is stored as its own fields and recorded as
+<code>ZonelessReference()</code>. The stored instant is unchanged from the old UTC-by-convention reading —
+what is new is that the store now records that it <em>was</em> a convention.</li>
 <li>A <strong><code>TimeZones.ZonedDateTime</code> is accepted wherever a <code>DateTime</code> is</strong> — an initial timestamp, a
-timestamp vector, a <code>time_range</code> bound, a reader's <code>t</code> — and is converted to the instant it names.
-It needs no convention, so prefer it when your data is genuinely zoned. TimeZones is a <strong>weak
-dependency</strong>: the conversion lives in the <code>InfraStoreTimeZonesExt</code> extension, which loads when you
-<code>using TimeZones</code>, so nobody else pays for the tz database. Passing one without loading TimeZones
-raises an <code>InvalidParameterError</code> saying so.</li>
-<li><strong>Reads always return a <code>DateTime</code></strong>, in UTC, whichever kind went in. Returning a <code>ZonedDateTime</code>
-would mean inventing a zone the store never recorded — it stores instants, not civil time.</li>
+timestamp vector, a <code>time_range</code> bound, a reader's <code>t</code> — and is converted to the instant it names,
+recording the spelling its zone names. TimeZones is a <strong>weak dependency</strong>: the conversion lives in
+the <code>InfraStoreTimeZonesExt</code> extension, which loads when you <code>using TimeZones</code>, so nobody else
+pays for the tz database. Passing one without loading TimeZones raises an <code>InvalidParameterError</code>
+saying so.</li>
+<li><strong>Reads always return a <code>DateTime</code></strong> holding the instant, whichever kind went in, with the
+spelling beside it as a <code>time_reference</code>. Widening the return type was rejected: it would make the
+type depend on package load order, and <code>zdt == dt</code> raises in Julia, so it would turn working
+comparisons against a <code>DateTime</code> literal into runtime errors.</li>
 <li>A vector of <code>ZonedDateTime</code>s is ordered by the <strong>instants</strong> it names, not by its local wall
-clocks, so the strictly-increasing rule is checked after conversion.</li>
+clocks, so the strictly-increasing rule is checked after conversion. It must also agree on one
+spelling — one series records one reference.</li>
 <li>Milliseconds are lossless in both directions: the store records every instant to the millisecond
 and refuses a finer one on write, so this boundary cannot truncate a series written under that
 rule. See <a href="reference/../explanation/data-model.html#timestamp-precision">timestamp precision</a>. (An artifact
@@ -7960,6 +8241,75 @@ written before the rule may hold finer instants; those still truncate here.)</li
 <li><code>resolution</code> is passed as a <code>Period</code> and converted to an ISO-8601 duration string; reads return
 resolution as a <code>Period</code> (<code>Millisecond</code> for fixed durations).</li>
 </ul>
+<h3 id="time-references-2"><a class="header" href="#time-references-2">Time references</a></h3>
+<pre><code class="language-julia">abstract type TimeReference end
+struct UTCReference         &lt;: TimeReference end          # an instant, written as UTC
+struct FixedOffsetReference &lt;: TimeReference; minutes::Int end   # minutes east
+struct ZoneReference        &lt;: TimeReference; name::String end   # an IANA zone name
+struct ZonelessReference    &lt;: TimeReference end          # a wall clock, naming no instant
+
+is_zoneless(reference) -&gt; Bool     # false for `nothing`: unset groups with the zoned ones
+</code></pre>
+<p>An abstract type with subtypes rather than an <code>@enum</code> like <code>UnitSystem</code>, because two of the four
+carry a payload. The constructors infer one for you:</p>
+<div class="table-wrapper"><table><thead><tr><th>Input</th><th><code>time_reference</code></th></tr></thead><tbody>
+<tr><td><code>ZonedDateTime(..., tz"UTC")</code></td><td><code>UTCReference()</code></td></tr>
+<tr><td><code>ZonedDateTime(..., tz"-07:00")</code></td><td><code>FixedOffsetReference(-420)</code></td></tr>
+<tr><td><code>ZonedDateTime(..., tz"America/Denver")</code></td><td><code>ZoneReference("America/Denver")</code></td></tr>
+<tr><td>a bare <code>DateTime</code> or <code>Date</code></td><td><code>ZonelessReference()</code></td></tr>
+</tbody></table>
+</div>
+<p>The constructor signatures above write this default as <code>time_reference=&lt;inferred&gt;</code> rather than
+naming a value, because there is no Julia literal for it: omitting the keyword infers the spelling
+from the timestamp handed in, per the table above. Copying a literal <code>nothing</code> out of a signature
+would <em>suppress</em> that inference.</p>
+<p>Passing <code>time_reference=nothing</code> explicitly is a different claim from omitting the keyword: it
+records <em>unspecified</em>, which is also what a read hands back for a series that declared no spelling
+(one written by a native Rust caller, say). The two are never collapsed — a read that invented
+<code>ZonelessReference()</code> for an unspecified series would have <code>add_time_series!</code> write that invention
+back, since its default is the series' own reference.</p>
+<p>The two <code>FixedTimeZone</code> cases split on the zone's <em>name</em>, not its offset: <code>tz"UTC"</code> and <code>tz"+00:00"</code>
+place every instant identically forever, and telling them apart is the point of recording a spelling
+at all.</p>
+<pre><code class="language-julia">zoned_timestamp(instant::DateTime, reference::TimeReference) -&gt; ZonedDateTime
+zoned_timestamp(series) -&gt; ZonedDateTime          # SingleTimeSeries / the three forecasts
+zoned_timestamp(metadata::TimeSeriesMetadata) -&gt; ZonedDateTime
+zoned_timestamps(series::NonSequentialTimeSeries) -&gt; Vector{ZonedDateTime}
+</code></pre>
+<p>Fuses a read instant back together with the spelling it was written in. Requires <code>using TimeZones</code>
+(the methods live in the extension), and it is <strong>lossless</strong> — the instant plus the zone name
+reconstructs the exact value written, including which side of a fall-back hour it was on:</p>
+<pre><code class="language-julia">using TimeZones
+series = get_time_series(SingleTimeSeries, store, key)
+zoned_timestamp(series)   # 2024-01-01T00:00:00-07:00
+</code></pre>
+<p>Throws for a <code>ZonelessReference()</code> series, whose timestamps name no instant, and for one that
+recorded no reference at all.</p>
+<p>A <strong>query bound must be spelled the way the series is</strong>: a bare <code>DateTime</code> bound against a series
+that records instants, or a <code>ZonedDateTime</code> bound against a zoneless one, raises
+<code>InvalidParameterError</code> rather than being coerced, and so does a <code>time_range</code> whose two ends
+disagree. <code>list_keys</code>, <code>list_time_series</code>, <code>build_static_reader</code>, and the other filter-taking
+functions accept <code>zoneless=true|false</code> for building a coherent selection. See
+<a href="reference/../explanation/data-model.html#time-references">Time references</a> for the full rules, including why a
+calendar <code>Month</code>/<code>Year</code> resolution still steps on the UTC calendar.</p>
+<p>Because a read always hands back a bare <code>DateTime</code>, the obvious round trip does <strong>not</strong> close on a
+series that records instants — the returned timestamp holds the instant, but its Julia type says
+wall clock:</p>
+<pre><code class="language-julia">t = series.initial_timestamp                                # a DateTime: a wall clock
+get_time_series(store, key; time_range=(t, t + Hour(3)))    # InvalidParameterError
+</code></pre>
+<p>Fuse the instant back together with the spelling that came with it, and the bound matches the
+series:</p>
+<pre><code class="language-julia">using TimeZones
+t = zoned_timestamp(series)                                 # or zoned_timestamp(metadata)
+get_time_series(store, key; time_range=(t, t + Hour(3)))    # reads
+</code></pre>
+<p>A Julia-only workflow never meets this, because a bare <code>DateTime</code> writes a zoneless series and a
+<code>DateTime</code> bound then matches it. It is a store written by Python, the CLI, or a native Rust caller
+— which record instants — that needs the zoned bound, and therefore <code>using TimeZones</code>.</p>
+<p><code>KeyInfo</code> deliberately carries <strong>no</strong> <code>time_reference</code>: a key handle is an identity handle and
+carries no descriptive snapshot fields at all (no <code>length</code>, no <code>initial_timestamp</code>). Read the
+spelling from <code>KeyRow</code> (<code>list_keys</code>), <code>TimeSeriesMetadata</code>, or the series itself.</p>
 <h2 id="tracing"><a class="header" href="#tracing">Tracing</a></h2>
 <pre><code class="language-julia">init_logging(level::AbstractString = "") -&gt; Int32  # the FFI status code
 </code></pre>
@@ -8011,8 +8361,17 @@ recorded with the association at add time.</li>
 verbatim to the add functions and stored uninterpreted. Element typing does not go here — that is
 <code>element_type</code>.</li>
 <li><strong>Strings</strong> are null-terminated UTF-8. Optional string arguments (<code>application_data</code>,
-<code>features_json</code>, <code>units</code>, <code>quantity_kind</code>, <code>unit_system</code>, <code>component_field</code>, <code>name_glob</code>) accept
-<code>NULL</code>.</li>
+<code>features_json</code>, <code>units</code>, <code>quantity_kind</code>, <code>unit_system</code>, <code>time_reference</code>, <code>component_field</code>,
+<code>name_glob</code>) accept <code>NULL</code>.</li>
+<li><strong><code>time_reference</code></strong> records how a series' timestamps were <em>spelled</em>: <code>"utc"</code>, <code>"zoneless"</code>, a
+fixed offset (<code>"-07:00"</code>), or an IANA zone name (<code>"America/Denver"</code>). An unparseable value fails
+with <code>INFRASTORE_ERR_INVALID_PARAMETER</code> rather than degrading to unset. Zone <em>existence</em> is not
+checked here — the caller's own tz database is the one that should warn. Timestamps stay Unix
+milliseconds either way, so <code>time_range_zoneless</code> is what tells a wall-clock bound from an instant
+one, and the store refuses a bound whose spelling the series cannot answer rather than coercing
+it. The <code>zoneless</code> filter argument on the list/filter exports is a tri-state <code>int32_t</code>: negative
+means no filter, <code>0</code> selects the instant-bearing rows (including those with no reference), and <code>1</code>
+selects the wall-clock rows. See <a href="reference/../explanation/data-model.html#time-references">Time references</a>.</li>
 <li><strong>Features</strong> are passed as a JSON object string whose values are int / float / bool / string. An
 add call whose feature names shadow a time-series or key field (<code>name</code>, <code>resolution</code>, <code>owner_id</code>,
 …) fails with <code>INFRASTORE_ERR_INVALID_PARAMETER</code>; see
@@ -8093,11 +8452,13 @@ same position on <code>infrastore_store_get_non_sequential</code> and on the for
                             const char *units,                /* optional */
                             const char *quantity_kind,        /* optional */
                             const char *unit_system,          /* optional: "natural_units" | "component_base" */
+                            const char *time_reference,       /* optional: "utc" | "zoneless" | "-07:00" | IANA name */
                             const char *component_field,      /* optional: e.g. "max_active_power" */
                             struct InfraStoreKey **out_key);          /* owned; infrastore_key_free */
 
 int32_t infrastore_store_get_single(const struct InfraStore *handle, const struct InfraStoreKey *key,
                             bool time_range_present,          /* false = whole series */
+                            bool time_range_zoneless,         /* how the caller spelled the bounds */
                             int64_t time_range_start_ms, int64_t time_range_end_ms,  /* start inclusive, end exclusive */
                             int64_t *out_initial_ts_unix_ms,
                             char **out_resolution,            /* ISO-8601; infrastore_string_free */
@@ -8109,6 +8470,7 @@ int32_t infrastore_store_get_single(const struct InfraStore *handle, const struc
                             char **out_units,          /* optional (NULL skips); owned, same free */
                             char **out_quantity_kind,  /* optional (NULL skips); owned, same free */
                             char **out_unit_system,    /* optional (NULL skips); owned, same free */
+                            char **out_time_reference, /* optional (NULL skips); owned, same free */
                             char **out_component_field); /* optional (NULL skips); owned, same free */
 
 int32_t infrastore_store_remove(struct InfraStore *handle, const struct InfraStoreKey *key);
@@ -8144,11 +8506,13 @@ Earlier revisions copied it into a caller-sized buffer, which invited silent tru
                                     const char *application_data, const char *features_json,
                                     const char *units,
                                     const char *quantity_kind, const char *unit_system,
+                                    const char *time_reference,
                                     const char *component_field,
                                     struct InfraStoreKey **out_key);
 
 int32_t infrastore_store_get_non_sequential(const struct InfraStore *handle, const struct InfraStoreKey *key,
                                     bool time_range_present,          /* false = every point */
+                                    bool time_range_zoneless,         /* how the caller spelled the bounds */
                                     int64_t time_range_start_ms, int64_t time_range_end_ms,  /* start inclusive, end exclusive */
                                     int64_t **out_timestamps, uint64_t *out_timestamps_len,
                                     int32_t *out_dtype,
@@ -8159,6 +8523,7 @@ int32_t infrastore_store_get_non_sequential(const struct InfraStore *handle, con
                                     char **out_units,         /* optional (NULL skips); owned, same free */
                                     char **out_quantity_kind, /* optional (NULL skips); owned, same free */
                                     char **out_unit_system,   /* optional (NULL skips); owned, same free */
+                                    char **out_time_reference, /* optional (NULL skips); owned, same free */
                                     char **out_component_field); /* optional (NULL skips); owned, same free */
 </code></pre>
 <h2 id="attribute-based-access"><a class="header" href="#attribute-based-access">Attribute-Based Access</a></h2>
@@ -8186,7 +8551,7 @@ int32_t infrastore_store_has_any_by_filter(const struct InfraStore *handle,
                                    bool has_time_series_type, int32_t time_series_type,
                                    const char *name, const char *name_glob,  /* GLOB pattern; NULL = unset */
                                    const char *resolution, const char *interval,  /* ISO-8601; NULL = unset */
-                                   const char *features_json, const char *component_field,
+                                   const char *features_json, const char *component_field, int32_t zoneless,
                                    bool *out_present);
 
 int32_t infrastore_store_remove_by_attrs(struct InfraStore *handle,
@@ -8241,7 +8606,7 @@ int32_t infrastore_key_attributes(const struct InfraStoreKey *key,
    infrastore_store_list_time_series element: owner_id, owner_type, owner_category,
    time_series_type, name, data_hash (64-char hex), initial_timestamp_ms, resolution,
    horizon, interval, count, length, percentiles, element_type, element_shape, features,
-   units, quantity_kind, unit_system, component_field, application_data — fields that do not apply
+   units, quantity_kind, unit_system, time_reference, component_field, application_data — fields that do not apply
    to the key's
    type are null. One export
    covers every time series type, static and forecast alike. Probe-then-fetch:
@@ -8309,6 +8674,7 @@ to <code>*out_count</code>:</p>
                               const char *features_json, const char *units,
                               const char *quantity_kind,        /* optional */
                               const char *unit_system,          /* optional: "natural_units" | "component_base" */
+                            const char *time_reference,       /* optional: "utc" | "zoneless" | "-07:00" | IANA name */
                               const char *component_field,      /* optional: e.g. "max_active_power" */
                               struct InfraStoreKey **out_key);
 
@@ -8326,6 +8692,7 @@ int32_t infrastore_store_add_probabilistic(struct InfraStore *handle,
                                    const char *features_json, const char *units,
                                    const char *quantity_kind,        /* optional */
                                    const char *unit_system,          /* optional: "natural_units" | "component_base" */
+                            const char *time_reference,       /* optional: "utc" | "zoneless" | "-07:00" | IANA name */
                                    const char *component_field,      /* optional: e.g. "max_active_power" */
                                    struct InfraStoreKey **out_key);
 
@@ -8389,6 +8756,7 @@ ISO-8601 strings with <code>infrastore_string_free</code>.</p>
                               const char *resolution, const char *interval,  /* ISO-8601 filters; NULL = none */
                               const char *features_json,
                               bool time_range_present,
+                              bool time_range_zoneless,         /* how the caller spelled the bounds */
                               int64_t time_range_start_ms, int64_t time_range_end_ms,
                               int64_t *out_initial_ts_unix_ms,
                               char **out_resolution, char **out_horizon, char **out_interval,  /* ISO-8601; infrastore_string_free */
@@ -8403,6 +8771,7 @@ ISO-8601 strings with <code>infrastore_string_free</code>.</p>
                               char **out_units,          /* optional (NULL skips); owned, same free */
                               char **out_quantity_kind,  /* optional (NULL skips); owned, same free */
                               char **out_unit_system,    /* optional (NULL skips); owned, same free */
+                            char **out_time_reference, /* optional (NULL skips); owned, same free */
                               char **out_component_field); /* optional (NULL skips); owned, same free */
 </code></pre>
 <p><code>infrastore_store_get_forecast_by_key</code> is the key-based counterpart: it takes a <code>InfraStoreKey</code>
@@ -8415,6 +8784,7 @@ there is no family to resolve: <code>*out_matched_type</code> is simply the key'
 <code>infrastore_store_get_forecast</code> for a family request.</p>
 <pre><code class="language-c">int32_t infrastore_store_get_forecast_by_key(const struct InfraStore *handle, const struct InfraStoreKey *key,
                                      bool time_range_present,
+                                     bool time_range_zoneless,         /* how the caller spelled the bounds */
                                      int64_t time_range_start_ms, int64_t time_range_end_ms,
                                      int64_t *out_initial_ts_unix_ms,
                                      char **out_resolution, char **out_horizon, char **out_interval,  /* ISO-8601; infrastore_string_free */
@@ -8429,6 +8799,7 @@ there is no family to resolve: <code>*out_matched_type</code> is simply the key'
                                      char **out_units,          /* optional (NULL skips); owned, same free */
                                      char **out_quantity_kind,  /* optional (NULL skips); owned, same free */
                                      char **out_unit_system,    /* optional (NULL skips); owned, same free */
+                            char **out_time_reference, /* optional (NULL skips); owned, same free */
                                      char **out_component_field); /* optional (NULL skips); owned, same free */
 </code></pre>
 <p>Forecast metadata is read with the same <code>infrastore_store_get_metadata_by_key</code> as everything else —
@@ -8490,12 +8861,14 @@ column <code>j</code> is the key from <code>infrastore_static_reader_group_key(r
                                      bool has_owner_category, int32_t owner_category,
                                      const char *name, const char *name_glob,
                                      const char *resolution,
-                                     const char *features_json, const char *component_field,
+                                     const char *features_json, const char *component_field, int32_t zoneless,
                                      struct InfraStoreStaticReaderHandle **out_reader);
 
 int32_t infrastore_static_reader_grid(const struct InfraStoreStaticReaderHandle *reader,
                               int64_t *out_initial_ms, char **out_resolution,  /* null, or free with infrastore_string_free */
                               uint64_t *out_length);
+int32_t infrastore_static_reader_time_reference(const struct InfraStoreStaticReaderHandle *reader,
+                              char **out_time_reference);  /* null, or free with infrastore_string_free */
 int32_t infrastore_static_reader_timestamps(const struct InfraStoreStaticReaderHandle *reader,
                               int64_t *buf, uint64_t cap, uint64_t *out_len);  /* probe with buf=NULL, cap=0 */
 int32_t infrastore_static_reader_num_groups(const struct InfraStoreStaticReaderHandle *reader, uint64_t *out_n);
@@ -8520,6 +8893,15 @@ share one timestamp vector; <code>infrastore_static_reader_grid</code> then repo
 and <code>infrastore_static_reader_timestamps</code> is how the timeline is read. Any other discriminant is
 rejected. Either way the build validates the uniformity and errors on divergence, so every column
 has a value at every valid timestamp (no presence mask).</p>
+<p><code>infrastore_static_reader_time_reference</code> reports the one spelling the axis carries — <code>"utc"</code>,
+<code>"zoneless"</code>, a fixed offset such as <code>"-07:00"</code>, or an IANA zone name — as an owned string the
+caller frees with <code>infrastore_string_free</code>. It is <strong>null</strong> when the cohort records no spelling,
+which is not the same claim as <code>"zoneless"</code>: the second says the timestamps are wall clocks. A
+cohort whose columns agree reports their reference; one whose columns merely agree on naming
+instants reports <code>"utc"</code>; one mixing zoneless with the rest never builds at all. Reading the axis
+without it leaves a C consumer unable to tell a wall-clock timeline from an unspecified or a UTC
+one. <code>infrastore_forecast_reader_time_reference</code> is the window-timeline counterpart, on the same
+terms.</p>
 <h3 id="forecastreader-2"><a class="header" href="#forecastreader-2">ForecastReader</a></h3>
 <p>Reads the forecast window at one timestamp for every matching forecast of one type. The build
 <code>ts_type</code> names the forecast type; a <code>Deterministic</code> reader (<code>2</code>) also includes
@@ -8533,13 +8915,15 @@ has a value at every valid timestamp (no presence mask).</p>
                                        int32_t time_series_type,
                                        const char *name, const char *name_glob,
                                        const char *resolution,
-                                       const char *features_json, const char *component_field,
+                                       const char *features_json, const char *component_field, int32_t zoneless,
                                        struct InfraStoreForecastReaderHandle **out_reader);
 
 int32_t infrastore_forecast_reader_timeline(const struct InfraStoreForecastReaderHandle *reader,
                                     int64_t *out_initial_ms,
                                     char **out_resolution, char **out_interval,  /* free each with infrastore_string_free */
                                     uint64_t *out_count);
+int32_t infrastore_forecast_reader_time_reference(const struct InfraStoreForecastReaderHandle *reader,
+                                    char **out_time_reference);  /* null, or free with infrastore_string_free */
 int32_t infrastore_forecast_reader_num_entries(const struct InfraStoreForecastReaderHandle *reader, uint64_t *out_n);
 int32_t infrastore_forecast_reader_num_slots(const struct InfraStoreForecastReaderHandle *reader, uint64_t *out_n);
 int32_t infrastore_forecast_reader_entry_slot(const struct InfraStoreForecastReaderHandle *reader,
@@ -8710,7 +9094,7 @@ int32_t infrastore_store_list_keys(const struct InfraStore *handle,
                            bool has_time_series_type, int32_t time_series_type,
                            const char *name, const char *name_glob,
                            const char *resolution, const char *interval,
-                           const char *features_json, const char *component_field,
+                           const char *features_json, const char *component_field, int32_t zoneless,
                            char **out_json, uint64_t *out_len);
 /* Like infrastore_store_list_keys, but each row is annotated with the hex content hash of
    the array it resolves to (keys_to_json's shape plus a `data_hash` field); rows
@@ -8723,7 +9107,7 @@ int32_t infrastore_store_list_array_groups(const struct InfraStore *handle,
                                    bool has_time_series_type, int32_t time_series_type,
                                    const char *name, const char *name_glob,
                                    const char *resolution, const char *interval,
-                                   const char *features_json, const char *component_field,
+                                   const char *features_json, const char *component_field, int32_t zoneless,
                                    char **out_json, uint64_t *out_len);
 </code></pre>
 <h2 id="associations-6"><a class="header" href="#associations-6">Associations</a></h2>
@@ -8924,7 +9308,7 @@ int32_t infrastore_store_export_time_series_associations_openapi(const struct In
                                                           bool has_time_series_type, int32_t time_series_type,
                                                           const char *name, const char *resolution,
                                                           const char *interval, const char *features_json,
-                                                          const char *component_field,
+                                                          const char *component_field, int32_t zoneless,
                                                           char **out_json, uint64_t *out_len);
 
 /* Export the whole supplemental_attribute_associations table as an OpenAPI-row
@@ -9043,6 +9427,7 @@ message TimeSeriesKey {
   optional uint64 length                     = 9;
   optional string horizon                    = 10;  // ISO-8601 duration
   optional uint64 count                      = 11;
+  optional string time_reference             = 12;  // how the timestamps were spelled
 }
 
 message TimeSeriesMetadata {
@@ -9073,6 +9458,9 @@ message TimeSeriesMetadata {
   optional string component_field           = 24;  // owning component's field, free-form
   //   `ListReq.component_field` filters on this. A row that declares none
   //   matches no value, so it cannot select the rows that left it unset.
+  optional string time_reference            = 25;  // "utc" | "zoneless" | "-07:00" | IANA name
+  //   How this series' timestamps were spelled. Absent means unspecified,
+  //   which is NOT a claim they were written as UTC.
 }
 </code></pre>
 <h2 id="request--response-messages"><a class="header" href="#request--response-messages">Request / Response Messages</a></h2>
@@ -9086,13 +9474,15 @@ message TimeSeriesMetadata {
   optional OwnerCategory  owner_category   = 7;
   optional string         interval         = 8;   // ISO-8601 duration
   optional string         component_field  = 9;   // exact, case-sensitive
+  optional bool           zoneless         = 10;  // coherence predicate; see below
 }
 message ListResp { repeated TimeSeriesMetadata metadata = 1; }
 
 message GetReq {
-  TimeSeriesKey   key           = 1;
-  optional string start_rfc3339 = 2;   // optional time-axis slice; all-or-nothing with end
-  optional string end_rfc3339   = 3;
+  TimeSeriesKey   key             = 1;
+  optional string start_rfc3339   = 2;   // optional time-axis slice; all-or-nothing with end
+  optional string end_rfc3339     = 3;
+  optional bool   bounds_zoneless = 4;   // how the client spelled those bounds; see below
 }
 message GetResp {
   string          initial_timestamp_rfc3339 = 1;
@@ -9112,6 +9502,7 @@ message GetResp {
   uint64          count                     = 13;
   repeated double percentiles               = 14;  // Probabilistic only
   uint64          scenario_count            = 15;  // Scenarios only
+  optional string time_reference            = 21;  // how the timestamps were spelled
 }
 
 message KeysReq  { int64 owner_id = 1; OwnerCategory owner_category = 2; }
@@ -9150,6 +9541,22 @@ message VerifyResp { repeated string errors = 1; }
 or neither to fetch the whole series. Setting exactly one is rejected with <code>InvalidArgument</code>
 (<code>"start_rfc3339 and end_rfc3339 must be supplied together"</code>). Each value must parse as RFC 3339; a
 malformed timestamp is also <code>InvalidArgument</code>.</p>
+<h2 id="time-references-3"><a class="header" href="#time-references-3">Time References</a></h2>
+<p>Every metadata and key message carries an optional <code>time_reference</code> recording how a series'
+timestamps were <strong>spelled</strong>: <code>"utc"</code>, <code>"zoneless"</code>, a fixed offset (<code>"-07:00"</code>), or an IANA zone
+name (<code>"America/Denver"</code>). Absent means <em>unspecified</em>, which is not a claim they were written as
+UTC. It is descriptive, so it is not part of a key's identity. An unparseable value is a convert
+error rather than a silent absence: "unspecified" and "a spelling this build cannot read" must not
+look alike.</p>
+<p>Timestamps stay RFC 3339 UTC on the wire whatever the reference says — the reference is the label,
+applied by the client. <code>GetReq.bounds_zoneless</code> and <code>BulkReadReq.bounds_zoneless</code> carry how the
+client spelled its slice bounds, because the wire form is identical either way: a zoneless client
+sends the wall clock read as if UTC, exactly as the store holds one. The server refuses a bound
+whose spelling the series cannot answer (<code>InvalidArgument</code>) rather than coercing it, and refuses a
+ranged bulk read whose selection mixes zoneless series with instant-bearing ones. <code>ListReq.zoneless</code>
+is the constructive half — <code>true</code> selects the wall-clock series, <code>false</code> selects everything that
+accepts an instant bound, including the rows that recorded no reference.</p>
+<p>See <a href="reference/../explanation/data-model.html#time-references">Time references</a> for the full rules.</p>
 <h2 id="forecasts-over-grpc"><a class="header" href="#forecasts-over-grpc">Forecasts Over gRPC</a></h2>
 <p>The service is read-only, but its read surface covers dense forecasts. Forecast associations created
 through the <a href="reference/./rust-api.html#forecasts">Rust core</a> or <a href="reference/./c-abi.html#forecasts">C ABI</a> appear in
@@ -9285,7 +9692,8 @@ compare, treating length as non-secret.</p>
 The store holds only the <em>relationship</em> — the components and supplemental attributes themselves live
 in the consumer's object graph — which is why the association flags are bare ids and type names.</p>
 <h2 id="synopsis"><a class="header" href="#synopsis">Synopsis</a></h2>
-<pre><code class="language-text">infrastore [--store &lt;PATH.h5&gt;] [-f &lt;FORMAT&gt;] [--log-level &lt;FILTER&gt;] [-y] [--assume-timezone &lt;ZONE&gt;] &lt;COMMAND&gt;
+<pre><code class="language-text">infrastore [--store &lt;PATH.h5&gt;] [-f &lt;FORMAT&gt;] [--log-level &lt;FILTER&gt;] [-y]
+           [--assume-timezone &lt;ZONE&gt; | --zoneless] &lt;COMMAND&gt;
 </code></pre>
 <p>Every global option is accepted after the command too (<code>infrastore add --store demo.h5 …</code>).</p>
 <h3 id="global-options"><a class="header" href="#global-options">Global options</a></h3>
@@ -9294,7 +9702,8 @@ in the consumer's object graph — which is why the association flags are bare i
 <tr><td><code>-f</code>, <code>--format</code></td><td>Output format: <code>table</code> (default), <code>json</code>, <code>jsonl</code>, or <code>csv</code>.</td></tr>
 <tr><td><code>--log-level</code></td><td>Tracing filter; also read from <code>RUST_LOG</code>. Defaults to <code>warn</code>.</td></tr>
 <tr><td><code>-y</code>, <code>--yes</code></td><td>Answer every confirmation prompt with yes.</td></tr>
-<tr><td><code>--assume-timezone &lt;ZONE&gt;</code></td><td>Read timestamps that carry no time zone as being in this one: <code>UTC</code> (or <code>Z</code>), or a fixed offset — <code>-07:00</code>, <code>-0700</code>, <code>-07</code>.</td></tr>
+<tr><td><code>--assume-timezone &lt;ZONE&gt;</code></td><td>Read timestamps that carry no time zone as being in this one: <code>UTC</code> (or <code>Z</code>), a fixed offset (<code>-07:00</code>, <code>-0700</code>, <code>-07</code>), or an IANA zone name (<code>America/Denver</code>).</td></tr>
+<tr><td><code>--zoneless</code></td><td>Store timestamps that carry no time zone as the wall clocks they are, naming no instant. Mutually exclusive with <code>--assume-timezone</code>.</td></tr>
 </tbody></table>
 </div>
 <p><code>--store</code> (or <code>INFRASTORE_STORE</code>) is required by every command except <code>template</code> and <code>completions</code>.</p>
@@ -9336,16 +9745,18 @@ flag each spells it with. The per-command <code>--force</code> flags still work 
 for.</p>
 <h3 id="zoneless-timestamps"><a class="header" href="#zoneless-timestamps">Zoneless timestamps</a></h3>
 <p>A timestamp with no offset — <code>2024-01-01T00:00:00</code>, or the <code>2024-01-01 00:00:00</code> that most CSV
-writers produce — names a wall-clock reading, not an instant, and the store records instants. Such a
-timestamp is therefore refused, and the error names the flag that resolves it:</p>
+writers produce — names a wall-clock reading, not an instant. The CLI will not guess which of the
+two you mean, so such a timestamp is refused and the error names both flags that resolve it:</p>
 <pre><code class="language-console">$ infrastore --store s.h5 add --csv load.csv ...
 Error: timestamp '2024-01-01 00:00:00' names no time zone, so it names no instant. Give it an
-offset (RFC3339, like 2024-01-01T00:00:00Z), or pass --assume-timezone UTC (or a fixed offset
-like -07:00) to read every zoneless timestamp with it.
+offset (RFC3339, like 2024-01-01T00:00:00Z), pass --assume-timezone UTC (a fixed offset like
+-07:00, or an IANA name like America/Denver) to read every zoneless timestamp with it, or pass
+--zoneless to store them as the wall clocks they are.
 </code></pre>
-<p><code>--assume-timezone</code> supplies the missing offset for the whole invocation:</p>
-<pre><code class="language-console">$ infrastore --store s.h5 --assume-timezone UTC     add --csv load.csv ...   # read as UTC
-$ infrastore --store s.h5 --assume-timezone -07:00  add --csv load.csv ...   # 00:00 becomes 07:00Z
+<h4 id="--assume-timezone-resolve-them-to-instants"><a class="header" href="#--assume-timezone-resolve-them-to-instants"><code>--assume-timezone</code>: resolve them to instants</a></h4>
+<pre><code class="language-console">$ infrastore --store s.h5 --assume-timezone UTC             add --csv load.csv ...
+$ infrastore --store s.h5 --assume-timezone -07:00          add --csv load.csv ...
+$ infrastore --store s.h5 --assume-timezone America/Denver  add --csv load.csv ...
 </code></pre>
 <p>Three things to know:</p>
 <ul>
@@ -9353,13 +9764,42 @@ $ infrastore --store s.h5 --assume-timezone -07:00  add --csv load.csv ...   # 0
 overridden, so a mixed file loads correctly and a fully-offset file is unaffected.</li>
 <li>It is global, so it also covers <code>--time-range</code> bounds and <code>--issue-time</code>, which hit the same
 parser.</li>
-<li>Named zones (<code>America/Denver</code>) are <strong>not</strong> accepted. A zoneless timestamp in a zone with daylight
-saving is not always a single instant — the skipped hour names none and the repeated hour names
-two — so the flag would have to fail part-way through an ingest or silently pick one. Data written
-zoneless in this domain is nearly always local <em>standard</em> time, which is a fixed offset
-year-round; pass that offset. Data that really is civil time with daylight saving should carry its
-offsets in the file, where each row can say which side of a transition it is on.</li>
+<li>Whatever it resolves is also <strong>recorded</strong>, as the series' <code>time_reference</code> (see
+<a href="reference/../explanation/data-model.html#time-references">Time references</a>) — so a read hands the same
+spelling back rather than relabelling everything UTC. <code>--assume-timezone -07:00</code> over a midnight
+column stores <code>07:00Z</code> and prints <code>2024-01-01T00:00:00-07:00</code>.</li>
 </ul>
+<p><strong>Prefer a named zone to a fixed offset</strong> for anything that crosses a daylight-saving transition. A
+year of Denver data read as <code>-07:00</code> renders every timestamp after March an hour wrong; the same
+data read as <code>America/Denver</code> renders all of it correctly, because the zone is applied per instant
+rather than baked in once.</p>
+<p>A named zone is the one place in the system that runs local → instant, and it has two wall clocks it
+cannot resolve. Both are <strong>errors naming the row</strong>, not guesses:</p>
+<pre><code class="language-console">$ infrastore --store s.h5 --assume-timezone America/Denver add --csv fold.csv ...
+Error: timestamp '2024-11-03 01:30:00' is ambiguous in America/Denver: daylight saving repeats
+that wall clock, so it names two instants (2024-11-03T07:30:00+00:00 and
+2024-11-03T08:30:00+00:00). The file has to say which — give the row an explicit offset, or
+re-read the column with --assume-timezone -06:00 or -07:00.
+</code></pre>
+<h4 id="--zoneless-keep-them-as-wall-clocks"><a class="header" href="#--zoneless-keep-them-as-wall-clocks"><code>--zoneless</code>: keep them as wall clocks</a></h4>
+<p>For data that has no time zone and wants none — modeled profiles on 24-hour days, say — <code>--zoneless</code>
+stores the fields as written, converts nothing, and reads them back unlabelled:</p>
+<pre><code class="language-console">$ infrastore --store s.h5 --zoneless add --csv profile.csv ...
+$ infrastore --store s.h5 get --owner-id 42 --name load -f csv
+2024-01-01T00:00:00,1
+</code></pre>
+<p>The store then holds the series to that claim. An instant-bearing <code>--time-range</code> bound against it is
+refused rather than coerced, and it cannot share one <code>grid</code> axis or one ranged bulk read with series
+that do record instants — there is no single meaning either could carry for both. <code>list --wide</code>,
+<code>info</code>, and <code>export -f json</code> all report the <code>time_reference</code>, and <code>store-info</code> lists the catalog's
+distinct spellings with any unrecognized zone name flagged:</p>
+<pre><code class="language-console">$ infrastore --store s.h5 store-info
+...
+time_references   ["America/Denver", "utc", "America/Dever (unrecognized zone?)"]
+</code></pre>
+<p>A zone the store has never heard of is <em>reported</em>, never refused: the store does not gate on zone
+existence, because that would refuse legitimate data whenever IANA moves ahead of this build's
+database.</p>
 <h2 id="commands"><a class="header" href="#commands">Commands</a></h2>
 <p><code>infrastore --help</code> lists these under the same eight headings used below. The grouping is a display
 aid only — every command is invoked flat, as <code>infrastore &lt;command&gt;</code>; there are no subcommand
@@ -9642,8 +10082,15 @@ value:</p>
 <tr><td><code>--type &lt;T&gt;</code></td><td>See the type spellings below.</td></tr>
 <tr><td><code>--resolution &lt;DUR&gt;</code></td><td>Resolution as an ISO-8601 duration, e.g. <code>PT1H</code>, <code>PT15M</code>, <code>P1M</code>.</td></tr>
 <tr><td><code>--feature key=value</code></td><td>Feature filter; repeatable. Values are inferred as int/float/bool/string.</td></tr>
+<tr><td><code>--spelling &lt;S&gt;</code></td><td><code>zoned</code> or <code>zoneless</code>: which timestamp spelling to keep.</td></tr>
 </tbody></table>
 </div>
+<p><code>--spelling</code> is the constructive half of the time-reference coherence rule. <code>zoneless</code> keeps the
+wall-clock series; <code>zoned</code> keeps the ones that record instants, including those that declare no
+reference at all. <code>grid</code> and the bulk reads span one timestamp axis, so they refuse a selection
+holding both groups — this is how a store containing both is split into one they can read. It is
+unrelated to the global <code>--zoneless</code>, which says how timestamps arriving on the <em>input</em> side are to
+be read.</p>
 <p><code>--component-field</code> selects every series that varies that field on its owner — the query the
 descriptor exists for. It is descriptive rather than identifying, so it narrows a selector but
 rarely resolves one on its own; and a series that declares no <code>component_field</code> matches no value, so
@@ -9698,7 +10145,8 @@ calendar ones. This is also the spelling every command <em>prints</em>, so a dur
 <em>stored</em> timestamp must be a whole number of milliseconds — a finer one is refused by <code>add</code> rather
 than truncated, and the epoch-millisecond form cannot express one at all. See
 <a href="reference/../explanation/data-model.html#timestamp-precision">timestamp precision</a>. A timestamp with no
-offset needs <a href="reference/cli.html#zoneless-timestamps"><code>--assume-timezone</code></a>.</p>
+offset needs <a href="reference/cli.html#zoneless-timestamps"><code>--assume-timezone</code> or <code>--zoneless</code></a>, and whichever one you
+pass is also recorded as the series' <code>time_reference</code>.</p>
 </li>
 <li>
 <p><strong><code>--time-range</code></strong> is a pair of <em>timestamps</em>, not a duration: <code>START..END</code> (half-open — <code>START</code>
@@ -9725,10 +10173,11 @@ The CSV holds only numbers, preceded by a mandatory header row (plus a leading t
 <tr><td><code>units</code></td><td>optional</td><td>Free-form label.</td></tr>
 <tr><td><code>quantity_kind</code></td><td>optional</td><td>What the values measure, e.g. <code>ActivePower</code> (QUDT name).</td></tr>
 <tr><td><code>unit_system</code></td><td>optional</td><td><code>natural_units</code> or <code>component_base</code>; unset = unspecified.</td></tr>
+<tr><td><code>time_reference</code></td><td>optional</td><td><code>utc</code> / <code>zoneless</code> / <code>-07:00</code> / an IANA name; normally inferred.</td></tr>
 <tr><td><code>component_field</code></td><td>optional</td><td>Owning component's field these values vary over time.</td></tr>
 <tr><td><code>application_data</code></td><td>optional</td><td>Opaque package-owned payload (e.g. JSON), stored verbatim.</td></tr>
 <tr><td><code>features</code></td><td>optional</td><td>JSON object; int/float/bool/string values. See below.</td></tr>
-<tr><td><code>initial_timestamp</code></td><td>all but non-sequential</td><td></td></tr>
+<tr><td><code>initial_timestamp</code></td><td>all but non-sequential</td><td>Also decides the series' <code>time_reference</code> unless declared.</td></tr>
 <tr><td><code>resolution</code></td><td>all but non-sequential</td><td>ISO-8601 duration, e.g. <code>PT1H</code>.</td></tr>
 <tr><td><code>horizon</code>, <code>interval</code>, <code>count</code></td><td>forecasts</td><td>The two durations are ISO-8601, e.g. <code>PT24H</code>.</td></tr>
 <tr><td><code>percentiles</code></td><td><code>Probabilistic</code></td><td>Strictly increasing list of floats.</td></tr>
