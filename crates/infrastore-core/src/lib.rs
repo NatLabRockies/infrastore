@@ -29,9 +29,13 @@ pub use codec::{
     DecodedValues, LinearFunction, QuadraticFunction, StepFunction, XyPoint, decode, encode,
 };
 pub use error::{Result, TimeSeriesError};
-// The two hashing utilities a binding genuinely needs: `array_hash` to
-// content-address an array and `hash_hex` to render a 32-byte hash as hex.
-pub use hash::{array_hash, hash_hex};
+// The hashing utilities a binding genuinely needs: `array_hash` to
+// content-address an array, `hash_hex` to render a 32-byte hash as hex,
+// `association_id` to derive a catalog row's surrogate id, and
+// `features_hash` -- the one component of `association_id`'s domain a caller
+// cannot otherwise supply -- for reconstructing a `TimeSeriesMetadata` (e.g.
+// from a wire format) that must carry a real id rather than a sentinel.
+pub use hash::{array_hash, association_id, features_hash, hash_hex};
 pub use metadata::{
     ForecastSummaryRow, ParentChildAssociation, ParentChildFilter, StaticSummaryRow,
     SupplementalAttributeAssociation, SupplementalAttributeFilter, SupplementalAttributeSummaryRow,

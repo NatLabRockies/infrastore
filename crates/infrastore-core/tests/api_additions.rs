@@ -1876,3 +1876,33 @@ fn reader_columns_are_ordered_by_features_when_nothing_else_separates_them() {
     assert_eq!(column_order(&[1, 2, 3]), vec![1, 2, 3]);
     assert_eq!(column_order(&[3, 2, 1]), vec![1, 2, 3]);
 }
+
+// ---- association_id --------------------------------------------------------
+
+#[test]
+fn get_metadata_by_association_id_round_trips_through_list() {
+    let mut store = create_store(None, true).unwrap();
+    store
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(sts("load", 10.0, 4)),
+        ))
+        .unwrap();
+
+    let rows = store.list_time_series(ListFilter::new()).unwrap();
+    assert_eq!(rows.len(), 1);
+    let association_id = rows[0].association_id;
+
+    let found = store
+        .get_metadata_by_association_id(association_id)
+        .unwrap();
+    assert_eq!(found.name, "load");
+    assert_eq!(found.association_id, association_id);
+
+    let err = store
+        .get_metadata_by_association_id(association_id ^ 1)
+        .unwrap_err();
+    assert!(matches!(err, TimeSeriesError::NotFound));
+}

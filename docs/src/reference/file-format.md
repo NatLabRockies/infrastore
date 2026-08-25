@@ -57,16 +57,27 @@ Opening a store whose recorded version differs from the version this build reads
 the check is exact equality and there is no in-place upgrade path: regenerate the store with the
 matching build.
 
-(`0.17.0` added the metadata column `time_reference`, which records how a series' timestamps were
-_spelled_ — an instant in UTC, an instant at a fixed offset, an instant in a named IANA zone, or a
-wall clock naming no instant. It also changes how stored timestamps are _interpreted_: a row marked
-`zoneless` holds wall clocks the store keeps as if UTC, which an older reader would hand back as
-instants. See [Time references](../explanation/data-model.md#time-references); `0.16.0` added the
-metadata column `component_field`; `0.15.0` renamed the metadata column `ext` to `application_data`
-and added the `quantity_kind` and `unit_system` columns; unlike a new _table_, new _columns_ are not
-picked up by the idempotent `CREATE TABLE IF NOT EXISTS` DDL, so a store one version behind is
-rejected on open; `0.14.0` moved a `NonSequentialTimeSeries`'s timestamps out of the association
-row: the `timestamps_json` TEXT column became a `timestamps_hash` BLOB resolving into the new
+(`0.18.0` added the `association_id` column to `time_series_associations`: a derived surrogate id
+(`hash::association_id`) over the `uq_ts_assoc` tuple —
+`(owner_id, owner_category,
+time_series_type, name, resolution, interval, features_hash)` — enforced
+UNIQUE by its own index (`uq_ts_assoc_id`) and exposed by
+`get_time_series_metadata_by_association_id`. Same reasoning as `0.16.0`/`0.17.0` below for why a
+new NOT NULL column is not the additive case: `CREATE TABLE IF NOT
+EXISTS` leaves a `0.17.0` store's
+column set alone, so every statement naming the column fails against it. It also adds a hash domain:
+the encoding `hash::association_id` computes is part of the on-disk contract, so a future change to
+it is itself a format bump, not merely a code change; `0.17.0` added the metadata column
+`time_reference`, which records how a series' timestamps were _spelled_ — an instant in UTC, an
+instant at a fixed offset, an instant in a named IANA zone, or a wall clock naming no instant. It
+also changes how stored timestamps are _interpreted_: a row marked `zoneless` holds wall clocks the
+store keeps as if UTC, which an older reader would hand back as instants. See
+[Time references](../explanation/data-model.md#time-references); `0.16.0` added the metadata column
+`component_field`; `0.15.0` renamed the metadata column `ext` to `application_data` and added the
+`quantity_kind` and `unit_system` columns; unlike a new _table_, new _columns_ are not picked up by
+the idempotent `CREATE TABLE IF NOT EXISTS` DDL, so a store one version behind is rejected on open;
+`0.14.0` moved a `NonSequentialTimeSeries`'s timestamps out of the association row: the
+`timestamps_json` TEXT column became a `timestamps_hash` BLOB resolving into the new
 content-addressed [`timestamp_sets`](#timestamp_sets) table, and irregular arrays that share a time
 axis are now column-packed into `nsts_…` datasets keyed by that hash instead of one standalone
 `arr_…` dataset each; `0.13.0` replaced the `dtype` column with `element_type`, which names the
@@ -288,32 +299,33 @@ The catalog database is created with `PRAGMA foreign_keys = ON` and the followin
 
 One row per association between an owner and a stored array.
 
-| Column              | Type    | Notes                                                               |
-| ------------------- | ------- | ------------------------------------------------------------------- |
-| `id`                | INTEGER | Primary key                                                         |
-| `owner_id`          | INTEGER | Owner identity; signed 64-bit integer identifier (part of key)      |
-| `owner_type`        | TEXT    | Owner's concrete type, descriptive                                  |
-| `owner_category`    | INTEGER | Code, `CHECK` in (0, 1); part of key — see below                    |
-| `time_series_type`  | INTEGER | Code, `CHECK` between 0 and 5; part of key — see below              |
-| `name`              | TEXT    | Series name                                                         |
-| `initial_timestamp` | TEXT    | RFC 3339 string; `NULL` for `NonSequentialTimeSeries`               |
-| `resolution`        | TEXT    | ISO-8601 duration (`PT1H`, `P1M`, …); `NULL` for non-sequential     |
-| `length`            | INTEGER | Number of timesteps                                                 |
-| `horizon`           | TEXT    | ISO-8601 forecast horizon; `NULL` for non-forecasts                 |
-| `interval`          | TEXT    | ISO-8601 forecast interval; `NULL` for non-forecasts                |
-| `count`             | INTEGER | Forecast window count; `NULL` for non-forecasts                     |
-| `timestamps_hash`   | BLOB    | 32-byte SHA-256 of the timestamp vector (`NonSequentialTimeSeries`) |
-| `units`             | TEXT    | Free-form units label                                               |
-| `quantity_kind`     | TEXT    | What the values measure (QUDT `QuantityKind` name); `NULL` if unset |
-| `unit_system`       | TEXT    | `natural_units` or `component_base`; `NULL` means _unspecified_     |
-| `time_reference`    | TEXT    | How the timestamps were spelled (below); `NULL` means _unspecified_ |
-| `component_field`   | TEXT    | Owning component's field these values vary; `NULL` if unset         |
-| `percentiles_json`  | TEXT    | JSON array of percentiles for `Probabilistic`; `NULL` else          |
-| `element_type`      | TEXT    | Canonical element-type string (`NOT NULL DEFAULT 'f64'`)            |
-| `element_shape`     | TEXT    | JSON array of per-step dims (`[]` = scalar)                         |
-| `application_data`  | TEXT    | Opaque package-owned payload (JSON), verbatim; `NULL` if unset      |
-| `data_hash`         | BLOB    | 32-byte SHA-256 of the array; links to an HDF5 column/variable      |
-| `features_hash`     | BLOB    | 32-byte SHA-256 of the feature map                                  |
+| Column              | Type    | Notes                                                                |
+| ------------------- | ------- | -------------------------------------------------------------------- |
+| `id`                | INTEGER | Primary key                                                          |
+| `association_id`    | INTEGER | Derived surrogate id over the key (`hash::association_id`); `UNIQUE` |
+| `owner_id`          | INTEGER | Owner identity; signed 64-bit integer identifier (part of key)       |
+| `owner_type`        | TEXT    | Owner's concrete type, descriptive                                   |
+| `owner_category`    | INTEGER | Code, `CHECK` in (0, 1); part of key — see below                     |
+| `time_series_type`  | INTEGER | Code, `CHECK` between 0 and 5; part of key — see below               |
+| `name`              | TEXT    | Series name                                                          |
+| `initial_timestamp` | TEXT    | RFC 3339 string; `NULL` for `NonSequentialTimeSeries`                |
+| `resolution`        | TEXT    | ISO-8601 duration (`PT1H`, `P1M`, …); `NULL` for non-sequential      |
+| `length`            | INTEGER | Number of timesteps                                                  |
+| `horizon`           | TEXT    | ISO-8601 forecast horizon; `NULL` for non-forecasts                  |
+| `interval`          | TEXT    | ISO-8601 forecast interval; `NULL` for non-forecasts                 |
+| `count`             | INTEGER | Forecast window count; `NULL` for non-forecasts                      |
+| `timestamps_hash`   | BLOB    | 32-byte SHA-256 of the timestamp vector (`NonSequentialTimeSeries`)  |
+| `units`             | TEXT    | Free-form units label                                                |
+| `quantity_kind`     | TEXT    | What the values measure (QUDT `QuantityKind` name); `NULL` if unset  |
+| `unit_system`       | TEXT    | `natural_units` or `component_base`; `NULL` means _unspecified_      |
+| `time_reference`    | TEXT    | How the timestamps were spelled (below); `NULL` means _unspecified_  |
+| `component_field`   | TEXT    | Owning component's field these values vary; `NULL` if unset          |
+| `percentiles_json`  | TEXT    | JSON array of percentiles for `Probabilistic`; `NULL` else           |
+| `element_type`      | TEXT    | Canonical element-type string (`NOT NULL DEFAULT 'f64'`)             |
+| `element_shape`     | TEXT    | JSON array of per-step dims (`[]` = scalar)                          |
+| `application_data`  | TEXT    | Opaque package-owned payload (JSON), verbatim; `NULL` if unset       |
+| `data_hash`         | BLOB    | 32-byte SHA-256 of the array; links to an HDF5 column/variable       |
+| `features_hash`     | BLOB    | 32-byte SHA-256 of the feature map                                   |
 
 The two content-address hashes are the last two columns. Column order is not load-bearing — every
 statement names its columns — so the layout is chosen for readability.
@@ -587,7 +599,7 @@ carries no `data_format_version` change.
 
 ```sql
 CREATE VIEW time_series_readable AS
-SELECT id, owner_id, owner_type,
+SELECT id, association_id, owner_id, owner_type,
        CASE owner_category WHEN 0 THEN 'Component'
                            WHEN 1 THEN 'SupplementalAttribute'
                            ELSE 'unknown(' || owner_category || ')' END AS owner_category,

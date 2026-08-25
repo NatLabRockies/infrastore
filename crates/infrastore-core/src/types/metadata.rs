@@ -271,6 +271,7 @@ pub type Features = BTreeMap<String, FeatureValue>;
 /// reader can scan it.
 pub const RESERVED_FEATURE_NAMES: &[&str] = &[
     "application_data",
+    "association_id",
     "component_field",
     "count",
     "data",
@@ -365,6 +366,12 @@ pub struct TimeSeriesMetadata {
     pub owner_id: i64,
     pub owner_type: String,
     pub owner_category: OwnerCategory,
+    /// Derived surrogate id: `hash::association_id` over this row's
+    /// `uq_ts_assoc` identity tuple (owner_id, owner_category,
+    /// time_series_type, name, resolution, interval, features_hash). Recomputed
+    /// on insert from those fields, not trusted from the caller -- see
+    /// `MetadataStore::insert_batched`.
+    pub association_id: i64,
     pub time_series_type: TimeSeriesType,
     pub name: String,
     pub data_hash: [u8; 32],
@@ -515,6 +522,9 @@ mod tests {
             owner_id: 1,
             owner_type: "Generator".into(),
             owner_category: OwnerCategory::Component,
+            // Only field *names* are asserted below; the value is never
+            // checked, so a placeholder is fine here.
+            association_id: 0,
             time_series_type: TimeSeriesType::SingleTimeSeries,
             name: "load".into(),
             data_hash: [0u8; 32],

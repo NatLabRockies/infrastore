@@ -142,6 +142,7 @@ impl From<ListFilter> for MetadataFilter {
             interval: value.interval,
             features: value.features,
             features_hash: None,
+            association_id: None,
         }
     }
 }
@@ -2286,6 +2287,17 @@ impl Store {
         keys.iter().map(|k| self.metadata.get_by_key(k)).collect()
     }
 
+    /// [`Self::get_metadata`], addressed by the derived surrogate id
+    /// (`association_id`) instead of a [`KeyIdentity`]. Errors with `NotFound`
+    /// if no association carries it.
+    pub fn get_metadata_by_association_id(
+        &self,
+        association_id: i64,
+    ) -> Result<TimeSeriesMetadata> {
+        self.metadata
+            .get_time_series_metadata_by_association_id(association_id)
+    }
+
     /// Resolve a forecast addressed by attributes plus a requested
     /// [`TimeSeriesType`] to the [`TimeSeriesKey`] of the single matching
     /// association. The returned key's `time_series_type` is the concrete
@@ -2613,6 +2625,10 @@ impl Store {
                 horizon: Some(horizon),
                 interval: Some(interval),
                 count: Some(count),
+                // Ignored by insert, which recomputes it. Set explicitly
+                // because `..src` would otherwise carry the source row's live
+                // id across a change of hash-domain fields.
+                association_id: 0,
                 ..src.clone()
             });
         }
@@ -2666,10 +2682,7 @@ impl Store {
             interval: key.interval,
             features: None,
             features_hash: Some(crate::hash::features_hash(&key.features)),
-            owner_type: None,
-            name_glob: None,
-            component_field: None,
-            zoneless: None,
+            ..Default::default()
         })
     }
 
@@ -3887,6 +3900,8 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
                     owner_id: item.owner_id,
                     owner_type: item.owner_type.clone(),
                     owner_category: item.owner_category,
+                    // Ignored by insert, which recomputes it.
+                    association_id: 0,
                     time_series_type: TimeSeriesType::SingleTimeSeries,
                     name: single.name.clone(),
                     data_hash: hash,
@@ -3933,6 +3948,8 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
                     owner_id: item.owner_id,
                     owner_type: item.owner_type.clone(),
                     owner_category: item.owner_category,
+                    // Ignored by insert, which recomputes it.
+                    association_id: 0,
                     time_series_type: TimeSeriesType::NonSequentialTimeSeries,
                     name: non_sequential.name.clone(),
                     data_hash: hash,
@@ -4542,6 +4559,8 @@ fn forecast_metadata(
         owner_id: item.owner_id,
         owner_type: item.owner_type.clone(),
         owner_category: item.owner_category,
+        // Ignored by insert, which recomputes it.
+        association_id: 0,
         time_series_type,
         name: name.to_owned(),
         data_hash: array_hash(data),

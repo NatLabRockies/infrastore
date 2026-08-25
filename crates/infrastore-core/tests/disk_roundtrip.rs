@@ -893,6 +893,28 @@ fn golden_hash_pin() {
 }
 
 #[test]
+fn association_id_golden_pin() {
+    // Pin the exact association id for a fixed uq_ts_assoc tuple. Any change
+    // in the canonical encoding that perturbs this value is a format-breaking
+    // change and must bump DATA_FORMAT_VERSION.
+    use infrastore_core::{Period, TimeSeriesType, association_id};
+    let fh = [7u8; 32];
+    let id = association_id(
+        42,
+        OwnerCategory::Component,
+        TimeSeriesType::SingleTimeSeries,
+        "max_active_power",
+        Some(&Period::from_iso8601("PT1H").unwrap()),
+        None,
+        &fh,
+    );
+    assert_eq!(
+        id, 315076378881986,
+        "association_id encoding drifted; bump DATA_FORMAT_VERSION if intentional",
+    );
+}
+
+#[test]
 fn non_sequential_persistent_round_trip() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");

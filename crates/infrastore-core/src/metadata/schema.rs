@@ -15,6 +15,12 @@
 pub const DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS time_series_associations (
     id                INTEGER PRIMARY KEY,
+    -- Derived surrogate id: hash::association_id over the uq_ts_assoc tuple.
+    -- Portable across stores (same association => same value everywhere),
+    -- carried on the wire by document consumers. 53-bit, so exact in every
+    -- JSON reader. UNIQUE: a violation here that does not violate uq_ts_assoc
+    -- is a hash collision and is reported as such, loudly.
+    association_id    INTEGER NOT NULL,
     owner_id          INTEGER NOT NULL,
     owner_type        TEXT    NOT NULL,
     -- `owner_category` and `time_series_type` are stored as small INTEGER
@@ -192,6 +198,10 @@ CREATE TABLE IF NOT EXISTS timestamp_sets (
 -- dropped enforced the very same constraint. Index names are not part of the
 -- on-disk contract, so this needs no DATA_FORMAT_VERSION bump; an older build
 -- opening the store would simply re-create the old names alongside.
+-- A violation here and one on uq_ts_assoc below cannot be told apart by which
+-- index fired; see `classify_association_violation` in metadata.rs.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_ts_assoc_id ON time_series_associations(association_id);
+
 DROP INDEX IF EXISTS uq_assoc;
 DROP INDEX IF EXISTS uq_assoc_coalesced;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_ts_assoc ON time_series_associations
@@ -396,7 +406,7 @@ CREATE INDEX IF NOT EXISTS idx_parent_child_child
 -- so this costs nothing and cannot lose anything.
 DROP VIEW IF EXISTS time_series_readable;
 CREATE VIEW time_series_readable AS
-SELECT id, owner_id, owner_type,
+SELECT id, association_id, owner_id, owner_type,
        CASE owner_category WHEN 0 THEN 'Component'
                            WHEN 1 THEN 'SupplementalAttribute'
                            ELSE 'unknown(' || owner_category || ')' END AS owner_category,

@@ -10,7 +10,9 @@ use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 
 use crate::types::array::{Dtype, TypedArray};
-use crate::types::metadata::{FeatureValue, Features};
+use crate::types::metadata::{FeatureValue, Features, OwnerCategory};
+use crate::types::period::Period;
+use crate::types::time_series::TimeSeriesType;
 
 /// Compute the canonical content hash for a [`TypedArray`].
 ///
@@ -169,6 +171,88 @@ pub fn timestamps_hash(timestamps: &[DateTime<Utc>]) -> [u8; 32] {
     let mut out = [0u8; 32];
     out.copy_from_slice(&digest);
     out
+}
+
+/// Derived surrogate id of one association row: SHA-256 over the catalog's
+/// uniqueness tuple, truncated to 53 bits so every JSON consumer (doubles
+/// included) represents it exactly. Part of the on-disk contract: any change
+/// to this encoding must bump [`crate::DATA_FORMAT_VERSION`].
+///
+/// Domain = uq_ts_assoc = (owner_id, owner_category, time_series_type, name,
+/// resolution, interval, features_hash). Descriptive fields are deliberately
+/// excluded. Periods enter as their canonical ISO-8601 spellings; absent
+/// periods hash a distinct absence tag so `None` can never collide with any
+/// string value.
+pub fn association_id(
+    owner_id: i64,
+    owner_category: OwnerCategory,
+    time_series_type: TimeSeriesType,
+    name: &str,
+    resolution: Option<&Period>,
+    interval: Option<&Period>,
+    features_hash: &[u8; 32],
+) -> i64 {
+    let resolution_iso = resolution.map(Period::to_iso8601);
+    let interval_iso = interval.map(Period::to_iso8601);
+    association_id_iso(
+        owner_id,
+        owner_category,
+        time_series_type,
+        name,
+        resolution_iso.as_deref(),
+        interval_iso.as_deref(),
+        features_hash,
+    )
+}
+
+/// [`association_id`] taking the periods already rendered to their canonical
+/// ISO-8601 spellings — what the catalog columns hold. Same encoding, so the two
+/// agree by construction; this is the one that carries it. Callers holding the
+/// stored strings (or ones they just rendered) use this and skip the round-trip
+/// through [`Period`].
+#[allow(clippy::too_many_arguments)]
+pub fn association_id_iso(
+    owner_id: i64,
+    owner_category: OwnerCategory,
+    time_series_type: TimeSeriesType,
+    name: &str,
+    resolution_iso: Option<&str>,
+    interval_iso: Option<&str>,
+    features_hash: &[u8; 32],
+) -> i64 {
+    let mut hasher = Sha256::new();
+    hasher.update(b"association_id\0");
+    hasher.update(owner_id.to_le_bytes());
+    hasher.update([owner_category.code() as u8]);
+    hasher.update([time_series_type.code() as u8]);
+    update_str(&mut hasher, name);
+    update_optional_str(&mut hasher, resolution_iso);
+    update_optional_str(&mut hasher, interval_iso);
+    hasher.update(features_hash);
+    let digest = hasher.finalize();
+    let mut first8 = [0u8; 8];
+    first8.copy_from_slice(&digest[..8]);
+    i64::from_be_bytes(first8) & ((1i64 << 53) - 1)
+}
+
+/// Feed a string to `hasher` length-prefixed, so concatenations of adjacent
+/// fields can never be confused for one another.
+fn update_str(hasher: &mut Sha256, value: &str) {
+    let bytes = value.as_bytes();
+    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
+
+/// [`update_str`] for an optional string, tagging presence so `None` never
+/// collides with any string value.
+fn update_optional_str(hasher: &mut Sha256, value: Option<&str>) {
+    match value {
+        None => hasher.update([0u8]),
+        Some(s) => {
+            hasher.update([1u8]);
+            update_str(hasher, s);
+        }
+    }
 }
 
 /// Hex-encode a 32-byte hash for storage in TEXT columns / HDF5 hash datasets.
@@ -376,5 +460,153 @@ mod tests {
         let mut b = Features::new();
         b.insert("k".into(), FeatureValue::Bool(true));
         assert_ne!(features_hash(&a), features_hash(&b));
+    }
+
+    #[test]
+    fn association_id_is_deterministic_and_53_bit() {
+        let fh = [7u8; 32];
+        let a = association_id(
+            42,
+            OwnerCategory::Component,
+            TimeSeriesType::SingleTimeSeries,
+            "max_active_power",
+            Some(&Period::from_iso8601("PT1H").unwrap()),
+            None,
+            &fh,
+        );
+        let b = association_id(
+            42,
+            OwnerCategory::Component,
+            TimeSeriesType::SingleTimeSeries,
+            "max_active_power",
+            Some(&Period::from_iso8601("PT1H").unwrap()),
+            None,
+            &fh,
+        );
+        assert_eq!(a, b);
+        assert!((0..(1i64 << 53)).contains(&a));
+    }
+
+    #[test]
+    fn association_id_separates_each_tuple_member() {
+        let fh = [7u8; 32];
+        let base = association_id(
+            42,
+            OwnerCategory::Component,
+            TimeSeriesType::SingleTimeSeries,
+            "n",
+            None,
+            None,
+            &fh,
+        );
+        assert_ne!(
+            base,
+            association_id(
+                43,
+                OwnerCategory::Component,
+                TimeSeriesType::SingleTimeSeries,
+                "n",
+                None,
+                None,
+                &fh
+            )
+        );
+        assert_ne!(
+            base,
+            association_id(
+                42,
+                OwnerCategory::SupplementalAttribute,
+                TimeSeriesType::SingleTimeSeries,
+                "n",
+                None,
+                None,
+                &fh
+            )
+        );
+        assert_ne!(
+            base,
+            association_id(
+                42,
+                OwnerCategory::Component,
+                TimeSeriesType::Deterministic,
+                "n",
+                None,
+                None,
+                &fh
+            )
+        );
+        assert_ne!(
+            base,
+            association_id(
+                42,
+                OwnerCategory::Component,
+                TimeSeriesType::SingleTimeSeries,
+                "m",
+                None,
+                None,
+                &fh
+            )
+        );
+        assert_ne!(
+            base,
+            association_id(
+                42,
+                OwnerCategory::Component,
+                TimeSeriesType::SingleTimeSeries,
+                "n",
+                Some(&Period::from_iso8601("PT1H").unwrap()),
+                None,
+                &fh
+            )
+        );
+        assert_ne!(
+            base,
+            association_id(
+                42,
+                OwnerCategory::Component,
+                TimeSeriesType::SingleTimeSeries,
+                "n",
+                None,
+                Some(&Period::from_iso8601("PT1H").unwrap()),
+                &fh
+            )
+        );
+        assert_ne!(
+            base,
+            association_id(
+                42,
+                OwnerCategory::Component,
+                TimeSeriesType::SingleTimeSeries,
+                "n",
+                None,
+                None,
+                &[8u8; 32]
+            )
+        );
+    }
+
+    #[test]
+    fn association_id_none_period_differs_from_empty_leaning_encodings() {
+        // A None resolution must not collide with any string-valued resolution.
+        let fh = [0u8; 32];
+        let none_res = association_id(
+            1,
+            OwnerCategory::Component,
+            TimeSeriesType::SingleTimeSeries,
+            "n",
+            None,
+            None,
+            &fh,
+        );
+        let pt0 = association_id(
+            1,
+            OwnerCategory::Component,
+            TimeSeriesType::SingleTimeSeries,
+            "n",
+            Some(&Period::from_iso8601("PT0S").unwrap()),
+            None,
+            &fh,
+        );
+        assert_ne!(none_res, pt0);
     }
 }

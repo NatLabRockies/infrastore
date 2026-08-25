@@ -47,4 +47,14 @@
 /// row marked `zoneless` holds wall clocks the store keeps as if UTC, which an
 /// older reader would hand back as instants. Stores written by 0.16.0 and
 /// earlier are rejected on open.
-pub const DATA_FORMAT_VERSION: &str = "0.17.0";
+///
+/// 0.18.0 added the `association_id` column to `time_series_associations`: a
+/// derived surrogate id (`hash::association_id`) over the `uq_ts_assoc` tuple,
+/// enforced UNIQUE by its own index. Same reasoning as 0.15.0-0.17.0 for why a
+/// new NOT NULL column is not the additive case -- `CREATE TABLE IF NOT
+/// EXISTS` leaves a 0.17.0 store's column set alone, so every INSERT naming
+/// the column fails against it. It also adds a hash domain: the encoding
+/// `hash::association_id` computes is part of the on-disk contract, so a
+/// future change to that encoding is itself a format bump, not merely a code
+/// change. Stores written by 0.17.0 and earlier are rejected on open.
+pub const DATA_FORMAT_VERSION: &str = "0.18.0";

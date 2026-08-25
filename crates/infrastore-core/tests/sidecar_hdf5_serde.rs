@@ -19,9 +19,9 @@ use sha2::{Digest, Sha256};
 
 use infrastore_core::{
     CatalogMode, Compression, Deterministic, Dtype, ElementType, Features, OwnerCategory,
-    ParentChildAssociation, ParentChildFilter, SingleTimeSeries, TimeSeriesData, TimeSeriesType,
-    TypedArray, array_hash, catalog_sqlite_path, create_store, create_store_with_catalog, hash_hex,
-    open_store,
+    ParentChildAssociation, ParentChildFilter, Period, SingleTimeSeries, TimeSeriesData,
+    TimeSeriesType, TypedArray, array_hash, association_id, catalog_sqlite_path, create_store,
+    create_store_with_catalog, hash_hex, open_store,
 };
 
 /// SHA-256 of an empty `Features` map, reproducing the domain documented for
@@ -47,6 +47,11 @@ struct RawAssocRow<'a> {
     owner_category: i64,
     time_series_type: i64,
     name: &'a str,
+    // Computed by the caller via the public `association_id` function, the
+    // same value `MetadataStore::insert_batched` would derive for this row's
+    // identity tuple -- a hand-inserted row must carry it too, since the
+    // column is NOT NULL and uniquely indexed.
+    association_id: i64,
     data_hash: [u8; 32],
     initial_timestamp: String,
     resolution: String,
@@ -62,13 +67,14 @@ struct RawAssocRow<'a> {
 fn insert_association_row(conn: &rusqlite::Connection, row: &RawAssocRow) {
     conn.execute(
         "INSERT INTO time_series_associations
-         (owner_id, owner_type, owner_category, time_series_type, name, data_hash,
-          initial_timestamp, resolution, length, horizon, interval, count,
+         (association_id, owner_id, owner_type, owner_category, time_series_type, name,
+          data_hash, initial_timestamp, resolution, length, horizon, interval, count,
           timestamps_hash, units, quantity_kind, unit_system, component_field,
           percentiles_json, element_type, element_shape, application_data, features_hash)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, NULL, ?13, NULL, NULL, NULL,
-                 NULL, ?14, ?15, NULL, ?16)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL, ?14, NULL, NULL,
+                 NULL, NULL, ?15, ?16, NULL, ?17)",
         rusqlite::params![
+            row.association_id,
             row.owner_id,
             row.owner_type,
             row.owner_category,
@@ -180,6 +186,15 @@ fn sidecar_reads_back_through_the_public_api() {
                 owner_category: OwnerCategory::Component.code(),
                 time_series_type: TimeSeriesType::SingleTimeSeries.code(),
                 name: "load",
+                association_id: association_id(
+                    1,
+                    OwnerCategory::Component,
+                    TimeSeriesType::SingleTimeSeries,
+                    "load",
+                    Some(&Period::from_iso8601("PT1H").unwrap()),
+                    None,
+                    &empty_features_hash(),
+                ),
                 data_hash: static_hash,
                 initial_timestamp: initial_timestamp.to_rfc3339(),
                 resolution: "PT1H".to_string(),
@@ -200,6 +215,15 @@ fn sidecar_reads_back_through_the_public_api() {
                 owner_category: OwnerCategory::Component.code(),
                 time_series_type: TimeSeriesType::Deterministic.code(),
                 name: "forecast",
+                association_id: association_id(
+                    1,
+                    OwnerCategory::Component,
+                    TimeSeriesType::Deterministic,
+                    "forecast",
+                    Some(&Period::from_iso8601("PT1H").unwrap()),
+                    Some(&Period::from_iso8601("PT1H").unwrap()),
+                    &empty_features_hash(),
+                ),
                 data_hash: forecast_hash,
                 initial_timestamp: initial_timestamp.to_rfc3339(),
                 resolution: "PT1H".to_string(),

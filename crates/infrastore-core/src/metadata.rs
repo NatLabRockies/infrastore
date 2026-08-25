@@ -475,6 +475,11 @@ pub struct MetadataFilter {
     /// avoiding a feature fetch+compare for siblings that share the other key
     /// columns. Distinct from `features` (an in-memory subset filter).
     pub features_hash: Option<[u8; 32]>,
+    /// Exact match on the derived surrogate id, pinpointing a row via
+    /// `uq_ts_assoc_id` the way `features_hash` pinpoints one via
+    /// `uq_ts_assoc`. Set by [`MetadataStore::get_time_series_metadata_by_association_id`]
+    /// only; nothing else derives one to filter on.
+    pub association_id: Option<i64>,
 }
 
 /// Remembers which content-addressed sets a batch of inserts has already
@@ -695,6 +700,10 @@ impl MetadataFilter {
         if let Some(ref f_hash) = self.features_hash {
             sql.push_str(" AND features_hash = ?");
             params_vec.push(Box::new(f_hash.to_vec()));
+        }
+        if let Some(association_id) = self.association_id {
+            sql.push_str(" AND association_id = ?");
+            params_vec.push(Box::new(association_id));
         }
         (sql, params_vec)
     }
@@ -949,20 +958,34 @@ impl MetadataStore {
             None => None,
         };
         let element_shape_json = serde_json::to_string(&meta.element_shape)?;
+        // Recomputed here rather than trusted from `meta.association_id`: the
+        // caller's copy may be stale (e.g. a struct-updated derived view whose
+        // identity fields changed) or simply unset, so the stored value must
+        // always be this row's own derivation.
+        let assoc_id = crate::hash::association_id_iso(
+            meta.owner_id,
+            meta.owner_category,
+            meta.time_series_type,
+            &meta.name,
+            resolution_iso.as_deref(),
+            interval_iso.as_deref(),
+            &f_hash,
+        );
 
         // `prepare_cached` so bulk adds parse each INSERT's SQL once per
         // connection instead of once per row.
         let mut insert_stmt = tx.prepare_cached(
             "INSERT INTO time_series_associations
-             (owner_id, owner_type, owner_category, time_series_type, name, data_hash,
-              initial_timestamp, resolution, length, horizon, interval, count,
+             (association_id, owner_id, owner_type, owner_category, time_series_type, name,
+              data_hash, initial_timestamp, resolution, length, horizon, interval, count,
               timestamps_hash, units, quantity_kind, unit_system, time_reference,
               component_field, percentiles_json, element_type, element_shape,
               application_data, features_hash)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                     ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+                     ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
         )?;
         let result = insert_stmt.execute(params![
+            assoc_id,
             meta.owner_id,
             meta.owner_type,
             meta.owner_category.code(),
@@ -995,10 +1018,17 @@ impl MetadataStore {
             Err(rusqlite::Error::SqliteFailure(err, _))
                 if err.code == rusqlite::ErrorCode::ConstraintViolation =>
             {
-                // The unique index covers (owner_id, owner_category,
-                // time_series_type, name, resolution, interval, features_hash).
-                // Surface the spec error.
-                return Err(TimeSeriesError::DuplicateTimeSeries);
+                return Err(classify_association_violation(
+                    tx,
+                    assoc_id,
+                    meta.owner_id,
+                    meta.owner_category,
+                    meta.time_series_type,
+                    &meta.name,
+                    resolution_iso.as_deref(),
+                    interval_iso.as_deref(),
+                    &f_hash,
+                )?);
             }
             Err(e) => return Err(e.into()),
         };
@@ -1185,31 +1215,108 @@ impl MetadataStore {
     /// given `owner_category`. Only the owning id changes; type/category and the
     /// underlying arrays are untouched (arrays are content-addressed). Returns
     /// the rows updated.
+    ///
+    /// `owner_id` is part of the `association_id` hash domain, so every moved
+    /// row's derived id changes too. SQL cannot compute the hash, so this reads
+    /// each matched row's remaining identity fields first and recomputes its id
+    /// individually, rather than reassigning `owner_id` in the one set-based
+    /// `UPDATE` the untouched columns would otherwise allow.
     pub fn replace_owner(
         tx: &Connection,
         old_owner: i64,
         new_owner: i64,
         owner_category: OwnerCategory,
     ) -> Result<usize> {
-        // A collision (the new owner already holds an identical association)
-        // fires the unique index on the UPDATE; surface the spec error rather
-        // than a raw rusqlite error (REVIEW_FOLLOWUPS.md item 5).
-        tx.execute(
-            "UPDATE time_series_associations SET owner_id = ?1
-             WHERE owner_id = ?2 AND owner_category = ?3",
-            params![new_owner, old_owner, owner_category.code()],
-        )
-        .map_err(map_unique_violation)
+        struct MovingRow {
+            id: i64,
+            time_series_type: i64,
+            name: String,
+            resolution: Option<String>,
+            interval: Option<String>,
+            features_hash: Vec<u8>,
+        }
+        let rows: Vec<MovingRow> = tx
+            .prepare_cached(
+                "SELECT id, time_series_type, name, resolution, interval, features_hash
+                 FROM time_series_associations
+                 WHERE owner_id = ?1 AND owner_category = ?2",
+            )?
+            .query_map(params![old_owner, owner_category.code()], |r| {
+                Ok(MovingRow {
+                    id: r.get(0)?,
+                    time_series_type: r.get(1)?,
+                    name: r.get(2)?,
+                    resolution: r.get(3)?,
+                    interval: r.get(4)?,
+                    features_hash: r.get(5)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        let mut update_stmt = tx.prepare_cached(
+            "UPDATE time_series_associations SET owner_id = ?1, association_id = ?2 WHERE id = ?3",
+        )?;
+        let count = rows.len();
+        for row in rows {
+            let ts_type = decode_type(row.time_series_type)?;
+            let f_hash = bytes_to_hash32(&row.features_hash).ok_or_else(|| {
+                TimeSeriesError::IntegrityError("features_hash is not 32 bytes".into())
+            })?;
+            // The stored spellings are already the canonical ISO-8601 ones the
+            // hash domain is defined over, so they go in as read.
+            let assoc_id = crate::hash::association_id_iso(
+                new_owner,
+                owner_category,
+                ts_type,
+                &row.name,
+                row.resolution.as_deref(),
+                row.interval.as_deref(),
+                &f_hash,
+            );
+            match update_stmt.execute(params![new_owner, assoc_id, row.id]) {
+                Ok(_) => {}
+                Err(rusqlite::Error::SqliteFailure(err, _))
+                    if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+                {
+                    return Err(classify_association_violation(
+                        tx,
+                        assoc_id,
+                        new_owner,
+                        owner_category,
+                        ts_type,
+                        &row.name,
+                        row.resolution.as_deref(),
+                        row.interval.as_deref(),
+                        &f_hash,
+                    )?);
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(count)
     }
 
     /// Rename one association identified by `key` to `new_name`, leaving its data
     /// and hash untouched. Returns the number of rows updated (0 if `key` matches
     /// nothing). A collision with an existing series of the new identity maps to
-    /// [`TimeSeriesError::DuplicateTimeSeries`].
+    /// [`TimeSeriesError::DuplicateTimeSeries`]; a collision of the *derived id*
+    /// alone (a different existing identity that happens to hash the same) maps
+    /// to [`TimeSeriesError::AssociationIdCollision`].
     pub fn rename(tx: &Connection, key: &KeyIdentity, new_name: &str) -> Result<usize> {
         let f_hash = features_hash(&key.features);
         let resolution_iso = key.resolution.map(period_to_iso);
         let interval_iso = key.interval.map(period_to_iso);
+        // `name` is part of the association_id hash domain, so a rename always
+        // moves the row to a new derived id too.
+        let assoc_id = crate::hash::association_id_iso(
+            key.owner_id,
+            key.owner_category,
+            key.time_series_type,
+            new_name,
+            resolution_iso.as_deref(),
+            interval_iso.as_deref(),
+            &f_hash,
+        );
         // Both period predicates distinguish NULL, so this matches exactly the
         // row the key names. [`Self::delete_by_key`] deliberately treats a NULL
         // interval as "any interval" — a documented convenience for removal —
@@ -1219,14 +1326,15 @@ impl MetadataStore {
         // and since a `KeyIdentity` carries `Some` interval for every forecast
         // type and `None` only for the static types, the wildcard could not even
         // be asked for deliberately.
-        tx.execute(
-            "UPDATE time_series_associations SET name = ?1
-             WHERE owner_id = ?2 AND owner_category = ?3 AND time_series_type = ?4 AND name = ?5
-               AND ((?6 IS NULL AND resolution IS NULL) OR resolution = ?6)
-               AND ((?7 IS NULL AND interval IS NULL) OR interval = ?7)
-               AND features_hash = ?8",
+        let result = tx.execute(
+            "UPDATE time_series_associations SET name = ?1, association_id = ?2
+             WHERE owner_id = ?3 AND owner_category = ?4 AND time_series_type = ?5 AND name = ?6
+               AND ((?7 IS NULL AND resolution IS NULL) OR resolution = ?7)
+               AND ((?8 IS NULL AND interval IS NULL) OR interval = ?8)
+               AND features_hash = ?9",
             params![
                 new_name,
+                assoc_id,
                 key.owner_id,
                 key.owner_category.code(),
                 key.time_series_type.code(),
@@ -1235,8 +1343,26 @@ impl MetadataStore {
                 interval_iso,
                 f_hash.as_slice(),
             ],
-        )
-        .map_err(map_unique_violation)
+        );
+        match result {
+            Ok(n) => Ok(n),
+            Err(rusqlite::Error::SqliteFailure(err, _))
+                if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                Err(classify_association_violation(
+                    tx,
+                    assoc_id,
+                    key.owner_id,
+                    key.owner_category,
+                    key.time_series_type,
+                    new_name,
+                    resolution_iso.as_deref(),
+                    interval_iso.as_deref(),
+                    &f_hash,
+                )?)
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Delete every association in the store. Returns the removed data_hashes.
@@ -1305,7 +1431,7 @@ impl MetadataStore {
                     data_hash, initial_timestamp, resolution, length, horizon,
                     interval, count, timestamps_hash, units, quantity_kind, unit_system,
                     time_reference, component_field, percentiles_json, element_type,
-                    element_shape, application_data, id
+                    element_shape, application_data, id, association_id
              FROM time_series_associations {where_clause}"
         );
         let mut stmt = self.conn.prepare_cached(&sql)?;
@@ -1638,10 +1764,7 @@ impl MetadataStore {
             // (astronomically unlikely) hash collision.
             features: None,
             features_hash: Some(features_hash(&key.features)),
-            owner_type: None,
-            name_glob: None,
-            component_field: None,
-            zoneless: None,
+            ..Default::default()
         })?;
         matches.retain(|m| m.features == key.features);
         match matches.len() {
@@ -1651,6 +1774,23 @@ impl MetadataStore {
                 "expected exactly one match for key, found {n}"
             ))),
         }
+    }
+
+    /// Look up one association by its derived surrogate id, the indexed
+    /// counterpart of [`Self::get_by_key`]. A bogus id (one no row carries) is
+    /// [`TimeSeriesError::NotFound`], same as an unmatched key.
+    pub fn get_time_series_metadata_by_association_id(
+        &self,
+        association_id: i64,
+    ) -> Result<TimeSeriesMetadata> {
+        // `uq_ts_assoc_id` makes this at most one row, so there is no
+        // multiple-match case to report.
+        self.list(&MetadataFilter {
+            association_id: Some(association_id),
+            ..Default::default()
+        })?
+        .pop()
+        .ok_or(TimeSeriesError::NotFound)
     }
 
     pub fn distinct_resolutions(&self, ts_type: Option<TimeSeriesType>) -> Result<Vec<Period>> {
@@ -2642,19 +2782,81 @@ fn parse_feature_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, Featu
     Ok((key, value))
 }
 
-/// Map a SQLite UNIQUE-index constraint violation to the spec's
-/// [`TimeSeriesError::DuplicateTimeSeries`], passing every other error through.
-/// Shared by the `INSERT` and `UPDATE` paths where the association uniqueness
-/// index can fire (`rename`, `replace_owner`).
-fn map_unique_violation(e: rusqlite::Error) -> TimeSeriesError {
-    match e {
-        rusqlite::Error::SqliteFailure(err, _)
-            if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+/// The identity-tuple columns of one association row, as read back for
+/// collision classification.
+type IdentityColumns = (
+    i64,
+    i64,
+    i64,
+    String,
+    Option<String>,
+    Option<String>,
+    Vec<u8>,
+);
+
+/// Disambiguate a UNIQUE-constraint violation on `time_series_associations`
+/// between an ordinary identity-tuple duplicate
+/// ([`TimeSeriesError::DuplicateTimeSeries`]) and a genuine `association_id`
+/// hash collision ([`TimeSeriesError::AssociationIdCollision`]) -- shared by
+/// every write that can fire either index (`insert_batched`, `rename`,
+/// `replace_owner`).
+///
+/// SQLite's choice of which of several simultaneously violated unique indexes
+/// to name in the failure is unspecified, so this does not parse the error at
+/// all: it looks up the row that already holds `assoc_id` (unique, so there is
+/// at most one) and compares its identity tuple against the one the caller was
+/// trying to write. An ordinary duplicate always collides on the derived id
+/// too, by construction (equal input hashes to equal output), so the row found
+/// there has the *same* tuple; a genuine hash collision is the only way a
+/// *different* tuple can hold it. No existing row is the defensive
+/// fallback for a violation this function cannot otherwise explain (it should
+/// not be reachable, since every unique index on this table participates in
+/// one of the two cases above).
+#[allow(clippy::too_many_arguments)]
+fn classify_association_violation(
+    tx: &Connection,
+    assoc_id: i64,
+    owner_id: i64,
+    owner_category: OwnerCategory,
+    time_series_type: TimeSeriesType,
+    name: &str,
+    resolution_iso: Option<&str>,
+    interval_iso: Option<&str>,
+    features_hash: &[u8; 32],
+) -> Result<TimeSeriesError> {
+    let existing: Option<IdentityColumns> = tx
+        .query_row(
+            "SELECT owner_id, owner_category, time_series_type, name, resolution, interval,
+                    features_hash
+             FROM time_series_associations WHERE association_id = ?1",
+            params![assoc_id],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
+            },
+        )
+        .optional()?;
+    Ok(match &existing {
+        Some((o, oc, tst, n, res, intv, fh))
+            if *o != owner_id
+                || *oc != owner_category.code()
+                || *tst != time_series_type.code()
+                || n.as_str() != name
+                || res.as_deref() != resolution_iso
+                || intv.as_deref() != interval_iso
+                || fh.as_slice() != features_hash.as_slice() =>
         {
-            TimeSeriesError::DuplicateTimeSeries
+            TimeSeriesError::AssociationIdCollision
         }
-        other => other.into(),
-    }
+        _ => TimeSeriesError::DuplicateTimeSeries,
+    })
 }
 
 /// Open a catalog file read-only, including on read-only media.
@@ -2775,6 +2977,7 @@ struct MetaRow {
     /// [`TimeSeriesMetadata`] — that type's identity is the key tuple, not a
     /// storage-assigned id — but used internally by [`Self::list_inner`].
     id: i64,
+    association_id: i64,
     owner_id: i64,
     owner_type: String,
     owner_category: OwnerCategory,
@@ -2811,6 +3014,7 @@ impl MetaRow {
             owner_id: self.owner_id,
             owner_type: self.owner_type,
             owner_category: self.owner_category,
+            association_id: self.association_id,
             time_series_type: self.time_series_type,
             name: self.name,
             data_hash: self.data_hash,
@@ -2863,6 +3067,7 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<([u8; 32], MetaRo
     let element_shape_json: Option<String> = row.get(21)?;
     let application_data: Option<String> = row.get(22)?;
     let id: i64 = row.get(23)?;
+    let association_id: i64 = row.get(24)?;
 
     // An unrecognized basis is an error, not a silent `None`. The column has no
     // CHECK precisely so a future basis can be added without a format bump,
@@ -3017,6 +3222,7 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<([u8; 32], MetaRo
         features_hash,
         MetaRow {
             id,
+            association_id,
             owner_id,
             owner_type,
             owner_category,
@@ -3599,5 +3805,208 @@ mod type_predicate_tests {
         assert_eq!(lo, TimeSeriesType::Deterministic.code());
         assert_eq!(hi, TimeSeriesType::DeterministicSingleTimeSeries.code());
         assert_eq!(hi - lo, 1, "adjacency is what makes the range correct");
+    }
+}
+
+#[cfg(test)]
+mod association_id_tests {
+    use super::*;
+
+    fn sample_metadata(owner_id: i64, name: &str) -> TimeSeriesMetadata {
+        TimeSeriesMetadata {
+            owner_id,
+            owner_type: "Generator".into(),
+            owner_category: OwnerCategory::Component,
+            association_id: 0, // ignored by `insert`, which recomputes it
+            time_series_type: TimeSeriesType::SingleTimeSeries,
+            name: name.into(),
+            data_hash: [1u8; 32],
+            initial_timestamp: None,
+            resolution: Some(Period::from(chrono::Duration::hours(1))),
+            length: Some(1),
+            horizon: None,
+            interval: None,
+            count: None,
+            timestamps: None,
+            features: Features::new(),
+            units: None,
+            quantity_kind: None,
+            unit_system: None,
+            time_reference: None,
+            component_field: None,
+            percentiles: None,
+            element_type: ElementType::Scalar(crate::types::array::Dtype::F64),
+            element_shape: vec![],
+            application_data: None,
+        }
+    }
+
+    fn expected_association_id(meta: &TimeSeriesMetadata) -> i64 {
+        crate::hash::association_id(
+            meta.owner_id,
+            meta.owner_category,
+            meta.time_series_type,
+            &meta.name,
+            meta.resolution.as_ref(),
+            meta.interval.as_ref(),
+            &features_hash(&meta.features),
+        )
+    }
+
+    #[test]
+    fn insert_populates_the_derived_association_id() {
+        let store = MetadataStore::open_in_memory().unwrap();
+        let meta = sample_metadata(1, "load");
+        let expected = expected_association_id(&meta);
+        MetadataStore::insert(&store.conn, &meta).unwrap();
+
+        let rows = store.list(&MetadataFilter::default()).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].association_id, expected);
+    }
+
+    #[test]
+    fn get_by_association_id_finds_the_row_and_rejects_a_bogus_one() {
+        let store = MetadataStore::open_in_memory().unwrap();
+        let meta = sample_metadata(1, "load");
+        let expected = expected_association_id(&meta);
+        MetadataStore::insert(&store.conn, &meta).unwrap();
+
+        let found = store
+            .get_time_series_metadata_by_association_id(expected)
+            .unwrap();
+        assert_eq!(found.name, "load");
+
+        let err = store
+            .get_time_series_metadata_by_association_id(expected ^ 1)
+            .unwrap_err();
+        assert!(matches!(err, TimeSeriesError::NotFound));
+    }
+
+    #[test]
+    fn a_colliding_association_id_is_reported_distinctly_from_a_duplicate_identity() {
+        // Row A's identity tuple differs from row B's, but its association_id
+        // is fabricated (via test-only raw SQL -- `insert` always recomputes
+        // its own, so there is no way to force a collision through the public
+        // API) to equal what B's real identity tuple hashes to. Inserting B
+        // for real must then report AssociationIdCollision, not
+        // DuplicateTimeSeries; see `classify_association_violation`.
+        let store = MetadataStore::open_in_memory().unwrap();
+        let meta_b = sample_metadata(1, "load_b");
+        let colliding_id = expected_association_id(&meta_b);
+
+        store
+            .conn
+            .execute(
+                "INSERT INTO time_series_associations
+                 (association_id, owner_id, owner_type, owner_category, time_series_type,
+                  name, data_hash, features_hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    colliding_id,
+                    1i64,
+                    "Generator",
+                    OwnerCategory::Component.code(),
+                    TimeSeriesType::SingleTimeSeries.code(),
+                    "load_a",
+                    [2u8; 32].as_slice(),
+                    features_hash(&Features::new()).as_slice(),
+                ],
+            )
+            .unwrap();
+
+        let err = MetadataStore::insert(&store.conn, &meta_b).unwrap_err();
+        assert!(matches!(err, TimeSeriesError::AssociationIdCollision));
+
+        // A genuine repeat of the same identity is still the ordinary spec
+        // error, not a collision.
+        MetadataStore::insert(&store.conn, &sample_metadata(1, "load_c")).unwrap();
+        let err = MetadataStore::insert(&store.conn, &sample_metadata(1, "load_c")).unwrap_err();
+        assert!(matches!(err, TimeSeriesError::DuplicateTimeSeries));
+    }
+
+    #[test]
+    fn rename_recomputes_the_derived_association_id() {
+        let store = MetadataStore::open_in_memory().unwrap();
+        let meta = sample_metadata(1, "old");
+        let old_id = expected_association_id(&meta);
+        MetadataStore::insert(&store.conn, &meta).unwrap();
+
+        let key = KeyIdentity {
+            owner_id: meta.owner_id,
+            owner_category: meta.owner_category,
+            time_series_type: meta.time_series_type,
+            name: meta.name.clone(),
+            resolution: meta.resolution,
+            interval: meta.interval,
+            features: meta.features.clone(),
+        };
+        let updated = MetadataStore::rename(&store.conn, &key, "new").unwrap();
+        assert_eq!(updated, 1);
+
+        let new_id = crate::hash::association_id(
+            meta.owner_id,
+            meta.owner_category,
+            meta.time_series_type,
+            "new",
+            meta.resolution.as_ref(),
+            meta.interval.as_ref(),
+            &features_hash(&meta.features),
+        );
+        assert_ne!(
+            old_id, new_id,
+            "renaming the identity must move the derived id"
+        );
+
+        let found = store
+            .get_time_series_metadata_by_association_id(new_id)
+            .unwrap();
+        assert_eq!(found.name, "new");
+        assert_eq!(found.association_id, new_id);
+
+        let err = store
+            .get_time_series_metadata_by_association_id(old_id)
+            .unwrap_err();
+        assert!(
+            matches!(err, TimeSeriesError::NotFound),
+            "the old id must no longer resolve"
+        );
+    }
+
+    #[test]
+    fn replace_owner_recomputes_the_derived_association_id() {
+        let store = MetadataStore::open_in_memory().unwrap();
+        let meta = sample_metadata(1, "load");
+        let old_id = expected_association_id(&meta);
+        MetadataStore::insert(&store.conn, &meta).unwrap();
+
+        let updated =
+            MetadataStore::replace_owner(&store.conn, 1, 2, OwnerCategory::Component).unwrap();
+        assert_eq!(updated, 1);
+
+        let new_id = crate::hash::association_id(
+            2,
+            meta.owner_category,
+            meta.time_series_type,
+            &meta.name,
+            meta.resolution.as_ref(),
+            meta.interval.as_ref(),
+            &features_hash(&meta.features),
+        );
+        assert_ne!(old_id, new_id, "moving the owner must move the derived id");
+
+        let found = store
+            .get_time_series_metadata_by_association_id(new_id)
+            .unwrap();
+        assert_eq!(found.owner_id, 2);
+        assert_eq!(found.association_id, new_id);
+
+        let err = store
+            .get_time_series_metadata_by_association_id(old_id)
+            .unwrap_err();
+        assert!(
+            matches!(err, TimeSeriesError::NotFound),
+            "the old id must no longer resolve"
+        );
     }
 }
