@@ -931,11 +931,12 @@ int32_t infrastore_store_persist_catalog(struct InfraStore *handle);
  *
  * The row shape is identical to one element of the
  * `infrastore_store_list_time_series` array: `owner_id`, `owner_type`,
- * `owner_category`, `time_series_type`, `name`, `data_hash` (64-character hex),
- * `initial_timestamp_ms`, `resolution`, `horizon`, `interval`, `count`,
- * `length`, `percentiles`, `element_type`, `element_shape`, `features`,
- * `units`, `quantity_kind`, `unit_system`, `time_reference`, `component_field`, and
- * `application_data`, with the fields that do not apply to the key's type set to `null`.
+ * `owner_category`, `association_id`, `time_series_type`, `name`, `data_hash`
+ * (64-character hex), `initial_timestamp_ms`, `resolution`, `horizon`,
+ * `interval`, `count`, `length`, `percentiles`, `element_type`,
+ * `element_shape`, `features`, `units`, `quantity_kind`, `unit_system`,
+ * `time_reference`, `component_field`, and `application_data`, with the
+ * fields that do not apply to the key's type set to `null`.
  * (There is no `dtype` field; `element_type` is what says how to read the
  * values.)
  * That is the whole `TimeSeriesMetadata` the core holds for the association, so
@@ -956,6 +957,49 @@ int32_t infrastore_store_get_metadata_by_key(const struct InfraStore *handle,
                                              char *buf,
                                              uint64_t cap,
                                              uint64_t *out_len);
+
+/**
+ * Write the full metadata record addressed by its derived `association_id`
+ * (the indexed counterpart of `infrastore_store_get_metadata_by_key`), as a
+ * JSON object string. Row shape and the probe-then-fetch convention are
+ * identical to `infrastore_store_get_metadata_by_key`. Returns
+ * `INFRASTORE_ERR_NOT_FOUND` when no association carries the given id.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle. `buf`, when non-null, must be valid
+ * for writing `cap` bytes, and `out_len` must be valid for writing one `u64`.
+ */
+int32_t infrastore_store_get_time_series_metadata_by_association_id(const struct InfraStore *handle,
+                                                                    int64_t association_id,
+                                                                    char *buf,
+                                                                    uint64_t cap,
+                                                                    uint64_t *out_len);
+
+/**
+ * Compute the derived `association_id` for a candidate identity tuple, without
+ * touching the store — a pure function of its inputs mirroring
+ * `hash::association_id`. Lets a caller predict the id an insert will assign,
+ * or reconstruct one for a row coming off the wire.
+ *
+ * # Safety
+ *
+ * `owner_category` (`0` = Component, `1` = SupplementalAttribute) and
+ * `time_series_type` (the `INFRASTORE_TYPE_*` code) are plain scalars. `name`
+ * must point to a valid, null-terminated UTF-8 string. `resolution` and
+ * `interval` may each be null (absent) or a null-terminated ISO-8601 period.
+ * `features_json` may be null (no features) or a null-terminated UTF-8 JSON
+ * object, the same shape the catalog-filter exports accept. `out_id` must be
+ * valid for writing one `i64`.
+ */
+int32_t infrastore_association_id(int64_t owner_id,
+                                  int32_t owner_category,
+                                  int32_t time_series_type,
+                                  const char *name,
+                                  const char *resolution,
+                                  const char *interval,
+                                  const char *features_json,
+                                  int64_t *out_id);
 
 /**
  * True iff a SingleTimeSeries with the given attributes exists.
@@ -1885,7 +1929,7 @@ int32_t infrastore_store_list_keys(const struct InfraStore *handle,
 
 /**
  * List full time-series metadata rows as a JSON array (see `metadata_to_map`
- * for the per-row shape: the key fields plus `data_hash`,
+ * for the per-row shape: the key fields plus `association_id`, `data_hash`,
  * `initial_timestamp_ms`, `horizon`, `interval`, `count`, `length`,
  * `percentiles`, `element_type`, `element_shape`, `units`, `quantity_kind`,
  * `unit_system`, `component_field`, and `application_data`). There is no

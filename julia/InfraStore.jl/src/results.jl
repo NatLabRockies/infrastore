@@ -26,6 +26,9 @@ anything but a `Probabilistic`).
 
 - `owner_id`, `owner_category`, `owner_type`, `name`, `time_series_type` — the
   association's identity and its owner.
+- `association_id` — the derived surrogate id of this association (see
+  [`association_id`](@ref)); addresses the row via
+  [`get_time_series_metadata`](@ref) without needing the full identity tuple.
 - `data_hash` — the 32-byte content hash, ready for [`get_array_by_hash`](@ref)
   and [`count_array_references`](@ref); `bytes2hex` it for the display form.
 - `initial_timestamp`, `resolution`, `length` — the static time grid.
@@ -50,6 +53,7 @@ struct TimeSeriesMetadata
     owner_id::Int64
     owner_type::String
     owner_category::OwnerCategory
+    association_id::Int64
     time_series_type::Type
     name::String
     data_hash::Vector{UInt8}

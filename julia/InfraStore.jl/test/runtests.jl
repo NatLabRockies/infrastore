@@ -193,6 +193,35 @@ end
     )
 end
 
+@testset "association_id and get_time_series_metadata" begin
+    store = Store(in_memory=true)
+    initial = DateTime(2024, 1, 1)
+    resolution = Hour(1)
+    values = collect(100.0:123.0)
+    ts = SingleTimeSeries(initial, resolution, values, "load")
+
+    owner = 17
+    feats = Dict("model_year" => 2030)
+    add_time_series!(store, owner, "Generator", Component, ts; features=feats, units="MW")
+
+    meta = get_metadata(
+        store, owner, Component, "load"; resolution=resolution, features=feats
+    )
+
+    computed = InfraStore.association_id(
+        owner, Component, SingleTimeSeries, "load"; resolution=resolution, features=feats
+    )
+    @test computed == meta.association_id
+
+    fetched = get_time_series_metadata(store, meta.association_id)
+    @test fetched == meta
+    @test fetched.name == "load"
+
+    @test_throws InfraStore.NotFoundError get_time_series_metadata(
+        store, meta.association_id ⊻ 1
+    )
+end
+
 @testset "InfraStore.jl persistent round-trip" begin
     mktempdir() do dir
         path = joinpath(dir, "store.h5")

@@ -13,7 +13,8 @@
 //! # Wire contract
 //!
 //! A time-series association row carries the fields every type shares —
-//! `owner_id`, `owner_type`, `owner_category`, `time_series_type`, `name`,
+//! `association_id` (the derived surrogate id, emitted first), `owner_id`,
+//! `owner_type`, `owner_category`, `time_series_type`, `name`,
 //! `features` (a *plain* scalar map — int, float, bool, or string values, never
 //! the store's internally-tagged [`crate::types::metadata::FeatureValue`] form),
 //! `uri` (the schema's locator for the dense data, unique within one store, no
@@ -214,6 +215,7 @@ fn insert_forecast_fields(row: &mut Map<String, Value>, meta: &TimeSeriesMetadat
 /// — infrastore never accepts a caller-supplied locator for its own rows.
 fn ts_row_to_json(meta: &TimeSeriesMetadata) -> Value {
     let mut row = Map::new();
+    row.insert("association_id".into(), Value::from(meta.association_id));
     row.insert("owner_id".into(), Value::from(meta.owner_id));
     row.insert("owner_type".into(), Value::from(meta.owner_type.clone()));
     row.insert(

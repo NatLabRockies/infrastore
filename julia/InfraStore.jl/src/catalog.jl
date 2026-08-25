@@ -241,6 +241,7 @@ function _decode_metadata(r::AbstractDict)
         Int64(r["owner_id"]),
         String(r["owner_type"]),
         _category_for_name(r["owner_category"]),
+        Int64(r["association_id"]),
         _type_for_name(r["time_series_type"]),
         String(r["name"]),
         hex2bytes(String(r["data_hash"])),
@@ -261,6 +262,67 @@ function _decode_metadata(r::AbstractDict)
         r["component_field"] === nothing ? nothing : String(r["component_field"]),
         r["application_data"] === nothing ? nothing : String(r["application_data"]),
     )
+end
+
+"""
+    association_id(owner_id, owner_category, time_series_type, name;
+                    resolution=nothing, interval=nothing, features=nothing) -> Int64
+
+The derived surrogate id a stored association with this identity would carry
+(see [`TimeSeriesMetadata`](@ref)) — a pure computation, no store access.
+`time_series_type` is the Julia type (`SingleTimeSeries`, `Deterministic`,
+...); `owner_category` is the owner's `OwnerCategory`. Matches the
+`association_id` [`list_time_series`](@ref) and [`get_metadata`](@ref) report
+for the same identity, and the id [`get_time_series_metadata`](@ref) accepts.
+"""
+function association_id(
+    owner_id::Integer,
+    owner_category::OwnerCategory,
+    time_series_type::Type,
+    name::AbstractString;
+    resolution::Union{Nothing, Period}=nothing,
+    interval::Union{Nothing, Period}=nothing,
+    features::Union{Nothing, AbstractDict}=nothing,
+)
+    resolution_iso = _period_to_cstr(resolution)
+    interval_iso = _period_to_cstr(interval)
+    features_json = _features_arg(features)
+    out_id = Ref{Int64}(0)
+    code = @ccall lib_path().infrastore_association_id(
+        Int64(owner_id)::Int64,
+        _category_int(owner_category)::Int32,
+        _filter_type_code(time_series_type)::Int32,
+        name::Cstring,
+        resolution_iso::Cstring,
+        interval_iso::Cstring,
+        features_json::Cstring,
+        out_id::Ref{Int64},
+    )::Int32
+    _check(code)
+    return out_id[]
+end
+
+"""
+    get_time_series_metadata(store, association_id::Int64) -> TimeSeriesMetadata
+
+The complete [`TimeSeriesMetadata`](@ref) of the association carrying the given
+derived surrogate id — the indexed counterpart of [`get_metadata`](@ref),
+addressed by [`association_id`](@ref) instead of the full identity tuple.
+
+Throws `NotFoundError` if no association carries it.
+"""
+function get_time_series_metadata(store::Store, association_id::Int64)
+    json = _probe(
+        (buf, cap, out_len) ->
+            @ccall lib_path().infrastore_store_get_time_series_metadata_by_association_id(
+                store::Ptr{Cvoid},
+                association_id::Int64,
+                buf::Ptr{UInt8},
+                cap::UInt64,
+                out_len::Ref{UInt64},
+            )::Int32
+    )
+    return _decode_metadata(JSON.parse(json))
 end
 
 # Marshal the shared catalog-filter arguments every `infrastore_store_list_*` /

@@ -2734,11 +2734,12 @@ unsafe fn build_key_from_attrs(
 ///
 /// The row shape is identical to one element of the
 /// `infrastore_store_list_time_series` array: `owner_id`, `owner_type`,
-/// `owner_category`, `time_series_type`, `name`, `data_hash` (64-character hex),
-/// `initial_timestamp_ms`, `resolution`, `horizon`, `interval`, `count`,
-/// `length`, `percentiles`, `element_type`, `element_shape`, `features`,
-/// `units`, `quantity_kind`, `unit_system`, `time_reference`, `component_field`, and
-/// `application_data`, with the fields that do not apply to the key's type set to `null`.
+/// `owner_category`, `association_id`, `time_series_type`, `name`, `data_hash`
+/// (64-character hex), `initial_timestamp_ms`, `resolution`, `horizon`,
+/// `interval`, `count`, `length`, `percentiles`, `element_type`,
+/// `element_shape`, `features`, `units`, `quantity_kind`, `unit_system`,
+/// `time_reference`, `component_field`, and `application_data`, with the
+/// fields that do not apply to the key's type set to `null`.
 /// (There is no `dtype` field; `element_type` is what says how to read the
 /// values.)
 /// That is the whole `TimeSeriesMetadata` the core holds for the association, so
@@ -2780,6 +2781,117 @@ pub unsafe extern "C" fn infrastore_store_get_metadata_by_key(
     };
     let json = Value::Object(metadata_to_map(&meta)).to_string();
     unsafe { write_str_out(&json, buf, cap, out_len) };
+    INFRASTORE_OK
+}
+
+/// Write the full metadata record addressed by its derived `association_id`
+/// (the indexed counterpart of `infrastore_store_get_metadata_by_key`), as a
+/// JSON object string. Row shape and the probe-then-fetch convention are
+/// identical to `infrastore_store_get_metadata_by_key`. Returns
+/// `INFRASTORE_ERR_NOT_FOUND` when no association carries the given id.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle. `buf`, when non-null, must be valid
+/// for writing `cap` bytes, and `out_len` must be valid for writing one `u64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_store_get_time_series_metadata_by_association_id(
+    handle: *const InfraStoreHandle,
+    association_id: i64,
+    buf: *mut c_char,
+    cap: u64,
+    out_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = deref_handle!(ref handle);
+    if out_len.is_null() {
+        set_error("out_len is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let meta = match store.inner.get_metadata_by_association_id(association_id) {
+        Ok(m) => m,
+        Err(e) => return map_core_error(e),
+    };
+    let json = Value::Object(metadata_to_map(&meta)).to_string();
+    unsafe { write_str_out(&json, buf, cap, out_len) };
+    INFRASTORE_OK
+}
+
+/// Compute the derived `association_id` for a candidate identity tuple, without
+/// touching the store — a pure function of its inputs mirroring
+/// `hash::association_id`. Lets a caller predict the id an insert will assign,
+/// or reconstruct one for a row coming off the wire.
+///
+/// # Safety
+///
+/// `owner_category` (`0` = Component, `1` = SupplementalAttribute) and
+/// `time_series_type` (the `INFRASTORE_TYPE_*` code) are plain scalars. `name`
+/// must point to a valid, null-terminated UTF-8 string. `resolution` and
+/// `interval` may each be null (absent) or a null-terminated ISO-8601 period.
+/// `features_json` may be null (no features) or a null-terminated UTF-8 JSON
+/// object, the same shape the catalog-filter exports accept. `out_id` must be
+/// valid for writing one `i64`.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn infrastore_association_id(
+    owner_id: i64,
+    owner_category: i32,
+    time_series_type: i32,
+    name: *const c_char,
+    resolution: *const c_char,
+    interval: *const c_char,
+    features_json: *const c_char,
+    out_id: *mut i64,
+) -> i32 {
+    clear_error();
+    if out_id.is_null() {
+        set_error("out_id pointer is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let owner_category = match core_lib::OwnerCategory::from_code(owner_category as i64) {
+        Some(c) => c,
+        None => {
+            set_error(format!("invalid owner_category {owner_category}"));
+            return INFRASTORE_ERR_INVALID_PARAMETER;
+        }
+    };
+    let ts_type = match time_series_type_from_int(time_series_type) {
+        Some(t) => t,
+        None => {
+            set_error(format!("invalid time_series_type {time_series_type}"));
+            return INFRASTORE_ERR_INVALID_PARAMETER;
+        }
+    };
+    let name = match unsafe { cstr_to_str(name) } {
+        Ok(s) => s,
+        Err(_) => {
+            set_error("name is invalid");
+            return INFRASTORE_ERR_INVALID_UTF8;
+        }
+    };
+    let resolution = match unsafe { cstr_to_optional_period(resolution) } {
+        Ok(p) => p,
+        Err(c) => return c,
+    };
+    let interval = match unsafe { cstr_to_optional_period(interval) } {
+        Ok(p) => p,
+        Err(c) => return c,
+    };
+    let features = match unsafe { parse_features_json(features_json) } {
+        Ok(f) => f,
+        Err(c) => return c,
+    };
+    let f_hash = core_lib::features_hash(&features);
+    let id = core_lib::association_id(
+        owner_id,
+        owner_category,
+        ts_type,
+        name,
+        resolution.as_ref(),
+        interval.as_ref(),
+        &f_hash,
+    );
+    unsafe { *out_id = id };
     INFRASTORE_OK
 }
 
@@ -5608,8 +5720,9 @@ fn keys_with_hash_to_json(rows: &[(core_lib::TimeSeriesKey, [u8; 32])]) -> Strin
 
 /// Full-metadata JSON object for one association row: the identity/descriptive
 /// key fields plus the storage columns a key row omits (`data_hash` hex,
-/// `element_type`, `element_shape`, `percentiles`, `units`, `application_data`).
-/// Periods are ISO-8601 strings; `initial_timestamp_ms` is Unix milliseconds.
+/// `element_type`, `element_shape`, `percentiles`, `units`, `application_data`),
+/// and the derived `association_id`. Periods are ISO-8601 strings;
+/// `initial_timestamp_ms` is Unix milliseconds.
 fn metadata_to_map(m: &core_lib::TimeSeriesMetadata) -> serde_json::Map<String, Value> {
     let iso = |p: Option<core_lib::Period>| -> Value {
         p.map(|x| Value::from(x.to_iso8601()))
@@ -5622,6 +5735,7 @@ fn metadata_to_map(m: &core_lib::TimeSeriesMetadata) -> serde_json::Map<String, 
         "owner_category".into(),
         Value::from(m.owner_category.as_str()),
     );
+    o.insert("association_id".into(), Value::from(m.association_id));
     o.insert(
         "time_series_type".into(),
         Value::from(m.time_series_type.as_str()),
@@ -5803,7 +5917,7 @@ pub unsafe extern "C" fn infrastore_store_list_keys(
 }
 
 /// List full time-series metadata rows as a JSON array (see `metadata_to_map`
-/// for the per-row shape: the key fields plus `data_hash`,
+/// for the per-row shape: the key fields plus `association_id`, `data_hash`,
 /// `initial_timestamp_ms`, `horizon`, `interval`, `count`, `length`,
 /// `percentiles`, `element_type`, `element_shape`, `units`, `quantity_kind`,
 /// `unit_system`, `component_field`, and `application_data`). There is no
