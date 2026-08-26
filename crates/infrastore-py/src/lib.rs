@@ -2844,6 +2844,24 @@ impl PyStore {
         metadata_to_dict(py, &m)
     }
 
+    /// The full metadata record for the association carrying `association_id`,
+    /// as the same dict `get_metadata` returns.
+    ///
+    /// The counterpart of `get_metadata`, addressed by the catalog's own id
+    /// instead of the full identity tuple. Raises `NotFoundError` if no
+    /// association carries it.
+    fn get_metadata_by_association_id<'py>(
+        &self,
+        py: Python<'py>,
+        association_id: i64,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let m = self
+            .store()?
+            .get_metadata_by_association_id(association_id)
+            .map_err(map_err)?;
+        metadata_to_dict(py, &m)
+    }
+
     /// List the `TimeSeriesKey`s matching the filter.
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
@@ -3979,6 +3997,7 @@ fn metadata_to_dict<'py>(
 ) -> PyResult<Bound<'py, PyDict>> {
     let iso = |p: Option<core_lib::Period>| p.map(|x| x.to_iso8601());
     let d = PyDict::new(py);
+    d.set_item("association_id", m.association_id)?;
     d.set_item("owner_id", m.owner_id)?;
     d.set_item("owner_type", &m.owner_type)?;
     d.set_item("owner_category", m.owner_category.as_str())?;

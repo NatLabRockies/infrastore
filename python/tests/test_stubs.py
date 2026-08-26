@@ -8,6 +8,8 @@ compared — the stub is hand-written — but name-level drift is caught here.
 import ast
 from pathlib import Path
 
+import pytest
+
 import infrastore
 
 STUB_PATH = (
@@ -178,3 +180,100 @@ def test_method_signatures_match():
     assert not problems, "signature drift between the stub and the runtime:\n" + "\n".join(
         problems
     )
+
+
+# ---- metadata-dict drift ---------------------------------------------------
+#
+# `get_metadata` returns a plain dict, so the stub says `dict[str, Any]` and the
+# name-level checks above cannot see a field that never made it in. That is not
+# hypothetical: `association_id` reached the OpenAPI export row, the C ABI, and
+# Julia while Python's metadata dict silently omitted it.
+#
+# The catch is that the export row and the metadata dict are *independent*
+# renderings of the same core `TimeSeriesMetadata`, one in `openapi.rs` and one
+# in `metadata_to_dict`. Every column the row carries must therefore also be
+# reachable from the dict, so a field threaded into one renderer and not the
+# other shows up here. `uri` is the row's own addition — it names the store, not
+# a catalog column — and is the single documented exception.
+
+import json
+from datetime import datetime, timedelta, timezone
+
+import numpy as np
+
+import infrastore as _is
+
+_T0 = datetime(2030, 1, 1, tzinfo=timezone.utc)
+_HOUR = timedelta(hours=1)
+ROW_ONLY_KEYS = {"uri"}
+
+
+def _store_with_every_shape():
+    store = _is.Store.create(in_memory=True)
+    common = {
+        "owner_type": "Generator",
+        "owner_category": _is.OwnerCategory.Component,
+    }
+    store.add_time_series(
+        owner_id=1,
+        time_series=_is.SingleTimeSeries(
+            initial_timestamp=_T0, resolution=_HOUR, data=np.arange(3.0), name="sts"
+        ),
+        **common,
+    )
+    store.add_time_series(
+        owner_id=2,
+        time_series=_is.Deterministic(
+            initial_timestamp=_T0,
+            resolution=_HOUR,
+            horizon=3 * _HOUR,
+            interval=_HOUR,
+            count=3,
+            data=np.arange(9.0).reshape(3, 3),
+            name="fc",
+        ),
+        **common,
+    )
+    store.add_time_series(
+        owner_id=3,
+        time_series=_is.NonSequentialTimeSeries(
+            timestamps=[_T0, _T0 + _HOUR, _T0 + 3 * _HOUR],
+            data=np.arange(3.0),
+            name="nsts",
+        ),
+        **common,
+    )
+    return store
+
+
+def test_metadata_dict_covers_every_exported_row_field():
+    store = _store_with_every_shape()
+    rows = {r["name"]: r for r in json.loads(store.export_time_series_associations_openapi())}
+    problems = []
+    for key in store.list_keys():
+        meta = store.get_metadata(key)
+        row = rows[meta["name"]]
+        missing = set(row) - ROW_ONLY_KEYS - set(meta)
+        if missing:
+            problems.append(
+                f"{meta['name']}: exported row fields absent from get_metadata: {sorted(missing)}"
+            )
+    assert not problems, "\n".join(problems)
+
+
+def test_metadata_dict_carries_the_association_id():
+    """The specific field this guard was added for — and the by-id getter that
+    makes it useful, which core, the C ABI, and Julia had before Python did."""
+    store = _store_with_every_shape()
+    for key in store.list_keys():
+        meta = store.get_metadata(key)
+        assoc_id = meta["association_id"]
+        assert isinstance(assoc_id, int) and assoc_id > 0
+        assert store.get_metadata_by_association_id(assoc_id) == meta
+
+
+def test_get_metadata_by_association_id_rejects_an_unknown_id():
+    store = _store_with_every_shape()
+    known = {store.get_metadata(k)["association_id"] for k in store.list_keys()}
+    with pytest.raises(_is.NotFoundError):
+        store.get_metadata_by_association_id(max(known) + 1000)

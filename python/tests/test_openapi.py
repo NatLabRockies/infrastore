@@ -186,15 +186,10 @@ class TestImportedAssociationIds:
             ]
         )
 
-        # Verified through the export: Python has no by-id getter and does not
-        # surface `association_id` on its metadata object, though core, the C ABI,
-        # and Julia all do. The export is the only read path for the id here.
-        reimported = {
-            r["association_id"]: r["name"]
-            for r in json.loads(target.export_time_series_associations_openapi())
-        }
         for assoc_id, name, _ in exported:
-            assert reimported[assoc_id] == name
+            meta = target.get_metadata_by_association_id(assoc_id)
+            assert meta["association_id"] == assoc_id
+            assert meta["name"] == name
 
         # A later add lands past every imported id.
         target.add_time_series(
