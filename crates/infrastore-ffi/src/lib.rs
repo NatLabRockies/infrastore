@@ -904,7 +904,6 @@ unsafe fn build_single_request(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
-    association_id: i64,
 ) -> Result<core_lib::AddRequest, i32> {
     if data_ptr.is_null() {
         set_error("data_ptr is null");
@@ -971,7 +970,6 @@ unsafe fn build_single_request(
         owner_category,
         data,
         features,
-        association_id,
     })
 }
 
@@ -1051,7 +1049,6 @@ pub unsafe extern "C" fn infrastore_store_add_single(
             unit_system,
             time_reference,
             component_field,
-            0,
         )
     } {
         Ok(r) => r,
@@ -1093,7 +1090,6 @@ unsafe fn build_non_sequential_request(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
-    association_id: i64,
 ) -> Result<core_lib::AddRequest, i32> {
     if timestamps_unix_ms.is_null() || data_ptr.is_null() {
         set_error("an input pointer is null");
@@ -1156,7 +1152,6 @@ unsafe fn build_non_sequential_request(
         owner_category,
         data,
         features,
-        association_id,
     })
 }
 
@@ -1225,7 +1220,6 @@ pub unsafe extern "C" fn infrastore_store_add_non_sequential(
             unit_system,
             time_reference,
             component_field,
-            0,
         )
     } {
         Ok(r) => r,
@@ -2790,7 +2784,7 @@ pub unsafe extern "C" fn infrastore_store_get_metadata_by_key(
     INFRASTORE_OK
 }
 
-/// Write the full metadata record addressed by its derived `association_id`
+/// Write the full metadata record addressed by its `association_id`
 /// (the indexed counterpart of `infrastore_store_get_metadata_by_key`), as a
 /// JSON object string. Row shape and the probe-then-fetch convention are
 /// identical to `infrastore_store_get_metadata_by_key`. Returns
@@ -3278,7 +3272,6 @@ pub unsafe extern "C" fn infrastore_store_add_forecast(
             unit_system,
             time_reference,
             component_field,
-            0,
         )
     } {
         Ok(r) => r,
@@ -3322,7 +3315,6 @@ unsafe fn build_forecast_request(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
-    association_id: i64,
 ) -> Result<core_lib::AddRequest, i32> {
     if data_ptr.is_null() {
         set_error("data_ptr is null");
@@ -3429,7 +3421,6 @@ unsafe fn build_forecast_request(
         owner_category,
         data,
         features,
-        association_id,
     })
 }
 
@@ -3503,7 +3494,6 @@ pub unsafe extern "C" fn infrastore_store_add_probabilistic(
             unit_system,
             time_reference,
             component_field,
-            0,
         )
     } {
         Ok(r) => r,
@@ -3548,7 +3538,6 @@ unsafe fn build_probabilistic_request(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
-    association_id: i64,
 ) -> Result<core_lib::AddRequest, i32> {
     if data_ptr.is_null() || percentiles_ptr.is_null() {
         set_error("a required pointer is null");
@@ -3618,7 +3607,6 @@ unsafe fn build_probabilistic_request(
         owner_category,
         data,
         features,
-        association_id,
     })
 }
 
@@ -3638,9 +3626,9 @@ unsafe fn build_probabilistic_request(
 /// than erroring. A binding compares this against the generation it was written
 /// for and refuses the mismatch.
 ///
-/// 1: the first generation to declare itself. `infrastore_batch_add_*` take a
-///    trailing `association_id`, and `infrastore_association_id` is gone — the
-///    id is minted by the store, not derived by the caller.
+/// 1: the first generation to declare itself. `infrastore_association_id` is
+///    gone — the id is the catalog row's primary key, assigned by SQLite at
+///    insert, so there is nothing for a caller to derive or to pass in.
 pub const INFRASTORE_ABI_VERSION: u32 = 1;
 
 /// Read [`INFRASTORE_ABI_VERSION`] out of the loaded library.
@@ -3653,49 +3641,6 @@ pub const INFRASTORE_ABI_VERSION: u32 = 1;
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_abi_version() -> u32 {
     INFRASTORE_ABI_VERSION
-}
-
-/// Reserve `count` consecutive `association_id` values and write the first to
-/// `out_first`. The caller owns `first .. first + count` and must set them on the
-/// rows it stages (`infrastore_batch_add_*`'s `association_id` argument).
-///
-/// Lets a caller name a row's id before the row exists — the Julia binding hands
-/// the id out on a `TimeSeriesKey` at stage time, well before the batch flushes.
-/// Reserved ids are consumed whether or not they are written, so an abandoned
-/// batch leaves a gap; ids are never reused.
-///
-/// # Safety
-///
-/// `store` must be a non-null handle returned by one of the store constructors
-/// and not yet freed, and must not be used concurrently from another thread for
-/// the duration of this call. `count` must be greater than zero. `out_first`
-/// must be valid for writing one `i64`. Neither pointer is retained after this
-/// call returns.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn infrastore_store_reserve_association_ids(
-    store: *mut InfraStoreHandle,
-    count: u64,
-    out_first: *mut i64,
-) -> i32 {
-    clear_error();
-    if out_first.is_null() {
-        set_error("out_first pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let handle = match unsafe { store.as_mut() } {
-        Some(h) => h,
-        None => {
-            set_error("store handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    match handle.inner.reserve_association_ids(count) {
-        Ok(first) => {
-            unsafe { *out_first = first };
-            INFRASTORE_OK
-        }
-        Err(e) => map_core_error(e),
-    }
 }
 
 /// Create an empty add-batch. Building a batch performs no store I/O.
@@ -3755,7 +3700,6 @@ pub unsafe extern "C" fn infrastore_batch_add_single(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
-    association_id: i64,
 ) -> i32 {
     clear_error();
     let batch = match unsafe { batch.as_mut() } {
@@ -3785,7 +3729,6 @@ pub unsafe extern "C" fn infrastore_batch_add_single(
             unit_system,
             time_reference,
             component_field,
-            association_id,
         )
     } {
         Ok(req) => {
@@ -3828,7 +3771,6 @@ pub unsafe extern "C" fn infrastore_batch_add_non_sequential(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
-    association_id: i64,
 ) -> i32 {
     clear_error();
     let batch = match unsafe { batch.as_mut() } {
@@ -3858,7 +3800,6 @@ pub unsafe extern "C" fn infrastore_batch_add_non_sequential(
             unit_system,
             time_reference,
             component_field,
-            association_id,
         )
     } {
         Ok(req) => {
@@ -3905,7 +3846,6 @@ pub unsafe extern "C" fn infrastore_batch_add_forecast(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
-    association_id: i64,
 ) -> i32 {
     clear_error();
     let batch = match unsafe { batch.as_mut() } {
@@ -3939,7 +3879,6 @@ pub unsafe extern "C" fn infrastore_batch_add_forecast(
             unit_system,
             time_reference,
             component_field,
-            association_id,
         )
     } {
         Ok(req) => {
@@ -3987,7 +3926,6 @@ pub unsafe extern "C" fn infrastore_batch_add_probabilistic(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
-    association_id: i64,
 ) -> i32 {
     clear_error();
     let batch = match unsafe { batch.as_mut() } {
@@ -4022,7 +3960,6 @@ pub unsafe extern "C" fn infrastore_batch_add_probabilistic(
             unit_system,
             time_reference,
             component_field,
-            association_id,
         )
     } {
         Ok(req) => {
@@ -5732,7 +5669,7 @@ fn keys_with_hash_to_json(rows: &[(core_lib::TimeSeriesKey, [u8; 32])]) -> Strin
 /// Full-metadata JSON object for one association row: the identity/descriptive
 /// key fields plus the storage columns a key row omits (`data_hash` hex,
 /// `element_type`, `element_shape`, `percentiles`, `units`, `application_data`),
-/// and the derived `association_id`. Periods are ISO-8601 strings;
+/// and the `association_id`. Periods are ISO-8601 strings;
 /// `initial_timestamp_ms` is Unix milliseconds.
 fn metadata_to_map(m: &core_lib::TimeSeriesMetadata) -> serde_json::Map<String, Value> {
     let iso = |p: Option<core_lib::Period>| -> Value {

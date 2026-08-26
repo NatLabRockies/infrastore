@@ -67,7 +67,7 @@ struct RawAssocRow<'a> {
 fn insert_association_row(conn: &rusqlite::Connection, row: &RawAssocRow) {
     conn.execute(
         "INSERT INTO time_series_associations
-         (association_id, owner_id, owner_type, owner_category, time_series_type, name,
+         (id, owner_id, owner_type, owner_category, time_series_type, name,
           data_hash, initial_timestamp, resolution, length, horizon, interval, count,
           timestamps_hash, units, quantity_kind, unit_system, component_field,
           percentiles_json, element_type, element_shape, application_data, features_hash)

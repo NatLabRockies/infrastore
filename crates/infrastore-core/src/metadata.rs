@@ -29,9 +29,9 @@ use crate::types::time_series::TimeSeriesType;
 /// malformed to name one. Returned by [`MetadataStore::referenced_arrays`].
 pub type ReferencedArrays = (Vec<([u8; 32], ElementType)>, Vec<String>);
 
-/// A catalog row paired with its `INTEGER PRIMARY KEY` (SQLite rowid). Used
-/// internally by [`Self::list_inner`]; public APIs surface metadata without
-/// the raw storage id.
+/// A catalog row paired with its `association_id` (the SQLite rowid). Used
+/// internally by [`Self::list_inner`], which needs the id beside the metadata
+/// it built.
 pub(crate) type IdentifiedRow = (i64, TimeSeriesMetadata);
 
 /// A SQLite value's storage class, for a diagnostic that has to describe a
@@ -63,12 +63,6 @@ pub struct MetadataStore {
     /// this is resolved once at open.
     has_supplemental_attribute_table: bool,
     has_parent_child_table: bool,
-    /// Next `association_id` to hand out — the floor `reserve_association_ids`
-    /// advances. Held here rather than read from `association_id_sequence` on
-    /// each call so a rolled-back transaction cannot rewind an id that has
-    /// already been given to a caller. Seeded at open from the table and the
-    /// rows present, whichever is higher.
-    next_association_id: i64,
     /// Recently decoded timestamp vectors — see [`TimestampCache`].
     ///
     /// `RefCell` rather than a lock because this type is already `!Sync` (it
@@ -481,10 +475,9 @@ pub struct MetadataFilter {
     /// avoiding a feature fetch+compare for siblings that share the other key
     /// columns. Distinct from `features` (an in-memory subset filter).
     pub features_hash: Option<[u8; 32]>,
-    /// Exact match on the minted surrogate id, pinpointing a row via
-    /// `uq_ts_assoc_id` the way `features_hash` pinpoints one via
-    /// `uq_ts_assoc`. Set by [`MetadataStore::get_time_series_metadata_by_association_id`]
-    /// only; nothing else derives one to filter on.
+    /// Exact match on `association_id`, pinpointing a row by primary key. Set by
+    /// [`MetadataStore::get_time_series_metadata_by_association_id`] only;
+    /// nothing else derives one to filter on.
     pub association_id: Option<i64>,
 }
 
@@ -708,29 +701,11 @@ impl MetadataFilter {
             params_vec.push(Box::new(f_hash.to_vec()));
         }
         if let Some(association_id) = self.association_id {
-            sql.push_str(" AND association_id = ?");
+            sql.push_str(" AND id = ?");
             params_vec.push(Box::new(association_id));
         }
         (sql, params_vec)
     }
-}
-
-/// Read the reservation floor from the catalog, or 1 when the table is absent
-/// (a read-only open of a pre-0.18.0 catalog). `init_schema` has already
-/// reconciled it against the rows present, so this is the authoritative floor
-/// for the life of the connection.
-fn read_association_id_floor(conn: &Connection) -> Result<i64> {
-    if !table_exists(conn, "association_id_sequence")? {
-        return Ok(1);
-    }
-    let floor: Option<i64> = conn
-        .query_row(
-            "SELECT next_association_id FROM association_id_sequence LIMIT 1",
-            [],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(floor.unwrap_or(1))
 }
 
 impl MetadataStore {
@@ -741,7 +716,6 @@ impl MetadataStore {
             table_exists(&conn, "supplemental_attribute_associations")?;
         let has_parent_child_table = table_exists(&conn, "parent_child_associations")?;
         Ok(Self {
-            next_association_id: read_association_id_floor(&conn)?,
             conn,
             read_only: false,
             has_supplemental_attribute_table,
@@ -770,7 +744,6 @@ impl MetadataStore {
             table_exists(&conn, "supplemental_attribute_associations")?;
         let has_parent_child_table = table_exists(&conn, "parent_child_associations")?;
         Ok(Self {
-            next_association_id: read_association_id_floor(&conn)?,
             conn,
             read_only,
             has_supplemental_attribute_table,
@@ -808,7 +781,6 @@ impl MetadataStore {
             table_exists(&conn, "supplemental_attribute_associations")?;
         let has_parent_child_table = table_exists(&conn, "parent_child_associations")?;
         Ok(Self {
-            next_association_id: read_association_id_floor(&conn)?,
             conn,
             read_only,
             has_supplemental_attribute_table,
@@ -868,20 +840,6 @@ impl MetadataStore {
             conn.execute(
                 "INSERT INTO schema_version (version)
                  SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM schema_version)",
-                [],
-            )?;
-            // Reconcile the mark against the rows actually present, so it can
-            // never hand out an id the catalog already holds. Two cases need it:
-            // a catalog whose rows were written outside `reserve_association_ids`
-            // (the documented hand-built-sidecar path does exactly this), and an
-            // interrupted write whose rows survived while the mark did not. The
-            // mark only ever moves forward here.
-            conn.execute(
-                "UPDATE association_id_sequence
-                    SET next_association_id = MAX(
-                        next_association_id,
-                        COALESCE((SELECT MAX(association_id) FROM time_series_associations), 0) + 1
-                    )",
                 [],
             )?;
         }
@@ -968,22 +926,14 @@ impl MetadataStore {
         Ok(())
     }
 
-    /// Insert a metadata record + its features inside the supplied transaction.
-    /// Returns the association id. Caller is responsible for committing.
-    /// Insert one association, reserving its id first when it carries the unset
-    /// sentinel. Takes `&mut self` because assigning the id advances the
-    /// in-memory reservation floor.
+    /// Insert one association and its features, returning the `association_id`
+    /// SQLite assigned. Caller is responsible for committing.
     ///
-    /// Test-only: the production paths assign ids for a whole batch in one
-    /// reservation (`Store::assign_association_ids`) before opening their
-    /// savepoint, so none of them inserts a row one at a time.
+    /// Test-only: the production paths all insert through
+    /// [`Self::insert_batched`] with a batch-wide [`SharedSetCache`].
     #[cfg(test)]
-    pub fn insert(&mut self, meta: &TimeSeriesMetadata) -> Result<i64> {
-        let mut meta = meta.clone();
-        if meta.association_id == 0 {
-            meta.association_id = self.reserve_association_ids(1)?;
-        }
-        Self::insert_batched(&self.conn, &meta, &mut SharedSetCache::default())
+    pub fn insert(&self, meta: &TimeSeriesMetadata) -> Result<i64> {
+        Self::insert_batched(&self.conn, meta, &mut SharedSetCache::default())
     }
 
     /// [`Self::insert`], but reusing a caller-held [`SharedSetCache`] across the
@@ -1011,33 +961,19 @@ impl MetadataStore {
             None => None,
         };
         let element_shape_json = serde_json::to_string(&meta.element_shape)?;
-        // Every id is assigned before this runs -- `flush_bulk_add` reserves one
-        // block for the whole batch and fills in the unset rows -- so the id is
-        // stored exactly as given. Minting here instead would need the in-memory
-        // floor this associated function has no access to, and reading the mark
-        // from the table would let the two sources drift apart and collide.
-        let assoc_id = meta.association_id;
-        if assoc_id <= 0 {
-            return Err(TimeSeriesError::IntegrityError(format!(
-                "association_id {assoc_id} reached insert unassigned; ids are reserved \
-                 before a row is written"
-            )));
-        }
-
         // `prepare_cached` so bulk adds parse each INSERT's SQL once per
         // connection instead of once per row.
         let mut insert_stmt = tx.prepare_cached(
             "INSERT INTO time_series_associations
-             (association_id, owner_id, owner_type, owner_category, time_series_type, name,
+             (owner_id, owner_type, owner_category, time_series_type, name,
               data_hash, initial_timestamp, resolution, length, horizon, interval, count,
               timestamps_hash, units, quantity_kind, unit_system, time_reference,
               component_field, percentiles_json, element_type, element_shape,
               application_data, features_hash)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                     ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+                     ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
         )?;
         let result = insert_stmt.execute(params![
-            assoc_id,
             meta.owner_id,
             meta.owner_type,
             meta.owner_category.code(),
@@ -1067,22 +1003,7 @@ impl MetadataStore {
 
         let id = match result {
             Ok(_) => tx.last_insert_rowid(),
-            Err(rusqlite::Error::SqliteFailure(err, _))
-                if err.code == rusqlite::ErrorCode::ConstraintViolation =>
-            {
-                return Err(classify_association_violation(
-                    tx,
-                    assoc_id,
-                    meta.owner_id,
-                    meta.owner_category,
-                    meta.time_series_type,
-                    &meta.name,
-                    resolution_iso.as_deref(),
-                    interval_iso.as_deref(),
-                    &f_hash,
-                )?);
-            }
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(map_unique_violation(e)),
         };
 
         // `insert` on the cache returns true the first time this batch sees the
@@ -1239,53 +1160,6 @@ impl MetadataStore {
         Ok(out)
     }
 
-    /// Reserve `count` consecutive `association_id` values and return the first.
-    /// The caller owns `first..first + count` and writes them itself.
-    ///
-    /// Reserving is separate from inserting because a staged row's id has to be
-    /// known before the batch flushes — IS hands the id out on a
-    /// `TimeSeriesKey` that callers embed in their own objects, so it cannot be
-    /// assigned at write time. The consequence is that a batch abandoned after
-    /// staging leaves its reservation behind as a gap; the mark never rewinds,
-    /// so no later row can be handed an id a consumer may already be holding.
-    ///
-    /// Runs in the caller's transaction, so the reservation and the rows that
-    /// use it commit or roll back together. A rollback still leaves the gap:
-    /// SQLite restores the mark, but the ids were already handed out, so
-    /// [`Self::reserve_association_ids`] must not be relied on to recycle them.
-    pub fn reserve_association_ids(&mut self, count: u64) -> Result<i64> {
-        if count == 0 {
-            return Err(TimeSeriesError::InvalidParameter(
-                "cannot reserve zero association ids".into(),
-            ));
-        }
-        let count = i64::try_from(count).map_err(|_| {
-            TimeSeriesError::InvalidParameter(format!(
-                "association id reservation of {count} exceeds the addressable range"
-            ))
-        })?;
-        // The floor is held in memory, not read back from the table, because the
-        // table is transactional and an id must not be: a caller reserves an id,
-        // puts it on a key its own caller keeps, and only then does the enclosing
-        // transaction roll back. `ROLLBACK TO` would restore the column, and the
-        // next reservation would hand that id to a *different* association while
-        // the first key still names it. Advancing a plain field instead makes a
-        // handed-out id unreachable for the life of the process, whatever the
-        // transaction does.
-        let first = self.next_association_id;
-        self.next_association_id += count;
-        // Written through so the mark survives the process. A rollback may undo
-        // this row; the open-time reconciliation against MAX(association_id)
-        // repairs it, and the in-memory floor covers the window in between.
-        self.conn
-            .prepare_cached(
-                "UPDATE association_id_sequence
-                    SET next_association_id = MAX(next_association_id, ?1)",
-            )?
-            .execute(params![self.next_association_id])?;
-        Ok(first)
-    }
-
     /// Delete all associations for the owner `(owner_id, owner_category)`.
     /// Returns the data_hashes of removed rows.
     pub fn delete_by_owner(
@@ -1315,11 +1189,11 @@ impl MetadataStore {
     /// underlying arrays are untouched (arrays are content-addressed). Returns
     /// the rows updated.
     ///
-    /// Every moved row keeps its `association_id`: ids are minted, not derived
-    /// from the owner, so reassigning an owner does not renumber anything. That
-    /// is the point of minting them — a consumer holding an id for one of these
-    /// rows still resolves it afterwards, with no old-to-new mapping to chase —
-    /// and it is why this is one set-based `UPDATE` rather than a per-row
+    /// Every moved row keeps its `association_id`: the id is the row's primary
+    /// key, not anything derived from the owner, so reassigning an owner does not
+    /// renumber anything — a consumer holding an id for one of these rows still
+    /// resolves it afterwards, with no old-to-new mapping to chase. That is why
+    /// this is one set-based `UPDATE` rather than a per-row
     /// read-recompute-write loop.
     pub fn replace_owner(
         tx: &Connection,
@@ -1335,7 +1209,7 @@ impl MetadataStore {
             .execute(params![new_owner, old_owner, owner_category.code()]);
         match result {
             Ok(count) => Ok(count),
-            // `uq_ts_assoc_id` cannot fire here — no id changes — so the only
+            // The primary key cannot fire here — no id changes — so the only
             // reachable violation is `uq_ts_assoc`: the destination owner already
             // holds a series identical to one being moved onto it.
             Err(rusqlite::Error::SqliteFailure(err, _))
@@ -1464,7 +1338,7 @@ impl MetadataStore {
                     data_hash, initial_timestamp, resolution, length, horizon,
                     interval, count, timestamps_hash, units, quantity_kind, unit_system,
                     time_reference, component_field, percentiles_json, element_type,
-                    element_shape, application_data, id, association_id
+                    element_shape, application_data, id
              FROM time_series_associations {where_clause}"
         );
         let mut stmt = self.conn.prepare_cached(&sql)?;
@@ -1601,7 +1475,7 @@ impl MetadataStore {
                     }
                 }
             };
-            let id = partial.id;
+            let id = partial.association_id;
             out.push((id, partial.into_metadata(features, timestamps)));
         }
         Ok((out, cohorts))
@@ -1816,8 +1690,8 @@ impl MetadataStore {
         &self,
         association_id: i64,
     ) -> Result<TimeSeriesMetadata> {
-        // `uq_ts_assoc_id` makes this at most one row, so there is no
-        // multiple-match case to report.
+        // The id is the primary key, so this matches at most one row and there
+        // is no multiple-match case to report.
         self.list(&MetadataFilter {
             association_id: Some(association_id),
             ..Default::default()
@@ -2815,89 +2689,19 @@ fn parse_feature_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, Featu
     Ok((key, value))
 }
 
-/// The identity-tuple columns of one association row, as read back to tell an
-/// ordinary duplicate identity from a catalog that has diverged from its id
-/// sequence.
-type IdentityColumns = (
-    i64,
-    i64,
-    i64,
-    String,
-    Option<String>,
-    Option<String>,
-    Vec<u8>,
-);
-
-/// Classify a UNIQUE-constraint violation on `time_series_associations`.
-///
-/// The expected outcome is an ordinary identity-tuple duplicate
-/// ([`TimeSeriesError::DuplicateTimeSeries`]) -- a caller re-adding a series it
-/// already stored.
-///
-/// SQLite's choice of which of several simultaneously violated unique indexes
-/// to name in the failure is unspecified, so this does not parse the error at
-/// all: it looks up the row that already holds `assoc_id` (unique, so there is
-/// at most one) and compares its identity tuple against the one the caller was
-/// trying to write.
-///
-/// A *different* tuple holding `assoc_id` is unreachable now that ids are minted
-/// from a monotonic, never-reused sequence rather than hashed: two distinct rows
-/// cannot be handed the same id. It therefore means the sequence and the table
-/// have diverged -- a rewound mark, a hand-edited catalog, a row inserted with a
-/// forged id -- so it reports [`TimeSeriesError::IntegrityError`] naming the id,
-/// not a user-facing duplicate.
-///
-/// No existing row at all is the ordinary case, not a contradiction: a freshly
-/// assigned id is held by no row, so the violation came from `uq_ts_assoc` and
-/// this is a plain duplicate identity.
-#[allow(clippy::too_many_arguments)]
-fn classify_association_violation(
-    tx: &Connection,
-    assoc_id: i64,
-    owner_id: i64,
-    owner_category: OwnerCategory,
-    time_series_type: TimeSeriesType,
-    name: &str,
-    resolution_iso: Option<&str>,
-    interval_iso: Option<&str>,
-    features_hash: &[u8; 32],
-) -> Result<TimeSeriesError> {
-    let existing: Option<IdentityColumns> = tx
-        .query_row(
-            "SELECT owner_id, owner_category, time_series_type, name, resolution, interval,
-                    features_hash
-             FROM time_series_associations WHERE association_id = ?1",
-            params![assoc_id],
-            |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                    r.get(6)?,
-                ))
-            },
-        )
-        .optional()?;
-    Ok(match &existing {
-        Some((o, oc, tst, n, res, intv, fh))
-            if *o != owner_id
-                || *oc != owner_category.code()
-                || *tst != time_series_type.code()
-                || n.as_str() != name
-                || res.as_deref() != resolution_iso
-                || intv.as_deref() != interval_iso
-                || fh.as_slice() != features_hash.as_slice() =>
+/// Map a SQLite UNIQUE-index constraint violation to the spec's
+/// [`TimeSeriesError::DuplicateTimeSeries`], passing every other error through.
+/// Shared by the `INSERT` and `UPDATE` paths where the association uniqueness
+/// index can fire (`rename`, `replace_owner`).
+fn map_unique_violation(e: rusqlite::Error) -> TimeSeriesError {
+    match e {
+        rusqlite::Error::SqliteFailure(err, _)
+            if err.code == rusqlite::ErrorCode::ConstraintViolation =>
         {
-            TimeSeriesError::IntegrityError(format!(
-                "association_id {assoc_id} is already held by a row with a different identity; \
-                 minted ids are never reused, so the catalog and its id sequence have diverged"
-            ))
+            TimeSeriesError::DuplicateTimeSeries
         }
-        _ => TimeSeriesError::DuplicateTimeSeries,
-    })
+        other => other.into(),
+    }
 }
 
 /// Open a catalog file read-only, including on read-only media.
@@ -3014,10 +2818,8 @@ fn collect_data_hashes(
 }
 
 struct MetaRow {
-    /// The catalog's `INTEGER PRIMARY KEY` (SQLite rowid). Not part of
-    /// [`TimeSeriesMetadata`] — that type's identity is the key tuple, not a
-    /// storage-assigned id — but used internally by [`Self::list_inner`].
-    id: i64,
+    /// The catalog's `INTEGER PRIMARY KEY` (SQLite rowid), which *is* this row's
+    /// `association_id` — the column is one and the same.
     association_id: i64,
     owner_id: i64,
     owner_type: String,
@@ -3107,8 +2909,7 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<([u8; 32], MetaRo
     let element_type_str: String = row.get(20)?;
     let element_shape_json: Option<String> = row.get(21)?;
     let application_data: Option<String> = row.get(22)?;
-    let id: i64 = row.get(23)?;
-    let association_id: i64 = row.get(24)?;
+    let association_id: i64 = row.get(23)?;
 
     // An unrecognized basis is an error, not a silent `None`. The column has no
     // CHECK precisely so a future basis can be added without a format bump,
@@ -3262,7 +3063,6 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<([u8; 32], MetaRo
     Ok((
         features_hash,
         MetaRow {
-            id,
             association_id,
             owner_id,
             owner_type,
@@ -3850,45 +3650,6 @@ mod type_predicate_tests {
 }
 
 #[cfg(test)]
-mod association_id_sequence_tests {
-    use super::*;
-
-    #[test]
-    fn the_sequence_starts_at_one_so_zero_stays_an_unset_sentinel() {
-        let mut store = MetadataStore::open_in_memory().unwrap();
-        let first = store.reserve_association_ids(1).unwrap();
-        assert_eq!(first, 1);
-    }
-
-    #[test]
-    fn reservations_are_contiguous_and_never_overlap() {
-        let mut store = MetadataStore::open_in_memory().unwrap();
-        let a = store.reserve_association_ids(3).unwrap();
-        let b = store.reserve_association_ids(2).unwrap();
-        let c = store.reserve_association_ids(1).unwrap();
-        assert_eq!((a, b, c), (1, 4, 6));
-    }
-
-    #[test]
-    fn reserving_zero_ids_is_rejected_rather_than_a_silent_no_op() {
-        let mut store = MetadataStore::open_in_memory().unwrap();
-        let err = store.reserve_association_ids(0).unwrap_err();
-        assert!(matches!(err, TimeSeriesError::InvalidParameter(_)));
-    }
-
-    #[test]
-    fn an_abandoned_reservation_leaves_a_gap_and_is_never_handed_out_again() {
-        let mut store = MetadataStore::open_in_memory().unwrap();
-        let abandoned = store.reserve_association_ids(5).unwrap();
-        let next = store.reserve_association_ids(1).unwrap();
-        assert_eq!(abandoned, 1);
-        // The five staged-then-dropped ids are skipped, not recycled: a consumer
-        // may already be holding one on a key it never flushed.
-        assert_eq!(next, 6);
-    }
-}
-
-#[cfg(test)]
 mod association_id_tests {
     use super::*;
 
@@ -3897,7 +3658,7 @@ mod association_id_tests {
             owner_id,
             owner_type: "Generator".into(),
             owner_category: OwnerCategory::Component,
-            association_id: 0, // the unset sentinel; `insert` assigns one
+            association_id: 0, // ignored on write; the catalog assigns it
             time_series_type: TimeSeriesType::SingleTimeSeries,
             name: name.into(),
             data_hash: [1u8; 32],
@@ -3922,10 +3683,9 @@ mod association_id_tests {
     }
 
     #[test]
-    fn insert_mints_sequential_association_ids_for_unset_rows() {
-        let mut store = MetadataStore::open_in_memory().unwrap();
-        // `association_id: 0` is the unset sentinel -- an unstaged row -- so
-        // `insert` mints, starting at 1 and advancing by one per row.
+    fn insert_assigns_sequential_association_ids_starting_at_one() {
+        let store = MetadataStore::open_in_memory().unwrap();
+        // SQLite assigns the rowid, starting at 1 and advancing by one per row.
         store.insert(&sample_metadata(1, "load_a")).unwrap();
         store.insert(&sample_metadata(1, "load_b")).unwrap();
 
@@ -3940,92 +3700,69 @@ mod association_id_tests {
     }
 
     #[test]
-    fn insert_stores_a_reserved_id_as_given_rather_than_minting_over_it() {
-        let mut store = MetadataStore::open_in_memory().unwrap();
-        // What a staged batch does: reserve first, then insert carrying the
-        // reserved id. The stored value must be the reserved one, because it was
-        // already handed out on a key before this row existed.
-        let reserved = store.reserve_association_ids(1).unwrap();
-        let mut meta = sample_metadata(1, "staged");
-        meta.association_id = reserved;
+    fn insert_ignores_an_id_carried_on_the_record_and_assigns_its_own() {
+        let store = MetadataStore::open_in_memory().unwrap();
+        // A record reused from another row carries that row's id. The insert must
+        // not honor it: the id belongs to the catalog, not to the caller.
+        let mut meta = sample_metadata(1, "reused");
+        meta.association_id = 9_999;
         store.insert(&meta).unwrap();
 
         let rows = store.list(&MetadataFilter::default()).unwrap();
-        assert_eq!(rows[0].association_id, reserved);
+        assert_eq!(rows[0].association_id, 1);
+    }
+
+    #[test]
+    fn deleting_the_highest_row_does_not_free_its_id_for_reuse() {
+        let store = MetadataStore::open_in_memory().unwrap();
+        store.insert(&sample_metadata(1, "first")).unwrap();
+        let highest = store.insert(&sample_metadata(1, "second")).unwrap();
+
+        store
+            .conn
+            .execute(
+                "DELETE FROM time_series_associations WHERE id = ?1",
+                params![highest],
+            )
+            .unwrap();
+
+        // The whole reason the primary key is AUTOINCREMENT: a bare rowid would
+        // reissue MAX(id) + 1 here, and a reference a consumer still holds to the
+        // deleted series would silently resolve to this new one.
+        let next = store.insert(&sample_metadata(1, "third")).unwrap();
+        assert_eq!(next, highest + 1);
     }
 
     #[test]
     fn get_by_association_id_finds_the_row_and_rejects_a_bogus_one() {
-        let mut store = MetadataStore::open_in_memory().unwrap();
+        let store = MetadataStore::open_in_memory().unwrap();
         let meta = sample_metadata(1, "load");
         store.insert(&meta).unwrap();
-        let minted = store.list(&MetadataFilter::default()).unwrap()[0].association_id;
+        let assigned = store.list(&MetadataFilter::default()).unwrap()[0].association_id;
 
         let found = store
-            .get_time_series_metadata_by_association_id(minted)
+            .get_time_series_metadata_by_association_id(assigned)
             .unwrap();
         assert_eq!(found.name, "load");
-        assert_eq!(found.association_id, minted);
+        assert_eq!(found.association_id, assigned);
 
         let err = store
-            .get_time_series_metadata_by_association_id(minted + 1_000)
+            .get_time_series_metadata_by_association_id(assigned + 1_000)
             .unwrap_err();
         assert!(matches!(err, TimeSeriesError::NotFound));
     }
 
     #[test]
-    fn a_forged_duplicate_id_is_an_integrity_error_not_a_duplicate_identity() {
-        // Unreachable through the public API now that ids are minted from a
-        // never-reused sequence: two rows cannot be handed the same id. Forced
-        // here with test-only raw SQL to pin what happens if the catalog and its
-        // sequence ever diverge -- it must name the divergence, not masquerade as
-        // an ordinary duplicate.
-        let mut store = MetadataStore::open_in_memory().unwrap();
-        let forged_id = 4242i64;
-
-        store
-            .conn
-            .execute(
-                "INSERT INTO time_series_associations
-                 (association_id, owner_id, owner_type, owner_category, time_series_type,
-                  name, data_hash, features_hash)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    forged_id,
-                    1i64,
-                    "Generator",
-                    OwnerCategory::Component.code(),
-                    TimeSeriesType::SingleTimeSeries.code(),
-                    "load_a",
-                    [2u8; 32].as_slice(),
-                    features_hash(&Features::new()).as_slice(),
-                ],
-            )
-            .unwrap();
-
-        let mut meta_b = sample_metadata(1, "load_b");
-        meta_b.association_id = forged_id;
-        let err = store.insert(&meta_b).unwrap_err();
-        match err {
-            TimeSeriesError::IntegrityError(msg) => {
-                assert!(
-                    msg.contains(&forged_id.to_string()),
-                    "message must name the id: {msg}"
-                );
-            }
-            other => panic!("expected IntegrityError, got {other:?}"),
-        }
-
-        // A genuine repeat of the same identity is still the ordinary spec
-        // error, not an integrity failure.
-        store.insert(&sample_metadata(1, "load_c")).unwrap();
-        let err = store.insert(&sample_metadata(1, "load_c")).unwrap_err();
+    fn a_repeated_identity_is_the_ordinary_duplicate_error() {
+        let store = MetadataStore::open_in_memory().unwrap();
+        store.insert(&sample_metadata(1, "load")).unwrap();
+        let err = store.insert(&sample_metadata(1, "load")).unwrap_err();
         assert!(matches!(err, TimeSeriesError::DuplicateTimeSeries));
     }
 
     #[test]
     fn rename_preserves_the_association_id() {
-        let mut store = MetadataStore::open_in_memory().unwrap();
+        let store = MetadataStore::open_in_memory().unwrap();
         let meta = sample_metadata(1, "old");
         store.insert(&meta).unwrap();
         let minted = store.list(&MetadataFilter::default()).unwrap()[0].association_id;
@@ -4053,7 +3790,7 @@ mod association_id_tests {
 
     #[test]
     fn replace_owner_preserves_the_association_id() {
-        let mut store = MetadataStore::open_in_memory().unwrap();
+        let store = MetadataStore::open_in_memory().unwrap();
         let meta = sample_metadata(1, "load");
         store.insert(&meta).unwrap();
         let minted = store.list(&MetadataFilter::default()).unwrap()[0].association_id;

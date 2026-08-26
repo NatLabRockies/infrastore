@@ -605,7 +605,6 @@ pub fn merge(
             // Merged rows are minted fresh ids by the destination. Ids are
             // store-local, so carrying the source's would collide with whatever
             // the destination already assigned that number to.
-            association_id: 0,
         })
         .collect();
 

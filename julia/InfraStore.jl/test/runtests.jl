@@ -228,79 +228,46 @@ end
     @test still_there.association_id == meta.association_id
 end
 
-@testset "InfraStore.jl reserved association ids" begin
+@testset "InfraStore.jl store-assigned association ids" begin
     store = Store()
     initial = DateTime(2024, 1, 1)
     resolution = Hour(1)
 
-    # Reserve before the row exists, which is what a caller building a key at
-    # stage time has to do.
-    reserved = reserve_association_ids!(store, 2)
-    @test reserved > 0
-
     batch = AddBatch()
     add_time_series!(
         batch, 1, "Generator", Component,
-        SingleTimeSeries(initial, resolution, collect(1.0:24.0), "load");
-        association_id=reserved,
+        SingleTimeSeries(initial, resolution, collect(1.0:24.0), "load"),
     )
     add_time_series!(
         batch, 2, "Generator", Component,
-        SingleTimeSeries(initial, resolution, collect(1.0:24.0), "load");
-        association_id=reserved + 1,
+        SingleTimeSeries(initial, resolution, collect(1.0:24.0), "load"),
     )
     add_time_series_bulk!(store, batch)
     flush!(store)
 
-    # The reserved id is the id the row carries. If it were not, the key a caller
-    # already embedded would name a row that does not exist.
-    first_row = get_time_series_metadata(store, reserved)
-    @test first_row.association_id == reserved
-    @test first_row.owner_id == 1
+    # The catalog assigns each row an id; a caller reads it back off the row and
+    # can then address the row by it alone.
+    rows = sort(list_time_series(store); by=(r -> r.owner_id))
+    ids = [r.association_id for r in rows]
+    @test all(id -> id > 0, ids)
+    @test length(unique(ids)) == 2
 
-    second_row = get_time_series_metadata(store, reserved + 1)
-    @test second_row.association_id == reserved + 1
-    @test second_row.owner_id == 2
+    for row in rows
+        fetched = get_time_series_metadata(store, row.association_id)
+        @test fetched.association_id == row.association_id
+        @test fetched.owner_id == row.owner_id
+    end
 
-    # An unreserved add mints past the reservation rather than colliding with it.
+    # A later add lands past every id already in the catalog.
     add_time_series!(
         store, 3, "Generator", Component,
         SingleTimeSeries(initial, resolution, collect(1.0:24.0), "load"),
     )
     flush!(store)
-    minted = only(
+    third = only(
         r.association_id for r in list_time_series(store) if r.owner_id == 3
     )
-    @test minted > reserved + 1
-end
-
-@testset "InfraStore.jl pooled association ids" begin
-    store = Store()
-
-    # Ids come out ascending and never repeat, whatever the block boundaries are.
-    ids = [InfraStore.next_association_id!(store) for _ in 1:600]
-    @test length(unique(ids)) == 600
-    @test issorted(ids)
-    @test all(id -> id > 0, ids)
-
-    # An explicit reservation must not land inside a block the pool already holds:
-    # the store's floor advanced by the whole block when the pool refilled.
-    reserved = reserve_association_ids!(store, 4)
-    @test reserved > maximum(ids)
-    following = InfraStore.next_association_id!(store)
-    @test following ∉ (reserved):(reserved + 3)
-
-    # A pooled id is a real id: a row written under it is addressable by it.
-    id = InfraStore.next_association_id!(store)
-    batch = AddBatch()
-    add_time_series!(
-        batch, 1, "Generator", Component,
-        SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(1.0:24.0), "load");
-        association_id=id,
-    )
-    add_time_series_bulk!(store, batch)
-    flush!(store)
-    @test get_time_series_metadata(store, id).association_id == id
+    @test third > maximum(ids)
 end
 
 @testset "InfraStore.jl persistent round-trip" begin

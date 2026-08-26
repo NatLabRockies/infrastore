@@ -48,20 +48,19 @@
 /// older reader would hand back as instants. Stores written by 0.16.0 and
 /// earlier are rejected on open.
 ///
-/// 0.18.0 added the `association_id` column to `time_series_associations` and
-/// the `association_id_sequence` table that fills it: a surrogate id minted
-/// from a per-store monotonic sequence, enforced UNIQUE by its own index
-/// (`uq_ts_assoc_id`). Same reasoning as 0.15.0-0.17.0 for why a new NOT NULL
-/// column is not the additive case -- `CREATE TABLE IF NOT EXISTS` leaves a
-/// 0.17.0 store's column set alone, so every INSERT naming the column fails
-/// against it, and a 0.17.0 store carries no sequence row for the mark to be
-/// read from. Stores written by 0.17.0 and earlier are rejected on open.
+/// 0.18.0 made `time_series_associations.id` an `AUTOINCREMENT` primary key and
+/// surfaces it to consumers as `association_id`: the row's own id, assigned by
+/// SQLite at insert. Same reasoning as 0.15.0-0.17.0 for why this is not the
+/// additive case -- `CREATE TABLE IF NOT EXISTS` leaves a 0.17.0 store's table
+/// definition alone, so its `id` column keeps bare-rowid semantics and would
+/// reissue a freed id. Stores written by 0.17.0 and earlier are rejected on open.
 ///
-/// The id is deliberately not derived from the row's identity: it is immutable
-/// across a rename or an owner reassignment, so a consumer may hold it as a
-/// durable reference, and it is never reused, so a stale reference resolves to
-/// nothing rather than to some later series. The cost is that it is store-local
-/// -- two independently built stores do not agree on an id for the same
-/// association -- and that ids are gapped, since one reserved before its row is
-/// written is spent whether or not the write lands.
+/// `AUTOINCREMENT` rather than a bare `INTEGER PRIMARY KEY` is the whole point:
+/// a bare rowid reissues `MAX(id) + 1`, so deleting the highest row frees its id
+/// and a reference a consumer already holds would later resolve to a different
+/// series. `sqlite_sequence` holds a mark that only advances. The id is therefore
+/// immutable across a rename or an owner reassignment, and never reused -- a
+/// stale reference resolves to nothing. The cost is that it is store-local (two
+/// independently built stores do not agree on an id for the same association)
+/// and that ids are gapped, since a rolled-back insert spends one.
 pub const DATA_FORMAT_VERSION: &str = "0.18.0";

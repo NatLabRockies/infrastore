@@ -14,17 +14,18 @@
 /// mismatch is the error worth reporting, and it must get there first.
 pub const DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS time_series_associations (
-    id                INTEGER PRIMARY KEY,
-    -- Minted surrogate id, drawn from `association_id_sequence` when the row is
-    -- staged. Store-local: it is NOT portable across stores, and nothing derives
-    -- it, which is precisely why it never moves -- a rename or an owner
+    -- The rowid, surfaced to consumers as `association_id`. Assigned by SQLite
+    -- when the row is inserted, and never moved after: a rename or an owner
     -- reassignment leaves it alone, so a consumer may persist it as a durable
-    -- reference. Never reused, so a stale reference resolves to nothing rather
-    -- than to some later series. Ids are gapped, not dense (see the sequence
-    -- table). UNIQUE: with ids minted from a monotonic sequence a violation here
-    -- is unreachable, so it asserts internal consistency rather than detecting a
-    -- collision.
-    association_id    INTEGER NOT NULL,
+    -- reference.
+    --
+    -- AUTOINCREMENT, not a bare `INTEGER PRIMARY KEY`, is load-bearing. A bare
+    -- rowid reissues `MAX(id) + 1`, so deleting the highest row frees its id and
+    -- a reference held by a consumer would later resolve to a different series
+    -- -- the failure this id exists to prevent. AUTOINCREMENT parks the mark in
+    -- `sqlite_sequence` instead, which only advances. Ids are therefore gapped,
+    -- not dense, and must never be compacted.
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
     owner_id          INTEGER NOT NULL,
     owner_type        TEXT    NOT NULL,
     -- `owner_category` and `time_series_type` are stored as small INTEGER
@@ -202,10 +203,6 @@ CREATE TABLE IF NOT EXISTS timestamp_sets (
 -- dropped enforced the very same constraint. Index names are not part of the
 -- on-disk contract, so this needs no DATA_FORMAT_VERSION bump; an older build
 -- opening the store would simply re-create the old names alongside.
--- A violation here and one on uq_ts_assoc below cannot be told apart by which
--- index fired; see `classify_association_violation` in metadata.rs.
-CREATE UNIQUE INDEX IF NOT EXISTS uq_ts_assoc_id ON time_series_associations(association_id);
-
 DROP INDEX IF EXISTS uq_assoc;
 DROP INDEX IF EXISTS uq_assoc_coalesced;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_ts_assoc ON time_series_associations
@@ -309,21 +306,6 @@ CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
 -- absent, because a read-only open cannot run this DDL.
 CREATE TABLE IF NOT EXISTS catalog_identity (generation TEXT NOT NULL);
 
--- High-water mark for `time_series_associations.association_id`. Holds the next
--- id to hand out, seeded to 1 so 0 stays available as an "unset" sentinel.
---
--- It is a stored mark rather than `MAX(association_id) + 1` on purpose: deleting
--- the highest row must not free its id. Reusing one would let a reference held
--- by a consumer -- PSY persists these in exported documents -- resolve to a
--- different series later, which is the failure this id exists to prevent.
---
--- The mark only ever advances. Ids are reserved when a row is staged, so a batch
--- abandoned before it flushes leaves its reservation behind as a gap: the
--- sequence is monotonic, never dense, and must never be compacted.
-CREATE TABLE IF NOT EXISTS association_id_sequence (next_association_id INTEGER NOT NULL);
-INSERT INTO association_id_sequence (next_association_id)
-    SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM association_id_sequence);
-
 -- The two association tables below record relationships between catalog
 -- entities, independent of time series. They are deliberately separate rather
 -- than one generic endpoint table: attaching an attribute to a component and
@@ -425,7 +407,7 @@ CREATE INDEX IF NOT EXISTS idx_parent_child_child
 -- so this costs nothing and cannot lose anything.
 DROP VIEW IF EXISTS time_series_readable;
 CREATE VIEW time_series_readable AS
-SELECT id, association_id, owner_id, owner_type,
+SELECT id AS association_id, owner_id, owner_type,
        CASE owner_category WHEN 0 THEN 'Component'
                            WHEN 1 THEN 'SupplementalAttribute'
                            ELSE 'unknown(' || owner_category || ')' END AS owner_category,

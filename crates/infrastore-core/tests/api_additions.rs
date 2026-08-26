@@ -1907,30 +1907,38 @@ fn get_metadata_by_association_id_round_trips_through_list() {
     assert!(matches!(err, TimeSeriesError::NotFound));
 }
 
-/// A reserved id must never be handed out twice, even when the transaction that
-/// reserved it rolls back.
+/// A rolled-back insert releases its id, and that is safe.
 ///
-/// The reservation floor is deliberately not transactional. If it lived only in
-/// `association_id_sequence`, `ROLLBACK TO` would restore the column and the next
-/// reservation would hand the same id to a *different* association -- while the
-/// first caller still holds it on a key. That key would then resolve, silently,
-/// to the wrong series.
+/// `sqlite_sequence` is transactional: rolling back an insert restores the mark,
+/// so the next insert lands on the same id. That cannot strand a reference,
+/// because an id only becomes visible to a consumer when the transaction that
+/// wrote its row commits -- a rolled-back id was never handed to anyone. The
+/// guarantee that matters is the *committed* one, pinned by
+/// `a_committed_id_is_never_reissued_after_its_row_is_deleted` below.
 #[test]
-fn a_rolled_back_transaction_does_not_recycle_a_reserved_id() {
+fn a_rolled_back_insert_leaves_its_id_available_again() {
     let mut store = infrastore_core::create_store(None, true).unwrap();
 
     store.begin_transaction().unwrap();
-    let reserved = store.reserve_association_ids(1).unwrap();
+    store
+        .add_time_series(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(sts("rolled_back", 1.0, 3)),
+            Features::new(),
+        )
+        .unwrap();
     store.rollback_transaction().unwrap();
 
-    let after_rollback = store.reserve_association_ids(1).unwrap();
     assert!(
-        after_rollback > reserved,
-        "rollback recycled a handed-out id: reserved {reserved}, then re-issued {after_rollback}"
+        store
+            .list_time_series(ListFilter::new())
+            .unwrap()
+            .is_empty(),
+        "the rolled-back row must not be in the catalog"
     );
 
-    // The row written under the recycled id would have been the real damage, so
-    // pin that the id a later add lands on is not the rolled-back one either.
     store
         .add_time_series(
             1,
@@ -1941,8 +1949,66 @@ fn a_rolled_back_transaction_does_not_recycle_a_reserved_id() {
         )
         .unwrap();
     let rows = store.list_time_series(ListFilter::new()).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].association_id, 1);
+}
+
+/// Deleting a row must not free its id for a later series to land on: a consumer
+/// may still hold that id, and reuse would make it resolve to the wrong series.
+/// This is what `AUTOINCREMENT` buys over a bare `INTEGER PRIMARY KEY`.
+#[test]
+fn a_committed_id_is_never_reissued_after_its_row_is_deleted() {
+    let mut store = infrastore_core::create_store(None, true).unwrap();
+
+    for name in ["first", "second"] {
+        store
+            .add_time_series(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(sts(name, 1.0, 3)),
+                Features::new(),
+            )
+            .unwrap();
+    }
+    let highest = store
+        .list_time_series(ListFilter::new())
+        .unwrap()
+        .iter()
+        .map(|r| r.association_id)
+        .max()
+        .unwrap();
+
+    store
+        .remove_time_series(&KeyIdentity {
+            owner_id: 1,
+            owner_category: OwnerCategory::Component,
+            time_series_type: TimeSeriesType::SingleTimeSeries,
+            name: "second".into(),
+            resolution: Some(Period::from(chrono::Duration::hours(1))),
+            interval: None,
+            features: Features::new(),
+        })
+        .unwrap();
+
+    store
+        .add_time_series(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(sts("third", 1.0, 3)),
+            Features::new(),
+        )
+        .unwrap();
+    let third = store
+        .list_time_series(ListFilter::new())
+        .unwrap()
+        .iter()
+        .find(|r| r.name == "third")
+        .unwrap()
+        .association_id;
     assert!(
-        rows.iter().all(|r| r.association_id != reserved),
-        "a row was written under the id that was reserved and rolled back"
+        third > highest,
+        "a deleted row's id was reissued: deleted {highest}, new row got {third}"
     );
 }
