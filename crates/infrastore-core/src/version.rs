@@ -48,25 +48,20 @@
 /// older reader would hand back as instants. Stores written by 0.16.0 and
 /// earlier are rejected on open.
 ///
-/// 0.18.0 added the `association_id` column to `time_series_associations`: a
-/// derived surrogate id (`hash::association_id`) over the `uq_ts_assoc` tuple,
-/// enforced UNIQUE by its own index. Same reasoning as 0.15.0-0.17.0 for why a
-/// new NOT NULL column is not the additive case -- `CREATE TABLE IF NOT
-/// EXISTS` leaves a 0.17.0 store's column set alone, so every INSERT naming
-/// the column fails against it. It also adds a hash domain: the encoding
-/// `hash::association_id` computes is part of the on-disk contract, so a
-/// future change to that encoding is itself a format bump, not merely a code
-/// change. Stores written by 0.17.0 and earlier are rejected on open.
+/// 0.18.0 added the `association_id` column to `time_series_associations` and
+/// the `association_id_sequence` table that fills it: a surrogate id minted
+/// from a per-store monotonic sequence, enforced UNIQUE by its own index
+/// (`uq_ts_assoc_id`). Same reasoning as 0.15.0-0.17.0 for why a new NOT NULL
+/// column is not the additive case -- `CREATE TABLE IF NOT EXISTS` leaves a
+/// 0.17.0 store's column set alone, so every INSERT naming the column fails
+/// against it, and a 0.17.0 store carries no sequence row for the mark to be
+/// read from. Stores written by 0.17.0 and earlier are rejected on open.
 ///
-/// 0.19.0 keeps that column but changes what fills it: the id is now minted
-/// from the new `association_id_sequence` table instead of hashed from the
-/// identity tuple. This is a format break in both directions, and the column
-/// set alone does not express it. A 0.18.0 store's ids are hashes over a domain
-/// that no longer exists, and it carries no sequence row, so a 0.19.0 writer
-/// reading one would mint from 1 and collide with rows already holding
-/// arbitrary 53-bit values; a 0.18.0 reader opening a 0.19.0 store would find
-/// ids that do not reproduce from the tuple and reject every row as corrupt.
-/// The hash domain is retired with it -- there is no derivation left whose
-/// encoding a later change could break. Stores written by 0.18.0 and earlier
-/// are rejected on open.
-pub const DATA_FORMAT_VERSION: &str = "0.19.0";
+/// The id is deliberately not derived from the row's identity: it is immutable
+/// across a rename or an owner reassignment, so a consumer may hold it as a
+/// durable reference, and it is never reused, so a stale reference resolves to
+/// nothing rather than to some later series. The cost is that it is store-local
+/// -- two independently built stores do not agree on an id for the same
+/// association -- and that ids are gapped, since one reserved before its row is
+/// written is spent whether or not the write lands.
+pub const DATA_FORMAT_VERSION: &str = "0.18.0";

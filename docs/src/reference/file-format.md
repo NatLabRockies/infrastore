@@ -57,27 +57,22 @@ Opening a store whose recorded version differs from the version this build reads
 the check is exact equality and there is no in-place upgrade path: regenerate the store with the
 matching build.
 
-(`0.19.0` changed what fills the `association_id` column and added the `association_id_sequence`
-table that supplies it. The id is now **minted** from a per-store monotonic sequence rather than
-derived from the row's identity, which makes it immutable: a rename or an owner reassignment leaves
-it alone, so a consumer may hold it as a durable reference. The cost is that it is store-local — two
-independently built stores do not agree on an id for the same association — and that it is gapped,
-since an id reserved before its row is written is consumed whether or not the write lands. An id is
-never reused. `0.19.0` is a break in both directions: a `0.18.0` store's ids are hashes over a
-domain that no longer exists and it carries no sequence row, while a `0.18.0` reader would reject
-`0.19.0` ids as not reproducing from the tuple. The retired hash domain is gone with it, so there is
-no longer an `association_id` encoding a future change could break.
-
-`0.18.0` had added the `association_id` column to `time_series_associations` as a derived surrogate
-id over the `uq_ts_assoc` tuple, enforced UNIQUE by its own index (`uq_ts_assoc_id`) and exposed by
-`get_time_series_metadata_by_association_id`. Same reasoning as `0.16.0`/`0.17.0` below for why a
-new NOT NULL column is not the additive case: `CREATE TABLE IF NOT
-EXISTS` leaves a `0.17.0` store's
-column set alone, so every statement naming the column fails against it; `0.17.0` added the metadata
-column `time_reference`, which records how a series' timestamps were _spelled_ — an instant in UTC,
-an instant at a fixed offset, an instant in a named IANA zone, or a wall clock naming no instant. It
-also changes how stored timestamps are _interpreted_: a row marked `zoneless` holds wall clocks the
-store keeps as if UTC, which an older reader would hand back as instants. See
+(`0.18.0` added the `association_id` column to `time_series_associations` and the
+`association_id_sequence` table that fills it: a surrogate id **minted** from a per-store monotonic
+sequence rather than derived from the row's identity, enforced UNIQUE by its own index
+(`uq_ts_assoc_id`) and exposed by `get_time_series_metadata_by_association_id`. Minting is what
+makes it immutable: a rename or an owner reassignment leaves it alone, so a consumer may hold it as
+a durable reference, and an id is never reused, so a stale reference resolves to nothing rather than
+to some later series. The cost is that it is store-local — two independently built stores do not
+agree on an id for the same association — and that ids are gapped, since one reserved before its row
+is written is spent whether or not the write lands. Same reasoning as `0.16.0`/`0.17.0` below for
+why a new NOT NULL column is not the additive case: `CREATE TABLE IF NOT
+EXISTS` leaves a `0.17.0`
+store's column set alone, so every statement naming the column fails against it; `0.17.0` added the
+metadata column `time_reference`, which records how a series' timestamps were _spelled_ — an instant
+in UTC, an instant at a fixed offset, an instant in a named IANA zone, or a wall clock naming no
+instant. It also changes how stored timestamps are _interpreted_: a row marked `zoneless` holds wall
+clocks the store keeps as if UTC, which an older reader would hand back as instants. See
 [Time references](../explanation/data-model.md#time-references); `0.16.0` added the metadata column
 `component_field`; `0.15.0` renamed the metadata column `ext` to `application_data` and added the
 `quantity_kind` and `unit_system` columns; unlike a new _table_, new _columns_ are not picked up by

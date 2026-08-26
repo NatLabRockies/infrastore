@@ -716,7 +716,7 @@ impl MetadataFilter {
 }
 
 /// Read the reservation floor from the catalog, or 1 when the table is absent
-/// (a read-only open of a pre-0.19.0 catalog). `init_schema` has already
+/// (a read-only open of a pre-0.18.0 catalog). `init_schema` has already
 /// reconciled it against the rows present, so this is the authoritative floor
 /// for the life of the connection.
 fn read_association_id_floor(conn: &Connection) -> Result<i64> {
@@ -2815,8 +2815,9 @@ fn parse_feature_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, Featu
     Ok((key, value))
 }
 
-/// The identity-tuple columns of one association row, as read back for
-/// collision classification.
+/// The identity-tuple columns of one association row, as read back to tell an
+/// ordinary duplicate identity from a catalog that has diverged from its id
+/// sequence.
 type IdentityColumns = (
     i64,
     i64,
