@@ -2012,3 +2012,112 @@ fn a_committed_id_is_never_reissued_after_its_row_is_deleted() {
         "a deleted row's id was reissued: deleted {highest}, new row got {third}"
     );
 }
+
+/// The point of a caller-supplied `association_id`: rebuild a store from an
+/// export and every id still resolves to the series it named.
+#[test]
+fn ids_survive_an_export_and_reimport_into_a_fresh_store() {
+    let mut source = create_store(None, true).unwrap();
+    for (owner, name) in [(1i64, "load"), (2, "wind"), (3, "solar")] {
+        source
+            .add_time_series(
+                owner,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(sts(name, 1.0, 3)),
+                Features::new(),
+            )
+            .unwrap();
+    }
+    let exported: Vec<(i64, String, i64)> = source
+        .list_time_series(ListFilter::new())
+        .unwrap()
+        .iter()
+        .map(|r| (r.association_id, r.name.clone(), r.owner_id))
+        .collect();
+
+    // Rebuild into an empty store, carrying each row's id from the export. The
+    // rows deliberately arrive in a different order than they were written.
+    let mut target = create_store(None, true).unwrap();
+    let mut items: Vec<AddRequest> = exported
+        .iter()
+        .map(|(id, name, owner)| {
+            AddRequest::new(
+                *owner,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(sts(name, 1.0, 3)),
+            )
+            .with_association_id(*id)
+        })
+        .collect();
+    items.reverse();
+    target.add_time_series_bulk(items).unwrap();
+
+    for (id, name, _) in &exported {
+        let meta = target.get_metadata_by_association_id(*id).unwrap();
+        assert_eq!(&meta.name, name, "id {id} resolved to the wrong series");
+        assert_eq!(meta.association_id, *id);
+    }
+
+    // A later add cannot collide with an imported id, whatever order they landed.
+    target
+        .add_time_series(
+            9,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(sts("added_after", 1.0, 3)),
+            Features::new(),
+        )
+        .unwrap();
+    let fresh = target
+        .list_time_series(ListFilter::new())
+        .unwrap()
+        .iter()
+        .find(|r| r.name == "added_after")
+        .unwrap()
+        .association_id;
+    let max_imported = exported.iter().map(|(id, _, _)| *id).max().unwrap();
+    assert!(
+        fresh > max_imported,
+        "an assigned id landed inside the imported range: {fresh} <= {max_imported}"
+    );
+}
+
+/// Dan's case 4: importing into a store that already holds the id cannot be
+/// papered over by renumbering, so it is refused and says which id collided.
+#[test]
+fn importing_an_id_the_target_already_holds_is_refused() {
+    let mut store = create_store(None, true).unwrap();
+    store
+        .add_time_series(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(sts("first", 1.0, 3)),
+            Features::new(),
+        )
+        .unwrap();
+    let taken = store.list_time_series(ListFilter::new()).unwrap()[0].association_id;
+
+    let err = store
+        .add_time_series_bulk(vec![
+            AddRequest::new(
+                2,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(sts("second", 1.0, 3)),
+            )
+            .with_association_id(taken),
+        ])
+        .unwrap_err();
+    match err {
+        TimeSeriesError::InvalidParameter(msg) => {
+            assert!(msg.contains(&taken.to_string()), "must name the id: {msg}");
+        }
+        other => panic!("expected InvalidParameter, got {other:?}"),
+    }
+
+    // All-or-nothing: the refused batch left nothing behind.
+    assert_eq!(store.list_time_series(ListFilter::new()).unwrap().len(), 1);
+}

@@ -679,6 +679,7 @@ fn add_bulk_rejects_geometry_mismatch_and_leaves_the_whole_batch_untouched() {
             owner_category: OwnerCategory::Component,
             data: TimeSeriesData::SingleTimeSeries(clean),
             features: Features::new(),
+            association_id: 0,
         },
         infrastore_core::AddRequest {
             owner_id: 1,
@@ -686,6 +687,7 @@ fn add_bulk_rejects_geometry_mismatch_and_leaves_the_whole_batch_untouched() {
             owner_category: OwnerCategory::Component,
             data: TimeSeriesData::SingleTimeSeries(broken),
             features: Features::new(),
+            association_id: 0,
         },
     ];
     let err = store.add_time_series_bulk(items).unwrap_err();

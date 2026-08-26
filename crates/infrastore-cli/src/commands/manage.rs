@@ -602,9 +602,11 @@ pub fn merge(
             owner_category: m.owner_category,
             data,
             features: m.features.clone(),
-            // Merged rows are minted fresh ids by the destination. Ids are
+            // Merged rows get fresh ids from the destination. Ids are
             // store-local, so carrying the source's would collide with whatever
-            // the destination already assigned that number to.
+            // the destination already assigned that number to -- a merge is the
+            // non-empty-target case an id import deliberately does not support.
+            association_id: 0,
         })
         .collect();
 

@@ -63,16 +63,16 @@ its id, so a rename or an owner reassignment leaves it alone and a consumer may 
 reference. `AUTOINCREMENT` rather than a bare `INTEGER PRIMARY KEY` is the point: a bare rowid
 reissues `MAX(id) + 1`, so deleting the highest row would free its id and a held reference would
 later resolve to a different series. `sqlite_sequence` keeps a mark that only advances, so an id is
-never reused and a stale reference resolves to nothing. The cost is that it is store-local — two
-independently built stores do not agree on an id for the same association — and that ids are gapped,
-since a rolled-back insert spends one. Same reasoning as `0.16.0`/`0.17.0` below for why a new NOT
-NULL column is not the additive case: `CREATE TABLE IF NOT
-EXISTS` leaves a `0.17.0` store's column
-set alone, so every statement naming the column fails against it; `0.17.0` added the metadata column
-`time_reference`, which records how a series' timestamps were _spelled_ — an instant in UTC, an
-instant at a fixed offset, an instant in a named IANA zone, or a wall clock naming no instant. It
-also changes how stored timestamps are _interpreted_: a row marked `zoneless` holds wall clocks the
-store keeps as if UTC, which an older reader would hand back as instants. See
+the catalog never reissues one and a stale reference resolves to nothing. A writer may also supply
+an id rather than let the catalog assign one — see [Importing an id](#importing-an-id) below. Same
+reasoning as `0.16.0`/`0.17.0` below for why a new NOT NULL column is not the additive case:
+`CREATE TABLE IF NOT
+EXISTS` leaves a `0.17.0` store's column set alone, so every statement naming
+the column fails against it; `0.17.0` added the metadata column `time_reference`, which records how
+a series' timestamps were _spelled_ — an instant in UTC, an instant at a fixed offset, an instant in
+a named IANA zone, or a wall clock naming no instant. It also changes how stored timestamps are
+_interpreted_: a row marked `zoneless` holds wall clocks the store keeps as if UTC, which an older
+reader would hand back as instants. See
 [Time references](../explanation/data-model.md#time-references); `0.16.0` added the metadata column
 `component_field`; `0.15.0` renamed the metadata column `ext` to `application_data` and added the
 `quantity_kind` and `unit_system` columns; unlike a new _table_, new _columns_ are not picked up by
@@ -300,32 +300,32 @@ The catalog database is created with `PRAGMA foreign_keys = ON` and the followin
 
 One row per association between an owner and a stored array.
 
-| Column              | Type    | Notes                                                                                             |
-| ------------------- | ------- | ------------------------------------------------------------------------------------------------- |
-| `id`                | INTEGER | Primary key, `AUTOINCREMENT`; surfaced as `association_id` — immutable, store-local, never reused |
-| `owner_id`          | INTEGER | Owner identity; signed 64-bit integer identifier (part of key)                                    |
-| `owner_type`        | TEXT    | Owner's concrete type, descriptive                                                                |
-| `owner_category`    | INTEGER | Code, `CHECK` in (0, 1); part of key — see below                                                  |
-| `time_series_type`  | INTEGER | Code, `CHECK` between 0 and 5; part of key — see below                                            |
-| `name`              | TEXT    | Series name                                                                                       |
-| `initial_timestamp` | TEXT    | RFC 3339 string; `NULL` for `NonSequentialTimeSeries`                                             |
-| `resolution`        | TEXT    | ISO-8601 duration (`PT1H`, `P1M`, …); `NULL` for non-sequential                                   |
-| `length`            | INTEGER | Number of timesteps                                                                               |
-| `horizon`           | TEXT    | ISO-8601 forecast horizon; `NULL` for non-forecasts                                               |
-| `interval`          | TEXT    | ISO-8601 forecast interval; `NULL` for non-forecasts                                              |
-| `count`             | INTEGER | Forecast window count; `NULL` for non-forecasts                                                   |
-| `timestamps_hash`   | BLOB    | 32-byte SHA-256 of the timestamp vector (`NonSequentialTimeSeries`)                               |
-| `units`             | TEXT    | Free-form units label                                                                             |
-| `quantity_kind`     | TEXT    | What the values measure (QUDT `QuantityKind` name); `NULL` if unset                               |
-| `unit_system`       | TEXT    | `natural_units` or `component_base`; `NULL` means _unspecified_                                   |
-| `time_reference`    | TEXT    | How the timestamps were spelled (below); `NULL` means _unspecified_                               |
-| `component_field`   | TEXT    | Owning component's field these values vary; `NULL` if unset                                       |
-| `percentiles_json`  | TEXT    | JSON array of percentiles for `Probabilistic`; `NULL` else                                        |
-| `element_type`      | TEXT    | Canonical element-type string (`NOT NULL DEFAULT 'f64'`)                                          |
-| `element_shape`     | TEXT    | JSON array of per-step dims (`[]` = scalar)                                                       |
-| `application_data`  | TEXT    | Opaque package-owned payload (JSON), verbatim; `NULL` if unset                                    |
-| `data_hash`         | BLOB    | 32-byte SHA-256 of the array; links to an HDF5 column/variable                                    |
-| `features_hash`     | BLOB    | 32-byte SHA-256 of the feature map                                                                |
+| Column              | Type    | Notes                                                                                                                                 |
+| ------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`                | INTEGER | Primary key, `AUTOINCREMENT`; surfaced as `association_id` — immutable, store-local; assigned by the catalog or supplied by an import |
+| `owner_id`          | INTEGER | Owner identity; signed 64-bit integer identifier (part of key)                                                                        |
+| `owner_type`        | TEXT    | Owner's concrete type, descriptive                                                                                                    |
+| `owner_category`    | INTEGER | Code, `CHECK` in (0, 1); part of key — see below                                                                                      |
+| `time_series_type`  | INTEGER | Code, `CHECK` between 0 and 5; part of key — see below                                                                                |
+| `name`              | TEXT    | Series name                                                                                                                           |
+| `initial_timestamp` | TEXT    | RFC 3339 string; `NULL` for `NonSequentialTimeSeries`                                                                                 |
+| `resolution`        | TEXT    | ISO-8601 duration (`PT1H`, `P1M`, …); `NULL` for non-sequential                                                                       |
+| `length`            | INTEGER | Number of timesteps                                                                                                                   |
+| `horizon`           | TEXT    | ISO-8601 forecast horizon; `NULL` for non-forecasts                                                                                   |
+| `interval`          | TEXT    | ISO-8601 forecast interval; `NULL` for non-forecasts                                                                                  |
+| `count`             | INTEGER | Forecast window count; `NULL` for non-forecasts                                                                                       |
+| `timestamps_hash`   | BLOB    | 32-byte SHA-256 of the timestamp vector (`NonSequentialTimeSeries`)                                                                   |
+| `units`             | TEXT    | Free-form units label                                                                                                                 |
+| `quantity_kind`     | TEXT    | What the values measure (QUDT `QuantityKind` name); `NULL` if unset                                                                   |
+| `unit_system`       | TEXT    | `natural_units` or `component_base`; `NULL` means _unspecified_                                                                       |
+| `time_reference`    | TEXT    | How the timestamps were spelled (below); `NULL` means _unspecified_                                                                   |
+| `component_field`   | TEXT    | Owning component's field these values vary; `NULL` if unset                                                                           |
+| `percentiles_json`  | TEXT    | JSON array of percentiles for `Probabilistic`; `NULL` else                                                                            |
+| `element_type`      | TEXT    | Canonical element-type string (`NOT NULL DEFAULT 'f64'`)                                                                              |
+| `element_shape`     | TEXT    | JSON array of per-step dims (`[]` = scalar)                                                                                           |
+| `application_data`  | TEXT    | Opaque package-owned payload (JSON), verbatim; `NULL` if unset                                                                        |
+| `data_hash`         | BLOB    | 32-byte SHA-256 of the array; links to an HDF5 column/variable                                                                        |
+| `features_hash`     | BLOB    | 32-byte SHA-256 of the feature map                                                                                                    |
 
 The two content-address hashes are the last two columns. Column order is not load-bearing — every
 statement names its columns — so the layout is chosen for readability.
@@ -541,6 +541,30 @@ Added additively, so it lands on an existing store's first writable open without
 `data_format_version` change. A store predating it has no row here and no root attribute, and reads
 as unstamped rather than as a mismatch. Because a read-only open cannot run the DDL, every read of
 this table tolerates the table being absent.
+
+### Importing an id
+
+A writer normally leaves `association_id` unset (`0` in every binding) and the catalog assigns the
+row's `id`. A writer may instead **supply** one, which is how a document's own ids are imported so
+that an export and a re-import preserve them: a consumer that persisted an `association_id` keeps
+resolving it against the rebuilt store.
+
+`AUTOINCREMENT` makes this safe without extra bookkeeping. Inserting an explicit `id` advances the
+`sqlite_sequence` mark to it, so a later catalog-assigned id cannot land on one the document already
+used, whatever order the rows arrive in. A supplied id that another row already holds is refused
+(`InvalidParameter`, naming the id) rather than renumbered.
+
+Two limits follow from the id being store-local:
+
+- **Import into a fresh store.** Importing into a store that already holds associations will
+  generally collide, and the store will not pick new ids to paper over it. Rebuild into an empty
+  store — that is the supported round trip.
+- **"Never reused" is the catalog's guarantee about ids it assigns.** A writer that supplies an id
+  whose row was deleted owns that guarantee itself; nothing stops it.
+
+The OpenAPI row schemas currently mark `association_id` `readOnly`, which describes the export
+direction only. A consumer that imports ids is relying on this store-level contract, not on that
+schema flag.
 
 ### Indexes
 

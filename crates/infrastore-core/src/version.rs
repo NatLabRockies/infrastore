@@ -59,8 +59,16 @@
 /// a bare rowid reissues `MAX(id) + 1`, so deleting the highest row frees its id
 /// and a reference a consumer already holds would later resolve to a different
 /// series. `sqlite_sequence` holds a mark that only advances. The id is therefore
-/// immutable across a rename or an owner reassignment, and never reused -- a
-/// stale reference resolves to nothing. The cost is that it is store-local (two
-/// independently built stores do not agree on an id for the same association)
-/// and that ids are gapped, since a rolled-back insert spends one.
+/// immutable across a rename or an owner reassignment, and the catalog never
+/// reissues one -- a stale reference resolves to nothing.
+///
+/// A writer may also *supply* an id instead of letting the catalog assign one,
+/// which is how a document's own ids are imported: `AUTOINCREMENT` seeds its mark
+/// from an explicitly inserted id, so a later assignment cannot land on one the
+/// document used, and a duplicate is refused by the primary key rather than
+/// renumbered. Two consequences worth naming. The id is store-local, so importing
+/// into a store that already holds rows generally collides; a round trip through a
+/// *fresh* store is the supported case. And "never reused" is the catalog's
+/// guarantee about ids it assigns -- a writer that supplies an id whose row was
+/// deleted owns that guarantee itself.
 pub const DATA_FORMAT_VERSION: &str = "0.18.0";

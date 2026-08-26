@@ -366,13 +366,15 @@ pub struct TimeSeriesMetadata {
     pub owner_id: i64,
     pub owner_type: String,
     pub owner_category: OwnerCategory,
-    /// The catalog row's primary key, assigned by SQLite when the row is
-    /// inserted. It survives a rename or an owner reassignment, and it is
-    /// store-local rather than portable across stores.
+    /// The catalog row's primary key. It survives a rename or an owner
+    /// reassignment, and it is store-local rather than portable across stores.
     ///
-    /// Read-only: on a read this is the stored value; on a write it is ignored,
-    /// so reusing a metadata record for a new association cannot carry the
-    /// source row's id onto it.
+    /// On a read this is the stored value. On a write, `0` asks the catalog to
+    /// assign one (the ordinary path) and any other value is stored as given, so
+    /// a document's own id can be imported and an export/import round trip
+    /// preserves it. Because a non-zero value is *honored*, clear it to `0` when
+    /// reusing a metadata record for a new association -- otherwise the insert
+    /// collides on the source row's id.
     pub association_id: i64,
     pub time_series_type: TimeSeriesType,
     pub name: String,

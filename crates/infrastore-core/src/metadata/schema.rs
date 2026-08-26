@@ -15,9 +15,10 @@
 pub const DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS time_series_associations (
     -- The rowid, surfaced to consumers as `association_id`. Assigned by SQLite
-    -- when the row is inserted, and never moved after: a rename or an owner
-    -- reassignment leaves it alone, so a consumer may persist it as a durable
-    -- reference.
+    -- when the row is inserted -- or supplied by the caller, so a document's own
+    -- id survives an export/import round trip. Never moved after: a rename or an
+    -- owner reassignment leaves it alone, so a consumer may persist it as a
+    -- durable reference.
     --
     -- AUTOINCREMENT, not a bare `INTEGER PRIMARY KEY`, is load-bearing. A bare
     -- rowid reissues `MAX(id) + 1`, so deleting the highest row frees its id and

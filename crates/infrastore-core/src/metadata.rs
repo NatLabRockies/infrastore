@@ -961,19 +961,27 @@ impl MetadataStore {
             None => None,
         };
         let element_shape_json = serde_json::to_string(&meta.element_shape)?;
+        // `None` (SQL NULL) lets SQLite assign the rowid; `Some` imports the id a
+        // caller read out of a document, which is what makes an export/import
+        // round trip preserve it. A duplicate is refused by the primary key.
+        let requested_id = match meta.association_id {
+            0 => None,
+            id => Some(id),
+        };
         // `prepare_cached` so bulk adds parse each INSERT's SQL once per
         // connection instead of once per row.
         let mut insert_stmt = tx.prepare_cached(
             "INSERT INTO time_series_associations
-             (owner_id, owner_type, owner_category, time_series_type, name,
+             (id, owner_id, owner_type, owner_category, time_series_type, name,
               data_hash, initial_timestamp, resolution, length, horizon, interval, count,
               timestamps_hash, units, quantity_kind, unit_system, time_reference,
               component_field, percentiles_json, element_type, element_shape,
               application_data, features_hash)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                     ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+                     ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
         )?;
         let result = insert_stmt.execute(params![
+            requested_id,
             meta.owner_id,
             meta.owner_type,
             meta.owner_category.code(),
@@ -1003,7 +1011,12 @@ impl MetadataStore {
 
         let id = match result {
             Ok(_) => tx.last_insert_rowid(),
-            Err(e) => return Err(map_unique_violation(e)),
+            Err(rusqlite::Error::SqliteFailure(err, _))
+                if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                return Err(classify_association_violation(tx, requested_id)?);
+            }
+            Err(e) => return Err(e.into()),
         };
 
         // `insert` on the cache returns true the first time this batch sees the
@@ -2689,19 +2702,34 @@ fn parse_feature_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, Featu
     Ok((key, value))
 }
 
-/// Map a SQLite UNIQUE-index constraint violation to the spec's
-/// [`TimeSeriesError::DuplicateTimeSeries`], passing every other error through.
-/// Shared by the `INSERT` and `UPDATE` paths where the association uniqueness
-/// index can fire (`rename`, `replace_owner`).
-fn map_unique_violation(e: rusqlite::Error) -> TimeSeriesError {
-    match e {
-        rusqlite::Error::SqliteFailure(err, _)
-            if err.code == rusqlite::ErrorCode::ConstraintViolation =>
-        {
-            TimeSeriesError::DuplicateTimeSeries
-        }
-        other => other.into(),
+/// Classify a constraint violation on an association `INSERT`.
+///
+/// Two constraints can fire, and SQLite's choice of which to name is
+/// unspecified, so this asks the catalog instead of parsing the message: if the
+/// caller asked for a specific `association_id` and a row already holds it, the
+/// import collided on the id; otherwise it repeated an identity tuple.
+///
+/// Only reachable with an imported id for the first case -- an id SQLite assigns
+/// is fresh by construction.
+fn classify_association_violation(
+    tx: &Connection,
+    requested_id: Option<i64>,
+) -> Result<TimeSeriesError> {
+    let Some(id) = requested_id else {
+        return Ok(TimeSeriesError::DuplicateTimeSeries);
+    };
+    let taken: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM time_series_associations WHERE id = ?1)",
+        params![id],
+        |r| r.get(0),
+    )?;
+    if taken {
+        return Ok(TimeSeriesError::InvalidParameter(format!(
+            "association_id {id} is already held by another association; an imported id \
+             must be free in the target store"
+        )));
     }
+    Ok(TimeSeriesError::DuplicateTimeSeries)
 }
 
 /// Open a catalog file read-only, including on read-only media.
@@ -3700,16 +3728,48 @@ mod association_id_tests {
     }
 
     #[test]
-    fn insert_ignores_an_id_carried_on_the_record_and_assigns_its_own() {
+    fn insert_imports_a_supplied_id_as_given() {
         let store = MetadataStore::open_in_memory().unwrap();
-        // A record reused from another row carries that row's id. The insert must
-        // not honor it: the id belongs to the catalog, not to the caller.
-        let mut meta = sample_metadata(1, "reused");
+        // What importing a document does: the row carries the id the document
+        // recorded, and the catalog stores it rather than renumbering.
+        let mut meta = sample_metadata(1, "imported");
         meta.association_id = 9_999;
         store.insert(&meta).unwrap();
 
         let rows = store.list(&MetadataFilter::default()).unwrap();
-        assert_eq!(rows[0].association_id, 1);
+        assert_eq!(rows[0].association_id, 9_999);
+    }
+
+    #[test]
+    fn an_id_assigned_after_an_import_lands_past_it() {
+        let store = MetadataStore::open_in_memory().unwrap();
+        let mut imported = sample_metadata(1, "imported");
+        imported.association_id = 500;
+        store.insert(&imported).unwrap();
+
+        // AUTOINCREMENT seeds its mark from the imported id, so a later add
+        // cannot land on one the document already used.
+        let assigned = store.insert(&sample_metadata(1, "fresh")).unwrap();
+        assert_eq!(assigned, 501);
+    }
+
+    #[test]
+    fn importing_an_id_another_row_already_holds_is_refused() {
+        let store = MetadataStore::open_in_memory().unwrap();
+        let mut first = sample_metadata(1, "first");
+        first.association_id = 42;
+        store.insert(&first).unwrap();
+
+        // A distinct identity asking for a taken id is an id collision, not a
+        // duplicate series -- the error has to say which.
+        let mut second = sample_metadata(2, "second");
+        second.association_id = 42;
+        match store.insert(&second).unwrap_err() {
+            TimeSeriesError::InvalidParameter(msg) => {
+                assert!(msg.contains("42"), "message must name the id: {msg}");
+            }
+            other => panic!("expected InvalidParameter, got {other:?}"),
+        }
     }
 
     #[test]

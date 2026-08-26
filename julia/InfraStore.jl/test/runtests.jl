@@ -270,6 +270,77 @@ end
     @test third > maximum(ids)
 end
 
+@testset "InfraStore.jl imported association ids survive a round trip" begin
+    initial = DateTime(2024, 1, 1)
+    resolution = Hour(1)
+    names = ["load", "wind", "solar"]
+
+    source = Store()
+    for (i, name) in enumerate(names)
+        add_time_series!(
+            source, i, "Generator", Component,
+            SingleTimeSeries(initial, resolution, collect(1.0:24.0), name),
+        )
+    end
+    flush!(source)
+    exported = [(r.association_id, r.name, r.owner_id) for r in list_time_series(source)]
+
+    # Rebuild into a fresh store carrying each row's exported id, in reverse
+    # order, so the ids cannot be an artifact of insertion order.
+    target = Store()
+    batch = AddBatch()
+    for (id, name, owner) in reverse(exported)
+        add_time_series!(
+            batch, owner, "Generator", Component,
+            SingleTimeSeries(initial, resolution, collect(1.0:24.0), name);
+            association_id=id,
+        )
+    end
+    add_time_series_bulk!(target, batch)
+    flush!(target)
+
+    for (id, name, _) in exported
+        meta = get_time_series_metadata(target, Int64(id))
+        @test meta.association_id == id
+        @test meta.name == name
+    end
+
+    # A later add lands past every imported id.
+    add_time_series!(
+        target, 9, "Generator", Component,
+        SingleTimeSeries(initial, resolution, collect(1.0:24.0), "added_after"),
+    )
+    flush!(target)
+    fresh = only(
+        r.association_id for r in list_time_series(target) if r.name == "added_after"
+    )
+    @test fresh > maximum(id for (id, _, _) in exported)
+
+    close!(source)
+    close!(target)
+end
+
+@testset "InfraStore.jl importing a taken association id is refused" begin
+    store = Store()
+    initial = DateTime(2024, 1, 1)
+    add_time_series!(
+        store, 1, "Generator", Component,
+        SingleTimeSeries(initial, Hour(1), collect(1.0:24.0), "first"),
+    )
+    flush!(store)
+    taken = only(r.association_id for r in list_time_series(store))
+
+    batch = AddBatch()
+    add_time_series!(
+        batch, 2, "Generator", Component,
+        SingleTimeSeries(initial, Hour(1), collect(1.0:24.0), "second");
+        association_id=taken,
+    )
+    @test_throws InfraStore.InvalidParameterError add_time_series_bulk!(store, batch)
+    @test length(list_time_series(store)) == 1
+    close!(store)
+end
+
 @testset "InfraStore.jl persistent round-trip" begin
     mktempdir() do dir
         path = joinpath(dir, "store.h5")

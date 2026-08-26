@@ -2105,11 +2105,15 @@ impl PyStore {
     /// `items` is a list of dicts whose keys mirror `add_time_series`'s
     /// parameters: `owner_id`, `owner_type`, `owner_category`,
     /// `time_series`, and optionally `features`, `units`, `element_type`,
-    /// `application_data`, `quantity_kind`, `unit_system`, and
-    /// `component_field`. Any other key raises, as the misspelled keyword it
+    /// `application_data`, `quantity_kind`, `unit_system`, `component_field`,
+    /// and `association_id`. Any other key raises, as the misspelled keyword it
     /// almost always is: `add_time_series` rejects one for free, and reading
     /// only the keys it knows made the bulk path silently drop `unit_sytem` and
     /// every other typo, along with whatever it was carrying.
+    ///
+    /// `association_id` imports a document's own id instead of letting the
+    /// catalog assign one, so an export/import round trip preserves it; omit it
+    /// (or pass ``0``) on the ordinary path. The id must be free in this store.
     ///
     /// All-or-nothing: if any item fails, the entire batch is rolled back.
     /// Returns the new keys in input order.
@@ -2163,6 +2167,10 @@ impl PyStore {
                 Some(e) if !e.is_none() => Some(parse_element_type(&e.extract::<String>()?)?),
                 _ => None,
             };
+            let association_id: i64 = match item.get_item("association_id")? {
+                Some(a) if !a.is_none() => a.extract()?,
+                _ => 0,
+            };
             let mut data = extract_time_series_data(&time_series)?;
             // As in `add_time_series`: a key the item omits leaves the series'
             // own descriptor alone rather than clearing it.
@@ -2193,6 +2201,7 @@ impl PyStore {
                 owner_category: owner_category.into(),
                 data,
                 features,
+                association_id,
             });
         }
         let keys = self
@@ -3789,7 +3798,7 @@ fn pyany_to_requested_type_opt(
 
 /// Decode a 64-character lowercase-or-uppercase hex string into a 32-byte hash.
 /// Every key `add_time_series_bulk` reads out of one item dict.
-const BULK_ITEM_KEYS: [&str; 12] = [
+const BULK_ITEM_KEYS: [&str; 13] = [
     "owner_id",
     "owner_type",
     "owner_category",
@@ -3802,6 +3811,7 @@ const BULK_ITEM_KEYS: [&str; 12] = [
     "unit_system",
     "time_reference",
     "component_field",
+    "association_id",
 ];
 
 /// Refuse an item carrying a key the bulk add does not read.

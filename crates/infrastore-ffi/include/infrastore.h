@@ -66,8 +66,10 @@
  * for and refuses the mismatch.
  *
  * 1: the first generation to declare itself. `infrastore_association_id` is
- *    gone — the id is the catalog row's primary key, assigned by SQLite at
- *    insert, so there is nothing for a caller to derive or to pass in.
+ *    gone — the id is the catalog row's primary key, not anything a caller
+ *    derives. `infrastore_batch_add_*` take a trailing `association_id`: `0`
+ *    lets the catalog assign one, and any other value imports a document's own
+ *    id so an export/import round trip preserves it.
  */
 #define INFRASTORE_ABI_VERSION 1
 
@@ -1256,7 +1258,8 @@ int32_t infrastore_batch_add_single(struct InfraStoreBatch *batch,
                                     const char *quantity_kind,
                                     const char *unit_system,
                                     const char *time_reference,
-                                    const char *component_field);
+                                    const char *component_field,
+                                    int64_t association_id);
 
 /**
  * Append a NonSequentialTimeSeries to a batch. Arguments match
@@ -1288,7 +1291,8 @@ int32_t infrastore_batch_add_non_sequential(struct InfraStoreBatch *batch,
                                             const char *quantity_kind,
                                             const char *unit_system,
                                             const char *time_reference,
-                                            const char *component_field);
+                                            const char *component_field,
+                                            int64_t association_id);
 
 /**
  * Append a dense forecast (`ts_type` 2=Deterministic or 5=Scenarios) to a
@@ -1324,7 +1328,8 @@ int32_t infrastore_batch_add_forecast(struct InfraStoreBatch *batch,
                                       const char *quantity_kind,
                                       const char *unit_system,
                                       const char *time_reference,
-                                      const char *component_field);
+                                      const char *component_field,
+                                      int64_t association_id);
 
 /**
  * Append a `Probabilistic` forecast to a batch. Arguments match
@@ -1361,7 +1366,8 @@ int32_t infrastore_batch_add_probabilistic(struct InfraStoreBatch *batch,
                                            const char *quantity_kind,
                                            const char *unit_system,
                                            const char *time_reference,
-                                           const char *component_field);
+                                           const char *component_field,
+                                           int64_t association_id);
 
 /**
  * Submit every request in `batch` through one all-or-nothing bulk add. On

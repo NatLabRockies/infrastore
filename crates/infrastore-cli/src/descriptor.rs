@@ -630,6 +630,7 @@ impl Descriptor {
             owner_category,
             data,
             features: self.features()?,
+            association_id: 0,
         })
     }
 
@@ -770,6 +771,7 @@ impl Descriptor {
                 owner_category,
                 data,
                 features: features.clone(),
+                association_id: 0,
             });
         }
         Ok(out)

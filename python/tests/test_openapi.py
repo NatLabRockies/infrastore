@@ -143,3 +143,93 @@ class TestSupplementalAttributeExportImport:
         with pytest.raises(infrastore.DuplicateAssociationError):
             store.import_supplemental_attribute_associations_openapi(json.dumps([row, row]))
         assert store.export_supplemental_attribute_associations_openapi() == "[]"
+
+
+class TestImportedAssociationIds:
+    """A supplied ``association_id`` is stored as given, so an export and a
+    re-import into a fresh store preserve every id."""
+
+    def _series(self, name):
+        return SingleTimeSeries(
+            initial_timestamp=T0,
+            resolution=HOUR,
+            data=np.arange(3.0),
+            name=name,
+        )
+
+    def test_ids_survive_export_and_reimport(self):
+        source = Store.create(in_memory=True)
+        for owner, name in [(1, "load"), (2, "wind"), (3, "solar")]:
+            source.add_time_series(
+                owner_id=owner,
+                owner_type="Generator",
+                owner_category=OwnerCategory.Component,
+                time_series=self._series(name),
+            )
+        exported = [
+            (r["association_id"], r["name"], r["owner_id"])
+            for r in json.loads(source.export_time_series_associations_openapi())
+        ]
+
+        # Reversed, so a preserved id cannot be an artifact of insertion order.
+        target = Store.create(in_memory=True)
+        target.add_time_series_bulk(
+            [
+                {
+                    "owner_id": owner,
+                    "owner_type": "Generator",
+                    "owner_category": OwnerCategory.Component,
+                    "time_series": self._series(name),
+                    "association_id": assoc_id,
+                }
+                for assoc_id, name, owner in reversed(exported)
+            ]
+        )
+
+        # Verified through the export: Python has no by-id getter and does not
+        # surface `association_id` on its metadata object, though core, the C ABI,
+        # and Julia all do. The export is the only read path for the id here.
+        reimported = {
+            r["association_id"]: r["name"]
+            for r in json.loads(target.export_time_series_associations_openapi())
+        }
+        for assoc_id, name, _ in exported:
+            assert reimported[assoc_id] == name
+
+        # A later add lands past every imported id.
+        target.add_time_series(
+            owner_id=9,
+            owner_type="Generator",
+            owner_category=OwnerCategory.Component,
+            time_series=self._series("added_after"),
+        )
+        rows = json.loads(target.export_time_series_associations_openapi())
+        fresh = next(r["association_id"] for r in rows if r["name"] == "added_after")
+        assert fresh > max(i for i, _, _ in exported)
+
+    def test_importing_a_taken_id_is_refused(self):
+        store = Store.create(in_memory=True)
+        store.add_time_series(
+            owner_id=1,
+            owner_type="Generator",
+            owner_category=OwnerCategory.Component,
+            time_series=self._series("first"),
+        )
+        rows = json.loads(store.export_time_series_associations_openapi())
+        taken = rows[0]["association_id"]
+
+        with pytest.raises(infrastore.InvalidParameterError, match=str(taken)):
+            store.add_time_series_bulk(
+                [
+                    {
+                        "owner_id": 2,
+                        "owner_type": "Generator",
+                        "owner_category": OwnerCategory.Component,
+                        "time_series": self._series("second"),
+                        "association_id": taken,
+                    }
+                ]
+            )
+
+        # All-or-nothing: the refused batch left nothing behind.
+        assert len(json.loads(store.export_time_series_associations_openapi())) == 1

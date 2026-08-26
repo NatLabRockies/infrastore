@@ -904,6 +904,7 @@ unsafe fn build_single_request(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
+    association_id: i64,
 ) -> Result<core_lib::AddRequest, i32> {
     if data_ptr.is_null() {
         set_error("data_ptr is null");
@@ -970,6 +971,7 @@ unsafe fn build_single_request(
         owner_category,
         data,
         features,
+        association_id,
     })
 }
 
@@ -1049,6 +1051,7 @@ pub unsafe extern "C" fn infrastore_store_add_single(
             unit_system,
             time_reference,
             component_field,
+            0,
         )
     } {
         Ok(r) => r,
@@ -1090,6 +1093,7 @@ unsafe fn build_non_sequential_request(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
+    association_id: i64,
 ) -> Result<core_lib::AddRequest, i32> {
     if timestamps_unix_ms.is_null() || data_ptr.is_null() {
         set_error("an input pointer is null");
@@ -1152,6 +1156,7 @@ unsafe fn build_non_sequential_request(
         owner_category,
         data,
         features,
+        association_id,
     })
 }
 
@@ -1220,6 +1225,7 @@ pub unsafe extern "C" fn infrastore_store_add_non_sequential(
             unit_system,
             time_reference,
             component_field,
+            0,
         )
     } {
         Ok(r) => r,
@@ -3272,6 +3278,7 @@ pub unsafe extern "C" fn infrastore_store_add_forecast(
             unit_system,
             time_reference,
             component_field,
+            0,
         )
     } {
         Ok(r) => r,
@@ -3315,6 +3322,7 @@ unsafe fn build_forecast_request(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
+    association_id: i64,
 ) -> Result<core_lib::AddRequest, i32> {
     if data_ptr.is_null() {
         set_error("data_ptr is null");
@@ -3421,6 +3429,7 @@ unsafe fn build_forecast_request(
         owner_category,
         data,
         features,
+        association_id,
     })
 }
 
@@ -3494,6 +3503,7 @@ pub unsafe extern "C" fn infrastore_store_add_probabilistic(
             unit_system,
             time_reference,
             component_field,
+            0,
         )
     } {
         Ok(r) => r,
@@ -3538,6 +3548,7 @@ unsafe fn build_probabilistic_request(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
+    association_id: i64,
 ) -> Result<core_lib::AddRequest, i32> {
     if data_ptr.is_null() || percentiles_ptr.is_null() {
         set_error("a required pointer is null");
@@ -3607,6 +3618,7 @@ unsafe fn build_probabilistic_request(
         owner_category,
         data,
         features,
+        association_id,
     })
 }
 
@@ -3627,8 +3639,10 @@ unsafe fn build_probabilistic_request(
 /// for and refuses the mismatch.
 ///
 /// 1: the first generation to declare itself. `infrastore_association_id` is
-///    gone — the id is the catalog row's primary key, assigned by SQLite at
-///    insert, so there is nothing for a caller to derive or to pass in.
+///    gone — the id is the catalog row's primary key, not anything a caller
+///    derives. `infrastore_batch_add_*` take a trailing `association_id`: `0`
+///    lets the catalog assign one, and any other value imports a document's own
+///    id so an export/import round trip preserves it.
 pub const INFRASTORE_ABI_VERSION: u32 = 1;
 
 /// Read [`INFRASTORE_ABI_VERSION`] out of the loaded library.
@@ -3700,6 +3714,7 @@ pub unsafe extern "C" fn infrastore_batch_add_single(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
+    association_id: i64,
 ) -> i32 {
     clear_error();
     let batch = match unsafe { batch.as_mut() } {
@@ -3729,6 +3744,7 @@ pub unsafe extern "C" fn infrastore_batch_add_single(
             unit_system,
             time_reference,
             component_field,
+            association_id,
         )
     } {
         Ok(req) => {
@@ -3771,6 +3787,7 @@ pub unsafe extern "C" fn infrastore_batch_add_non_sequential(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
+    association_id: i64,
 ) -> i32 {
     clear_error();
     let batch = match unsafe { batch.as_mut() } {
@@ -3800,6 +3817,7 @@ pub unsafe extern "C" fn infrastore_batch_add_non_sequential(
             unit_system,
             time_reference,
             component_field,
+            association_id,
         )
     } {
         Ok(req) => {
@@ -3846,6 +3864,7 @@ pub unsafe extern "C" fn infrastore_batch_add_forecast(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
+    association_id: i64,
 ) -> i32 {
     clear_error();
     let batch = match unsafe { batch.as_mut() } {
@@ -3879,6 +3898,7 @@ pub unsafe extern "C" fn infrastore_batch_add_forecast(
             unit_system,
             time_reference,
             component_field,
+            association_id,
         )
     } {
         Ok(req) => {
@@ -3926,6 +3946,7 @@ pub unsafe extern "C" fn infrastore_batch_add_probabilistic(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
+    association_id: i64,
 ) -> i32 {
     clear_error();
     let batch = match unsafe { batch.as_mut() } {
@@ -3960,6 +3981,7 @@ pub unsafe extern "C" fn infrastore_batch_add_probabilistic(
             unit_system,
             time_reference,
             component_field,
+            association_id,
         )
     } {
         Ok(req) => {

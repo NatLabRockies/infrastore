@@ -199,6 +199,7 @@ fn make_sts_requests(count: usize, length: usize) -> Vec<AddRequest> {
                         .with_units("MW"),
                 ),
                 features: Features::default(),
+                association_id: 0,
             }
         })
         .collect()
@@ -232,6 +233,7 @@ fn make_det_requests(count: usize, length: usize) -> Vec<AddRequest> {
                 owner_category: OwnerCategory::Component,
                 data: TimeSeriesData::Deterministic(det),
                 features: Features::default(),
+                association_id: 0,
             }
         })
         .collect()

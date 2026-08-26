@@ -155,6 +155,15 @@ pub struct AddRequest {
     pub owner_category: OwnerCategory,
     pub data: TimeSeriesData,
     pub features: Features,
+    /// An `association_id` to store on this row, or `0` to let the catalog assign
+    /// one. `0` is the ordinary path.
+    ///
+    /// Set it to import a document's own id so an export/import round trip
+    /// preserves it: a consumer that persisted the id keeps resolving it against
+    /// the rebuilt store. The id must be free in the target — a collision is
+    /// refused rather than renumbered, which is why importing into a store that
+    /// already holds rows generally cannot work.
+    pub association_id: i64,
 }
 
 impl AddRequest {
@@ -179,12 +188,20 @@ impl AddRequest {
             owner_category,
             data,
             features: Features::new(),
+            association_id: 0,
         }
     }
 
     /// Set the feature set.
     pub fn with_features(mut self, features: Features) -> Self {
         self.features = features;
+        self
+    }
+
+    /// Store this row under `association_id` rather than one the catalog assigns
+    /// — how a document's own id is imported. See [`Self::association_id`].
+    pub fn with_association_id(mut self, association_id: i64) -> Self {
+        self.association_id = association_id;
         self
     }
 }
@@ -1125,6 +1142,7 @@ impl Store {
             owner_category,
             data,
             features,
+            association_id: 0,
         }])
         .map(|mut keys| keys.remove(0))
     }
@@ -1540,8 +1558,8 @@ impl Store {
         let mut meta = self.metadata.get_by_key(src)?;
         meta.owner_id = dst_owner_id;
         meta.owner_type = dst_owner_type.to_string();
-        // The copy is a new association and gets its own id: the insert ignores
-        // whatever the source row's metadata carried.
+        // The copy is a new association and must get its own id, not the
+        // source's -- the insert honors a non-zero one, so clear it.
         meta.association_id = 0;
         if let Some(name) = new_name {
             meta.name = name.to_string();
@@ -2626,9 +2644,9 @@ impl Store {
                 horizon: Some(horizon),
                 interval: Some(interval),
                 count: Some(count),
-                // Set explicitly because `..src` would otherwise carry the
-                // source row's id into a record for a second row. The insert
-                // ignores it either way.
+                // Set explicitly: `..src` would otherwise carry the source row's
+                // id onto a second row, which the insert now honors and would
+                // refuse as a collision.
                 association_id: 0,
                 ..src.clone()
             });
@@ -3803,6 +3821,7 @@ impl BulkAdd<'_> {
             owner_category,
             data,
             features,
+            association_id: 0,
         })
     }
 
@@ -3901,8 +3920,8 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
                     owner_id: item.owner_id,
                     owner_type: item.owner_type.clone(),
                     owner_category: item.owner_category,
-                    // Assigned by the catalog at insert; ignored here.
-                    association_id: 0,
+                    // `0` unless the caller is importing a document's own id.
+                    association_id: item.association_id,
                     time_series_type: TimeSeriesType::SingleTimeSeries,
                     name: single.name.clone(),
                     data_hash: hash,
@@ -3949,8 +3968,8 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
                     owner_id: item.owner_id,
                     owner_type: item.owner_type.clone(),
                     owner_category: item.owner_category,
-                    // Assigned by the catalog at insert; ignored here.
-                    association_id: 0,
+                    // `0` unless the caller is importing a document's own id.
+                    association_id: item.association_id,
                     time_series_type: TimeSeriesType::NonSequentialTimeSeries,
                     name: non_sequential.name.clone(),
                     data_hash: hash,
@@ -4560,8 +4579,8 @@ fn forecast_metadata(
         owner_id: item.owner_id,
         owner_type: item.owner_type.clone(),
         owner_category: item.owner_category,
-        // Assigned by the catalog at insert; ignored here.
-        association_id: 0,
+        // `0` unless the caller is importing a document's own id.
+        association_id: item.association_id,
         time_series_type,
         name: name.to_owned(),
         data_hash: array_hash(data),
