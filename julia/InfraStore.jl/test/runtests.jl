@@ -274,6 +274,35 @@ end
     @test minted > reserved + 1
 end
 
+@testset "InfraStore.jl pooled association ids" begin
+    store = Store()
+
+    # Ids come out ascending and never repeat, whatever the block boundaries are.
+    ids = [InfraStore.next_association_id!(store) for _ in 1:600]
+    @test length(unique(ids)) == 600
+    @test issorted(ids)
+    @test all(id -> id > 0, ids)
+
+    # An explicit reservation must not land inside a block the pool already holds:
+    # the store's floor advanced by the whole block when the pool refilled.
+    reserved = reserve_association_ids!(store, 4)
+    @test reserved > maximum(ids)
+    following = InfraStore.next_association_id!(store)
+    @test following ∉ (reserved):(reserved + 3)
+
+    # A pooled id is a real id: a row written under it is addressable by it.
+    id = InfraStore.next_association_id!(store)
+    batch = AddBatch()
+    add_time_series!(
+        batch, 1, "Generator", Component,
+        SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(1.0:24.0), "load");
+        association_id=id,
+    )
+    add_time_series_bulk!(store, batch)
+    flush!(store)
+    @test get_time_series_metadata(store, id).association_id == id
+end
+
 @testset "InfraStore.jl persistent round-trip" begin
     mktempdir() do dir
         path = joinpath(dir, "store.h5")

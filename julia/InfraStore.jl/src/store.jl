@@ -20,8 +20,17 @@ end
 
 mutable struct Store
     handle::Ptr{Cvoid}
+    """
+    Next id from the block this store last reserved, and one past its end.
+
+    Only [`next_association_id!`](@ref) touches these. Equal values mean the
+    block is spent and the next call refills. See that function for why the
+    block exists.
+    """
+    id_pool_next::Int64
+    id_pool_stop::Int64
     function Store(handle::Ptr{Cvoid})
-        s = new(handle)
+        s = new(handle, 0, 0)
         finalizer(close!, s)
         return s
     end
