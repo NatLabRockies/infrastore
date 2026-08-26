@@ -56,6 +56,22 @@
 #define INFRASTORE_ERR_INTERNAL 99
 
 /**
+ * The generation of this C ABI: bumped whenever an exported signature changes
+ * in a way a caller cannot detect on its own.
+ *
+ * A C caller that passes one argument too many does not fail — the calling
+ * convention simply ignores the surplus — so a binding built against a newer
+ * header and loaded against an older library corrupts data silently rather
+ * than erroring. A binding compares this against the generation it was written
+ * for and refuses the mismatch.
+ *
+ * 1: the first generation to declare itself. `infrastore_batch_add_*` take a
+ *    trailing `association_id`, and `infrastore_association_id` is gone — the
+ *    id is minted by the store, not derived by the caller.
+ */
+#define INFRASTORE_ABI_VERSION 1
+
+/**
  * Buffer size a caller must provide for
  * `infrastore_store_transform_single_time_series`'s `out_interval`. An
  * ISO-8601 period is far shorter than this; the slack is deliberate.
@@ -977,31 +993,6 @@ int32_t infrastore_store_get_time_series_metadata_by_association_id(const struct
                                                                     uint64_t *out_len);
 
 /**
- * Compute the derived `association_id` for a candidate identity tuple, without
- * touching the store — a pure function of its inputs mirroring
- * `hash::association_id`. Lets a caller predict the id an insert will assign,
- * or reconstruct one for a row coming off the wire.
- *
- * # Safety
- *
- * `owner_category` (`0` = Component, `1` = SupplementalAttribute) and
- * `time_series_type` (the `INFRASTORE_TYPE_*` code) are plain scalars. `name`
- * must point to a valid, null-terminated UTF-8 string. `resolution` and
- * `interval` may each be null (absent) or a null-terminated ISO-8601 period.
- * `features_json` may be null (no features) or a null-terminated UTF-8 JSON
- * object, the same shape the catalog-filter exports accept. `out_id` must be
- * valid for writing one `i64`.
- */
-int32_t infrastore_association_id(int64_t owner_id,
-                                  int32_t owner_category,
-                                  int32_t time_series_type,
-                                  const char *name,
-                                  const char *resolution,
-                                  const char *interval,
-                                  const char *features_json,
-                                  int64_t *out_id);
-
-/**
  * True iff a SingleTimeSeries with the given attributes exists.
  *
  * # Safety
@@ -1204,6 +1195,39 @@ int32_t infrastore_store_add_probabilistic(struct InfraStore *handle,
                                            struct InfraStoreKey **out_key);
 
 /**
+ * Read [`INFRASTORE_ABI_VERSION`] out of the loaded library.
+ *
+ * # Safety
+ *
+ * Takes no arguments, touches no pointers, and returns a plain scalar. Safe to
+ * call at any time from any thread; it exists as an `extern "C"` symbol so a
+ * binding can resolve and call it before making any other call.
+ */
+uint32_t infrastore_abi_version(void);
+
+/**
+ * Reserve `count` consecutive `association_id` values and write the first to
+ * `out_first`. The caller owns `first .. first + count` and must set them on the
+ * rows it stages (`infrastore_batch_add_*`'s `association_id` argument).
+ *
+ * Lets a caller name a row's id before the row exists — the Julia binding hands
+ * the id out on a `TimeSeriesKey` at stage time, well before the batch flushes.
+ * Reserved ids are consumed whether or not they are written, so an abandoned
+ * batch leaves a gap; ids are never reused.
+ *
+ * # Safety
+ *
+ * `store` must be a non-null handle returned by one of the store constructors
+ * and not yet freed, and must not be used concurrently from another thread for
+ * the duration of this call. `count` must be greater than zero. `out_first`
+ * must be valid for writing one `i64`. Neither pointer is retained after this
+ * call returns.
+ */
+int32_t infrastore_store_reserve_association_ids(struct InfraStore *store,
+                                                 uint64_t count,
+                                                 int64_t *out_first);
+
+/**
  * Create an empty add-batch. Building a batch performs no store I/O.
  *
  * # Safety
@@ -1254,7 +1278,8 @@ int32_t infrastore_batch_add_single(struct InfraStoreBatch *batch,
                                     const char *quantity_kind,
                                     const char *unit_system,
                                     const char *time_reference,
-                                    const char *component_field);
+                                    const char *component_field,
+                                    int64_t association_id);
 
 /**
  * Append a NonSequentialTimeSeries to a batch. Arguments match
@@ -1286,7 +1311,8 @@ int32_t infrastore_batch_add_non_sequential(struct InfraStoreBatch *batch,
                                             const char *quantity_kind,
                                             const char *unit_system,
                                             const char *time_reference,
-                                            const char *component_field);
+                                            const char *component_field,
+                                            int64_t association_id);
 
 /**
  * Append a dense forecast (`ts_type` 2=Deterministic or 5=Scenarios) to a
@@ -1322,7 +1348,8 @@ int32_t infrastore_batch_add_forecast(struct InfraStoreBatch *batch,
                                       const char *quantity_kind,
                                       const char *unit_system,
                                       const char *time_reference,
-                                      const char *component_field);
+                                      const char *component_field,
+                                      int64_t association_id);
 
 /**
  * Append a `Probabilistic` forecast to a batch. Arguments match
@@ -1359,7 +1386,8 @@ int32_t infrastore_batch_add_probabilistic(struct InfraStoreBatch *batch,
                                            const char *quantity_kind,
                                            const char *unit_system,
                                            const char *time_reference,
-                                           const char *component_field);
+                                           const char *component_field,
+                                           int64_t association_id);
 
 /**
  * Submit every request in `batch` through one all-or-nothing bulk add. On

@@ -22,15 +22,6 @@ pub enum TimeSeriesError {
     #[error("duplicate association: {0}")]
     DuplicateAssociation(String),
 
-    /// The derived `association_id` for a newly inserted row collided with a
-    /// different association's id: `hash::association_id` produced the same
-    /// 53-bit value for two distinct identity tuples. Astronomically
-    /// unlikely; reported loudly rather than silently overwritten, and
-    /// distinguished from [`TimeSeriesError::DuplicateTimeSeries`] (which
-    /// means the identity tuple itself repeated).
-    #[error("association id collision: a different association already carries this id")]
-    AssociationIdCollision,
-
     #[error("invalid parameter: {0}")]
     InvalidParameter(String),
 

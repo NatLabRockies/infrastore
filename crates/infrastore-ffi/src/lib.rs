@@ -904,6 +904,7 @@ unsafe fn build_single_request(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
+    association_id: i64,
 ) -> Result<core_lib::AddRequest, i32> {
     if data_ptr.is_null() {
         set_error("data_ptr is null");
@@ -970,6 +971,7 @@ unsafe fn build_single_request(
         owner_category,
         data,
         features,
+        association_id,
     })
 }
 
@@ -1049,6 +1051,7 @@ pub unsafe extern "C" fn infrastore_store_add_single(
             unit_system,
             time_reference,
             component_field,
+            0,
         )
     } {
         Ok(r) => r,
@@ -1090,6 +1093,7 @@ unsafe fn build_non_sequential_request(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
+    association_id: i64,
 ) -> Result<core_lib::AddRequest, i32> {
     if timestamps_unix_ms.is_null() || data_ptr.is_null() {
         set_error("an input pointer is null");
@@ -1152,6 +1156,7 @@ unsafe fn build_non_sequential_request(
         owner_category,
         data,
         features,
+        association_id,
     })
 }
 
@@ -1220,6 +1225,7 @@ pub unsafe extern "C" fn infrastore_store_add_non_sequential(
             unit_system,
             time_reference,
             component_field,
+            0,
         )
     } {
         Ok(r) => r,
@@ -2817,84 +2823,6 @@ pub unsafe extern "C" fn infrastore_store_get_time_series_metadata_by_associatio
     INFRASTORE_OK
 }
 
-/// Compute the derived `association_id` for a candidate identity tuple, without
-/// touching the store — a pure function of its inputs mirroring
-/// `hash::association_id`. Lets a caller predict the id an insert will assign,
-/// or reconstruct one for a row coming off the wire.
-///
-/// # Safety
-///
-/// `owner_category` (`0` = Component, `1` = SupplementalAttribute) and
-/// `time_series_type` (the `INFRASTORE_TYPE_*` code) are plain scalars. `name`
-/// must point to a valid, null-terminated UTF-8 string. `resolution` and
-/// `interval` may each be null (absent) or a null-terminated ISO-8601 period.
-/// `features_json` may be null (no features) or a null-terminated UTF-8 JSON
-/// object, the same shape the catalog-filter exports accept. `out_id` must be
-/// valid for writing one `i64`.
-#[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn infrastore_association_id(
-    owner_id: i64,
-    owner_category: i32,
-    time_series_type: i32,
-    name: *const c_char,
-    resolution: *const c_char,
-    interval: *const c_char,
-    features_json: *const c_char,
-    out_id: *mut i64,
-) -> i32 {
-    clear_error();
-    if out_id.is_null() {
-        set_error("out_id pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let owner_category = match core_lib::OwnerCategory::from_code(owner_category as i64) {
-        Some(c) => c,
-        None => {
-            set_error(format!("invalid owner_category {owner_category}"));
-            return INFRASTORE_ERR_INVALID_PARAMETER;
-        }
-    };
-    let ts_type = match time_series_type_from_int(time_series_type) {
-        Some(t) => t,
-        None => {
-            set_error(format!("invalid time_series_type {time_series_type}"));
-            return INFRASTORE_ERR_INVALID_PARAMETER;
-        }
-    };
-    let name = match unsafe { cstr_to_str(name) } {
-        Ok(s) => s,
-        Err(_) => {
-            set_error("name is invalid");
-            return INFRASTORE_ERR_INVALID_UTF8;
-        }
-    };
-    let resolution = match unsafe { cstr_to_optional_period(resolution) } {
-        Ok(p) => p,
-        Err(c) => return c,
-    };
-    let interval = match unsafe { cstr_to_optional_period(interval) } {
-        Ok(p) => p,
-        Err(c) => return c,
-    };
-    let features = match unsafe { parse_features_json(features_json) } {
-        Ok(f) => f,
-        Err(c) => return c,
-    };
-    let f_hash = core_lib::features_hash(&features);
-    let id = core_lib::association_id(
-        owner_id,
-        owner_category,
-        ts_type,
-        name,
-        resolution.as_ref(),
-        interval.as_ref(),
-        &f_hash,
-    );
-    unsafe { *out_id = id };
-    INFRASTORE_OK
-}
-
 /// True iff a SingleTimeSeries with the given attributes exists.
 ///
 /// # Safety
@@ -3350,6 +3278,7 @@ pub unsafe extern "C" fn infrastore_store_add_forecast(
             unit_system,
             time_reference,
             component_field,
+            0,
         )
     } {
         Ok(r) => r,
@@ -3393,6 +3322,7 @@ unsafe fn build_forecast_request(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
+    association_id: i64,
 ) -> Result<core_lib::AddRequest, i32> {
     if data_ptr.is_null() {
         set_error("data_ptr is null");
@@ -3499,6 +3429,7 @@ unsafe fn build_forecast_request(
         owner_category,
         data,
         features,
+        association_id,
     })
 }
 
@@ -3572,6 +3503,7 @@ pub unsafe extern "C" fn infrastore_store_add_probabilistic(
             unit_system,
             time_reference,
             component_field,
+            0,
         )
     } {
         Ok(r) => r,
@@ -3616,6 +3548,7 @@ unsafe fn build_probabilistic_request(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
+    association_id: i64,
 ) -> Result<core_lib::AddRequest, i32> {
     if data_ptr.is_null() || percentiles_ptr.is_null() {
         set_error("a required pointer is null");
@@ -3685,6 +3618,7 @@ unsafe fn build_probabilistic_request(
         owner_category,
         data,
         features,
+        association_id,
     })
 }
 
@@ -3694,6 +3628,75 @@ unsafe fn build_probabilistic_request(
 // them through `Store::add_time_series_bulk` in ONE metadata transaction.
 // This is the fast path for ingesting many series: per-item adds pay one
 // SQLite commit each, while a batch pays a single commit for all items.
+
+/// The generation of this C ABI: bumped whenever an exported signature changes
+/// in a way a caller cannot detect on its own.
+///
+/// A C caller that passes one argument too many does not fail — the calling
+/// convention simply ignores the surplus — so a binding built against a newer
+/// header and loaded against an older library corrupts data silently rather
+/// than erroring. A binding compares this against the generation it was written
+/// for and refuses the mismatch.
+///
+/// 1: the first generation to declare itself. `infrastore_batch_add_*` take a
+///    trailing `association_id`, and `infrastore_association_id` is gone — the
+///    id is minted by the store, not derived by the caller.
+pub const INFRASTORE_ABI_VERSION: u32 = 1;
+
+/// Read [`INFRASTORE_ABI_VERSION`] out of the loaded library.
+///
+/// # Safety
+///
+/// Takes no arguments, touches no pointers, and returns a plain scalar. Safe to
+/// call at any time from any thread; it exists as an `extern "C"` symbol so a
+/// binding can resolve and call it before making any other call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_abi_version() -> u32 {
+    INFRASTORE_ABI_VERSION
+}
+
+/// Reserve `count` consecutive `association_id` values and write the first to
+/// `out_first`. The caller owns `first .. first + count` and must set them on the
+/// rows it stages (`infrastore_batch_add_*`'s `association_id` argument).
+///
+/// Lets a caller name a row's id before the row exists — the Julia binding hands
+/// the id out on a `TimeSeriesKey` at stage time, well before the batch flushes.
+/// Reserved ids are consumed whether or not they are written, so an abandoned
+/// batch leaves a gap; ids are never reused.
+///
+/// # Safety
+///
+/// `store` must be a non-null handle returned by one of the store constructors
+/// and not yet freed, and must not be used concurrently from another thread for
+/// the duration of this call. `count` must be greater than zero. `out_first`
+/// must be valid for writing one `i64`. Neither pointer is retained after this
+/// call returns.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_store_reserve_association_ids(
+    store: *mut InfraStoreHandle,
+    count: u64,
+    out_first: *mut i64,
+) -> i32 {
+    clear_error();
+    if out_first.is_null() {
+        set_error("out_first pointer is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let handle = match unsafe { store.as_mut() } {
+        Some(h) => h,
+        None => {
+            set_error("store handle is null");
+            return INFRASTORE_ERR_NULL_POINTER;
+        }
+    };
+    match handle.inner.reserve_association_ids(count) {
+        Ok(first) => {
+            unsafe { *out_first = first };
+            INFRASTORE_OK
+        }
+        Err(e) => map_core_error(e),
+    }
+}
 
 /// Create an empty add-batch. Building a batch performs no store I/O.
 ///
@@ -3752,6 +3755,7 @@ pub unsafe extern "C" fn infrastore_batch_add_single(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
+    association_id: i64,
 ) -> i32 {
     clear_error();
     let batch = match unsafe { batch.as_mut() } {
@@ -3781,6 +3785,7 @@ pub unsafe extern "C" fn infrastore_batch_add_single(
             unit_system,
             time_reference,
             component_field,
+            association_id,
         )
     } {
         Ok(req) => {
@@ -3823,6 +3828,7 @@ pub unsafe extern "C" fn infrastore_batch_add_non_sequential(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
+    association_id: i64,
 ) -> i32 {
     clear_error();
     let batch = match unsafe { batch.as_mut() } {
@@ -3852,6 +3858,7 @@ pub unsafe extern "C" fn infrastore_batch_add_non_sequential(
             unit_system,
             time_reference,
             component_field,
+            association_id,
         )
     } {
         Ok(req) => {
@@ -3898,6 +3905,7 @@ pub unsafe extern "C" fn infrastore_batch_add_forecast(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
+    association_id: i64,
 ) -> i32 {
     clear_error();
     let batch = match unsafe { batch.as_mut() } {
@@ -3931,6 +3939,7 @@ pub unsafe extern "C" fn infrastore_batch_add_forecast(
             unit_system,
             time_reference,
             component_field,
+            association_id,
         )
     } {
         Ok(req) => {
@@ -3978,6 +3987,7 @@ pub unsafe extern "C" fn infrastore_batch_add_probabilistic(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
+    association_id: i64,
 ) -> i32 {
     clear_error();
     let batch = match unsafe { batch.as_mut() } {
@@ -4012,6 +4022,7 @@ pub unsafe extern "C" fn infrastore_batch_add_probabilistic(
             unit_system,
             time_reference,
             component_field,
+            association_id,
         )
     } {
         Ok(req) => {

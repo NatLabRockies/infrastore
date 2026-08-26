@@ -58,7 +58,15 @@ class TestTimeSeriesExport:
         assert len(rows) == 1
         row = rows[0]
         want = fixture("single_time_series")
-        assert row == want
+
+        # `association_id` is minted per store and records insertion order, so
+        # this store's value is not the fixture's: this store holds one series,
+        # the fixture's holds six. The fixture pins the wire shape; the id's own
+        # contract is that it addresses the row it was exported with.
+        assert {k: v for k, v in row.items() if k != "association_id"} == {
+            k: v for k, v in want.items() if k != "association_id"
+        }
+        assert row["association_id"] > 0
 
     def test_empty_filter_exports_the_whole_catalog(self):
         store = Store.create(in_memory=True)

@@ -226,6 +226,62 @@ fn build_fixture_store() -> Store {
 
 // ---- golden: time-series export --------------------------------------------
 
+/// Close the loop the fixtures only open: every `association_id` that reaches
+/// the serialized row must address the very row it was exported from.
+///
+/// The fixtures pin what the id *serializes as*; this pins what it still *means*
+/// after serialization. Since the id is minted rather than derived, a reader
+/// cannot recompute it to check — the stored value is the only authority, so a
+/// row exported under one id and resolving to another would be undetectable
+/// downstream.
+#[test]
+fn every_exported_association_id_resolves_to_the_row_it_came_from() {
+    let store = build_fixture_store();
+    let json = store
+        .export_time_series_associations_openapi(&ListFilter::new())
+        .expect("export should succeed");
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&json).expect("export is a JSON array");
+    assert!(!rows.is_empty(), "fixture store exports no rows");
+
+    let mut seen = std::collections::HashSet::new();
+    for row in &rows {
+        let obj = row.as_object().expect("each row is a JSON object");
+        let id = obj
+            .get("association_id")
+            .and_then(serde_json::Value::as_i64)
+            .expect("every exported row carries an association_id");
+
+        assert!(id > 0, "0 is the unset sentinel and must never be exported");
+        assert!(seen.insert(id), "association_id {id} was exported twice");
+
+        let found = store
+            .get_metadata_by_association_id(id)
+            .unwrap_or_else(|e| panic!("exported association_id {id} does not resolve: {e}"));
+
+        // The row it resolves to is the row it was serialized from.
+        assert_eq!(found.association_id, id);
+        assert_eq!(
+            found.name,
+            obj.get("name").and_then(serde_json::Value::as_str).unwrap(),
+            "association_id {id} resolved to a different series",
+        );
+        assert_eq!(
+            found.owner_id,
+            obj.get("owner_id")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap(),
+            "association_id {id} resolved to a different owner",
+        );
+        assert_eq!(
+            found.time_series_type.as_str(),
+            obj.get("time_series_type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap(),
+            "association_id {id} resolved to a different time series type",
+        );
+    }
+}
+
 #[test]
 fn export_reproduces_every_time_series_fixture() {
     let store = build_fixture_store();
@@ -411,7 +467,22 @@ fn export_sort_order_does_not_depend_on_insertion_order() {
         serde_json::from_str(&ordered_json).expect("export is a JSON array");
 
     // The sort order should be identical regardless of insertion order.
-    assert_eq!(shuffled_rows, ordered_rows);
+    //
+    // `association_id` is excluded: it is minted from a per-store counter, so it
+    // records the order rows were inserted in and legitimately differs between
+    // these two stores. Nothing else may.
+    fn without_id(rows: &[serde_json::Value]) -> Vec<serde_json::Value> {
+        rows.iter()
+            .map(|r| {
+                let mut r = r.clone();
+                r.as_object_mut()
+                    .expect("each row is a JSON object")
+                    .remove("association_id");
+                r
+            })
+            .collect()
+    }
+    assert_eq!(without_id(&shuffled_rows), without_id(&ordered_rows));
 }
 
 // ---- golden: supplemental-attribute export/import round trip --------------
@@ -608,6 +679,7 @@ fn add_bulk_rejects_geometry_mismatch_and_leaves_the_whole_batch_untouched() {
             owner_category: OwnerCategory::Component,
             data: TimeSeriesData::SingleTimeSeries(clean),
             features: Features::new(),
+            association_id: 0,
         },
         infrastore_core::AddRequest {
             owner_id: 1,
@@ -615,6 +687,7 @@ fn add_bulk_rejects_geometry_mismatch_and_leaves_the_whole_batch_untouched() {
             owner_category: OwnerCategory::Component,
             data: TimeSeriesData::SingleTimeSeries(broken),
             features: Features::new(),
+            association_id: 0,
         },
     ];
     let err = store.add_time_series_bulk(items).unwrap_err();

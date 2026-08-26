@@ -2193,6 +2193,7 @@ impl PyStore {
                 owner_category: owner_category.into(),
                 data,
                 features,
+                association_id: 0,
             });
         }
         let keys = self
@@ -2663,6 +2664,23 @@ impl PyStore {
 
     fn flush(&mut self) -> PyResult<()> {
         self.store_mut()?.flush().map_err(map_err)
+    }
+
+    /// Reserve `count` consecutive ``association_id`` values and return the
+    /// first. The caller owns ``first .. first + count`` and is responsible for
+    /// writing rows under them.
+    ///
+    /// Only needed when an id must be known before its row exists. An ordinary
+    /// ``add_time_series`` assigns its own id and needs nothing from this.
+    ///
+    /// Reserved ids are consumed whether or not they are ever written, so an
+    /// abandoned reservation leaves a gap; an id is never reused, including
+    /// across a rolled-back transaction.
+    #[pyo3(signature = (count = 1))]
+    fn reserve_association_ids(&mut self, count: u64) -> PyResult<i64> {
+        self.store_mut()?
+            .reserve_association_ids(count)
+            .map_err(map_err)
     }
 
     // ---- Transactions -----------------------------------------------------

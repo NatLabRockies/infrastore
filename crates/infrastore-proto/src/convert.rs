@@ -8,7 +8,7 @@ use infrastore_core::{
     KeyIdentity, NonSequentialTimeSeries, NonSequentialTimeSeriesKey, OwnerCategory, Period,
     Probabilistic, Scenarios, SingleTimeSeries, SingleTimeSeriesKey, StaticSummaryRow,
     TimeReference, TimeSeriesData, TimeSeriesKey, TimeSeriesMetadata, TimeSeriesType, TypedArray,
-    UnitSystem, association_id, features_hash,
+    UnitSystem,
 };
 
 use crate::pb;
@@ -252,6 +252,7 @@ pub fn key_from_pb(k: pb::TimeSeriesKey) -> Result<KeyIdentity, ConvertError> {
 
 pub fn metadata_to_pb(m: &TimeSeriesMetadata) -> pb::TimeSeriesMetadata {
     pb::TimeSeriesMetadata {
+        association_id: m.association_id,
         owner_id: m.owner_id,
         owner_type: m.owner_type.clone(),
         owner_category: pb::OwnerCategory::from(m.owner_category) as i32,
@@ -325,26 +326,12 @@ pub fn metadata_from_pb(m: pb::TimeSeriesMetadata) -> Result<TimeSeriesMetadata,
     let time_series_type = TimeSeriesType::from(ts_type);
     let resolution = opt_period(m.resolution.as_deref())?;
     let interval = opt_period(m.interval.as_deref())?;
-    // The wire format carries no `association_id` field (it is derived, not
-    // stored data), so it is recomputed here from the tuple this message
-    // decoded to -- the same derivation `MetadataStore::insert_batched` uses
-    // on write, via the two hashing primitives `infrastore_core` exports for
-    // exactly this: `features_hash` and `association_id`.
-    let association_id = association_id(
-        m.owner_id,
-        owner_category,
-        time_series_type,
-        &m.name,
-        resolution.as_ref(),
-        interval.as_ref(),
-        &features_hash(&features),
-    );
 
     Ok(TimeSeriesMetadata {
+        association_id: m.association_id,
         owner_id: m.owner_id,
         owner_type: m.owner_type,
         owner_category,
-        association_id,
         time_series_type,
         name: m.name,
         data_hash,
@@ -863,6 +850,7 @@ mod tests {
 
     fn base_pb_metadata() -> pb::TimeSeriesMetadata {
         pb::TimeSeriesMetadata {
+            association_id: 1,
             owner_id: 1,
             owner_type: "Generator".into(),
             owner_category: pb::OwnerCategory::Component as i32,
@@ -898,6 +886,18 @@ mod tests {
         // And it round-trips back to Some(0) on the wire.
         let pb = metadata_to_pb(&m);
         assert_eq!(pb.length, Some(0));
+    }
+
+    #[test]
+    fn association_id_survives_the_wire_in_both_directions() {
+        // The id is minted by the serving store and cannot be recomputed from the
+        // tuple, so it has to be transmitted. Pin both directions: a client that
+        // dropped the field would otherwise silently report id 0 for every row.
+        let mut pb = base_pb_metadata();
+        pb.association_id = 987_654_321;
+        let m = metadata_from_pb(pb).unwrap();
+        assert_eq!(m.association_id, 987_654_321);
+        assert_eq!(metadata_to_pb(&m).association_id, 987_654_321);
     }
 
     #[test]
@@ -1168,31 +1168,6 @@ mod convert_coverage_tests {
 
     const ALL_DTYPES: &[Dtype] = Dtype::ALL;
 
-    /// The real `association_id` for a tuple, the same derivation
-    /// `metadata_from_pb` uses on decode -- so a fixture built here and one
-    /// decoded off the wire compare equal by [`TimeSeriesMetadata`]'s full
-    /// struct `PartialEq`, and no literal below carries an invented sentinel.
-    #[allow(clippy::too_many_arguments)]
-    fn expected_association_id(
-        owner_id: i64,
-        owner_category: OwnerCategory,
-        time_series_type: TimeSeriesType,
-        name: &str,
-        resolution: Option<&Period>,
-        interval: Option<&Period>,
-        features: &Features,
-    ) -> i64 {
-        association_id(
-            owner_id,
-            owner_category,
-            time_series_type,
-            name,
-            resolution,
-            interval,
-            &features_hash(features),
-        )
-    }
-
     // ---- Dtype matrix ------------------------------------------------------
 
     #[test]
@@ -1227,15 +1202,7 @@ mod convert_coverage_tests {
                 owner_id: 1,
                 owner_type: "Generator".into(),
                 owner_category: OwnerCategory::Component,
-                association_id: expected_association_id(
-                    1,
-                    OwnerCategory::Component,
-                    TimeSeriesType::SingleTimeSeries,
-                    "load",
-                    resolution.as_ref(),
-                    None,
-                    &features,
-                ),
+                association_id: 1,
                 time_series_type: TimeSeriesType::SingleTimeSeries,
                 name: "load".into(),
                 data_hash: [7u8; 32],
@@ -1387,15 +1354,7 @@ mod convert_coverage_tests {
             owner_id: 9,
             owner_type: "Generator".into(),
             owner_category: OwnerCategory::Component,
-            association_id: expected_association_id(
-                9,
-                OwnerCategory::Component,
-                TimeSeriesType::Deterministic,
-                "monthly",
-                resolution.as_ref(),
-                interval.as_ref(),
-                &features,
-            ),
+            association_id: 1,
             time_series_type: TimeSeriesType::Deterministic,
             name: "monthly".into(),
             data_hash: [3u8; 32],
@@ -1442,15 +1401,7 @@ mod convert_coverage_tests {
             owner_id: 1,
             owner_type: "Generator".into(),
             owner_category: OwnerCategory::Component,
-            association_id: expected_association_id(
-                1,
-                OwnerCategory::Component,
-                TimeSeriesType::SingleTimeSeries,
-                "yearly",
-                resolution.as_ref(),
-                None,
-                &features,
-            ),
+            association_id: 1,
             time_series_type: TimeSeriesType::SingleTimeSeries,
             name: "yearly".into(),
             data_hash: [0u8; 32],
@@ -1779,15 +1730,7 @@ mod convert_coverage_tests {
             owner_id: 4,
             owner_type: "Generator".into(),
             owner_category: OwnerCategory::Component,
-            association_id: expected_association_id(
-                4,
-                OwnerCategory::Component,
-                TimeSeriesType::DeterministicSingleTimeSeries,
-                "load",
-                resolution.as_ref(),
-                interval.as_ref(),
-                &features,
-            ),
+            association_id: 1,
             time_series_type: TimeSeriesType::DeterministicSingleTimeSeries,
             name: "load".into(),
             data_hash: [1u8; 32],
@@ -1992,15 +1935,7 @@ mod convert_coverage_tests {
             owner_id: 1,
             owner_type: "Generator".into(),
             owner_category: OwnerCategory::Component,
-            association_id: expected_association_id(
-                1,
-                OwnerCategory::Component,
-                TimeSeriesType::SingleTimeSeries,
-                "load",
-                resolution.as_ref(),
-                None,
-                &features,
-            ),
+            association_id: 1,
             time_series_type: TimeSeriesType::SingleTimeSeries,
             name: "load".into(),
             data_hash: [0u8; 32],

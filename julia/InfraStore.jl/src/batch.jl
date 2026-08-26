@@ -53,6 +53,7 @@ function add_time_series!(
     component_field::Union{Nothing, AbstractString}=ts.component_field,
     application_data::Union{Nothing, AbstractString}=ts.application_data,
     element_type::Union{Nothing, AbstractString}=ts.element_type,
+    association_id::Integer=0,
 )
     element_type_arg = _element_type_arg(element_type, ts.data)
     dims = UInt64[size(ts.data)...]
@@ -79,6 +80,7 @@ function add_time_series!(
             _time_reference_str(_audit_zone(_time_reference(time_reference)))
         )::Cstring,
         _opt_string_arg(component_field)::Cstring,
+        Int64(association_id)::Int64,
     )::Int32
     _check(code)
     batch.count += 1
@@ -99,6 +101,7 @@ function add_time_series!(
     component_field::Union{Nothing, AbstractString}=ts.component_field,
     application_data::Union{Nothing, AbstractString}=ts.application_data,
     element_type::Union{Nothing, AbstractString}=ts.element_type,
+    association_id::Integer=0,
 )
     timestamps = Int64[_to_unix_ms(timestamp) for timestamp in ts.timestamps]
     element_type_arg = _element_type_arg(element_type, ts.data)
@@ -126,6 +129,7 @@ function add_time_series!(
             _time_reference_str(_audit_zone(_time_reference(time_reference)))
         )::Cstring,
         _opt_string_arg(component_field)::Cstring,
+        Int64(association_id)::Int64,
     )::Int32
     _check(code)
     batch.count += 1
@@ -146,6 +150,7 @@ function add_time_series!(
     component_field::Union{Nothing, AbstractString}=ts.component_field,
     application_data::Union{Nothing, AbstractString}=ts.application_data,
     element_type::Union{Nothing, AbstractString}=ts.element_type,
+    association_id::Integer=0,
 )
     return _batch_add_dense_forecast!(
         batch,
@@ -168,6 +173,7 @@ function add_time_series!(
         component_field=component_field,
         application_data=application_data,
         element_type=element_type,
+        association_id=association_id,
     )
 end
 
@@ -185,6 +191,7 @@ function add_time_series!(
     component_field::Union{Nothing, AbstractString}=ts.component_field,
     application_data::Union{Nothing, AbstractString}=ts.application_data,
     element_type::Union{Nothing, AbstractString}=ts.element_type,
+    association_id::Integer=0,
 )
     return _batch_add_dense_forecast!(
         batch,
@@ -207,6 +214,7 @@ function add_time_series!(
         component_field=component_field,
         application_data=application_data,
         element_type=element_type,
+        association_id=association_id,
     )
 end
 
@@ -231,6 +239,7 @@ function _batch_add_dense_forecast!(
     component_field::Union{Nothing, AbstractString}=nothing,
     application_data::Union{Nothing, AbstractString}=nothing,
     element_type::Union{Nothing, AbstractString}=nothing,
+    association_id::Integer=0,
 )
     element_type_arg = _element_type_arg(element_type, data)
     dims = UInt64[size(data)...]
@@ -261,6 +270,7 @@ function _batch_add_dense_forecast!(
             _time_reference_str(_audit_zone(_time_reference(time_reference)))
         )::Cstring,
         _opt_string_arg(component_field)::Cstring,
+        Int64(association_id)::Int64,
     )::Int32
     _check(code)
     batch.count += 1
@@ -281,6 +291,7 @@ function add_time_series!(
     component_field::Union{Nothing, AbstractString}=ts.component_field,
     application_data::Union{Nothing, AbstractString}=ts.application_data,
     element_type::Union{Nothing, AbstractString}=ts.element_type,
+    association_id::Integer=0,
 )
     element_type_arg = _element_type_arg(element_type, ts.data)
     dims = UInt64[size(ts.data)...]
@@ -312,6 +323,7 @@ function add_time_series!(
             _time_reference_str(_audit_zone(_time_reference(time_reference)))
         )::Cstring,
         _opt_string_arg(component_field)::Cstring,
+        Int64(association_id)::Int64,
     )::Int32
     _check(code)
     batch.count += 1

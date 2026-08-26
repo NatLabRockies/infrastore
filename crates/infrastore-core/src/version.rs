@@ -57,4 +57,16 @@
 /// `hash::association_id` computes is part of the on-disk contract, so a
 /// future change to that encoding is itself a format bump, not merely a code
 /// change. Stores written by 0.17.0 and earlier are rejected on open.
-pub const DATA_FORMAT_VERSION: &str = "0.18.0";
+///
+/// 0.19.0 keeps that column but changes what fills it: the id is now minted
+/// from the new `association_id_sequence` table instead of hashed from the
+/// identity tuple. This is a format break in both directions, and the column
+/// set alone does not express it. A 0.18.0 store's ids are hashes over a domain
+/// that no longer exists, and it carries no sequence row, so a 0.19.0 writer
+/// reading one would mint from 1 and collide with rows already holding
+/// arbitrary 53-bit values; a 0.18.0 reader opening a 0.19.0 store would find
+/// ids that do not reproduce from the tuple and reject every row as corrupt.
+/// The hash domain is retired with it -- there is no derivation left whose
+/// encoding a later change could break. Stores written by 0.18.0 and earlier
+/// are rejected on open.
+pub const DATA_FORMAT_VERSION: &str = "0.19.0";

@@ -23,6 +23,35 @@ function _library_filename()
     end
 end
 
+# The ABI generation this binding is written against. A C caller that passes one
+# argument too many does not fail -- the calling convention ignores the surplus
+# register -- so a binding loaded against an older library would store rows under
+# different ids than the keys it hands back, silently. The library states its own
+# generation instead, and a mismatch is refused here rather than corrupting data.
+const _EXPECTED_ABI_VERSION = UInt32(1)
+
+function _check_abi(path::AbstractString)
+    # Populate the shared handle rather than opening a second one: `_cached_dlsym`
+    # caches this same handle for every later call.
+    if _LIB_HANDLE[] == C_NULL
+        _LIB_HANDLE[] = dlopen(path)
+    end
+    sym = dlsym(_LIB_HANDLE[], :infrastore_abi_version; throw_error=false)
+    sym === nothing && error(
+        "libinfrastore_ffi at $(path) predates the versioned C ABI (no " *
+        "infrastore_abi_version). Rebuild it with " *
+        "`cargo build -p infrastore-ffi --release` and point INFRASTORE_LIB at the result.",
+    )
+    found = @ccall $sym()::UInt32
+    found == _EXPECTED_ABI_VERSION || error(
+        "libinfrastore_ffi at $(path) reports C ABI version $(found), but this " *
+        "InfraStore.jl expects $(_EXPECTED_ABI_VERSION). The two disagree on at least one " *
+        "exported signature, and a C call cannot detect that on its own. Rebuild the " *
+        "cdylib from the matching source.",
+    )
+    return nothing
+end
+
 """
 Path to the `libinfrastore_ffi` cdylib. Override with the
 `INFRASTORE_LIB` environment variable (development builds); otherwise the
@@ -41,6 +70,7 @@ function lib_path()
         "environment variable to a built cdylib, or reinstall the package to " *
         "fetch the artifact.",
     )
+    _check_abi(p)
     _LIB_REF[] = p
     return p
 end

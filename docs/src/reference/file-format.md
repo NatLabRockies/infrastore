@@ -57,19 +57,25 @@ Opening a store whose recorded version differs from the version this build reads
 the check is exact equality and there is no in-place upgrade path: regenerate the store with the
 matching build.
 
-(`0.18.0` added the `association_id` column to `time_series_associations`: a derived surrogate id
-(`hash::association_id`) over the `uq_ts_assoc` tuple —
-`(owner_id, owner_category,
-time_series_type, name, resolution, interval, features_hash)` — enforced
-UNIQUE by its own index (`uq_ts_assoc_id`) and exposed by
+(`0.19.0` changed what fills the `association_id` column and added the `association_id_sequence`
+table that supplies it. The id is now **minted** from a per-store monotonic sequence rather than
+derived from the row's identity, which makes it immutable: a rename or an owner reassignment leaves
+it alone, so a consumer may hold it as a durable reference. The cost is that it is store-local — two
+independently built stores do not agree on an id for the same association — and that it is gapped,
+since an id reserved before its row is written is consumed whether or not the write lands. An id is
+never reused. `0.19.0` is a break in both directions: a `0.18.0` store's ids are hashes over a
+domain that no longer exists and it carries no sequence row, while a `0.18.0` reader would reject
+`0.19.0` ids as not reproducing from the tuple. The retired hash domain is gone with it, so there is
+no longer an `association_id` encoding a future change could break.
+
+`0.18.0` had added the `association_id` column to `time_series_associations` as a derived surrogate
+id over the `uq_ts_assoc` tuple, enforced UNIQUE by its own index (`uq_ts_assoc_id`) and exposed by
 `get_time_series_metadata_by_association_id`. Same reasoning as `0.16.0`/`0.17.0` below for why a
 new NOT NULL column is not the additive case: `CREATE TABLE IF NOT
 EXISTS` leaves a `0.17.0` store's
-column set alone, so every statement naming the column fails against it. It also adds a hash domain:
-the encoding `hash::association_id` computes is part of the on-disk contract, so a future change to
-it is itself a format bump, not merely a code change; `0.17.0` added the metadata column
-`time_reference`, which records how a series' timestamps were _spelled_ — an instant in UTC, an
-instant at a fixed offset, an instant in a named IANA zone, or a wall clock naming no instant. It
+column set alone, so every statement naming the column fails against it; `0.17.0` added the metadata
+column `time_reference`, which records how a series' timestamps were _spelled_ — an instant in UTC,
+an instant at a fixed offset, an instant in a named IANA zone, or a wall clock naming no instant. It
 also changes how stored timestamps are _interpreted_: a row marked `zoneless` holds wall clocks the
 store keeps as if UTC, which an older reader would hand back as instants. See
 [Time references](../explanation/data-model.md#time-references); `0.16.0` added the metadata column
@@ -299,33 +305,33 @@ The catalog database is created with `PRAGMA foreign_keys = ON` and the followin
 
 One row per association between an owner and a stored array.
 
-| Column              | Type    | Notes                                                                |
-| ------------------- | ------- | -------------------------------------------------------------------- |
-| `id`                | INTEGER | Primary key                                                          |
-| `association_id`    | INTEGER | Derived surrogate id over the key (`hash::association_id`); `UNIQUE` |
-| `owner_id`          | INTEGER | Owner identity; signed 64-bit integer identifier (part of key)       |
-| `owner_type`        | TEXT    | Owner's concrete type, descriptive                                   |
-| `owner_category`    | INTEGER | Code, `CHECK` in (0, 1); part of key — see below                     |
-| `time_series_type`  | INTEGER | Code, `CHECK` between 0 and 5; part of key — see below               |
-| `name`              | TEXT    | Series name                                                          |
-| `initial_timestamp` | TEXT    | RFC 3339 string; `NULL` for `NonSequentialTimeSeries`                |
-| `resolution`        | TEXT    | ISO-8601 duration (`PT1H`, `P1M`, …); `NULL` for non-sequential      |
-| `length`            | INTEGER | Number of timesteps                                                  |
-| `horizon`           | TEXT    | ISO-8601 forecast horizon; `NULL` for non-forecasts                  |
-| `interval`          | TEXT    | ISO-8601 forecast interval; `NULL` for non-forecasts                 |
-| `count`             | INTEGER | Forecast window count; `NULL` for non-forecasts                      |
-| `timestamps_hash`   | BLOB    | 32-byte SHA-256 of the timestamp vector (`NonSequentialTimeSeries`)  |
-| `units`             | TEXT    | Free-form units label                                                |
-| `quantity_kind`     | TEXT    | What the values measure (QUDT `QuantityKind` name); `NULL` if unset  |
-| `unit_system`       | TEXT    | `natural_units` or `component_base`; `NULL` means _unspecified_      |
-| `time_reference`    | TEXT    | How the timestamps were spelled (below); `NULL` means _unspecified_  |
-| `component_field`   | TEXT    | Owning component's field these values vary; `NULL` if unset          |
-| `percentiles_json`  | TEXT    | JSON array of percentiles for `Probabilistic`; `NULL` else           |
-| `element_type`      | TEXT    | Canonical element-type string (`NOT NULL DEFAULT 'f64'`)             |
-| `element_shape`     | TEXT    | JSON array of per-step dims (`[]` = scalar)                          |
-| `application_data`  | TEXT    | Opaque package-owned payload (JSON), verbatim; `NULL` if unset       |
-| `data_hash`         | BLOB    | 32-byte SHA-256 of the array; links to an HDF5 column/variable       |
-| `features_hash`     | BLOB    | 32-byte SHA-256 of the feature map                                   |
+| Column              | Type    | Notes                                                                   |
+| ------------------- | ------- | ----------------------------------------------------------------------- |
+| `id`                | INTEGER | Primary key                                                             |
+| `association_id`    | INTEGER | Minted from `association_id_sequence`; immutable, store-local; `UNIQUE` |
+| `owner_id`          | INTEGER | Owner identity; signed 64-bit integer identifier (part of key)          |
+| `owner_type`        | TEXT    | Owner's concrete type, descriptive                                      |
+| `owner_category`    | INTEGER | Code, `CHECK` in (0, 1); part of key — see below                        |
+| `time_series_type`  | INTEGER | Code, `CHECK` between 0 and 5; part of key — see below                  |
+| `name`              | TEXT    | Series name                                                             |
+| `initial_timestamp` | TEXT    | RFC 3339 string; `NULL` for `NonSequentialTimeSeries`                   |
+| `resolution`        | TEXT    | ISO-8601 duration (`PT1H`, `P1M`, …); `NULL` for non-sequential         |
+| `length`            | INTEGER | Number of timesteps                                                     |
+| `horizon`           | TEXT    | ISO-8601 forecast horizon; `NULL` for non-forecasts                     |
+| `interval`          | TEXT    | ISO-8601 forecast interval; `NULL` for non-forecasts                    |
+| `count`             | INTEGER | Forecast window count; `NULL` for non-forecasts                         |
+| `timestamps_hash`   | BLOB    | 32-byte SHA-256 of the timestamp vector (`NonSequentialTimeSeries`)     |
+| `units`             | TEXT    | Free-form units label                                                   |
+| `quantity_kind`     | TEXT    | What the values measure (QUDT `QuantityKind` name); `NULL` if unset     |
+| `unit_system`       | TEXT    | `natural_units` or `component_base`; `NULL` means _unspecified_         |
+| `time_reference`    | TEXT    | How the timestamps were spelled (below); `NULL` means _unspecified_     |
+| `component_field`   | TEXT    | Owning component's field these values vary; `NULL` if unset             |
+| `percentiles_json`  | TEXT    | JSON array of percentiles for `Probabilistic`; `NULL` else              |
+| `element_type`      | TEXT    | Canonical element-type string (`NOT NULL DEFAULT 'f64'`)                |
+| `element_shape`     | TEXT    | JSON array of per-step dims (`[]` = scalar)                             |
+| `application_data`  | TEXT    | Opaque package-owned payload (JSON), verbatim; `NULL` if unset          |
+| `data_hash`         | BLOB    | 32-byte SHA-256 of the array; links to an HDF5 column/variable          |
+| `features_hash`     | BLOB    | 32-byte SHA-256 of the feature map                                      |
 
 The two content-address hashes are the last two columns. Column order is not load-bearing — every
 statement names its columns — so the layout is chosen for readability.
@@ -541,6 +547,31 @@ Added additively, so it lands on an existing store's first writable open without
 `data_format_version` change. A store predating it has no row here and no root attribute, and reads
 as unstamped rather than as a mismatch. Because a read-only open cannot run the DDL, every read of
 this table tolerates the table being absent.
+
+### `association_id_sequence`
+
+```sql
+CREATE TABLE association_id_sequence (next_association_id INTEGER NOT NULL);
+```
+
+Holds exactly one row: the next `association_id` to hand out. Seeded to 1, so `0` stays available as
+the "unset" sentinel a writer uses to ask the store to assign an id.
+
+It is a stored high-water mark rather than `MAX(association_id) + 1` on purpose. Deleting the
+highest row must not free its id: a consumer may still hold that id as a reference, and reusing it
+would make that reference resolve to a different series — silently, and wrongly. The mark only ever
+advances.
+
+Two consequences follow. Ids are **gapped**, not dense: a caller may reserve an id before the row
+exists (needed when the id must appear on a key its own caller keeps), and that id is consumed
+whether or not the write ever lands. And the mark is **reconciled on every writable open** against
+`MAX(association_id)` in `time_series_associations`, so a catalog whose rows were written outside
+the sequence — a hand-built sidecar, or an interrupted write whose rows survived while the mark did
+not — cannot go on to mint an id the catalog already holds.
+
+The reservation floor a live store hands out from is held in memory, not read back from this table
+per call, because this table is transactional and an id must not be: an id already given to a caller
+has to stay spent even if the transaction that reserved it rolls back.
 
 ### Indexes
 

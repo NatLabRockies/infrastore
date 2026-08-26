@@ -26,7 +26,7 @@ anything but a `Probabilistic`).
 
 - `owner_id`, `owner_category`, `owner_type`, `name`, `time_series_type` — the
   association's identity and its owner.
-- `association_id` — the derived surrogate id of this association (see
+- `association_id` — the store-minted surrogate id of this association (see
   [`association_id`](@ref)); addresses the row via
   [`get_time_series_metadata`](@ref) without needing the full identity tuple.
 - `data_hash` — the 32-byte content hash, ready for [`get_array_by_hash`](@ref)

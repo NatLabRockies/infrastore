@@ -366,11 +366,14 @@ pub struct TimeSeriesMetadata {
     pub owner_id: i64,
     pub owner_type: String,
     pub owner_category: OwnerCategory,
-    /// Derived surrogate id: `hash::association_id` over this row's
-    /// `uq_ts_assoc` identity tuple (owner_id, owner_category,
-    /// time_series_type, name, resolution, interval, features_hash). Recomputed
-    /// on insert from those fields, not trusted from the caller -- see
-    /// `MetadataStore::insert_batched`.
+    /// Surrogate id minted by the store, not derived from anything on this
+    /// struct: it survives a rename or an owner reassignment, and it is
+    /// store-local rather than portable.
+    ///
+    /// On a read this is the stored value. On a write it is the id to store, and
+    /// `0` is the unset sentinel that asks the store to assign one -- so a value
+    /// copied from another row is *not* ignored, it is honored. Clear it to `0`
+    /// when reusing a metadata record for a new association.
     pub association_id: i64,
     pub time_series_type: TimeSeriesType,
     pub name: String,

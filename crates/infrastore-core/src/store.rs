@@ -155,6 +155,14 @@ pub struct AddRequest {
     pub owner_category: OwnerCategory,
     pub data: TimeSeriesData,
     pub features: Features,
+    /// A reserved `association_id` to store on this row, or `0` to let the
+    /// insert mint one.
+    ///
+    /// A caller that must know the id before the row exists — the Julia binding
+    /// hands one out on a `TimeSeriesKey` at stage time, long before the batch
+    /// flushes — reserves it with [`Store::reserve_association_ids`] and sets it
+    /// here. Leaving it `0` is the ordinary path.
+    pub association_id: i64,
 }
 
 impl AddRequest {
@@ -179,12 +187,20 @@ impl AddRequest {
             owner_category,
             data,
             features: Features::new(),
+            association_id: 0,
         }
     }
 
     /// Set the feature set.
     pub fn with_features(mut self, features: Features) -> Self {
         self.features = features;
+        self
+    }
+
+    /// Store this row under an id already reserved with
+    /// [`Store::reserve_association_ids`], rather than one minted at insert.
+    pub fn with_association_id(mut self, association_id: i64) -> Self {
+        self.association_id = association_id;
         self
     }
 }
@@ -1125,6 +1141,7 @@ impl Store {
             owner_category,
             data,
             features,
+            association_id: 0,
         }])
         .map(|mut keys| keys.remove(0))
     }
@@ -1151,6 +1168,43 @@ impl Store {
         self.flush_bulk_add(items)
     }
 
+    /// Fill each id slot in `ids` from one reservation.
+    ///
+    /// Takes the slots rather than the rows so every producer of a new
+    /// association can share it, whatever it is building: `AddRequest`s on the
+    /// two ingest paths, `TimeSeriesMetadata` on the derive path.
+    ///
+    /// Reserving before any savepoint opens is deliberate: the reservation floor
+    /// is not transactional, so advancing it from inside a transaction that
+    /// later rolls back would let a handed-out id be issued twice.
+    fn fill_association_ids<'a>(
+        &mut self,
+        ids: impl ExactSizeIterator<Item = &'a mut i64>,
+    ) -> Result<()> {
+        let count = ids.len();
+        if count == 0 {
+            return Ok(());
+        }
+        let mut next = self.metadata.reserve_association_ids(count as u64)?;
+        for id in ids {
+            *id = next;
+            next += 1;
+        }
+        Ok(())
+    }
+
+    /// Give every unassigned request in `items` an id. Rows staged by a caller
+    /// that needed the id before the row existed already carry a reserved one
+    /// and keep it.
+    fn assign_association_ids(&mut self, items: &mut [AddRequest]) -> Result<()> {
+        let unassigned: Vec<&mut i64> = items
+            .iter_mut()
+            .map(|i| &mut i.association_id)
+            .filter(|id| **id == 0)
+            .collect();
+        self.fill_association_ids(unassigned.into_iter())
+    }
+
     /// Per-column insert used by single [`Self::add_time_series`] calls: each
     /// packed array is dropped into the first free slot of a shared, default-width
     /// dataset (created on demand, spilling once full). This keeps incremental
@@ -1158,10 +1212,11 @@ impl Store {
     /// at the cost of a per-column read-modify-write under the timestamp-major
     /// chunking. All-or-nothing, like [`Self::add_time_series_bulk`].
     #[tracing::instrument(skip(self, items), fields(count = items.len()))]
-    fn add_per_column(&mut self, items: Vec<AddRequest>) -> Result<Vec<TimeSeriesKey>> {
+    fn add_per_column(&mut self, mut items: Vec<AddRequest>) -> Result<Vec<TimeSeriesKey>> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
+        self.assign_association_ids(&mut items)?;
 
         // Derive (and validate) every item's parts before writing anything, so a
         // bad request part-way through the batch cannot leave an array behind.
@@ -1249,13 +1304,14 @@ impl Store {
     /// transaction. All-or-nothing: any metadata error rolls the transaction back
     /// and removes every array staged in this call.
     #[tracing::instrument(skip(self, items), fields(count = items.len()))]
-    fn flush_bulk_add(&mut self, items: Vec<AddRequest>) -> Result<Vec<TimeSeriesKey>> {
+    fn flush_bulk_add(&mut self, mut items: Vec<AddRequest>) -> Result<Vec<TimeSeriesKey>> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
         if items.is_empty() {
             return Ok(Vec::new());
         }
+        self.assign_association_ids(&mut items)?;
 
         // Derive parts (validates + hashes) for every item, aligned to `items`.
         let mut parts: Vec<RequestParts> = items
@@ -1542,6 +1598,10 @@ impl Store {
         let mut meta = self.metadata.get_by_key(src)?;
         meta.owner_id = dst_owner_id;
         meta.owner_type = dst_owner_type.to_string();
+        // The copy is a new association and must carry its own id, not the
+        // source's. Reserved before the savepoint opens, because the reservation
+        // floor is not transactional.
+        meta.association_id = self.metadata.reserve_association_ids(1)?;
         if let Some(name) = new_name {
             meta.name = name.to_string();
         }
@@ -1561,7 +1621,7 @@ impl Store {
 
         let tx = self.metadata.savepoint()?;
         check_forecast_family_free(&tx, &meta, "copy")?;
-        MetadataStore::insert(&tx, &meta)?;
+        MetadataStore::insert_batched(&tx, &meta, &mut SharedSetCache::default())?;
         tx.commit()?;
 
         TimeSeriesKey::from_metadata(&meta)
@@ -2273,6 +2333,25 @@ impl Store {
         }
     }
 
+    /// Reserve `count` consecutive `association_id` values and return the first,
+    /// so a caller can name a row's id before the row exists.
+    ///
+    /// The Julia binding needs this: it returns a `TimeSeriesKey` carrying the id
+    /// when a series is *staged*, and callers embed that key in their own objects
+    /// well before the batch flushes. Set the reserved value on
+    /// [`AddRequest::association_id`] so the insert stores that id instead of
+    /// minting a different one.
+    ///
+    /// Reserved ids are consumed whether or not they are ever written: an
+    /// abandoned batch leaves a gap. The sequence is monotonic, never dense, and
+    /// an id is never reused.
+    pub fn reserve_association_ids(&mut self, count: u64) -> Result<i64> {
+        if self.read_only {
+            return Err(TimeSeriesError::ReadOnlyStore);
+        }
+        self.metadata.reserve_association_ids(count)
+    }
+
     /// Look up the full metadata record for a key. Errors with `NotFound` if no
     /// association matches. Used by external bindings (e.g. the Julia
     /// `RustTimeSeriesStore`) to reconstruct a typed metadata object on read.
@@ -2287,7 +2366,7 @@ impl Store {
         keys.iter().map(|k| self.metadata.get_by_key(k)).collect()
     }
 
-    /// [`Self::get_metadata`], addressed by the derived surrogate id
+    /// [`Self::get_metadata`], addressed by the minted surrogate id
     /// (`association_id`) instead of a [`KeyIdentity`]. Errors with `NotFound`
     /// if no association carries it.
     pub fn get_metadata_by_association_id(
@@ -2625,9 +2704,9 @@ impl Store {
                 horizon: Some(horizon),
                 interval: Some(interval),
                 count: Some(count),
-                // Ignored by insert, which recomputes it. Set explicitly
-                // because `..src` would otherwise carry the source row's live
-                // id across a change of hash-domain fields.
+                // The derived series is its own association and gets its own
+                // minted id. Set explicitly because `..src` would otherwise
+                // carry the source row's id onto a second row.
                 association_id: 0,
                 ..src.clone()
             });
@@ -2643,6 +2722,9 @@ impl Store {
                 interval_normalized: plan.interval_normalized,
             });
         }
+
+        // Each derived view is its own association and needs its own id.
+        self.fill_association_ids(new_metas.iter_mut().map(|m| &mut m.association_id))?;
 
         let tx = self.metadata.savepoint()?;
         // One cache for the whole batch: every derived row shares its source's
@@ -3802,6 +3884,7 @@ impl BulkAdd<'_> {
             owner_category,
             data,
             features,
+            association_id: 0,
         })
     }
 
@@ -3900,8 +3983,8 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
                     owner_id: item.owner_id,
                     owner_type: item.owner_type.clone(),
                     owner_category: item.owner_category,
-                    // Ignored by insert, which recomputes it.
-                    association_id: 0,
+                    // Assigned before the write; `0` asks the store to mint one.
+                    association_id: item.association_id,
                     time_series_type: TimeSeriesType::SingleTimeSeries,
                     name: single.name.clone(),
                     data_hash: hash,
@@ -3948,8 +4031,8 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
                     owner_id: item.owner_id,
                     owner_type: item.owner_type.clone(),
                     owner_category: item.owner_category,
-                    // Ignored by insert, which recomputes it.
-                    association_id: 0,
+                    // Assigned before the write; `0` asks the store to mint one.
+                    association_id: item.association_id,
                     time_series_type: TimeSeriesType::NonSequentialTimeSeries,
                     name: non_sequential.name.clone(),
                     data_hash: hash,
@@ -4559,8 +4642,7 @@ fn forecast_metadata(
         owner_id: item.owner_id,
         owner_type: item.owner_type.clone(),
         owner_category: item.owner_category,
-        // Ignored by insert, which recomputes it.
-        association_id: 0,
+        association_id: item.association_id,
         time_series_type,
         name: name.to_owned(),
         data_hash: array_hash(data),

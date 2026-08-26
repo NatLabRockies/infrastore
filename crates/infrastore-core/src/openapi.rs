@@ -13,7 +13,7 @@
 //! # Wire contract
 //!
 //! A time-series association row carries the fields every type shares —
-//! `association_id` (the derived surrogate id, emitted first), `owner_id`,
+//! `association_id` (the store-minted surrogate id, emitted first), `owner_id`,
 //! `owner_type`, `owner_category`, `time_series_type`, `name`,
 //! `features` (a *plain* scalar map — int, float, bool, or string values, never
 //! the store's internally-tagged [`crate::types::metadata::FeatureValue`] form),

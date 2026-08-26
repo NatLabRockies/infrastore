@@ -265,49 +265,33 @@ function _decode_metadata(r::AbstractDict)
 end
 
 """
-    association_id(owner_id, owner_category, time_series_type, name;
-                    resolution=nothing, interval=nothing, features=nothing) -> Int64
+    reserve_association_ids!(store, count::Integer=1) -> Int64
 
-The derived surrogate id a stored association with this identity would carry
-(see [`TimeSeriesMetadata`](@ref)) — a pure computation, no store access.
-`time_series_type` is the Julia type (`SingleTimeSeries`, `Deterministic`,
-...); `owner_category` is the owner's `OwnerCategory`. Matches the
-`association_id` [`list_time_series`](@ref) and [`get_metadata`](@ref) report
-for the same identity, and the id [`get_time_series_metadata`](@ref) accepts.
+Reserve `count` consecutive `association_id` values and return the first. The
+caller owns `first:first + count - 1` and passes them to `add_time_series!` as
+the `association_id` keyword.
+
+Use this when a row's id must be known before the row exists — building a key at
+stage time, before the batch flushes. Reserved ids are consumed whether or not
+they are written, so an abandoned batch leaves a gap; an id is never reused.
 """
-function association_id(
-    owner_id::Integer,
-    owner_category::OwnerCategory,
-    time_series_type::Type,
-    name::AbstractString;
-    resolution::Union{Nothing, Period}=nothing,
-    interval::Union{Nothing, Period}=nothing,
-    features::Union{Nothing, AbstractDict}=nothing,
-)
-    resolution_iso = _period_to_cstr(resolution)
-    interval_iso = _period_to_cstr(interval)
-    features_json = _features_arg(features)
-    out_id = Ref{Int64}(0)
-    code = @ccall lib_path().infrastore_association_id(
-        Int64(owner_id)::Int64,
-        _category_int(owner_category)::Int32,
-        _filter_type_code(time_series_type)::Int32,
-        name::Cstring,
-        resolution_iso::Cstring,
-        interval_iso::Cstring,
-        features_json::Cstring,
-        out_id::Ref{Int64},
+function reserve_association_ids!(store::Store, count::Integer=1)
+    out_first = Ref{Int64}(0)
+    code = @ccall lib_path().infrastore_store_reserve_association_ids(
+        store::Ptr{Cvoid},
+        UInt64(count)::UInt64,
+        out_first::Ref{Int64},
     )::Int32
     _check(code)
-    return out_id[]
+    return out_first[]
 end
 
 """
     get_time_series_metadata(store, association_id::Int64) -> TimeSeriesMetadata
 
 The complete [`TimeSeriesMetadata`](@ref) of the association carrying the given
-derived surrogate id — the indexed counterpart of [`get_metadata`](@ref),
-addressed by [`association_id`](@ref) instead of the full identity tuple.
+minted surrogate id — the indexed counterpart of [`get_metadata`](@ref),
+addressed by the store-assigned id instead of the full identity tuple.
 
 Throws `NotFoundError` if no association carries it.
 """

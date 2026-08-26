@@ -15,11 +15,15 @@
 pub const DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS time_series_associations (
     id                INTEGER PRIMARY KEY,
-    -- Derived surrogate id: hash::association_id over the uq_ts_assoc tuple.
-    -- Portable across stores (same association => same value everywhere),
-    -- carried on the wire by document consumers. 53-bit, so exact in every
-    -- JSON reader. UNIQUE: a violation here that does not violate uq_ts_assoc
-    -- is a hash collision and is reported as such, loudly.
+    -- Minted surrogate id, drawn from `association_id_sequence` when the row is
+    -- staged. Store-local: it is NOT portable across stores, and nothing derives
+    -- it, which is precisely why it never moves -- a rename or an owner
+    -- reassignment leaves it alone, so a consumer may persist it as a durable
+    -- reference. Never reused, so a stale reference resolves to nothing rather
+    -- than to some later series. Ids are gapped, not dense (see the sequence
+    -- table). UNIQUE: with ids minted from a monotonic sequence a violation here
+    -- is unreachable, so it asserts internal consistency rather than detecting a
+    -- collision.
     association_id    INTEGER NOT NULL,
     owner_id          INTEGER NOT NULL,
     owner_type        TEXT    NOT NULL,
@@ -304,6 +308,21 @@ CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
 -- than as a mismatch. Holds zero or one row; reads must tolerate the table being
 -- absent, because a read-only open cannot run this DDL.
 CREATE TABLE IF NOT EXISTS catalog_identity (generation TEXT NOT NULL);
+
+-- High-water mark for `time_series_associations.association_id`. Holds the next
+-- id to hand out, seeded to 1 so 0 stays available as an "unset" sentinel.
+--
+-- It is a stored mark rather than `MAX(association_id) + 1` on purpose: deleting
+-- the highest row must not free its id. Reusing one would let a reference held
+-- by a consumer -- PSY persists these in exported documents -- resolve to a
+-- different series later, which is the failure this id exists to prevent.
+--
+-- The mark only ever advances. Ids are reserved when a row is staged, so a batch
+-- abandoned before it flushes leaves its reservation behind as a gap: the
+-- sequence is monotonic, never dense, and must never be compacted.
+CREATE TABLE IF NOT EXISTS association_id_sequence (next_association_id INTEGER NOT NULL);
+INSERT INTO association_id_sequence (next_association_id)
+    SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM association_id_sequence);
 
 -- The two association tables below record relationships between catalog
 -- entities, independent of time series. They are deliberately separate rather

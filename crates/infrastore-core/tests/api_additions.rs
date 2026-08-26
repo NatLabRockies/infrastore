@@ -1906,3 +1906,43 @@ fn get_metadata_by_association_id_round_trips_through_list() {
         .unwrap_err();
     assert!(matches!(err, TimeSeriesError::NotFound));
 }
+
+/// A reserved id must never be handed out twice, even when the transaction that
+/// reserved it rolls back.
+///
+/// The reservation floor is deliberately not transactional. If it lived only in
+/// `association_id_sequence`, `ROLLBACK TO` would restore the column and the next
+/// reservation would hand the same id to a *different* association -- while the
+/// first caller still holds it on a key. That key would then resolve, silently,
+/// to the wrong series.
+#[test]
+fn a_rolled_back_transaction_does_not_recycle_a_reserved_id() {
+    let mut store = infrastore_core::create_store(None, true).unwrap();
+
+    store.begin_transaction().unwrap();
+    let reserved = store.reserve_association_ids(1).unwrap();
+    store.rollback_transaction().unwrap();
+
+    let after_rollback = store.reserve_association_ids(1).unwrap();
+    assert!(
+        after_rollback > reserved,
+        "rollback recycled a handed-out id: reserved {reserved}, then re-issued {after_rollback}"
+    );
+
+    // The row written under the recycled id would have been the real damage, so
+    // pin that the id a later add lands on is not the rolled-back one either.
+    store
+        .add_time_series(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(sts("load", 1.0, 3)),
+            Features::new(),
+        )
+        .unwrap();
+    let rows = store.list_time_series(ListFilter::new()).unwrap();
+    assert!(
+        rows.iter().all(|r| r.association_id != reserved),
+        "a row was written under the id that was reserved and rolled back"
+    );
+}

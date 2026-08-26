@@ -130,6 +130,10 @@ message TimeSeriesMetadata {
   // `TimeReference::as_storage_string`: how this series' timestamps were
   // spelled. See TimeSeriesKey.time_reference.
   optional string time_reference                 = 25;
+  // The catalog's minted surrogate id for this association. Transmitted rather
+  // than recomputed by the client: nothing derives it from the identity tuple,
+  // so the serving store is the only thing that knows it.
+  int64           association_id                 = 26;
 }
 
 // ---- ListTimeSeries ----

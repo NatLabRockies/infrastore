@@ -893,28 +893,6 @@ fn golden_hash_pin() {
 }
 
 #[test]
-fn association_id_golden_pin() {
-    // Pin the exact association id for a fixed uq_ts_assoc tuple. Any change
-    // in the canonical encoding that perturbs this value is a format-breaking
-    // change and must bump DATA_FORMAT_VERSION.
-    use infrastore_core::{Period, TimeSeriesType, association_id};
-    let fh = [7u8; 32];
-    let id = association_id(
-        42,
-        OwnerCategory::Component,
-        TimeSeriesType::SingleTimeSeries,
-        "max_active_power",
-        Some(&Period::from_iso8601("PT1H").unwrap()),
-        None,
-        &fh,
-    );
-    assert_eq!(
-        id, 315076378881986,
-        "association_id encoding drifted; bump DATA_FORMAT_VERSION if intentional",
-    );
-}
-
-#[test]
 fn non_sequential_persistent_round_trip() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
@@ -1981,4 +1959,71 @@ fn a_file_that_will_not_open_is_not_reported_as_a_store_needing_migration() {
         "{message}"
     );
     assert!(message.contains("netcdf"), "{message}");
+}
+
+/// The minted `association_id` and the sequence that hands it out must both
+/// survive a close and reopen.
+///
+/// If the mark did not persist, a reopened store would restart minting at 1 and
+/// hand a second row an id the first one already holds — the exact reuse the
+/// design forbids, and the reason this is a disk test rather than an in-memory
+/// one.
+#[test]
+fn minted_association_ids_and_the_sequence_survive_a_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.h5");
+
+    let first_id = {
+        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        store
+            .add_time_series(
+                42,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(series(2024, 24, 100.0)).with_units("MW"),
+                Features::new(),
+            )
+            .unwrap();
+        store.flush().unwrap();
+        let rows = store.list_time_series(ListFilter::new()).unwrap();
+        assert_eq!(rows.len(), 1);
+        rows[0].association_id
+    };
+
+    let mut store = open_store(path.as_path(), false).unwrap();
+
+    // The id the first session minted is still on the row, and still addresses it.
+    let found = store.get_metadata_by_association_id(first_id).unwrap();
+    assert_eq!(found.association_id, first_id);
+
+    // A row added after the reopen must not be handed that same id.
+    store
+        .add_time_series(
+            43,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series(2024, 24, 200.0)).with_units("MW"),
+            Features::new(),
+        )
+        .unwrap();
+    store.flush().unwrap();
+
+    let rows = store.list_time_series(ListFilter::new()).unwrap();
+    assert_eq!(rows.len(), 2);
+    let second_id = rows
+        .iter()
+        .find(|r| r.owner_id == 43)
+        .expect("the row added after reopen")
+        .association_id;
+    assert_ne!(
+        second_id, first_id,
+        "the sequence restarted: a reopened store reused an id already in the catalog"
+    );
+    assert!(
+        second_id > first_id,
+        "the mark must advance across a reopen, got {second_id} after {first_id}"
+    );
+
+    let report = store.verify_integrity().unwrap();
+    assert!(report.ok(), "integrity errors: {:?}", report.errors);
 }

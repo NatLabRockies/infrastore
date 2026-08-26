@@ -208,18 +208,70 @@ end
         store, owner, Component, "load"; resolution=resolution, features=feats
     )
 
-    computed = InfraStore.association_id(
-        owner, Component, SingleTimeSeries, "load"; resolution=resolution, features=feats
-    )
-    @test computed == meta.association_id
+    # Minted by the store, so there is nothing to recompute: the id the metadata
+    # reports is the id the store assigned, and it addresses the same row.
+    @test meta.association_id > 0
 
     fetched = get_time_series_metadata(store, meta.association_id)
     @test fetched == meta
     @test fetched.name == "load"
 
     @test_throws InfraStore.NotFoundError get_time_series_metadata(
-        store, meta.association_id ⊻ 1
+        store, meta.association_id + 1000
     )
+
+    # The id is a durable handle: renumbering the owner does not move it. This is
+    # the path IS drives from `assign_new_id!`.
+    replace_owner!(store, owner, 99, Component)
+    still_there = get_time_series_metadata(store, meta.association_id)
+    @test still_there.owner_id == 99
+    @test still_there.association_id == meta.association_id
+end
+
+@testset "InfraStore.jl reserved association ids" begin
+    store = Store()
+    initial = DateTime(2024, 1, 1)
+    resolution = Hour(1)
+
+    # Reserve before the row exists, which is what a caller building a key at
+    # stage time has to do.
+    reserved = reserve_association_ids!(store, 2)
+    @test reserved > 0
+
+    batch = AddBatch()
+    add_time_series!(
+        batch, 1, "Generator", Component,
+        SingleTimeSeries(initial, resolution, collect(1.0:24.0), "load");
+        association_id=reserved,
+    )
+    add_time_series!(
+        batch, 2, "Generator", Component,
+        SingleTimeSeries(initial, resolution, collect(1.0:24.0), "load");
+        association_id=reserved + 1,
+    )
+    add_time_series_bulk!(store, batch)
+    flush!(store)
+
+    # The reserved id is the id the row carries. If it were not, the key a caller
+    # already embedded would name a row that does not exist.
+    first_row = get_time_series_metadata(store, reserved)
+    @test first_row.association_id == reserved
+    @test first_row.owner_id == 1
+
+    second_row = get_time_series_metadata(store, reserved + 1)
+    @test second_row.association_id == reserved + 1
+    @test second_row.owner_id == 2
+
+    # An unreserved add mints past the reservation rather than colliding with it.
+    add_time_series!(
+        store, 3, "Generator", Component,
+        SingleTimeSeries(initial, resolution, collect(1.0:24.0), "load"),
+    )
+    flush!(store)
+    minted = only(
+        r.association_id for r in list_time_series(store) if r.owner_id == 3
+    )
+    @test minted > reserved + 1
 end
 
 @testset "InfraStore.jl persistent round-trip" begin
@@ -2358,7 +2410,19 @@ end
         @test length(rows) == 1
         row = rows[1]
         want = _openapi_fixture("single_time_series")
-        @test row == want
+
+        # `association_id` is minted per store and records insertion order, so
+        # this store's value is not the fixture's: this store holds one series,
+        # the fixture's holds six. The fixture pins the wire shape; the id's own
+        # contract is that it addresses the row it was exported with, asserted
+        # below rather than by equality.
+        @test Dict(k => v for (k, v) in row if k != "association_id") ==
+            Dict(k => v for (k, v) in want if k != "association_id")
+
+        exported_id = row["association_id"]
+        @test exported_id > 0
+        @test get_time_series_metadata(store, Int64(exported_id)).name ==
+            "max_active_power"
 
         close!(store)
     end
