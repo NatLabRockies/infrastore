@@ -276,7 +276,7 @@ class TestSupplementalAttributeBulk:
             attached_typed(2, "Load", 100, "GeographicInfo"),
         ]
         source = Store.create(in_memory=True)
-        assert source.add_supplemental_attribute_associations(records) == len(records)
+        assert len(source.add_supplemental_attribute_associations(records)) == len(records)
         exported = source.list_supplemental_attribute_associations()
         assert exported == records
 
@@ -452,7 +452,7 @@ class TestParentChildBulk:
             edge_typed(2, "Load", 10, "Bus"),
         ]
         source = Store.create(in_memory=True)
-        assert source.add_parent_child_associations(records) == len(records)
+        assert len(source.add_parent_child_associations(records)) == len(records)
         exported = source.list_parent_child_associations()
         assert exported == records
 

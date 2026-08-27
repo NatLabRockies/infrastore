@@ -48,7 +48,7 @@ def test_deterministic_scalar_round_trip():
     key = store.add_time_series(
         OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Deterministic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data, "det_scalar"),
-    )
+    ).key
 
     assert key.time_series_type == TimeSeriesType.Deterministic
 
@@ -73,7 +73,7 @@ def test_deterministic_multidim_element():
     key = store.add_time_series(
         OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Deterministic(T0, RES_1H, horizon, INTERVAL_12H, C, data, "det_multidim"),
-    )
+    ).key
 
     got = store.get_time_series(key)
     assert isinstance(got, Deterministic)
@@ -92,7 +92,7 @@ def test_deterministic_window_selection():
     key = store.add_time_series(
         OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Deterministic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data, "det_window"),
-    )
+    ).key
 
     # Select windows 2, 3, 4 (0-indexed): start = T0 + 2*interval, end = T0 + 5*interval
     w_start = T0 + 2 * INTERVAL_12H
@@ -117,7 +117,7 @@ def test_deterministic_int64_dtype():
     key = store.add_time_series(
         OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Deterministic(T0, RES_1H, horizon, INTERVAL_12H, C, data, "det_int64"),
-    )
+    ).key
 
     got = store.get_time_series(key)
     arr = np.asarray(got.data)
@@ -140,7 +140,7 @@ def test_probabilistic_round_trip():
     key = store.add_time_series(
         OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Probabilistic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, percentiles, data, "prob_basic"),
-    )
+    ).key
 
     assert key.time_series_type == TimeSeriesType.Probabilistic
 
@@ -167,7 +167,7 @@ def test_probabilistic_window_selection():
     key = store.add_time_series(
         OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Probabilistic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, percentiles, data, "prob_window"),
-    )
+    ).key
 
     # Windows 1 and 2 (0-indexed): start = T0 + 1*interval, end = T0 + 3*interval
     w_start = T0 + 1 * INTERVAL_12H
@@ -197,7 +197,7 @@ def test_scenarios_round_trip():
     key = store.add_time_series(
         OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Scenarios(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data, "scen_basic"),
-    )
+    ).key
 
     assert key.time_series_type == TimeSeriesType.Scenarios
 
@@ -223,7 +223,7 @@ def test_scenarios_window_selection():
     key = store.add_time_series(
         OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Scenarios(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data, "scen_window"),
-    )
+    ).key
 
     # Select windows 2, 3, 4 (0-indexed)
     w_start = T0 + 2 * INTERVAL_12H
@@ -249,7 +249,7 @@ def test_scenarios_int64_dtype():
     key = store.add_time_series(
         OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Scenarios(T0, RES_1H, horizon, INTERVAL_12H, C, data, "scen_int64"),
-    )
+    ).key
 
     got = store.get_time_series(key)
     arr = np.asarray(got.data)
@@ -312,7 +312,7 @@ def test_misaligned_window_start_raises():
     key = store.add_time_series(
         OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Deterministic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data, "det_misalign"),
-    )
+    ).key
 
     # 1 hour off — not a window boundary (interval=12h)
     bad_start = T0 + timedelta(hours=1)
@@ -329,7 +329,7 @@ def test_end_before_start_raises():
     key = store.add_time_series(
         OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Deterministic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data, "det_backwards"),
-    )
+    ).key
 
     with pytest.raises(InvalidParameterError):
         store.get_time_series(
@@ -346,7 +346,7 @@ def test_start_past_last_window_raises():
     key = store.add_time_series(
         OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Deterministic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data, "det_past"),
-    )
+    ).key
 
     # Windows exist at indices 0..3; index C (one past the last) does not.
     past_start = T0 + C * INTERVAL_12H
@@ -362,7 +362,7 @@ def test_empty_window_range():
     key = store.add_time_series(
         OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Deterministic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data, "det_empty"),
-    )
+    ).key
 
     # Aligned start but end == start selects no windows
     w_start = T0 + INTERVAL_12H
@@ -424,7 +424,7 @@ def test_repr_smoke():
     det_key = store.add_time_series(
         OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Deterministic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, det_data, "det_repr"),
-    )
+    ).key
     det = store.get_time_series(det_key)
     assert "Deterministic" in repr(det)
 
@@ -433,7 +433,7 @@ def test_repr_smoke():
     prob_key = store.add_time_series(
         OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Probabilistic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, [0.1, 0.9], prob_data, "prob_repr"),
-    )
+    ).key
     prob = store.get_time_series(prob_key)
     assert "Probabilistic" in repr(prob)
 
@@ -442,6 +442,6 @@ def test_repr_smoke():
     scen_key = store.add_time_series(
         OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Scenarios(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, scen_data, "scen_repr"),
-    )
+    ).key
     scen = store.get_time_series(scen_key)
     assert "Scenarios" in repr(scen)

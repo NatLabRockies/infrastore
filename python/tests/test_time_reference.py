@@ -45,7 +45,7 @@ def add(store, owner, ts, **kwargs):
         owner_category=OwnerCategory.Component,
         time_series=ts,
         **kwargs,
-    )
+    ).key
 
 
 class TestInference:

@@ -54,7 +54,7 @@ def _infrastore_roundtrip(path):
         owner_category=OwnerCategory.Component,
         time_series=ts,
         units="MW",
-    )
+    ).key
     assert np.array_equal(np.asarray(store.get_time_series(key).data), values)
     del store
 

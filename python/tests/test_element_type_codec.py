@@ -71,7 +71,7 @@ def test_a_stored_piecewise_series_round_trips_through_the_store():
             datetime(2024, 1, 1, tzinfo=timezone.utc), timedelta(hours=1), values, "cost"
         ),
         element_type="piecewise_linear",
-    )
+    ).key
     meta = store.get_metadata(key)
     assert meta["element_type"] == "piecewise_linear"
 
