@@ -1766,6 +1766,73 @@ impl Store {
         })
     }
 
+    /// Insert association rows verbatim, filing each under the `id` it carries.
+    ///
+    /// The write half of the OpenAPI document round trip (see
+    /// [`Self::import_time_series_associations_openapi`], which owns the wire
+    /// spelling and calls this). Rows only: every row must name an array the
+    /// store already holds, because the document carries locators, never
+    /// values. The arrays arrive with the artifact.
+    ///
+    /// All-or-nothing, and validated before anything is written:
+    ///
+    /// - Each row's `data_hash` must be present in the backend. A row naming an
+    ///   array the store does not hold would be a dangling association — the
+    ///   store opens cleanly, lists the series, and reads nothing — which is
+    ///   the failure [`TimeSeriesError::StoreExists`] exists to prevent,
+    ///   arriving by a different door.
+    /// - `NonSequentialTimeSeries` is refused. Its timestamp vector is
+    ///   content-addressed in the catalog and deliberately absent from the wire
+    ///   form, so no document can reconstruct one.
+    /// - A `DeterministicSingleTimeSeries` is a view of a `SingleTimeSeries`,
+    ///   so its source must be present — in this batch or already stored. Views
+    ///   are therefore written last, after the rows they may depend on.
+    ///
+    /// Returns the number of rows inserted.
+    pub fn import_association_rows(&mut self, rows: Vec<TimeSeriesMetadata>) -> Result<usize> {
+        if self.read_only {
+            return Err(TimeSeriesError::ReadOnlyStore);
+        }
+        for meta in &rows {
+            if meta.time_series_type == TimeSeriesType::NonSequentialTimeSeries {
+                return Err(TimeSeriesError::InvalidParameter(format!(
+                    "cannot import NonSequentialTimeSeries '{}': its timestamp vector is \
+                     content-addressed in the catalog and is not carried by the wire form, \
+                     so no document holds enough to reconstruct the row",
+                    meta.name,
+                )));
+            }
+            if !self.backend.contains(&meta.data_hash)? {
+                return Err(TimeSeriesError::InvalidParameter(format!(
+                    "cannot import '{}' (owner {}): it names array {}, which this store does \
+                     not hold. An import writes rows only — the arrays arrive with the \
+                     artifact — so the row would be a dangling reference",
+                    meta.name,
+                    meta.owner_id,
+                    crate::hash::hash_hex(&meta.data_hash),
+                )));
+            }
+        }
+
+        // Views last: a `DeterministicSingleTimeSeries` is a view of a
+        // `SingleTimeSeries`, and `check_forecast_family_free` reads the rows
+        // already inserted, so the order within one batch is load-bearing
+        // rather than cosmetic.
+        let (views, plain): (Vec<_>, Vec<_>) = rows
+            .into_iter()
+            .partition(|m| m.time_series_type == TimeSeriesType::DeterministicSingleTimeSeries);
+
+        let tx = self.metadata.savepoint()?;
+        let mut shared_sets = SharedSetCache::default();
+        let mut inserted = 0usize;
+        for meta in plain.iter().chain(views.iter()) {
+            insert_association(&tx, meta, &mut shared_sets)?;
+            inserted += 1;
+        }
+        tx.commit()?;
+        Ok(inserted)
+    }
+
     /// Read one series, optionally sliced to `time_range`.
     ///
     /// A range does not have to be grid-aligned — `start` is floored and `end`

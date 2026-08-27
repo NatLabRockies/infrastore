@@ -57,6 +57,11 @@ class TestTimeSeriesExport:
         rows = json.loads(store.export_time_series_associations_openapi())
         assert len(rows) == 1
         row = rows[0]
+        # The fixture is a golden of row *content*, so it carries no ``id``: an
+        # id is the store's own bookkeeping, and its value depends on how many
+        # rows were written before it. That the export emits one is asserted
+        # here instead.
+        assert row.pop("id") == 1
         want = fixture("single_time_series")
         assert row == want
 

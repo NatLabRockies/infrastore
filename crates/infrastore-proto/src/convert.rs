@@ -281,6 +281,7 @@ pub fn metadata_to_pb(m: &TimeSeriesMetadata) -> pb::TimeSeriesMetadata {
         element_type: m.element_type.to_string(),
         element_shape: m.element_shape.iter().map(|d| *d as u64).collect(),
         application_data: m.application_data.clone(),
+        id: m.id,
         percentiles: m.percentiles.clone().unwrap_or_default(),
     }
 }
@@ -366,11 +367,7 @@ pub fn metadata_from_pb(m: pb::TimeSeriesMetadata) -> Result<TimeSeriesMetadata,
         })?,
         element_shape: m.element_shape.iter().map(|d| *d as usize).collect(),
         application_data: m.application_data,
-        // The wire form does not carry the association id yet, so a client
-        // reconstructing metadata from a response has none to report. `None`
-        // here reads as "unknown", not "assign one" — nothing writes through
-        // this path; the server is read-only.
-        id: None,
+        id: m.id,
     })
 }
 
@@ -871,6 +868,7 @@ mod tests {
             element_type: "f64".into(),
             element_shape: Vec::new(),
             application_data: None,
+            id: None,
             percentiles: Vec::new(),
         }
     }

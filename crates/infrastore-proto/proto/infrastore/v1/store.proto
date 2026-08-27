@@ -130,6 +130,12 @@ message TimeSeriesMetadata {
   // `TimeReference::as_storage_string`: how this series' timestamps were
   // spelled. See TimeSeriesKey.time_reference.
   optional string time_reference                 = 25;
+  // The catalog row's own id -- the handle a consumer stores in its own model
+  // to reference this series later. Transmitted rather than derived: nothing
+  // computes it from the identity tuple, so the serving store is the only
+  // thing that knows it. Absent only for metadata that never came from a
+  // catalog; every row a server returns carries one.
+  optional int64  id                             = 26;
 }
 
 // ---- ListTimeSeries ----

@@ -1134,3 +1134,142 @@ fn the_sweep_reports_the_views_it_wrote() {
     assert_eq!(again.transformed, 0);
     assert!(again.written.is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// The OpenAPI document round trip
+// ---------------------------------------------------------------------------
+
+/// Exported rows re-import into a store holding the arrays, ids intact.
+///
+/// This is the point of putting the id on the wire: an import that assigned
+/// fresh ids would leave every reference the document carries pointing at the
+/// wrong series.
+#[test]
+fn a_document_round_trips_with_its_ids() {
+    let mut source = create_store(None, true).unwrap();
+    let mut expected = Vec::new();
+    for (owner, name) in [(1, "load"), (2, "wind"), (3, "solar")] {
+        let added = source
+            .add(
+                AddRequest::new(
+                    owner,
+                    "Generator",
+                    OwnerCategory::Component,
+                    TimeSeriesData::SingleTimeSeries(series(name)),
+                )
+                .with_id(owner * 100),
+            )
+            .unwrap();
+        expected.push((name.to_string(), added.id));
+    }
+    let json = source
+        .export_time_series_associations_openapi(&ListFilter::default())
+        .unwrap();
+    assert!(
+        json.contains("\"id\":100"),
+        "the wire form must carry the id"
+    );
+
+    // A store that already holds the array the document's rows name, under an
+    // identity of its own. Arrays are content-addressed, so "the artifact
+    // brought the values" is exactly this: the bytes are present, and the rows
+    // being imported are the ones that do not exist yet.
+    let mut target = create_store(None, true).unwrap();
+    target
+        .add(AddRequest::new(
+            9,
+            "Anchor",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series("anchor")),
+        ))
+        .unwrap();
+
+    assert_eq!(
+        target
+            .import_time_series_associations_openapi(&json)
+            .unwrap(),
+        3,
+    );
+    for (name, id) in &expected {
+        let meta = target
+            .get_metadata_by_id(*id)
+            .unwrap()
+            .unwrap_or_else(|| panic!("id {id} did not survive the import"));
+        assert_eq!(&meta.name, name);
+    }
+}
+
+/// An import refuses a row naming an array the store does not hold, rather than
+/// writing an association that reads back as nothing.
+#[test]
+fn an_import_refuses_a_row_whose_array_is_absent() {
+    let mut source = create_store(None, true).unwrap();
+    source
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series("load")),
+        ))
+        .unwrap();
+    let json = source
+        .export_time_series_associations_openapi(&ListFilter::default())
+        .unwrap();
+
+    let mut empty = create_store(None, true).unwrap();
+    let err = empty
+        .import_time_series_associations_openapi(&json)
+        .unwrap_err();
+    match err {
+        TimeSeriesError::InvalidParameter(msg) => {
+            assert!(msg.contains("does not hold"), "{msg}");
+            assert!(msg.contains("dangling"), "{msg}");
+        }
+        other => panic!("expected InvalidParameter, got {other:?}"),
+    }
+    // Nothing was written.
+    assert_eq!(
+        empty.list_time_series(ListFilter::default()).unwrap().len(),
+        0
+    );
+}
+
+/// A `NonSequentialTimeSeries` cannot be imported: its timestamp vector is
+/// content-addressed in the catalog and deliberately absent from the wire form,
+/// so no document holds enough to rebuild the row. Refused with a message that
+/// says so, rather than written with the wrong time axis.
+#[test]
+fn an_import_refuses_an_irregular_row() {
+    let mut store = create_store(None, true).unwrap();
+    let timestamps = vec![
+        Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
+        Utc.with_ymd_and_hms(2024, 1, 1, 5, 0, 0).unwrap(),
+    ];
+    let irregular = infrastore_core::NonSequentialTimeSeries::new(
+        timestamps,
+        TypedArray::from_f64(vec![2], &[1.0, 2.0]),
+        "events",
+    )
+    .unwrap();
+    store
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::NonSequentialTimeSeries(irregular),
+        ))
+        .unwrap();
+    let json = store
+        .export_time_series_associations_openapi(&ListFilter::default())
+        .unwrap();
+
+    let err = store
+        .import_time_series_associations_openapi(&json)
+        .unwrap_err();
+    match err {
+        TimeSeriesError::InvalidParameter(msg) => {
+            assert!(msg.contains("timestamp vector"), "{msg}");
+        }
+        other => panic!("expected InvalidParameter, got {other:?}"),
+    }
+}

@@ -234,6 +234,21 @@ fn export_reproduces_every_time_series_fixture() {
         .expect("export should succeed");
     let rows: Vec<serde_json::Value> = serde_json::from_str(&json).expect("export is a JSON array");
 
+    // The fixtures are goldens of row *content*, so they carry no `id`: an id is
+    // the store's own bookkeeping, and its value depends on how many rows were
+    // written before it — pinning one would make this fixture disagree with the
+    // same row exported from any differently-ordered store. That the export
+    // emits an id at all is asserted below, and its round trip is covered in
+    // `association_ids.rs`.
+    let mut content: Vec<serde_json::Value> = rows.clone();
+    for row in &mut content {
+        let object = row.as_object_mut().expect("each row is an object");
+        assert!(
+            object.remove("id").is_some(),
+            "every exported row must carry its catalog id",
+        );
+    }
+
     for name in [
         "single_time_series",
         "non_sequential_time_series",
@@ -244,7 +259,7 @@ fn export_reproduces_every_time_series_fixture() {
     ] {
         let want = fixture(name);
         assert!(
-            rows.contains(&want),
+            content.contains(&want),
             "export does not contain the {name} fixture row; export was {rows:#?}"
         );
     }
@@ -410,8 +425,23 @@ fn export_sort_order_does_not_depend_on_insertion_order() {
     let ordered_rows: Vec<serde_json::Value> =
         serde_json::from_str(&ordered_json).expect("export is a JSON array");
 
-    // The sort order should be identical regardless of insertion order.
-    assert_eq!(shuffled_rows, ordered_rows);
+    // The sort order should be identical regardless of insertion order — but
+    // the ids are not, and must not be: an id records *when* a row was written,
+    // so two stores built in different orders assign them differently. That is
+    // the whole reason the id sits outside a series' identity, so this compares
+    // the rows without it.
+    let without_ids = |rows: Vec<serde_json::Value>| -> Vec<serde_json::Value> {
+        rows.into_iter()
+            .map(|mut row| {
+                row.as_object_mut()
+                    .expect("each row is an object")
+                    .remove("id")
+                    .expect("every exported row carries its id");
+                row
+            })
+            .collect()
+    };
+    assert_eq!(without_ids(shuffled_rows), without_ids(ordered_rows));
 }
 
 // ---- golden: supplemental-attribute export/import round trip --------------
