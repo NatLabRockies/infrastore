@@ -1044,7 +1044,8 @@ fn store_on_disk() -> (tempfile::TempDir, std::path::PathBuf, TimeSeriesKey) {
                 TimeSeriesData::SingleTimeSeries(series(2024, 8, 1.0)),
                 Features::new(),
             )
-            .unwrap();
+            .unwrap()
+            .key;
         store.flush().unwrap();
         key
     };

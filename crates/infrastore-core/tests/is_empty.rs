@@ -36,6 +36,7 @@ fn attach(component_id: i64, attribute_id: i64) -> SupplementalAttributeAssociat
         component_type: "Generator".into(),
         attribute_id,
         attribute_type: "GeographicInfo".into(),
+        id: None,
     }
 }
 
@@ -45,6 +46,7 @@ fn edge(parent_id: i64, child_id: i64) -> ParentChildAssociation {
         parent_type: "Generator".into(),
         child_id,
         child_type: "Bus".into(),
+        id: None,
     }
 }
 
@@ -80,10 +82,10 @@ fn time_series_alone_makes_the_store_non_empty() {
                     owner_id: 1,
                     owner_category: OwnerCategory::Component,
                     time_series_type: TimeSeriesType::SingleTimeSeries,
-                    name: key.name().to_string(),
-                    resolution: key.resolution(),
+                    name: key.key.name().to_string(),
+                    resolution: key.key.resolution(),
                     interval: None,
-                    features: key.features().clone(),
+                    features: key.key.features().clone(),
                 })
                 .unwrap();
             assert!(store.is_empty().unwrap(), "{backend}");

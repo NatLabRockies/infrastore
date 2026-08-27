@@ -425,6 +425,7 @@ fn export_reproduces_the_supplemental_attribute_fixture() {
             component_type: "ThermalStandard".into(),
             attribute_id: 481,
             attribute_type: "GeometricDistributionForcedOutage".into(),
+            id: None,
         })
         .expect("association should add");
 
@@ -445,12 +446,14 @@ fn supplemental_attribute_export_import_round_trips_byte_equal() {
                 component_type: "Generator".into(),
                 attribute_id: 100,
                 attribute_type: "GeographicInfo".into(),
+                id: None,
             },
             SupplementalAttributeAssociation {
                 component_id: 2,
                 component_type: "Load".into(),
                 attribute_id: 100,
                 attribute_type: "GeographicInfo".into(),
+                id: None,
             },
         ])
         .expect("associations should add");

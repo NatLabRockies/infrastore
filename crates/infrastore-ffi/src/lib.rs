@@ -1060,7 +1060,7 @@ pub unsafe extern "C" fn infrastore_store_add_single(
     match store.inner.add_time_series_bulk(vec![req]) {
         Ok(mut keys) => {
             let handle = Box::new(InfraStoreKeyHandle {
-                inner: keys.remove(0).identity().clone(),
+                inner: keys.remove(0).key.identity().clone(),
             });
             unsafe { *out_key = Box::into_raw(handle) };
             INFRASTORE_OK
@@ -1235,7 +1235,7 @@ pub unsafe extern "C" fn infrastore_store_add_non_sequential(
         Ok(mut keys) => {
             unsafe {
                 *out_key = Box::into_raw(Box::new(InfraStoreKeyHandle {
-                    inner: keys.remove(0).identity().clone(),
+                    inner: keys.remove(0).key.identity().clone(),
                 }))
             };
             INFRASTORE_OK
@@ -3252,7 +3252,7 @@ pub unsafe extern "C" fn infrastore_store_add_forecast(
     match store.inner.add_time_series_bulk(vec![req]) {
         Ok(mut keys) => {
             let handle = Box::new(InfraStoreKeyHandle {
-                inner: keys.remove(0).identity().clone(),
+                inner: keys.remove(0).key.identity().clone(),
             });
             unsafe { *out_key = Box::into_raw(handle) };
             INFRASTORE_OK
@@ -3477,7 +3477,7 @@ pub unsafe extern "C" fn infrastore_store_add_probabilistic(
     match store.inner.add_time_series_bulk(vec![req]) {
         Ok(mut keys) => {
             let handle = Box::new(InfraStoreKeyHandle {
-                inner: keys.remove(0).identity().clone(),
+                inner: keys.remove(0).key.identity().clone(),
             });
             unsafe { *out_key = Box::into_raw(handle) };
             INFRASTORE_OK
@@ -3969,7 +3969,7 @@ pub unsafe extern "C" fn infrastore_store_add_batch(
                 .into_iter()
                 .map(|k| {
                     Box::into_raw(Box::new(InfraStoreKeyHandle {
-                        inner: k.identity().clone(),
+                        inner: k.key.identity().clone(),
                     }))
                 })
                 .collect();
@@ -6835,9 +6835,11 @@ pub unsafe extern "C" fn infrastore_store_add_supplemental_attribute_association
             component_type,
             attribute_id,
             attribute_type,
+            // The C entry point does not surface the id yet.
+            id: None,
         },
     ) {
-        Ok(()) => INFRASTORE_OK,
+        Ok(_) => INFRASTORE_OK,
         Err(e) => map_core_error(e),
     }
 }
@@ -6867,9 +6869,9 @@ pub unsafe extern "C" fn infrastore_store_add_supplemental_attribute_association
             Err(c) => return c,
         };
     match store.inner.add_supplemental_attribute_associations(assocs) {
-        Ok(n) => {
+        Ok(ids) => {
             if !out_added.is_null() {
-                unsafe { *out_added = n as u64 };
+                unsafe { *out_added = ids.len() as u64 };
             }
             INFRASTORE_OK
         }
@@ -7247,8 +7249,10 @@ pub unsafe extern "C" fn infrastore_store_add_parent_child_association(
             parent_type,
             child_id,
             child_type,
+            // The C entry point does not surface the id yet.
+            id: None,
         }) {
-        Ok(()) => INFRASTORE_OK,
+        Ok(_) => INFRASTORE_OK,
         Err(e) => map_core_error(e),
     }
 }
@@ -7276,9 +7280,9 @@ pub unsafe extern "C" fn infrastore_store_add_parent_child_associations(
             Err(c) => return c,
         };
     match store.inner.add_parent_child_associations(assocs) {
-        Ok(n) => {
+        Ok(ids) => {
             if !out_added.is_null() {
-                unsafe { *out_added = n as u64 };
+                unsafe { *out_added = ids.len() as u64 };
             }
             INFRASTORE_OK
         }

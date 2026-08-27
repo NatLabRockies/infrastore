@@ -250,6 +250,7 @@ pub fn attach(store_path: &Path, args: &AttachArgs<'_>) -> Result<(), String> {
                 component_type: r.1,
                 attribute_id: r.2,
                 attribute_type: r.3,
+                id: None,
             })
             .collect::<Vec<_>>(),
         None => vec![SupplementalAttributeAssociation {
@@ -257,6 +258,7 @@ pub fn attach(store_path: &Path, args: &AttachArgs<'_>) -> Result<(), String> {
             component_type: require_type(args.component_type, "--component-type")?,
             attribute_id: require_id(args.attribute_id, "--attribute-id")?,
             attribute_type: require_type(args.attribute_type, "--attribute-type")?,
+            id: None,
         }],
     };
     if args.dry_run {
@@ -288,7 +290,8 @@ pub fn attach(store_path: &Path, args: &AttachArgs<'_>) -> Result<(), String> {
     let mut store = store_access::open_writable(store_path)?;
     let n = store
         .add_supplemental_attribute_associations(rows)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?
+        .len();
     store.flush().map_err(|e| e.to_string())?;
     report(
         args.format,
@@ -391,6 +394,7 @@ pub fn link(store_path: &Path, args: &LinkArgs<'_>) -> Result<(), String> {
                 parent_type: r.1,
                 child_id: r.2,
                 child_type: r.3,
+                id: None,
             })
             .collect::<Vec<_>>(),
         None => vec![ParentChildAssociation {
@@ -398,6 +402,7 @@ pub fn link(store_path: &Path, args: &LinkArgs<'_>) -> Result<(), String> {
             parent_type: require_type(args.parent_type, "--parent-type")?,
             child_id: require_id(args.child_id, "--child-id")?,
             child_type: require_type(args.child_type, "--child-type")?,
+            id: None,
         }],
     };
     if args.dry_run {
@@ -429,7 +434,8 @@ pub fn link(store_path: &Path, args: &LinkArgs<'_>) -> Result<(), String> {
     let mut store = store_access::open_writable(store_path)?;
     let n = store
         .add_parent_child_associations(rows)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?
+        .len();
     store.flush().map_err(|e| e.to_string())?;
     report(
         args.format,

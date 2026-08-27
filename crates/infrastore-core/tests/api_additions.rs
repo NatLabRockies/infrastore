@@ -417,6 +417,7 @@ fn add_sts(store: &mut infrastore_core::Store, owner: i64, name: &str, base: f64
             TimeSeriesData::SingleTimeSeries(sts(name, base, 4)),
         ))
         .unwrap()
+        .key
 }
 
 #[test]
@@ -712,7 +713,7 @@ fn copy_time_series_shares_the_array() {
             let copy = store
                 .copy_time_series(src.identity(), 2, "Generator", Some("load_copy"))
                 .unwrap();
-            assert_eq!(copy.name(), "load_copy", "{backend}");
+            assert_eq!(copy.key.name(), "load_copy", "{backend}");
 
             // No array data was duplicated.
             assert_eq!(store.num_distinct_arrays().unwrap(), 1, "{backend}");
@@ -723,7 +724,7 @@ fn copy_time_series_shares_the_array() {
 
             // Both read the same values.
             let expected = vec![7.0, 8.0, 9.0, 10.0];
-            for key in [src, &copy] {
+            for key in [src, &copy.key] {
                 let got = store.get_time_series(key.identity(), None).unwrap();
                 assert_eq!(
                     got.as_single().unwrap().data.to_f64_vec().unwrap(),

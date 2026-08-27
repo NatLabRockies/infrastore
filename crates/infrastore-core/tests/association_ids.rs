@@ -17,9 +17,10 @@
 
 use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{
-    AddRequest, FeatureValue, Features, KeyIdentity, ListFilter, OwnerCategory, Period,
-    SingleTimeSeries, TimeSeriesData, TimeSeriesError, TimeSeriesType, TransformPolicy, TypedArray,
-    create_store, open_store,
+    AddRequest, FeatureValue, Features, KeyIdentity, ListFilter, OwnerCategory,
+    ParentChildAssociation, Period, SingleTimeSeries, SupplementalAttributeAssociation,
+    SupplementalAttributeFilter, TimeSeriesData, TimeSeriesError, TimeSeriesType, TransformPolicy,
+    TypedArray, create_store, open_store,
 };
 
 /// One hourly `SingleTimeSeries` named `name`, three points long.
@@ -77,6 +78,7 @@ fn every_association_table_declares_autoincrement() {
                     component_type: "Generator".into(),
                     attribute_id: 7,
                     attribute_type: "GeographicInfo".into(),
+                    id: None,
                 },
             )
             .unwrap();
@@ -86,6 +88,7 @@ fn every_association_table_declares_autoincrement() {
                 parent_type: "Generator".into(),
                 child_id: 2,
                 child_type: "Bus".into(),
+                id: None,
             })
             .unwrap();
         store.flush().unwrap();
@@ -242,6 +245,7 @@ fn the_three_tables_have_independent_id_streams() {
                     component_type: "Generator".into(),
                     attribute_id: 7,
                     attribute_type: "GeographicInfo".into(),
+                    id: None,
                 },
             )
             .unwrap();
@@ -251,6 +255,7 @@ fn the_three_tables_have_independent_id_streams() {
                 parent_type: "Generator".into(),
                 child_id: 2,
                 child_type: "Bus".into(),
+                id: None,
             })
             .unwrap();
         store.flush().unwrap();
@@ -484,5 +489,228 @@ fn id_cannot_be_used_as_a_feature_name() {
     assert!(
         matches!(err, TimeSeriesError::InvalidParameter(_)),
         "a reserved feature name must be refused, got {err:?}",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The write API reports what it wrote
+// ---------------------------------------------------------------------------
+
+/// A write hands back the id it was filed under, and it is the same id a read
+/// reports. The bulk form does the same, in input order.
+#[test]
+fn a_write_reports_the_id_it_used() {
+    let mut store = create_store(None, true).unwrap();
+    let added = store
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series("load")),
+        ))
+        .unwrap();
+    assert_eq!(
+        store.get_metadata(added.identity()).unwrap().id,
+        Some(added.id)
+    );
+
+    let bulk = store
+        .add_time_series_bulk(
+            ["a", "b", "c"]
+                .into_iter()
+                .map(|n| {
+                    AddRequest::new(
+                        2,
+                        "Generator",
+                        OwnerCategory::Component,
+                        TimeSeriesData::SingleTimeSeries(series(n)),
+                    )
+                })
+                .collect(),
+        )
+        .unwrap();
+    let ids: Vec<i64> = bulk.iter().map(|a| a.id).collect();
+    assert_eq!(
+        ids,
+        vec![added.id + 1, added.id + 2, added.id + 3],
+        "bulk ids must be assigned in input order",
+    );
+    for a in &bulk {
+        assert_eq!(store.get_metadata(a.identity()).unwrap().id, Some(a.id));
+    }
+}
+
+/// A batch either supplies every id or none. Half of each has no coherent
+/// meaning — whether an explicit id collides with an assigned one would depend
+/// on the order the items happened to be in.
+#[test]
+fn a_batch_may_not_mix_supplied_and_assigned_ids() {
+    let mut store = create_store(None, true).unwrap();
+    let err = store
+        .add_time_series_bulk(vec![
+            AddRequest::new(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(series("supplied")),
+            )
+            .with_id(10),
+            AddRequest::new(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(series("assigned")),
+            ),
+        ])
+        .unwrap_err();
+    assert!(
+        matches!(err, TimeSeriesError::InvalidParameter(_)),
+        "a mixed batch must be refused, got {err:?}",
+    );
+    // All-or-none both pass.
+    store
+        .add_time_series_bulk(vec![
+            AddRequest::new(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(series("one")),
+            )
+            .with_id(10),
+            AddRequest::new(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(series("two")),
+            )
+            .with_id(11),
+        ])
+        .unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// The two association catalogs
+// ---------------------------------------------------------------------------
+
+fn attach(component_id: i64, attribute_id: i64) -> SupplementalAttributeAssociation {
+    SupplementalAttributeAssociation {
+        component_id,
+        component_type: "Generator".into(),
+        attribute_id,
+        attribute_type: "GeographicInfo".into(),
+        id: None,
+    }
+}
+
+/// Attaching reports the id, a read reports the same one, and an explicit id is
+/// honored over this table's own stream.
+#[test]
+fn attaching_reports_its_id() {
+    let mut store = create_store(None, true).unwrap();
+    let first = store
+        .add_supplemental_attribute_association(attach(1, 100))
+        .unwrap();
+    assert_eq!(first, 1);
+
+    let ids = store
+        .add_supplemental_attribute_associations(vec![attach(2, 100), attach(3, 100)])
+        .unwrap();
+    assert_eq!(ids, vec![2, 3], "bulk ids come back in input order");
+
+    let mut explicit = attach(4, 100);
+    explicit.id = Some(90);
+    assert_eq!(
+        store
+            .add_supplemental_attribute_association(explicit)
+            .unwrap(),
+        90,
+    );
+
+    let rows = store
+        .list_supplemental_attribute_associations(&SupplementalAttributeFilter::default())
+        .unwrap();
+    let seen: Vec<Option<i64>> = rows.iter().map(|r| r.id).collect();
+    assert_eq!(seen, vec![Some(1), Some(2), Some(3), Some(90)]);
+}
+
+/// Two associations describing the same attachment are equal and hash alike
+/// whether or not either has been through the catalog.
+///
+/// Identity here is the endpoint pair — the unique index says so — so folding
+/// the id into equality would make a read-back row unequal to the value that
+/// produced it, and would break `Hash`'s contract with `Eq` in every set these
+/// land in.
+#[test]
+fn an_association_id_is_outside_equality_and_hashing() {
+    use std::collections::HashSet;
+    use std::hash::{BuildHasher, RandomState};
+
+    let fresh = attach(1, 100);
+    let mut stored = attach(1, 100);
+    stored.id = Some(42);
+
+    assert_eq!(fresh, stored);
+    let hasher = RandomState::new();
+    assert_eq!(
+        hasher.hash_one(&fresh),
+        hasher.hash_one(&stored),
+        "equal values must hash equally",
+    );
+
+    let mut set = HashSet::new();
+    set.insert(fresh.clone());
+    assert!(
+        set.contains(&stored),
+        "a row read back from the catalog must be found by the value that wrote it",
+    );
+
+    // The same holds for the directed-edge table.
+    let edge = ParentChildAssociation {
+        parent_id: 1,
+        parent_type: "Generator".into(),
+        child_id: 2,
+        child_type: "Bus".into(),
+        id: None,
+    };
+    let mut stored_edge = edge.clone();
+    stored_edge.id = Some(7);
+    assert_eq!(edge, stored_edge);
+    assert_eq!(hasher.hash_one(&edge), hasher.hash_one(&stored_edge));
+}
+
+/// The exported attribute-association JSON carries no id, so it still parses
+/// through an importer that denies unknown fields.
+///
+/// The struct gained an `id` and the export used to be its serde derive, which
+/// would have put the field on the wire and had the import reject it — an
+/// export its own importer refuses.
+#[test]
+fn the_attribute_association_wire_form_carries_no_id() {
+    let mut store = create_store(None, true).unwrap();
+    store
+        .add_supplemental_attribute_associations(vec![attach(1, 100), attach(2, 101)])
+        .unwrap();
+
+    let json = store
+        .export_supplemental_attribute_associations_openapi()
+        .unwrap();
+    assert!(
+        !json.contains("\"id\""),
+        "the wire form must not carry the catalog id; got {json}",
+    );
+
+    let mut fresh = create_store(None, true).unwrap();
+    let n = fresh
+        .import_supplemental_attribute_associations_openapi(&json)
+        .unwrap();
+    assert_eq!(n, 2);
+    assert_eq!(
+        fresh
+            .list_supplemental_attribute_associations(&SupplementalAttributeFilter::default())
+            .unwrap(),
+        store
+            .list_supplemental_attribute_associations(&SupplementalAttributeFilter::default())
+            .unwrap(),
+        "the rows must round trip; ids are assigned fresh and are outside equality",
     );
 }

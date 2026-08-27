@@ -70,7 +70,7 @@
 //! to match them; any ISO-8601 string remains schema-valid either way.
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::error::Result;
@@ -333,7 +333,41 @@ fn export_sa_rows(store: &Store) -> Result<String> {
     let mut rows =
         store.list_supplemental_attribute_associations(&SupplementalAttributeFilter::default())?;
     rows.sort_by_key(|row| (row.component_id, row.attribute_id));
-    serde_json::to_string(&rows).map_err(Into::into)
+    let wire: Vec<SaWireRow> = rows.iter().map(SaWireRow::from).collect();
+    serde_json::to_string(&wire).map_err(Into::into)
+}
+
+/// The four fields the schema defines, named explicitly rather than serialized
+/// off [`SupplementalAttributeAssociation`] directly.
+///
+/// The struct's own derive used to be the wire form by coincidence, which made
+/// every field added to it a silent wire change. It also stopped being correct
+/// the moment the type gained an `id`: that would have gone out in the JSON and
+/// come straight back as an unknown field, since [`RawSaRow`] denies them —
+/// an export its own importer rejects.
+///
+/// The id is deliberately absent. Nothing references an attachment the way a
+/// consumer references a time series, so it has no reason to cross the wire,
+/// and leaving it off means the vendored schema needs no change. The
+/// consequence to know: ids do not survive an export/import cycle here; the
+/// importer assigns fresh ones. Putting them on the wire later is additive.
+#[derive(Debug, Serialize)]
+struct SaWireRow<'a> {
+    component_id: i64,
+    component_type: &'a str,
+    attribute_id: i64,
+    attribute_type: &'a str,
+}
+
+impl<'a> From<&'a SupplementalAttributeAssociation> for SaWireRow<'a> {
+    fn from(row: &'a SupplementalAttributeAssociation) -> Self {
+        Self {
+            component_id: row.component_id,
+            component_type: &row.component_type,
+            attribute_id: row.attribute_id,
+            attribute_type: &row.attribute_type,
+        }
+    }
 }
 
 /// One row of the incoming SA-association JSON, denying unknown fields so a
@@ -357,6 +391,8 @@ impl From<RawSaRow> for SupplementalAttributeAssociation {
             component_type: row.component_type,
             attribute_id: row.attribute_id,
             attribute_type: row.attribute_type,
+            // The wire form carries no id, so an import is always assigned one.
+            id: None,
         }
     }
 }
@@ -369,7 +405,12 @@ fn import_sa_rows(store: &mut Store, json: &str) -> Result<usize> {
     let rows: Vec<RawSaRow> = serde_json::from_str(json)?;
     let associations: Vec<SupplementalAttributeAssociation> =
         rows.into_iter().map(Into::into).collect();
-    store.add_supplemental_attribute_associations(associations)
+    // The public import surface reports a count, not ids: the wire form carries
+    // no id, so the ones assigned here are this store's own and mean nothing to
+    // the document that was imported.
+    store
+        .add_supplemental_attribute_associations(associations)
+        .map(|ids| ids.len())
 }
 
 // ============================================================================

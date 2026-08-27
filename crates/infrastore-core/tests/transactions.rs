@@ -47,6 +47,7 @@ fn add(store: &mut Store, owner: i64, base: f64) -> TimeSeriesKey {
             Features::new(),
         )
         .unwrap()
+        .key
 }
 
 fn count(store: &Store) -> usize {

@@ -206,6 +206,37 @@ impl AddRequest {
     }
 }
 
+/// One association as it was written: the key that names it, and the catalog
+/// id it was filed under.
+///
+/// The id is deliberately *not* on [`TimeSeriesKey`]. A key is also an input —
+/// to `get`, to `remove` — where an id would be meaningless, and the snapshot
+/// key variants compare by all their fields, so folding it in would make two
+/// keys for the same series in two stores compare unequal. This pairs them
+/// instead, and leaves room to report more about a write without changing the
+/// signature again.
+///
+/// The id is valid only once the enclosing transaction commits: a rollback
+/// returns it to the catalog's counter rather than stranding it, so an id read
+/// out of a span that later rolls back may name a different row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AddedTimeSeries {
+    pub key: TimeSeriesKey,
+    pub id: i64,
+}
+
+impl AddedTimeSeries {
+    /// The identifying tuple of the series just written, forwarded from
+    /// [`Self::key`].
+    ///
+    /// The overwhelmingly common thing to do with a write's result is read the
+    /// series back, which takes a [`KeyIdentity`]; forwarding keeps that one
+    /// step rather than two.
+    pub fn identity(&self) -> &KeyIdentity {
+        self.key.identity()
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct TimeSeriesCounts {
     pub components_with_time_series: i64,
@@ -1135,7 +1166,7 @@ impl Store {
         owner_category: OwnerCategory,
         data: TimeSeriesData,
         features: Features,
-    ) -> Result<TimeSeriesKey> {
+    ) -> Result<AddedTimeSeries> {
         self.add_per_column(vec![AddRequest {
             owner_id,
             owner_type: owner_type.to_string(),
@@ -1146,7 +1177,7 @@ impl Store {
             // caller supplying its own id uses `AddRequest::with_id`.
             id: None,
         }])
-        .map(|mut keys| keys.remove(0))
+        .map(|mut added| added.remove(0))
     }
 
     /// Add one time series from an [`AddRequest`]. Equivalent to
@@ -1154,9 +1185,9 @@ impl Store {
     /// `units`, `quantity_kind`, `unit_system`, `component_field`, and
     /// `application_data`, since those travel on the [`TimeSeriesData`] itself.
     /// Routed through the same per-column path.
-    pub fn add(&mut self, request: AddRequest) -> Result<TimeSeriesKey> {
+    pub fn add(&mut self, request: AddRequest) -> Result<AddedTimeSeries> {
         self.add_per_column(vec![request])
-            .map(|mut keys| keys.remove(0))
+            .map(|mut added| added.remove(0))
     }
 
     /// Bulk insert. All-or-nothing: any error rolls back every association and
@@ -1167,7 +1198,7 @@ impl Store {
     /// datasets that fill whole chunks. A one-at-a-time un-managed loop should use
     /// [`Self::add_time_series`], which packs incrementally into shared datasets.
     #[tracing::instrument(skip(self, items), fields(count = items.len()))]
-    pub fn add_time_series_bulk(&mut self, items: Vec<AddRequest>) -> Result<Vec<TimeSeriesKey>> {
+    pub fn add_time_series_bulk(&mut self, items: Vec<AddRequest>) -> Result<Vec<AddedTimeSeries>> {
         self.flush_bulk_add(items)
     }
 
@@ -1178,10 +1209,11 @@ impl Store {
     /// at the cost of a per-column read-modify-write under the timestamp-major
     /// chunking. All-or-nothing, like [`Self::add_time_series_bulk`].
     #[tracing::instrument(skip(self, items), fields(count = items.len()))]
-    fn add_per_column(&mut self, items: Vec<AddRequest>) -> Result<Vec<TimeSeriesKey>> {
+    fn add_per_column(&mut self, items: Vec<AddRequest>) -> Result<Vec<AddedTimeSeries>> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
+        validate_id_mode(&items)?;
 
         // Derive (and validate) every item's parts before writing anything, so a
         // bad request part-way through the batch cannot leave an array behind.
@@ -1194,7 +1226,7 @@ impl Store {
         // Stage backend writes so we can roll them back on metadata error.
         let mut staged_hashes: Vec<[u8; 32]> = Vec::with_capacity(items.len());
         let tx = self.metadata.savepoint()?;
-        let mut keys = Vec::with_capacity(items.len());
+        let mut added = Vec::with_capacity(items.len());
         // Feature sets and timestamp vectors are shared, and a batch typically
         // spans only a handful of distinct ones; write each once rather than
         // once per item.
@@ -1224,8 +1256,8 @@ impl Store {
             }
 
             match insert_association(&tx, &meta, &mut shared_sets) {
-                Ok(()) => {
-                    keys.push(key);
+                Ok(id) => {
+                    added.push(AddedTimeSeries { key, id });
                 }
                 Err(e) => {
                     // Rollback metadata via Drop; also undo any array puts we
@@ -1246,8 +1278,8 @@ impl Store {
         for hash in staged_hashes {
             self.note_array_written(hash);
         }
-        tracing::debug!(count = keys.len(), "transaction committed");
-        Ok(keys)
+        tracing::debug!(count = added.len(), "transaction committed");
+        Ok(added)
     }
 
     /// Begin a buffered bulk add. Requests pushed onto the returned [`BulkAdd`]
@@ -1269,13 +1301,14 @@ impl Store {
     /// transaction. All-or-nothing: any metadata error rolls the transaction back
     /// and removes every array staged in this call.
     #[tracing::instrument(skip(self, items), fields(count = items.len()))]
-    fn flush_bulk_add(&mut self, items: Vec<AddRequest>) -> Result<Vec<TimeSeriesKey>> {
+    fn flush_bulk_add(&mut self, items: Vec<AddRequest>) -> Result<Vec<AddedTimeSeries>> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
         if items.is_empty() {
             return Ok(Vec::new());
         }
+        validate_id_mode(&items)?;
 
         // Derive parts (validates + hashes) for every item, aligned to `items`.
         let mut parts: Vec<RequestParts> = items
@@ -1319,13 +1352,17 @@ impl Store {
         // Insert associations in input order; roll the whole batch back on error.
         let tx = self.metadata.savepoint()?;
         let mut shared_sets = SharedSetCache::default();
+        let mut ids = Vec::with_capacity(parts.len());
         for p in &parts {
-            if let Err(e) = insert_association(&tx, &p.meta, &mut shared_sets) {
-                drop(tx);
-                for staged in &staged_hashes {
-                    let _ = self.backend.remove_array(staged);
+            match insert_association(&tx, &p.meta, &mut shared_sets) {
+                Ok(id) => ids.push(id),
+                Err(e) => {
+                    drop(tx);
+                    for staged in &staged_hashes {
+                        let _ = self.backend.remove_array(staged);
+                    }
+                    return Err(e);
                 }
-                return Err(e);
             }
         }
         tx.commit()?;
@@ -1333,7 +1370,11 @@ impl Store {
             self.note_array_written(hash);
         }
         tracing::debug!(count = parts.len(), "bulk-add transaction committed");
-        Ok(parts.into_iter().map(|p| p.key).collect())
+        Ok(parts
+            .into_iter()
+            .zip(ids)
+            .map(|(p, id)| AddedTimeSeries { key: p.key, id })
+            .collect())
     }
 
     #[tracing::instrument(skip(self, key), fields(owner = key.owner_id, name = %key.name))]
@@ -1554,7 +1595,7 @@ impl Store {
         dst_owner_id: i64,
         dst_owner_type: &str,
         new_name: Option<&str>,
-    ) -> Result<TimeSeriesKey> {
+    ) -> Result<AddedTimeSeries> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
@@ -1587,10 +1628,13 @@ impl Store {
 
         let tx = self.metadata.savepoint()?;
         check_forecast_family_free(&tx, &meta, "copy")?;
-        MetadataStore::insert(&tx, &meta)?;
+        let id = MetadataStore::insert(&tx, &meta)?;
         tx.commit()?;
 
-        TimeSeriesKey::from_metadata(&meta)
+        Ok(AddedTimeSeries {
+            key: TimeSeriesKey::from_metadata(&meta)?,
+            id,
+        })
     }
 
     /// Read one series, optionally sliced to `time_range`.
@@ -3024,39 +3068,49 @@ impl Store {
     // in both directions — removing a component's series leaves its attachments
     // alone, and vice versa.
 
-    /// Attach a supplemental attribute to a component. Fails with
+    /// Attach a supplemental attribute to a component, returning the catalog id
+    /// the attachment was filed under. Fails with
     /// [`TimeSeriesError::DuplicateAssociation`] if that component already
     /// carries that attribute, whatever type names are supplied.
+    ///
+    /// Set `assoc.id` to file it under a specific id instead of an assigned one;
+    /// that collides with [`TimeSeriesError::DuplicateAssociationId`] if the id
+    /// is taken. This table's ids are independent of the other two catalogs'.
     pub fn add_supplemental_attribute_association(
         &mut self,
         assoc: SupplementalAttributeAssociation,
-    ) -> Result<()> {
+    ) -> Result<i64> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
         let tx = self.metadata.savepoint()?;
-        MetadataStore::insert_supplemental_attribute_association(&tx, &assoc)?;
+        let id = MetadataStore::insert_supplemental_attribute_association(&tx, &assoc)?;
         tx.commit()?;
-        Ok(())
+        Ok(id)
     }
 
-    /// Attach many in one all-or-nothing transaction, returning the number
-    /// inserted. A duplicate anywhere in the batch rolls the whole batch back.
-    /// This is the import half of the bulk round trip whose export is
+    /// Attach many in one all-or-nothing transaction, returning the id of each
+    /// in input order. A duplicate anywhere in the batch rolls the whole batch
+    /// back. This is the import half of the bulk round trip whose export is
     /// [`Self::list_supplemental_attribute_associations`] with a default filter.
+    ///
+    /// Returns ids rather than a count, which is `.len()` on the result.
     pub fn add_supplemental_attribute_associations(
         &mut self,
         assocs: Vec<SupplementalAttributeAssociation>,
-    ) -> Result<usize> {
+    ) -> Result<Vec<i64>> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
         let tx = self.metadata.savepoint()?;
+        let mut ids = Vec::with_capacity(assocs.len());
         for assoc in &assocs {
-            MetadataStore::insert_supplemental_attribute_association(&tx, assoc)?;
+            ids.push(MetadataStore::insert_supplemental_attribute_association(
+                &tx, assoc,
+            )?);
         }
         tx.commit()?;
-        Ok(assocs.len())
+        Ok(ids)
     }
 
     /// Whether any attachment matches `filter`.
@@ -3173,31 +3227,35 @@ impl Store {
     /// Record a parent/child edge. Fails with
     /// [`TimeSeriesError::DuplicateAssociation`] if that ordered pair is already
     /// related.
-    pub fn add_parent_child_association(&mut self, assoc: ParentChildAssociation) -> Result<()> {
+    /// Record a directed edge, returning the catalog id it was filed under. See
+    /// [`Self::add_supplemental_attribute_association`] for the explicit-id
+    /// behavior, which is the same here over this table's own id stream.
+    pub fn add_parent_child_association(&mut self, assoc: ParentChildAssociation) -> Result<i64> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
         let tx = self.metadata.savepoint()?;
-        MetadataStore::insert_parent_child_association(&tx, &assoc)?;
+        let id = MetadataStore::insert_parent_child_association(&tx, &assoc)?;
         tx.commit()?;
-        Ok(())
+        Ok(id)
     }
 
-    /// Record many edges in one all-or-nothing transaction, returning the number
-    /// inserted.
+    /// Record many edges in one all-or-nothing transaction, returning the id of
+    /// each in input order. The count is `.len()` on the result.
     pub fn add_parent_child_associations(
         &mut self,
         assocs: Vec<ParentChildAssociation>,
-    ) -> Result<usize> {
+    ) -> Result<Vec<i64>> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
         let tx = self.metadata.savepoint()?;
+        let mut ids = Vec::with_capacity(assocs.len());
         for assoc in &assocs {
-            MetadataStore::insert_parent_child_association(&tx, assoc)?;
+            ids.push(MetadataStore::insert_parent_child_association(&tx, assoc)?);
         }
         tx.commit()?;
-        Ok(assocs.len())
+        Ok(ids)
     }
 
     /// Whether any edge matches `filter`.
@@ -3840,7 +3898,7 @@ impl BulkAdd<'_> {
     /// Flush the buffer: write all arrays as batch-sized blocks and insert every
     /// association in one transaction, returning the keys in push order. On any
     /// error nothing is committed and staged arrays are rolled back.
-    pub fn commit(mut self) -> Result<Vec<TimeSeriesKey>> {
+    pub fn commit(mut self) -> Result<Vec<AddedTimeSeries>> {
         self.committed = true;
         let items = std::mem::take(&mut self.items);
         self.store.flush_bulk_add(items)
@@ -4202,6 +4260,27 @@ fn request_array(item: &AddRequest) -> &TypedArray {
     }
 }
 
+/// Refuse a batch that mixes caller-supplied ids with ones the catalog would
+/// assign.
+///
+/// The two modes are individually fine and jointly a trap. Ids only ratchet
+/// upward, so an assigned id lands one past the current high-water mark — which
+/// a *later* explicit id in the same batch can then collide with, or step over,
+/// depending only on the order the items happen to be in. A batch is either
+/// importing ids or letting the catalog assign them; there is no coherent
+/// meaning for half of each, so the cheap check is worth more than the
+/// flexibility.
+fn validate_id_mode(items: &[AddRequest]) -> Result<()> {
+    let explicit = items.iter().filter(|i| i.id.is_some()).count();
+    if explicit == 0 || explicit == items.len() {
+        return Ok(());
+    }
+    Err(TimeSeriesError::InvalidParameter(format!(
+        "{explicit} of {} requests supply an explicit id and the rest do not; a batch must          either supply an id for every request (importing a document's own ids) or for none          of them (letting the catalog assign)",
+        items.len()
+    )))
+}
+
 /// Insert one association, enforcing the Deterministic/DeterministicSingleTimeSeries
 /// mutual exclusion: a DST is a synthetic view of a SingleTimeSeries, so a family
 /// may hold one or the other but never both. A DST is only ever created by
@@ -4211,9 +4290,9 @@ fn insert_association(
     tx: &rusqlite::Connection,
     meta: &TimeSeriesMetadata,
     cache: &mut SharedSetCache,
-) -> Result<()> {
+) -> Result<i64> {
     check_forecast_family_free(tx, meta, "add")?;
-    MetadataStore::insert_batched(tx, meta, cache).map(|_| ())
+    MetadataStore::insert_batched(tx, meta, cache)
 }
 
 /// The type that may not share an abstract-deterministic family with `ty`, or

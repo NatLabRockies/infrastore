@@ -1356,6 +1356,7 @@ impl PySupplementalAttributeAssociation {
                 component_type,
                 attribute_id,
                 attribute_type,
+                id: None,
             },
         }
     }
@@ -1428,6 +1429,7 @@ impl PyParentChildAssociation {
                 parent_type,
                 child_id,
                 child_type,
+                id: None,
             },
         }
     }
@@ -2091,9 +2093,9 @@ impl PyStore {
         }
         let request = core_lib::AddRequest::new(owner_id, owner_type, owner_category.into(), data)
             .with_features(features);
-        let key = self.store_mut()?.add(request).map_err(map_err)?;
+        let added = self.store_mut()?.add(request).map_err(map_err)?;
         Ok(PyTimeSeriesKey {
-            inner: key.identity().clone(),
+            inner: added.key.identity().clone(),
         })
     }
 
@@ -2203,7 +2205,7 @@ impl PyStore {
         Ok(keys
             .into_iter()
             .map(|k| PyTimeSeriesKey {
-                inner: k.identity().clone(),
+                inner: k.key.identity().clone(),
             })
             .collect())
     }
@@ -3027,7 +3029,7 @@ impl PyStore {
             )
             .map_err(map_err)?;
         Ok(PyTimeSeriesKey {
-            inner: k.identity().clone(),
+            inner: k.key.identity().clone(),
         })
     }
 
@@ -3275,6 +3277,7 @@ impl PyStore {
     ) -> PyResult<()> {
         self.store_mut()?
             .add_supplemental_attribute_association(association.inner.clone())
+            .map(|_| ())
             .map_err(map_err)
     }
 
@@ -3289,6 +3292,7 @@ impl PyStore {
         let assocs = associations.into_iter().map(|a| a.inner).collect();
         self.store_mut()?
             .add_supplemental_attribute_associations(assocs)
+            .map(|ids| ids.len())
             .map_err(map_err)
     }
 
@@ -3516,6 +3520,7 @@ impl PyStore {
     ) -> PyResult<()> {
         self.store_mut()?
             .add_parent_child_association(association.inner.clone())
+            .map(|_| ())
             .map_err(map_err)
     }
 
@@ -3528,6 +3533,7 @@ impl PyStore {
         let assocs = associations.into_iter().map(|a| a.inner).collect();
         self.store_mut()?
             .add_parent_child_associations(assocs)
+            .map(|ids| ids.len())
             .map_err(map_err)
     }
 

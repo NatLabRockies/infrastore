@@ -350,12 +350,12 @@ fn flush(
     let keys = store
         .add_time_series_bulk(requests)
         .map_err(|e| e.to_string())?;
-    for k in &keys {
+    for a in &keys {
         added.push(format!(
             "added {} '{}' (owner {})",
-            k.time_series_type().as_str(),
-            k.name(),
-            k.owner_id()
+            a.key.time_series_type().as_str(),
+            a.key.name(),
+            a.key.owner_id()
         ));
     }
     Ok(keys.len())

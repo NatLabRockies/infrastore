@@ -271,6 +271,7 @@ fn sidecar_reads_back_through_the_public_api() {
             parent_type: "Generator".to_string(),
             child_id: 20,
             child_type: "Bus".to_string(),
+            id: None,
         }]
     );
 }
@@ -335,6 +336,7 @@ fn public_api_writes_the_documented_layout() {
                 parent_type: "Generator".to_string(),
                 child_id: 20,
                 child_type: "Bus".to_string(),
+                id: None,
             })
             .unwrap();
 

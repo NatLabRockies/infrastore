@@ -26,6 +26,7 @@ fn typed_attach(
         component_type: component_type.into(),
         attribute_id,
         attribute_type: attribute_type.into(),
+        id: None,
     }
 }
 
@@ -45,6 +46,7 @@ fn typed_edge(
         parent_type: parent_type.into(),
         child_id,
         child_type: child_type.into(),
+        id: None,
     }
 }
 
@@ -434,7 +436,8 @@ fn attachment_bulk_export_import_round_trips() {
     assert_eq!(
         source
             .add_supplemental_attribute_associations(records.clone())
-            .unwrap(),
+            .unwrap()
+            .len(),
         records.len()
     );
     let exported = source

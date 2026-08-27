@@ -114,6 +114,7 @@ fn add_forecast(
             Features::new(),
         )
         .unwrap()
+        .key
 }
 
 // Convenience: build f64 TypedArray.
@@ -1410,8 +1411,8 @@ fn monthly_deterministic_round_trips_on_both_backends() {
         move |store, key, backend| {
             // The calendar periods survive the ISO-8601 encoding as `Months`,
             // never collapsing into an equivalent-looking `Fixed` span.
-            assert_eq!(key.resolution(), Some(Period::Months(1)), "{backend}");
-            assert_eq!(key.interval(), Some(Period::Months(1)), "{backend}");
+            assert_eq!(key.key.resolution(), Some(Period::Months(1)), "{backend}");
+            assert_eq!(key.key.interval(), Some(Period::Months(1)), "{backend}");
 
             let got = store.get_time_series(key.identity(), None).unwrap();
             let det = got.as_deterministic().unwrap();

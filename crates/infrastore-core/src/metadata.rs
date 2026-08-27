@@ -246,18 +246,62 @@ impl EndpointFilter {
     }
 }
 
+/// One row of either association table, as the shared SQL returns it: the
+/// catalog `id`, then the left endpoint's `(id, type)` and the right's. Named
+/// because both tables share the same shape, so both `assoc_list` callers
+/// destructure the same tuple.
+type AssocRow = (i64, i64, String, i64, String);
+
 /// One row of `supplemental_attribute_associations`: a supplemental attribute
 /// attached to a component.
 ///
 /// Identity is the `(component_id, attribute_id)` pair. The type names are
 /// denormalized labels carried for filtering and reporting, so re-attaching the
 /// same pair under different type names is still a duplicate.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// [`Self::id`] is excluded from equality and hashing — see the `PartialEq` impl
+/// below.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SupplementalAttributeAssociation {
     pub component_id: i64,
     pub component_type: String,
     pub attribute_id: i64,
     pub attribute_type: String,
+    /// The catalog row's `id`, or `None`.
+    ///
+    /// `Some` on anything read back; on the way in, `None` asks the catalog to
+    /// assign and `Some` supplies one explicitly (for an import preserving a
+    /// document's own ids). See [`crate::TimeSeriesMetadata::id`], which this
+    /// mirrors — including that the two tables' id streams are independent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<i64>,
+}
+
+/// Equality and hashing are over the endpoint pair and its labels, never the
+/// `id`. Written out rather than derived, because deriving would quietly change
+/// what these types mean: identity here is the `(component_id, attribute_id)`
+/// pair — the doc above says so and the unique index enforces it — so two
+/// values describing the same attachment must stay equal whether or not either
+/// has been through the catalog. Folding the id in would also break `Hash`'s
+/// contract with `Eq` for every set and map these land in.
+impl PartialEq for SupplementalAttributeAssociation {
+    fn eq(&self, other: &Self) -> bool {
+        self.component_id == other.component_id
+            && self.component_type == other.component_type
+            && self.attribute_id == other.attribute_id
+            && self.attribute_type == other.attribute_type
+    }
+}
+
+impl Eq for SupplementalAttributeAssociation {}
+
+impl std::hash::Hash for SupplementalAttributeAssociation {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.component_id.hash(state);
+        self.component_type.hash(state);
+        self.attribute_id.hash(state);
+        self.attribute_type.hash(state);
+    }
 }
 
 /// One row of `parent_child_associations`: a directed edge between two
@@ -265,12 +309,39 @@ pub struct SupplementalAttributeAssociation {
 ///
 /// Identity is the `(parent_id, child_id)` pair. Both endpoints are always
 /// components — an attribute cannot appear here.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// [`Self::id`] is excluded from equality and hashing, for the reasons given on
+/// [`SupplementalAttributeAssociation`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParentChildAssociation {
     pub parent_id: i64,
     pub parent_type: String,
     pub child_id: i64,
     pub child_type: String,
+    /// The catalog row's `id`, or `None`. See
+    /// [`SupplementalAttributeAssociation::id`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<i64>,
+}
+
+impl PartialEq for ParentChildAssociation {
+    fn eq(&self, other: &Self) -> bool {
+        self.parent_id == other.parent_id
+            && self.parent_type == other.parent_type
+            && self.child_id == other.child_id
+            && self.child_type == other.child_type
+    }
+}
+
+impl Eq for ParentChildAssociation {}
+
+impl std::hash::Hash for ParentChildAssociation {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.parent_id.hash(state);
+        self.parent_type.hash(state);
+        self.child_id.hash(state);
+        self.child_type.hash(state);
+    }
 }
 
 /// One grouped row of the supplemental-attribute summary: a distinct
@@ -2164,12 +2235,8 @@ impl MetadataStore {
         }
     }
 
-    /// Both endpoint pairs of every matching row, in insertion order.
-    fn assoc_list(
-        &self,
-        table: AssocTable,
-        filter: &EndpointFilter,
-    ) -> Result<Vec<(i64, String, i64, String)>> {
+    /// Every matching row's id and both endpoint pairs, in insertion order.
+    fn assoc_list(&self, table: AssocTable, filter: &EndpointFilter) -> Result<Vec<AssocRow>> {
         if !self.assoc_present(table) {
             return Ok(Vec::new());
         }
@@ -2178,12 +2245,12 @@ impl MetadataStore {
         // Ordered by rowid so a bulk export/import round trip preserves the
         // order the caller inserted in.
         let sql = format!(
-            "SELECT {}, {}, {}, {} FROM {} {where_clause} ORDER BY id",
+            "SELECT id, {}, {}, {}, {} FROM {} {where_clause} ORDER BY id",
             table.left_id, table.left_type, table.right_id, table.right_type, table.name
         );
         let mut stmt = self.conn.prepare_cached(&sql)?;
         let rows = stmt.query_map(param_refs.as_slice(), |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
@@ -2264,9 +2331,16 @@ impl MetadataStore {
             .map_err(Into::into)
     }
 
+    /// Insert one endpoint pair and return the id it was filed under.
+    ///
+    /// `id` binds `NULL` to let the catalog assign, exactly as the time-series
+    /// insert does, and `RETURNING` reads back what landed rather than relying
+    /// on `last_insert_rowid()` being untouched by whatever runs next.
+    #[allow(clippy::too_many_arguments)]
     fn assoc_insert(
         tx: &Connection,
         table: AssocTable,
+        id: Option<i64>,
         left_id: i64,
         left_type: &str,
         right_id: i64,
@@ -2274,13 +2348,26 @@ impl MetadataStore {
         detail: &str,
     ) -> Result<i64> {
         let sql = format!(
-            "INSERT INTO {} ({}, {}, {}, {}) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO {} (id, {}, {}, {}, {}) VALUES (?1, ?2, ?3, ?4, ?5) RETURNING id",
             table.name, table.left_id, table.left_type, table.right_id, table.right_type
         );
         let mut stmt = tx.prepare_cached(&sql)?;
-        stmt.execute(params![left_id, left_type, right_id, right_type])
-            .map_err(|e| map_association_violation(e, detail))?;
-        Ok(tx.last_insert_rowid())
+        stmt.query_row(
+            params![id, left_id, left_type, right_id, right_type],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|e| match (&e, id) {
+            // An explicit id that is already taken is a different failure from
+            // the endpoint pair colliding, and `detail` describes only the
+            // latter. Told apart by the extended code, as on the time-series
+            // insert.
+            (rusqlite::Error::SqliteFailure(err, _), Some(id))
+                if err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY =>
+            {
+                TimeSeriesError::DuplicateAssociationId(id)
+            }
+            _ => map_association_violation(e, detail),
+        })
     }
 
     fn assoc_delete(tx: &Connection, table: AssocTable, filter: &EndpointFilter) -> Result<usize> {
@@ -2299,6 +2386,7 @@ impl MetadataStore {
         Self::assoc_insert(
             tx,
             SUPPLEMENTAL_ATTRIBUTE_TABLE,
+            assoc.id,
             assoc.component_id,
             &assoc.component_type,
             assoc.attribute_id,
@@ -2376,12 +2464,13 @@ impl MetadataStore {
             .assoc_list(SUPPLEMENTAL_ATTRIBUTE_TABLE, &filter.endpoints())?
             .into_iter()
             .map(
-                |(component_id, component_type, attribute_id, attribute_type)| {
+                |(id, component_id, component_type, attribute_id, attribute_type)| {
                     SupplementalAttributeAssociation {
                         component_id,
                         component_type,
                         attribute_id,
                         attribute_type,
+                        id: Some(id),
                     }
                 },
             )
@@ -2490,6 +2579,7 @@ impl MetadataStore {
         Self::assoc_insert(
             tx,
             PARENT_CHILD_TABLE,
+            assoc.id,
             assoc.parent_id,
             &assoc.parent_type,
             assoc.child_id,
@@ -2560,11 +2650,12 @@ impl MetadataStore {
             .assoc_list(PARENT_CHILD_TABLE, &filter.endpoints())?
             .into_iter()
             .map(
-                |(parent_id, parent_type, child_id, child_type)| ParentChildAssociation {
+                |(id, parent_id, parent_type, child_id, child_type)| ParentChildAssociation {
                     parent_id,
                     parent_type,
                     child_id,
                     child_type,
+                    id: Some(id),
                 },
             )
             .collect())
