@@ -545,20 +545,31 @@ this table tolerates the table being absent.
 ### Importing an id
 
 A writer normally leaves `association_id` unset (`0` in every binding) and the catalog assigns the
-row's `id`. A writer may instead **supply** one, which is how a document's own ids are imported so
-that an export and a re-import preserve them: a consumer that persisted an `association_id` keeps
-resolving it against the rebuilt store.
+row's `id`. A writer may instead **supply** one. Two sources of a supplied id are legitimate.
 
-`AUTOINCREMENT` makes this safe without extra bookkeeping. Inserting an explicit `id` advances the
-`sqlite_sequence` mark to it, so a later catalog-assigned id cannot land on one the document already
-used, whatever order the rows arrive in. A supplied id that another row already holds is refused
-(`InvalidParameter`, naming the id) rather than renumbered.
+**A document's own id**, so that an export and a re-import preserve it: a consumer that persisted an
+`association_id` keeps resolving it against the rebuilt store. The id is store-local, so this is
+valid against a **fresh** store — see the limits below.
 
-Two limits follow from the id being store-local:
+**An id this store reserved.** `Store::reserve_association_ids(count)` reserves a contiguous run and
+returns its first id, for a writer that must name a row's id before the row exists (it embeds the id
+in a document it is still building and flushes the associations later). Unlike an imported id, a
+reserved one is valid against a **non-empty** store: the run comes from this store's own sequence,
+which has already moved past it. Reserving `0` ids is an error, not a no-op.
 
-- **Import into a fresh store.** Importing into a store that already holds associations will
-  generally collide, and the store will not pick new ids to paper over it. Rebuild into an empty
-  store — that is the supported round trip.
+`AUTOINCREMENT` makes both safe without extra bookkeeping. Inserting an explicit `id` advances the
+`sqlite_sequence` mark to it, and a reservation advances that same mark past the whole run — so a
+later catalog-assigned id cannot land on a supplied or reserved one, whatever order the rows arrive
+in and whichever path assigns it (a plain add, `transform_single_time_series`, `copy_time_series`,
+the CLI `merge`). A supplied id that another row already holds is refused (`InvalidParameter`,
+naming the id) rather than renumbered.
+
+Two limits:
+
+- **Import a document's ids into a fresh store.** Importing into a store that already holds
+  associations will generally collide, and the store will not pick new ids to paper over it. Rebuild
+  into an empty store — that is the supported round trip. (A reserved id is exempt: it is free in
+  this store by construction.)
 - **"Never reused" is the catalog's guarantee about ids it assigns.** A writer that supplies an id
   whose row was deleted owns that guarantee itself; nothing stops it.
 

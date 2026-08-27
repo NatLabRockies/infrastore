@@ -2216,6 +2216,22 @@ impl PyStore {
             .collect())
     }
 
+    /// Reserve `count` association ids and return the first of them.
+    ///
+    /// The run is contiguous: `[first, first + count)`. Spend each id by
+    /// passing it as `association_id` on the matching `add_time_series_bulk`
+    /// item; an id left unspent stays a gap. The catalog will not assign any
+    /// of them itself, so a writer that has to know a series' id before the
+    /// batch is flushed can mint one up front.
+    ///
+    /// Raises `InvalidParameterError` if `count` is 0, and
+    /// `ReadOnlyStoreError` on a read-only store.
+    fn reserve_association_ids(&mut self, count: u64) -> PyResult<i64> {
+        self.store_mut()?
+            .reserve_association_ids(count)
+            .map_err(map_err)
+    }
+
     /// Derive `DeterministicSingleTimeSeries` forecasts from the stored
     /// `SingleTimeSeries` associations (mirrors InfrastructureSystems.jl's
     /// `transform_single_time_series!`). Each `SingleTimeSeries` is re-described

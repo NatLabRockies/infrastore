@@ -188,6 +188,13 @@ def add_time_series_bulk(self, items: list[dict]) -> list[TimeSeriesKey]: ...
 # All items commit in ONE metadata transaction (all-or-nothing), which is much
 # faster than looping over add_time_series. Keys are returned in input order.
 
+def reserve_association_ids(self, count: int) -> int: ...
+# Reserves the contiguous run [first, first + count) and returns `first`. The
+# catalog never assigns a reserved id itself, so a writer that must know a
+# series' id before its batch is flushed mints one here and spends it as an
+# item's `association_id`. An unspent id stays a gap. `count` of 0 raises
+# InvalidParameterError; a read-only store raises ReadOnlyStoreError.
+
 def transform_single_time_series(
     self,
     horizon: timedelta | str,

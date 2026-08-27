@@ -1391,6 +1391,39 @@ int32_t infrastore_store_add_batch(struct InfraStore *handle,
                                    uint64_t *out_len);
 
 /**
+ * Reserve `count` contiguous association ids and write the **first** of the
+ * run to `out_first_id`; the run spans `[first, first + count)`.
+ *
+ * For a writer that must name a row's id before the row exists — one that
+ * embeds the id in a document it is still building and flushes the
+ * associations later. Spend each reserved id by passing it as the trailing
+ * `association_id` argument of an `infrastore_batch_add_*` call (or of
+ * `infrastore_store_add_single` / `infrastore_store_add_non_sequential`).
+ * An id the catalog assigns on its own can never land inside a reserved run,
+ * and a reserved id that is never spent stays a gap.
+ *
+ * Unlike importing a document's own ids, a reservation is valid against a
+ * non-empty store.
+ *
+ * Returns `INFRASTORE_ERR_INVALID_PARAMETER` when `count` is `0` or the run
+ * would overflow the id range, and `INFRASTORE_ERR_READ_ONLY` on a read-only
+ * store; in both cases nothing is reserved.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle obtained from one of the
+ * `infrastore_store_open*` / `infrastore_store_create*` constructors and not
+ * yet passed to `infrastore_store_free`; it is borrowed mutably for the
+ * duration of the call, so no other thread may touch the same handle
+ * concurrently. `out_first_id` must be non-null and valid for writing one
+ * `i64`; it is written only on `INFRASTORE_OK`. Nothing is allocated, so
+ * there is no matching deallocator — the caller owns the `i64` it supplied.
+ */
+int32_t infrastore_store_reserve_association_ids(struct InfraStore *handle,
+                                                 uint64_t count,
+                                                 int64_t *out_first_id);
+
+/**
  * Read many full `SingleTimeSeries` at once. `keys` points to `n` live key
  * handles; the results are returned through `out_result` as a handle whose
  * elements line up with `keys` in order. Every key must identify a

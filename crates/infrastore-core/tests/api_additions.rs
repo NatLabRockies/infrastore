@@ -2013,6 +2013,274 @@ fn a_committed_id_is_never_reissued_after_its_row_is_deleted() {
     );
 }
 
+// ---- reserve_association_ids ----------------------------------------------
+
+/// Add one `SingleTimeSeries` and return the id the catalog assigned it.
+fn add_named(store: &mut infrastore_core::Store, owner_id: i64, name: &str) -> i64 {
+    store
+        .add_time_series(
+            owner_id,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(sts(name, 1.0, 24)),
+            Features::new(),
+        )
+        .unwrap();
+    store
+        .list_time_series(ListFilter::new())
+        .unwrap()
+        .iter()
+        .find(|r| r.name == name)
+        .unwrap()
+        .association_id
+}
+
+/// Every `association_id` in the catalog.
+fn all_ids(store: &infrastore_core::Store) -> Vec<i64> {
+    store
+        .list_time_series(ListFilter::new())
+        .unwrap()
+        .iter()
+        .map(|r| r.association_id)
+        .collect()
+}
+
+/// A reservation is a run the caller owns: the ids it hands back are contiguous
+/// and start past whatever the catalog has already spent.
+#[test]
+fn reserving_hands_back_a_contiguous_run_past_the_rows_already_written() {
+    let mut store = create_store(None, true).unwrap();
+    let existing = add_named(&mut store, 1, "load");
+
+    let first = store.reserve_association_ids(4).unwrap();
+    assert!(
+        first > existing,
+        "reserved run must start past a live id: reserved {first}, held {existing}"
+    );
+
+    // Every id in the run is free, and usable, in one batch.
+    let items: Vec<AddRequest> = (0..4)
+        .map(|i| {
+            AddRequest::new(
+                2,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(sts(&format!("reserved_{i}"), 1.0, 24)),
+            )
+            .with_association_id(first + i)
+        })
+        .collect();
+    store.add_time_series_bulk(items).unwrap();
+
+    for i in 0..4 {
+        let meta = store.get_metadata_by_association_id(first + i).unwrap();
+        assert_eq!(meta.name, format!("reserved_{i}"));
+        assert_eq!(meta.association_id, first + i);
+    }
+}
+
+/// Reserving nothing is a caller bug, not a silent no-op.
+#[test]
+fn reserving_zero_ids_is_refused() {
+    let mut store = create_store(None, true).unwrap();
+    match store.reserve_association_ids(0).unwrap_err() {
+        TimeSeriesError::InvalidParameter(msg) => {
+            assert!(msg.contains("at least 1"), "unhelpful message: {msg}");
+        }
+        other => panic!("expected InvalidParameter, got {other:?}"),
+    }
+    // And it spent nothing: the next reservation still starts at 1.
+    assert_eq!(store.reserve_association_ids(1).unwrap(), 1);
+}
+
+/// Reserving is a write, so a read-only store refuses it.
+#[test]
+fn reserving_on_a_read_only_store_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.h5");
+    {
+        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        add_named(&mut store, 1, "load");
+        store.flush().unwrap();
+    }
+    let mut store = infrastore_core::open_store(path.as_path(), true).unwrap();
+    assert!(matches!(
+        store.reserve_association_ids(2).unwrap_err(),
+        TimeSeriesError::ReadOnlyStore
+    ));
+}
+
+/// The guarantee the reservation exists for: an id the catalog assigns on its
+/// own can never land inside a reserved run. Checked on a plain add, since that
+/// is the ordinary assignment path.
+#[test]
+fn a_plain_add_cannot_land_inside_a_reserved_run() {
+    let mut store = create_store(None, true).unwrap();
+    let first = store.reserve_association_ids(100).unwrap();
+    let last = first + 99;
+
+    let assigned = add_named(&mut store, 1, "load");
+    assert!(
+        assigned > last,
+        "an assigned id landed inside the reserved run [{first}, {last}]: {assigned}"
+    );
+
+    // The reserved ids are still free afterwards.
+    store
+        .add_time_series_bulk(vec![
+            AddRequest::new(
+                2,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(sts("reserved", 1.0, 24)),
+            )
+            .with_association_id(first),
+        ])
+        .unwrap();
+    assert_eq!(
+        store
+            .get_metadata_by_association_id(first)
+            .unwrap()
+            .name
+            .as_str(),
+        "reserved"
+    );
+}
+
+/// The derive path assigns ids too, and must respect a reservation the same way.
+#[test]
+fn transform_derived_rows_cannot_land_inside_a_reserved_run() {
+    let mut store = create_store(None, true).unwrap();
+    add_named(&mut store, 1, "load");
+    add_named(&mut store, 2, "wind");
+
+    let first = store.reserve_association_ids(50).unwrap();
+    let last = first + 49;
+
+    let outcome = store
+        .transform_single_time_series(
+            Duration::hours(4),
+            Duration::hours(1),
+            None,
+            None,
+            Default::default(),
+        )
+        .unwrap();
+    assert_eq!(outcome.transformed, 2);
+
+    let derived: Vec<i64> = store
+        .list_time_series(
+            ListFilter::new().time_series_type(TimeSeriesType::DeterministicSingleTimeSeries),
+        )
+        .unwrap()
+        .iter()
+        .map(|r| r.association_id)
+        .collect();
+    assert_eq!(derived.len(), 2);
+    for id in derived {
+        assert!(
+            id > last,
+            "a derived id landed inside the reserved run [{first}, {last}]: {id}"
+        );
+    }
+}
+
+/// Copying assigns a fresh id, which must also start past a reserved run.
+#[test]
+fn a_copy_cannot_land_inside_a_reserved_run() {
+    let mut store = create_store(None, true).unwrap();
+    add_named(&mut store, 1, "load");
+
+    let first = store.reserve_association_ids(50).unwrap();
+    let last = first + 49;
+
+    let src = KeyIdentity {
+        owner_id: 1,
+        owner_category: OwnerCategory::Component,
+        time_series_type: TimeSeriesType::SingleTimeSeries,
+        name: "load".into(),
+        resolution: Some(Period::from(Duration::hours(1))),
+        interval: None,
+        features: Features::new(),
+    };
+    store.copy_time_series(&src, 7, "Generator", None).unwrap();
+
+    let copied = store
+        .list_time_series(ListFilter::new().owner_id(7))
+        .unwrap()[0]
+        .association_id;
+    assert!(
+        copied > last,
+        "a copied id landed inside the reserved run [{first}, {last}]: {copied}"
+    );
+}
+
+/// Two reservations must not overlap, and the ids must ascend.
+#[test]
+fn successive_reservations_do_not_overlap() {
+    let mut store = create_store(None, true).unwrap();
+    let first = store.reserve_association_ids(10).unwrap();
+    let second = store.reserve_association_ids(10).unwrap();
+    let third = store.reserve_association_ids(1).unwrap();
+
+    assert!(
+        second >= first + 10,
+        "second run overlaps the first: {first}..{} then {second}",
+        first + 9
+    );
+    assert!(
+        third >= second + 10,
+        "third run overlaps the second: {second}..{} then {third}",
+        second + 9
+    );
+
+    // Both runs are usable at once, which is what "do not overlap" has to mean.
+    let items: Vec<AddRequest> = [first, second, third]
+        .iter()
+        .enumerate()
+        .map(|(i, id)| {
+            AddRequest::new(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(sts(&format!("run_{i}"), 1.0, 24)),
+            )
+            .with_association_id(*id)
+        })
+        .collect();
+    store.add_time_series_bulk(items).unwrap();
+    let mut ids = all_ids(&store);
+    ids.sort_unstable();
+    assert_eq!(ids, vec![first, second, third]);
+}
+
+/// A reservation draws from the same never-rewinding mark an assignment does, so
+/// it cannot hand back the id of a row that has since been deleted.
+#[test]
+fn reserving_does_not_reissue_a_deleted_rows_id() {
+    let mut store = create_store(None, true).unwrap();
+    add_named(&mut store, 1, "first");
+    let highest = add_named(&mut store, 1, "second");
+
+    store
+        .remove_time_series(&KeyIdentity {
+            owner_id: 1,
+            owner_category: OwnerCategory::Component,
+            time_series_type: TimeSeriesType::SingleTimeSeries,
+            name: "second".into(),
+            resolution: Some(Period::from(Duration::hours(1))),
+            interval: None,
+            features: Features::new(),
+        })
+        .unwrap();
+
+    let first = store.reserve_association_ids(3).unwrap();
+    assert!(
+        first > highest,
+        "a deleted row's id was reserved: deleted {highest}, run starts at {first}"
+    );
+}
+
 /// The point of a caller-supplied `association_id`: rebuild a store from an
 /// export and every id still resolves to the series it named.
 #[test]

@@ -265,6 +265,66 @@ function _decode_metadata(r::AbstractDict)
 end
 
 """
+    reserve_association_ids!(store, count::Integer=1) -> Int64
+
+Reserve `count` consecutive `association_id` values and return the first. The
+caller owns `first:first + count - 1` and passes them to `add_time_series!` as
+the `association_id` keyword.
+
+Use this when a row's id must be known before the row exists — building a key at
+stage time, before the batch flushes. Reserved ids are consumed whether or not
+they are written, so an abandoned batch leaves a gap; an id is never reused.
+
+`count` must be at least 1, and a read-only store refuses to reserve.
+"""
+function reserve_association_ids!(store::Store, count::Integer=1)
+    out_first = Ref{Int64}(0)
+    code = @ccall lib_path().infrastore_store_reserve_association_ids(
+        store::Ptr{Cvoid},
+        UInt64(count)::UInt64,
+        out_first::Ref{Int64},
+    )::Int32
+    _check(code)
+    return out_first[]
+end
+
+# How many ids `next_association_id!` takes per round trip. Sized so a staging
+# loop crosses the FFI boundary once per few hundred series rather than once per
+# series, while an abandoned block wastes an inconsequential span of a 63-bit
+# space.
+const ID_POOL_BLOCK = Int64(256)
+
+"""
+    next_association_id!(store) -> Int64
+
+One id for a row about to be staged, drawn from a locally held block.
+
+Same guarantees as [`reserve_association_ids!`](@ref) — the id is spent whether
+or not a row is ever written under it, and it is never handed out twice — but a
+caller staging N series pays one round trip per block instead of N. A consumer
+that stages a series at a time (InfrastructureSystems does) would otherwise
+cross the FFI boundary and touch the catalog's sequence row once per series,
+while the array data beside it is already batched.
+
+A refill advances the store's own floor by the whole block, so an explicit
+[`reserve_association_ids!`](@ref) can never land inside a block the pool is
+still holding.
+
+Ids left unused in a block are gaps, which the sequence permits by design. Use
+[`reserve_association_ids!`](@ref) instead when you need a known contiguous run.
+"""
+function next_association_id!(store::Store)
+    if store.id_pool_next >= store.id_pool_stop
+        first = reserve_association_ids!(store, ID_POOL_BLOCK)
+        store.id_pool_next = first
+        store.id_pool_stop = first + ID_POOL_BLOCK
+    end
+    id = store.id_pool_next
+    store.id_pool_next += 1
+    return id
+end
+
+"""
     get_time_series_metadata(store, association_id::Int64) -> TimeSeriesMetadata
 
 The complete [`TimeSeriesMetadata`](@ref) of the association carrying the given

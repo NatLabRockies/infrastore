@@ -270,6 +270,98 @@ end
     @test third > maximum(ids)
 end
 
+@testset "InfraStore.jl reserved association ids" begin
+    store = Store()
+    initial = DateTime(2024, 1, 1)
+    resolution = Hour(1)
+
+    # Reserve before the row exists, which is what a caller building a key at
+    # stage time has to do.
+    reserved = reserve_association_ids!(store, 2)
+    @test reserved > 0
+
+    batch = AddBatch()
+    add_time_series!(
+        batch, 1, "Generator", Component,
+        SingleTimeSeries(initial, resolution, collect(1.0:24.0), "load");
+        association_id=reserved,
+    )
+    add_time_series!(
+        batch, 2, "Generator", Component,
+        SingleTimeSeries(initial, resolution, collect(1.0:24.0), "load");
+        association_id=reserved + 1,
+    )
+    add_time_series_bulk!(store, batch)
+    flush!(store)
+
+    # The reserved id is the id the row carries. If it were not, the key a caller
+    # already embedded would name a row that does not exist.
+    first_row = get_time_series_metadata(store, reserved)
+    @test first_row.association_id == reserved
+    @test first_row.owner_id == 1
+
+    second_row = get_time_series_metadata(store, reserved + 1)
+    @test second_row.association_id == reserved + 1
+    @test second_row.owner_id == 2
+
+    # An unreserved add mints past the reservation rather than colliding with it.
+    add_time_series!(
+        store, 3, "Generator", Component,
+        SingleTimeSeries(initial, resolution, collect(1.0:24.0), "load"),
+    )
+    flush!(store)
+    minted = only(
+        r.association_id for r in list_time_series(store) if r.owner_id == 3
+    )
+    @test minted > reserved + 1
+
+    # A run with nothing in it is not a run.
+    @test_throws InfraStore.InvalidParameterError reserve_association_ids!(store, 0)
+end
+
+@testset "InfraStore.jl pooled association ids" begin
+    store = Store()
+
+    # Ids come out ascending and never repeat, whatever the block boundaries are.
+    ids = [next_association_id!(store) for _ in 1:600]
+    @test length(unique(ids)) == 600
+    @test issorted(ids)
+    @test all(id -> id > 0, ids)
+
+    # An explicit reservation must not land inside a block the pool already holds:
+    # the store's floor advanced by the whole block when the pool refilled.
+    reserved = reserve_association_ids!(store, 4)
+    @test reserved > maximum(ids)
+    following = next_association_id!(store)
+    @test following ∉ (reserved):(reserved + 3)
+
+    # A pooled id is a real id: a row written under it is addressable by it.
+    id = next_association_id!(store)
+    batch = AddBatch()
+    add_time_series!(
+        batch, 1, "Generator", Component,
+        SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(1.0:24.0), "load");
+        association_id=id,
+    )
+    add_time_series_bulk!(store, batch)
+    flush!(store)
+    @test get_time_series_metadata(store, id).association_id == id
+
+    # A catalog-assigned add clears every id handed out so far — the pool's block
+    # and the explicit reservation alike.
+    add_time_series!(
+        store, 2, "Generator", Component,
+        SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(1.0:24.0), "load"),
+    )
+    flush!(store)
+    assigned = only(
+        r.association_id for r in list_time_series(store) if r.owner_id == 2
+    )
+    @test assigned > id
+    @test assigned ∉ (reserved):(reserved + 3)
+    @test assigned ∉ ids
+end
+
 @testset "InfraStore.jl imported association ids survive a round trip" begin
     initial = DateTime(2024, 1, 1)
     resolution = Hour(1)

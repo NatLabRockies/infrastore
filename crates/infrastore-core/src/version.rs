@@ -62,13 +62,17 @@
 /// immutable across a rename or an owner reassignment, and the catalog never
 /// reissues one -- a stale reference resolves to nothing.
 ///
-/// A writer may also *supply* an id instead of letting the catalog assign one,
-/// which is how a document's own ids are imported: `AUTOINCREMENT` seeds its mark
-/// from an explicitly inserted id, so a later assignment cannot land on one the
-/// document used, and a duplicate is refused by the primary key rather than
-/// renumbered. Two consequences worth naming. The id is store-local, so importing
-/// into a store that already holds rows generally collides; a round trip through a
-/// *fresh* store is the supported case. And "never reused" is the catalog's
-/// guarantee about ids it assigns -- a writer that supplies an id whose row was
-/// deleted owns that guarantee itself.
+/// A writer may also *supply* an id instead of letting the catalog assign one.
+/// `AUTOINCREMENT` seeds its mark from an explicitly inserted id, so a later
+/// assignment cannot land on a supplied one, and a duplicate is refused by the
+/// primary key rather than renumbered. Two sources of a supplied id are
+/// legitimate. A **document's own id**, on import: the id is store-local, so
+/// importing into a store that already holds rows generally collides, and a round
+/// trip through a *fresh* store is the supported case. And an id this store
+/// **reserved** (`Store::reserve_association_ids`), for a writer that must name a
+/// row's id before the row exists: reserving advances the same `sqlite_sequence`
+/// mark, so a reserved run is free by construction and stays valid against a
+/// non-empty store. Either way, "never reused" is the catalog's guarantee about
+/// ids it *assigns* -- a writer that supplies an id whose row was deleted owns
+/// that guarantee itself.
 pub const DATA_FORMAT_VERSION: &str = "0.18.0";

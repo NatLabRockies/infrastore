@@ -926,6 +926,70 @@ impl MetadataStore {
         Ok(())
     }
 
+    /// Reserve `count` contiguous `association_id`s and return the first of the
+    /// run, so a caller may name a row's id before the row exists.
+    ///
+    /// The run is `[first, first + count)`. Each id is used by supplying it on
+    /// the row's insert (`AddRequest::with_association_id`); an id reserved and
+    /// never used simply stays a gap, like every other unspent id.
+    ///
+    /// The reservation is nothing more than a forward jump of the
+    /// `sqlite_sequence` mark for `time_series_associations`: after it, an id the
+    /// catalog assigns on its own starts past the run, so an assigned id can
+    /// never land inside a reserved one. The floor is `MAX(mark, MAX(id))` so a
+    /// catalog whose rows were written outside this connection — the hand-built
+    /// sidecar path — cannot have a live id reserved out from under it.
+    ///
+    /// Reserving takes a savepoint, so it composes into a caller's transaction.
+    /// The consequence is that a rollback rewinds the mark: a caller that
+    /// reserves inside a transaction it then abandons must abandon the ids too.
+    pub fn reserve_association_ids(&mut self, count: u64) -> Result<i64> {
+        if self.read_only {
+            return Err(TimeSeriesError::ReadOnlyStore);
+        }
+        let span = match count {
+            0 => {
+                return Err(TimeSeriesError::InvalidParameter(
+                    "reserve_association_ids: count must be at least 1".to_string(),
+                ));
+            }
+            n => i64::try_from(n).map_err(|_| {
+                TimeSeriesError::InvalidParameter(format!(
+                    "reserve_association_ids: count {n} is beyond the id range"
+                ))
+            })?,
+        };
+        let tx = self.savepoint()?;
+        let floor: i64 = tx.query_row(
+            "SELECT MAX(
+                 COALESCE((SELECT seq FROM sqlite_sequence
+                            WHERE name = 'time_series_associations'), 0),
+                 COALESCE((SELECT MAX(id) FROM time_series_associations), 0))",
+            [],
+            |r| r.get(0),
+        )?;
+        let last = floor.checked_add(span).ok_or_else(|| {
+            TimeSeriesError::InvalidParameter(format!(
+                "reserve_association_ids: reserving {count} ids past {floor} overflows the id range"
+            ))
+        })?;
+        // `sqlite_sequence` carries no unique index, so this is an UPDATE with an
+        // INSERT fallback rather than an upsert. The row is absent until the
+        // table's first insert.
+        let updated = tx.execute(
+            "UPDATE sqlite_sequence SET seq = ?1 WHERE name = 'time_series_associations'",
+            params![last],
+        )?;
+        if updated == 0 {
+            tx.execute(
+                "INSERT INTO sqlite_sequence (name, seq) VALUES ('time_series_associations', ?1)",
+                params![last],
+            )?;
+        }
+        tx.commit()?;
+        Ok(floor + 1)
+    }
+
     /// Insert one association and its features, returning the `association_id`
     /// SQLite assigned. Caller is responsible for committing.
     ///

@@ -1157,6 +1157,40 @@ impl Store {
             .map(|mut keys| keys.remove(0))
     }
 
+    /// Reserve `count` contiguous `association_id`s and return the **first** of
+    /// the run, which spans `[first, first + count)`.
+    ///
+    /// This is for a writer that must name a row's id before the row exists —
+    /// one that embeds the id in a document it is still building, and flushes
+    /// the associations later. Put each reserved id on its row with
+    /// [`AddRequest::with_association_id`].
+    ///
+    /// An id the catalog assigns on its own can never land inside a reserved run:
+    /// the reservation advances the same `sqlite_sequence` mark that assignment
+    /// draws from, so every later assignment — a plain
+    /// [`add`](Self::add_time_series), a
+    /// [`transform`](Self::transform_single_time_series), a
+    /// [`copy`](Self::copy_time_series) — starts past the run. Reserved ids that
+    /// are never used stay gaps; ids are gapped by design and must not be
+    /// compacted.
+    ///
+    /// Unlike importing a document's own ids, a reservation is valid against a
+    /// **non-empty** store: the ids come from this store's own sequence, so they
+    /// are free here by construction.
+    ///
+    /// # Errors
+    ///
+    /// [`TimeSeriesError::ReadOnlyStore`] on a read-only store, and
+    /// [`TimeSeriesError::InvalidParameter`] if `count` is `0` — reserving
+    /// nothing is a caller bug, not a no-op — or if the run would run past the
+    /// id range.
+    pub fn reserve_association_ids(&mut self, count: u64) -> Result<i64> {
+        if self.read_only {
+            return Err(TimeSeriesError::ReadOnlyStore);
+        }
+        self.metadata.reserve_association_ids(count)
+    }
+
     /// Bulk insert. All-or-nothing: any error rolls back every association and
     /// array put performed in this call.
     ///

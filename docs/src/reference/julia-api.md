@@ -37,15 +37,15 @@ Exported names (types first, then functions):
 `list_children`, `list_components_with_attributes`, `list_keys`, `list_names`, `list_owner_ids`,
 `list_owner_types`, `list_parent_child_associations`, `list_parents`,
 `list_supplemental_attribute_associations`, `list_supplemental_attribute_ids`, `list_time_series`,
-`num_distinct_arrays`, `open_copy`, `open_store`, `persist!`, `persist_catalog!`, `read_only`,
-`rollback_transaction!`, `transaction`, `begin_transaction!`, `commit_transaction!`,
-`remove_by_filter!`, `remove_parent_child_associations!`,
+`next_association_id!`, `num_distinct_arrays`, `open_copy`, `open_store`, `persist!`,
+`persist_catalog!`, `read_only`, `rollback_transaction!`, `transaction`, `begin_transaction!`,
+`commit_transaction!`, `remove_by_filter!`, `remove_parent_child_associations!`,
 `remove_supplemental_attribute_associations!`, `remove_time_series!`, `rename_time_series!`,
 `replace_owner!`, `replace_parent_child_component_id!`,
-`replace_supplemental_attribute_component_id!`, `static_grid`, `static_groups`, `static_read!`,
-`static_summary`, `static_timestamps`, `static_values`, `supplemental_attribute_counts_by_type`,
-`supplemental_attribute_summary`, `time_series_counts`, `transform_single_time_series!`,
-`verify_integrity`.
+`replace_supplemental_attribute_component_id!`, `reserve_association_ids!`, `static_grid`,
+`static_groups`, `static_read!`, `static_summary`, `static_timestamps`, `static_values`,
+`supplemental_attribute_counts_by_type`, `supplemental_attribute_summary`, `time_series_counts`,
+`transform_single_time_series!`, `verify_integrity`.
 
 ## Constructors
 
