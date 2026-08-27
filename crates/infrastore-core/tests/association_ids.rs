@@ -17,7 +17,7 @@
 
 use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{
-    AddRequest, FeatureValue, Features, KeyIdentity, ListFilter, OwnerCategory,
+    AddRequest, AddedTimeSeries, FeatureValue, Features, KeyIdentity, ListFilter, OwnerCategory,
     ParentChildAssociation, Period, SingleTimeSeries, SupplementalAttributeAssociation,
     SupplementalAttributeFilter, TimeSeriesData, TimeSeriesError, TimeSeriesType, TransformPolicy,
     TypedArray, create_store, open_store,
@@ -852,4 +852,285 @@ fn ids_survive_a_persist_and_reopen() {
             .unwrap_or_else(|| panic!("id {id} did not survive the reopen"));
         assert_eq!(&meta.name, name);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Deriving one view directly
+// ---------------------------------------------------------------------------
+
+/// A 24-step hourly series, long enough to carry a 6-hour forecast window.
+fn long_series(name: &str) -> SingleTimeSeries {
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let values: Vec<f64> = (0..24).map(|i| i as f64).collect();
+    SingleTimeSeries::new(
+        initial,
+        Duration::hours(1),
+        TypedArray::from_f64(vec![24], &values),
+        name,
+    )
+}
+
+fn add_long(store: &mut infrastore_core::Store, name: &str) -> AddedTimeSeries {
+    store
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(long_series(name)),
+        ))
+        .unwrap()
+}
+
+/// A view is one catalog row and no array: it shares its source's `data_hash`,
+/// so an importer recreating one never has to re-supply the values.
+#[test]
+fn a_derived_view_adds_a_row_and_no_array() {
+    let mut store = create_store(None, true).unwrap();
+    let source = add_long(&mut store, "load");
+    let before = store.num_distinct_arrays().unwrap();
+
+    let view = store
+        .add_derived_view(
+            source.identity(),
+            Duration::hours(6),
+            Duration::hours(6),
+            TransformPolicy::default(),
+            None,
+        )
+        .unwrap();
+
+    assert_eq!(
+        store.num_distinct_arrays().unwrap(),
+        before,
+        "a view must not add an array",
+    );
+    let src_meta = store.get_metadata_by_id(source.id).unwrap().unwrap();
+    let view_meta = store.get_metadata_by_id(view.id).unwrap().unwrap();
+    assert_eq!(view_meta.data_hash, src_meta.data_hash);
+    assert_eq!(
+        view_meta.time_series_type,
+        TimeSeriesType::DeterministicSingleTimeSeries,
+    );
+    assert_ne!(view.id, source.id);
+}
+
+/// An importer can name the view's id, which is the whole point: the reference
+/// a document recorded is preserved rather than reassigned.
+#[test]
+fn a_derived_view_can_be_filed_under_a_given_id() {
+    let mut store = create_store(None, true).unwrap();
+    let source = add_long(&mut store, "load");
+    let view = store
+        .add_derived_view(
+            source.identity(),
+            Duration::hours(6),
+            Duration::hours(6),
+            TransformPolicy::default(),
+            Some(4_242),
+        )
+        .unwrap();
+    assert_eq!(view.id, 4_242);
+    assert_eq!(
+        store
+            .get_metadata_by_id(4_242)
+            .unwrap()
+            .unwrap()
+            .time_series_type,
+        TimeSeriesType::DeterministicSingleTimeSeries,
+    );
+}
+
+/// Deriving one view directly produces the same row the whole-store sweep
+/// would.
+///
+/// This is what keeps the two paths interchangeable. `interval` is part of the
+/// identity, so if the direct path picked a different encoding than the sweep,
+/// the "same" view added two ways would be two different series — and an
+/// imported model would stop matching one built by transforming.
+#[test]
+fn a_directly_derived_view_matches_a_swept_one() {
+    let policy = TransformPolicy {
+        normalize_single_window: true,
+        ..TransformPolicy::default()
+    };
+
+    let direct = {
+        let mut store = create_store(None, true).unwrap();
+        let source = add_long(&mut store, "load");
+        store
+            .add_derived_view(
+                source.identity(),
+                Duration::hours(24),
+                Duration::hours(24),
+                policy,
+                None,
+            )
+            .unwrap();
+        store
+            .list_time_series(ListFilter::default())
+            .unwrap()
+            .into_iter()
+            .find(|m| m.time_series_type == TimeSeriesType::DeterministicSingleTimeSeries)
+            .unwrap()
+    };
+
+    let swept = {
+        let mut store = create_store(None, true).unwrap();
+        add_long(&mut store, "load");
+        store
+            .transform_single_time_series(
+                Duration::hours(24),
+                Duration::hours(24),
+                None,
+                None,
+                policy,
+            )
+            .unwrap();
+        store
+            .list_time_series(ListFilter::default())
+            .unwrap()
+            .into_iter()
+            .find(|m| m.time_series_type == TimeSeriesType::DeterministicSingleTimeSeries)
+            .unwrap()
+    };
+
+    assert_eq!(
+        direct.interval, swept.interval,
+        "interval is part of identity"
+    );
+    assert_eq!(direct.horizon, swept.horizon);
+    assert_eq!(direct.count, swept.count);
+    assert_eq!(direct.name, swept.name);
+    assert_eq!(direct.resolution, swept.resolution);
+}
+
+/// The direct path refuses what the sweep refuses, and refuses a second view of
+/// the same identity.
+#[test]
+fn a_derived_view_is_refused_where_the_sweep_would_refuse_it() {
+    let mut store = create_store(None, true).unwrap();
+    let source = add_long(&mut store, "load");
+
+    // A horizon longer than the series has no window to fill.
+    let err = store
+        .add_derived_view(
+            source.identity(),
+            Duration::hours(48),
+            Duration::hours(6),
+            TransformPolicy::default(),
+            None,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, TimeSeriesError::InvalidParameter(_)),
+        "{err:?}"
+    );
+
+    // A dry run belongs on the sweep, not here.
+    let err = store
+        .add_derived_view(
+            source.identity(),
+            Duration::hours(6),
+            Duration::hours(6),
+            TransformPolicy {
+                dry_run: true,
+                ..TransformPolicy::default()
+            },
+            None,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, TimeSeriesError::InvalidParameter(_)),
+        "{err:?}"
+    );
+
+    // Deriving twice at the same interval is a duplicate: horizon is not part
+    // of the identity, so the second one has nowhere else to go.
+    store
+        .add_derived_view(
+            source.identity(),
+            Duration::hours(6),
+            Duration::hours(6),
+            TransformPolicy::default(),
+            None,
+        )
+        .unwrap();
+    let err = store
+        .add_derived_view(
+            source.identity(),
+            Duration::hours(12),
+            Duration::hours(6),
+            TransformPolicy::default(),
+            None,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, TimeSeriesError::DuplicateTimeSeries),
+        "{err:?}"
+    );
+}
+
+/// The sweep reports the id of every view it wrote, so a caller can reference
+/// one without listing the store to find it again.
+#[test]
+fn the_sweep_reports_the_views_it_wrote() {
+    let mut store = create_store(None, true).unwrap();
+    for name in ["load", "wind"] {
+        add_long(&mut store, name);
+    }
+
+    let outcome = store
+        .transform_single_time_series(
+            Duration::hours(6),
+            Duration::hours(6),
+            None,
+            None,
+            TransformPolicy::default(),
+        )
+        .unwrap();
+    assert_eq!(outcome.transformed, 2);
+    assert_eq!(outcome.written.len(), 2);
+    for added in &outcome.written {
+        let meta = store.get_metadata_by_id(added.id).unwrap().unwrap();
+        assert_eq!(
+            meta.time_series_type,
+            TimeSeriesType::DeterministicSingleTimeSeries,
+        );
+        assert_eq!(meta.id, Some(added.id));
+    }
+
+    // A dry run writes nothing, and says so.
+    let mut fresh = create_store(None, true).unwrap();
+    add_long(&mut fresh, "load");
+    let rehearsal = fresh
+        .transform_single_time_series(
+            Duration::hours(6),
+            Duration::hours(6),
+            None,
+            None,
+            TransformPolicy {
+                dry_run: true,
+                ..TransformPolicy::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        rehearsal.transformed, 1,
+        "a rehearsal still reports the count"
+    );
+    assert!(rehearsal.written.is_empty(), "a rehearsal writes nothing");
+
+    // Re-running the committed sweep is idempotent, and writes nothing the
+    // second time.
+    let again = store
+        .transform_single_time_series(
+            Duration::hours(6),
+            Duration::hours(6),
+            None,
+            None,
+            TransformPolicy::default(),
+        )
+        .unwrap();
+    assert_eq!(again.transformed, 0);
+    assert!(again.written.is_empty());
 }

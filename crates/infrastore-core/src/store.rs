@@ -222,7 +222,10 @@ impl AddRequest {
 /// The id is valid only once the enclosing transaction commits: a rollback
 /// returns it to the catalog's counter rather than stranding it, so an id read
 /// out of a span that later rolls back may name a different row.
-#[derive(Debug, Clone, PartialEq)]
+/// Equality and hashing follow [`TimeSeriesKey`]'s: identity plus the id. Two
+/// results naming the same series in two different stores are *not* equal,
+/// which is the honest answer — the id is the row, and the rows are different.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct AddedTimeSeries {
     pub key: TimeSeriesKey,
     pub id: i64,
@@ -323,6 +326,16 @@ pub struct TransformOutcome {
     /// True when the requested `interval` equalled the horizon and that horizon
     /// spanned the whole series, so the interval was normalized to zero.
     pub interval_normalized: bool,
+    /// The views this call wrote, in the order they were written — each with the
+    /// catalog id it was filed under, so a caller can reference a view it just
+    /// derived without listing the store to find it again.
+    ///
+    /// Empty for a dry run, which writes nothing: [`Self::transformed`] still
+    /// reports what *would* have been written, and is the field to read there.
+    /// Also empty, with `transformed` zero, when every eligible series already
+    /// had its view — the sweep is idempotent, and a series it skipped was not
+    /// written by this call.
+    pub written: Vec<AddedTimeSeries>,
 }
 
 /// The window parameters `transform_single_time_series` will write, derived
@@ -1640,6 +1653,119 @@ impl Store {
         })
     }
 
+    /// Derive a `DeterministicSingleTimeSeries` view of one stored
+    /// `SingleTimeSeries`, filing it under `id` (or an assigned one).
+    ///
+    /// The single-series counterpart of
+    /// [`Self::transform_single_time_series`], which sweeps every eligible
+    /// series in the store. Two callers want this instead: one deriving a view
+    /// over a series it just added, without re-examining the rest of the store,
+    /// and an importer replaying a document that already recorded the view — and
+    /// its id — so the reference is preserved rather than reassigned.
+    ///
+    /// A view carries no array of its own. It shares its source's `data_hash`
+    /// and inherits every descriptive column from it, so this writes one catalog
+    /// row and no HDF5 bytes; an importer never has to re-supply the values to
+    /// recreate one.
+    ///
+    /// The window parameters are validated exactly as the sweep validates them —
+    /// same plan derivation, so `count` is derived rather than trusted, and
+    /// `policy.normalize_single_window` selects the same interval encoding. That
+    /// matters: `interval` is part of the identity, so a view added here under a
+    /// different encoding than the sweep would use is a *different* series.
+    ///
+    /// # Errors
+    ///
+    /// - [`TimeSeriesError::NotFound`] if `source` names no row.
+    /// - [`TimeSeriesError::InvalidParameter`] if `source` is not a
+    ///   `SingleTimeSeries`, if the window parameters do not fit its grid, if a
+    ///   `Deterministic` of the same family already exists (the two are mutually
+    ///   exclusive), or if `policy.dry_run` is set — this entry point writes or
+    ///   fails, and the sweep is where a rehearsal belongs.
+    /// - [`TimeSeriesError::DuplicateTimeSeries`] if the view already exists.
+    ///   `horizon` is not part of the identity, so this fires for a view at this
+    ///   interval whatever horizon it was derived with.
+    /// - [`TimeSeriesError::DuplicateAssociationId`] if `id` is already taken.
+    #[tracing::instrument(
+        skip(self, source, horizon, interval, policy),
+        fields(owner = source.owner_id, name = %source.name)
+    )]
+    pub fn add_derived_view(
+        &mut self,
+        source: &KeyIdentity,
+        horizon: impl Into<Period>,
+        interval: impl Into<Period>,
+        policy: TransformPolicy,
+        id: Option<i64>,
+    ) -> Result<AddedTimeSeries> {
+        if self.read_only {
+            return Err(TimeSeriesError::ReadOnlyStore);
+        }
+        if policy.dry_run {
+            return Err(TimeSeriesError::InvalidParameter(
+                "add_derived_view writes or fails; use transform_single_time_series with \
+                 dry_run to rehearse"
+                    .to_string(),
+            ));
+        }
+        if source.time_series_type != TimeSeriesType::SingleTimeSeries {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "a DeterministicSingleTimeSeries is a view of a SingleTimeSeries, but \
+                 '{}' names a {}",
+                source.name,
+                source.time_series_type.as_str(),
+            )));
+        }
+        let src = self.metadata.get_by_key(source)?;
+        let resolution = required_resolution(&src, "add_derived_view")?;
+        let initial_timestamp = src.initial_timestamp.ok_or_else(|| {
+            TimeSeriesError::IntegrityError("SingleTimeSeries missing initial_timestamp".into())
+        })?;
+        let length = src.length.ok_or_else(|| {
+            TimeSeriesError::IntegrityError("SingleTimeSeries missing length".into())
+        })?;
+
+        // Run the sweep's own plan derivation over this one series' grid, rather
+        // than repeating the window arithmetic here. Anything the sweep would
+        // reject — a horizon that is not a whole number of steps, one longer
+        // than the series — is rejected here with the same message.
+        let grid = StaticConsistency {
+            resolution,
+            initial_timestamp,
+            length,
+        };
+        let plan = TransformPlan::derive(&[grid], horizon.into(), interval.into(), policy)?
+            .ok_or_else(|| {
+                TimeSeriesError::IntegrityError(
+                    "add_derived_view: no plan for a grid that was just supplied".into(),
+                )
+            })?;
+        let GridPlan { interval, count } = plan.for_resolution(resolution)?;
+        if policy.require_uniform_forecast_grid {
+            let existing = self.get_forecast_parameters(Some(resolution), Some(interval))?;
+            plan.check_compatible_with(&existing)?;
+        }
+
+        let meta = TimeSeriesMetadata {
+            time_series_type: TimeSeriesType::DeterministicSingleTimeSeries,
+            horizon: Some(plan.horizon),
+            interval: Some(interval),
+            count: Some(count),
+            // The view is its own row; `..src` would carry the source's id.
+            id,
+            ..src
+        };
+        let tx = self.metadata.savepoint()?;
+        check_forecast_family_free(&tx, &meta, "derive")?;
+        let assigned = MetadataStore::insert(&tx, &meta)?;
+        tx.commit()?;
+
+        Ok(AddedTimeSeries {
+            key: TimeSeriesKey::from_metadata(&meta)?,
+            id: assigned,
+        })
+    }
+
     /// Read one series, optionally sliced to `time_range`.
     ///
     /// A range does not have to be grid-aligned — `start` is floored and `end`
@@ -2619,6 +2745,7 @@ impl Store {
                 sources: 0,
                 interval: requested_interval,
                 interval_normalized: false,
+                written: Vec::new(),
             });
         };
         let interval = plan.interval;
@@ -2767,6 +2894,7 @@ impl Store {
                 sources: sources.len(),
                 interval,
                 interval_normalized: plan.interval_normalized,
+                written: Vec::new(),
             });
         }
 
@@ -2776,10 +2904,17 @@ impl Store {
         // the feature-set writes collapse to a handful regardless of how many
         // series are transformed.
         let mut feature_sets = SharedSetCache::default();
+        let mut written = Vec::with_capacity(new_metas.len());
         for meta in &new_metas {
-            if let Err(e) = MetadataStore::insert_batched(&tx, meta, &mut feature_sets) {
-                drop(tx);
-                return Err(e);
+            match MetadataStore::insert_batched(&tx, meta, &mut feature_sets) {
+                Ok(id) => written.push(AddedTimeSeries {
+                    key: TimeSeriesKey::from_metadata(meta)?,
+                    id,
+                }),
+                Err(e) => {
+                    drop(tx);
+                    return Err(e);
+                }
             }
         }
         tx.commit()?;
@@ -2788,6 +2923,7 @@ impl Store {
             sources: sources.len(),
             interval,
             interval_normalized: plan.interval_normalized,
+            written,
         })
     }
 
