@@ -2193,6 +2193,7 @@ impl PyStore {
                 owner_category: owner_category.into(),
                 data,
                 features,
+                id: None,
             });
         }
         let keys = self

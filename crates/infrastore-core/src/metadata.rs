@@ -952,53 +952,91 @@ impl MetadataStore {
 
         // `prepare_cached` so bulk adds parse each INSERT's SQL once per
         // connection instead of once per row.
+        //
+        // `id` is bound rather than omitted, and `RETURNING id` reads back what
+        // landed. Both choices are deliberate:
+        //
+        //   * Binding `NULL` into an `INTEGER PRIMARY KEY` is how SQLite is
+        //     asked to assign one, so a caller-supplied id and an assigned one
+        //     are the same statement -- no second prepared statement, and no
+        //     branch that could drift between the two.
+        //   * `RETURNING` instead of `last_insert_rowid()`. That function is
+        //     per-connection and reports the most recent insert on it, so
+        //     reading it here was only correct because the feature-set and
+        //     timestamp-set inserts below happen *after* it. Both write to
+        //     rowid tables and would clobber it. Nothing should have to
+        //     preserve that ordering to keep this function correct.
         let mut insert_stmt = tx.prepare_cached(
             "INSERT INTO time_series_associations
-             (owner_id, owner_type, owner_category, time_series_type, name, data_hash,
+             (id, owner_id, owner_type, owner_category, time_series_type, name, data_hash,
               initial_timestamp, resolution, length, horizon, interval, count,
               timestamps_hash, units, quantity_kind, unit_system, time_reference,
               component_field, percentiles_json, element_type, element_shape,
               application_data, features_hash)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                     ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+                     ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
+             RETURNING id",
         )?;
-        let result = insert_stmt.execute(params![
-            meta.owner_id,
-            meta.owner_type,
-            meta.owner_category.code(),
-            meta.time_series_type.code(),
-            meta.name,
-            meta.data_hash.as_slice(),
-            initial_ts,
-            resolution_iso,
-            meta.length.map(|l| l as i64),
-            horizon_iso,
-            interval_iso,
-            meta.count.map(|c| c as i64),
-            timestamps_hash.map(|h| h.to_vec()),
-            meta.units,
-            meta.quantity_kind,
-            meta.unit_system.map(|u| u.as_str()),
-            meta.time_reference
-                .as_ref()
-                .map(TimeReference::as_storage_string),
-            meta.component_field,
-            percentiles_json,
-            meta.element_type.to_string(),
-            element_shape_json,
-            meta.application_data,
-            f_hash.as_slice(),
-        ]);
+        let result = insert_stmt.query_row(
+            params![
+                meta.id,
+                meta.owner_id,
+                meta.owner_type,
+                meta.owner_category.code(),
+                meta.time_series_type.code(),
+                meta.name,
+                meta.data_hash.as_slice(),
+                initial_ts,
+                resolution_iso,
+                meta.length.map(|l| l as i64),
+                horizon_iso,
+                interval_iso,
+                meta.count.map(|c| c as i64),
+                timestamps_hash.map(|h| h.to_vec()),
+                meta.units,
+                meta.quantity_kind,
+                meta.unit_system.map(|u| u.as_str()),
+                meta.time_reference
+                    .as_ref()
+                    .map(TimeReference::as_storage_string),
+                meta.component_field,
+                percentiles_json,
+                meta.element_type.to_string(),
+                element_shape_json,
+                meta.application_data,
+                f_hash.as_slice(),
+            ],
+            |row| row.get::<_, i64>(0),
+        );
 
         let id = match result {
-            Ok(_) => tx.last_insert_rowid(),
+            Ok(id) => id,
             Err(rusqlite::Error::SqliteFailure(err, _))
                 if err.code == rusqlite::ErrorCode::ConstraintViolation =>
             {
-                // The unique index covers (owner_id, owner_category,
-                // time_series_type, name, resolution, interval, features_hash).
-                // Surface the spec error.
-                return Err(TimeSeriesError::DuplicateTimeSeries);
+                // Two different collisions arrive here as the same primary
+                // result code, and they mean opposite things to the caller, so
+                // the extended code is what tells them apart.
+                //
+                //   * PRIMARYKEY -- the caller supplied an explicit `id` that
+                //     is already taken. Only reachable when `meta.id` is
+                //     `Some`; an assigned id cannot collide by construction.
+                //   * UNIQUE -- the identity tuple collided on the index over
+                //     (owner_id, owner_category, time_series_type, name,
+                //     resolution, interval, features_hash).
+                //
+                // Anything else constraint-shaped is left as the raw error
+                // rather than guessed at: reporting a wrong one of these two
+                // sends a caller looking in the wrong place entirely.
+                return Err(match (err.extended_code, meta.id) {
+                    (rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY, Some(id)) => {
+                        TimeSeriesError::DuplicateAssociationId(id)
+                    }
+                    (rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE, _) => {
+                        TimeSeriesError::DuplicateTimeSeries
+                    }
+                    _ => rusqlite::Error::SqliteFailure(err, None).into(),
+                });
             }
             Err(e) => return Err(e.into()),
         };
@@ -2771,9 +2809,10 @@ fn collect_data_hashes(
 }
 
 struct MetaRow {
-    /// The catalog's `INTEGER PRIMARY KEY` (SQLite rowid). Not part of
-    /// [`TimeSeriesMetadata`] — that type's identity is the key tuple, not a
-    /// storage-assigned id — but used internally by [`Self::list_inner`].
+    /// The catalog's `INTEGER PRIMARY KEY`. Carried onto
+    /// [`TimeSeriesMetadata::id`] as `Some`, since a stored row always has one,
+    /// and used directly by [`Self::list_inner`] for the callers that want the
+    /// id beside the metadata rather than inside it.
     id: i64,
     owner_id: i64,
     owner_type: String,
@@ -2831,6 +2870,9 @@ impl MetaRow {
             element_type: self.element_type,
             element_shape: self.element_shape,
             application_data: self.application_data,
+            // A row that came out of the catalog always has an id; `None` is
+            // reserved for the write direction, where it means "assign one".
+            id: Some(self.id),
         }
     }
 }

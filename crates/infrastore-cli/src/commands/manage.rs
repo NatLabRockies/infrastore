@@ -602,6 +602,10 @@ pub fn merge(
             owner_category: m.owner_category,
             data,
             features: m.features.clone(),
+            // A merge deliberately drops the source's id. The destination has
+            // its own id stream, so a source id may already be taken there;
+            // the rows are re-added and assigned fresh ids.
+            id: None,
         })
         .collect();
 

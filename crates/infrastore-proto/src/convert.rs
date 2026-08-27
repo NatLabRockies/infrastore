@@ -366,6 +366,11 @@ pub fn metadata_from_pb(m: pb::TimeSeriesMetadata) -> Result<TimeSeriesMetadata,
         })?,
         element_shape: m.element_shape.iter().map(|d| *d as usize).collect(),
         application_data: m.application_data,
+        // The wire form does not carry the association id yet, so a client
+        // reconstructing metadata from a response has none to report. `None`
+        // here reads as "unknown", not "assign one" — nothing writes through
+        // this path; the server is read-only.
+        id: None,
     })
 }
 
@@ -1201,6 +1206,7 @@ mod convert_coverage_tests {
                 element_type: ElementType::Scalar(dtype),
                 element_shape: vec![],
                 application_data: None,
+                id: None,
             };
             let pb = metadata_to_pb(&meta);
             assert_eq!(pb.element_type, dtype.as_str(), "{dtype:?}");
@@ -1349,6 +1355,7 @@ mod convert_coverage_tests {
             element_type: ElementType::default(),
             element_shape: vec![],
             application_data: None,
+            id: None,
         };
 
         let pb = metadata_to_pb(&meta);
@@ -1393,6 +1400,7 @@ mod convert_coverage_tests {
             element_type: ElementType::default(),
             element_shape: vec![],
             application_data: None,
+            id: None,
         };
         let pb = metadata_to_pb(&meta);
         assert_eq!(pb.resolution.as_deref(), Some("P1Y"));
@@ -1718,6 +1726,7 @@ mod convert_coverage_tests {
             element_type: ElementType::default(),
             element_shape: vec![],
             application_data: Some("QuadraticFunctionData".into()),
+            id: None,
         };
 
         let pb = metadata_to_pb(&meta);
@@ -1920,6 +1929,7 @@ mod convert_coverage_tests {
             element_type: ElementType::default(),
             element_shape: vec![],
             application_data: None,
+            id: None,
         });
         pb.data_hash = vec![0u8; 31];
         assert!(matches!(

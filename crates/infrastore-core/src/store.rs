@@ -154,6 +154,10 @@ pub struct AddRequest {
     pub owner_category: OwnerCategory,
     pub data: TimeSeriesData,
     pub features: Features,
+    /// The catalog id to file this association under, or `None` to let the
+    /// catalog assign one. See [`TimeSeriesMetadata::id`]; set it with
+    /// [`Self::with_id`].
+    pub id: Option<i64>,
 }
 
 impl AddRequest {
@@ -178,12 +182,26 @@ impl AddRequest {
             owner_category,
             data,
             features: Features::new(),
+            id: None,
         }
     }
 
     /// Set the feature set.
     pub fn with_features(mut self, features: Features) -> Self {
         self.features = features;
+        self
+    }
+
+    /// File this association under `id` rather than letting the catalog assign
+    /// one.
+    ///
+    /// For a writer importing a document that already recorded the id and needs
+    /// the reference preserved — not for ordinary adds, which should leave the
+    /// catalog to assign. Ids only ratchet upward, so a document's own ids fit
+    /// a fresh store; against one that has already assigned ids of its own they
+    /// collide with [`TimeSeriesError::DuplicateAssociationId`].
+    pub fn with_id(mut self, id: i64) -> Self {
+        self.id = Some(id);
         self
     }
 }
@@ -1124,6 +1142,9 @@ impl Store {
             owner_category,
             data,
             features,
+            // The wide positional forms are the "just add this" surface; a
+            // caller supplying its own id uses `AddRequest::with_id`.
+            id: None,
         }])
         .map(|mut keys| keys.remove(0))
     }
@@ -1544,6 +1565,12 @@ impl Store {
         if let Some(name) = new_name {
             meta.name = name.to_string();
         }
+        // The copy is its own catalog row and gets its own id. `meta` came from
+        // a read, so its `id` is the *source's* — carrying it over would make
+        // this an explicit-id insert of an id that is by definition already
+        // taken, and the primary key would reject it. Every column the copy
+        // does keep is descriptive; this one describes the row.
+        meta.id = None;
 
         let dst = KeyIdentity {
             owner_id: meta.owner_id,
@@ -2613,6 +2640,11 @@ impl Store {
                 horizon: Some(horizon),
                 interval: Some(interval),
                 count: Some(count),
+                // A derived view is its own catalog row, so it gets its own id.
+                // `..src` would otherwise carry the *source's* id here — it is
+                // `Some` on anything read back from the catalog — and the
+                // primary key would reject the insert.
+                id: None,
                 ..src.clone()
             });
         }
@@ -3789,6 +3821,9 @@ impl BulkAdd<'_> {
             owner_category,
             data,
             features,
+            // The wide positional forms are the "just add this" surface; a
+            // caller supplying its own id uses `AddRequest::with_id`.
+            id: None,
         })
     }
 
@@ -3907,6 +3942,7 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
                     element_type,
                     element_shape: single.data.element_shape().to_vec(),
                     application_data: item.data.application_data().map(str::to_owned),
+                    id: item.id,
                 },
                 TimeSeriesKey::Single(SingleTimeSeriesKey::new(
                     item.owner_id,
@@ -3953,6 +3989,7 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
                     element_type,
                     element_shape: non_sequential.data.element_shape().to_vec(),
                     application_data: item.data.application_data().map(str::to_owned),
+                    id: item.id,
                 },
                 TimeSeriesKey::NonSequential(NonSequentialTimeSeriesKey::new(
                     item.owner_id,
@@ -4562,6 +4599,7 @@ fn forecast_metadata(
         element_type,
         element_shape: data.element_shape().to_vec(),
         application_data: item.data.application_data().map(str::to_owned),
+        id: item.id,
     }
 }
 

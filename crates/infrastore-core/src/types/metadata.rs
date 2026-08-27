@@ -289,6 +289,12 @@ pub const RESERVED_FEATURE_NAMES: &[&str] = &[
     "ext",
     "features",
     "horizon",
+    // Reserved for the catalog row's own id, which every binding surfaces
+    // alongside the fields above. Unlike `dtype` and `ext` below it, this one
+    // is reserved *before* anything could have used it: the name is too
+    // generic to be a plausible series discriminator, so the shadowing this
+    // list prevents is the only thing it could cause.
+    "id",
     "initial_timestamp",
     "interval",
     "length",
@@ -440,6 +446,34 @@ pub struct TimeSeriesMetadata {
     /// it; end users are not expected to set it. Element typing does *not*
     /// belong here — that is [`Self::element_type`].
     pub application_data: Option<String>,
+
+    /// The catalog row's `id`, or `None`.
+    ///
+    /// Unlike every other field here, this describes the *row* rather than the
+    /// data: it is what the catalog filed this association under, and a
+    /// consumer stores it in its own object model as a durable reference back
+    /// (a generator's cost function naming the series that varies it). It is
+    /// never reissued once its row is deleted — see the `id` column in
+    /// `metadata/schema.rs` — but it is meaningful only within the store that
+    /// minted it and only alongside the table it came from.
+    ///
+    /// The direction decides what `None` means:
+    ///
+    /// * **Reading** — always `Some`. Every stored row has an id.
+    /// * **Writing** — `None` asks the catalog to assign one, which is what
+    ///   almost every caller wants. `Some` supplies the id explicitly, for a
+    ///   writer importing a document that already recorded it and needs the
+    ///   reference preserved. Explicit ids only ratchet the catalog's counter
+    ///   *upward*, so one at or below the current high-water mark collides and
+    ///   is refused with [`TimeSeriesError::DuplicateAssociationId`].
+    ///
+    /// Descriptive, so it sits outside [`crate::TimeSeriesKey`] and outside
+    /// both content hashes: two series differing only in it are the same
+    /// series, and it changes nothing about what is stored.
+    ///
+    /// [`TimeSeriesError::DuplicateAssociationId`]: crate::TimeSeriesError::DuplicateAssociationId
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<i64>,
 }
 
 #[cfg(test)]
@@ -535,6 +569,7 @@ mod tests {
             element_type: ElementType::Scalar(single.data.dtype),
             element_shape: vec![],
             application_data: None,
+            id: None,
         };
         let identity = KeyIdentity {
             owner_id: 1,

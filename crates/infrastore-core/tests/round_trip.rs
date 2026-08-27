@@ -368,6 +368,7 @@ fn bulk_add_atomic_rollback() {
             owner_category: OwnerCategory::Component,
             data: TimeSeriesData::SingleTimeSeries(s_ok.clone()),
             features: Features::new(),
+            id: None,
         },
         AddRequest {
             owner_id: 1,
@@ -375,6 +376,7 @@ fn bulk_add_atomic_rollback() {
             owner_category: OwnerCategory::Component,
             data: TimeSeriesData::SingleTimeSeries(s_dup.clone()),
             features: Features::new(),
+            id: None,
         },
     ];
     let err = store.add_time_series_bulk(bulk).unwrap_err();

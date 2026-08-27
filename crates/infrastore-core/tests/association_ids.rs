@@ -17,8 +17,9 @@
 
 use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{
-    Features, KeyIdentity, OwnerCategory, Period, SingleTimeSeries, TimeSeriesData, TimeSeriesType,
-    TypedArray, create_store, open_store,
+    AddRequest, FeatureValue, Features, KeyIdentity, ListFilter, OwnerCategory, Period,
+    SingleTimeSeries, TimeSeriesData, TimeSeriesError, TimeSeriesType, TransformPolicy, TypedArray,
+    create_store, open_store,
 };
 
 /// One hourly `SingleTimeSeries` named `name`, three points long.
@@ -265,4 +266,223 @@ fn the_three_tables_have_independent_id_streams() {
     assert_eq!(first_id("time_series_associations"), 1);
     assert_eq!(first_id("supplemental_attribute_associations"), 1);
     assert_eq!(first_id("parent_child_associations"), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Explicit ids, and the row-level paths that must not carry one over
+// ---------------------------------------------------------------------------
+
+/// A stored row always reports its id; a request that did not ask for one gets
+/// whatever the catalog assigned.
+#[test]
+fn a_stored_row_reports_the_id_the_catalog_gave_it() {
+    let mut store = create_store(None, true).unwrap();
+    store
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series("load")),
+        ))
+        .unwrap();
+
+    let meta = store.get_metadata(&key("load")).unwrap();
+    assert_eq!(
+        meta.id,
+        Some(1),
+        "the first row of a fresh catalog is id 1, and a read must report it",
+    );
+}
+
+/// An explicit id is honored, and the catalog's counter ratchets past it — so a
+/// later assigned id cannot land on top of one the caller already placed.
+#[test]
+fn an_explicit_id_is_honored_and_ratchets_the_counter() {
+    let mut store = create_store(None, true).unwrap();
+    store
+        .add(
+            AddRequest::new(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(series("imported")),
+            )
+            .with_id(500),
+        )
+        .unwrap();
+    store
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series("assigned")),
+        ))
+        .unwrap();
+
+    assert_eq!(store.get_metadata(&key("imported")).unwrap().id, Some(500));
+    assert_eq!(
+        store.get_metadata(&key("assigned")).unwrap().id,
+        Some(501),
+        "an assigned id must start past the explicit one, not collide with it",
+    );
+}
+
+/// The two collisions that both arrive as a SQLite constraint violation stay
+/// distinguishable. Reporting one as the other sends a caller looking in
+/// entirely the wrong place: a duplicate series is a re-add to fix, an id
+/// collision means the import's ids do not fit this store.
+#[test]
+fn an_id_collision_and_an_identity_collision_are_different_errors() {
+    let mut store = create_store(None, true).unwrap();
+    store
+        .add(
+            AddRequest::new(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(series("load")),
+            )
+            .with_id(7),
+        )
+        .unwrap();
+
+    // Same id, different series.
+    let err = store
+        .add(
+            AddRequest::new(
+                2,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(series("other")),
+            )
+            .with_id(7),
+        )
+        .unwrap_err();
+    match err {
+        TimeSeriesError::DuplicateAssociationId(id) => assert_eq!(id, 7),
+        other => panic!("expected DuplicateAssociationId, got {other:?}"),
+    }
+
+    // Same series, no id: still the identity collision it always was.
+    let err = store
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series("load")),
+        ))
+        .unwrap_err();
+    assert!(
+        matches!(err, TimeSeriesError::DuplicateTimeSeries),
+        "an identity collision must stay DuplicateTimeSeries, got {err:?}",
+    );
+}
+
+/// A copy is a new row and gets a new id.
+///
+/// Regression guard. `copy_time_series` reads the source's metadata, edits the
+/// owner in place, and re-inserts it — so the source's id rode along, making
+/// every copy an explicit-id insert of an id that was by definition already
+/// taken.
+#[test]
+fn a_copy_gets_its_own_id() {
+    let mut store = create_store(None, true).unwrap();
+    store
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series("load")),
+        ))
+        .unwrap();
+    let source_id = store.get_metadata(&key("load")).unwrap().id.unwrap();
+
+    store
+        .copy_time_series(&key("load"), 2, "Generator", None)
+        .unwrap();
+
+    let mut copied = key("load");
+    copied.owner_id = 2;
+    let copy_id = store.get_metadata(&copied).unwrap().id.unwrap();
+    assert_ne!(
+        copy_id, source_id,
+        "a copy must be filed under its own id, not the source's",
+    );
+    assert_eq!(
+        store.get_metadata(&key("load")).unwrap().id,
+        Some(source_id),
+        "copying must not disturb the source's id",
+    );
+}
+
+/// A derived `DeterministicSingleTimeSeries` is a new row and gets a new id.
+///
+/// Regression guard, and the subtler of the two: the transform builds the
+/// derived row with `..src`, which fills in every field it does not name — the
+/// source's id included, invisibly, with no compiler error to catch it.
+#[test]
+fn a_derived_view_gets_its_own_id() {
+    let mut store = create_store(None, true).unwrap();
+    let long = {
+        let initial_timestamp = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let values: Vec<f64> = (0..24).map(|i| i as f64).collect();
+        let data = TypedArray::from_f64(vec![24], &values);
+        SingleTimeSeries::new(initial_timestamp, Duration::hours(1), data, "load")
+    };
+    store
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(long),
+        ))
+        .unwrap();
+    let source_id = store.get_metadata(&key("load")).unwrap().id.unwrap();
+
+    let outcome = store
+        .transform_single_time_series(
+            Duration::hours(6),
+            Duration::hours(6),
+            None,
+            None,
+            TransformPolicy::default(),
+        )
+        .unwrap();
+    assert_eq!(outcome.transformed, 1);
+
+    let derived: Vec<_> = store
+        .list_time_series(ListFilter::default())
+        .unwrap()
+        .into_iter()
+        .filter(|m| m.time_series_type == TimeSeriesType::DeterministicSingleTimeSeries)
+        .collect();
+    assert_eq!(derived.len(), 1);
+    assert_ne!(
+        derived[0].id,
+        Some(source_id),
+        "a derived view must be filed under its own id, not its source's",
+    );
+}
+
+/// `id` is a reserved feature name, so it cannot shadow the metadata field.
+#[test]
+fn id_cannot_be_used_as_a_feature_name() {
+    let mut store = create_store(None, true).unwrap();
+    let mut features = Features::new();
+    features.insert("id".to_string(), FeatureValue::Int(3));
+    let err = store
+        .add(
+            AddRequest::new(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(series("load")),
+            )
+            .with_features(features),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, TimeSeriesError::InvalidParameter(_)),
+        "a reserved feature name must be refused, got {err:?}",
+    );
 }

@@ -970,6 +970,9 @@ unsafe fn build_single_request(
         owner_category,
         data,
         features,
+        // The per-type C entry points assign; an explicit id arrives through
+        // the import surface, not here.
+        id: None,
     })
 }
 
@@ -1152,6 +1155,9 @@ unsafe fn build_non_sequential_request(
         owner_category,
         data,
         features,
+        // The per-type C entry points assign; an explicit id arrives through
+        // the import surface, not here.
+        id: None,
     })
 }
 
@@ -3387,6 +3393,9 @@ unsafe fn build_forecast_request(
         owner_category,
         data,
         features,
+        // The per-type C entry points assign; an explicit id arrives through
+        // the import surface, not here.
+        id: None,
     })
 }
 
@@ -3573,6 +3582,9 @@ unsafe fn build_probabilistic_request(
         owner_category,
         data,
         features,
+        // The per-type C entry points assign; an explicit id arrives through
+        // the import surface, not here.
+        id: None,
     })
 }
 
