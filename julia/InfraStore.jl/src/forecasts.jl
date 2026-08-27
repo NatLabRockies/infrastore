@@ -36,6 +36,60 @@ struct TransformOutcome
 end
 
 """
+    add_derived_view!(store, source, horizon, interval; normalize_single_window=false,
+                      require_uniform_forecast_grid=false, id=nothing) -> AddedTimeSeries
+
+Derive one `DeterministicSingleTimeSeries` view of the stored `SingleTimeSeries`
+named by `source`.
+
+The single-series form of [`transform_single_time_series!`](@ref), which sweeps
+every eligible series in the store. Two callers want this instead: one deriving
+a view over a series it just added, and a writer replaying a recorded model,
+which passes `id` so the reference that model holds is preserved rather than
+reassigned.
+
+A view carries no array of its own — it shares its source's data — so this
+writes one catalog row and no array bytes, and a caller recreating one never
+re-supplies the values.
+
+`normalize_single_window` must match what the sweep would use: `interval` is
+part of a series' identity, so a view derived here under a different encoding
+than the sweep's would be a *different* series.
+
+```julia
+added = add_time_series!(store, 1, "Generator", Component, ts)
+view = add_derived_view!(store, added, Hour(6), Hour(6))
+```
+"""
+function add_derived_view!(
+    store::Store,
+    source::TimeSeriesRef,
+    horizon::Period,
+    interval::Period;
+    normalize_single_window::Bool=false,
+    require_uniform_forecast_grid::Bool=false,
+    id::Union{Nothing, Integer}=nothing,
+)
+    out_key = Ref{Ptr{Cvoid}}(C_NULL)
+    out_id = Ref{Int64}(0)
+    _check(
+        @ccall lib_path().infrastore_store_add_derived_view(
+            store::Ptr{Cvoid},
+            _key(source)::Ptr{Cvoid},
+            _period_to_iso(horizon)::Cstring,
+            _period_to_iso(interval)::Cstring,
+            normalize_single_window::Bool,
+            require_uniform_forecast_grid::Bool,
+            # The C ABI spells "assign one" as a non-positive id.
+            Int64(id === nothing ? 0 : id)::Int64,
+            out_key::Ref{Ptr{Cvoid}},
+            out_id::Ref{Int64},
+        )::Int32
+    )
+    return AddedTimeSeries(TimeSeriesKey(out_key[]), out_id[])
+end
+
+"""
     transform_single_time_series!(store, horizon, interval; owner_category=nothing,
                                   resolution=nothing, normalize_single_window=false,
                                   require_uniform_forecast_grid=false,
@@ -435,7 +489,7 @@ end
 # (`infrastore_store_get_forecast_by_key`), so the time series type comes from the key.
 function _get_forecast_raw(
     store::Store,
-    key::TimeSeriesKey;
+    key::TimeSeriesRef;
     time_range::TimeRangeArg=nothing,
 )
     time_range_present, time_range_zoneless, range_start_ms, range_end_ms = _time_range_args(
@@ -665,7 +719,7 @@ so decoding one as another does not merely mislabel the result, it misreads it.
 function get_time_series(
     ::Type{T},
     store::Store,
-    key::TimeSeriesKey;
+    key::TimeSeriesRef;
     time_range::TimeRangeArg=nothing,
 ) where {T <: _ForecastRequest}
     # `Deterministic{Float64,3} <: Deterministic`, so a parameterized spelling

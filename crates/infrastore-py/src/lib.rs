@@ -11,6 +11,7 @@
 //!     IntegrityError, ReadOnlyStoreError, IoError, ConnectionError,
 //!     IncompatibleFormatError, IncompatibleForecastError, StorageError,
 //!     DuplicateAssociationError,
+//!     DuplicateAssociationIdError,
 //! )
 //! ```
 
@@ -32,6 +33,7 @@ create_exception!(infrastore, TimeSeriesError, PyException);
 create_exception!(infrastore, NotFoundError, TimeSeriesError);
 create_exception!(infrastore, DuplicateTimeSeriesError, TimeSeriesError);
 create_exception!(infrastore, DuplicateAssociationError, TimeSeriesError);
+create_exception!(infrastore, DuplicateAssociationIdError, TimeSeriesError);
 create_exception!(infrastore, InvalidParameterError, TimeSeriesError);
 create_exception!(infrastore, IntegrityError, TimeSeriesError);
 create_exception!(infrastore, ReadOnlyStoreError, TimeSeriesError);
@@ -51,6 +53,7 @@ fn map_err(e: core_lib::TimeSeriesError) -> PyErr {
             DuplicateTimeSeriesError::new_err("a time series with that key already exists")
         }
         E::DuplicateAssociation(m) => DuplicateAssociationError::new_err(m),
+        ref e @ E::DuplicateAssociationId(_) => DuplicateAssociationIdError::new_err(e.to_string()),
         E::InvalidParameter(m) => InvalidParameterError::new_err(m),
         E::IntegrityError(m) => IntegrityError::new_err(m),
         E::ReadOnlyStore => ReadOnlyStoreError::new_err("store is read-only"),
@@ -4358,6 +4361,10 @@ fn infrastore(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add(
         "DuplicateAssociationError",
         py.get_type::<DuplicateAssociationError>(),
+    )?;
+    m.add(
+        "DuplicateAssociationIdError",
+        py.get_type::<DuplicateAssociationIdError>(),
     )?;
     m.add(
         "InvalidParameterError",

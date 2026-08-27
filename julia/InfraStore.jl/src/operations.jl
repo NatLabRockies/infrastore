@@ -319,7 +319,7 @@ get_metadata(store, 42, Component, "load"; resolution=Hour(1))
 get_metadata(Scenarios, store, 42, Component, "wind"; resolution=Hour(1))
 ```
 """
-function get_metadata(store::Store, key::TimeSeriesKey)
+function get_metadata(store::Store, key::TimeSeriesRef)
     json = _probe(
         (buf, cap, out_len) -> @ccall lib_path().infrastore_store_get_metadata_by_key(
             store::Ptr{Cvoid},
@@ -330,6 +330,57 @@ function get_metadata(store::Store, key::TimeSeriesKey)
         )::Int32
     )
     return _decode_metadata(JSON.parse(json))
+end
+
+"""
+    get_metadata_by_id(store, id) -> Union{TimeSeriesMetadata, Nothing}
+
+The metadata of the association filed under catalog `id`, or `nothing` if the
+catalog holds no such row.
+
+The read direction of the id every write hands back: a caller that recorded ids
+in its own model resolves them here rather than keeping an id-to-key map beside
+the store. `nothing` rather than a `NotFoundError`, because a caller validating
+references it persisted earlier is asking whether one still resolves, and a
+stale reference is an answer.
+
+See also [`association_exists`](@ref), which answers the same question without
+building the row.
+"""
+function get_metadata_by_id(store::Store, id::Integer)
+    out_present = Ref{Bool}(false)
+    json = _probe(
+        (buf, cap, out_len) -> @ccall lib_path().infrastore_store_get_metadata_by_id(
+            store::Ptr{Cvoid},
+            Int64(id)::Int64,
+            buf::Ptr{UInt8},
+            cap::UInt64,
+            out_len::Ref{UInt64},
+            out_present::Ref{Bool},
+        )::Int32
+    )
+    out_present[] || return nothing
+    return _decode_metadata(JSON.parse(json))
+end
+
+"""
+    association_exists(store, id) -> Bool
+
+Whether an association is filed under catalog `id`.
+
+A primary-key probe that fetches no row, so a model can check every reference it
+holds on load rather than discovering a dangling one mid-run. An id is never
+reissued once its row is deleted, so a reference that stops resolving stays
+stale — it can never come to mean a different series.
+"""
+function association_exists(store::Store, id::Integer)
+    out_present = Ref{Bool}(false)
+    _check(
+        @ccall lib_path().infrastore_store_association_exists(
+            store::Ptr{Cvoid}, Int64(id)::Int64, out_present::Ref{Bool}
+        )::Int32
+    )
+    return out_present[]
 end
 
 function get_metadata(
@@ -396,7 +447,7 @@ end
 Rename the series identified by `key` to `new_name`, returning the renamed key
 (same identity, new name). Only the catalog name changes.
 """
-function rename_time_series!(store::Store, key::TimeSeriesKey, new_name::AbstractString)
+function rename_time_series!(store::Store, key::TimeSeriesRef, new_name::AbstractString)
     out_key = Ref{Ptr{Cvoid}}(C_NULL)
     code = @ccall lib_path().infrastore_store_rename(
         store::Ptr{Cvoid},
@@ -630,7 +681,7 @@ end
 
 function get_time_series(
     store::Store,
-    key::TimeSeriesKey;
+    key::TimeSeriesRef;
     time_range::TimeRangeArg=nothing,
 )
     out_initial = Ref{Int64}(0)
@@ -965,14 +1016,14 @@ dataset. Pass `time_range = (start, stop)` to slice every series to that window.
 """
 function bulk_read(
     store::Store,
-    keys::AbstractVector{TimeSeriesKey};
+    keys::AbstractVector{<:TimeSeriesRef};
     time_range::TimeRangeArg=nothing,
 )
     n = length(keys)
     out = Vector{Any}(undef, n)
     n == 0 && return out
 
-    key_handles = Ptr{Cvoid}[k.handle for k in keys]
+    key_handles = Ptr{Cvoid}[_key(k).handle for k in keys]
     out_result = Ref{Ptr{Cvoid}}(C_NULL)
     tr_present, tr_zoneless, tr_start, tr_end = _time_range_args(time_range)
     code = GC.@preserve keys key_handles @ccall lib_path().infrastore_store_bulk_read(
@@ -1014,7 +1065,7 @@ end
 function get_time_series(
     ::Type{T},
     store::Store,
-    key::TimeSeriesKey;
+    key::TimeSeriesRef;
     time_range::TimeRangeArg=nothing,
 ) where {T <: NonSequentialTimeSeries}
     _check_request_type(T)

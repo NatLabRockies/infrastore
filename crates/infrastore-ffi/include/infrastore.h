@@ -53,6 +53,16 @@
  */
 #define INFRASTORE_ERR_MISMATCHED_ARTIFACT 12
 
+/**
+ * A caller supplied an explicit association id that is already in use.
+ *
+ * Distinct from `INFRASTORE_ERR_DUPLICATE_ASSOCIATION`, which is the endpoint
+ * pair colliding, and from `INFRASTORE_ERR_DUPLICATE`, which is a series'
+ * identity colliding. The three mean different things to a caller: a taken id
+ * says the ids being imported do not fit this store.
+ */
+#define INFRASTORE_ERR_DUPLICATE_ASSOCIATION_ID 13
+
 #define INFRASTORE_ERR_INTERNAL 99
 
 /**

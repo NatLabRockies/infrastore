@@ -371,7 +371,7 @@ materialize each unique window only once.
 struct ForecastEntry
     dtype::DataType
     window_shape::Vector{Int}
-    key::TimeSeriesKey
+    key::TimeSeriesRef
     slot::Int
 end
 

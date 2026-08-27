@@ -68,6 +68,13 @@ pub const INFRASTORE_ERR_STORE_EXISTS: i32 = 11;
 /// The HDF5 file and its catalog do not carry the same generation stamp: they
 /// are halves of two different saves.
 pub const INFRASTORE_ERR_MISMATCHED_ARTIFACT: i32 = 12;
+/// A caller supplied an explicit association id that is already in use.
+///
+/// Distinct from `INFRASTORE_ERR_DUPLICATE_ASSOCIATION`, which is the endpoint
+/// pair colliding, and from `INFRASTORE_ERR_DUPLICATE`, which is a series'
+/// identity colliding. The three mean different things to a caller: a taken id
+/// says the ids being imported do not fit this store.
+pub const INFRASTORE_ERR_DUPLICATE_ASSOCIATION_ID: i32 = 13;
 pub const INFRASTORE_ERR_INTERNAL: i32 = 99;
 
 thread_local! {
@@ -88,6 +95,7 @@ fn map_core_error(e: core_lib::TimeSeriesError) -> i32 {
         E::NotFound => INFRASTORE_ERR_NOT_FOUND,
         E::DuplicateTimeSeries => INFRASTORE_ERR_DUPLICATE,
         E::DuplicateAssociation(_) => INFRASTORE_ERR_DUPLICATE_ASSOCIATION,
+        E::DuplicateAssociationId(_) => INFRASTORE_ERR_DUPLICATE_ASSOCIATION_ID,
         E::InvalidParameter(_) => INFRASTORE_ERR_INVALID_PARAMETER,
         E::IntegrityError(_) => INFRASTORE_ERR_INTEGRITY,
         E::ReadOnlyStore => INFRASTORE_ERR_READ_ONLY,

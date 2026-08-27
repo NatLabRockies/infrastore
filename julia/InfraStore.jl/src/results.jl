@@ -45,6 +45,10 @@ anything but a `Probabilistic`).
   and the row's timestamps were *spelled*, or `nothing` when unspecified (which
   is not a claim they were written as UTC). `initial_timestamp` is still the
   instant; `using TimeZones` adds [`zoned_timestamp`](@ref) to fuse the two.
+- `id` — the catalog row's own id, the handle a caller stores in its own model
+  to reference this association later. Never reissued once the row is deleted,
+  so a stored reference can go stale but can never come to mean a different
+  series. `nothing` only for metadata that never came from the catalog.
 """
 struct TimeSeriesMetadata
     owner_id::Int64
@@ -69,8 +73,8 @@ struct TimeSeriesMetadata
     time_reference::Union{Nothing, TimeReference}
     component_field::Union{Nothing, String}
     application_data::Union{Nothing, String}
+    id::Union{Nothing, Int64}
 end
-
 """
     KeyInfo
 

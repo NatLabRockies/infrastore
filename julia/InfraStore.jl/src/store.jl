@@ -9,6 +9,32 @@ mutable struct TimeSeriesKey
     end
 end
 
+"""
+    AddedTimeSeries
+
+What a write reports: the [`TimeSeriesKey`](@ref) naming the series, and the
+catalog `id` its row was filed under.
+
+Returned by [`add_time_series!`](@ref), [`add_time_series_bulk!`](@ref) and
+[`add_derived_view!`](@ref). The id is deliberately not part of a
+`TimeSeriesKey` — a key is also an *argument*, to `get_time_series` and
+`remove_time_series!`, where an id would mean nothing — so a write hands back
+the pair instead. Reach the key with `.key`:
+
+```julia
+added = add_time_series!(store, 1, "Generator", Component, ts)
+series = get_time_series(store, added.key)
+@assert get_metadata(store, added.key).id == added.id
+```
+
+The id is valid only once any enclosing transaction commits: a rollback returns
+it to the catalog's counter rather than stranding it.
+"""
+struct AddedTimeSeries
+    key::TimeSeriesKey
+    id::Int64
+end
+
 function _finalize_key(k::TimeSeriesKey)
     if k.handle != C_NULL
         @ccall lib_path().infrastore_key_free(k::Ptr{Cvoid})::Cvoid
@@ -41,6 +67,27 @@ end
 # without rooting `x`, so a GC after the object's last syntactic use could run
 # its finalizer (freeing the handle) while the call is still using it.
 Base.unsafe_convert(::Type{Ptr{Cvoid}}, k::TimeSeriesKey) = k.handle
+
+"""
+    TimeSeriesRef
+
+Anything that names one stored series: a [`TimeSeriesKey`](@ref), or the
+[`AddedTimeSeries`](@ref) a write handed back.
+
+Every function here that takes a key takes either, so the result of an
+`add_time_series!` can be read back, renamed, or removed without unwrapping it
+first. Reach for `.key` where a bare `TimeSeriesKey` is genuinely needed — a
+`Vector{TimeSeriesKey}`, say.
+"""
+const TimeSeriesRef = Union{TimeSeriesKey, AddedTimeSeries}
+
+_key(k::TimeSeriesKey) = k
+_key(a::AddedTimeSeries) = a.key
+
+# So an `AddedTimeSeries` reaches the FFI as the handle it wraps, exactly as a
+# bare key does. The struct is rooted as the `@ccall` argument, which roots the
+# key it holds.
+Base.unsafe_convert(::Type{Ptr{Cvoid}}, a::AddedTimeSeries) = a.key.handle
 Base.unsafe_convert(::Type{Ptr{Cvoid}}, s::Store) = s.handle
 
 """
