@@ -714,3 +714,142 @@ fn the_attribute_association_wire_form_carries_no_id() {
         "the rows must round trip; ids are assigned fresh and are outside equality",
     );
 }
+
+// ---------------------------------------------------------------------------
+// Reading by id — the direction that makes a stored reference useful
+// ---------------------------------------------------------------------------
+
+/// An id resolves to its row, and an id nothing was filed under resolves to
+/// `None` rather than an error: a consumer validating references it persisted
+/// earlier is asking a question, and a stale reference is an answer.
+#[test]
+fn an_id_resolves_to_its_row_or_to_nothing() {
+    let mut store = create_store(None, true).unwrap();
+    let added = store
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series("load")),
+        ))
+        .unwrap();
+
+    let meta = store.get_metadata_by_id(added.id).unwrap().unwrap();
+    assert_eq!(meta.name, "load");
+    assert_eq!(meta.id, Some(added.id));
+    assert!(store.association_exists(added.id).unwrap());
+
+    assert!(store.get_metadata_by_id(9_999).unwrap().is_none());
+    assert!(!store.association_exists(9_999).unwrap());
+}
+
+/// A removed row's id stops resolving, and — because ids are never reissued —
+/// never starts resolving to something else.
+///
+/// This is the guarantee a consumer's stored reference rests on: it can go
+/// stale, but it cannot quietly come back meaning a different series.
+#[test]
+fn a_removed_rows_id_stops_resolving_and_is_not_reused() {
+    let mut store = create_store(None, true).unwrap();
+    let added = store
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series("load")),
+        ))
+        .unwrap();
+    store.remove_time_series(&key("load")).unwrap();
+    assert!(!store.association_exists(added.id).unwrap());
+
+    let replacement = store
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series("load")),
+        ))
+        .unwrap();
+    assert_ne!(replacement.id, added.id);
+    assert!(
+        !store.association_exists(added.id).unwrap(),
+        "the old reference must stay dangling, not resolve to the replacement",
+    );
+}
+
+/// A bulk read by id returns the series in the order the ids were given,
+/// repeats included, and refuses a set containing an id that names no row.
+#[test]
+fn a_bulk_read_by_id_follows_the_order_it_was_given() {
+    let mut store = create_store(None, true).unwrap();
+    let mut ids = Vec::new();
+    for (name, base) in [("a", 1.0), ("b", 10.0), ("c", 100.0)] {
+        let data = TypedArray::from_f64(vec![3], &[base, base + 1.0, base + 2.0]);
+        let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let s = SingleTimeSeries::new(initial, Duration::hours(1), data, name);
+        ids.push(
+            store
+                .add(AddRequest::new(
+                    1,
+                    "Generator",
+                    OwnerCategory::Component,
+                    TimeSeriesData::SingleTimeSeries(s),
+                ))
+                .unwrap()
+                .id,
+        );
+    }
+
+    // Reversed, with a repeat: neither the catalog's order nor uniqueness is
+    // assumed.
+    let asked = vec![ids[2], ids[0], ids[2], ids[1]];
+    let got = store.bulk_read_by_ids(&asked).unwrap();
+    let firsts: Vec<f64> = got
+        .iter()
+        .map(|d| d.as_single().unwrap().data.to_f64_vec().unwrap()[0])
+        .collect();
+    assert_eq!(firsts, vec![100.0, 1.0, 100.0, 10.0]);
+
+    let err = store.bulk_read_by_ids(&[ids[0], 9_999]).unwrap_err();
+    assert!(
+        matches!(err, TimeSeriesError::NotFound),
+        "an id naming no row must fail the read, got {err:?}",
+    );
+
+    assert!(store.bulk_read_by_ids(&[]).unwrap().is_empty());
+}
+
+/// The ids survive the trip to disk and back — the path IS3.jl's system
+/// serialization actually takes, where the catalog is copied rather than
+/// rewritten.
+#[test]
+fn ids_survive_a_persist_and_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.h5");
+    let expected: Vec<(String, i64)> = {
+        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut out = Vec::new();
+        for name in ["first", "second", "third"] {
+            let added = store
+                .add(AddRequest::new(
+                    1,
+                    "Generator",
+                    OwnerCategory::Component,
+                    TimeSeriesData::SingleTimeSeries(series(name)),
+                ))
+                .unwrap();
+            out.push((name.to_string(), added.id));
+        }
+        store.flush().unwrap();
+        out
+    };
+
+    let store = open_store(path.as_path(), true).unwrap();
+    for (name, id) in &expected {
+        let meta = store
+            .get_metadata_by_id(*id)
+            .unwrap()
+            .unwrap_or_else(|| panic!("id {id} did not survive the reopen"));
+        assert_eq!(&meta.name, name);
+    }
+}

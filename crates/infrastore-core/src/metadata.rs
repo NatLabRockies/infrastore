@@ -546,6 +546,19 @@ pub struct MetadataFilter {
     /// avoiding a feature fetch+compare for siblings that share the other key
     /// columns. Distinct from `features` (an in-memory subset filter).
     pub features_hash: Option<[u8; 32]>,
+    /// Restrict to these catalog ids — a primary-key lookup, not a scan.
+    ///
+    /// Internal to this layer, deliberately: the public [`crate::ListFilter`]
+    /// has no counterpart, because a filter field invites scan-shaped use of
+    /// what is a point lookup. It is here so the by-id reads share
+    /// [`Self::list_inner`]'s feature and timestamp hydration instead of
+    /// growing a second copy of it, and so a bulk by-id read is one query
+    /// rather than one per id.
+    ///
+    /// `Some(vec![])` matches nothing, which is what a caller asking for no ids
+    /// means; it is spelled as a false predicate rather than an empty `IN ()`,
+    /// which is not valid SQLite.
+    pub ids: Option<Vec<i64>>,
 }
 
 /// Remembers which content-addressed sets a batch of inserts has already
@@ -719,6 +732,21 @@ impl MetadataFilter {
     fn to_sql(&self) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
         let mut sql = String::from("WHERE 1=1");
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(ref ids) = self.ids {
+            if ids.is_empty() {
+                sql.push_str(" AND 0");
+            } else {
+                sql.push_str(" AND id IN (");
+                for (i, id) in ids.iter().enumerate() {
+                    if i > 0 {
+                        sql.push(',');
+                    }
+                    sql.push('?');
+                    params_vec.push(Box::new(*id));
+                }
+                sql.push(')');
+            }
+        }
         if let Some(owner_id) = self.owner_id {
             sql.push_str(" AND owner_id = ?");
             params_vec.push(Box::new(owner_id));
@@ -1734,6 +1762,45 @@ impl MetadataStore {
         Ok(found.is_some())
     }
 
+    /// The row filed under `id`, or `None` if the catalog holds no such row.
+    ///
+    /// `None` rather than [`TimeSeriesError::NotFound`] because a caller
+    /// validating references it stored earlier is *asking* whether one still
+    /// resolves; a dangling reference is the answer, not an error.
+    pub fn get_by_id(&self, id: i64) -> Result<Option<TimeSeriesMetadata>> {
+        let mut matches = self.list(&MetadataFilter {
+            ids: Some(vec![id]),
+            ..Default::default()
+        })?;
+        Ok(matches.pop())
+    }
+
+    /// Every row named by `ids`, in catalog order and without duplicates —
+    /// callers that need them in *their* order reorder by [`TimeSeriesMetadata::id`].
+    ///
+    /// One query rather than one per id, which is what makes a bulk read by
+    /// reference cost the same as a bulk read by key.
+    pub fn list_by_ids(&self, ids: &[i64]) -> Result<Vec<TimeSeriesMetadata>> {
+        self.list(&MetadataFilter {
+            ids: Some(ids.to_vec()),
+            ..Default::default()
+        })
+    }
+
+    /// Whether a row is filed under `id`.
+    ///
+    /// A primary-key probe: one statement, no row fetched, no metadata
+    /// hydrated. Cheap enough for a consumer to validate every reference in its
+    /// model on load.
+    pub fn exists_by_id(&self, id: i64) -> Result<bool> {
+        let found: Option<i64> = self
+            .conn
+            .prepare_cached("SELECT 1 FROM time_series_associations WHERE id = ?1 LIMIT 1")?
+            .query_row([id], |row| row.get(0))
+            .optional()?;
+        Ok(found.is_some())
+    }
+
     pub fn get_by_key(&self, key: &KeyIdentity) -> Result<TimeSeriesMetadata> {
         let mut matches = self.list(&MetadataFilter {
             owner_id: Some(key.owner_id),
@@ -1751,6 +1818,7 @@ impl MetadataStore {
             name_glob: None,
             component_field: None,
             zoneless: None,
+            ids: None,
         })?;
         matches.retain(|m| m.features == key.features);
         match matches.len() {

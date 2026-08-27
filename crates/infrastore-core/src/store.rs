@@ -142,6 +142,9 @@ impl From<ListFilter> for MetadataFilter {
             interval: value.interval,
             features: value.features,
             features_hash: None,
+            // `ListFilter` has no id predicate by design; by-id reads are point
+            // lookups with their own entry points.
+            ids: None,
         }
     }
 }
@@ -2247,7 +2250,50 @@ impl Store {
             .iter()
             .map(|k| self.metadata.get_by_key(k))
             .collect::<Result<_>>()?;
+        self.bulk_read_metas(&metas)
+    }
 
+    /// Read every series named by its catalog `id`, in the order the ids are
+    /// given.
+    ///
+    /// The read-direction counterpart of the id a write hands back: a consumer
+    /// that recorded ids in its own model (a generator's cost function naming
+    /// the series that varies it) resolves them here without keeping an
+    /// id-to-key map of its own.
+    ///
+    /// [`TimeSeriesError::NotFound`] if any id names no row — unlike
+    /// [`Self::association_exists`], which asks the question, this one is
+    /// already committed to reading and a missing id means the caller's
+    /// reference is stale. The error does not say *which* id dangled; a caller
+    /// that needs to know sifts them with [`Self::association_exists`], which
+    /// is the cheaper call for exactly that.
+    ///
+    /// One catalog query for the whole set, so this costs what the keyed bulk
+    /// read costs.
+    #[tracing::instrument(skip(self, ids), fields(count = ids.len()))]
+    pub fn bulk_read_by_ids(&self, ids: &[i64]) -> Result<Vec<TimeSeriesData>> {
+        let found = self.metadata.list_by_ids(ids)?;
+        // The catalog returns each row once, in its own order; the caller asked
+        // for a specific order and may have repeated an id.
+        let by_id: HashMap<i64, &TimeSeriesMetadata> = found
+            .iter()
+            .filter_map(|m| m.id.map(|id| (id, m)))
+            .collect();
+        let metas: Vec<TimeSeriesMetadata> = ids
+            .iter()
+            .map(|id| {
+                by_id
+                    .get(id)
+                    .map(|m| (*m).clone())
+                    .ok_or(TimeSeriesError::NotFound)
+            })
+            .collect::<Result<_>>()?;
+        self.bulk_read_metas(&metas)
+    }
+
+    /// The shared body of [`Self::bulk_read`] and [`Self::bulk_read_by_ids`],
+    /// working from rows both have already resolved.
+    fn bulk_read_metas(&self, metas: &[TimeSeriesMetadata]) -> Result<Vec<TimeSeriesData>> {
         // Batch the packed SingleTimeSeries reads; everything else is standalone
         // and reuses the per-key reconstruction.
         let (single_hashes, single_dtypes): (Vec<[u8; 32]>, Vec<Dtype>) = metas
@@ -2260,12 +2306,12 @@ impl Store {
             .read_arrays(&single_hashes, &single_dtypes)?
             .into_iter();
 
-        let mut out = Vec::with_capacity(keys.len());
-        for meta in &metas {
+        let mut out = Vec::with_capacity(metas.len());
+        for meta in metas {
             if meta.time_series_type == TimeSeriesType::SingleTimeSeries {
                 let data = single_arrays.next().ok_or_else(|| {
                     TimeSeriesError::IntegrityError(
-                        "bulk_read: fewer arrays returned than SingleTimeSeries keys".into(),
+                        "bulk_read: fewer arrays returned than SingleTimeSeries rows".into(),
                     )
                 })?;
                 let initial = meta.initial_timestamp.ok_or_else(|| {
@@ -2346,6 +2392,26 @@ impl Store {
     /// Look up the full metadata record for a key. Errors with `NotFound` if no
     /// association matches. Used by external bindings (e.g. the Julia
     /// `RustTimeSeriesStore`) to reconstruct a typed metadata object on read.
+    /// The metadata of the association filed under `id`, or `None` if the
+    /// catalog holds no such row.
+    ///
+    /// `None` rather than an error: a consumer validating references it
+    /// persisted earlier is asking whether one still resolves, and a stale
+    /// reference is an answer.
+    pub fn get_metadata_by_id(&self, id: i64) -> Result<Option<TimeSeriesMetadata>> {
+        self.metadata.get_by_id(id)
+    }
+
+    /// Whether an association is filed under `id`.
+    ///
+    /// A primary-key probe — one statement, no row fetched — so a consumer can
+    /// check every reference in its model on load rather than discovering a
+    /// dangling one mid-run. Use [`Self::get_metadata_by_id`] when the answer
+    /// is wanted along with the row.
+    pub fn association_exists(&self, id: i64) -> Result<bool> {
+        self.metadata.exists_by_id(id)
+    }
+
     pub fn get_metadata(&self, key: &KeyIdentity) -> Result<TimeSeriesMetadata> {
         self.metadata.get_by_key(key)
     }
@@ -2746,6 +2812,7 @@ impl Store {
             name_glob: None,
             component_field: None,
             zoneless: None,
+            ids: None,
         })
     }
 
