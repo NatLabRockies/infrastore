@@ -297,6 +297,10 @@ for (fname, T, sym) in (
                 association.$type1::Cstring,
                 association.$id2::Int64,
                 association.$type2::Cstring,
+                # Explicit id (non-positive assigns) and the id out-param;
+                # neither is surfaced by the binding yet.
+                Int64(0)::Int64,
+                C_NULL::Ptr{Int64},
             )::Int32
         )
         return nothing

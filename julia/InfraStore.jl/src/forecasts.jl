@@ -101,6 +101,8 @@ function transform_single_time_series!(
         out_sources::Ref{UInt64},
         out_interval::Ptr{UInt8},
         out_normalized::Ref{Bool},
+        # The ids of the views just written; not surfaced yet.
+        C_NULL::Ptr{Ptr{Int64}},
     )::Int32
     _check(code)
     return TransformOutcome(

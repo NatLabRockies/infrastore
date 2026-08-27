@@ -312,7 +312,9 @@ int32_t infrastore_store_add_single(struct InfraStore *handle,
                                     const char *unit_system,
                                     const char *time_reference,
                                     const char *component_field,
-                                    struct InfraStoreKey **out_key);
+                                    int64_t association_id,
+                                    struct InfraStoreKey **out_key,
+                                    int64_t *out_id);
 
 /**
  * Add a NonSequentialTimeSeries to the store.
@@ -344,7 +346,9 @@ int32_t infrastore_store_add_non_sequential(struct InfraStore *handle,
                                             const char *unit_system,
                                             const char *time_reference,
                                             const char *component_field,
-                                            struct InfraStoreKey **out_key);
+                                            int64_t association_id,
+                                            struct InfraStoreKey **out_key,
+                                            int64_t *out_id);
 
 /**
  * Fetch a SingleTimeSeries by key in its native dtype and shape.
@@ -958,6 +962,93 @@ int32_t infrastore_store_get_metadata_by_key(const struct InfraStore *handle,
                                              uint64_t *out_len);
 
 /**
+ * Fetch the metadata row filed under `association_id`, as one JSON object.
+ *
+ * The read-direction counterpart of the id every `infrastore_store_add_*`
+ * hands back: a caller that recorded ids in its own model resolves them here
+ * without keeping an id-to-key map beside the store. The row shape is exactly
+ * `infrastore_store_get_metadata_by_key`'s, `id` included.
+ *
+ * Writes `false` to `*out_present` and nothing to `buf` when the catalog holds
+ * no such row, returning `INFRASTORE_OK` rather than
+ * `INFRASTORE_ERR_NOT_FOUND`: a caller validating references it stored earlier
+ * is asking whether one still resolves, and a stale reference is an answer.
+ *
+ * Follows the two-call buffer protocol used throughout: call with `buf` null
+ * (or too small) to learn the required length from `*out_len`, then call again
+ * with a buffer of that size.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle, not retained past the call. `buf`,
+ * when non-null, must be valid for writing `cap` bytes. `out_len` must be
+ * valid for writing one `u64` and `out_present` for writing one `bool`; both
+ * are required.
+ */
+int32_t infrastore_store_get_metadata_by_id(const struct InfraStore *handle,
+                                            int64_t association_id,
+                                            char *buf,
+                                            uint64_t cap,
+                                            uint64_t *out_len,
+                                            bool *out_present);
+
+/**
+ * Whether an association is filed under `association_id`.
+ *
+ * A primary-key probe: one statement, no row fetched, no metadata built. Cheap
+ * enough to validate every reference in a model on load, rather than
+ * discovering a dangling one mid-run. Use
+ * `infrastore_store_get_metadata_by_id` when the row is wanted too.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle, not retained past the call.
+ * `out_present` must be valid for writing one `bool`.
+ */
+int32_t infrastore_store_association_exists(const struct InfraStore *handle,
+                                            int64_t association_id,
+                                            bool *out_present);
+
+/**
+ * Derive one `DeterministicSingleTimeSeries` view of the stored
+ * `SingleTimeSeries` named by `source`.
+ *
+ * The single-series counterpart of
+ * `infrastore_store_transform_single_time_series`, which sweeps the whole
+ * store. A view carries no array of its own — it shares its source's data — so
+ * this writes one catalog row and no array bytes, and a caller recreating a
+ * view never re-supplies the values.
+ *
+ * `horizon` and `interval` are ISO-8601 durations. The policy flags mean what
+ * they mean on the sweep, and `normalize_single_window` must match what the
+ * sweep would use: `interval` is part of a series' identity, so the two paths
+ * disagreeing would produce two different series. `dry_run` has no counterpart
+ * here and is not accepted — this entry point writes or fails.
+ *
+ * `association_id` files the view under a specific id when positive, which is
+ * what an importer replaying a recorded view needs; non-positive assigns one,
+ * as on every other add.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle and `source` a live key handle naming a
+ * `SingleTimeSeries`; neither is retained past the call. `horizon` and
+ * `interval` must be null-terminated UTF-8. `out_key`, when non-null, must be
+ * valid for writing one pointer, and on `INFRASTORE_OK` receives a key handle
+ * the caller must release exactly once with `infrastore_key_free`. `out_id`,
+ * when non-null, must be valid for writing one `i64`.
+ */
+int32_t infrastore_store_add_derived_view(struct InfraStore *handle,
+                                          const struct InfraStoreKey *source,
+                                          const char *horizon,
+                                          const char *interval,
+                                          bool normalize_single_window,
+                                          bool require_uniform_forecast_grid,
+                                          int64_t association_id,
+                                          struct InfraStoreKey **out_key,
+                                          int64_t *out_id);
+
+/**
  * True iff a SingleTimeSeries with the given attributes exists.
  *
  * # Safety
@@ -1119,7 +1210,9 @@ int32_t infrastore_store_add_forecast(struct InfraStore *handle,
                                       const char *unit_system,
                                       const char *time_reference,
                                       const char *component_field,
-                                      struct InfraStoreKey **out_key);
+                                      int64_t association_id,
+                                      struct InfraStoreKey **out_key,
+                                      int64_t *out_id);
 
 /**
  * Add a `Probabilistic` forecast. `data` is the flattened 3-D storage array
@@ -1157,7 +1250,9 @@ int32_t infrastore_store_add_probabilistic(struct InfraStore *handle,
                                            const char *unit_system,
                                            const char *time_reference,
                                            const char *component_field,
-                                           struct InfraStoreKey **out_key);
+                                           int64_t association_id,
+                                           struct InfraStoreKey **out_key,
+                                           int64_t *out_id);
 
 /**
  * Create an empty add-batch. Building a batch performs no store I/O.
@@ -1210,7 +1305,8 @@ int32_t infrastore_batch_add_single(struct InfraStoreBatch *batch,
                                     const char *quantity_kind,
                                     const char *unit_system,
                                     const char *time_reference,
-                                    const char *component_field);
+                                    const char *component_field,
+                                    int64_t association_id);
 
 /**
  * Append a NonSequentialTimeSeries to a batch. Arguments match
@@ -1242,7 +1338,8 @@ int32_t infrastore_batch_add_non_sequential(struct InfraStoreBatch *batch,
                                             const char *quantity_kind,
                                             const char *unit_system,
                                             const char *time_reference,
-                                            const char *component_field);
+                                            const char *component_field,
+                                            int64_t association_id);
 
 /**
  * Append a dense forecast (`ts_type` 2=Deterministic or 5=Scenarios) to a
@@ -1278,7 +1375,8 @@ int32_t infrastore_batch_add_forecast(struct InfraStoreBatch *batch,
                                       const char *quantity_kind,
                                       const char *unit_system,
                                       const char *time_reference,
-                                      const char *component_field);
+                                      const char *component_field,
+                                      int64_t association_id);
 
 /**
  * Append a `Probabilistic` forecast to a batch. Arguments match
@@ -1315,7 +1413,8 @@ int32_t infrastore_batch_add_probabilistic(struct InfraStoreBatch *batch,
                                            const char *quantity_kind,
                                            const char *unit_system,
                                            const char *time_reference,
-                                           const char *component_field);
+                                           const char *component_field,
+                                           int64_t association_id);
 
 /**
  * Submit every request in `batch` through one all-or-nothing bulk add. On
@@ -1336,7 +1435,8 @@ int32_t infrastore_batch_add_probabilistic(struct InfraStoreBatch *batch,
 int32_t infrastore_store_add_batch(struct InfraStore *handle,
                                    struct InfraStoreBatch *batch,
                                    struct InfraStoreKey ***out_keys,
-                                   uint64_t *out_len);
+                                   uint64_t *out_len,
+                                   int64_t **out_ids);
 
 /**
  * Read many full `SingleTimeSeries` at once. `keys` points to `n` live key
@@ -1591,7 +1691,8 @@ int32_t infrastore_store_transform_single_time_series(struct InfraStore *handle,
                                                       uint64_t *out_count,
                                                       uint64_t *out_sources,
                                                       char *out_interval,
-                                                      bool *out_interval_normalized);
+                                                      bool *out_interval_normalized,
+                                                      int64_t **out_ids);
 
 /**
  * Fetch a forecast by attributes and return the full data array plus metadata.
@@ -2264,7 +2365,9 @@ int32_t infrastore_store_add_supplemental_attribute_association(struct InfraStor
                                                                 int64_t component_id,
                                                                 const char *component_type,
                                                                 int64_t attribute_id,
-                                                                const char *attribute_type);
+                                                                const char *attribute_type,
+                                                                int64_t association_id,
+                                                                int64_t *out_id);
 
 /**
  * Attach many in one all-or-nothing transaction, from a JSON array of objects
@@ -2446,7 +2549,9 @@ int32_t infrastore_store_add_parent_child_association(struct InfraStore *handle,
                                                       int64_t parent_id,
                                                       const char *parent_type,
                                                       int64_t child_id,
-                                                      const char *child_type);
+                                                      const char *child_type,
+                                                      int64_t association_id,
+                                                      int64_t *out_id);
 
 /**
  * Record many edges in one all-or-nothing transaction, from a JSON array of

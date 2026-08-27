@@ -79,6 +79,9 @@ function add_time_series!(
             _time_reference_str(_audit_zone(_time_reference(time_reference)))
         )::Cstring,
         _opt_string_arg(component_field)::Cstring,
+        # Explicit association id; non-positive asks the catalog to assign one.
+        # Surfacing a caller-supplied id is the binding's own change.
+        Int64(0)::Int64,
     )::Int32
     _check(code)
     batch.count += 1
@@ -126,6 +129,9 @@ function add_time_series!(
             _time_reference_str(_audit_zone(_time_reference(time_reference)))
         )::Cstring,
         _opt_string_arg(component_field)::Cstring,
+        # Explicit association id; non-positive asks the catalog to assign one.
+        # Surfacing a caller-supplied id is the binding's own change.
+        Int64(0)::Int64,
     )::Int32
     _check(code)
     batch.count += 1
@@ -261,6 +267,9 @@ function _batch_add_dense_forecast!(
             _time_reference_str(_audit_zone(_time_reference(time_reference)))
         )::Cstring,
         _opt_string_arg(component_field)::Cstring,
+        # Explicit association id; non-positive asks the catalog to assign one.
+        # Surfacing a caller-supplied id is the binding's own change.
+        Int64(0)::Int64,
     )::Int32
     _check(code)
     batch.count += 1
@@ -312,6 +321,9 @@ function add_time_series!(
             _time_reference_str(_audit_zone(_time_reference(time_reference)))
         )::Cstring,
         _opt_string_arg(component_field)::Cstring,
+        # Explicit association id; non-positive asks the catalog to assign one.
+        # Surfacing a caller-supplied id is the binding's own change.
+        Int64(0)::Int64,
     )::Int32
     _check(code)
     batch.count += 1
@@ -333,6 +345,8 @@ function add_time_series_bulk!(store::Store, batch::AddBatch)
         batch::Ptr{Cvoid},
         out_keys::Ref{Ptr{Ptr{Cvoid}}},
         out_len::Ref{UInt64},
+        # The ids of the rows just written; not surfaced yet.
+        C_NULL::Ptr{Ptr{Int64}},
     )::Int32
     batch.count = 0
     _check(code)

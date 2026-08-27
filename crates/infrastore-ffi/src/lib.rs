@@ -904,6 +904,7 @@ unsafe fn build_single_request(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
+    association_id: i64,
 ) -> Result<core_lib::AddRequest, i32> {
     if data_ptr.is_null() {
         set_error("data_ptr is null");
@@ -970,9 +971,10 @@ unsafe fn build_single_request(
         owner_category,
         data,
         features,
-        // The per-type C entry points assign; an explicit id arrives through
-        // the import surface, not here.
-        id: None,
+        // C has no `Option<i64>`, so a non-positive `association_id` is the
+        // "assign one" spelling. The catalog's ids start at 1 and only ever
+        // increase, so no real id is excluded by the sentinel.
+        id: (association_id > 0).then_some(association_id),
     })
 }
 
@@ -1018,7 +1020,9 @@ pub unsafe extern "C" fn infrastore_store_add_single(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
+    association_id: i64,
     out_key: *mut *mut InfraStoreKeyHandle,
+    out_id: *mut i64,
 ) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_mut() } {
@@ -1052,17 +1056,22 @@ pub unsafe extern "C" fn infrastore_store_add_single(
             unit_system,
             time_reference,
             component_field,
+            association_id,
         )
     } {
         Ok(r) => r,
         Err(c) => return c,
     };
     match store.inner.add_time_series_bulk(vec![req]) {
-        Ok(mut keys) => {
+        Ok(mut added) => {
+            let added = added.remove(0);
             let handle = Box::new(InfraStoreKeyHandle {
-                inner: keys.remove(0).key.identity().clone(),
+                inner: added.key.identity().clone(),
             });
             unsafe { *out_key = Box::into_raw(handle) };
+            if !out_id.is_null() {
+                unsafe { *out_id = added.id };
+            }
             INFRASTORE_OK
         }
         Err(e) => map_core_error(e),
@@ -1093,6 +1102,7 @@ unsafe fn build_non_sequential_request(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
+    association_id: i64,
 ) -> Result<core_lib::AddRequest, i32> {
     if timestamps_unix_ms.is_null() || data_ptr.is_null() {
         set_error("an input pointer is null");
@@ -1155,9 +1165,10 @@ unsafe fn build_non_sequential_request(
         owner_category,
         data,
         features,
-        // The per-type C entry points assign; an explicit id arrives through
-        // the import surface, not here.
-        id: None,
+        // C has no `Option<i64>`, so a non-positive `association_id` is the
+        // "assign one" spelling. The catalog's ids start at 1 and only ever
+        // increase, so no real id is excluded by the sentinel.
+        id: (association_id > 0).then_some(association_id),
     })
 }
 
@@ -1192,7 +1203,9 @@ pub unsafe extern "C" fn infrastore_store_add_non_sequential(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
+    association_id: i64,
     out_key: *mut *mut InfraStoreKeyHandle,
+    out_id: *mut i64,
 ) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_mut() } {
@@ -1226,18 +1239,23 @@ pub unsafe extern "C" fn infrastore_store_add_non_sequential(
             unit_system,
             time_reference,
             component_field,
+            association_id,
         )
     } {
         Ok(r) => r,
         Err(c) => return c,
     };
     match store.inner.add_time_series_bulk(vec![request]) {
-        Ok(mut keys) => {
+        Ok(mut added) => {
+            let added = added.remove(0);
             unsafe {
                 *out_key = Box::into_raw(Box::new(InfraStoreKeyHandle {
-                    inner: keys.remove(0).key.identity().clone(),
+                    inner: added.key.identity().clone(),
                 }))
             };
+            if !out_id.is_null() {
+                unsafe { *out_id = added.id };
+            }
             INFRASTORE_OK
         }
         Err(error) => map_core_error(error),
@@ -2789,6 +2807,180 @@ pub unsafe extern "C" fn infrastore_store_get_metadata_by_key(
     INFRASTORE_OK
 }
 
+/// Fetch the metadata row filed under `association_id`, as one JSON object.
+///
+/// The read-direction counterpart of the id every `infrastore_store_add_*`
+/// hands back: a caller that recorded ids in its own model resolves them here
+/// without keeping an id-to-key map beside the store. The row shape is exactly
+/// `infrastore_store_get_metadata_by_key`'s, `id` included.
+///
+/// Writes `false` to `*out_present` and nothing to `buf` when the catalog holds
+/// no such row, returning `INFRASTORE_OK` rather than
+/// `INFRASTORE_ERR_NOT_FOUND`: a caller validating references it stored earlier
+/// is asking whether one still resolves, and a stale reference is an answer.
+///
+/// Follows the two-call buffer protocol used throughout: call with `buf` null
+/// (or too small) to learn the required length from `*out_len`, then call again
+/// with a buffer of that size.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle, not retained past the call. `buf`,
+/// when non-null, must be valid for writing `cap` bytes. `out_len` must be
+/// valid for writing one `u64` and `out_present` for writing one `bool`; both
+/// are required.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_store_get_metadata_by_id(
+    handle: *const InfraStoreHandle,
+    association_id: i64,
+    buf: *mut c_char,
+    cap: u64,
+    out_len: *mut u64,
+    out_present: *mut bool,
+) -> i32 {
+    clear_error();
+    let store = deref_handle!(ref handle);
+    if out_len.is_null() || out_present.is_null() {
+        set_error("out_len or out_present is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    match store.inner.get_metadata_by_id(association_id) {
+        Ok(Some(meta)) => {
+            let json = Value::Object(metadata_to_map(&meta)).to_string();
+            unsafe {
+                *out_present = true;
+                write_str_out(&json, buf, cap, out_len);
+            }
+            INFRASTORE_OK
+        }
+        Ok(None) => {
+            unsafe {
+                *out_present = false;
+                *out_len = 0;
+            }
+            INFRASTORE_OK
+        }
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// Whether an association is filed under `association_id`.
+///
+/// A primary-key probe: one statement, no row fetched, no metadata built. Cheap
+/// enough to validate every reference in a model on load, rather than
+/// discovering a dangling one mid-run. Use
+/// `infrastore_store_get_metadata_by_id` when the row is wanted too.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle, not retained past the call.
+/// `out_present` must be valid for writing one `bool`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_store_association_exists(
+    handle: *const InfraStoreHandle,
+    association_id: i64,
+    out_present: *mut bool,
+) -> i32 {
+    clear_error();
+    let store = deref_handle!(ref handle);
+    if out_present.is_null() {
+        set_error("out_present is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    match store.inner.association_exists(association_id) {
+        Ok(found) => {
+            unsafe { *out_present = found };
+            INFRASTORE_OK
+        }
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// Derive one `DeterministicSingleTimeSeries` view of the stored
+/// `SingleTimeSeries` named by `source`.
+///
+/// The single-series counterpart of
+/// `infrastore_store_transform_single_time_series`, which sweeps the whole
+/// store. A view carries no array of its own — it shares its source's data — so
+/// this writes one catalog row and no array bytes, and a caller recreating a
+/// view never re-supplies the values.
+///
+/// `horizon` and `interval` are ISO-8601 durations. The policy flags mean what
+/// they mean on the sweep, and `normalize_single_window` must match what the
+/// sweep would use: `interval` is part of a series' identity, so the two paths
+/// disagreeing would produce two different series. `dry_run` has no counterpart
+/// here and is not accepted — this entry point writes or fails.
+///
+/// `association_id` files the view under a specific id when positive, which is
+/// what an importer replaying a recorded view needs; non-positive assigns one,
+/// as on every other add.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle and `source` a live key handle naming a
+/// `SingleTimeSeries`; neither is retained past the call. `horizon` and
+/// `interval` must be null-terminated UTF-8. `out_key`, when non-null, must be
+/// valid for writing one pointer, and on `INFRASTORE_OK` receives a key handle
+/// the caller must release exactly once with `infrastore_key_free`. `out_id`,
+/// when non-null, must be valid for writing one `i64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_store_add_derived_view(
+    handle: *mut InfraStoreHandle,
+    source: *const InfraStoreKeyHandle,
+    horizon: *const c_char,
+    interval: *const c_char,
+    normalize_single_window: bool,
+    require_uniform_forecast_grid: bool,
+    association_id: i64,
+    out_key: *mut *mut InfraStoreKeyHandle,
+    out_id: *mut i64,
+) -> i32 {
+    clear_error();
+    let store = deref_handle!(mut handle);
+    let source = match unsafe { source.as_ref() } {
+        Some(k) => k,
+        None => {
+            set_error("source key handle is null");
+            return INFRASTORE_ERR_NULL_POINTER;
+        }
+    };
+    let horizon = match unsafe { cstr_to_period(horizon) } {
+        Ok(p) => p,
+        Err(c) => return c,
+    };
+    let interval = match unsafe { cstr_to_period(interval) } {
+        Ok(p) => p,
+        Err(c) => return c,
+    };
+    let policy = core_lib::TransformPolicy {
+        normalize_single_window,
+        require_uniform_forecast_grid,
+        dry_run: false,
+    };
+    match store.inner.add_derived_view(
+        &source.inner,
+        horizon,
+        interval,
+        policy,
+        (association_id > 0).then_some(association_id),
+    ) {
+        Ok(added) => {
+            if !out_key.is_null() {
+                unsafe {
+                    *out_key = Box::into_raw(Box::new(InfraStoreKeyHandle {
+                        inner: added.key.identity().clone(),
+                    }))
+                };
+            }
+            if !out_id.is_null() {
+                unsafe { *out_id = added.id };
+            }
+            INFRASTORE_OK
+        }
+        Err(e) => map_core_error(e),
+    }
+}
+
 /// True iff a SingleTimeSeries with the given attributes exists.
 ///
 /// # Safety
@@ -3212,7 +3404,9 @@ pub unsafe extern "C" fn infrastore_store_add_forecast(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
+    association_id: i64,
     out_key: *mut *mut InfraStoreKeyHandle,
+    out_id: *mut i64,
 ) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
@@ -3244,17 +3438,22 @@ pub unsafe extern "C" fn infrastore_store_add_forecast(
             unit_system,
             time_reference,
             component_field,
+            association_id,
         )
     } {
         Ok(r) => r,
         Err(c) => return c,
     };
     match store.inner.add_time_series_bulk(vec![req]) {
-        Ok(mut keys) => {
+        Ok(mut added) => {
+            let added = added.remove(0);
             let handle = Box::new(InfraStoreKeyHandle {
-                inner: keys.remove(0).key.identity().clone(),
+                inner: added.key.identity().clone(),
             });
             unsafe { *out_key = Box::into_raw(handle) };
+            if !out_id.is_null() {
+                unsafe { *out_id = added.id };
+            }
             INFRASTORE_OK
         }
         Err(e) => map_core_error(e),
@@ -3287,6 +3486,7 @@ unsafe fn build_forecast_request(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
+    association_id: i64,
 ) -> Result<core_lib::AddRequest, i32> {
     if data_ptr.is_null() {
         set_error("data_ptr is null");
@@ -3393,9 +3593,10 @@ unsafe fn build_forecast_request(
         owner_category,
         data,
         features,
-        // The per-type C entry points assign; an explicit id arrives through
-        // the import surface, not here.
-        id: None,
+        // C has no `Option<i64>`, so a non-positive `association_id` is the
+        // "assign one" spelling. The catalog's ids start at 1 and only ever
+        // increase, so no real id is excluded by the sentinel.
+        id: (association_id > 0).then_some(association_id),
     })
 }
 
@@ -3436,7 +3637,9 @@ pub unsafe extern "C" fn infrastore_store_add_probabilistic(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
+    association_id: i64,
     out_key: *mut *mut InfraStoreKeyHandle,
+    out_id: *mut i64,
 ) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
@@ -3469,17 +3672,22 @@ pub unsafe extern "C" fn infrastore_store_add_probabilistic(
             unit_system,
             time_reference,
             component_field,
+            association_id,
         )
     } {
         Ok(r) => r,
         Err(c) => return c,
     };
     match store.inner.add_time_series_bulk(vec![req]) {
-        Ok(mut keys) => {
+        Ok(mut added) => {
+            let added = added.remove(0);
             let handle = Box::new(InfraStoreKeyHandle {
-                inner: keys.remove(0).key.identity().clone(),
+                inner: added.key.identity().clone(),
             });
             unsafe { *out_key = Box::into_raw(handle) };
+            if !out_id.is_null() {
+                unsafe { *out_id = added.id };
+            }
             INFRASTORE_OK
         }
         Err(e) => map_core_error(e),
@@ -3513,6 +3721,7 @@ unsafe fn build_probabilistic_request(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
+    association_id: i64,
 ) -> Result<core_lib::AddRequest, i32> {
     if data_ptr.is_null() || percentiles_ptr.is_null() {
         set_error("a required pointer is null");
@@ -3582,9 +3791,10 @@ unsafe fn build_probabilistic_request(
         owner_category,
         data,
         features,
-        // The per-type C entry points assign; an explicit id arrives through
-        // the import surface, not here.
-        id: None,
+        // C has no `Option<i64>`, so a non-positive `association_id` is the
+        // "assign one" spelling. The catalog's ids start at 1 and only ever
+        // increase, so no real id is excluded by the sentinel.
+        id: (association_id > 0).then_some(association_id),
     })
 }
 
@@ -3652,6 +3862,7 @@ pub unsafe extern "C" fn infrastore_batch_add_single(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
+    association_id: i64,
 ) -> i32 {
     clear_error();
     let batch = match unsafe { batch.as_mut() } {
@@ -3681,6 +3892,7 @@ pub unsafe extern "C" fn infrastore_batch_add_single(
             unit_system,
             time_reference,
             component_field,
+            association_id,
         )
     } {
         Ok(req) => {
@@ -3723,6 +3935,7 @@ pub unsafe extern "C" fn infrastore_batch_add_non_sequential(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
+    association_id: i64,
 ) -> i32 {
     clear_error();
     let batch = match unsafe { batch.as_mut() } {
@@ -3752,6 +3965,7 @@ pub unsafe extern "C" fn infrastore_batch_add_non_sequential(
             unit_system,
             time_reference,
             component_field,
+            association_id,
         )
     } {
         Ok(req) => {
@@ -3798,6 +4012,7 @@ pub unsafe extern "C" fn infrastore_batch_add_forecast(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
+    association_id: i64,
 ) -> i32 {
     clear_error();
     let batch = match unsafe { batch.as_mut() } {
@@ -3831,6 +4046,7 @@ pub unsafe extern "C" fn infrastore_batch_add_forecast(
             unit_system,
             time_reference,
             component_field,
+            association_id,
         )
     } {
         Ok(req) => {
@@ -3878,6 +4094,7 @@ pub unsafe extern "C" fn infrastore_batch_add_probabilistic(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
+    association_id: i64,
 ) -> i32 {
     clear_error();
     let batch = match unsafe { batch.as_mut() } {
@@ -3912,6 +4129,7 @@ pub unsafe extern "C" fn infrastore_batch_add_probabilistic(
             unit_system,
             time_reference,
             component_field,
+            association_id,
         )
     } {
         Ok(req) => {
@@ -3942,6 +4160,7 @@ pub unsafe extern "C" fn infrastore_store_add_batch(
     batch: *mut InfraStoreBatchHandle,
     out_keys: *mut *mut *mut InfraStoreKeyHandle,
     out_len: *mut u64,
+    out_ids: *mut *mut i64,
 ) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_mut() } {
@@ -3964,12 +4183,13 @@ pub unsafe extern "C" fn infrastore_store_add_batch(
     }
     let items = std::mem::take(&mut batch.items);
     match store.inner.add_time_series_bulk(items) {
-        Ok(keys) => {
-            let handles: Vec<*mut InfraStoreKeyHandle> = keys
+        Ok(added) => {
+            let ids: Vec<i64> = added.iter().map(|a| a.id).collect();
+            let handles: Vec<*mut InfraStoreKeyHandle> = added
                 .into_iter()
-                .map(|k| {
+                .map(|a| {
                     Box::into_raw(Box::new(InfraStoreKeyHandle {
-                        inner: k.key.identity().clone(),
+                        inner: a.key.identity().clone(),
                     }))
                 })
                 .collect();
@@ -3986,6 +4206,17 @@ pub unsafe extern "C" fn infrastore_store_add_batch(
             unsafe {
                 *out_keys = ptr;
                 *out_len = len;
+            }
+            if !out_ids.is_null() {
+                // Same length and ordering as `out_keys`, and released the same
+                // way. An empty batch hands back null, so there is nothing to
+                // free.
+                let id_ptr = if ids.is_empty() {
+                    ptr::null_mut()
+                } else {
+                    vec_into_raw(ids).0
+                };
+                unsafe { *out_ids = id_ptr };
             }
             INFRASTORE_OK
         }
@@ -4748,6 +4979,7 @@ pub unsafe extern "C" fn infrastore_store_transform_single_time_series(
     out_sources: *mut u64,
     out_interval: *mut c_char,
     out_interval_normalized: *mut bool,
+    out_ids: *mut *mut i64,
 ) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
@@ -4804,6 +5036,17 @@ pub unsafe extern "C" fn infrastore_store_transform_single_time_series(
                         INTERVAL_BUF_LEN,
                         &raw mut written,
                     );
+                }
+                if !out_ids.is_null() {
+                    // `*out_count` elements, in the order they were written.
+                    // Null for a dry run and for an idempotent re-run, which
+                    // both write nothing — `*out_count` says so first.
+                    let ids: Vec<i64> = outcome.written.iter().map(|a| a.id).collect();
+                    *out_ids = if ids.is_empty() {
+                        ptr::null_mut()
+                    } else {
+                        vec_into_raw(ids).0
+                    };
                 }
             }
             INFRASTORE_OK
@@ -5640,6 +5883,9 @@ fn metadata_to_map(m: &core_lib::TimeSeriesMetadata) -> serde_json::Map<String, 
     );
     o.insert("name".into(), Value::from(m.name.clone()));
     o.insert("data_hash".into(), Value::from(hash_to_hex(&m.data_hash)));
+    // Always present on a row read out of the catalog; `null` only if a caller
+    // built the metadata itself without one.
+    o.insert("id".into(), m.id.map(Value::from).unwrap_or(Value::Null));
     o.insert(
         "initial_timestamp_ms".into(),
         m.initial_timestamp
@@ -6818,6 +7064,8 @@ pub unsafe extern "C" fn infrastore_store_add_supplemental_attribute_association
     component_type: *const c_char,
     attribute_id: i64,
     attribute_type: *const c_char,
+    association_id: i64,
+    out_id: *mut i64,
 ) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
@@ -6835,11 +7083,16 @@ pub unsafe extern "C" fn infrastore_store_add_supplemental_attribute_association
             component_type,
             attribute_id,
             attribute_type,
-            // The C entry point does not surface the id yet.
-            id: None,
+            // Non-positive means "assign one", as on the time-series adds.
+            id: (association_id > 0).then_some(association_id),
         },
     ) {
-        Ok(_) => INFRASTORE_OK,
+        Ok(id) => {
+            if !out_id.is_null() {
+                unsafe { *out_id = id };
+            }
+            INFRASTORE_OK
+        }
         Err(e) => map_core_error(e),
     }
 }
@@ -7231,6 +7484,8 @@ pub unsafe extern "C" fn infrastore_store_add_parent_child_association(
     parent_type: *const c_char,
     child_id: i64,
     child_type: *const c_char,
+    association_id: i64,
+    out_id: *mut i64,
 ) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
@@ -7249,10 +7504,15 @@ pub unsafe extern "C" fn infrastore_store_add_parent_child_association(
             parent_type,
             child_id,
             child_type,
-            // The C entry point does not surface the id yet.
-            id: None,
+            // Non-positive means "assign one", as on the time-series adds.
+            id: (association_id > 0).then_some(association_id),
         }) {
-        Ok(_) => INFRASTORE_OK,
+        Ok(id) => {
+            if !out_id.is_null() {
+                unsafe { *out_id = id };
+            }
+            INFRASTORE_OK
+        }
         Err(e) => map_core_error(e),
     }
 }
@@ -9325,7 +9585,9 @@ mod abi_tests {
                 ptr::null(),
                 ptr::null(),
                 ptr::null(),
+                0,
                 &mut key,
+                ptr::null_mut(),
             )
         };
         (rc, key)
@@ -9381,7 +9643,9 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     ptr::null(),
+                    0,
                     &mut key,
+                    ptr::null_mut(),
                 )
             },
             INFRASTORE_OK
@@ -10357,7 +10621,9 @@ mod abi_tests {
                 ptr::null(),
                 ptr::null(),
                 ptr::null(),
+                0,
                 &mut key,
+                ptr::null_mut(),
             )
         };
         assert_eq!(rc, INFRASTORE_ERR_INVALID_UTF8);
@@ -10419,7 +10685,9 @@ mod abi_tests {
                 ptr::null(),
                 ptr::null(),
                 ptr::null(),
+                0,
                 &mut key,
+                ptr::null_mut(),
             )
         };
         assert_eq!(rc, INFRASTORE_ERR_INVALID_PARAMETER);
@@ -10746,7 +11014,9 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     ptr::null(),
+                    0,
                     &mut key,
+                    ptr::null_mut(),
                 )
             },
             INFRASTORE_OK
