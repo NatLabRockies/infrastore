@@ -21,7 +21,7 @@ carries netcdf-c's `_NCProperties` attribute, and `Store::open` accepts only fil
 The HDF5 root carries four global attributes:
 
 ```text
-data_format_version = "0.16.0"
+data_format_version = "0.18.0"
 compression         = "deflate:3:shuffle"
 storage_backend     = "hdf5"
 catalog_generation  = "9f2c1ab4e70d5836c41b9e2af0d7c358"
@@ -57,16 +57,24 @@ Opening a store whose recorded version differs from the version this build reads
 the check is exact equality and there is no in-place upgrade path: regenerate the store with the
 matching build.
 
-(`0.17.0` added the metadata column `time_reference`, which records how a series' timestamps were
-_spelled_ — an instant in UTC, an instant at a fixed offset, an instant in a named IANA zone, or a
-wall clock naming no instant. It also changes how stored timestamps are _interpreted_: a row marked
-`zoneless` holds wall clocks the store keeps as if UTC, which an older reader would hand back as
-instants. See [Time references](../explanation/data-model.md#time-references); `0.16.0` added the
-metadata column `component_field`; `0.15.0` renamed the metadata column `ext` to `application_data`
-and added the `quantity_kind` and `unit_system` columns; unlike a new _table_, new _columns_ are not
-picked up by the idempotent `CREATE TABLE IF NOT EXISTS` DDL, so a store one version behind is
-rejected on open; `0.14.0` moved a `NonSequentialTimeSeries`'s timestamps out of the association
-row: the `timestamps_json` TEXT column became a `timestamps_hash` BLOB resolving into the new
+(`0.18.0` made the `id` column of all three catalog tables — `time_series_associations`,
+`supplemental_attribute_associations`, and `parent_child_associations` — an
+`INTEGER PRIMARY KEY AUTOINCREMENT` rather than a bare rowid alias, so an id is never reissued once
+its row is deleted. It is the one bump that adds no column and changes no value, and it still cannot
+be additive: `AUTOINCREMENT` is part of a table's declaration and there is no `ALTER TABLE` for it,
+so applying this DDL to an older catalog would leave all three tables on recycled ids while
+reporting success. Recycled ids matter because the id is an external reference — a consumer stores
+it in its own model — and reuse makes a stale reference resolve to a different, valid row; `0.17.0`
+added the metadata column `time_reference`, which records how a series' timestamps were _spelled_ —
+an instant in UTC, an instant at a fixed offset, an instant in a named IANA zone, or a wall clock
+naming no instant. It also changes how stored timestamps are _interpreted_: a row marked `zoneless`
+holds wall clocks the store keeps as if UTC, which an older reader would hand back as instants. See
+[Time references](../explanation/data-model.md#time-references); `0.16.0` added the metadata column
+`component_field`; `0.15.0` renamed the metadata column `ext` to `application_data` and added the
+`quantity_kind` and `unit_system` columns; unlike a new _table_, new _columns_ are not picked up by
+the idempotent `CREATE TABLE IF NOT EXISTS` DDL, so a store one version behind is rejected on open;
+`0.14.0` moved a `NonSequentialTimeSeries`'s timestamps out of the association row: the
+`timestamps_json` TEXT column became a `timestamps_hash` BLOB resolving into the new
 content-addressed [`timestamp_sets`](#timestamp_sets) table, and irregular arrays that share a time
 axis are now column-packed into `nsts_…` datasets keyed by that hash instead of one standalone
 `arr_…` dataset each; `0.13.0` replaced the `dtype` column with `element_type`, which names the
@@ -134,7 +142,7 @@ Arrays live under a two-level group hierarchy, in one of **two storage modes**:
 
 ```text
 <name>.h5
-├── attribute  data_format_version = "0.16.0"
+├── attribute  data_format_version = "0.18.0"
 ├── attribute  compression         = "deflate:3:shuffle"
 ├── attribute  storage_backend     = "hdf5"
 └── group      time_series/
@@ -290,7 +298,7 @@ One row per association between an owner and a stored array.
 
 | Column              | Type    | Notes                                                               |
 | ------------------- | ------- | ------------------------------------------------------------------- |
-| `id`                | INTEGER | Primary key                                                         |
+| `id`                | INTEGER | `AUTOINCREMENT` primary key; never reissued — see below             |
 | `owner_id`          | INTEGER | Owner identity; signed 64-bit integer identifier (part of key)      |
 | `owner_type`        | TEXT    | Owner's concrete type, descriptive                                  |
 | `owner_category`    | INTEGER | Code, `CHECK` in (0, 1); part of key — see below                    |
@@ -432,7 +440,7 @@ data model.
 
 ```sql
 CREATE TABLE supplemental_attribute_associations (
-    id             INTEGER PRIMARY KEY,
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
     component_id   INTEGER NOT NULL,
     component_type TEXT    NOT NULL,
     attribute_id   INTEGER NOT NULL,
@@ -461,7 +469,7 @@ cannot appear here by construction.
 
 ```sql
 CREATE TABLE parent_child_associations (
-    id          INTEGER PRIMARY KEY,
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
     parent_id   INTEGER NOT NULL,
     parent_type TEXT    NOT NULL,
     child_id    INTEGER NOT NULL,
@@ -491,16 +499,19 @@ Both are also independent of each other: the same integer may name a row in each
 
 #### Compatibility
 
-Both tables were added **without** bumping `data_format_version`, which is why a `0.10.0` store may
-or may not contain them:
+Both tables were originally added **without** bumping `data_format_version`, since the gate is exact
+equality with no upgrade path and bumping for a purely additive table would have made every existing
+store unreadable in exchange for nothing.
 
-- Opening a store for writing applies the full DDL, which is idempotent, so a store written before
-  they existed gains both on first writable open.
-- Opening read-only cannot run DDL. Reads of a missing table return empty results (`0`, `false`, no
-  rows) rather than failing.
+That is no longer how they land. `0.18.0` gave both an `AUTOINCREMENT` id, which is part of a
+table's declaration and so cannot reach an existing table through `CREATE TABLE IF NOT EXISTS`; the
+version check rejects an older catalog before this DDL runs. Only a store at the current version can
+contain them, and it always does.
 
-The version gate is exact equality with no upgrade path, so bumping for purely additive tables would
-have made every existing store unreadable in exchange for nothing.
+One consequence of the additive era survives, and is still required: **opening read-only cannot run
+DDL at all**, so reads of a missing table return empty results (`0`, `false`, no rows) rather than
+failing. That tolerance is not vestigial — it is what lets a read-only open work on a store whose
+catalog was never opened for writing.
 
 ### `schema_version`
 
@@ -686,7 +697,7 @@ sqlite3 system.h5.sqlite '.schema'
 # Query the view, not the table, to see decoded discriminants.
 sqlite3 system.h5.sqlite \
   'SELECT name, time_series_type, element_type, element_shape, length FROM time_series_readable;'
-# Both association tables are absent in stores written before they existed.
+# Both association tables are present in every current-format store.
 sqlite3 system.h5.sqlite 'SELECT * FROM supplemental_attribute_associations;'
 sqlite3 system.h5.sqlite 'SELECT * FROM parent_child_associations;'
 ```

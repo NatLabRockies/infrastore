@@ -47,4 +47,21 @@
 /// row marked `zoneless` holds wall clocks the store keeps as if UTC, which an
 /// older reader would hand back as instants. Stores written by 0.16.0 and
 /// earlier are rejected on open.
-pub const DATA_FORMAT_VERSION: &str = "0.17.0";
+/// 0.18.0 made the `id` column of all three catalog tables --
+/// `time_series_associations`, `supplemental_attribute_associations`, and
+/// `parent_child_associations` -- an `INTEGER PRIMARY KEY AUTOINCREMENT`
+/// instead of a bare rowid alias, so a row's id is never reissued after that
+/// row is deleted. The id is now an external reference a consumer stores in its
+/// own object model, and a bare rowid alias recycles: delete the highest row,
+/// add another, and a persisted reference silently resolves to a different and
+/// entirely valid row. See the `id` comment in `metadata/schema.rs`.
+///
+/// Unlike every bump above, this one adds no column and changes no value --
+/// which is exactly why it needs the version check rather than the idempotent
+/// DDL. `AUTOINCREMENT` is part of a table's declaration and there is no
+/// `ALTER TABLE` for it, so `CREATE TABLE IF NOT EXISTS` applied to a 0.17.0
+/// catalog would leave all three tables on recycled ids while reporting
+/// success. That is a silent wrong answer rather than a loud failure, so the
+/// rejection has to come from the version. Stores written by 0.17.0 and earlier
+/// are rejected on open.
+pub const DATA_FORMAT_VERSION: &str = "0.18.0";

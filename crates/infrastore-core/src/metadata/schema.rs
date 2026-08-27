@@ -14,7 +14,32 @@
 /// mismatch is the error worth reporting, and it must get there first.
 pub const DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS time_series_associations (
-    id                INTEGER PRIMARY KEY,
+    -- AUTOINCREMENT, not a bare `INTEGER PRIMARY KEY`, because this id is an
+    -- *external* reference: a consumer stores it in its own object model (a
+    -- generator's cost function naming the series that varies it) and expects
+    -- it to keep meaning the same row. A bare rowid alias assigns max(rowid)+1,
+    -- so deleting the highest row and adding another hands the new row the old
+    -- one's id -- and a stale reference then resolves to a different, entirely
+    -- valid series, with no foreign key anywhere to catch it. AUTOINCREMENT
+    -- keeps a high-water mark in `sqlite_sequence` and never reissues.
+    --
+    -- Two consequences worth knowing, both verified rather than assumed:
+    --
+    --   * `sqlite_sequence` is an ordinary table, so its update is part of the
+    --     transaction. A rollback therefore *recycles* the id rather than
+    --     stranding it, which is why an id is only valid once the enclosing
+    --     transaction commits -- see `Store::add_time_series`. Stranding does
+    --     happen on the delete path, which is the case that matters.
+    --   * An explicit insert above the current high-water mark ratchets the
+    --     sequence to it, so a caller supplying its own ids (the OpenAPI model
+    --     import) needs no reservation protocol; SQLite's counter follows. It
+    --     only ratchets *upward*: an explicit id at or below the mark collides.
+    --
+    -- This cannot be applied to an existing table -- AUTOINCREMENT is part of
+    -- the declaration and there is no ALTER TABLE for it, so `CREATE TABLE IF
+    -- NOT EXISTS` would silently leave an older catalog on recycled ids. The
+    -- `DATA_FORMAT_VERSION` bump to 0.18.0 is what rejects those stores.
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
     owner_id          INTEGER NOT NULL,
     owner_type        TEXT    NOT NULL,
     -- `owner_category` and `time_series_type` are stored as small INTEGER
@@ -312,12 +337,20 @@ CREATE TABLE IF NOT EXISTS catalog_identity (generation TEXT NOT NULL);
 --   * Independent of `time_series_associations`. Removing a time series never
 --     touches these rows and vice versa; a consumer wanting both effects makes
 --     both calls.
---   * Added additively, without bumping DATA_FORMAT_VERSION. The DDL is
---     idempotent, so an older store gains both tables on its first writable
---     open and older code ignores them. A read-only open of an older store
---     cannot run DDL, so every read of these tables tolerates the table being
---     absent (see `MetadataStore::has_supplemental_attribute_table` and
+--   * Originally added additively, without bumping DATA_FORMAT_VERSION. That
+--     is no longer how they land: 0.18.0 gave both an AUTOINCREMENT id (see
+--     `time_series_associations` above for why), which is part of the table
+--     declaration and so cannot reach an existing table through idempotent
+--     DDL. The version check now rejects an older catalog before this DDL
+--     runs. The read-side tolerance the additive era required is still
+--     correct and still needed, because a read-only open of a *current-format*
+--     store cannot run DDL either -- so every read of these tables tolerates
+--     the table being absent (see
+--     `MetadataStore::has_supplemental_attribute_table` and
 --     `has_parent_child_table`).
+--   * Independent id streams. Each table has its own `sqlite_sequence` row, so
+--     an id is only meaningful together with the table it came from; the three
+--     counters never coincide and are never meant to.
 
 -- Which supplemental attributes are attached to which components. Columns match
 -- infrasys' table of the same name, whose logic this replaces (IS3.jl kept an
@@ -327,7 +360,8 @@ CREATE TABLE IF NOT EXISTS catalog_identity (generation TEXT NOT NULL);
 -- denormalized labels carried for filtering, not part of identity. One
 -- component may carry an attribute at most once.
 CREATE TABLE IF NOT EXISTS supplemental_attribute_associations (
-    id             INTEGER PRIMARY KEY,
+    -- AUTOINCREMENT for the reason given on `time_series_associations.id`.
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
     component_id   INTEGER NOT NULL,
     component_type TEXT    NOT NULL,
     attribute_id   INTEGER NOT NULL,
@@ -350,7 +384,8 @@ CREATE INDEX IF NOT EXISTS idx_sa_assoc_attribute
 -- there is no relationship-kind column, so a second kind of edge between the
 -- same two components would need one added (and the unique index widened).
 CREATE TABLE IF NOT EXISTS parent_child_associations (
-    id          INTEGER PRIMARY KEY,
+    -- AUTOINCREMENT for the reason given on `time_series_associations.id`.
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
     parent_id   INTEGER NOT NULL,
     parent_type TEXT    NOT NULL,
     child_id    INTEGER NOT NULL,
