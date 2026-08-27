@@ -71,6 +71,7 @@ pub fn list(
 /// content hash: it is what ties a catalog row to the bytes in the HDF5 file,
 /// and it makes array sharing (two series with one hash) visible at a glance.
 const LIST_HEADERS: &[&str] = &[
+    "ID",
     "Owner",
     "Owner Type",
     "Category",
@@ -107,6 +108,7 @@ fn list_headers(wide: bool) -> Vec<String> {
 
 fn list_row(m: &TimeSeriesMetadata, wide: bool) -> Vec<String> {
     let mut row = vec![
+        fields::opt(m.id),
         m.owner_id.to_string(),
         m.owner_type.clone(),
         m.owner_category.as_str().to_string(),
@@ -148,6 +150,7 @@ fn list_row(m: &TimeSeriesMetadata, wide: bool) -> Vec<String> {
 /// forces callers back to `info` one series at a time.
 fn list_json(m: &TimeSeriesMetadata) -> Value {
     let mut obj = Map::new();
+    obj.insert("id".into(), json!(m.id));
     obj.insert("owner_id".into(), json!(m.owner_id));
     obj.insert("owner_type".into(), json!(m.owner_type));
     obj.insert("owner_category".into(), json!(m.owner_category.as_str()));
@@ -409,6 +412,7 @@ pub fn info(
     // Always-present fields first, then the optional ones in the order a reader
     // scans for them.
     let mut rows: Vec<(String, Value)> = vec![
+        ("id".into(), json!(meta.id)),
         ("name".into(), json!(meta.name)),
         ("owner_id".into(), json!(meta.owner_id)),
         ("owner_type".into(), json!(meta.owner_type)),

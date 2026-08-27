@@ -205,9 +205,9 @@ time series with one of these names raises `InvalidParameter`:
 
 ```text
 application_data, component_field, count, data, data_hash, dtype, element_shape, element_type, ext,
-features, horizon, initial_timestamp, interval, length, name, owner_category, owner_id, owner_type,
-percentiles, quantity_kind, resolution, scenario_count, time_reference, time_series_type,
-timestamps, unit_system, units
+features, horizon, id, initial_timestamp, interval, length, name, owner_category, owner_id,
+owner_type, percentiles, quantity_kind, resolution, scenario_count, time_reference,
+time_series_type, timestamps, unit_system, units
 ```
 
 `dtype` and `ext` no longer name metadata fields — `element_type` and `application_data` replaced
@@ -259,6 +259,55 @@ flowchart LR
 
 Note that two different keys (`K1` and `K3` above) can point at the _same_ underlying array. The key
 is a metadata concept; the array is shared by [content addressing](./content-addressing.md).
+
+## Association IDs
+
+Every catalog row also has an **`id`**: a plain integer, assigned by the store, that names _that
+row_. It is the second way to re-find a series, and it answers a question a key cannot.
+
+A key describes a series — owner, name, resolution, features. An id names the row the store filed it
+under. That difference is the point: a consumer that wants to record "this generator's cost curve is
+_that_ series" inside its own object model would otherwise have to embed the whole key tuple, and
+keep it in step with every rename. An id is one integer, and a rename does not move it.
+
+```julia
+added = add_time_series!(store, 42, "ThermalStandard", Component, cost_curve)
+generator.operation_cost.variable = added.id   # one integer, stored in the model
+```
+
+Three properties make an id safe to persist:
+
+- **It is never reissued.** Deleting a row strands its id permanently. A reference to a deleted
+  series stops resolving — it can never come back meaning a _different_ series, which is the failure
+  a recycled row number would cause silently, with no foreign key anywhere to catch it.
+- **It survives the operations that change a series' description.** A rename or a reassignment to a
+  new owner keeps the id, as do `compact` and a save-and-reopen. Those are `UPDATE`s and file
+  copies, not new rows.
+- **It is not part of identity.** Two series differing only in id are the same series to the
+  uniqueness rule and to both content hashes. It sits outside the key deliberately: a key is also an
+  _argument_ — to `get_time_series`, to `remove_time_series!` — where an id would mean nothing.
+
+What an id does _not_ do is travel between stores. It is the row's number in one catalog, so a
+`merge` assigns fresh ids in the destination, and two stores holding identical content will disagree
+about them. The one place ids do cross a boundary is the
+[OpenAPI document round trip](../reference/file-format.md), where preserving them is the whole
+point: an import that assigned fresh ids would leave every reference the document carries pointing
+at the wrong series.
+
+Each of the three catalog tables keeps its own independent counter, so an id is only meaningful
+alongside the table it came from.
+
+Writes report the id they used, and reads take one:
+
+| Direction | Rust                                  | Python               | Julia                |
+| --------- | ------------------------------------- | -------------------- | -------------------- |
+| Write     | `add_time_series` → `AddedTimeSeries` | `.id` on the result  | `.id` on the result  |
+| Resolve   | `get_metadata_by_id`                  | `get_metadata_by_id` | `get_metadata_by_id` |
+| Validate  | `association_exists`                  | `association_exists` | `association_exists` |
+| Read      | `bulk_read_by_ids`                    | `read_by_ids`        | —                    |
+
+`association_exists` fetches no row, so a consumer can check every reference in its model on load
+rather than discovering a dangling one mid-simulation.
 
 ## Optional Descriptors
 

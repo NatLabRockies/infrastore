@@ -482,6 +482,7 @@ value:
 
 | Flag                    | Meaning                                                                    |
 | ----------------------- | -------------------------------------------------------------------------- |
+| `--id <N>`              | Catalog association ID. A point lookup — see below.                        |
 | `--owner-id <I>`        | Owner identifier (`i64` integer).                                          |
 | `--owner-category <C>`  | Restrict to `Component` or `SupplementalAttribute`; omit to match either.  |
 | `--name <N>`            | Series name (exact match).                                                 |
@@ -491,6 +492,19 @@ value:
 | `--resolution <DUR>`    | Resolution as an ISO-8601 duration, e.g. `PT1H`, `PT15M`, `P1M`.           |
 | `--feature key=value`   | Feature filter; repeatable. Values are inferred as int/float/bool/string.  |
 | `--spelling <S>`        | `zoned` or `zoneless`: which timestamp spelling to keep.                   |
+
+`--id` is different in kind from the flags under it. The others narrow a set; `--id` names exactly
+one row, by the catalog id that `add`, `list`, and `info` report. So it cannot be combined with them
+(the error says as much), and it cannot stand in for them on a command that works over a set —
+`list --id 3` is refused rather than quietly returning one row. Use it where a caller has stored an
+id in its own model and wants that series back:
+
+```sh
+infrastore --store system.h5 -f json info --id 214
+```
+
+An id that names no row is an error saying so, and saying that it will stay that way: ids are never
+reissued, so a reference that stops resolving cannot later come to mean a different series.
 
 `--spelling` is the constructive half of the time-reference coherence rule. `zoneless` keeps the
 wall-clock series; `zoned` keeps the ones that record instants, including those that declare no

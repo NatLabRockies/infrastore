@@ -3596,3 +3596,49 @@ fn a_descriptor_zone_the_database_does_not_know_is_warned_about_and_stored() {
     let info = run(&store, &["store-info"]);
     assert!(info.contains("unrecognized"), "{info}");
 }
+
+/// Two stores holding the same series compare clean even though their catalog
+/// ids differ.
+///
+/// An id names a row in one catalog, not a series, so two stores built in
+/// different orders assign them differently. `diff` pairs on identity and
+/// content hash and never reads the id — this pins that, since "diff ignores
+/// the id" is now a documented guarantee rather than an accident of the code.
+#[test]
+fn diff_ignores_catalog_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    let left = dir.path().join("left.h5");
+    let right = dir.path().join("right.h5");
+
+    write(dir.path(), "a.csv", "value\n1\n2\n3\n");
+    write(dir.path(), "b.csv", "value\n4\n5\n6\n");
+    let descriptor = |name: &str, csv: &str| {
+        format!(
+            r#"{{"owner_id": 42, "owner_type": "Generator", "name": "{name}",
+                 "type": "SingleTimeSeries", "element_type": "f64", "csv": "{csv}",
+                 "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H"}}"#
+        )
+    };
+    let a = write(dir.path(), "a.json", &descriptor("alpha", "a.csv"));
+    let b = write(dir.path(), "b.json", &descriptor("beta", "b.csv"));
+
+    // Same two series, opposite insertion orders, so the ids are swapped.
+    run(&left, &["add", "--descriptor", a.to_str().unwrap()]);
+    run(&left, &["add", "--descriptor", b.to_str().unwrap()]);
+    run(&right, &["add", "--descriptor", b.to_str().unwrap()]);
+    run(&right, &["add", "--descriptor", a.to_str().unwrap()]);
+
+    let id_of = |store: &Path, name: &str| -> i64 {
+        let listed = run(store, &["-f", "json", "list", "--name", name]);
+        let rows: serde_json::Value = serde_json::from_str(&listed).unwrap();
+        rows["items"][0]["id"].as_i64().unwrap()
+    };
+    assert_ne!(
+        id_of(&left, "alpha"),
+        id_of(&right, "alpha"),
+        "the two stores must disagree about the id for this test to mean anything",
+    );
+
+    let same = run(&left, &["diff", "--against", right.to_str().unwrap()]);
+    assert!(same.contains("0 added, 0 removed, 0 changed"), "{same}");
+}

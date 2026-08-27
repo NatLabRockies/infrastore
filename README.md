@@ -38,6 +38,10 @@ Under development, unstable API, integrating with parent packages
   attribute) and `parent_child_associations` (directed component ↔ component edges) record
   relationships independently of time series, so consumers need not keep a SQLite database of their
   own.
+- **A stable handle for every series** — each catalog row carries an `id` a consumer can store in
+  its own model (a generator's cost function naming the series that varies it). It is never
+  reissued, so a reference can go stale but can never come to mean a different series, and it
+  survives a rename, a reassignment, a compaction, and a save-and-reopen.
 - **Timestamps that round-trip as written** — every series records a `time_reference`: an instant in
   UTC, an instant at a fixed offset, an instant in a named IANA zone, or a wall clock naming no
   instant at all. Each binding infers it from the input type — a naive `datetime` or a bare

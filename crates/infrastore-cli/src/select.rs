@@ -31,6 +31,13 @@ pub enum Spelling {
 /// Flags that narrow a query down to (ideally) a single stored series.
 #[derive(Debug, Clone, clap::Args)]
 pub struct SelectorArgs {
+    /// Catalog association ID, as reported by `add`, `list`, and `info`.
+    ///
+    /// A point lookup: it names exactly one row, so it cannot be combined with
+    /// the narrowing flags below, and it is not a filter — the commands that
+    /// operate over a *set* of series take those flags instead.
+    #[arg(long)]
+    pub id: Option<i64>,
     /// Owner ID of the time series.
     #[arg(long)]
     pub owner_id: Option<i64>,
@@ -80,7 +87,31 @@ pub struct SelectorArgs {
 
 impl SelectorArgs {
     /// Build a [`ListFilter`] from the provided flags.
+    /// Whether any flag other than `--id` narrows the selection.
+    fn narrows_further(&self) -> bool {
+        self.owner_id.is_some()
+            || self.owner_category.is_some()
+            || self.name.is_some()
+            || self.name_glob.is_some()
+            || self.component_field.is_some()
+            || self.ts_type.is_some()
+            || self.resolution.is_some()
+            || self.spelling.is_some()
+            || !self.feature.is_empty()
+    }
+
     pub fn to_filter(&self) -> Result<ListFilter, String> {
+        // `--id` is a primary-key lookup, not a predicate. The core deliberately
+        // has no id filter — one would invite scan-shaped use of a point lookup
+        // — so a command that works over a matching *set* cannot honor it.
+        if self.id.is_some() {
+            return Err(
+                "--id names exactly one association, so it cannot select a set here; \
+                 use it with `info`/`get`, or narrow this command with \
+                 --owner-id/--name/--name-glob/--type instead"
+                    .to_string(),
+            );
+        }
         let mut filter = ListFilter::new();
         if let Some(u) = self.owner_id {
             filter = filter.owner_id(u);
@@ -120,6 +151,25 @@ impl SelectorArgs {
     /// Resolve to exactly one stored series, returning its metadata and key.
     /// Errors with a helpful list when zero or multiple series match.
     pub fn resolve(&self, store: &Store) -> Result<(TimeSeriesMetadata, KeyIdentity), String> {
+        if let Some(id) = self.id {
+            if self.narrows_further() {
+                return Err(
+                    "--id already names exactly one association; drop the other selector flags"
+                        .to_string(),
+                );
+            }
+            let meta = store
+                .get_metadata_by_id(id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| {
+                    format!(
+                        "no association has id {id}. Ids are never reissued, so one that stops \
+                         resolving stays stale rather than coming to name a different series"
+                    )
+                })?;
+            let key = key_of(&meta);
+            return Ok((meta, key));
+        }
         let mut matches = store
             .list_time_series(self.to_filter()?)
             .map_err(|e| e.to_string())?;

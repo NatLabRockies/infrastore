@@ -84,6 +84,7 @@ pub fn attributes(
         .list_supplemental_attribute_associations(&filter)
         .map_err(|e| e.to_string())?;
     let headers = vec![
+        "ID".to_string(),
         "Component".to_string(),
         "Component Type".to_string(),
         "Attribute".to_string(),
@@ -93,6 +94,7 @@ pub fn attributes(
         .iter()
         .map(|r| {
             vec![
+                crate::fields::opt(r.id),
                 r.component_id.to_string(),
                 r.component_type.clone(),
                 r.attribute_id.to_string(),
@@ -106,6 +108,7 @@ pub fn attributes(
                 .iter()
                 .map(|r| {
                     json!({
+                        "id": r.id,
                         "component_id": r.component_id,
                         "component_type": r.component_type,
                         "attribute_id": r.attribute_id,
@@ -137,6 +140,7 @@ pub fn links(
         .list_parent_child_associations(&filter)
         .map_err(|e| e.to_string())?;
     let headers = vec![
+        "ID".to_string(),
         "Parent".to_string(),
         "Parent Type".to_string(),
         "Child".to_string(),
@@ -146,6 +150,7 @@ pub fn links(
         .iter()
         .map(|r| {
             vec![
+                crate::fields::opt(r.id),
                 r.parent_id.to_string(),
                 r.parent_type.clone(),
                 r.child_id.to_string(),
@@ -159,6 +164,7 @@ pub fn links(
                 .iter()
                 .map(|r| {
                     json!({
+                        "id": r.id,
                         "parent_id": r.parent_id,
                         "parent_type": r.parent_type,
                         "child_id": r.child_id,

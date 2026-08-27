@@ -44,6 +44,20 @@ over gRPC: `supplemental_attribute_associations` (component ↔ supplemental att
 surface — counts, counts-by-type, grouped summary) and `parent_child_associations` (directed
 component ↔ component edges, e.g. a generator connected to a bus, deliberately narrower until a
 consumer needs more). Both are independent of time series in both directions, and of each other.
+Every catalog row also carries an **`id`** — an `INTEGER PRIMARY KEY AUTOINCREMENT`, so it is never
+reissued once its row is deleted — which a consumer stores in its own object model to reference a
+series later (a generator's `operation_cost` naming the series that varies it). Writes return it
+(`AddedTimeSeries` in the Rust core, Python, and Julia; an `out_id` across the C ABI), reads resolve
+it (`get_metadata_by_id`, `association_exists`, `bulk_read_by_ids`), and it crosses the gRPC and
+OpenAPI wire forms. It is descriptive — outside `TimeSeriesKey` and both content hashes — but unlike
+the descriptors above it describes the _row_ rather than the data: it is per-store, so `merge`
+assigns fresh ids and `diff` ignores it, while `rename`/`reassign`/`compact`/`persist_to` all
+preserve it. A caller may supply one explicitly (all-or-none within a batch) so an imported document
+keeps the references it recorded; `import_time_series_associations_openapi` is the rows-only import
+that does so, refusing a row whose array is absent and refusing `NonSequentialTimeSeries` outright
+(its timestamp vector is not on the wire). The two association catalogs carry ids on the same terms,
+with independent counters, and equality on both association types deliberately excludes the id.
+
 Metadata getters surface `element_shape` and `features` in every binding. Alongside `units`, a
 series carries two further unit descriptors in every binding: `quantity_kind` (free-form, QUDT
 `QuantityKind` local names recommended — it separates active from reactive power, which dimensional
