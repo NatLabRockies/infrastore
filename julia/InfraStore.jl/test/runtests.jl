@@ -2328,12 +2328,14 @@ end
         rows = InfraStore.JSON.parse(json)
         @test length(rows) == 1
         row = rows[1]
-        # The fixture is a golden of row *content*, so it carries no `id`: an id
-        # is the store's own bookkeeping, and its value depends on how many rows
-        # were written before it. That the export emits one is asserted here.
-        @test row["id"] == 1
+        # The schema requires `association_id`, so the fixture carries one --
+        # but its *value* is the store's own bookkeeping, depending on how many
+        # rows were written first. Presence is asserted here and the value
+        # dropped from both sides.
+        @test row["association_id"] == 1
         want = _openapi_fixture("single_time_series")
-        @test Dict(k => v for (k, v) in row if k != "id") == want
+        drop_id(d) = Dict(k => v for (k, v) in d if k != "association_id")
+        @test drop_id(row) == drop_id(want)
 
         close!(store)
     end

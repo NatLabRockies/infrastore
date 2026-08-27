@@ -1166,8 +1166,8 @@ fn a_document_round_trips_with_its_ids() {
         .export_time_series_associations_openapi(&ListFilter::default())
         .unwrap();
     assert!(
-        json.contains("\"id\":100"),
-        "the wire form must carry the id"
+        json.contains("\"association_id\":100"),
+        "the wire form must carry the id, under the schema's spelling",
     );
 
     // A store that already holds the array the document's rows name, under an

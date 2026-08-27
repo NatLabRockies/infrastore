@@ -234,20 +234,26 @@ fn export_reproduces_every_time_series_fixture() {
         .expect("export should succeed");
     let rows: Vec<serde_json::Value> = serde_json::from_str(&json).expect("export is a JSON array");
 
-    // The fixtures are goldens of row *content*, so they carry no `id`: an id is
-    // the store's own bookkeeping, and its value depends on how many rows were
-    // written before it — pinning one would make this fixture disagree with the
-    // same row exported from any differently-ordered store. That the export
-    // emits an id at all is asserted below, and its round trip is covered in
-    // `association_ids.rs`.
-    let mut content: Vec<serde_json::Value> = rows.clone();
-    for row in &mut content {
-        let object = row.as_object_mut().expect("each row is an object");
-        assert!(
-            object.remove("id").is_some(),
-            "every exported row must carry its catalog id",
-        );
-    }
+    // The schema requires `association_id`, so the fixtures carry one — but its
+    // *value* is the store's own bookkeeping, depending on how many rows were
+    // written before it. Comparing it would make these fixtures disagree with
+    // the same rows exported from any differently-ordered store, so the
+    // presence is asserted and the value dropped on both sides. The round trip
+    // of the value itself is covered in `association_ids.rs`.
+    let strip = |rows: &[serde_json::Value]| -> Vec<serde_json::Value> {
+        rows.iter()
+            .map(|row| {
+                let mut row = row.clone();
+                let object = row.as_object_mut().expect("each row is an object");
+                assert!(
+                    object.remove("association_id").is_some(),
+                    "every exported row must carry its association_id",
+                );
+                row
+            })
+            .collect()
+    };
+    let content = strip(&rows);
 
     for name in [
         "single_time_series",
@@ -257,7 +263,9 @@ fn export_reproduces_every_time_series_fixture() {
         "probabilistic",
         "scenarios",
     ] {
-        let want = fixture(name);
+        let want = strip(std::slice::from_ref(&fixture(name)))
+            .pop()
+            .expect("one row");
         assert!(
             content.contains(&want),
             "export does not contain the {name} fixture row; export was {rows:#?}"
@@ -435,8 +443,8 @@ fn export_sort_order_does_not_depend_on_insertion_order() {
             .map(|mut row| {
                 row.as_object_mut()
                     .expect("each row is an object")
-                    .remove("id")
-                    .expect("every exported row carries its id");
+                    .remove("association_id")
+                    .expect("every exported row carries its association_id");
                 row
             })
             .collect()

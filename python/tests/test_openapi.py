@@ -57,12 +57,13 @@ class TestTimeSeriesExport:
         rows = json.loads(store.export_time_series_associations_openapi())
         assert len(rows) == 1
         row = rows[0]
-        # The fixture is a golden of row *content*, so it carries no ``id``: an
-        # id is the store's own bookkeeping, and its value depends on how many
-        # rows were written before it. That the export emits one is asserted
-        # here instead.
-        assert row.pop("id") == 1
+        # The schema requires ``association_id``, so the fixture carries one --
+        # but its *value* is the store's own bookkeeping, depending on how many
+        # rows were written first. Presence is asserted here and the value
+        # dropped from both sides.
+        assert row.pop("association_id") == 1
         want = fixture("single_time_series")
+        want.pop("association_id")
         assert row == want
 
     def test_empty_filter_exports_the_whole_catalog(self):

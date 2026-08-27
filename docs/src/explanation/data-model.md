@@ -292,7 +292,9 @@ What an id does _not_ do is travel between stores. It is the row's number in one
 about them. The one place ids do cross a boundary is the
 [OpenAPI document round trip](../reference/file-format.md), where preserving them is the whole
 point: an import that assigned fresh ids would leave every reference the document carries pointing
-at the wrong series.
+at the wrong series. That wire form spells the field `association_id` — in a document travelling
+beside components and supplemental attributes, an unqualified `id` would not say which id it is —
+and the schema requires it on every time-series row.
 
 Each of the three catalog tables keeps its own independent counter, so an id is only meaningful
 alongside the table it came from.

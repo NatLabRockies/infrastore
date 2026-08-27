@@ -37,12 +37,22 @@
 //! getters, the proto, and every binding — so an exporter that needs it today
 //! reads it from there; add it here in the same change that lands it upstream.
 //!
-//! A time-series row also carries `id`, the catalog row's own number and the
-//! handle a consumer stores in its own model to reference the series later. It
-//! is what makes the round trip *preserve* references rather than merely
-//! reproduce rows: an import that assigned fresh ids would leave every
-//! reference in the document pointing at the wrong series. The
-//! supplemental-attribute wire form deliberately carries no id — nothing
+//! A time-series row also carries **`association_id`**: the catalog row's own
+//! number, and the handle a consumer stores in its own model to reference the
+//! series later. It is what makes the round trip *preserve* references rather
+//! than merely reproduce rows — an import that assigned fresh ids would leave
+//! every reference in the document pointing at the wrong series — and the
+//! schema requires it on all six types.
+//!
+//! The wire spells it `association_id` where the store spells it
+//! [`TimeSeriesMetadata::id`]. That is this module's job, exactly as it maps
+//! `unit_system` between the store's snake_case and the schema's
+//! SCREAMING_CASE: inside the store the field sits among `owner_id`, `name`,
+//! and the rest, where the unqualified `id` is unambiguous; in a document that
+//! travels beside components and supplemental attributes it needs saying which
+//! id it is.
+//!
+//! The supplemental-attribute wire form deliberately carries no id — nothing
 //! references an attachment — which is why its export names its four fields
 //! explicitly rather than serializing the struct.
 //!
@@ -241,10 +251,10 @@ fn ts_row_to_json(meta: &TimeSeriesMetadata) -> Value {
     let hash_hex = crate::hash::hash_hex(&meta.data_hash);
     row.insert("uri".into(), Value::from(hash_hex.clone()));
     row.insert("data_hash".into(), Value::from(hash_hex));
-    // Omitted rather than written as `null` when absent, like every other
-    // optional field here. A row that came from the catalog always has one.
+    // Required by the schema, so a row without one is a row that never came
+    // from a catalog — which nothing exports.
     if let Some(id) = meta.id {
-        row.insert("id".into(), Value::from(id));
+        row.insert("association_id".into(), Value::from(id));
     }
     row.insert(
         "element_type".into(),
@@ -356,8 +366,9 @@ struct RawTsRow {
     data_hash: Option<String>,
     element_type: String,
     element_shape: Vec<usize>,
+    /// The store's `id`, under the schema's spelling.
     #[serde(default)]
-    id: Option<i64>,
+    association_id: Option<i64>,
     #[serde(default)]
     units: Option<String>,
     #[serde(default)]
@@ -540,7 +551,7 @@ impl RawTsRow {
             element_type,
             element_shape: self.element_shape,
             application_data: self.application_data,
-            id: self.id,
+            id: self.association_id,
         })
     }
 }

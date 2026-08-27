@@ -48,15 +48,17 @@ Every catalog row also carries an **`id`** — an `INTEGER PRIMARY KEY AUTOINCRE
 reissued once its row is deleted — which a consumer stores in its own object model to reference a
 series later (a generator's `operation_cost` naming the series that varies it). Writes return it
 (`AddedTimeSeries` in the Rust core, Python, and Julia; an `out_id` across the C ABI), reads resolve
-it (`get_metadata_by_id`, `association_exists`, `bulk_read_by_ids`), and it crosses the gRPC and
-OpenAPI wire forms. It is descriptive — outside `TimeSeriesKey` and both content hashes — but unlike
-the descriptors above it describes the _row_ rather than the data: it is per-store, so `merge`
-assigns fresh ids and `diff` ignores it, while `rename`/`reassign`/`compact`/`persist_to` all
-preserve it. A caller may supply one explicitly (all-or-none within a batch) so an imported document
-keeps the references it recorded; `import_time_series_associations_openapi` is the rows-only import
-that does so, refusing a row whose array is absent and refusing `NonSequentialTimeSeries` outright
-(its timestamp vector is not on the wire). The two association catalogs carry ids on the same terms,
-with independent counters, and equality on both association types deliberately excludes the id.
+it (`get_metadata_by_id`, `association_exists`, `bulk_read_by_ids`), and it crosses the gRPC wire
+and the OpenAPI one — where the schema spells it `association_id`, a rename `openapi.rs` applies the
+same way it maps `unit_system` between the store's snake_case and the schema's SCREAMING_CASE. It is
+descriptive — outside `TimeSeriesKey` and both content hashes — but unlike the descriptors above it
+describes the _row_ rather than the data: it is per-store, so `merge` assigns fresh ids and `diff`
+ignores it, while `rename`/`reassign`/`compact`/`persist_to` all preserve it. A caller may supply
+one explicitly (all-or-none within a batch) so an imported document keeps the references it
+recorded; `import_time_series_associations_openapi` is the rows-only import that does so, refusing a
+row whose array is absent and refusing `NonSequentialTimeSeries` outright (its timestamp vector is
+not on the wire). The two association catalogs carry ids on the same terms, with independent
+counters, and equality on both association types deliberately excludes the id.
 
 Metadata getters surface `element_shape` and `features` in every binding. Alongside `units`, a
 series carries two further unit descriptors in every binding: `quantity_kind` (free-form, QUDT
