@@ -279,6 +279,16 @@ jobs:
   # calls the released FFI does not export yet, and the full suite would fail
   # spuriously. The suite runs against the artifact anyway right before each
   # registration (see docs/src/releasing.md).
+  #
+  # The smoke test stays on the read-only surface, and must keep doing so. A
+  # wrapper that calls a symbol the released library lacks raises a clean Julia
+  # error, but one that calls an *existing* symbol whose signature has since
+  # widened gets no diagnostic at all: the old library ignores the extra
+  # out-pointer, returns success, leaves the pointer null, and the wrapper
+  # segfaults dereferencing it. Every write entry point carries such an
+  # out-pointer (`out_key`/`out_id`), and widening one is exactly what a
+  # release cycle does, so a write here reports an ABI skew that is expected
+  # as a crash in an unrelated PR. Reads take no out-pointer of that shape.
   julia-artifact:
     name: Julia artifact resolution
     runs-on: ubuntu-latest
@@ -298,7 +308,6 @@ jobs:
           unset INFRASTORE_LIB
           julia --project=julia/InfraStore.jl -e 'using Pkg; Pkg.instantiate()'
           julia --project=julia/InfraStore.jl <<'JULIA'
-          using Dates
           using InfraStore
 
           path = InfraStore.lib_path()
@@ -306,12 +315,14 @@ jobs:
               error("expected an artifact path in the depot, got: $(path)")
           println("resolved: ", path)
 
+          # Open a store and query it, which dlopens the resolved library and
+          # calls through it. Reads only -- see the note above this job.
           store = Store(; in_memory=true)
-          ts = SingleTimeSeries(
-              DateTime(2024, 1, 1), Hour(1), collect(1.0:24.0), "smoke"
-          )
-          key = add_time_series!(store, 1, "Generator", Component, ts)
-          got = get_time_series(store, key)
-          got.data == collect(1.0:24.0) || error("round trip mismatch")
-          println("artifact round trip OK")
+          counts = get_counts(store)
+          counts == TimeSeriesCounts(0, 0, 0) ||
+              error("expected empty counts, got: $(counts)")
+          isempty(list_names(store)) || error("expected no names in a new store")
+          isempty(list_owner_types(store)) ||
+              error("expected no owner types in a new store")
+          println("artifact call-through OK")
           JULIA
