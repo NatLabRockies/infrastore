@@ -211,12 +211,12 @@ default width (`DEFAULT_COLS_PER_DATASET = 1000`). In both cases `cols` is cappe
 within a byte budget (`MAX_CHUNK_BYTES = 1 MiB`); a batch wider than the cap spills across datasets.
 
 - **Rows are timesteps, columns are series.** Column `i` holds one complete series.
-- **Hash companion variable.** Each packed dataset has a sibling **string** variable `{dataset}_h`
-  of shape `(cols,)`. Slot `i` holds the lowercase hex SHA-256 (64 chars) of column `i`, or an empty
-  string if the column is free. This is the on-disk index: on open, the backend scans every `…_h`,
-  decodes the non-empty hashes, and rebuilds its `hash → (dataset, column)` map. (The backend also
-  recovers each dataset's `cols` from its column dimension length, so per-dataset widths
-  round-trip.)
+- **Hash companion dataset.** Each packed dataset has a sibling `{dataset}_h` dataset of `u8`,
+  shaped `(cols, 64)`. Row `i` holds the lowercase hex SHA-256 (64 characters) of column `i` as raw
+  bytes, or 64 zero bytes if the column is free. This is the on-disk index: on open, the backend
+  scans every `…_h`, decodes the non-zero rows, and rebuilds its `hash → (dataset, column)` map.
+  (The backend also recovers each dataset's `cols` from its column dimension length, so per-dataset
+  widths round-trip.)
 - **Spill.** When a family's current dataset is full — a batch exceeds the column cap, or
   incremental writes fill a default-width dataset — the next write creates a spill dataset `…__1`,
   then `…__2`, and so on.
