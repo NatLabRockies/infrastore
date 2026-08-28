@@ -607,11 +607,10 @@ fn render_sequential(
             obj.insert("values".into(), json!(values));
             output::print_value(f, &Value::Object(obj))?;
         }
-        // Every sequential CSV carries its timestamp column. A SingleTimeSeries
-        // used to emit values only, on the grounds that its grid is
-        // reconstructible from initial_timestamp + resolution — but those live
-        // in the metadata, not in the file being piped, so `get -f csv >
-        // out.csv` silently dropped the time axis.
+        // Every sequential CSV carries its timestamp column, including a
+        // SingleTimeSeries: its grid is reconstructible from
+        // initial_timestamp + resolution, but those live in the metadata rather
+        // than in the file being piped.
         _ => {
             let mut header = vec!["timestamp".to_string()];
             header.extend(value_headers(per_step));
@@ -637,10 +636,8 @@ fn render_sequential(
 
 /// A dense forecast, rendered as the structured view in every format.
 ///
-/// The table used to print `index,value` over the row-major flattening and
-/// point at `-f csv` for anything readable — but [`forecast_csv_rows`] was
-/// already computing the good view for that flag, so the table now uses it too:
-/// `issue_time`, `target_time`, and one column per percentile / scenario.
+/// Every format renders [`forecast_csv_rows`]'s view: `issue_time`,
+/// `target_time`, and one column per percentile / scenario.
 fn render_forecast(
     meta: &TimeSeriesMetadata,
     data: &TimeSeriesData,

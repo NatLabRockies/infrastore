@@ -193,9 +193,8 @@ struct Cli {
 
     /// Answer every confirmation prompt with yes.
     ///
-    /// The scriptable counterpart to the per-command --force flags: a script
-    /// no longer has to know which commands prompt, or which flag each spells
-    /// it with.
+    /// The scriptable counterpart to the per-command --force flags, so a
+    /// script need not know which commands prompt.
     #[arg(short = 'y', long, global = true)]
     yes: bool,
 

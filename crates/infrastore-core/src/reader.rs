@@ -183,8 +183,8 @@ impl StaticGroup {
     /// receives the column hashes (in key order), the dtype they share, and the
     /// output buffer to fill; splitting the borrow across the fields lets the
     /// backend read hashes and write the buffer of the *same* group without
-    /// aliasing. The group carries the dtype because a backend no longer infers
-    /// one — it comes from the catalog, via the group's `element_type`.
+    /// aliasing. The dtype comes from the catalog, via the group's
+    /// `element_type`, rather than being inferred by the backend.
     pub(crate) fn fill<F>(&mut self, read: F) -> Result<()>
     where
         F: FnOnce(&[[u8; 32]], Dtype, &mut Vec<u8>) -> Result<()>,

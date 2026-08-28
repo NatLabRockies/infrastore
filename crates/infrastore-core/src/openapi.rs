@@ -37,24 +37,11 @@
 //! getters, the proto, and every binding — so an exporter that needs it today
 //! reads it from there; add it here in the same change that lands it upstream.
 //!
-//! A time-series row also carries **`association_id`**: the catalog row's own
-//! number, and the handle a consumer stores in its own model to reference the
-//! series later. It is what makes the round trip *preserve* references rather
-//! than merely reproduce rows — an import that assigned fresh ids would leave
-//! every reference in the document pointing at the wrong series — and the
-//! schema requires it on all six types.
-//!
-//! The wire spells it `association_id` where the store spells it
-//! [`TimeSeriesMetadata::id`]. That is this module's job, exactly as it maps
-//! `unit_system` between the store's snake_case and the schema's
-//! SCREAMING_CASE: inside the store the field sits among `owner_id`, `name`,
-//! and the rest, where the unqualified `id` is unambiguous; in a document that
-//! travels beside components and supplemental attributes it needs saying which
-//! id it is.
-//!
-//! The supplemental-attribute wire form deliberately carries no id — nothing
-//! references an attachment — which is why its export names its four fields
-//! explicitly rather than serializing the struct.
+//! A time-series row also carries **`association_id`**, the wire spelling of
+//! [`TimeSeriesMetadata::id`], required by the schema on all six types.
+//! Carrying it is what makes the round trip *preserve* the references a
+//! document holds rather than merely reproduce its rows. The
+//! supplemental-attribute wire form carries no id.
 //!
 //! On top of the shared fields, each of the six [`TimeSeriesType`] values adds
 //! its own geometry fields — see [`ts_row_to_json`] — and every field that
@@ -68,7 +55,7 @@
 //! milliseconds. `resolution` / `horizon` / `interval` are
 //! [`Period::to_iso8601`]'s canonical spelling, which is not always the
 //! "seconds" form a hand-written fixture might guess (`PT3600S` canonicalizes
-//! to `PT1H`) — see the fixture correction note below.
+//! to `PT1H`).
 //!
 //! # Export sort order
 //!
@@ -77,16 +64,6 @@
 //! features)`, compared as **typed** values — see [`SortKey`] for why that
 //! matters and how periods and features participate in a total order despite
 //! not being numeric.
-//!
-//! # Fixture correction
-//!
-//! The checked-in fixtures at `conformance/openapi_row_fixtures/*.json` were
-//! originally hand-written with seconds-canonical durations (`PT3600S`,
-//! `PT86400S`), matching a Julia binding's emitter. [`Period::to_iso8601`]
-//! canonicalizes differently — `PT3600S` → `PT1H`, `PT86400S` → `P1D`,
-//! `PT900S` → `PT15M`, `PT7200S` → `PT2H`, `PT14400S` → `PT4H` — so the
-//! fixtures were corrected to Rust's spelling rather than the module bending
-//! to match them; any ISO-8601 string remains schema-valid either way.
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
@@ -111,9 +88,7 @@ use crate::types::time_series::TimeSeriesType;
 /// by a stringified rendering) extends to the export order. Comparing
 /// `owner_id` as a string would sort `10` before `2`; comparing a
 /// [`FeatureValue::Int`] `1` against a [`FeatureValue::Str`] `"1"` by their
-/// JSON spelling would collide two values the catalog treats as distinct —
-/// exactly the `1` vs `"1"` stringification collision `IS.openapi_row_sort_key`
-/// used to risk.
+/// JSON spelling would collide two values the catalog treats as distinct.
 ///
 /// `resolution` / `interval` compare by their canonical ISO-8601 string
 /// (`Period::to_iso8601`): a legal, deterministic total order, even though it
@@ -590,17 +565,10 @@ fn export_sa_rows(store: &Store) -> Result<String> {
 /// The four fields the schema defines, named explicitly rather than serialized
 /// off [`SupplementalAttributeAssociation`] directly.
 ///
-/// The struct's own derive used to be the wire form by coincidence, which made
-/// every field added to it a silent wire change. It also stopped being correct
-/// the moment the type gained an `id`: that would have gone out in the JSON and
-/// come straight back as an unknown field, since [`RawSaRow`] denies them —
-/// an export its own importer rejects.
-///
-/// The id is deliberately absent. Nothing references an attachment the way a
-/// consumer references a time series, so it has no reason to cross the wire,
-/// and leaving it off means the vendored schema needs no change. The
-/// consequence to know: ids do not survive an export/import cycle here; the
-/// importer assigns fresh ones. Putting them on the wire later is additive.
+/// Naming them explicitly keeps a field added to the struct from silently
+/// becoming a wire change. The `id` is deliberately absent — nothing
+/// references an attachment — so ids do not survive an export/import cycle
+/// here; the importer assigns fresh ones.
 #[derive(Debug, Serialize)]
 struct SaWireRow<'a> {
     component_id: i64,

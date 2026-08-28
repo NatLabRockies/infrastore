@@ -275,17 +275,15 @@ pub const RESERVED_FEATURE_NAMES: &[&str] = &[
     "count",
     "data",
     "data_hash",
-    // `dtype` no longer names a metadata field -- `element_type` replaced it --
-    // but it stays reserved: it is still the spelling of a `TypedArray`'s
-    // physical type in every binding, so allowing it as a feature name would
-    // reintroduce exactly the shadowing this list exists to prevent.
+    // Reserved though it names no metadata field: it is the spelling of a
+    // `TypedArray`'s physical type in every binding, so allowing it as a
+    // feature name would reintroduce the shadowing this list prevents.
     "dtype",
     "element_shape",
     "element_type",
-    // `ext` no longer names a metadata field -- `application_data` replaced it
-    // -- but it stays reserved for the same reason `dtype` does, and with an
-    // extra one: a consumer still passing the old spelling would otherwise have
-    // it silently accepted as an ordinary feature instead of failing loudly.
+    // Reserved for the same reason as `dtype`, plus one more: a consumer
+    // passing this older spelling of `application_data` fails loudly instead of
+    // having it silently accepted as an ordinary feature.
     "ext",
     "features",
     "horizon",

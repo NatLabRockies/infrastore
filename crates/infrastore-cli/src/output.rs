@@ -192,9 +192,9 @@ fn write_line(text: &str) -> Result<(), String> {
 ///
 /// For the commands whose stdout *is* the artifact — `export` with no `--dir`,
 /// `plot --out -`, `template`. `print!` panics on `EPIPE` (Rust ignores
-/// `SIGPIPE`), so `infrastore plot --out - | head` used to die with "failed
-/// printing to stdout" and exit 101 once the document outgrew the pipe buffer.
-/// A reader that stops early is not an error.
+/// `SIGPIPE`), which would make `infrastore plot --out - | head` exit 101 once
+/// the document outgrew the pipe buffer. A reader that stops early is not an
+/// error.
 pub fn write_raw(text: &str) -> Result<(), String> {
     write_stdout(text, false)
 }

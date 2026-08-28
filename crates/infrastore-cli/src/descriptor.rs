@@ -197,17 +197,13 @@ impl CsvLayout {
 
 /// Which physical layout a companion CSV is in, read off its header row.
 ///
-/// `add` originally required each type's rawest form: bare values for a
-/// SingleTimeSeries or a forecast, `timestamp,value...` for a
-/// NonSequentialTimeSeries. But `export` writes timestamps for every type — they
-/// are the useful part of the output — so an exported file could not be fed back
-/// in, even though `export` is meant to be `add`'s inverse. Detecting the shape
-/// from the header closes that loop without a new flag and without changing what
-/// a hand-written value-only CSV means.
+/// `export` writes timestamps for every type, so detecting the layout from the
+/// header is what lets an exported file be fed straight back to `add` while a
+/// hand-written value-only CSV keeps meaning what it did.
 ///
-/// This is why the header row is mandatory rather than optional: the detection
-/// has no other input, and guessing wrong on a forecast transposes its axes
-/// silently rather than failing.
+/// This is why the header row is mandatory: the detection has no other input,
+/// and guessing wrong on a forecast transposes its axes silently rather than
+/// failing.
 fn csv_layout(header: &[String], ts_type: TimeSeriesType) -> CsvLayout {
     let col = |i: usize| header.get(i).map(|s| s.trim().to_ascii_lowercase());
     let first_is = |name: &str| col(0).as_deref() == Some(name);
@@ -374,12 +370,11 @@ fn parse_descriptors(text: &str, path: &str) -> Result<Vec<Descriptor>, String> 
     }
 }
 
-/// A serde error, plus a migration note for a field this schema used to have.
+/// A serde error, plus a migration note for a retired field.
 ///
-/// `deny_unknown_fields` turns a retired key into `unknown field
-/// \`has_header\`, expected one of ...`, which is accurate but tells a reader
-/// with a working descriptor from an older release nothing about *why* it
-/// stopped being accepted or what to do instead.
+/// `deny_unknown_fields` reports a retired key as `unknown field ...`, which is
+/// accurate but does not tell a reader carrying an older descriptor what to do
+/// instead.
 fn explain(e: serde_json::Error) -> String {
     let msg = e.to_string();
     if msg.contains("has_header") {

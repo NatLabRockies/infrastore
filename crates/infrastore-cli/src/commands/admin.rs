@@ -53,13 +53,11 @@ fn value_to_cell(v: &Value) -> String {
 
 /// `stats`: overall counts, detailed counts, per-type counts, distinct arrays.
 ///
-/// The labels below are deliberately explicit about *what is being counted*.
-/// The catalog reports two different quantities that used to sit next to each
-/// other under near-identical names: the number of catalog rows (associations),
-/// and the number of distinct stored arrays those rows point at. Content
-/// addressing makes them diverge sharply — a store where every series shares one
-/// array has thousands of associations and one array — so a reader who takes
-/// them for the same thing draws the wrong conclusion about storage.
+/// The labels below are deliberately explicit about *what is being counted*:
+/// catalog rows (associations) and distinct stored arrays are different
+/// quantities, and content addressing makes them diverge sharply — a store
+/// where every series shares one array has thousands of associations and one
+/// array.
 pub fn stats(store_path: &Path, format: Format) -> Result<(), String> {
     let store = store_access::open_readonly(store_path)?;
     let counts = store.get_time_series_counts().map_err(|e| e.to_string())?;
@@ -532,11 +530,9 @@ pub fn summary(
             output::display_csv_rows(&headers, &rows)?;
         }
         _ => {
-            // `Series` (not `Count`): this column is how many series fall in the
-            // group. The forecast table also has a real forecast `count` — the
-            // number of windows — and spelling both "Count" invited reading one
-            // as the other. `Time Steps` / `Windows` name the per-series shape
-            // the JSON has always carried but the table used to drop.
+            // `Series` (not `Count`): this column is how many series fall in
+            // the group, while the forecast table's own `count` is the number
+            // of windows. `Time Steps` / `Windows` name the per-series shape.
             if show_static {
                 println!("{}", color::header("Static series"));
                 let headers: Vec<String> = [

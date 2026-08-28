@@ -276,13 +276,11 @@ pub fn run(store_path: &Path, opts: &Options<'_>) -> Result<(), String> {
         //
         // On the failure path too, and that is the point. Creating the store
         // stamps the HDF5 half immediately, while an in-memory catalog writes no
-        // `.sqlite` until this call — so returning early on a mid-load error
-        // used to leave a stamped array file with no catalog beside it. That is
-        // the `MismatchedArtifact` state, and it is terminal: the store cannot
-        // be opened again, not even by the corrected re-run, and the user's only
-        // recovery is to delete the file. Every batch that did commit is
-        // all-or-nothing, so what we write here is a valid store holding exactly
-        // the batches that succeeded.
+        // `.sqlite` until this call, so returning early on a mid-load error
+        // would leave a stamped array file with no catalog beside it — the
+        // terminal `MismatchedArtifact` state, recoverable only by deleting the
+        // file. Every batch that did commit is all-or-nothing, so what we write
+        // here is a valid store holding exactly the batches that succeeded.
         let persisted = store.persist_catalog().map_err(|e| e.to_string());
         // The load error is the one that explains what went wrong; a persist
         // failure on top of it is a consequence, not the cause.

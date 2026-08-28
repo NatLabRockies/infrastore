@@ -2859,7 +2859,7 @@ fn map_unique_violation(e: rusqlite::Error) -> TimeSeriesError {
 /// A WAL-mode database needs its `-shm` index to be read, and SQLite creates
 /// that sidecar even for a read-only connection. Where the file cannot be
 /// created — a read-only mount, a directory the process may not write, an
-/// archive served to a reader — the open fails outright, which used to make a
+/// archive served to a reader — the open fails outright, which would make a
 /// perfectly readable store unopenable for the two callers that read one
 /// without writing: a `read_only` [`Store::open`] and the load-into-memory of
 /// [`MetadataStore::open_path_into_memory`].

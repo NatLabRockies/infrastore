@@ -83,10 +83,9 @@ pub fn run(
         .collect();
     // `--limit` and `--full` bound a display, so — exactly as in `get` — they
     // apply to the table and nowhere else. A `grid -f csv` pipe is read straight
-    // back by `add`, and an explicit `--limit` used to shorten it silently:
-    // the truncated file is still a valid wide CSV, so the missing hours only
-    // surface much later as a series that ends early. Slice a pipe with
-    // `--time-range` instead.
+    // back by `add`, and a truncated file is still a valid wide CSV, so
+    // shortening one here would surface much later as a series that ends early.
+    // Slice a pipe with `--time-range` instead.
     let max = match (format, full, limit) {
         (Format::Table, false, Some(n)) => n,
         (Format::Table, false, None) => DEFAULT_LIMIT,

@@ -1,10 +1,7 @@
 //! Interactive confirmation, and the global `--yes` that turns it off.
 //!
-//! Every destructive command used to carry its own `--force`, which meant a
-//! script had to know which commands prompt and spell the right flag for each.
-//! A single global `--yes` answers all of them; the per-command `--force` flags
-//! stay, because they are what a one-off invocation reaches for and they read
-//! better next to the command they belong to.
+//! The global `--yes` answers every prompt, so a script need not know which
+//! commands prompt. The per-command `--force` flags stay for one-off use.
 
 use std::io::{IsTerminal, Write};
 use std::sync::OnceLock;

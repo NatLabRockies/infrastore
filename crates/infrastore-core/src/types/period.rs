@@ -361,14 +361,11 @@ impl Period {
     /// (e.g. `-PT1H`, `-P1M`) parses as a negative period, so the output of
     /// [`Period::to_iso8601`] always round-trips.
     ///
-    /// Every arithmetic step is checked. `parse_components` applies no
-    /// uniqueness rule, so a string may repeat a unit (`P…D…D`), and only the
-    /// per-component multiplies used to be guarded — the accumulation was a bare
-    /// `+=`. A single day component can reach the edge of `i64` milliseconds on
-    /// its own, so repeating one overflowed: a panic in a debug build, and in a
-    /// release build, where the workspace profile leaves `overflow-checks` off,
-    /// a silently wrapped period. This is fully public and takes an arbitrary
-    /// caller string, including one arriving over gRPC.
+    /// Every arithmetic step is checked, accumulation included. No uniqueness
+    /// rule applies, so a string may repeat a unit (`P…D…D`), and a single day
+    /// component can already reach the edge of `i64` milliseconds — the
+    /// workspace release profile leaves `overflow-checks` off, so an unchecked
+    /// `+=` would wrap silently on caller input arriving over gRPC.
     pub fn from_iso8601(s: &str) -> Result<Period> {
         let trimmed = s.trim();
         let invalid =

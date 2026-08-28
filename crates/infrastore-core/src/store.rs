@@ -3131,10 +3131,7 @@ impl Store {
         if updated > 1 {
             // A key names one series, so touching more than one row means the
             // predicate was wider than the caller asked for. Fail *before* the
-            // commit: this used to commit a multi-row update and only then
-            // discover the ambiguity on the follow-up lookup, reporting an error
-            // for a rename that had already taken full effect. The `tx` drop
-            // rolls it back.
+            // commit, so the `tx` drop rolls the update back.
             return Err(TimeSeriesError::IntegrityError(format!(
                 "rename matched {updated} associations for a single key identity"
             )));
@@ -4801,8 +4798,7 @@ fn require_ms(t: chrono::DateTime<chrono::Utc>, label: &str) -> Result<()> {
 /// catalog — `check_static_consistency`, `transform_single_time_series`,
 /// `build_static_reader` — works off the wrong grid.
 ///
-/// The sibling [`validate_non_sequential`] has always enforced the equivalent
-/// rule; this is the static path catching up.
+/// [`validate_non_sequential`] enforces the equivalent rule.
 fn validate_single(series: &SingleTimeSeries) -> Result<()> {
     require_ms(series.initial_timestamp, "SingleTimeSeries")?;
     if series.length != series.data.length() {
@@ -5098,11 +5094,11 @@ fn persist_temp_path(target: &Path, tag: &str) -> PathBuf {
 /// silently absent on the network filesystems this runs on, so it stages the
 /// same way.
 ///
-/// The cost is that a crashed staging no longer gets swept by the next one:
-/// leftovers accumulate as `<target>.persist-<tag>` / `<store>.h5.repack-<tag>`
-/// siblings. They cannot be swept safely, because a temp belonging to a live
-/// concurrent save is indistinguishable from an abandoned one. Callers may
-/// delete them once no save is in flight.
+/// The cost is that a crashed staging is not swept: leftovers accumulate as
+/// `<target>.persist-<tag>` / `<store>.h5.repack-<tag>` siblings. They cannot
+/// be swept safely, because a temp belonging to a live concurrent save is
+/// indistinguishable from an abandoned one. Callers may delete them once no
+/// save is in flight.
 fn temp_tag() -> String {
     let mut tag = mint_generation();
     tag.truncate(16);

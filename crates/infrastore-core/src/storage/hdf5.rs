@@ -159,10 +159,10 @@ macro_rules! vec_from_le {
 ///
 /// A [`TypedArray`]'s buffer is already in the layout libhdf5 wants on a
 /// little-endian host, so this borrows it outright whenever the slice is
-/// `$t`-aligned — which is the case for a whole array buffer, and is the point:
-/// a write no longer allocates and fills a second copy of the data first. A
-/// misaligned slice (a sub-slice of a packed write, say) still only costs a
-/// memcpy. Big-endian hosts decode element by element, as before.
+/// `$t`-aligned — which is the case for a whole array buffer, so a write does
+/// not allocate and fill a second copy of the data first. A misaligned slice (a
+/// sub-slice of a packed write, say) costs a memcpy. Big-endian hosts decode
+/// element by element.
 macro_rules! le_values {
     ($bytes:expr, $t:ty, $n:expr) => {{
         #[cfg(target_endian = "little")]
@@ -1234,10 +1234,9 @@ impl Inner {
                     columns.insert(col, col_bytes);
                 }
             } else {
-                // Sparse: one hyperslab per column, which reads exactly what is
-                // returned. A wide pool asked for one late column used to read
-                // every column before it, over the pool's full time extent --
-                // gigabytes to return kilobytes.
+                // Sparse: one hyperslab per column, which reads exactly what
+                // is returned rather than every column up to the last one asked
+                // for.
                 for &col in cols {
                     columns.insert(
                         col,

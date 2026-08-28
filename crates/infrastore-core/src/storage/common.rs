@@ -85,7 +85,7 @@ pub(crate) fn window_block_cols(dtype: Dtype, shape: &[usize], count_axis: usize
 }
 
 /// The HDF5 chunk shape for a standalone array. `None` → one whole-array chunk
-/// (the historical layout, used for irregular series). `Some(axis)` → full on
+/// (used for irregular series). `Some(axis)` → full on
 /// every axis except `axis`, which is blocked to [`window_block_cols`] windows.
 pub(crate) fn standalone_chunks(data: &TypedArray, window_axis: Option<usize>) -> Vec<usize> {
     match window_axis {

@@ -74,7 +74,7 @@ impl ArrayLayout {
 }
 
 impl Default for Compression {
-    /// Matches the historical hard-coded behaviour: DEFLATE level 3 + shuffle.
+    /// DEFLATE level 3 + shuffle.
     fn default() -> Self {
         Compression::Deflate {
             level: 3,
