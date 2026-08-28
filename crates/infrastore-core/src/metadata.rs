@@ -1411,8 +1411,9 @@ impl MetadataStore {
         // Clearing the store empties it, so every feature set is unreachable by
         // construction. Drop them here rather than leaving the whole catalog's
         // worth of orphans for a compaction that a cleared store may never get.
-        // The timestamp vectors are unreachable too, but they are the array
-        // file's; `Store::clear` sweeps them from there.
+        // The timestamp vectors are unreachable on the same terms, but they live
+        // in the array file, which this connection has no handle on:
+        // `Store::clear_time_series` sweeps them once this commits.
         tx.execute("DELETE FROM feature_sets", [])?;
         Ok(hashes)
     }
@@ -3355,6 +3356,19 @@ pub fn references_to_in_tx(tx: &Connection, data_hash: &[u8; 32]) -> Result<i64>
     let count: i64 = tx
         .prepare_cached("SELECT COUNT(*) FROM time_series_associations WHERE data_hash = ?1")?
         .query_row(params![data_hash.as_slice()], |row| row.get(0))?;
+    Ok(count)
+}
+
+/// Count the associations sitting on the explicit time axis `timestamps_hash`,
+/// inside an in-flight transaction.
+///
+/// The timestamp-vector counterpart of [`references_to_in_tx`], and the reason
+/// it is a separate function rather than a parameter: an axis is referenced
+/// through its own column, so an array's reference count says nothing about it.
+pub fn timestamp_references_in_tx(tx: &Connection, timestamps_hash: &[u8; 32]) -> Result<i64> {
+    let count: i64 = tx
+        .prepare_cached("SELECT COUNT(*) FROM time_series_associations WHERE timestamps_hash = ?1")?
+        .query_row(params![timestamps_hash.as_slice()], |row| row.get(0))?;
     Ok(count)
 }
 

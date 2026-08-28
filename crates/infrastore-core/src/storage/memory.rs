@@ -112,10 +112,6 @@ impl StorageBackend for MemoryBackend {
         crate::timestamps::from_millis(millis)
     }
 
-    fn contains_timestamps(&self, hash: &[u8; 32]) -> Result<bool> {
-        Ok(self.timestamps.contains_key(hash))
-    }
-
     fn remove_timestamps(&mut self, hash: &[u8; 32]) -> Result<()> {
         self.timestamps.remove(hash);
         Ok(())

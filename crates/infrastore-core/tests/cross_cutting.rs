@@ -699,6 +699,74 @@ fn sub_millisecond_non_sequential_timestamps_are_refused() {
     }
 }
 
+/// A leap second is a whole number of milliseconds, so it clears the
+/// sub-millisecond rule — and it still cannot be stored, because a unix
+/// millisecond count cannot express one. It folds onto the following second,
+/// which would make two distinct instants one stored instant.
+#[test]
+fn leap_second_instants_are_refused() {
+    let leap = chrono::NaiveDate::from_ymd_opt(2016, 12, 31)
+        .unwrap()
+        .and_hms_milli_opt(23, 59, 59, 1_000)
+        .unwrap()
+        .and_utc();
+    // The premise: it passes the precision rule's own arithmetic, and collides
+    // with the second after it once written as milliseconds.
+    let next = Utc.with_ymd_and_hms(2017, 1, 1, 0, 0, 0).unwrap();
+    assert_ne!(leap, next);
+    assert_eq!(leap.timestamp_millis(), next.timestamp_millis());
+
+    // In a timestamp vector, at a position after the first.
+    let series = NonSequentialTimeSeries::new(
+        vec![leap - Duration::hours(1), leap, next + Duration::hours(1)],
+        TypedArray::from_f64(vec![3], &[1.0, 2.0, 3.0]),
+        "outage",
+    )
+    .unwrap();
+    let mut store = create_store(None, true).unwrap();
+    let err = store
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::NonSequentialTimeSeries(series),
+        ))
+        .unwrap_err();
+    assert!(
+        matches!(err, infrastore_core::TimeSeriesError::InvalidParameter(ref m)
+            if m.contains("leap second") && m.contains("timestamp 1")),
+        "expected an InvalidParameter naming the offending index, got {err:?}"
+    );
+
+    // And as a regular series' initial_timestamp, which crosses the C ABI and
+    // Julia as the same `i64` millisecond count.
+    let err = store
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            sts_at("load", leap, Duration::hours(1)),
+        ))
+        .unwrap_err();
+    assert!(
+        matches!(err, infrastore_core::TimeSeriesError::InvalidParameter(ref m)
+            if m.contains("leap second")),
+        "{err:?}"
+    );
+
+    // The second either side of it is ordinary.
+    for ok in [next, leap - Duration::hours(1)] {
+        store
+            .add(AddRequest::new(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                sts_at(&format!("load{}", ok.timestamp()), ok, Duration::hours(1)),
+            ))
+            .unwrap();
+    }
+}
+
 // ===========================================================================
 // 4.2 Concurrency contract
 // ===========================================================================

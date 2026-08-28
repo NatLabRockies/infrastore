@@ -19,9 +19,10 @@
 //! everywhere.
 //!
 //! Milliseconds are the store's precision floor
-//! ([`require_millisecond_precision`]), so the encoding is exact for anything a
-//! write accepts, and [`crate::hash::timestamps_hash`] content-addresses a
-//! vector by hashing exactly these values.
+//! ([`require_millisecond_precision`], which refuses a finer instant and a leap
+//! second alike), so the encoding is exact for anything a write accepts, and
+//! [`crate::hash::timestamps_hash`] content-addresses a vector by hashing
+//! exactly these values.
 
 use chrono::{DateTime, Utc};
 
@@ -51,16 +52,33 @@ use crate::error::{Result, TimeSeriesError};
 /// that funnels through it), which is what lets the stored form be milliseconds
 /// outright: nothing finer can reach it.
 ///
-/// A leap second is spelled by chrono as a sub-second component at or above one
-/// second; the modulo below reads its *fractional* part, so a leap second on a
-/// whole millisecond is accepted like any other instant. Its extra second is not
-/// preserved by the stored form — [`to_millis`] folds it into the following
-/// second — which is the same normalization every other consumer of a unix
-/// millisecond count applies.
+/// A **leap second** is refused for the same reason and by the same rule, though
+/// it takes its own check. Chrono spells one as a sub-second component at or
+/// above one second (`23:59:60` is `23:59:59` plus 1,000,000,000 ns), which is a
+/// whole number of milliseconds and so passes the modulo — but it is not a unix
+/// millisecond count at all: [`to_millis`] folds it onto the *following* second,
+/// which every consumer of a unix timestamp does. Folding is what makes it
+/// unacceptable here rather than merely lossy. A leap second and the second
+/// after it are distinct `DateTime`s that would land on one stored instant, so
+/// they share a [`timestamps_hash`](crate::hash::timestamps_hash) — two
+/// genuinely different time axes interned as one, each reading back as whichever
+/// was stored first. Within one vector it is worse: `[…, 23:59:60, 00:00:00]` is
+/// strictly increasing going in and holds a duplicate coming back out.
 pub(crate) fn require_millisecond_precision(
     t: DateTime<Utc>,
     label: impl FnOnce() -> String,
 ) -> std::result::Result<(), String> {
+    // Read before the modulo: a leap second's sub-second component is a whole
+    // number of milliseconds, so the modulo would pass it.
+    if t.timestamp_subsec_nanos() >= 1_000_000_000 {
+        let label = label();
+        return Err(format!(
+            "{label} {t} is a leap second; the store records instants as unix milliseconds, \
+             which cannot express one — it would be stored as the following second, and two \
+             series a leap second apart would share one stored timestamp. Use the second \
+             before or after it."
+        ));
+    }
     if !t.timestamp_subsec_nanos().is_multiple_of(1_000_000) {
         let label = label();
         return Err(format!(
@@ -75,9 +93,11 @@ pub(crate) fn require_millisecond_precision(
 /// The stored form of a timestamp vector: unix milliseconds, one `i64` each.
 ///
 /// Exact for every instant a write accepts (see
-/// [`require_millisecond_precision`]) and infallible for the rest: chrono's own
-/// range is ±262,000 years, four orders of magnitude inside what `i64`
-/// milliseconds can count.
+/// [`require_millisecond_precision`], which is what keeps the one instant this
+/// *cannot* represent — a leap second, folded here onto the following second —
+/// off the write path) and infallible for the rest: chrono's own range is
+/// ±262,000 years, four orders of magnitude inside what `i64` milliseconds can
+/// count.
 pub(crate) fn to_millis(timestamps: &[DateTime<Utc>]) -> Vec<i64> {
     timestamps.iter().map(|t| t.timestamp_millis()).collect()
 }
@@ -155,6 +175,31 @@ mod tests {
         assert!(require_millisecond_precision(t0() + Duration::milliseconds(7), label).is_ok());
         assert!(require_millisecond_precision(t0() + Duration::microseconds(1), label).is_err());
         assert!(require_millisecond_precision(t0() + Duration::nanoseconds(1), label).is_err());
+    }
+
+    /// A leap second is a whole number of milliseconds and would sail through
+    /// the modulo, but it is not a unix millisecond count: it folds onto the
+    /// following second, which the two assertions below show colliding.
+    #[test]
+    fn a_leap_second_is_refused_because_it_folds_onto_the_next_instant() {
+        let leap = chrono::NaiveDate::from_ymd_opt(2016, 12, 31)
+            .unwrap()
+            .and_hms_milli_opt(23, 59, 59, 1_000)
+            .unwrap()
+            .and_utc();
+        let next = Utc.with_ymd_and_hms(2017, 1, 1, 0, 0, 0).unwrap();
+        assert_ne!(leap, next, "distinct instants going in");
+        assert_eq!(
+            leap.timestamp_millis(),
+            next.timestamp_millis(),
+            "one stored instant coming out"
+        );
+        assert!(leap.timestamp_subsec_nanos().is_multiple_of(1_000_000));
+
+        let err = require_millisecond_precision(leap, || "timestamp".to_string())
+            .expect_err("a leap second must not reach the store");
+        assert!(err.contains("leap second"), "{err}");
+        assert!(require_millisecond_precision(next, || "timestamp".to_string()).is_ok());
     }
 
     #[test]

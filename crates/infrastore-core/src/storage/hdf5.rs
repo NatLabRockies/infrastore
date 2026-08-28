@@ -1640,11 +1640,6 @@ impl StorageBackend for Hdf5Backend {
         crate::timestamps::from_millis(&millis)
     }
 
-    fn contains_timestamps(&self, hash: &[u8; 32]) -> Result<bool> {
-        let inner = self.inner.lock().expect("mutex poisoned");
-        Ok(inner.timestamp_hashes.contains(hash))
-    }
-
     fn remove_timestamps(&mut self, hash: &[u8; 32]) -> Result<()> {
         let inner = self.inner.get_mut().expect("mutex poisoned");
         inner.ensure_writable()?;

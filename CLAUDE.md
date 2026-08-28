@@ -316,11 +316,13 @@ cargo run -p infrastore-server -- --config my_server.toml
   milliseconds; every _instant_ the store records (a `SingleTimeSeries` or forecast
   `initial_timestamp`, every entry of a `NonSequentialTimeSeries` vector) is held to the same floor,
   enforced on the write path in `Store`'s `validate_data` and refused with `InvalidParameter` rather
-  than truncated. The reason is cross-binding: the C ABI and Julia exchange instants as `i64` Unix
-  milliseconds and Python's `datetime` is microsecond, so a finer instant is silently truncated at
-  some boundaries and not others. Reads stay permissive so a pre-rule artifact still reads back
-  exactly, which is why the rule does not bump `DATA_FORMAT_VERSION`. Query bounds (`time_range`, a
-  reader's `when`) are deliberately unconstrained.
+  than truncated. A leap second is refused by the same rule: unix milliseconds cannot express one,
+  so storing it would fold it onto the following second and make two distinct instants one. The
+  reason is cross-binding: the C ABI and Julia exchange instants as `i64` Unix milliseconds and
+  Python's `datetime` is microsecond, so a finer instant is silently truncated at some boundaries
+  and not others. Reads stay permissive so a pre-rule artifact still reads back exactly, which is
+  why the rule does not bump `DATA_FORMAT_VERSION`. Query bounds (`time_range`, a reader's `when`)
+  are deliberately unconstrained.
 - `DATA_FORMAT_VERSION` in `crates/infrastore-core/src/version.rs` is the on-disk compatibility
   contract. Any incompatible HDF5 layout, SQLite schema, dtype encoding, or hashing change must bump
   it and update format documentation and compatibility tests.

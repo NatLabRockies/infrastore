@@ -2075,6 +2075,160 @@ fn compaction_unlinks_a_time_axis_nothing_references() {
     assert!(timestamp_datasets(&path).is_empty());
 }
 
+/// A time axis content-addresses its own values, so `verify_integrity` rehashes
+/// it exactly as it rehashes an array. Presence alone would report this store
+/// clean while every read of the cohort silently returned an axis nobody wrote.
+#[test]
+fn verify_integrity_reports_a_time_axis_perturbed_behind_its_hash() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.h5");
+    let stamps = irregular_store(&path, 2);
+
+    // Move one instant, leaving the dataset — and so its recorded hash — alone.
+    {
+        let f = hdf5_metno::File::open_rw(&path).unwrap();
+        let name = timestamp_datasets(&path)[0].clone();
+        let ds = f
+            .dataset(&format!("time_series/timestamps/{name}"))
+            .unwrap();
+        let mut millis = ds.read_raw::<i64>().unwrap();
+        millis[2] += 60_000;
+        ds.write_raw(&millis).unwrap();
+    }
+
+    let store = open_store(path.as_path(), true).unwrap();
+    let report = store.verify_integrity().unwrap();
+    assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
+    assert!(
+        report.errors[0].contains("timestamp vector hash mismatch"),
+        "{:?}",
+        report.errors
+    );
+
+    // The arrays are untouched, so the read still succeeds — which is exactly
+    // why the check has to exist: it hands back an axis that is not the one
+    // written.
+    match store.get_time_series(
+        store.list_keys(ListFilter::new()).unwrap()[0].identity(),
+        None,
+    ) {
+        Ok(TimeSeriesData::NonSequentialTimeSeries(got)) => assert_ne!(got.timestamps, stamps),
+        other => panic!("expected the altered series to read, got {other:?}"),
+    }
+}
+
+/// Clearing orphans every axis at once, and a cleared store may never see a
+/// compaction, so the clear reclaims them itself.
+#[test]
+fn clearing_the_store_reclaims_its_time_axes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.h5");
+    irregular_store(&path, 3);
+
+    let mut store = open_store(path.as_path(), false).unwrap();
+    assert_eq!(timestamp_datasets(&path).len(), 1);
+    assert_eq!(store.clear_time_series(None).unwrap(), 3);
+    store.flush().unwrap();
+    drop(store);
+    assert!(
+        timestamp_datasets(&path).is_empty(),
+        "a cleared store still holds its time axes"
+    );
+}
+
+/// A rolled-back transaction leaves neither half of what it wrote: the array is
+/// removed, and so is the time axis the same add interned.
+#[test]
+fn rolling_back_a_transaction_removes_the_time_axis_it_wrote() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.h5");
+    let stamps: Vec<_> = (0..6)
+        .map(|k| Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap() + Duration::minutes(k * 7))
+        .collect();
+
+    let mut store = create_store(Some(path.as_path()), false).unwrap();
+    store.begin_transaction().unwrap();
+    let ns = NonSequentialTimeSeries::new(
+        stamps.clone(),
+        TypedArray::from_f64(vec![6], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+        "outage",
+    )
+    .unwrap();
+    store
+        .add_time_series(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::NonSequentialTimeSeries(ns),
+            Features::new(),
+        )
+        .unwrap();
+    store.flush().unwrap();
+    assert_eq!(timestamp_datasets(&path).len(), 1, "written inside the txn");
+
+    store.rollback_transaction().unwrap();
+    store.flush().unwrap();
+    assert!(
+        store.list_keys(ListFilter::new()).unwrap().is_empty(),
+        "the catalog rolled back"
+    );
+    assert!(
+        timestamp_datasets(&path).is_empty(),
+        "the axis outlived the transaction that wrote it"
+    );
+
+    // An axis that predates the transaction survives one: only what the
+    // transaction itself wrote is unwound.
+    let ns = NonSequentialTimeSeries::new(
+        stamps.clone(),
+        TypedArray::from_f64(vec![6], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+        "outage",
+    )
+    .unwrap();
+    store
+        .add_time_series(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::NonSequentialTimeSeries(ns),
+            Features::new(),
+        )
+        .unwrap();
+    store.begin_transaction().unwrap();
+    let ns = NonSequentialTimeSeries::new(
+        stamps.clone(),
+        TypedArray::from_f64(vec![6], &[9.0, 8.0, 7.0, 6.0, 5.0, 4.0]),
+        "outage",
+    )
+    .unwrap();
+    store
+        .add_time_series(
+            2,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::NonSequentialTimeSeries(ns),
+            Features::new(),
+        )
+        .unwrap();
+    store.rollback_transaction().unwrap();
+    store.flush().unwrap();
+    assert_eq!(
+        timestamp_datasets(&path).len(),
+        1,
+        "the surviving series' axis was swept with the rollback"
+    );
+    match store
+        .get_time_series(
+            store.list_keys(ListFilter::new()).unwrap()[0].identity(),
+            None,
+        )
+        .unwrap()
+    {
+        TimeSeriesData::NonSequentialTimeSeries(got) => assert_eq!(got.timestamps, stamps),
+        other => panic!("expected a NonSequentialTimeSeries, got {other:?}"),
+    }
+}
+
 /// A row naming a time axis the file does not hold is corruption, not an empty
 /// timeline: `verify_integrity` names it, and a read of the series fails rather
 /// than handing back a vectorless row.

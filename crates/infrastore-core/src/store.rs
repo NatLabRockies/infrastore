@@ -10,7 +10,8 @@ use crate::hash::array_hash;
 use crate::metadata::{
     AssociationIdentity, MetadataFilter, MetadataStore, ParentChildAssociation, ParentChildFilter,
     SeriesFamily, SharedSetCache, SupplementalAttributeAssociation, SupplementalAttributeFilter,
-    SupplementalAttributeSummaryRow, TypeMatch, references_to_in_tx, typed_references_to_in_tx,
+    SupplementalAttributeSummaryRow, TypeMatch, references_to_in_tx, timestamp_references_in_tx,
+    typed_references_to_in_tx,
 };
 use crate::reader::{ForecastReader, StaticReader};
 use crate::storage::{
@@ -578,18 +579,49 @@ struct OpenTxn {
     /// rollback — they are unreachable once the catalog rolls back, and leaving
     /// them would orphan bytes no association references.
     staged_hashes: Vec<[u8; 32]>,
-    /// `staged_hashes.len()` as each nesting level was opened, so a rollback can
-    /// tell which writes belong to the level it is unwinding. Without it an
-    /// inner rollback unwound the catalog but left its arrays in the file: the
-    /// outer commit only consults `pending_free`, so the bytes stayed with no
-    /// row referencing them — invisible to `verify_integrity`, which walks only
-    /// catalog-referenced arrays, and reclaimable only by `compact`.
-    marks: Vec<usize>,
+    /// Explicit timestamp vectors this transaction physically wrote, in write
+    /// order, and unwound on rollback for exactly the reasons above. Tracked
+    /// separately from `staged_hashes` because liveness is a different question
+    /// for them: an axis is referenced through `timestamps_hash`, not
+    /// `data_hash`.
+    staged_timestamps: Vec<[u8; 32]>,
+    /// The lengths of both staged lists as each nesting level was opened, so a
+    /// rollback can tell which writes belong to the level it is unwinding.
+    /// Without it an inner rollback unwound the catalog but left its writes in
+    /// the file: the outer commit only consults the pending-free sets, so the
+    /// bytes stayed with no row referencing them — invisible to
+    /// `verify_integrity`, which walks only catalog-referenced objects, and
+    /// reclaimable only by `compact`.
+    marks: Vec<Mark>,
     /// Arrays that a removal inside this transaction left unreferenced. The free
     /// is deferred to the outermost commit: while the transaction is open the
     /// bytes must survive, because a rollback restores the catalog rows that
     /// point at them.
     pending_free: HashSet<[u8; 32]>,
+    /// Timestamp vectors a clear inside this transaction left unreferenced,
+    /// deferred on the same terms as `pending_free`.
+    pending_free_timestamps: HashSet<[u8; 32]>,
+}
+
+/// What one write call physically put into the array file, so it can be undone
+/// if the call fails and handed to an enclosing transaction if it succeeds.
+///
+/// Only what the call *wrote* is recorded. Content addressing means a put of a
+/// hash the store already held is a no-op, and unwinding one of those would
+/// delete data the call did not create — so both backends report whether a put
+/// was a write, and only those land here.
+#[derive(Debug, Default)]
+struct StagedWrites {
+    arrays: Vec<[u8; 32]>,
+    timestamps: Vec<[u8; 32]>,
+}
+
+/// How much of each staged list belonged to the enclosing nesting level. See
+/// [`OpenTxn::marks`].
+#[derive(Debug, Clone, Copy, Default)]
+struct Mark {
+    arrays: usize,
+    timestamps: usize,
 }
 
 /// Where a store's SQLite catalog lives, independent of where its arrays live.
@@ -1003,7 +1035,10 @@ impl Store {
         self.metadata
             .execute_txn_stmt(&format!("SAVEPOINT {};", Self::txn_savepoint(depth)))?;
         let txn = self.txn.get_or_insert_with(OpenTxn::default);
-        txn.marks.push(txn.staged_hashes.len());
+        txn.marks.push(Mark {
+            arrays: txn.staged_hashes.len(),
+            timestamps: txn.staged_timestamps.len(),
+        });
         txn.depth = depth + 1;
         tracing::debug!(depth = depth + 1, "transaction begun");
         Ok(())
@@ -1020,10 +1055,23 @@ impl Store {
         let depth = self.txn_depth()? - 1;
         // Decide what to free *before* releasing, while the transaction's view of
         // the catalog is still the one the commit is about to make permanent.
-        let to_free = if depth == 0 {
-            self.unreferenced(|t| std::mem::take(&mut t.pending_free).into_iter().collect())?
+        let (to_free, axes_to_free) = if depth == 0 {
+            (
+                self.unreferenced(
+                    |t| std::mem::take(&mut t.pending_free).into_iter().collect(),
+                    references_to_in_tx,
+                )?,
+                self.unreferenced(
+                    |t| {
+                        std::mem::take(&mut t.pending_free_timestamps)
+                            .into_iter()
+                            .collect()
+                    },
+                    timestamp_references_in_tx,
+                )?,
+            )
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
         self.metadata
             .execute_txn_stmt(&format!("RELEASE {};", Self::txn_savepoint(depth)))?;
@@ -1039,7 +1087,14 @@ impl Store {
         for hash in &to_free {
             self.backend.remove_array(hash)?;
         }
-        tracing::debug!(freed = to_free.len(), "transaction committed");
+        for hash in &axes_to_free {
+            self.backend.remove_timestamps(hash)?;
+        }
+        tracing::debug!(
+            freed = to_free.len(),
+            axes_freed = axes_to_free.len(),
+            "transaction committed"
+        );
         Ok(())
     }
 
@@ -1059,41 +1114,70 @@ impl Store {
         self.metadata
             .execute_txn_stmt(&format!("ROLLBACK TO {name}; RELEASE {name};"))?;
         if depth > 0 {
-            // The catalog has unwound this level, so the arrays it wrote are as
-            // unreachable as an outermost rollback's — free them on the same
-            // terms rather than leaving them for the outer commit, which only
-            // ever looks at `pending_free` and would strand them in the file.
-            // `unreferenced` rechecks each one, so a hash that predates this
-            // level, or that an enclosing level also wrote, is kept.
+            // The catalog has unwound this level, so the arrays and time axes it
+            // wrote are as unreachable as an outermost rollback's — free them on
+            // the same terms rather than leaving them for the outer commit,
+            // which only ever looks at the pending-free sets and would strand
+            // them in the file. `unreferenced` rechecks each one, so a hash that
+            // predates this level, or that an enclosing level also wrote, is
+            // kept.
             let mark = {
                 let txn = self.txn.as_mut().expect("checked above");
                 txn.depth = depth;
-                txn.marks.pop().unwrap_or(0)
+                txn.marks.pop().unwrap_or_default()
             };
-            let to_free = self.unreferenced(|t| t.staged_hashes.split_off(mark))?;
+            let to_free = self.unreferenced(
+                |t| t.staged_hashes.split_off(mark.arrays),
+                references_to_in_tx,
+            )?;
+            let axes_to_free = self.unreferenced(
+                |t| t.staged_timestamps.split_off(mark.timestamps),
+                timestamp_references_in_tx,
+            )?;
             for hash in &to_free {
                 self.backend.remove_array(hash)?;
+            }
+            for hash in &axes_to_free {
+                self.backend.remove_timestamps(hash)?;
             }
             tracing::debug!(
                 depth,
                 removed = to_free.len(),
+                axes_removed = axes_to_free.len(),
                 "inner transaction rolled back"
             );
             return Ok(());
         }
         // The catalog is back to its pre-transaction state, so anything this
         // transaction wrote is now unreferenced and must go. Recheck rather than
-        // trusting the staged list: an array can predate the transaction and have
-        // been re-referenced by a rolled-back add.
-        let to_free =
-            self.unreferenced(|t| std::mem::take(&mut t.staged_hashes).into_iter().collect())?;
+        // trusting the staged lists: an array or an axis can predate the
+        // transaction and have been re-referenced by a rolled-back add.
+        let to_free = self.unreferenced(
+            |t| std::mem::take(&mut t.staged_hashes).into_iter().collect(),
+            references_to_in_tx,
+        )?;
+        let axes_to_free = self.unreferenced(
+            |t| {
+                std::mem::take(&mut t.staged_timestamps)
+                    .into_iter()
+                    .collect()
+            },
+            timestamp_references_in_tx,
+        )?;
         // Deferred frees are abandoned: rollback restored the rows pointing at
         // those arrays, so the data must stay.
         self.txn = None;
         for hash in &to_free {
             self.backend.remove_array(hash)?;
         }
-        tracing::debug!(removed = to_free.len(), "transaction rolled back");
+        for hash in &axes_to_free {
+            self.backend.remove_timestamps(hash)?;
+        }
+        tracing::debug!(
+            removed = to_free.len(),
+            axes_removed = axes_to_free.len(),
+            "transaction rolled back"
+        );
         Ok(())
     }
 
@@ -1106,9 +1190,15 @@ impl Store {
 
     /// Take a set of candidate hashes off the open transaction with `take`, and
     /// return those the catalog no longer references.
+    ///
+    /// `count` is what "references" means for the kind of hash being taken: an
+    /// array is referenced through `data_hash`, an explicit time axis through
+    /// `timestamps_hash`. Both are counted inside the same savepoint, against
+    /// the catalog as this commit or rollback has just left it.
     fn unreferenced(
         &mut self,
         take: impl FnOnce(&mut OpenTxn) -> Vec<[u8; 32]>,
+        count: impl Fn(&rusqlite::Connection, &[u8; 32]) -> Result<i64>,
     ) -> Result<Vec<[u8; 32]>> {
         let candidates = take(self.txn.as_mut().expect("caller checked a txn is open"));
         if candidates.is_empty() {
@@ -1118,7 +1208,7 @@ impl Store {
         let mut out = Vec::new();
         let mut seen = HashSet::new();
         for hash in candidates {
-            if seen.insert(hash) && references_to_in_tx(&tx, &hash)? == 0 {
+            if seen.insert(hash) && count(&tx, &hash)? == 0 {
                 out.push(hash);
             }
         }
@@ -1135,6 +1225,55 @@ impl Store {
         }
     }
 
+    /// Close out a write call: hand its staged writes to an enclosing
+    /// transaction if it succeeded, or undo them if it did not.
+    ///
+    /// This is what makes "all-or-nothing" hold for *every* way a write can
+    /// fail, not just the metadata insert. A failing `put_array` part-way
+    /// through a batch, a backend error while staging a time axis, and a
+    /// `commit` that does not take all leave writes behind otherwise — the
+    /// catalog rolls itself back through the savepoint's `Drop`, and the file
+    /// has no transaction to enlist, so the unwinding has to be explicit and has
+    /// to cover the `?` exits.
+    ///
+    /// Removal failures during the unwind are swallowed deliberately: the
+    /// original error is what the caller needs, and a store that cannot remove
+    /// what it just wrote has a bigger problem than an orphaned array, which
+    /// `compact` reclaims anyway.
+    fn settle<T>(&mut self, staged: StagedWrites, result: Result<T>) -> Result<T> {
+        match result {
+            Ok(value) => {
+                // Outside a transaction these are no-ops: the call has already
+                // unwound its own writes on every failing path.
+                for hash in staged.arrays {
+                    self.note_array_written(hash);
+                }
+                for hash in staged.timestamps {
+                    self.note_timestamps_written(hash);
+                }
+                Ok(value)
+            }
+            Err(e) => {
+                for hash in &staged.arrays {
+                    let _ = self.backend.remove_array(hash);
+                }
+                for hash in &staged.timestamps {
+                    let _ = self.backend.remove_timestamps(hash);
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// [`Self::note_array_written`] for an explicit time axis. Same contract:
+    /// only a vector this call physically wrote is recorded, so a rollback
+    /// removes what it added and leaves what it found.
+    fn note_timestamps_written(&mut self, hash: [u8; 32]) {
+        if let Some(txn) = self.txn.as_mut() {
+            txn.staged_timestamps.push(hash);
+        }
+    }
+
     /// Free `hash`, or defer the free to the outermost commit when a transaction
     /// is open — while it is, a rollback can still restore the associations that
     /// reference the array, so its bytes have to survive.
@@ -1145,6 +1284,19 @@ impl Store {
                 Ok(())
             }
             None => self.backend.remove_array(&hash),
+        }
+    }
+
+    /// [`Self::free_or_defer`] for an explicit time axis, deferred on the same
+    /// terms: a rollback restores the rows that sat on it, so it has to survive
+    /// while the transaction is open.
+    fn free_or_defer_timestamps(&mut self, hash: [u8; 32]) -> Result<()> {
+        match self.txn.as_mut() {
+            Some(txn) => {
+                txn.pending_free_timestamps.insert(hash);
+                Ok(())
+            }
+            None => self.backend.remove_timestamps(&hash),
         }
     }
 
@@ -1212,6 +1364,20 @@ impl Store {
     /// chunking. All-or-nothing, like [`Self::add_time_series_bulk`].
     #[tracing::instrument(skip(self, items), fields(count = items.len()))]
     fn add_per_column(&mut self, items: Vec<AddRequest>) -> Result<Vec<AddedTimeSeries>> {
+        let mut staged = StagedWrites::default();
+        let result = self.add_per_column_staged(items, &mut staged);
+        self.settle(staged, result)
+    }
+
+    /// The body of [`Self::add_per_column`], recording what it physically wrote
+    /// into `staged`. Every exit — including the `?` ones — hands `staged` back
+    /// to [`Self::settle`], which is what makes the all-or-nothing claim true
+    /// for the failures that are not the metadata insert.
+    fn add_per_column_staged(
+        &mut self,
+        items: Vec<AddRequest>,
+        staged: &mut StagedWrites,
+    ) -> Result<Vec<AddedTimeSeries>> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
@@ -1224,9 +1390,6 @@ impl Store {
             .collect::<Result<_>>()?;
         resolve_irregular_layouts(&*self.backend, &items, &mut parts);
 
-        // Stage backend writes so we can roll them back on metadata error.
-        let mut staged_hashes: Vec<[u8; 32]> = Vec::with_capacity(items.len());
-        let mut staged_timestamps: Vec<[u8; 32]> = Vec::new();
         let tx = self.metadata.savepoint()?;
         let mut added = Vec::with_capacity(items.len());
         // Feature sets and timestamp vectors are shared, and a batch typically
@@ -1260,39 +1423,18 @@ impl Store {
                 group,
                 meta.timestamps.as_deref(),
                 &mut shared_sets,
-                &mut staged_timestamps,
+                staged,
             )?;
             self.backend.put_array(&hash, data, group, layout)?;
             if !already_present {
-                staged_hashes.push(hash);
+                staged.arrays.push(hash);
             }
 
-            match insert_association(&tx, &meta, &mut shared_sets) {
-                Ok(id) => {
-                    added.push(AddedTimeSeries { key, id });
-                }
-                Err(e) => {
-                    // Rollback metadata via Drop; also undo any array puts we
-                    // staged in this call so the store returns to its prior state.
-                    drop(tx);
-                    for staged in &staged_hashes {
-                        let _ = self.backend.remove_array(staged);
-                    }
-                    for staged in &staged_timestamps {
-                        let _ = self.backend.remove_timestamps(staged);
-                    }
-                    return Err(e);
-                }
-            }
+            let id = insert_association(&tx, &meta, &mut shared_sets)?;
+            added.push(AddedTimeSeries { key, id });
         }
 
         tx.commit()?;
-        // Hand the writes to an enclosing transaction, which owns undoing them
-        // if it rolls back. Outside one this is a no-op: the call has already
-        // unwound its own writes on every failing path above.
-        for hash in staged_hashes {
-            self.note_array_written(hash);
-        }
         tracing::debug!(count = added.len(), "transaction committed");
         Ok(added)
     }
@@ -1317,6 +1459,18 @@ impl Store {
     /// and removes every array staged in this call.
     #[tracing::instrument(skip(self, items), fields(count = items.len()))]
     fn flush_bulk_add(&mut self, items: Vec<AddRequest>) -> Result<Vec<AddedTimeSeries>> {
+        let mut staged = StagedWrites::default();
+        let result = self.flush_bulk_add_staged(items, &mut staged);
+        self.settle(staged, result)
+    }
+
+    /// The body of [`Self::flush_bulk_add`]. See
+    /// [`Self::add_per_column_staged`] for why it is split this way.
+    fn flush_bulk_add_staged(
+        &mut self,
+        items: Vec<AddRequest>,
+        staged: &mut StagedWrites,
+    ) -> Result<Vec<AddedTimeSeries>> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
@@ -1330,8 +1484,6 @@ impl Store {
             .map(build_request_parts)
             .collect::<Result<_>>()?;
         resolve_irregular_layouts(&*self.backend, &items, &mut parts);
-        let mut staged_hashes: Vec<[u8; 32]> = Vec::new();
-        let mut staged_timestamps: Vec<[u8; 32]> = Vec::new();
         // Shared across the whole call: the timestamp vectors are written in the
         // loop below, the feature sets by `insert_association` further down, and
         // both are deduplicated over the same batch.
@@ -1342,7 +1494,7 @@ impl Store {
                 part.group,
                 part.meta.timestamps.as_deref(),
                 &mut shared_sets,
-                &mut staged_timestamps,
+                staged,
             )?;
         }
 
@@ -1362,7 +1514,7 @@ impl Store {
                 let already = self.backend.contains(&p.hash)?;
                 self.backend.put_array(&p.hash, array, p.group, p.layout)?;
                 if !already {
-                    staged_hashes.push(p.hash);
+                    staged.arrays.push(p.hash);
                 }
             }
         }
@@ -1372,7 +1524,7 @@ impl Store {
             let written = self.backend.put_packed_block(&hashes, &arrays, pool.3)?;
             for (j, &i) in idxs.iter().enumerate() {
                 if written[j] {
-                    staged_hashes.push(parts[i].hash);
+                    staged.arrays.push(parts[i].hash);
                 }
             }
         }
@@ -1381,24 +1533,9 @@ impl Store {
         let tx = self.metadata.savepoint()?;
         let mut ids = Vec::with_capacity(parts.len());
         for p in &parts {
-            match insert_association(&tx, &p.meta, &mut shared_sets) {
-                Ok(id) => ids.push(id),
-                Err(e) => {
-                    drop(tx);
-                    for staged in &staged_hashes {
-                        let _ = self.backend.remove_array(staged);
-                    }
-                    for staged in &staged_timestamps {
-                        let _ = self.backend.remove_timestamps(staged);
-                    }
-                    return Err(e);
-                }
-            }
+            ids.push(insert_association(&tx, &p.meta, &mut shared_sets)?);
         }
         tx.commit()?;
-        for hash in staged_hashes {
-            self.note_array_written(hash);
-        }
         tracing::debug!(count = parts.len(), "bulk-add transaction committed");
         Ok(parts
             .into_iter()
@@ -1545,6 +1682,10 @@ impl Store {
     /// Remove every time series for the owner `(owner_id, owner_category)`, or
     /// every time series in the store when `owner` is `None`. Returns the count
     /// removed.
+    ///
+    /// Unlike the targeted removals, this also reclaims the explicit time axes
+    /// the clear left unreferenced: it orphans them wholesale, and a cleared
+    /// store may never see the compaction that would otherwise sweep them.
     pub fn clear_time_series(&mut self, owner: Option<(i64, OwnerCategory)>) -> Result<usize> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
@@ -1564,6 +1705,14 @@ impl Store {
         tx.commit()?;
         for h in to_drop {
             self.free_or_defer(h)?;
+        }
+        // Clearing is the one removal that reclaims time axes eagerly, for the
+        // reason the feature sets go in the same breath: it orphans them
+        // wholesale, and a cleared store may never see a compaction. Every other
+        // removal leaves an unreferenced axis for `compact`, because one series
+        // going does not say the cohort is empty.
+        for h in self.orphaned_timestamp_vectors()? {
+            self.free_or_defer_timestamps(h)?;
         }
         Ok(count)
     }
@@ -3562,11 +3711,25 @@ impl Store {
     /// returning how many went. The array-file half of what
     /// [`MetadataStore::sweep_orphan_feature_sets`] does for the catalog.
     ///
-    /// Only [`Self::compact`] calls this. Vectors are shared, so removing one
-    /// series can never cascade into deleting the axis its cohort still sits on;
-    /// the unreachable ones simply accumulate until a compaction reclaims them,
-    /// exactly as unreachable arrays do.
+    /// Vectors are shared, so removing one series can never cascade into
+    /// deleting the axis its cohort still sits on; the unreachable ones
+    /// accumulate until a compaction reclaims them, exactly as unreachable
+    /// arrays do. [`Self::clear_time_series`] is the exception, and goes through
+    /// [`Self::orphaned_timestamp_vectors`] directly so its frees can be
+    /// deferred under an open transaction.
     fn sweep_orphan_timestamp_vectors(&mut self) -> Result<usize> {
+        let orphans = self.orphaned_timestamp_vectors()?;
+        for hash in &orphans {
+            self.backend.remove_timestamps(hash)?;
+        }
+        Ok(orphans.len())
+    }
+
+    /// Every timestamp vector the array file holds that no catalog row sits on.
+    ///
+    /// Sorted, so two calls on one store agree on the order and a caller's own
+    /// reporting is stable.
+    fn orphaned_timestamp_vectors(&self) -> Result<Vec<[u8; 32]>> {
         let (referenced, problems) = self.metadata.referenced_timestamp_hashes()?;
         // A row whose locator cannot be read might be the one holding a vector
         // alive; sweeping against a catalog that damaged would delete data the
@@ -3577,16 +3740,14 @@ impl Store {
                 "cannot sweep timestamp vectors: {problem}"
             )));
         }
-        let orphans: Vec<[u8; 32]> = self
+        let mut orphans: Vec<[u8; 32]> = self
             .backend
             .timestamp_hashes()?
             .into_iter()
             .filter(|hash| !referenced.contains(hash))
             .collect();
-        for hash in &orphans {
-            self.backend.remove_timestamps(hash)?;
-        }
-        Ok(orphans.len())
+        orphans.sort_unstable();
+        Ok(orphans)
     }
 
     /// Reclaim space in both halves of the artifact.
@@ -3736,7 +3897,8 @@ impl Store {
     ///
     /// A persisted store is two artifacts — the HDF5 file and its companion
     /// `<path>.sqlite` catalog — but this checks only the first. It reads each
-    /// array the HDF5 side knows about, rehashes it, and compares. It does
+    /// array the HDF5 side knows about, rehashes it, and compares, and does the
+    /// same for the explicit time axes, which live in that same half. It does
     /// **not** open, parse, or cross-reference the catalog, so an empty report is
     /// not a statement that the store as a whole is sound. In particular these
     /// are all invisible to it:
@@ -3751,8 +3913,9 @@ impl Store {
     ///   every array still on disk and now unreachable — verifies clean.
     ///
     /// What it does catch is the array-side corruption it is named for: a stored
-    /// value perturbed behind its recorded hash, and a read failure on any
-    /// indexed array.
+    /// value perturbed behind its recorded hash — an array's or a time axis's
+    /// alike — a time axis a row names and the file does not hold, and a read
+    /// failure on any indexed array.
     ///
     /// For catalog-side checks use the purpose-built calls instead:
     /// [`Self::check_static_consistency`] verifies that every series at a given
@@ -3770,27 +3933,40 @@ impl Store {
         // Catalog-side problems lead: a row too malformed to name an array is
         // why the array-side sweep skipped it.
         errors.append(&mut report.errors);
-        // The explicit time axes are in this same file and are just as
-        // load-bearing: a `NonSequentialTimeSeries` whose vector is missing
-        // cannot be read at all. There is no hash to recompute — the vector *is*
-        // its hash's content — so presence is the whole check. Sorted, so a
-        // report does not depend on hash-set iteration order.
+        // The explicit time axes are in this same file and are checked the same
+        // way, for the same reason: a vector content-addresses its own values,
+        // so reading it back and rehashing is what catches one perturbed behind
+        // an unchanged dataset name — presence alone would report such a store
+        // clean while every read of that cohort silently returned the altered
+        // axis. Sorted first, so a report does not depend on hash-set iteration
+        // order.
         let (referenced, mut problems) = self.metadata.referenced_timestamp_hashes()?;
         errors.append(&mut problems);
-        let mut dangling: Vec<[u8; 32]> = Vec::new();
+        let mut referenced: Vec<[u8; 32]> = referenced.into_iter().collect();
+        referenced.sort_unstable();
         for hash in referenced {
-            if !self.backend.contains_timestamps(&hash)? {
-                dangling.push(hash);
+            match self.backend.get_timestamps(&hash) {
+                Ok(timestamps) => {
+                    let recomputed = crate::hash::timestamps_hash(&timestamps);
+                    if recomputed != hash {
+                        errors.push(format!(
+                            "timestamp vector hash mismatch: stored={} computed={}",
+                            crate::hash::hash_hex(&hash),
+                            crate::hash::hash_hex(&recomputed),
+                        ));
+                    }
+                }
+                Err(TimeSeriesError::NotFound) => errors.push(format!(
+                    "dangling reference: the catalog references timestamp vector {} but the \
+                     array file does not hold it",
+                    crate::hash::hash_hex(&hash),
+                )),
+                Err(e) => errors.push(format!(
+                    "read error for timestamp vector {}: {e}",
+                    crate::hash::hash_hex(&hash)
+                )),
             }
         }
-        dangling.sort_unstable();
-        errors.extend(dangling.into_iter().map(|hash| {
-            format!(
-                "dangling reference: the catalog references timestamp vector {} but the array \
-                 store does not hold it",
-                crate::hash::hash_hex(&hash),
-            )
-        }));
         Ok(IntegrityReport { errors })
     }
 
@@ -4285,13 +4461,13 @@ fn stage_timestamp_vector(
     group: PackGroup,
     timestamps: Option<&[chrono::DateTime<chrono::Utc>]>,
     seen: &mut SharedSetCache,
-    staged: &mut Vec<[u8; 32]>,
+    staged: &mut StagedWrites,
 ) -> Result<()> {
     let (PackGroup::Irregular(hash), Some(timestamps)) = (group, timestamps) else {
         return Ok(());
     };
     if seen.note_timestamps(hash) && backend.put_timestamps(&hash, timestamps)? {
-        staged.push(hash);
+        staged.timestamps.push(hash);
     }
     Ok(())
 }

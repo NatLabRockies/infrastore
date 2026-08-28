@@ -345,7 +345,8 @@ deleting an association cannot cascade into them: removing the last association 
 leaves it unreachable. `compact()` deletes both — the feature set as a catalog row, the timestamp
 vector as an unlinked dataset — and reports the counts as `feature_sets_reclaimed` and
 `timestamp_sets_reclaimed`, before the rewrite, so the rewrite's liveness scan sees what survived.
-(Clearing the whole store is the exception for feature sets: it orphans every one of them by
-construction, so it drops them all outright.)
+(Clearing is the exception on both counts: it orphans every feature set and every axis by
+construction, so it reclaims them outright rather than waiting for a compaction a cleared store may
+never get.)
 
 See [`compact`](../reference/rust-api.md#store).

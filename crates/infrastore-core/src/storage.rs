@@ -429,9 +429,6 @@ pub(crate) trait StorageBackend: Send + Sync {
     /// The timestamp vector stored under `hash`, or [`TimeSeriesError::NotFound`].
     fn get_timestamps(&self, hash: &[u8; 32]) -> Result<Vec<DateTime<Utc>>>;
 
-    /// True iff the backend currently stores a timestamp vector under `hash`.
-    fn contains_timestamps(&self, hash: &[u8; 32]) -> Result<bool>;
-
     /// Remove the timestamp vector stored under `hash`. No-op if absent.
     ///
     /// Vectors are shared, so this is never driven by removing one association:

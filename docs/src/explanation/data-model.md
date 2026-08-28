@@ -131,6 +131,15 @@ not others, putting the same series on different instants depending on who read 
 distinct timestamps collapse into one, and the vector stops being strictly increasing on the way
 back out.
 
+A **leap second** is refused by the same rule, for the same reason, though it is not a matter of
+precision. Chrono spells one as a sub-second component at or above one second (`23:59:60`), which is
+a whole number of milliseconds and would otherwise pass — but a Unix millisecond count cannot
+express a leap second at all, so writing one would store the _following_ second. That is not merely
+lossy: a leap second and the second after it are distinct instants that would become one stored
+instant, so two genuinely different `NonSequentialTimeSeries` time axes would share a content hash
+and be interned as one, and a single vector holding `23:59:60` followed by `00:00:00` would go in
+strictly increasing and come back out with a duplicate. Use the second either side of it.
+
 A series needing a finer grid should scale its unit and record it in `units`, exactly as it must for
 a sub-millisecond resolution: a 500 µs series is a 500-unit series.
 

@@ -268,7 +268,9 @@ carries locators rather than values still finds the timestamps where it finds th
 `0.19.0` they were a delta-varint blob in a `timestamp_sets` catalog table.)
 
 Vectors are shared, so removing one series never deletes one; see
-[Deletion and compaction](#deletion-and-compaction).
+[Deletion and compaction](#deletion-and-compaction). `verify_integrity` reads each referenced vector
+back and rehashes it, exactly as it does an array — the name records the hash, so a dataset
+perturbed behind it is caught rather than silently served.
 
 ### Compression
 
@@ -302,6 +304,8 @@ regardless of the filter, so stores written with different settings stay mutuall
   deletes either; removing the last association that referenced one leaves it unreachable.
   `compact()` deletes them — the feature set as a catalog row, the timestamp vector as an unlinked
   HDF5 dataset — and reports the counts as `feature_sets_reclaimed` and `timestamp_sets_reclaimed`.
+  Clearing a store is the exception: it orphans every one of both by construction, so it drops them
+  outright rather than leaving a cleared store's worth of them for a compaction.
 
 `compact()` on an on-disk store **rewrites the `.h5` file**, because that is the only way HDF5 gives
 the freed space back:
