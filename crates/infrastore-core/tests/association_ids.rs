@@ -1317,7 +1317,7 @@ fn a_read_by_ids_spans_many_query_chunks() {
     let added = bulk.commit().unwrap();
     // Reversed, so the answer's order is visibly the caller's, not the catalog's.
     let asked: Vec<i64> = added.iter().rev().map(|a| a.id).collect();
-    let got = store.bulk_read_by_ids(&asked).unwrap();
+    let got = store.read_by_ids(&asked).unwrap();
     assert_eq!(got.len(), 1_200);
     let firsts: Vec<f64> = got
         .iter()

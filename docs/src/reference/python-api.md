@@ -198,7 +198,6 @@ class AddedTimeSeries:
 
 def get_metadata_by_id(self, id: int) -> dict | None: ...   # None when no row has the id
 def association_exists(self, id: int) -> bool: ...          # no row fetched
-def read_by_ids(self, ids: list[int]) -> list[TimeSeriesData]: ...   # in the order given
 
 def transform_single_time_series(
     self,
