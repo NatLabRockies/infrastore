@@ -198,7 +198,7 @@ carries netcdf-c's <code>_NCProperties</code> attribute, and <code>Store::open</
 (see <code>storage_backend</code> below). The <code>.h5</code> extension is a convention — the store never inspects it.</p>
 <h2 id="format-version"><a class="header" href="#format-version">Format Version</a></h2>
 <p>The HDF5 root carries four global attributes:</p>
-<pre><code class="language-text">data_format_version = "0.16.0"
+<pre><code class="language-text">data_format_version = "0.18.0"
 compression         = "deflate:3:shuffle"
 storage_backend     = "hdf5"
 catalog_generation  = "9f2c1ab4e70d5836c41b9e2af0d7c358"
@@ -228,16 +228,24 @@ existing value rather than minting a new one, since it rewrites only the HDF5 ha
 <code>IncompatibleFormat</code>, naming both versions. Every bump is backward-incompatible by definition, so
 the check is exact equality and there is no in-place upgrade path: regenerate the store with the
 matching build.</p>
-<p>(<code>0.17.0</code> added the metadata column <code>time_reference</code>, which records how a series' timestamps were
-<em>spelled</em> — an instant in UTC, an instant at a fixed offset, an instant in a named IANA zone, or a
-wall clock naming no instant. It also changes how stored timestamps are <em>interpreted</em>: a row marked
-<code>zoneless</code> holds wall clocks the store keeps as if UTC, which an older reader would hand back as
-instants. See <a href="../explanation/data-model.html#time-references">Time references</a>; <code>0.16.0</code> added the
-metadata column <code>component_field</code>; <code>0.15.0</code> renamed the metadata column <code>ext</code> to <code>application_data</code>
-and added the <code>quantity_kind</code> and <code>unit_system</code> columns; unlike a new <em>table</em>, new <em>columns</em> are not
-picked up by the idempotent <code>CREATE TABLE IF NOT EXISTS</code> DDL, so a store one version behind is
-rejected on open; <code>0.14.0</code> moved a <code>NonSequentialTimeSeries</code>'s timestamps out of the association
-row: the <code>timestamps_json</code> TEXT column became a <code>timestamps_hash</code> BLOB resolving into the new
+<p>(<code>0.18.0</code> made the <code>id</code> column of all three catalog tables — <code>time_series_associations</code>,
+<code>supplemental_attribute_associations</code>, and <code>parent_child_associations</code> — an
+<code>INTEGER PRIMARY KEY AUTOINCREMENT</code> rather than a bare rowid alias, so an id is never reissued once
+its row is deleted. It is the one bump that adds no column and changes no value, and it still cannot
+be additive: <code>AUTOINCREMENT</code> is part of a table's declaration and there is no <code>ALTER TABLE</code> for it,
+so applying this DDL to an older catalog would leave all three tables on recycled ids while
+reporting success. Recycled ids matter because the id is an external reference — a consumer stores
+it in its own model — and reuse makes a stale reference resolve to a different, valid row; <code>0.17.0</code>
+added the metadata column <code>time_reference</code>, which records how a series' timestamps were <em>spelled</em> —
+an instant in UTC, an instant at a fixed offset, an instant in a named IANA zone, or a wall clock
+naming no instant. It also changes how stored timestamps are <em>interpreted</em>: a row marked <code>zoneless</code>
+holds wall clocks the store keeps as if UTC, which an older reader would hand back as instants. See
+<a href="../explanation/data-model.html#time-references">Time references</a>; <code>0.16.0</code> added the metadata column
+<code>component_field</code>; <code>0.15.0</code> renamed the metadata column <code>ext</code> to <code>application_data</code> and added the
+<code>quantity_kind</code> and <code>unit_system</code> columns; unlike a new <em>table</em>, new <em>columns</em> are not picked up by
+the idempotent <code>CREATE TABLE IF NOT EXISTS</code> DDL, so a store one version behind is rejected on open;
+<code>0.14.0</code> moved a <code>NonSequentialTimeSeries</code>'s timestamps out of the association row: the
+<code>timestamps_json</code> TEXT column became a <code>timestamps_hash</code> BLOB resolving into the new
 content-addressed <a href="#timestamp_sets"><code>timestamp_sets</code></a> table, and irregular arrays that share a time
 axis are now column-packed into <code>nsts_…</code> datasets keyed by that hash instead of one standalone
 <code>arr_…</code> dataset each; <code>0.13.0</code> replaced the <code>dtype</code> column with <code>element_type</code>, which names the
@@ -296,7 +304,7 @@ against it and a mismatch is an integrity error.</p>
 <h2 id="hdf5-layout"><a class="header" href="#hdf5-layout">HDF5 Layout</a></h2>
 <p>Arrays live under a two-level group hierarchy, in one of <strong>two storage modes</strong>:</p>
 <pre><code class="language-text">&lt;name&gt;.h5
-├── attribute  data_format_version = "0.16.0"
+├── attribute  data_format_version = "0.18.0"
 ├── attribute  compression         = "deflate:3:shuffle"
 ├── attribute  storage_backend     = "hdf5"
 └── group      time_series/
@@ -435,7 +443,7 @@ the error surfaces with the compacting store still open on the original file.</p
 <h3 id="time_series_associations"><a class="header" href="#time_series_associations"><code>time_series_associations</code></a></h3>
 <p>One row per association between an owner and a stored array.</p>
 <div class="table-wrapper"><table><thead><tr><th>Column</th><th>Type</th><th>Notes</th></tr></thead><tbody>
-<tr><td><code>id</code></td><td>INTEGER</td><td>Primary key</td></tr>
+<tr><td><code>id</code></td><td>INTEGER</td><td><code>AUTOINCREMENT</code> primary key; never reissued — see below</td></tr>
 <tr><td><code>owner_id</code></td><td>INTEGER</td><td>Owner identity; signed 64-bit integer identifier (part of key)</td></tr>
 <tr><td><code>owner_type</code></td><td>TEXT</td><td>Owner's concrete type, descriptive</td></tr>
 <tr><td><code>owner_category</code></td><td>INTEGER</td><td>Code, <code>CHECK</code> in (0, 1); part of key — see below</td></tr>
@@ -556,7 +564,7 @@ same name, whose logic this replaces. See
 <a href="../explanation/data-model.html#associations-between-entities">Associations Between Entities</a> for the
 data model.</p>
 <pre><code class="language-sql">CREATE TABLE supplemental_attribute_associations (
-    id             INTEGER PRIMARY KEY,
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
     component_id   INTEGER NOT NULL,
     component_type TEXT    NOT NULL,
     attribute_id   INTEGER NOT NULL,
@@ -579,7 +587,7 @@ exact pair is constrained.</p>
 endpoints are always components, which is why there is no category column: a supplemental attribute
 cannot appear here by construction.</p>
 <pre><code class="language-sql">CREATE TABLE parent_child_associations (
-    id          INTEGER PRIMARY KEY,
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
     parent_id   INTEGER NOT NULL,
     parent_type TEXT    NOT NULL,
     child_id    INTEGER NOT NULL,
@@ -603,16 +611,17 @@ series therefore leaves both tables untouched, and vice versa; consumers issue b
 want both effects.</p>
 <p>Both are also independent of each other: the same integer may name a row in each without collision.</p>
 <h4 id="compatibility"><a class="header" href="#compatibility">Compatibility</a></h4>
-<p>Both tables were added <strong>without</strong> bumping <code>data_format_version</code>, which is why a <code>0.10.0</code> store may
-or may not contain them:</p>
-<ul>
-<li>Opening a store for writing applies the full DDL, which is idempotent, so a store written before
-they existed gains both on first writable open.</li>
-<li>Opening read-only cannot run DDL. Reads of a missing table return empty results (<code>0</code>, <code>false</code>, no
-rows) rather than failing.</li>
-</ul>
-<p>The version gate is exact equality with no upgrade path, so bumping for purely additive tables would
-have made every existing store unreadable in exchange for nothing.</p>
+<p>Both tables were originally added <strong>without</strong> bumping <code>data_format_version</code>, since the gate is exact
+equality with no upgrade path and bumping for a purely additive table would have made every existing
+store unreadable in exchange for nothing.</p>
+<p>That is no longer how they land. <code>0.18.0</code> gave both an <code>AUTOINCREMENT</code> id, which is part of a
+table's declaration and so cannot reach an existing table through <code>CREATE TABLE IF NOT EXISTS</code>; the
+version check rejects an older catalog before this DDL runs. Only a store at the current version can
+contain them, and it always does.</p>
+<p>One consequence of the additive era survives, and is still required: <strong>opening read-only cannot run
+DDL at all</strong>, so reads of a missing table return empty results (<code>0</code>, <code>false</code>, no rows) rather than
+failing. That tolerance is not vestigial — it is what lets a read-only open work on a store whose
+catalog was never opened for writing.</p>
 <h3 id="schema_version"><a class="header" href="#schema_version"><code>schema_version</code></a></h3>
 <pre><code class="language-sql">CREATE TABLE schema_version (version INTEGER NOT NULL);
 </code></pre>
@@ -766,7 +775,7 @@ sqlite3 system.h5.sqlite '.schema'
 # Query the view, not the table, to see decoded discriminants.
 sqlite3 system.h5.sqlite \
   'SELECT name, time_series_type, element_type, element_shape, length FROM time_series_readable;'
-# Both association tables are absent in stores written before they existed.
+# Both association tables are present in every current-format store.
 sqlite3 system.h5.sqlite 'SELECT * FROM supplemental_attribute_associations;'
 sqlite3 system.h5.sqlite 'SELECT * FROM parent_child_associations;'
 </code></pre>

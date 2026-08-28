@@ -309,7 +309,8 @@ same position on <code>infrastore_store_get_non_sequential</code> and on the for
                             const char *unit_system,          /* optional: "natural_units" | "component_base" */
                             const char *time_reference,       /* optional: "utc" | "zoneless" | "-07:00" | IANA name */
                             const char *component_field,      /* optional: e.g. "max_active_power" */
-                            struct InfraStoreKey **out_key);          /* owned; infrastore_key_free */
+                            struct InfraStoreKey **out_key,           /* owned; infrastore_key_free */
+                            int64_t *out_id);                         /* optional (NULL skips): the id filed under */
 
 int32_t infrastore_store_get_single(const struct InfraStore *handle, const struct InfraStoreKey *key,
                             bool time_range_present,          /* false = whole series */
@@ -363,7 +364,8 @@ Earlier revisions copied it into a caller-sized buffer, which invited silent tru
                                     const char *quantity_kind, const char *unit_system,
                                     const char *time_reference,
                                     const char *component_field,
-                                    struct InfraStoreKey **out_key);
+                                    struct InfraStoreKey **out_key,
+                                    int64_t *out_id);                 /* optional (NULL skips) */
 
 int32_t infrastore_store_get_non_sequential(const struct InfraStore *handle, const struct InfraStoreKey *key,
                                     bool time_range_present,          /* false = every point */
@@ -531,7 +533,8 @@ to <code>*out_count</code>:</p>
                               const char *unit_system,          /* optional: "natural_units" | "component_base" */
                             const char *time_reference,       /* optional: "utc" | "zoneless" | "-07:00" | IANA name */
                               const char *component_field,      /* optional: e.g. "max_active_power" */
-                              struct InfraStoreKey **out_key);
+                              struct InfraStoreKey **out_key,
+                              int64_t *out_id);                 /* optional (NULL skips) */
 
 int32_t infrastore_store_add_probabilistic(struct InfraStore *handle,
                                    int64_t owner_id, const char *owner_type,
@@ -549,7 +552,8 @@ int32_t infrastore_store_add_probabilistic(struct InfraStore *handle,
                                    const char *unit_system,          /* optional: "natural_units" | "component_base" */
                             const char *time_reference,       /* optional: "utc" | "zoneless" | "-07:00" | IANA name */
                                    const char *component_field,      /* optional: e.g. "max_active_power" */
-                                   struct InfraStoreKey **out_key);
+                                   struct InfraStoreKey **out_key,
+                                   int64_t *out_id);                 /* optional (NULL skips) */
 
 int32_t infrastore_store_transform_single_time_series(struct InfraStore *handle,
                                               const char *horizon, const char *interval,  /* ISO-8601 */
@@ -561,14 +565,25 @@ int32_t infrastore_store_transform_single_time_series(struct InfraStore *handle,
                                               uint64_t *out_count,
                                               uint64_t *out_sources,   /* optional (NULL skips): matched before idempotent skips */
                                               char *out_interval,      /* optional (NULL skips): ISO-8601, INTERVAL_BUF_LEN bytes */
-                                              bool *out_interval_normalized);  /* optional (NULL skips) */
+                                              bool *out_interval_normalized,   /* optional (NULL skips) */
+                                              int64_t **out_ids);              /* optional (NULL skips): infrastore_buffer_free_i64 */
 </code></pre>
-<p><code>infrastore_store_transform_single_time_series</code> reports the rest of its outcome through the three
+<p>Every writer takes an optional <code>out_id</code>, which receives the catalog id the row was filed under; pass
+<code>NULL</code> to skip it. No writer takes an id as <em>input</em>: the catalog always assigns. The one entry point
+that files rows under ids a caller supplies is
+<code>infrastore_store_import_time_series_associations_openapi</code>, replaying a document that already
+recorded them — see <a href="../explanation/data-model.html#association-ids">Association ids</a>.</p>
+<p><code>infrastore_store_transform_single_time_series</code> reports the rest of its outcome through four
 optional out-parameters, each skippable with <code>NULL</code>: <code>out_sources</code> is how many <code>SingleTimeSeries</code>
 matched <em>before</em> idempotent skips, so zero distinguishes "nothing to transform" from "everything was
 already derived"; <code>out_interval</code> receives the ISO-8601 interval actually stored, NUL-terminated (an
 ISO period is bounded, so this takes a fixed <code>INTERVAL_BUF_LEN</code>-byte buffer rather than a probe
-pass); and <code>out_interval_normalized</code> is non-zero when the request described a single window.</p>
+pass); <code>out_interval_normalized</code> is non-zero when the request described a single window; and
+<code>out_ids</code> receives the id of each view written, <code>*out_count</code> of them in write order, to free with
+<code>infrastore_buffer_free_i64</code>. When nothing was written — a dry run, or a re-run that finds every
+view already derived — <code>*out_ids</code> is set to <code>NULL</code>. On a dry run <code>*out_count</code> still reports the
+count a committing run <em>would</em> produce, so a caller must check the pointer rather than the count
+before indexing it.</p>
 <p>Its two policy flags are the <code>TransformPolicy</code> of the core API. Both <code>false</code> is the permissive
 default; InfrastructureSystems.jl passes both <code>true</code>. <code>normalize_single_window</code> selects the
 single-window encoding — non-zero stores the zero interval, which is what InfrastructureSystems.jl
@@ -846,6 +861,21 @@ int32_t infrastore_bulk_result_get_single(const struct InfraStoreBulkReadHandle 
                                   /* same out-params as infrastore_store_get_single */ ...);
 void    infrastore_bulk_result_free(struct InfraStoreBulkReadHandle *result);
 </code></pre>
+<p><code>infrastore_store_read_by_ids</code> is the same read addressed by catalog
+<a href="../explanation/data-model.html">association id</a> rather than by key — the read direction of the id
+every write hands back through its <code>out_id</code>, for a consumer that recorded ids in its own model
+instead of an id-to-key map. It fills the same <code>InfraStoreBulkReadHandle</code>, so the results come out
+through the same accessors; results follow the order the ids are given (repeats honoured in place),
+and an id naming no row fails the whole call with <code>INFRASTORE_ERR_NOT_FOUND</code> rather than being
+skipped. The handle carries each item's name whichever way the read was addressed, and
+<code>infrastore_bulk_result_item_name</code> hands item <code>index</code>'s back as an owned C string, freed with
+<code>infrastore_string_free</code> — the companion to <code>infrastore_bulk_result_item_type</code>, and how both reads
+label what they decode.</p>
+<pre><code class="language-c">int32_t infrastore_store_read_by_ids(const struct InfraStore *handle, const int64_t *ids,
+                             uint64_t n, struct InfraStoreBulkReadHandle **out_result);
+int32_t infrastore_bulk_result_item_name(const struct InfraStoreBulkReadHandle *result,
+                                 uint64_t index, char **out_name);
+</code></pre>
 <h2 id="store-wide-operations"><a class="header" href="#store-wide-operations">Store-Wide Operations</a></h2>
 <pre><code class="language-c">/* True iff the store holds nothing at all — no time series, and no associations
    in any catalog. One short-circuited existence probe per catalog table, so it is
@@ -1010,7 +1040,9 @@ int32_t infrastore_store_add_supplemental_attribute_association(struct InfraStor
    with a NULL filter. *out_added (when non-NULL) receives the number inserted. */
 int32_t infrastore_store_add_supplemental_attribute_associations(struct InfraStore *handle,
                                                          const char *associations_json,
-                                                         uint64_t *out_added);
+                                                         uint64_t *out_added,   /* optional */
+                                                         int64_t **out_ids);    /* optional; owned,
+                                                            infrastore_buffer_free_i64 */
 
 /* Whether any attachment matches filter_json (NULL = any). */
 int32_t infrastore_store_has_supplemental_attribute_association(const struct InfraStore *handle,
@@ -1098,7 +1130,9 @@ int32_t infrastore_store_add_parent_child_association(struct InfraStore *handle,
    receives the number inserted. */
 int32_t infrastore_store_add_parent_child_associations(struct InfraStore *handle,
                                                const char *associations_json,
-                                               uint64_t *out_added);
+                                               uint64_t *out_added,   /* optional */
+                                               int64_t **out_ids);    /* optional; owned,
+                                                  infrastore_buffer_free_i64 */
 
 /* Whether any edge matches filter_json (NULL = any). */
 int32_t infrastore_store_has_parent_child_association(const struct InfraStore *handle,
@@ -1166,6 +1200,15 @@ int32_t infrastore_store_export_time_series_associations_openapi(const struct In
                                                           const char *component_field, int32_t zoneless,
                                                           char **out_json, uint64_t *out_len);
 
+/* Bulk-ingest a JSON array of time-series association OpenAPI rows in one
+   all-or-nothing transaction -- the import half of the round trip whose export
+   is infrastore_store_export_time_series_associations_openapi. Rows only: every
+   row must name an array this store already holds, and each keeps the
+   association_id it carries. *out_added (when non-NULL) receives the number
+   inserted. */
+int32_t infrastore_store_import_time_series_associations_openapi(
+    struct InfraStore *handle, const char *json, uint64_t *out_added);
+
 /* Export the whole supplemental_attribute_associations table as an OpenAPI-row
    JSON array, sorted by (component_id, attribute_id). Owned-string return. */
 int32_t infrastore_store_export_supplemental_attribute_associations_openapi(
@@ -1179,11 +1222,13 @@ int32_t infrastore_store_import_supplemental_attribute_associations_openapi(
     struct InfraStore *handle, const char *json, uint64_t *out_added);
 </code></pre>
 <p>A catalog row's <code>data_hash</code> is <code>NOT NULL</code>, and infrastore fills a row's <code>uri</code>/<code>data_hash</code> wire
-fields with that same content hash, hex-encoded, on export. There is no corresponding time-series
-<em>import</em> export: infrastore never modifies the associations table or the data to make an incoming
-document agree with what it already holds. A geometry disagreement between an added series and its
-own association row is rejected at the add boundary instead (<code>INFRASTORE_ERR_INVALID_PARAMETER</code>),
-loudly and without writing anything.</p>
+fields with that same content hash, hex-encoded, on export. The time-series import writes <em>rows</em>
+only: infrastore never modifies the data to make an incoming document agree with what it already
+holds, so a row naming an array this store does not hold is refused
+(<code>INFRASTORE_ERR_INVALID_PARAMETER</code>) rather than written as a dangling reference, and a
+<code>NonSequentialTimeSeries</code> row is refused outright because its timestamp vector is not on the wire. A
+geometry disagreement between an added series and its own association row is likewise rejected at
+the add boundary, loudly and without writing anything.</p>
 <h2 id="error-messages"><a class="header" href="#error-messages">Error Messages</a></h2>
 <pre><code class="language-c">int32_t infrastore_last_error_message(char *buf, uint64_t buf_len, uint64_t *needed);
 </code></pre>

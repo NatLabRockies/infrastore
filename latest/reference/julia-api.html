@@ -203,24 +203,24 @@ or else from the <code>libinfrastore_ffi</code> artifact that <code>Pkg</code> d
 <code>TransformOutcome</code>, <code>UnitSystem</code> (<code>NaturalUnits</code>, <code>ComponentBase</code>), <code>add_parent_child_association!</code>,
 <code>add_parent_child_associations!</code>, <code>add_supplemental_attribute_association!</code>,
 <code>add_supplemental_attribute_associations!</code>, <code>add_time_series!</code>, <code>add_time_series_bulk!</code>,
-<code>build_forecast_reader</code>, <code>build_static_reader</code>, <code>bulk_read</code>, <code>catalog_mode</code>,
+<code>build_forecast_reader</code>, <code>build_static_reader</code>, <code>bulk_read</code>, <code>read_by_ids</code>, <code>catalog_mode</code>,
 <code>check_static_consistency</code>, <code>clear!</code>, <code>close!</code>, <code>compact!</code>, <code>copy_time_series!</code>,
 <code>count_array_references</code>, <code>count_components_with_attributes</code>,
 <code>export_supplemental_attribute_associations_openapi</code>, <code>export_time_series_associations_openapi</code>,
-<code>import_supplemental_attribute_associations_openapi!</code>, <code>count_parent_child_associations</code>,
-<code>count_supplemental_attribute_associations</code>, <code>count_supplemental_attributes</code>, <code>counts_by_type</code>,
-<code>flush!</code>, <code>forecast_entries</code>, <code>forecast_num_slots</code>, <code>forecast_read!</code>, <code>forecast_summary</code>,
-<code>forecast_timeline</code>, <code>forecast_values</code>, <code>get_array_by_hash</code>, <code>get_compression</code>, <code>get_counts</code>,
-<code>get_forecast_parameters</code>, <code>get_intervals</code>, <code>get_metadata</code>, <code>get_path</code>, <code>get_resolutions</code>,
-<code>get_time_series</code>, <code>get_time_series_key</code>, <code>get_time_series_keys</code>, <code>has_any_time_series</code>,
-<code>has_for_owner</code>, <code>has_parent_child_association</code>, <code>has_supplemental_attribute_association</code>,
-<code>has_time_series</code>, <code>in_transaction</code>, <code>init_logging</code>, <code>is_empty</code>, <code>key_info</code>, <code>list_array_groups</code>,
-<code>list_children</code>, <code>list_components_with_attributes</code>, <code>list_keys</code>, <code>list_names</code>, <code>list_owner_ids</code>,
-<code>list_owner_types</code>, <code>list_parent_child_associations</code>, <code>list_parents</code>,
-<code>list_supplemental_attribute_associations</code>, <code>list_supplemental_attribute_ids</code>, <code>list_time_series</code>,
-<code>num_distinct_arrays</code>, <code>open_copy</code>, <code>open_store</code>, <code>persist!</code>, <code>persist_catalog!</code>, <code>read_only</code>,
-<code>rollback_transaction!</code>, <code>transaction</code>, <code>begin_transaction!</code>, <code>commit_transaction!</code>,
-<code>remove_by_filter!</code>, <code>remove_parent_child_associations!</code>,
+<code>import_supplemental_attribute_associations_openapi!</code>, <code>import_time_series_associations_openapi!</code>,
+<code>count_parent_child_associations</code>, <code>count_supplemental_attribute_associations</code>,
+<code>count_supplemental_attributes</code>, <code>counts_by_type</code>, <code>flush!</code>, <code>forecast_entries</code>,
+<code>forecast_num_slots</code>, <code>forecast_read!</code>, <code>forecast_summary</code>, <code>forecast_timeline</code>, <code>forecast_values</code>,
+<code>get_array_by_hash</code>, <code>get_compression</code>, <code>get_counts</code>, <code>get_forecast_parameters</code>, <code>get_intervals</code>,
+<code>get_metadata</code>, <code>get_path</code>, <code>get_resolutions</code>, <code>get_time_series</code>, <code>get_time_series_key</code>,
+<code>get_time_series_keys</code>, <code>has_any_time_series</code>, <code>has_for_owner</code>, <code>has_parent_child_association</code>,
+<code>has_supplemental_attribute_association</code>, <code>has_time_series</code>, <code>in_transaction</code>, <code>init_logging</code>,
+<code>is_empty</code>, <code>key_info</code>, <code>list_array_groups</code>, <code>list_children</code>, <code>list_components_with_attributes</code>,
+<code>list_keys</code>, <code>list_names</code>, <code>list_owner_ids</code>, <code>list_owner_types</code>, <code>list_parent_child_associations</code>,
+<code>list_parents</code>, <code>list_supplemental_attribute_associations</code>, <code>list_supplemental_attribute_ids</code>,
+<code>list_time_series</code>, <code>num_distinct_arrays</code>, <code>open_copy</code>, <code>open_store</code>, <code>persist!</code>,
+<code>persist_catalog!</code>, <code>read_only</code>, <code>rollback_transaction!</code>, <code>transaction</code>, <code>begin_transaction!</code>,
+<code>commit_transaction!</code>, <code>remove_by_filter!</code>, <code>remove_parent_child_associations!</code>,
 <code>remove_supplemental_attribute_associations!</code>, <code>remove_time_series!</code>, <code>rename_time_series!</code>,
 <code>replace_owner!</code>, <code>replace_parent_child_component_id!</code>,
 <code>replace_supplemental_attribute_component_id!</code>, <code>static_grid</code>, <code>static_groups</code>, <code>static_read!</code>,
@@ -426,7 +426,12 @@ series is addressed by its identity (owner, category, type, name, resolution, in
 which carries no element type, so parameters on a <em>request</em> would have nothing to select on; passing
 them raises <code>InvalidParameterError</code> rather than being quietly ignored. The element type comes back
 on the result instead, in its own <code>{T,N}</code> and in a reader group's <code>dtype</code>.</p>
-<pre><code class="language-julia">struct TimeSeriesMetadata                    # get_metadata / list_time_series
+<pre><code class="language-julia">struct AddedTimeSeries                       # every write: add_time_series!, add_time_series_bulk!
+    key :: TimeSeriesKey                     # names the series
+    id  :: Int64                             # the catalog row's id; assigned, and never reissued
+end                                          # accepted anywhere a TimeSeriesKey is
+
+struct TimeSeriesMetadata                    # get_metadata / list_time_series
     owner_id          :: Int64
     owner_type        :: String
     owner_category    :: OwnerCategory
@@ -493,7 +498,8 @@ that the timestamps are wall clocks. Three- and four-argument constructors (<cod
     features::AbstractDict = Dict(), element_type = ts.element_type, units = ts.units,
     quantity_kind = ts.quantity_kind, unit_system = ts.unit_system,
     component_field = ts.component_field, application_data = ts.application_data,
-) -&gt; TimeSeriesKey
+    id = nothing,   # file under this catalog id (imports); `nothing` lets the catalog assign
+) -&gt; AddedTimeSeries   # `.key::TimeSeriesKey`, `.id::Int64`; usable wherever a key is
 
 get_time_series(store::Store, key::TimeSeriesKey; time_range=nothing) -&gt; SingleTimeSeries
 get_time_series(SingleTimeSeries, store::Store, key::TimeSeriesKey;
@@ -537,10 +543,21 @@ series, so this is the efficient way to load many complete series (exploration, 
 key vector returns an empty vector without touching the store.</p>
 <pre><code class="language-julia">series = bulk_read(store, keys)   # keys :: Vector{TimeSeriesKey}
 </code></pre>
+<pre><code class="language-julia">read_by_ids(store::Store, ids::AbstractVector{&lt;:Integer}) -&gt; Vector
+</code></pre>
+<p>The same read addressed by catalog <a href="../explanation/data-model.html">association id</a> rather than by key
+— the read direction of the id every write reports on its <code>AddedTimeSeries</code>, for a caller that
+recorded ids in its own model instead of keeping an id-to-key map beside the store. Results follow
+the order the ids are given, repeats included, each decoded into the same struct <code>bulk_read</code> would
+return. An id naming no row throws <code>NotFoundError</code> (the whole call fails; the error does not say
+which id dangled — sift them with <code>association_exists</code> when that matters), and an empty id vector
+returns an empty vector without touching the store.</p>
+<pre><code class="language-julia">series = read_by_ids(store, [added.id, other.id])
+</code></pre>
 <h2 id="bulk-adds"><a class="header" href="#bulk-adds">Bulk Adds</a></h2>
 <pre><code class="language-julia">batch = AddBatch()
 add_time_series!(batch, owner_id, owner_type, owner_category, ts; ...)  # any series type
-add_time_series_bulk!(store::Store, batch::AddBatch) -&gt; Vector{TimeSeriesKey}
+add_time_series_bulk!(store::Store, batch::AddBatch) -&gt; Vector{AddedTimeSeries}   # in input order
 </code></pre>
 <p><code>AddBatch</code> accepts the same <code>add_time_series!</code> methods as <code>Store</code> (every series and forecast type)
 but only accumulates the requests; <code>add_time_series_bulk!</code> commits the whole batch in <strong>one</strong>
@@ -639,7 +656,7 @@ dtype and dims and converts to row-major bytes, just like the static <code>add_t
     features=Dict(), element_type=ts.element_type, units=ts.units,
     quantity_kind=ts.quantity_kind, unit_system=ts.unit_system,
     component_field=ts.component_field, application_data=ts.application_data,
-) -&gt; TimeSeriesKey
+) -&gt; AddedTimeSeries
 </code></pre>
 <p>The descriptor keywords default to the struct's own fields, so a label set at construction survives
 the add; pass a keyword to override it for one association.</p>
@@ -987,9 +1004,11 @@ end
 <code>Dict</code>/<code>Set</code> members. In the <strong>catalog</strong>, identity is only the <code>(component_id, attribute_id)</code> pair —
 the type names are denormalized labels carried for filtering — so re-attaching the same pair under
 different type names throws <code>DuplicateAssociationError</code>.</p>
-<pre><code class="language-julia">add_supplemental_attribute_association!(store, association::SupplementalAttributeAssociation) -&gt; Nothing
-add_supplemental_attribute_associations!(store, associations::AbstractVector{SupplementalAttributeAssociation}) -&gt; Int
-                                  # one all-or-nothing transaction; count inserted
+<pre><code class="language-julia">add_supplemental_attribute_association!(store, association::SupplementalAttributeAssociation) -&gt; Int64
+                                  # the catalog id it was filed under
+add_supplemental_attribute_associations!(store, associations::AbstractVector{SupplementalAttributeAssociation}) -&gt; Vector{Int64}
+                                  # one all-or-nothing transaction; one id per
+                                  # input row, in order (count is `length`)
 has_supplemental_attribute_association(store; filters...) -&gt; Bool
 list_supplemental_attribute_associations(store; filters...) -&gt; Vector{SupplementalAttributeAssociation}
                                   # insertion order
@@ -1045,9 +1064,11 @@ the same ordered pair under different type names throws <code>DuplicateAssociati
 relationship-kind column, so one ordered pair may be related at most once.</p>
 <p>This family is deliberately narrower than the supplemental one — no counts-by-type and no grouped
 summary — because there is no consumer for them yet; both are additive if one appears.</p>
-<pre><code class="language-julia">add_parent_child_association!(store, association::ParentChildAssociation) -&gt; Nothing
-add_parent_child_associations!(store, associations::AbstractVector{ParentChildAssociation}) -&gt; Int
-                                  # one all-or-nothing transaction; count inserted
+<pre><code class="language-julia">add_parent_child_association!(store, association::ParentChildAssociation) -&gt; Int64
+                                  # the catalog id it was filed under
+add_parent_child_associations!(store, associations::AbstractVector{ParentChildAssociation}) -&gt; Vector{Int64}
+                                  # one all-or-nothing transaction; one id per
+                                  # input row, in order (count is `length`)
 has_parent_child_association(store; filters...) -&gt; Bool
 list_parent_child_associations(store; filters...) -&gt; Vector{ParentChildAssociation}
                                   # insertion order
@@ -1076,10 +1097,11 @@ remove_parent_child_associations!(store; parent_types=["Bus"])   # 1
 <p>Direct JSON serde of the two association catalogs, in the wire spelling
 <a href="https://github.com/Sienna-Platform/SiennaSchemas">SiennaSchemas</a> defines (<code>TimeSeries/*.json</code>,
 <code>Core/Associations/SupplementalAttributeAssociation.json</code>). Unlike <code>list_time_series</code> /
-<code>list_supplemental_attribute_associations</code>, which return Julia structs, these three functions
+<code>list_supplemental_attribute_associations</code>, which return Julia structs, these four functions
 exchange the wire JSON verbatim — the format a document author (e.g. PowerTableDataParser) reads and
 writes directly.</p>
 <pre><code class="language-julia">export_time_series_associations_openapi(store; filters...) -&gt; String
+import_time_series_associations_openapi!(store, json::AbstractString) -&gt; Int
 export_supplemental_attribute_associations_openapi(store) -&gt; String
 import_supplemental_attribute_associations_openapi!(store, json::AbstractString) -&gt; Int
 </code></pre>
@@ -1092,10 +1114,16 @@ identity.</p>
 <code>import_supplemental_attribute_associations_openapi!</code> is its import half — a bulk, all-or-nothing
 insert (a duplicate anywhere in the batch throws <code>DuplicateAssociationError</code> and rolls the batch
 back), returning the number of rows inserted.</p>
-<p>There is no corresponding time-series <em>import</em>: infrastore never modifies the associations table or
-the data to make an incoming document agree with what it already holds. A geometry disagreement
-between an added series and its own association row is rejected at the add boundary instead
-(<code>InvalidParameterError</code>), loudly and without writing anything.</p>
+<p><code>import_time_series_associations_openapi!</code> is the time-series import half, and it writes <strong>rows
+only</strong>: the document carries locators, never values, so every row must name an array this store
+already holds — the arrays arrive with the artifact. Each row keeps the <code>association_id</code> it carries,
+which is the point: an import that assigned fresh ids would leave every reference the document
+records pointing at the wrong series. A row whose array is absent, or a <code>NonSequentialTimeSeries</code>
+row (whose timestamp vector is not on the wire), throws <code>InvalidParameterError</code> and rolls the whole
+batch back.</p>
+<p>Infrastore never modifies the data to make an incoming document agree with what it already holds. A
+geometry disagreement between an added series and its own association row is likewise rejected at
+the add boundary (<code>InvalidParameterError</code>), loudly and without writing anything.</p>
 <h2 id="errors"><a class="header" href="#errors">Errors</a></h2>
 <p>All subtype <code>TimeSeriesException</code>:</p>
 <div class="table-wrapper"><table><thead><tr><th>Type</th><th>Mapped from FFI code</th></tr></thead><tbody>

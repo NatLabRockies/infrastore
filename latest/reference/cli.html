@@ -220,9 +220,11 @@ pipes into <code>jq</code> the way a scripted query does.</p>
 3
 </code></pre>
 <p>Each command's document names what it did — <code>{"removed": N}</code>, <code>{"added": N, "store": …}</code>,
-<code>{"merged": N, …}</code> — and a <code>--dry-run</code> reports <code>{"dry_run": true, "would_remove": N, …}</code> instead. A
-filter that matches nothing still reports its zero rather than printing nothing, so <code>jq .removed</code>
-reads <code>0</code> instead of failing on an empty document.</p>
+<code>{"merged": N, …}</code> — and a <code>--dry-run</code> reports <code>{"dry_run": true, "would_remove": N, …}</code> instead.
+The writing commands also name the catalog ids they created: <code>add</code> carries a <code>series</code> array of
+<code>{id, time_series_type, name, owner_id}</code> objects, and <code>attach</code> / <code>link</code> an <code>ids</code> array. A filter
+that matches nothing still reports its zero rather than printing nothing, so <code>jq .removed</code> reads <code>0</code>
+instead of failing on an empty document.</p>
 <p><code>csv</code> renders these status lines as prose alongside <code>table</code>: a status line has no rows to tabulate,
 and a one-row CSV of it would give scripts a shape that changes every time the message is reworded.
 JSON is the machine-readable channel for mutations. <code>template</code> always prints a JSON descriptor, and
@@ -442,6 +444,9 @@ infrastore --store demo.h5 reassign --old 42 --new 43
 <code>parent_id,parent_type,child_id,child_type</code> CSV. The header is mandatory and its names are checked:
 the four columns are two interchangeable-looking <code>(id, type)</code> pairs, so a file with the pairs
 swapped would import cleanly and silently invert every relationship.</p>
+<p>Both report the catalog ids they created, in input order: <code>ids</code> on the JSON document and an <code>ids:</code>
+line under <code>table</code> (which elides the tail past twenty). Those are the durable handles for the rows
+just written, so reporting only a count would leave a caller re-reading the catalog to find them.</p>
 <p><code>detach</code> and <code>unlink</code> with no filter would empty the whole catalog, so they require <code>--all</code> to say
 you meant it. <code>reassign</code> is the association counterpart of <code>replace-owner</code>, which moves time series;
 with neither <code>--attributes</code> nor <code>--links</code> it moves both catalogs, which is what a renumbered
@@ -575,6 +580,7 @@ catalog.</p>
 flags as filters. Every flag is optional. Only <code>--feature</code> may be repeated; the rest take a single
 value:</p>
 <div class="table-wrapper"><table><thead><tr><th>Flag</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>--id &lt;N&gt;</code></td><td>Catalog association ID. A point lookup — see below.</td></tr>
 <tr><td><code>--owner-id &lt;I&gt;</code></td><td>Owner identifier (<code>i64</code> integer).</td></tr>
 <tr><td><code>--owner-category &lt;C&gt;</code></td><td>Restrict to <code>Component</code> or <code>SupplementalAttribute</code>; omit to match either.</td></tr>
 <tr><td><code>--name &lt;N&gt;</code></td><td>Series name (exact match).</td></tr>
@@ -586,6 +592,15 @@ value:</p>
 <tr><td><code>--spelling &lt;S&gt;</code></td><td><code>zoned</code> or <code>zoneless</code>: which timestamp spelling to keep.</td></tr>
 </tbody></table>
 </div>
+<p><code>--id</code> is different in kind from the flags under it. The others narrow a set; <code>--id</code> names exactly
+one row, by the catalog id that <code>add</code>, <code>list</code>, and <code>info</code> report. So it cannot be combined with them
+(the error says as much), and it cannot stand in for them on a command that works over a set —
+<code>list --id 3</code> is refused rather than quietly returning one row. Use it where a caller has stored an
+id in its own model and wants that series back:</p>
+<pre><code class="language-sh">infrastore --store system.h5 -f json info --id 214
+</code></pre>
+<p>An id that names no row is an error saying so, and saying that it will stay that way: ids are never
+reissued, so a reference that stops resolving cannot later come to mean a different series.</p>
 <p><code>--spelling</code> is the constructive half of the time-reference coherence rule. <code>zoneless</code> keeps the
 wall-clock series; <code>zoned</code> keeps the ones that record instants, including those that declare no
 reference at all. <code>grid</code> and the bulk reads span one timestamp axis, so they refuse a selection

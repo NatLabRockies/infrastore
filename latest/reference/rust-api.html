@@ -274,11 +274,14 @@ changes how data is read back — see the <a href="../explanation/storage-model.
         data: TimeSeriesData,
         features: Features,
         units: Option&lt;String&gt;,
-    ) -&gt; Result&lt;TimeSeriesKey&gt;;
+    ) -&gt; Result&lt;AddedTimeSeries&gt;;   // `.key` names the series, `.id` is the catalog row's id
+    // The same write from a prebuilt request (sets `application_data`, an
+    // explicit `id`, …).
+    pub fn add(&amp;mut self, request: AddRequest) -&gt; Result&lt;AddedTimeSeries&gt;;
 
     // A managed batch: packed series are written into batch-sized datasets that
     // fill whole HDF5 chunks (the optimized bulk-write path).
-    pub fn add_time_series_bulk(&amp;mut self, items: Vec&lt;AddRequest&gt;) -&gt; Result&lt;Vec&lt;TimeSeriesKey&gt;&gt;;
+    pub fn add_time_series_bulk(&amp;mut self, items: Vec&lt;AddRequest&gt;) -&gt; Result&lt;Vec&lt;AddedTimeSeries&gt;&gt;;
 
     // Begin a buffered bulk add. Requests pushed onto the returned guard are
     // accumulated in memory and written together by `BulkAdd::commit` (same
@@ -305,6 +308,11 @@ changes how data is read back — see the <a href="../explanation/storage-model.
     // `SingleTimeSeries` are read in one decompress-once pass per dataset; other
     // types reuse the per-key path. Returns a `TimeSeriesData` per key, in order.
     pub fn bulk_read(&amp;self, keys: &amp;[&amp;KeyIdentity]) -&gt; Result&lt;Vec&lt;TimeSeriesData&gt;&gt;;
+
+    // The same read, addressed by catalog association id instead of by key.
+    // Results follow the order the ids are given, repeats included;
+    // `NotFound` if any id names no row.
+    pub fn read_by_ids(&amp;self, ids: &amp;[i64]) -&gt; Result&lt;Vec&lt;TimeSeriesData&gt;&gt;;
 
     pub fn transform_single_time_series(
         &amp;mut self,
@@ -661,7 +669,10 @@ the underlying packed array. The low-level pair still works for direct array acc
 <p><code>get_time_series</code> returns a whole series or forecast. To read <strong>many whole series at once</strong> (e.g.
 exploration or plotting), <code>bulk_read</code> takes a slice of keys and reads packed <code>SingleTimeSeries</code> in
 one decompress-once pass per dataset — far cheaper than a <code>get_time_series</code> per key under the
-timestamp-major chunking, where a single full-series read touches every chunk. For the
+timestamp-major chunking, where a single full-series read touches every chunk. <code>read_by_ids</code> is the
+same read addressed by catalog <a href="../explanation/data-model.html">association id</a> rather than by key,
+for a consumer that recorded ids in its own model: results follow the order the ids are given, and
+an id naming no row fails the read with <code>NotFound</code> rather than being skipped. For the
 timestamp-oriented access pattern — <em>walk the timeline and read every series' value at each instant</em>
 — build a <strong>reader</strong> instead. A reader is built once over a <a href="#listfilter"><code>ListFilter</code></a>, pins one
 resolution, and holds reusable buffers that each read overwrites in place, so a tight loop allocates
@@ -1342,6 +1353,30 @@ stored verbatim. The series name lives on the <code>TimeSeriesData</code> object
     pub features: Features,
     pub units: Option&lt;String&gt;,
     pub application_data: Option&lt;String&gt;,
+    // …plus the other descriptors (`quantity_kind`, `unit_system`,
+    // `time_reference`, `component_field`), all `Option` and defaulting to unset
+}
+
+impl AddRequest {
+    pub fn new(owner_id: i64, owner_type: &amp;str, owner_category: OwnerCategory,
+               data: TimeSeriesData) -&gt; Self;              // everything else unset
+    pub fn with_features(self, features: Features) -&gt; Self;
+}
+<span class="boring">}</span></code></pre></pre>
+<p>A request names no catalog id. Every add — this one, <code>add_time_series</code>, and both association
+catalogs' — lets the catalog assign, and reports the id it chose on <code>AddedTimeSeries</code>. The one
+writer that files rows under ids a caller supplies is <code>import_association_rows</code>, replaying a
+document that already recorded them; see
+<a href="../explanation/data-model.html#association-ids">Association ids</a>.</p>
+<h3 id="addedtimeseries"><a class="header" href="#addedtimeseries"><code>AddedTimeSeries</code></a></h3>
+<p>What every write returns: the key naming the series, and the catalog id it was filed under. The id
+is deliberately not on <code>TimeSeriesKey</code>, because a key is also an <em>argument</em> (to <code>get</code>, to <code>remove</code>)
+where an id would mean nothing. See <a href="../explanation/data-model.html#association-ids">Association ids</a>.</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub struct AddedTimeSeries {
+    pub key: TimeSeriesKey,
+    pub id: i64,
 }
 <span class="boring">}</span></code></pre></pre>
 <h3 id="bulkadd"><a class="header" href="#bulkadd"><code>BulkAdd</code></a></h3>
@@ -1364,7 +1399,7 @@ committing discards the buffer and writes nothing.</p>
     ) -&gt; &amp;mut Self;                                             // application_data = None
     pub fn len(&amp;self) -&gt; usize;          // requests buffered so far
     pub fn is_empty(&amp;self) -&gt; bool;
-    pub fn commit(self) -&gt; Result&lt;Vec&lt;TimeSeriesKey&gt;&gt;;          // keys in push order
+    pub fn commit(self) -&gt; Result&lt;Vec&lt;AddedTimeSeries&gt;&gt;;        // in push order
 }
 <span class="boring">}</span></code></pre></pre>
 <h3 id="requested-types"><a class="header" href="#requested-types">Requested types</a></h3>

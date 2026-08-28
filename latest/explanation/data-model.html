@@ -352,9 +352,9 @@ one. Consumers routinely spread a feature map into a keyword-argument query — 
 <code>resolution</code> would shadow the real field there and silently change what the query means. Adding a
 time series with one of these names raises <code>InvalidParameter</code>:</p>
 <pre><code class="language-text">application_data, component_field, count, data, data_hash, dtype, element_shape, element_type, ext,
-features, horizon, initial_timestamp, interval, length, name, owner_category, owner_id, owner_type,
-percentiles, quantity_kind, resolution, scenario_count, time_reference, time_series_type,
-timestamps, unit_system, units
+features, horizon, id, initial_timestamp, interval, length, name, owner_category, owner_id,
+owner_type, percentiles, quantity_kind, resolution, scenario_count, time_reference,
+time_series_type, timestamps, unit_system, units
 </code></pre>
 <p><code>dtype</code> and <code>ext</code> no longer name metadata fields — <code>element_type</code> and <code>application_data</code> replaced
 them — but both stay reserved. <code>dtype</code> is still how every binding spells a <code>TypedArray</code>'s physical
@@ -396,6 +396,67 @@ entirely separate sets of series.</p>
 </pre>
 <p>Note that two different keys (<code>K1</code> and <code>K3</code> above) can point at the <em>same</em> underlying array. The key
 is a metadata concept; the array is shared by <a href="./content-addressing.html">content addressing</a>.</p>
+<h2 id="association-ids"><a class="header" href="#association-ids">Association IDs</a></h2>
+<p>Every catalog row also has an <strong><code>id</code></strong>: a plain integer, assigned by the store, that names <em>that
+row</em>. It is the second way to re-find a series, and it answers a question a key cannot.</p>
+<p>A key describes a series — owner, name, resolution, features. An id names the row the store filed it
+under. That difference is the point: a consumer that wants to record "this generator's cost curve is
+<em>that</em> series" inside its own object model would otherwise have to embed the whole key tuple, and
+keep it in step with every rename. An id is one integer, and a rename does not move it.</p>
+<pre><code class="language-julia">added = add_time_series!(store, 42, "ThermalStandard", Component, cost_curve)
+generator.operation_cost.variable = added.id   # one integer, stored in the model
+</code></pre>
+<p>Three properties make an id safe to persist:</p>
+<ul>
+<li><strong>It is never reissued.</strong> Deleting a row strands its id permanently. A reference to a deleted
+series stops resolving — it can never come back meaning a <em>different</em> series, which is the failure
+a recycled row number would cause silently, with no foreign key anywhere to catch it.</li>
+<li><strong>It survives the operations that change a series' description.</strong> A rename or a reassignment to a
+new owner keeps the id, as do <code>compact</code> and a save-and-reopen. Those are <code>UPDATE</code>s and file
+copies, not new rows.</li>
+<li><strong>It is not part of identity.</strong> Two series differing only in id are the same series to the
+uniqueness rule and to both content hashes. It sits outside the key deliberately: a key is also an
+<em>argument</em> — to <code>get_time_series</code>, to <code>remove_time_series!</code> — where an id would mean nothing.</li>
+</ul>
+<p><strong>The store assigns it; no add accepts one.</strong> Not <code>add_time_series</code>, not a bulk add, and not either
+association catalog's <code>attach</code> / <code>link</code>. This is what makes "never reissued" a guarantee rather than
+a convention: <code>AUTOINCREMENT</code> only ratchets its counter upward, so an assigned id is never handed
+out twice, while a caller free to name one could re-file a retired id and make a stale reference in
+some consumer's model quietly resolve to a different series. The association row types carry an <code>id</code>
+field because a listing populates one, but it is an output — an add ignores it, so a row read from
+one store and attached to another is filed under a fresh id there.</p>
+<p>What an id does <em>not</em> do is travel between stores. It is the row's number in one catalog, so a
+<code>merge</code> assigns fresh ids in the destination, and two stores holding identical content will disagree
+about them. The one place ids do cross a boundary — and the one writer that files rows under ids it
+was given — is the <a href="../reference/file-format.html">OpenAPI document round trip</a>, where preserving them
+is the whole point: an import that assigned fresh ids would leave every reference the document
+carries pointing at the wrong series. That wire form spells the field <code>association_id</code> — in a
+document travelling beside components and supplemental attributes, an unqualified <code>id</code> would not say
+which id it is — and the schema requires it on every time-series row. Because the import is the only
+door, the guarantee holds there too: a supplied id must sit above the destination catalog's counter
+(<code>DuplicateAssociationId</code> otherwise, so a document's ids fit a fresh store but not one that has
+issued ids of its own), and a document supplies one for every row or for none. Neither association
+catalog's wire form carries an id at all, so both always assign.</p>
+<p>The same round trip carries two fields the schema gained late, vendored here from an un-merged
+SiennaSchemas branch (<code>conformance/sienna_schemas/SOURCE.md</code> records which commit): <code>array_shape</code>,
+the stored array's full native shape (<code>[length, *element_shape]</code> in the catalog's terms, where the
+schema's <code>element_shape</code> is only the per-step trailing shape), and <code>time_reference</code>. Both exist so
+an imported row is <em>identical</em> to the exported one — the forecast layouts above are conventions the
+caller owns, so the native shape cannot be rebuilt from <code>horizon</code> and <code>count</code>. Neither is required:
+a producer predating them writes rows without them, a reader that does not know them ignores them,
+and an import that finds them absent falls back to the schema's own fields.</p>
+<p>Each of the three catalog tables keeps its own independent counter, so an id is only meaningful
+alongside the table it came from.</p>
+<p>Writes report the id they used, and reads take one:</p>
+<div class="table-wrapper"><table><thead><tr><th>Direction</th><th>Rust</th><th>Python</th><th>Julia</th></tr></thead><tbody>
+<tr><td>Write</td><td><code>add_time_series</code> → <code>AddedTimeSeries</code></td><td><code>.id</code> on the result</td><td><code>.id</code> on the result</td></tr>
+<tr><td>Resolve</td><td><code>get_metadata_by_id</code></td><td><code>get_metadata_by_id</code></td><td><code>get_metadata_by_id</code></td></tr>
+<tr><td>Validate</td><td><code>association_exists</code></td><td><code>association_exists</code></td><td><code>association_exists</code></td></tr>
+<tr><td>Read</td><td><code>read_by_ids</code></td><td><code>read_by_ids</code></td><td><code>read_by_ids</code></td></tr>
+</tbody></table>
+</div>
+<p><code>association_exists</code> fetches no row, so a consumer can check every reference in its model on load
+rather than discovering a dangling one mid-simulation.</p>
 <h2 id="optional-descriptors"><a class="header" href="#optional-descriptors">Optional Descriptors</a></h2>
 <p>Each association can also carry:</p>
 <ul>

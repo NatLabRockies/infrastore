@@ -241,9 +241,12 @@ let key = store.add_time_series(
     Some("MW".into()),                      // units
 )?;
 <span class="boring">}</span></code></pre></pre>
-<p><code>add_time_series</code> returns a <a href="../reference/rust-api.html#timeserieskey"><code>TimeSeriesKey</code></a> — keep it to
-re-find the series, or rebuild it from its fields later. Adding a series whose key already exists
-returns <code>TimeSeriesError::DuplicateTimeSeries</code>.</p>
+<p><code>add_time_series</code> returns an <a href="../reference/rust-api.html#addedtimeseries"><code>AddedTimeSeries</code></a>: its
+<code>key</code> is the <a href="../reference/rust-api.html#timeserieskey"><code>TimeSeriesKey</code></a> — keep it to re-find the
+series, or rebuild it from its fields later — and its <code>id</code> is the catalog row's id, the one integer
+to store in your own object model when it needs to point at the series (see
+<a href="../explanation/data-model.html#association-ids">Association ids</a>). Adding a series whose key already
+exists returns <code>TimeSeriesError::DuplicateTimeSeries</code>.</p>
 <h3 id="bulk-inserts"><a class="header" href="#bulk-inserts">Bulk inserts</a></h3>
 <p>For many series at once, <code>add_time_series_bulk</code> takes a <code>Vec&lt;AddRequest&gt;</code> and commits the whole
 batch atomically — any error rolls back every array and association in the call:</p>
@@ -251,7 +254,7 @@ batch atomically — any error rolls back every array and association in the cal
 </span><span class="boring">fn main() {
 </span>use infrastore_core::AddRequest;
 
-let keys = store.add_time_series_bulk(vec![
+let added = store.add_time_series_bulk(vec![
     AddRequest {
         owner_id: 42,
         owner_type: "Generator".into(),
@@ -260,9 +263,12 @@ let keys = store.add_time_series_bulk(vec![
         features: Features::new(),
         units: Some("MW".into()),
         application_data: None,                             // opaque package-owned payload (e.g. JSON)
+        ..AddRequest::new(42, "Generator", OwnerCategory::Component,
+                          TimeSeriesData::SingleTimeSeries(ts_b))   // the remaining descriptors unset
     },
-    // ...
+    // ...or just AddRequest::new(...).with_features(...)
 ])?;
+let keys: Vec&lt;_&gt; = added.iter().map(|a| a.key.clone()).collect();   // one AddedTimeSeries per request
 <span class="boring">}</span></code></pre></pre>
 <p>A bulk insert is also the <strong>fast write path</strong>: packed <code>SingleTimeSeries</code> are grouped by shape and
 written into batch-sized datasets so the timestamp-major HDF5 chunks are filled whole, rather than a

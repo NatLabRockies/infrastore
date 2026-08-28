@@ -1000,9 +1000,9 @@ one. Consumers routinely spread a feature map into a keyword-argument query — 
 <code>resolution</code> would shadow the real field there and silently change what the query means. Adding a
 time series with one of these names raises <code>InvalidParameter</code>:</p>
 <pre><code class="language-text">application_data, component_field, count, data, data_hash, dtype, element_shape, element_type, ext,
-features, horizon, initial_timestamp, interval, length, name, owner_category, owner_id, owner_type,
-percentiles, quantity_kind, resolution, scenario_count, time_reference, time_series_type,
-timestamps, unit_system, units
+features, horizon, id, initial_timestamp, interval, length, name, owner_category, owner_id,
+owner_type, percentiles, quantity_kind, resolution, scenario_count, time_reference,
+time_series_type, timestamps, unit_system, units
 </code></pre>
 <p><code>dtype</code> and <code>ext</code> no longer name metadata fields — <code>element_type</code> and <code>application_data</code> replaced
 them — but both stay reserved. <code>dtype</code> is still how every binding spells a <code>TypedArray</code>'s physical
@@ -1044,6 +1044,67 @@ entirely separate sets of series.</p>
 </pre>
 <p>Note that two different keys (<code>K1</code> and <code>K3</code> above) can point at the <em>same</em> underlying array. The key
 is a metadata concept; the array is shared by <a href="explanation/./content-addressing.html">content addressing</a>.</p>
+<h2 id="association-ids"><a class="header" href="#association-ids">Association IDs</a></h2>
+<p>Every catalog row also has an <strong><code>id</code></strong>: a plain integer, assigned by the store, that names <em>that
+row</em>. It is the second way to re-find a series, and it answers a question a key cannot.</p>
+<p>A key describes a series — owner, name, resolution, features. An id names the row the store filed it
+under. That difference is the point: a consumer that wants to record "this generator's cost curve is
+<em>that</em> series" inside its own object model would otherwise have to embed the whole key tuple, and
+keep it in step with every rename. An id is one integer, and a rename does not move it.</p>
+<pre><code class="language-julia">added = add_time_series!(store, 42, "ThermalStandard", Component, cost_curve)
+generator.operation_cost.variable = added.id   # one integer, stored in the model
+</code></pre>
+<p>Three properties make an id safe to persist:</p>
+<ul>
+<li><strong>It is never reissued.</strong> Deleting a row strands its id permanently. A reference to a deleted
+series stops resolving — it can never come back meaning a <em>different</em> series, which is the failure
+a recycled row number would cause silently, with no foreign key anywhere to catch it.</li>
+<li><strong>It survives the operations that change a series' description.</strong> A rename or a reassignment to a
+new owner keeps the id, as do <code>compact</code> and a save-and-reopen. Those are <code>UPDATE</code>s and file
+copies, not new rows.</li>
+<li><strong>It is not part of identity.</strong> Two series differing only in id are the same series to the
+uniqueness rule and to both content hashes. It sits outside the key deliberately: a key is also an
+<em>argument</em> — to <code>get_time_series</code>, to <code>remove_time_series!</code> — where an id would mean nothing.</li>
+</ul>
+<p><strong>The store assigns it; no add accepts one.</strong> Not <code>add_time_series</code>, not a bulk add, and not either
+association catalog's <code>attach</code> / <code>link</code>. This is what makes "never reissued" a guarantee rather than
+a convention: <code>AUTOINCREMENT</code> only ratchets its counter upward, so an assigned id is never handed
+out twice, while a caller free to name one could re-file a retired id and make a stale reference in
+some consumer's model quietly resolve to a different series. The association row types carry an <code>id</code>
+field because a listing populates one, but it is an output — an add ignores it, so a row read from
+one store and attached to another is filed under a fresh id there.</p>
+<p>What an id does <em>not</em> do is travel between stores. It is the row's number in one catalog, so a
+<code>merge</code> assigns fresh ids in the destination, and two stores holding identical content will disagree
+about them. The one place ids do cross a boundary — and the one writer that files rows under ids it
+was given — is the <a href="explanation/../reference/file-format.html">OpenAPI document round trip</a>, where preserving them
+is the whole point: an import that assigned fresh ids would leave every reference the document
+carries pointing at the wrong series. That wire form spells the field <code>association_id</code> — in a
+document travelling beside components and supplemental attributes, an unqualified <code>id</code> would not say
+which id it is — and the schema requires it on every time-series row. Because the import is the only
+door, the guarantee holds there too: a supplied id must sit above the destination catalog's counter
+(<code>DuplicateAssociationId</code> otherwise, so a document's ids fit a fresh store but not one that has
+issued ids of its own), and a document supplies one for every row or for none. Neither association
+catalog's wire form carries an id at all, so both always assign.</p>
+<p>The same round trip carries two fields the schema gained late, vendored here from an un-merged
+SiennaSchemas branch (<code>conformance/sienna_schemas/SOURCE.md</code> records which commit): <code>array_shape</code>,
+the stored array's full native shape (<code>[length, *element_shape]</code> in the catalog's terms, where the
+schema's <code>element_shape</code> is only the per-step trailing shape), and <code>time_reference</code>. Both exist so
+an imported row is <em>identical</em> to the exported one — the forecast layouts above are conventions the
+caller owns, so the native shape cannot be rebuilt from <code>horizon</code> and <code>count</code>. Neither is required:
+a producer predating them writes rows without them, a reader that does not know them ignores them,
+and an import that finds them absent falls back to the schema's own fields.</p>
+<p>Each of the three catalog tables keeps its own independent counter, so an id is only meaningful
+alongside the table it came from.</p>
+<p>Writes report the id they used, and reads take one:</p>
+<div class="table-wrapper"><table><thead><tr><th>Direction</th><th>Rust</th><th>Python</th><th>Julia</th></tr></thead><tbody>
+<tr><td>Write</td><td><code>add_time_series</code> → <code>AddedTimeSeries</code></td><td><code>.id</code> on the result</td><td><code>.id</code> on the result</td></tr>
+<tr><td>Resolve</td><td><code>get_metadata_by_id</code></td><td><code>get_metadata_by_id</code></td><td><code>get_metadata_by_id</code></td></tr>
+<tr><td>Validate</td><td><code>association_exists</code></td><td><code>association_exists</code></td><td><code>association_exists</code></td></tr>
+<tr><td>Read</td><td><code>read_by_ids</code></td><td><code>read_by_ids</code></td><td><code>read_by_ids</code></td></tr>
+</tbody></table>
+</div>
+<p><code>association_exists</code> fetches no row, so a consumer can check every reference in its model on load
+rather than discovering a dangling one mid-simulation.</p>
 <h2 id="optional-descriptors"><a class="header" href="#optional-descriptors">Optional Descriptors</a></h2>
 <p>Each association can also carry:</p>
 <ul>
@@ -1813,8 +1874,11 @@ getters, and <code>transform_single_time_series!</code>, so all four forecast ty
 <li><strong>Bulk reads use a result handle.</strong> <code>bulk_read</code> reads many full <code>SingleTimeSeries</code> at once: the
 FFI fetches them in one decompress-once pass per dataset into a <code>InfraStoreBulkReadHandle</code>
 (<code>infrastore_store_bulk_read_single</code>), and Julia reads each element out, then frees the handle.
-Python's <code>store.bulk_read</code> exposes the same operation directly. Managed bulk <em>writes</em> already take
-the fast block-write path through the existing batch / <code>add_time_series_bulk</code> APIs.</li>
+Python's <code>store.bulk_read</code> exposes the same operation directly. <code>read_by_ids</code> addresses the same
+read by catalog association id and fills the same handle, so both reads decode by the same route:
+<code>infrastore_bulk_result_item_name</code> hands each item's name back beside its values, as
+<code>infrastore_bulk_result_item_type</code> does its type. Managed bulk <em>writes</em> already take the fast
+block-write path through the existing batch / <code>add_time_series_bulk</code> APIs.</li>
 </ul>
 <p><code>InfraStore.jl</code> loads the cdylib from the <code>INFRASTORE_LIB</code> environment variable when it is set, and
 otherwise from the <code>libinfrastore_ffi</code> artifact its <code>Artifacts.toml</code> pins to the matching GitHub
@@ -2222,9 +2286,12 @@ let key = store.add_time_series(
     Some("MW".into()),                      // units
 )?;
 <span class="boring">}</span></code></pre></pre>
-<p><code>add_time_series</code> returns a <a href="guides/../reference/rust-api.html#timeserieskey"><code>TimeSeriesKey</code></a> — keep it to
-re-find the series, or rebuild it from its fields later. Adding a series whose key already exists
-returns <code>TimeSeriesError::DuplicateTimeSeries</code>.</p>
+<p><code>add_time_series</code> returns an <a href="guides/../reference/rust-api.html#addedtimeseries"><code>AddedTimeSeries</code></a>: its
+<code>key</code> is the <a href="guides/../reference/rust-api.html#timeserieskey"><code>TimeSeriesKey</code></a> — keep it to re-find the
+series, or rebuild it from its fields later — and its <code>id</code> is the catalog row's id, the one integer
+to store in your own object model when it needs to point at the series (see
+<a href="guides/../explanation/data-model.html#association-ids">Association ids</a>). Adding a series whose key already
+exists returns <code>TimeSeriesError::DuplicateTimeSeries</code>.</p>
 <h3 id="bulk-inserts"><a class="header" href="#bulk-inserts">Bulk inserts</a></h3>
 <p>For many series at once, <code>add_time_series_bulk</code> takes a <code>Vec&lt;AddRequest&gt;</code> and commits the whole
 batch atomically — any error rolls back every array and association in the call:</p>
@@ -2232,7 +2299,7 @@ batch atomically — any error rolls back every array and association in the cal
 </span><span class="boring">fn main() {
 </span>use infrastore_core::AddRequest;
 
-let keys = store.add_time_series_bulk(vec![
+let added = store.add_time_series_bulk(vec![
     AddRequest {
         owner_id: 42,
         owner_type: "Generator".into(),
@@ -2241,9 +2308,12 @@ let keys = store.add_time_series_bulk(vec![
         features: Features::new(),
         units: Some("MW".into()),
         application_data: None,                             // opaque package-owned payload (e.g. JSON)
+        ..AddRequest::new(42, "Generator", OwnerCategory::Component,
+                          TimeSeriesData::SingleTimeSeries(ts_b))   // the remaining descriptors unset
     },
-    // ...
+    // ...or just AddRequest::new(...).with_features(...)
 ])?;
+let keys: Vec&lt;_&gt; = added.iter().map(|a| a.key.clone()).collect();   // one AddedTimeSeries per request
 <span class="boring">}</span></code></pre></pre>
 <p>A bulk insert is also the <strong>fast write path</strong>: packed <code>SingleTimeSeries</code> are grouped by shape and
 written into batch-sized datasets so the timestamp-major HDF5 chunks are filled whole, rather than a
@@ -2624,7 +2694,7 @@ element shape (such as cost-curve coefficients). The required <code>name</code> 
 carried on the object — the same array can be added under different names. Use
 <code>NonSequentialTimeSeries(timestamps, data, name)</code> for explicitly timestamped series.</p>
 <h2 id="add-a-series-1"><a class="header" href="#add-a-series-1">Add a Series</a></h2>
-<pre><code class="language-python">key = store.add_time_series(
+<pre><code class="language-python">added = store.add_time_series(
     owner_id=42,
     owner_type="Generator",
     owner_category=OwnerCategory.Component,
@@ -2632,6 +2702,8 @@ carried on the object — the same array can be added under different names. Use
     features={"model_year": 2030, "scenario": "high"},
     units="MW",
 )
+key = added.key   # TimeSeriesKey: re-find the series with it
+added.id          # the catalog row's id: one integer to keep in your own model
 </code></pre>
 <p><code>features</code> is a plain dict whose values are <code>int</code>, <code>float</code>, <code>bool</code>, or <code>str</code>. Adding a series whose
 <a href="guides/../explanation/data-model.html#keys">key</a> already exists raises <code>DuplicateTimeSeriesError</code>. The
@@ -2667,11 +2739,12 @@ descriptor are a duplicate. See
 commits them in one catalog transaction, taking the block-sized HDF5 write path. It is the way to
 load a system: an order of magnitude faster than a loop of single adds, and same-shaped series land
 in the same packed dataset.</p>
-<pre><code class="language-python">keys = store.add_time_series_bulk([
+<pre><code class="language-python">added = store.add_time_series_bulk([
     {"owner_id": i, "owner_type": "Generator", "owner_category": OwnerCategory.Component,
      "time_series": series[i], "units": "MW"}
     for i in range(len(series))
-])   # keys in input order; all-or-nothing
+])   # one AddedTimeSeries per item, in input order; all-or-nothing
+keys = [a.key for a in added]
 </code></pre>
 <h3 id="transactions"><a class="header" href="#transactions">Transactions</a></h3>
 <p>Several operations that must take effect together — replacing a series is an add plus a remove — go
@@ -2996,7 +3069,7 @@ ts = SingleTimeSeries(
 </code></pre>
 <p>Reads return a <code>DateTime</code> in UTC either way; see
 <a href="guides/../reference/julia-api.html#time-and-resolution-conversions">Time and resolution conversions</a>.</p>
-<pre><code class="language-julia">key = add_time_series!(
+<pre><code class="language-julia">added = add_time_series!(
     store,
     42,
     "Generator",
@@ -3005,6 +3078,8 @@ ts = SingleTimeSeries(
     features = Dict("model_year" =&gt; 2030),
     units = "MW",
 )
+key = added.key   # TimeSeriesKey
+added.id          # the catalog row's id: one integer to keep in your own model
 </code></pre>
 <p>Notes:</p>
 <ul>
@@ -3014,7 +3089,11 @@ ts = SingleTimeSeries(
 <code>Bool</code>, <code>String</code>). String features are supported and round-trip unchanged.</li>
 <li>Adding a duplicate <a href="guides/../explanation/data-model.html#keys">key</a> throws <code>DuplicateTimeSeriesError</code>.</li>
 </ul>
-<p><code>add_time_series!</code> returns a <code>TimeSeriesKey</code> holding an opaque handle into the store.</p>
+<p><code>add_time_series!</code> returns an <code>AddedTimeSeries</code>: its <code>key</code> is a <code>TimeSeriesKey</code> holding an opaque
+handle into the store, and its <code>id</code> is the catalog row's id (see
+<a href="guides/../explanation/data-model.html#association-ids">Association ids</a>). Every function taking a
+<code>TimeSeriesKey</code> also accepts the <code>AddedTimeSeries</code> directly, so <code>get_time_series(store, added)</code>
+works without unwrapping.</p>
 <p>Two more rules worth knowing up front. <strong>Stored instants and periods are millisecond-precision</strong>: a
 <code>Microsecond(1)</code> resolution, a <code>Millisecond(0)</code> one, or a negative period is refused with
 <code>InvalidParameterError</code> (query bounds are unconstrained). And a <code>Store</code> is <strong>not thread-safe</strong>:
@@ -3051,7 +3130,8 @@ adds, and same-shaped series land in the same packed dataset.</p>
 for (id, ts) in series
     add_time_series!(batch, id, "Generator", Component, ts; units = "MW")
 end
-keys = add_time_series_bulk!(store, batch)   # keys in input order; all-or-nothing
+added = add_time_series_bulk!(store, batch)   # Vector{AddedTimeSeries}, in input order; all-or-nothing
+keys = [a.key for a in added]
 </code></pre>
 <h3 id="transactions-1"><a class="header" href="#transactions-1">Transactions</a></h3>
 <p>Several operations that must take effect together — replacing a series is an add plus a remove — go
@@ -4252,7 +4332,7 @@ carries netcdf-c's <code>_NCProperties</code> attribute, and <code>Store::open</
 (see <code>storage_backend</code> below). The <code>.h5</code> extension is a convention — the store never inspects it.</p>
 <h2 id="format-version"><a class="header" href="#format-version">Format Version</a></h2>
 <p>The HDF5 root carries four global attributes:</p>
-<pre><code class="language-text">data_format_version = "0.16.0"
+<pre><code class="language-text">data_format_version = "0.18.0"
 compression         = "deflate:3:shuffle"
 storage_backend     = "hdf5"
 catalog_generation  = "9f2c1ab4e70d5836c41b9e2af0d7c358"
@@ -4282,16 +4362,24 @@ existing value rather than minting a new one, since it rewrites only the HDF5 ha
 <code>IncompatibleFormat</code>, naming both versions. Every bump is backward-incompatible by definition, so
 the check is exact equality and there is no in-place upgrade path: regenerate the store with the
 matching build.</p>
-<p>(<code>0.17.0</code> added the metadata column <code>time_reference</code>, which records how a series' timestamps were
-<em>spelled</em> — an instant in UTC, an instant at a fixed offset, an instant in a named IANA zone, or a
-wall clock naming no instant. It also changes how stored timestamps are <em>interpreted</em>: a row marked
-<code>zoneless</code> holds wall clocks the store keeps as if UTC, which an older reader would hand back as
-instants. See <a href="reference/../explanation/data-model.html#time-references">Time references</a>; <code>0.16.0</code> added the
-metadata column <code>component_field</code>; <code>0.15.0</code> renamed the metadata column <code>ext</code> to <code>application_data</code>
-and added the <code>quantity_kind</code> and <code>unit_system</code> columns; unlike a new <em>table</em>, new <em>columns</em> are not
-picked up by the idempotent <code>CREATE TABLE IF NOT EXISTS</code> DDL, so a store one version behind is
-rejected on open; <code>0.14.0</code> moved a <code>NonSequentialTimeSeries</code>'s timestamps out of the association
-row: the <code>timestamps_json</code> TEXT column became a <code>timestamps_hash</code> BLOB resolving into the new
+<p>(<code>0.18.0</code> made the <code>id</code> column of all three catalog tables — <code>time_series_associations</code>,
+<code>supplemental_attribute_associations</code>, and <code>parent_child_associations</code> — an
+<code>INTEGER PRIMARY KEY AUTOINCREMENT</code> rather than a bare rowid alias, so an id is never reissued once
+its row is deleted. It is the one bump that adds no column and changes no value, and it still cannot
+be additive: <code>AUTOINCREMENT</code> is part of a table's declaration and there is no <code>ALTER TABLE</code> for it,
+so applying this DDL to an older catalog would leave all three tables on recycled ids while
+reporting success. Recycled ids matter because the id is an external reference — a consumer stores
+it in its own model — and reuse makes a stale reference resolve to a different, valid row; <code>0.17.0</code>
+added the metadata column <code>time_reference</code>, which records how a series' timestamps were <em>spelled</em> —
+an instant in UTC, an instant at a fixed offset, an instant in a named IANA zone, or a wall clock
+naming no instant. It also changes how stored timestamps are <em>interpreted</em>: a row marked <code>zoneless</code>
+holds wall clocks the store keeps as if UTC, which an older reader would hand back as instants. See
+<a href="reference/../explanation/data-model.html#time-references">Time references</a>; <code>0.16.0</code> added the metadata column
+<code>component_field</code>; <code>0.15.0</code> renamed the metadata column <code>ext</code> to <code>application_data</code> and added the
+<code>quantity_kind</code> and <code>unit_system</code> columns; unlike a new <em>table</em>, new <em>columns</em> are not picked up by
+the idempotent <code>CREATE TABLE IF NOT EXISTS</code> DDL, so a store one version behind is rejected on open;
+<code>0.14.0</code> moved a <code>NonSequentialTimeSeries</code>'s timestamps out of the association row: the
+<code>timestamps_json</code> TEXT column became a <code>timestamps_hash</code> BLOB resolving into the new
 content-addressed <a href="reference/file-format.html#timestamp_sets"><code>timestamp_sets</code></a> table, and irregular arrays that share a time
 axis are now column-packed into <code>nsts_…</code> datasets keyed by that hash instead of one standalone
 <code>arr_…</code> dataset each; <code>0.13.0</code> replaced the <code>dtype</code> column with <code>element_type</code>, which names the
@@ -4350,7 +4438,7 @@ against it and a mismatch is an integrity error.</p>
 <h2 id="hdf5-layout"><a class="header" href="#hdf5-layout">HDF5 Layout</a></h2>
 <p>Arrays live under a two-level group hierarchy, in one of <strong>two storage modes</strong>:</p>
 <pre><code class="language-text">&lt;name&gt;.h5
-├── attribute  data_format_version = "0.16.0"
+├── attribute  data_format_version = "0.18.0"
 ├── attribute  compression         = "deflate:3:shuffle"
 ├── attribute  storage_backend     = "hdf5"
 └── group      time_series/
@@ -4489,7 +4577,7 @@ the error surfaces with the compacting store still open on the original file.</p
 <h3 id="time_series_associations"><a class="header" href="#time_series_associations"><code>time_series_associations</code></a></h3>
 <p>One row per association between an owner and a stored array.</p>
 <div class="table-wrapper"><table><thead><tr><th>Column</th><th>Type</th><th>Notes</th></tr></thead><tbody>
-<tr><td><code>id</code></td><td>INTEGER</td><td>Primary key</td></tr>
+<tr><td><code>id</code></td><td>INTEGER</td><td><code>AUTOINCREMENT</code> primary key; never reissued — see below</td></tr>
 <tr><td><code>owner_id</code></td><td>INTEGER</td><td>Owner identity; signed 64-bit integer identifier (part of key)</td></tr>
 <tr><td><code>owner_type</code></td><td>TEXT</td><td>Owner's concrete type, descriptive</td></tr>
 <tr><td><code>owner_category</code></td><td>INTEGER</td><td>Code, <code>CHECK</code> in (0, 1); part of key — see below</td></tr>
@@ -4610,7 +4698,7 @@ same name, whose logic this replaces. See
 <a href="reference/../explanation/data-model.html#associations-between-entities">Associations Between Entities</a> for the
 data model.</p>
 <pre><code class="language-sql">CREATE TABLE supplemental_attribute_associations (
-    id             INTEGER PRIMARY KEY,
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
     component_id   INTEGER NOT NULL,
     component_type TEXT    NOT NULL,
     attribute_id   INTEGER NOT NULL,
@@ -4633,7 +4721,7 @@ exact pair is constrained.</p>
 endpoints are always components, which is why there is no category column: a supplemental attribute
 cannot appear here by construction.</p>
 <pre><code class="language-sql">CREATE TABLE parent_child_associations (
-    id          INTEGER PRIMARY KEY,
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
     parent_id   INTEGER NOT NULL,
     parent_type TEXT    NOT NULL,
     child_id    INTEGER NOT NULL,
@@ -4657,16 +4745,17 @@ series therefore leaves both tables untouched, and vice versa; consumers issue b
 want both effects.</p>
 <p>Both are also independent of each other: the same integer may name a row in each without collision.</p>
 <h4 id="compatibility"><a class="header" href="#compatibility">Compatibility</a></h4>
-<p>Both tables were added <strong>without</strong> bumping <code>data_format_version</code>, which is why a <code>0.10.0</code> store may
-or may not contain them:</p>
-<ul>
-<li>Opening a store for writing applies the full DDL, which is idempotent, so a store written before
-they existed gains both on first writable open.</li>
-<li>Opening read-only cannot run DDL. Reads of a missing table return empty results (<code>0</code>, <code>false</code>, no
-rows) rather than failing.</li>
-</ul>
-<p>The version gate is exact equality with no upgrade path, so bumping for purely additive tables would
-have made every existing store unreadable in exchange for nothing.</p>
+<p>Both tables were originally added <strong>without</strong> bumping <code>data_format_version</code>, since the gate is exact
+equality with no upgrade path and bumping for a purely additive table would have made every existing
+store unreadable in exchange for nothing.</p>
+<p>That is no longer how they land. <code>0.18.0</code> gave both an <code>AUTOINCREMENT</code> id, which is part of a
+table's declaration and so cannot reach an existing table through <code>CREATE TABLE IF NOT EXISTS</code>; the
+version check rejects an older catalog before this DDL runs. Only a store at the current version can
+contain them, and it always does.</p>
+<p>One consequence of the additive era survives, and is still required: <strong>opening read-only cannot run
+DDL at all</strong>, so reads of a missing table return empty results (<code>0</code>, <code>false</code>, no rows) rather than
+failing. That tolerance is not vestigial — it is what lets a read-only open work on a store whose
+catalog was never opened for writing.</p>
 <h3 id="schema_version"><a class="header" href="#schema_version"><code>schema_version</code></a></h3>
 <pre><code class="language-sql">CREATE TABLE schema_version (version INTEGER NOT NULL);
 </code></pre>
@@ -4820,7 +4909,7 @@ sqlite3 system.h5.sqlite '.schema'
 # Query the view, not the table, to see decoded discriminants.
 sqlite3 system.h5.sqlite \
   'SELECT name, time_series_type, element_type, element_shape, length FROM time_series_readable;'
-# Both association tables are absent in stores written before they existed.
+# Both association tables are present in every current-format store.
 sqlite3 system.h5.sqlite 'SELECT * FROM supplemental_attribute_associations;'
 sqlite3 system.h5.sqlite 'SELECT * FROM parent_child_associations;'
 </code></pre>
@@ -5020,11 +5109,14 @@ changes how data is read back — see the <a href="reference/../explanation/stor
         data: TimeSeriesData,
         features: Features,
         units: Option&lt;String&gt;,
-    ) -&gt; Result&lt;TimeSeriesKey&gt;;
+    ) -&gt; Result&lt;AddedTimeSeries&gt;;   // `.key` names the series, `.id` is the catalog row's id
+    // The same write from a prebuilt request (sets `application_data`, an
+    // explicit `id`, …).
+    pub fn add(&amp;mut self, request: AddRequest) -&gt; Result&lt;AddedTimeSeries&gt;;
 
     // A managed batch: packed series are written into batch-sized datasets that
     // fill whole HDF5 chunks (the optimized bulk-write path).
-    pub fn add_time_series_bulk(&amp;mut self, items: Vec&lt;AddRequest&gt;) -&gt; Result&lt;Vec&lt;TimeSeriesKey&gt;&gt;;
+    pub fn add_time_series_bulk(&amp;mut self, items: Vec&lt;AddRequest&gt;) -&gt; Result&lt;Vec&lt;AddedTimeSeries&gt;&gt;;
 
     // Begin a buffered bulk add. Requests pushed onto the returned guard are
     // accumulated in memory and written together by `BulkAdd::commit` (same
@@ -5051,6 +5143,11 @@ changes how data is read back — see the <a href="reference/../explanation/stor
     // `SingleTimeSeries` are read in one decompress-once pass per dataset; other
     // types reuse the per-key path. Returns a `TimeSeriesData` per key, in order.
     pub fn bulk_read(&amp;self, keys: &amp;[&amp;KeyIdentity]) -&gt; Result&lt;Vec&lt;TimeSeriesData&gt;&gt;;
+
+    // The same read, addressed by catalog association id instead of by key.
+    // Results follow the order the ids are given, repeats included;
+    // `NotFound` if any id names no row.
+    pub fn read_by_ids(&amp;self, ids: &amp;[i64]) -&gt; Result&lt;Vec&lt;TimeSeriesData&gt;&gt;;
 
     pub fn transform_single_time_series(
         &amp;mut self,
@@ -5407,7 +5504,10 @@ the underlying packed array. The low-level pair still works for direct array acc
 <p><code>get_time_series</code> returns a whole series or forecast. To read <strong>many whole series at once</strong> (e.g.
 exploration or plotting), <code>bulk_read</code> takes a slice of keys and reads packed <code>SingleTimeSeries</code> in
 one decompress-once pass per dataset — far cheaper than a <code>get_time_series</code> per key under the
-timestamp-major chunking, where a single full-series read touches every chunk. For the
+timestamp-major chunking, where a single full-series read touches every chunk. <code>read_by_ids</code> is the
+same read addressed by catalog <a href="reference/../explanation/data-model.html">association id</a> rather than by key,
+for a consumer that recorded ids in its own model: results follow the order the ids are given, and
+an id naming no row fails the read with <code>NotFound</code> rather than being skipped. For the
 timestamp-oriented access pattern — <em>walk the timeline and read every series' value at each instant</em>
 — build a <strong>reader</strong> instead. A reader is built once over a <a href="reference/rust-api.html#listfilter"><code>ListFilter</code></a>, pins one
 resolution, and holds reusable buffers that each read overwrites in place, so a tight loop allocates
@@ -6088,6 +6188,30 @@ stored verbatim. The series name lives on the <code>TimeSeriesData</code> object
     pub features: Features,
     pub units: Option&lt;String&gt;,
     pub application_data: Option&lt;String&gt;,
+    // …plus the other descriptors (`quantity_kind`, `unit_system`,
+    // `time_reference`, `component_field`), all `Option` and defaulting to unset
+}
+
+impl AddRequest {
+    pub fn new(owner_id: i64, owner_type: &amp;str, owner_category: OwnerCategory,
+               data: TimeSeriesData) -&gt; Self;              // everything else unset
+    pub fn with_features(self, features: Features) -&gt; Self;
+}
+<span class="boring">}</span></code></pre></pre>
+<p>A request names no catalog id. Every add — this one, <code>add_time_series</code>, and both association
+catalogs' — lets the catalog assign, and reports the id it chose on <code>AddedTimeSeries</code>. The one
+writer that files rows under ids a caller supplies is <code>import_association_rows</code>, replaying a
+document that already recorded them; see
+<a href="reference/../explanation/data-model.html#association-ids">Association ids</a>.</p>
+<h3 id="addedtimeseries"><a class="header" href="#addedtimeseries"><code>AddedTimeSeries</code></a></h3>
+<p>What every write returns: the key naming the series, and the catalog id it was filed under. The id
+is deliberately not on <code>TimeSeriesKey</code>, because a key is also an <em>argument</em> (to <code>get</code>, to <code>remove</code>)
+where an id would mean nothing. See <a href="reference/../explanation/data-model.html#association-ids">Association ids</a>.</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub struct AddedTimeSeries {
+    pub key: TimeSeriesKey,
+    pub id: i64,
 }
 <span class="boring">}</span></code></pre></pre>
 <h3 id="bulkadd"><a class="header" href="#bulkadd"><code>BulkAdd</code></a></h3>
@@ -6110,7 +6234,7 @@ committing discards the buffer and writes nothing.</p>
     ) -&gt; &amp;mut Self;                                             // application_data = None
     pub fn len(&amp;self) -&gt; usize;          // requests buffered so far
     pub fn is_empty(&amp;self) -&gt; bool;
-    pub fn commit(self) -&gt; Result&lt;Vec&lt;TimeSeriesKey&gt;&gt;;          // keys in push order
+    pub fn commit(self) -&gt; Result&lt;Vec&lt;AddedTimeSeries&gt;&gt;;        // in push order
 }
 <span class="boring">}</span></code></pre></pre>
 <h3 id="requested-types"><a class="header" href="#requested-types">Requested types</a></h3>
@@ -6526,7 +6650,7 @@ store.in_transaction -&gt; bool
     unit_system: str | None = None,   # "natural_units" | "component_base"
     time_reference: str | None = None,   # "utc" | "zoneless" | "-07:00" | "America/Denver"
     component_field: str | None = None,  # e.g. "max_active_power"
-) -&gt; TimeSeriesKey: ...
+) -&gt; AddedTimeSeries: ...
 # `time_reference` is normally omitted: it is inferred from the datetime the
 # series was built with (see "Time references" below). Pass it to override.
 # An unrecognized `unit_system` raises InvalidParameterError rather than
@@ -6537,13 +6661,24 @@ store.in_transaction -&gt; bool
 # A `features` key that shadows a time-series or key field (`name`, `resolution`,
 # `owner_id`, ...) raises InvalidParameterError.
 
-def add_time_series_bulk(self, items: list[dict]) -&gt; list[TimeSeriesKey]: ...
+def add_time_series_bulk(self, items: list[dict]) -&gt; list[AddedTimeSeries]: ...
 # Each item dict mirrors add_time_series's parameters: required `owner_id`,
 # `owner_type`, `owner_category`, `time_series`; optional `features`, `units`,
 # `element_type`, `application_data`, `quantity_kind`, `unit_system`,
 # `time_reference`, `component_field`.
 # All items commit in ONE metadata transaction (all-or-nothing), which is much
-# faster than looping over add_time_series. Keys are returned in input order.
+# faster than looping over add_time_series. Results are in input order.
+
+class AddedTimeSeries:
+    key: TimeSeriesKey   # names the series
+    id: int              # the catalog row's id — store it to reference the series later
+# Hashable and comparable; the id is never reissued once its row is deleted.
+# No add takes an id — the catalog assigns, and this reports what it chose. The
+# one writer that files rows under supplied ids is
+# import_time_series_associations_openapi.
+
+def get_metadata_by_id(self, id: int) -&gt; dict | None: ...   # None when no row has the id
+def association_exists(self, id: int) -&gt; bool: ...          # no row fetched
 
 def transform_single_time_series(
     self,
@@ -6606,6 +6741,12 @@ def bulk_read(
 ) -&gt; list[SingleTimeSeries | NonSequentialTimeSeries | Deterministic | Probabilistic | Scenarios]: ...
 # `time_range` applies the same window to every key (default: each series in full).
 # Results are returned in the same order as `keys`; an empty list of keys returns an empty list.
+
+def read_by_ids(
+    self, ids: list[int]
+) -&gt; list[SingleTimeSeries | NonSequentialTimeSeries | Deterministic | Probabilistic | Scenarios]: ...
+# The same read addressed by catalog association id. Results follow the order the
+# ids are given, repeats included; NotFoundError if any id names no row.
 
 def remove_time_series(self, key: TimeSeriesKey) -&gt; None: ...
 def remove_time_series_bulk(self, keys: list[TimeSeriesKey]) -&gt; int: ...
@@ -6743,6 +6884,12 @@ returns an empty list). It is the bulk counterpart to <code>get_time_series</cod
 are read in one decompress-once pass per dataset instead of one read per key. Pass the
 keyword-only <code>time_range=(start, end)</code> to apply the same window to every key; by default each
 series comes back in full.</li>
+<li><strong><code>read_by_ids</code></strong> is the same read addressed by catalog
+<a href="reference/../explanation/data-model.html">association id</a> rather than by key — the read direction of the id
+every write reports on its <code>AddedTimeSeries</code>, for a caller that recorded ids in its own model
+instead of keeping an id-to-key map beside the store. Results follow the order the ids are given,
+repeats included; an id naming no row raises <code>NotFoundError</code> and fails the whole call, unlike
+<code>association_exists</code>, which asks the question rather than committing to a read.</li>
 <li><strong><code>list_time_series</code></strong> returns a list of dicts (the same shape <code>get_metadata</code> returns for one
 key), each with the keys: <code>owner_id</code>, <code>owner_type</code>, <code>owner_category</code>, <code>time_series_type</code>, <code>name</code>,
 <code>data_hash</code> (hex string), <code>initial_timestamp</code> (RFC 3339 string, or <code>None</code> for non-sequential
@@ -7056,11 +7203,14 @@ many components.</p>
     attribute_type: str,
 )
 </code></pre>
-<p>Read-only properties: <code>component_id</code>, <code>component_type</code>, <code>attribute_id</code>, <code>attribute_type</code>. The object
-is hashable and compares structurally, so attachments work in sets and as dict keys. In the
-<strong>catalog</strong>, though, identity is only the <code>(component_id, attribute_id)</code> pair — the type names are
-denormalized labels carried for filtering — so re-attaching the same pair under different type names
-raises <code>DuplicateAssociationError</code>.</p>
+<p>Read-only properties: <code>component_id</code>, <code>component_type</code>, <code>attribute_id</code>, <code>attribute_type</code>, and <code>id</code> —
+the catalog row's own number, <code>None</code> on a value that has not been through the catalog. The object is
+hashable and compares structurally (the <code>id</code> stays out of both), so attachments work in sets and as
+dict keys. In the <strong>catalog</strong>, though, identity is only the <code>(component_id, attribute_id)</code> pair —
+the type names are denormalized labels carried for filtering — so re-attaching the same pair under
+different type names raises <code>DuplicateAssociationError</code>.</p>
+<p>The <code>id</code> is an output only. The constructor takes none, and an add ignores whatever a listed row
+carries, so attaching a row read from one store to another files it under a fresh id there.</p>
 <pre><code class="language-python">def add_supplemental_attribute_association(
     self, association: SupplementalAttributeAssociation
 ) -&gt; None: ...
@@ -7138,11 +7288,12 @@ are always components; an attribute cannot appear here.</p>
     child_type: str,
 )
 </code></pre>
-<p>Read-only properties: <code>parent_id</code>, <code>parent_type</code>, <code>child_id</code>, <code>child_type</code>; hashable and
-structurally comparable like the attachment object. In the <strong>catalog</strong>, identity is the <em>ordered</em>
-<code>(parent_id, child_id)</code> pair, so the reversed pair is a different edge, while repeating the same
-ordered pair under different type names raises <code>DuplicateAssociationError</code>. There is no
-relationship-kind column, so one ordered pair may be related at most once.</p>
+<p>Read-only properties: <code>parent_id</code>, <code>parent_type</code>, <code>child_id</code>, <code>child_type</code>, and <code>id</code>; hashable and
+structurally comparable like the attachment object, with the same output-only <code>id</code>. In the
+<strong>catalog</strong>, identity is the <em>ordered</em> <code>(parent_id, child_id)</code> pair, so the reversed pair is a
+different edge, while repeating the same ordered pair under different type names raises
+<code>DuplicateAssociationError</code>. There is no relationship-kind column, so one ordered pair may be
+related at most once.</p>
 <p>This family is deliberately narrower than the supplemental one — no counts-by-type and no grouped
 summary — because there is no consumer for them yet; both are additive if one appears.</p>
 <pre><code class="language-python">def add_parent_child_association(self, association: ParentChildAssociation) -&gt; None: ...
@@ -7195,14 +7346,15 @@ store.remove_parent_child_associations(parent_types=["Bus"])   # -&gt; 1
 <p>Direct JSON serde of the two association catalogs, in the wire spelling
 <a href="https://github.com/Sienna-Platform/SiennaSchemas">SiennaSchemas</a> defines (<code>TimeSeries/*.json</code>,
 <code>Core/Associations/SupplementalAttributeAssociation.json</code>). Unlike <code>list_time_series</code> /
-<code>list_supplemental_attribute_associations</code>, which return Python objects, these three methods
-exchange the wire JSON verbatim — the format a document author (e.g. PowerTableDataParser) reads and
-writes directly.</p>
+<code>list_supplemental_attribute_associations</code>, which return Python objects, these four methods exchange
+the wire JSON verbatim — the format a document author (e.g. PowerTableDataParser) reads and writes
+directly.</p>
 <pre><code class="language-python">def export_time_series_associations_openapi(
     self, *, owner_id=None, owner_category=None, owner_type=None,
     time_series_type=None, name=None, name_glob=None, component_field=None,
     resolution=None, interval=None, features=None,
 ) -&gt; str: ...
+def import_time_series_associations_openapi(self, json: str) -&gt; int: ...
 def export_supplemental_attribute_associations_openapi(self) -&gt; str: ...
 def import_supplemental_attribute_associations_openapi(self, json: str) -&gt; int: ...
 </code></pre>
@@ -7215,10 +7367,16 @@ identity.</p>
 <code>import_supplemental_attribute_associations_openapi</code> is its import half — a bulk, all-or-nothing
 insert (a duplicate anywhere in the batch raises <code>DuplicateAssociationError</code> and rolls the batch
 back), returning the number of rows inserted.</p>
-<p>There is no corresponding time-series <em>import</em> method: infrastore never modifies the associations
-table or the data to make an incoming document agree with what it already holds. A geometry
-disagreement between an added series and its own association row is rejected at the add boundary
-instead (<code>InvalidParameterError</code>), loudly and without writing anything.</p>
+<p><code>import_time_series_associations_openapi</code> is the time-series import half, and it writes <strong>rows
+only</strong>: the document carries locators, never values, so every row must name an array this store
+already holds — the arrays arrive with the artifact. Each row keeps the <code>association_id</code> it carries,
+which is the point: an import that assigned fresh ids would leave every reference the document
+records pointing at the wrong series. A row whose array is absent, or a <code>NonSequentialTimeSeries</code>
+row (whose timestamp vector is not on the wire), raises <code>InvalidParameterError</code> and rolls the whole
+batch back.</p>
+<p>Infrastore never modifies the data to make an incoming document agree with what it already holds. A
+geometry disagreement between an added series and its own association row is likewise rejected at
+the add boundary (<code>InvalidParameterError</code>), loudly and without writing anything.</p>
 <pre><code class="language-python">store = Store.create(in_memory=True)
 store.add_time_series(
     owner_id=1, owner_type="Generator", owner_category=OwnerCategory.Component,
@@ -7284,24 +7442,24 @@ or else from the <code>libinfrastore_ffi</code> artifact that <code>Pkg</code> d
 <code>TransformOutcome</code>, <code>UnitSystem</code> (<code>NaturalUnits</code>, <code>ComponentBase</code>), <code>add_parent_child_association!</code>,
 <code>add_parent_child_associations!</code>, <code>add_supplemental_attribute_association!</code>,
 <code>add_supplemental_attribute_associations!</code>, <code>add_time_series!</code>, <code>add_time_series_bulk!</code>,
-<code>build_forecast_reader</code>, <code>build_static_reader</code>, <code>bulk_read</code>, <code>catalog_mode</code>,
+<code>build_forecast_reader</code>, <code>build_static_reader</code>, <code>bulk_read</code>, <code>read_by_ids</code>, <code>catalog_mode</code>,
 <code>check_static_consistency</code>, <code>clear!</code>, <code>close!</code>, <code>compact!</code>, <code>copy_time_series!</code>,
 <code>count_array_references</code>, <code>count_components_with_attributes</code>,
 <code>export_supplemental_attribute_associations_openapi</code>, <code>export_time_series_associations_openapi</code>,
-<code>import_supplemental_attribute_associations_openapi!</code>, <code>count_parent_child_associations</code>,
-<code>count_supplemental_attribute_associations</code>, <code>count_supplemental_attributes</code>, <code>counts_by_type</code>,
-<code>flush!</code>, <code>forecast_entries</code>, <code>forecast_num_slots</code>, <code>forecast_read!</code>, <code>forecast_summary</code>,
-<code>forecast_timeline</code>, <code>forecast_values</code>, <code>get_array_by_hash</code>, <code>get_compression</code>, <code>get_counts</code>,
-<code>get_forecast_parameters</code>, <code>get_intervals</code>, <code>get_metadata</code>, <code>get_path</code>, <code>get_resolutions</code>,
-<code>get_time_series</code>, <code>get_time_series_key</code>, <code>get_time_series_keys</code>, <code>has_any_time_series</code>,
-<code>has_for_owner</code>, <code>has_parent_child_association</code>, <code>has_supplemental_attribute_association</code>,
-<code>has_time_series</code>, <code>in_transaction</code>, <code>init_logging</code>, <code>is_empty</code>, <code>key_info</code>, <code>list_array_groups</code>,
-<code>list_children</code>, <code>list_components_with_attributes</code>, <code>list_keys</code>, <code>list_names</code>, <code>list_owner_ids</code>,
-<code>list_owner_types</code>, <code>list_parent_child_associations</code>, <code>list_parents</code>,
-<code>list_supplemental_attribute_associations</code>, <code>list_supplemental_attribute_ids</code>, <code>list_time_series</code>,
-<code>num_distinct_arrays</code>, <code>open_copy</code>, <code>open_store</code>, <code>persist!</code>, <code>persist_catalog!</code>, <code>read_only</code>,
-<code>rollback_transaction!</code>, <code>transaction</code>, <code>begin_transaction!</code>, <code>commit_transaction!</code>,
-<code>remove_by_filter!</code>, <code>remove_parent_child_associations!</code>,
+<code>import_supplemental_attribute_associations_openapi!</code>, <code>import_time_series_associations_openapi!</code>,
+<code>count_parent_child_associations</code>, <code>count_supplemental_attribute_associations</code>,
+<code>count_supplemental_attributes</code>, <code>counts_by_type</code>, <code>flush!</code>, <code>forecast_entries</code>,
+<code>forecast_num_slots</code>, <code>forecast_read!</code>, <code>forecast_summary</code>, <code>forecast_timeline</code>, <code>forecast_values</code>,
+<code>get_array_by_hash</code>, <code>get_compression</code>, <code>get_counts</code>, <code>get_forecast_parameters</code>, <code>get_intervals</code>,
+<code>get_metadata</code>, <code>get_path</code>, <code>get_resolutions</code>, <code>get_time_series</code>, <code>get_time_series_key</code>,
+<code>get_time_series_keys</code>, <code>has_any_time_series</code>, <code>has_for_owner</code>, <code>has_parent_child_association</code>,
+<code>has_supplemental_attribute_association</code>, <code>has_time_series</code>, <code>in_transaction</code>, <code>init_logging</code>,
+<code>is_empty</code>, <code>key_info</code>, <code>list_array_groups</code>, <code>list_children</code>, <code>list_components_with_attributes</code>,
+<code>list_keys</code>, <code>list_names</code>, <code>list_owner_ids</code>, <code>list_owner_types</code>, <code>list_parent_child_associations</code>,
+<code>list_parents</code>, <code>list_supplemental_attribute_associations</code>, <code>list_supplemental_attribute_ids</code>,
+<code>list_time_series</code>, <code>num_distinct_arrays</code>, <code>open_copy</code>, <code>open_store</code>, <code>persist!</code>,
+<code>persist_catalog!</code>, <code>read_only</code>, <code>rollback_transaction!</code>, <code>transaction</code>, <code>begin_transaction!</code>,
+<code>commit_transaction!</code>, <code>remove_by_filter!</code>, <code>remove_parent_child_associations!</code>,
 <code>remove_supplemental_attribute_associations!</code>, <code>remove_time_series!</code>, <code>rename_time_series!</code>,
 <code>replace_owner!</code>, <code>replace_parent_child_component_id!</code>,
 <code>replace_supplemental_attribute_component_id!</code>, <code>static_grid</code>, <code>static_groups</code>, <code>static_read!</code>,
@@ -7507,7 +7665,12 @@ series is addressed by its identity (owner, category, type, name, resolution, in
 which carries no element type, so parameters on a <em>request</em> would have nothing to select on; passing
 them raises <code>InvalidParameterError</code> rather than being quietly ignored. The element type comes back
 on the result instead, in its own <code>{T,N}</code> and in a reader group's <code>dtype</code>.</p>
-<pre><code class="language-julia">struct TimeSeriesMetadata                    # get_metadata / list_time_series
+<pre><code class="language-julia">struct AddedTimeSeries                       # every write: add_time_series!, add_time_series_bulk!
+    key :: TimeSeriesKey                     # names the series
+    id  :: Int64                             # the catalog row's id; assigned, and never reissued
+end                                          # accepted anywhere a TimeSeriesKey is
+
+struct TimeSeriesMetadata                    # get_metadata / list_time_series
     owner_id          :: Int64
     owner_type        :: String
     owner_category    :: OwnerCategory
@@ -7574,7 +7737,8 @@ that the timestamps are wall clocks. Three- and four-argument constructors (<cod
     features::AbstractDict = Dict(), element_type = ts.element_type, units = ts.units,
     quantity_kind = ts.quantity_kind, unit_system = ts.unit_system,
     component_field = ts.component_field, application_data = ts.application_data,
-) -&gt; TimeSeriesKey
+    id = nothing,   # file under this catalog id (imports); `nothing` lets the catalog assign
+) -&gt; AddedTimeSeries   # `.key::TimeSeriesKey`, `.id::Int64`; usable wherever a key is
 
 get_time_series(store::Store, key::TimeSeriesKey; time_range=nothing) -&gt; SingleTimeSeries
 get_time_series(SingleTimeSeries, store::Store, key::TimeSeriesKey;
@@ -7618,10 +7782,21 @@ series, so this is the efficient way to load many complete series (exploration, 
 key vector returns an empty vector without touching the store.</p>
 <pre><code class="language-julia">series = bulk_read(store, keys)   # keys :: Vector{TimeSeriesKey}
 </code></pre>
+<pre><code class="language-julia">read_by_ids(store::Store, ids::AbstractVector{&lt;:Integer}) -&gt; Vector
+</code></pre>
+<p>The same read addressed by catalog <a href="reference/../explanation/data-model.html">association id</a> rather than by key
+— the read direction of the id every write reports on its <code>AddedTimeSeries</code>, for a caller that
+recorded ids in its own model instead of keeping an id-to-key map beside the store. Results follow
+the order the ids are given, repeats included, each decoded into the same struct <code>bulk_read</code> would
+return. An id naming no row throws <code>NotFoundError</code> (the whole call fails; the error does not say
+which id dangled — sift them with <code>association_exists</code> when that matters), and an empty id vector
+returns an empty vector without touching the store.</p>
+<pre><code class="language-julia">series = read_by_ids(store, [added.id, other.id])
+</code></pre>
 <h2 id="bulk-adds"><a class="header" href="#bulk-adds">Bulk Adds</a></h2>
 <pre><code class="language-julia">batch = AddBatch()
 add_time_series!(batch, owner_id, owner_type, owner_category, ts; ...)  # any series type
-add_time_series_bulk!(store::Store, batch::AddBatch) -&gt; Vector{TimeSeriesKey}
+add_time_series_bulk!(store::Store, batch::AddBatch) -&gt; Vector{AddedTimeSeries}   # in input order
 </code></pre>
 <p><code>AddBatch</code> accepts the same <code>add_time_series!</code> methods as <code>Store</code> (every series and forecast type)
 but only accumulates the requests; <code>add_time_series_bulk!</code> commits the whole batch in <strong>one</strong>
@@ -7720,7 +7895,7 @@ dtype and dims and converts to row-major bytes, just like the static <code>add_t
     features=Dict(), element_type=ts.element_type, units=ts.units,
     quantity_kind=ts.quantity_kind, unit_system=ts.unit_system,
     component_field=ts.component_field, application_data=ts.application_data,
-) -&gt; TimeSeriesKey
+) -&gt; AddedTimeSeries
 </code></pre>
 <p>The descriptor keywords default to the struct's own fields, so a label set at construction survives
 the add; pass a keyword to override it for one association.</p>
@@ -8068,9 +8243,11 @@ end
 <code>Dict</code>/<code>Set</code> members. In the <strong>catalog</strong>, identity is only the <code>(component_id, attribute_id)</code> pair —
 the type names are denormalized labels carried for filtering — so re-attaching the same pair under
 different type names throws <code>DuplicateAssociationError</code>.</p>
-<pre><code class="language-julia">add_supplemental_attribute_association!(store, association::SupplementalAttributeAssociation) -&gt; Nothing
-add_supplemental_attribute_associations!(store, associations::AbstractVector{SupplementalAttributeAssociation}) -&gt; Int
-                                  # one all-or-nothing transaction; count inserted
+<pre><code class="language-julia">add_supplemental_attribute_association!(store, association::SupplementalAttributeAssociation) -&gt; Int64
+                                  # the catalog id it was filed under
+add_supplemental_attribute_associations!(store, associations::AbstractVector{SupplementalAttributeAssociation}) -&gt; Vector{Int64}
+                                  # one all-or-nothing transaction; one id per
+                                  # input row, in order (count is `length`)
 has_supplemental_attribute_association(store; filters...) -&gt; Bool
 list_supplemental_attribute_associations(store; filters...) -&gt; Vector{SupplementalAttributeAssociation}
                                   # insertion order
@@ -8126,9 +8303,11 @@ the same ordered pair under different type names throws <code>DuplicateAssociati
 relationship-kind column, so one ordered pair may be related at most once.</p>
 <p>This family is deliberately narrower than the supplemental one — no counts-by-type and no grouped
 summary — because there is no consumer for them yet; both are additive if one appears.</p>
-<pre><code class="language-julia">add_parent_child_association!(store, association::ParentChildAssociation) -&gt; Nothing
-add_parent_child_associations!(store, associations::AbstractVector{ParentChildAssociation}) -&gt; Int
-                                  # one all-or-nothing transaction; count inserted
+<pre><code class="language-julia">add_parent_child_association!(store, association::ParentChildAssociation) -&gt; Int64
+                                  # the catalog id it was filed under
+add_parent_child_associations!(store, associations::AbstractVector{ParentChildAssociation}) -&gt; Vector{Int64}
+                                  # one all-or-nothing transaction; one id per
+                                  # input row, in order (count is `length`)
 has_parent_child_association(store; filters...) -&gt; Bool
 list_parent_child_associations(store; filters...) -&gt; Vector{ParentChildAssociation}
                                   # insertion order
@@ -8157,10 +8336,11 @@ remove_parent_child_associations!(store; parent_types=["Bus"])   # 1
 <p>Direct JSON serde of the two association catalogs, in the wire spelling
 <a href="https://github.com/Sienna-Platform/SiennaSchemas">SiennaSchemas</a> defines (<code>TimeSeries/*.json</code>,
 <code>Core/Associations/SupplementalAttributeAssociation.json</code>). Unlike <code>list_time_series</code> /
-<code>list_supplemental_attribute_associations</code>, which return Julia structs, these three functions
+<code>list_supplemental_attribute_associations</code>, which return Julia structs, these four functions
 exchange the wire JSON verbatim — the format a document author (e.g. PowerTableDataParser) reads and
 writes directly.</p>
 <pre><code class="language-julia">export_time_series_associations_openapi(store; filters...) -&gt; String
+import_time_series_associations_openapi!(store, json::AbstractString) -&gt; Int
 export_supplemental_attribute_associations_openapi(store) -&gt; String
 import_supplemental_attribute_associations_openapi!(store, json::AbstractString) -&gt; Int
 </code></pre>
@@ -8173,10 +8353,16 @@ identity.</p>
 <code>import_supplemental_attribute_associations_openapi!</code> is its import half — a bulk, all-or-nothing
 insert (a duplicate anywhere in the batch throws <code>DuplicateAssociationError</code> and rolls the batch
 back), returning the number of rows inserted.</p>
-<p>There is no corresponding time-series <em>import</em>: infrastore never modifies the associations table or
-the data to make an incoming document agree with what it already holds. A geometry disagreement
-between an added series and its own association row is rejected at the add boundary instead
-(<code>InvalidParameterError</code>), loudly and without writing anything.</p>
+<p><code>import_time_series_associations_openapi!</code> is the time-series import half, and it writes <strong>rows
+only</strong>: the document carries locators, never values, so every row must name an array this store
+already holds — the arrays arrive with the artifact. Each row keeps the <code>association_id</code> it carries,
+which is the point: an import that assigned fresh ids would leave every reference the document
+records pointing at the wrong series. A row whose array is absent, or a <code>NonSequentialTimeSeries</code>
+row (whose timestamp vector is not on the wire), throws <code>InvalidParameterError</code> and rolls the whole
+batch back.</p>
+<p>Infrastore never modifies the data to make an incoming document agree with what it already holds. A
+geometry disagreement between an added series and its own association row is likewise rejected at
+the add boundary (<code>InvalidParameterError</code>), loudly and without writing anything.</p>
 <h2 id="errors-1"><a class="header" href="#errors-1">Errors</a></h2>
 <p>All subtype <code>TimeSeriesException</code>:</p>
 <div class="table-wrapper"><table><thead><tr><th>Type</th><th>Mapped from FFI code</th></tr></thead><tbody>
@@ -8454,7 +8640,8 @@ same position on <code>infrastore_store_get_non_sequential</code> and on the for
                             const char *unit_system,          /* optional: "natural_units" | "component_base" */
                             const char *time_reference,       /* optional: "utc" | "zoneless" | "-07:00" | IANA name */
                             const char *component_field,      /* optional: e.g. "max_active_power" */
-                            struct InfraStoreKey **out_key);          /* owned; infrastore_key_free */
+                            struct InfraStoreKey **out_key,           /* owned; infrastore_key_free */
+                            int64_t *out_id);                         /* optional (NULL skips): the id filed under */
 
 int32_t infrastore_store_get_single(const struct InfraStore *handle, const struct InfraStoreKey *key,
                             bool time_range_present,          /* false = whole series */
@@ -8508,7 +8695,8 @@ Earlier revisions copied it into a caller-sized buffer, which invited silent tru
                                     const char *quantity_kind, const char *unit_system,
                                     const char *time_reference,
                                     const char *component_field,
-                                    struct InfraStoreKey **out_key);
+                                    struct InfraStoreKey **out_key,
+                                    int64_t *out_id);                 /* optional (NULL skips) */
 
 int32_t infrastore_store_get_non_sequential(const struct InfraStore *handle, const struct InfraStoreKey *key,
                                     bool time_range_present,          /* false = every point */
@@ -8676,7 +8864,8 @@ to <code>*out_count</code>:</p>
                               const char *unit_system,          /* optional: "natural_units" | "component_base" */
                             const char *time_reference,       /* optional: "utc" | "zoneless" | "-07:00" | IANA name */
                               const char *component_field,      /* optional: e.g. "max_active_power" */
-                              struct InfraStoreKey **out_key);
+                              struct InfraStoreKey **out_key,
+                              int64_t *out_id);                 /* optional (NULL skips) */
 
 int32_t infrastore_store_add_probabilistic(struct InfraStore *handle,
                                    int64_t owner_id, const char *owner_type,
@@ -8694,7 +8883,8 @@ int32_t infrastore_store_add_probabilistic(struct InfraStore *handle,
                                    const char *unit_system,          /* optional: "natural_units" | "component_base" */
                             const char *time_reference,       /* optional: "utc" | "zoneless" | "-07:00" | IANA name */
                                    const char *component_field,      /* optional: e.g. "max_active_power" */
-                                   struct InfraStoreKey **out_key);
+                                   struct InfraStoreKey **out_key,
+                                   int64_t *out_id);                 /* optional (NULL skips) */
 
 int32_t infrastore_store_transform_single_time_series(struct InfraStore *handle,
                                               const char *horizon, const char *interval,  /* ISO-8601 */
@@ -8706,14 +8896,25 @@ int32_t infrastore_store_transform_single_time_series(struct InfraStore *handle,
                                               uint64_t *out_count,
                                               uint64_t *out_sources,   /* optional (NULL skips): matched before idempotent skips */
                                               char *out_interval,      /* optional (NULL skips): ISO-8601, INTERVAL_BUF_LEN bytes */
-                                              bool *out_interval_normalized);  /* optional (NULL skips) */
+                                              bool *out_interval_normalized,   /* optional (NULL skips) */
+                                              int64_t **out_ids);              /* optional (NULL skips): infrastore_buffer_free_i64 */
 </code></pre>
-<p><code>infrastore_store_transform_single_time_series</code> reports the rest of its outcome through the three
+<p>Every writer takes an optional <code>out_id</code>, which receives the catalog id the row was filed under; pass
+<code>NULL</code> to skip it. No writer takes an id as <em>input</em>: the catalog always assigns. The one entry point
+that files rows under ids a caller supplies is
+<code>infrastore_store_import_time_series_associations_openapi</code>, replaying a document that already
+recorded them — see <a href="reference/../explanation/data-model.html#association-ids">Association ids</a>.</p>
+<p><code>infrastore_store_transform_single_time_series</code> reports the rest of its outcome through four
 optional out-parameters, each skippable with <code>NULL</code>: <code>out_sources</code> is how many <code>SingleTimeSeries</code>
 matched <em>before</em> idempotent skips, so zero distinguishes "nothing to transform" from "everything was
 already derived"; <code>out_interval</code> receives the ISO-8601 interval actually stored, NUL-terminated (an
 ISO period is bounded, so this takes a fixed <code>INTERVAL_BUF_LEN</code>-byte buffer rather than a probe
-pass); and <code>out_interval_normalized</code> is non-zero when the request described a single window.</p>
+pass); <code>out_interval_normalized</code> is non-zero when the request described a single window; and
+<code>out_ids</code> receives the id of each view written, <code>*out_count</code> of them in write order, to free with
+<code>infrastore_buffer_free_i64</code>. When nothing was written — a dry run, or a re-run that finds every
+view already derived — <code>*out_ids</code> is set to <code>NULL</code>. On a dry run <code>*out_count</code> still reports the
+count a committing run <em>would</em> produce, so a caller must check the pointer rather than the count
+before indexing it.</p>
 <p>Its two policy flags are the <code>TransformPolicy</code> of the core API. Both <code>false</code> is the permissive
 default; InfrastructureSystems.jl passes both <code>true</code>. <code>normalize_single_window</code> selects the
 single-window encoding — non-zero stores the zero interval, which is what InfrastructureSystems.jl
@@ -8991,6 +9192,21 @@ int32_t infrastore_bulk_result_get_single(const struct InfraStoreBulkReadHandle 
                                   /* same out-params as infrastore_store_get_single */ ...);
 void    infrastore_bulk_result_free(struct InfraStoreBulkReadHandle *result);
 </code></pre>
+<p><code>infrastore_store_read_by_ids</code> is the same read addressed by catalog
+<a href="reference/../explanation/data-model.html">association id</a> rather than by key — the read direction of the id
+every write hands back through its <code>out_id</code>, for a consumer that recorded ids in its own model
+instead of an id-to-key map. It fills the same <code>InfraStoreBulkReadHandle</code>, so the results come out
+through the same accessors; results follow the order the ids are given (repeats honoured in place),
+and an id naming no row fails the whole call with <code>INFRASTORE_ERR_NOT_FOUND</code> rather than being
+skipped. The handle carries each item's name whichever way the read was addressed, and
+<code>infrastore_bulk_result_item_name</code> hands item <code>index</code>'s back as an owned C string, freed with
+<code>infrastore_string_free</code> — the companion to <code>infrastore_bulk_result_item_type</code>, and how both reads
+label what they decode.</p>
+<pre><code class="language-c">int32_t infrastore_store_read_by_ids(const struct InfraStore *handle, const int64_t *ids,
+                             uint64_t n, struct InfraStoreBulkReadHandle **out_result);
+int32_t infrastore_bulk_result_item_name(const struct InfraStoreBulkReadHandle *result,
+                                 uint64_t index, char **out_name);
+</code></pre>
 <h2 id="store-wide-operations-2"><a class="header" href="#store-wide-operations-2">Store-Wide Operations</a></h2>
 <pre><code class="language-c">/* True iff the store holds nothing at all — no time series, and no associations
    in any catalog. One short-circuited existence probe per catalog table, so it is
@@ -9155,7 +9371,9 @@ int32_t infrastore_store_add_supplemental_attribute_association(struct InfraStor
    with a NULL filter. *out_added (when non-NULL) receives the number inserted. */
 int32_t infrastore_store_add_supplemental_attribute_associations(struct InfraStore *handle,
                                                          const char *associations_json,
-                                                         uint64_t *out_added);
+                                                         uint64_t *out_added,   /* optional */
+                                                         int64_t **out_ids);    /* optional; owned,
+                                                            infrastore_buffer_free_i64 */
 
 /* Whether any attachment matches filter_json (NULL = any). */
 int32_t infrastore_store_has_supplemental_attribute_association(const struct InfraStore *handle,
@@ -9243,7 +9461,9 @@ int32_t infrastore_store_add_parent_child_association(struct InfraStore *handle,
    receives the number inserted. */
 int32_t infrastore_store_add_parent_child_associations(struct InfraStore *handle,
                                                const char *associations_json,
-                                               uint64_t *out_added);
+                                               uint64_t *out_added,   /* optional */
+                                               int64_t **out_ids);    /* optional; owned,
+                                                  infrastore_buffer_free_i64 */
 
 /* Whether any edge matches filter_json (NULL = any). */
 int32_t infrastore_store_has_parent_child_association(const struct InfraStore *handle,
@@ -9311,6 +9531,15 @@ int32_t infrastore_store_export_time_series_associations_openapi(const struct In
                                                           const char *component_field, int32_t zoneless,
                                                           char **out_json, uint64_t *out_len);
 
+/* Bulk-ingest a JSON array of time-series association OpenAPI rows in one
+   all-or-nothing transaction -- the import half of the round trip whose export
+   is infrastore_store_export_time_series_associations_openapi. Rows only: every
+   row must name an array this store already holds, and each keeps the
+   association_id it carries. *out_added (when non-NULL) receives the number
+   inserted. */
+int32_t infrastore_store_import_time_series_associations_openapi(
+    struct InfraStore *handle, const char *json, uint64_t *out_added);
+
 /* Export the whole supplemental_attribute_associations table as an OpenAPI-row
    JSON array, sorted by (component_id, attribute_id). Owned-string return. */
 int32_t infrastore_store_export_supplemental_attribute_associations_openapi(
@@ -9324,11 +9553,13 @@ int32_t infrastore_store_import_supplemental_attribute_associations_openapi(
     struct InfraStore *handle, const char *json, uint64_t *out_added);
 </code></pre>
 <p>A catalog row's <code>data_hash</code> is <code>NOT NULL</code>, and infrastore fills a row's <code>uri</code>/<code>data_hash</code> wire
-fields with that same content hash, hex-encoded, on export. There is no corresponding time-series
-<em>import</em> export: infrastore never modifies the associations table or the data to make an incoming
-document agree with what it already holds. A geometry disagreement between an added series and its
-own association row is rejected at the add boundary instead (<code>INFRASTORE_ERR_INVALID_PARAMETER</code>),
-loudly and without writing anything.</p>
+fields with that same content hash, hex-encoded, on export. The time-series import writes <em>rows</em>
+only: infrastore never modifies the data to make an incoming document agree with what it already
+holds, so a row naming an array this store does not hold is refused
+(<code>INFRASTORE_ERR_INVALID_PARAMETER</code>) rather than written as a dangling reference, and a
+<code>NonSequentialTimeSeries</code> row is refused outright because its timestamp vector is not on the wire. A
+geometry disagreement between an added series and its own association row is likewise rejected at
+the add boundary, loudly and without writing anything.</p>
 <h2 id="error-messages"><a class="header" href="#error-messages">Error Messages</a></h2>
 <pre><code class="language-c">int32_t infrastore_last_error_message(char *buf, uint64_t buf_len, uint64_t *needed);
 </code></pre>
@@ -9719,9 +9950,11 @@ pipes into <code>jq</code> the way a scripted query does.</p>
 3
 </code></pre>
 <p>Each command's document names what it did — <code>{"removed": N}</code>, <code>{"added": N, "store": …}</code>,
-<code>{"merged": N, …}</code> — and a <code>--dry-run</code> reports <code>{"dry_run": true, "would_remove": N, …}</code> instead. A
-filter that matches nothing still reports its zero rather than printing nothing, so <code>jq .removed</code>
-reads <code>0</code> instead of failing on an empty document.</p>
+<code>{"merged": N, …}</code> — and a <code>--dry-run</code> reports <code>{"dry_run": true, "would_remove": N, …}</code> instead.
+The writing commands also name the catalog ids they created: <code>add</code> carries a <code>series</code> array of
+<code>{id, time_series_type, name, owner_id}</code> objects, and <code>attach</code> / <code>link</code> an <code>ids</code> array. A filter
+that matches nothing still reports its zero rather than printing nothing, so <code>jq .removed</code> reads <code>0</code>
+instead of failing on an empty document.</p>
 <p><code>csv</code> renders these status lines as prose alongside <code>table</code>: a status line has no rows to tabulate,
 and a one-row CSV of it would give scripts a shape that changes every time the message is reworded.
 JSON is the machine-readable channel for mutations. <code>template</code> always prints a JSON descriptor, and
@@ -9941,6 +10174,9 @@ infrastore --store demo.h5 reassign --old 42 --new 43
 <code>parent_id,parent_type,child_id,child_type</code> CSV. The header is mandatory and its names are checked:
 the four columns are two interchangeable-looking <code>(id, type)</code> pairs, so a file with the pairs
 swapped would import cleanly and silently invert every relationship.</p>
+<p>Both report the catalog ids they created, in input order: <code>ids</code> on the JSON document and an <code>ids:</code>
+line under <code>table</code> (which elides the tail past twenty). Those are the durable handles for the rows
+just written, so reporting only a count would leave a caller re-reading the catalog to find them.</p>
 <p><code>detach</code> and <code>unlink</code> with no filter would empty the whole catalog, so they require <code>--all</code> to say
 you meant it. <code>reassign</code> is the association counterpart of <code>replace-owner</code>, which moves time series;
 with neither <code>--attributes</code> nor <code>--links</code> it moves both catalogs, which is what a renumbered
@@ -10074,6 +10310,7 @@ catalog.</p>
 flags as filters. Every flag is optional. Only <code>--feature</code> may be repeated; the rest take a single
 value:</p>
 <div class="table-wrapper"><table><thead><tr><th>Flag</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>--id &lt;N&gt;</code></td><td>Catalog association ID. A point lookup — see below.</td></tr>
 <tr><td><code>--owner-id &lt;I&gt;</code></td><td>Owner identifier (<code>i64</code> integer).</td></tr>
 <tr><td><code>--owner-category &lt;C&gt;</code></td><td>Restrict to <code>Component</code> or <code>SupplementalAttribute</code>; omit to match either.</td></tr>
 <tr><td><code>--name &lt;N&gt;</code></td><td>Series name (exact match).</td></tr>
@@ -10085,6 +10322,15 @@ value:</p>
 <tr><td><code>--spelling &lt;S&gt;</code></td><td><code>zoned</code> or <code>zoneless</code>: which timestamp spelling to keep.</td></tr>
 </tbody></table>
 </div>
+<p><code>--id</code> is different in kind from the flags under it. The others narrow a set; <code>--id</code> names exactly
+one row, by the catalog id that <code>add</code>, <code>list</code>, and <code>info</code> report. So it cannot be combined with them
+(the error says as much), and it cannot stand in for them on a command that works over a set —
+<code>list --id 3</code> is refused rather than quietly returning one row. Use it where a caller has stored an
+id in its own model and wants that series back:</p>
+<pre><code class="language-sh">infrastore --store system.h5 -f json info --id 214
+</code></pre>
+<p>An id that names no row is an error saying so, and saying that it will stay that way: ids are never
+reissued, so a reference that stops resolving cannot later come to mean a different series.</p>
 <p><code>--spelling</code> is the constructive half of the time-reference coherence rule. <code>zoneless</code> keeps the
 wall-clock series; <code>zoned</code> keeps the ones that record instants, including those that declare no
 reference at all. <code>grid</code> and the bulk reads span one timestamp axis, so they refuse a selection

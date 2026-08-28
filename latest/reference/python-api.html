@@ -329,7 +329,7 @@ store.in_transaction -&gt; bool
     unit_system: str | None = None,   # "natural_units" | "component_base"
     time_reference: str | None = None,   # "utc" | "zoneless" | "-07:00" | "America/Denver"
     component_field: str | None = None,  # e.g. "max_active_power"
-) -&gt; TimeSeriesKey: ...
+) -&gt; AddedTimeSeries: ...
 # `time_reference` is normally omitted: it is inferred from the datetime the
 # series was built with (see "Time references" below). Pass it to override.
 # An unrecognized `unit_system` raises InvalidParameterError rather than
@@ -340,13 +340,24 @@ store.in_transaction -&gt; bool
 # A `features` key that shadows a time-series or key field (`name`, `resolution`,
 # `owner_id`, ...) raises InvalidParameterError.
 
-def add_time_series_bulk(self, items: list[dict]) -&gt; list[TimeSeriesKey]: ...
+def add_time_series_bulk(self, items: list[dict]) -&gt; list[AddedTimeSeries]: ...
 # Each item dict mirrors add_time_series's parameters: required `owner_id`,
 # `owner_type`, `owner_category`, `time_series`; optional `features`, `units`,
 # `element_type`, `application_data`, `quantity_kind`, `unit_system`,
 # `time_reference`, `component_field`.
 # All items commit in ONE metadata transaction (all-or-nothing), which is much
-# faster than looping over add_time_series. Keys are returned in input order.
+# faster than looping over add_time_series. Results are in input order.
+
+class AddedTimeSeries:
+    key: TimeSeriesKey   # names the series
+    id: int              # the catalog row's id — store it to reference the series later
+# Hashable and comparable; the id is never reissued once its row is deleted.
+# No add takes an id — the catalog assigns, and this reports what it chose. The
+# one writer that files rows under supplied ids is
+# import_time_series_associations_openapi.
+
+def get_metadata_by_id(self, id: int) -&gt; dict | None: ...   # None when no row has the id
+def association_exists(self, id: int) -&gt; bool: ...          # no row fetched
 
 def transform_single_time_series(
     self,
@@ -409,6 +420,12 @@ def bulk_read(
 ) -&gt; list[SingleTimeSeries | NonSequentialTimeSeries | Deterministic | Probabilistic | Scenarios]: ...
 # `time_range` applies the same window to every key (default: each series in full).
 # Results are returned in the same order as `keys`; an empty list of keys returns an empty list.
+
+def read_by_ids(
+    self, ids: list[int]
+) -&gt; list[SingleTimeSeries | NonSequentialTimeSeries | Deterministic | Probabilistic | Scenarios]: ...
+# The same read addressed by catalog association id. Results follow the order the
+# ids are given, repeats included; NotFoundError if any id names no row.
 
 def remove_time_series(self, key: TimeSeriesKey) -&gt; None: ...
 def remove_time_series_bulk(self, keys: list[TimeSeriesKey]) -&gt; int: ...
@@ -546,6 +563,12 @@ returns an empty list). It is the bulk counterpart to <code>get_time_series</cod
 are read in one decompress-once pass per dataset instead of one read per key. Pass the
 keyword-only <code>time_range=(start, end)</code> to apply the same window to every key; by default each
 series comes back in full.</li>
+<li><strong><code>read_by_ids</code></strong> is the same read addressed by catalog
+<a href="../explanation/data-model.html">association id</a> rather than by key — the read direction of the id
+every write reports on its <code>AddedTimeSeries</code>, for a caller that recorded ids in its own model
+instead of keeping an id-to-key map beside the store. Results follow the order the ids are given,
+repeats included; an id naming no row raises <code>NotFoundError</code> and fails the whole call, unlike
+<code>association_exists</code>, which asks the question rather than committing to a read.</li>
 <li><strong><code>list_time_series</code></strong> returns a list of dicts (the same shape <code>get_metadata</code> returns for one
 key), each with the keys: <code>owner_id</code>, <code>owner_type</code>, <code>owner_category</code>, <code>time_series_type</code>, <code>name</code>,
 <code>data_hash</code> (hex string), <code>initial_timestamp</code> (RFC 3339 string, or <code>None</code> for non-sequential
@@ -859,11 +882,14 @@ many components.</p>
     attribute_type: str,
 )
 </code></pre>
-<p>Read-only properties: <code>component_id</code>, <code>component_type</code>, <code>attribute_id</code>, <code>attribute_type</code>. The object
-is hashable and compares structurally, so attachments work in sets and as dict keys. In the
-<strong>catalog</strong>, though, identity is only the <code>(component_id, attribute_id)</code> pair — the type names are
-denormalized labels carried for filtering — so re-attaching the same pair under different type names
-raises <code>DuplicateAssociationError</code>.</p>
+<p>Read-only properties: <code>component_id</code>, <code>component_type</code>, <code>attribute_id</code>, <code>attribute_type</code>, and <code>id</code> —
+the catalog row's own number, <code>None</code> on a value that has not been through the catalog. The object is
+hashable and compares structurally (the <code>id</code> stays out of both), so attachments work in sets and as
+dict keys. In the <strong>catalog</strong>, though, identity is only the <code>(component_id, attribute_id)</code> pair —
+the type names are denormalized labels carried for filtering — so re-attaching the same pair under
+different type names raises <code>DuplicateAssociationError</code>.</p>
+<p>The <code>id</code> is an output only. The constructor takes none, and an add ignores whatever a listed row
+carries, so attaching a row read from one store to another files it under a fresh id there.</p>
 <pre><code class="language-python">def add_supplemental_attribute_association(
     self, association: SupplementalAttributeAssociation
 ) -&gt; None: ...
@@ -941,11 +967,12 @@ are always components; an attribute cannot appear here.</p>
     child_type: str,
 )
 </code></pre>
-<p>Read-only properties: <code>parent_id</code>, <code>parent_type</code>, <code>child_id</code>, <code>child_type</code>; hashable and
-structurally comparable like the attachment object. In the <strong>catalog</strong>, identity is the <em>ordered</em>
-<code>(parent_id, child_id)</code> pair, so the reversed pair is a different edge, while repeating the same
-ordered pair under different type names raises <code>DuplicateAssociationError</code>. There is no
-relationship-kind column, so one ordered pair may be related at most once.</p>
+<p>Read-only properties: <code>parent_id</code>, <code>parent_type</code>, <code>child_id</code>, <code>child_type</code>, and <code>id</code>; hashable and
+structurally comparable like the attachment object, with the same output-only <code>id</code>. In the
+<strong>catalog</strong>, identity is the <em>ordered</em> <code>(parent_id, child_id)</code> pair, so the reversed pair is a
+different edge, while repeating the same ordered pair under different type names raises
+<code>DuplicateAssociationError</code>. There is no relationship-kind column, so one ordered pair may be
+related at most once.</p>
 <p>This family is deliberately narrower than the supplemental one — no counts-by-type and no grouped
 summary — because there is no consumer for them yet; both are additive if one appears.</p>
 <pre><code class="language-python">def add_parent_child_association(self, association: ParentChildAssociation) -&gt; None: ...
@@ -998,14 +1025,15 @@ store.remove_parent_child_associations(parent_types=["Bus"])   # -&gt; 1
 <p>Direct JSON serde of the two association catalogs, in the wire spelling
 <a href="https://github.com/Sienna-Platform/SiennaSchemas">SiennaSchemas</a> defines (<code>TimeSeries/*.json</code>,
 <code>Core/Associations/SupplementalAttributeAssociation.json</code>). Unlike <code>list_time_series</code> /
-<code>list_supplemental_attribute_associations</code>, which return Python objects, these three methods
-exchange the wire JSON verbatim — the format a document author (e.g. PowerTableDataParser) reads and
-writes directly.</p>
+<code>list_supplemental_attribute_associations</code>, which return Python objects, these four methods exchange
+the wire JSON verbatim — the format a document author (e.g. PowerTableDataParser) reads and writes
+directly.</p>
 <pre><code class="language-python">def export_time_series_associations_openapi(
     self, *, owner_id=None, owner_category=None, owner_type=None,
     time_series_type=None, name=None, name_glob=None, component_field=None,
     resolution=None, interval=None, features=None,
 ) -&gt; str: ...
+def import_time_series_associations_openapi(self, json: str) -&gt; int: ...
 def export_supplemental_attribute_associations_openapi(self) -&gt; str: ...
 def import_supplemental_attribute_associations_openapi(self, json: str) -&gt; int: ...
 </code></pre>
@@ -1018,10 +1046,16 @@ identity.</p>
 <code>import_supplemental_attribute_associations_openapi</code> is its import half — a bulk, all-or-nothing
 insert (a duplicate anywhere in the batch raises <code>DuplicateAssociationError</code> and rolls the batch
 back), returning the number of rows inserted.</p>
-<p>There is no corresponding time-series <em>import</em> method: infrastore never modifies the associations
-table or the data to make an incoming document agree with what it already holds. A geometry
-disagreement between an added series and its own association row is rejected at the add boundary
-instead (<code>InvalidParameterError</code>), loudly and without writing anything.</p>
+<p><code>import_time_series_associations_openapi</code> is the time-series import half, and it writes <strong>rows
+only</strong>: the document carries locators, never values, so every row must name an array this store
+already holds — the arrays arrive with the artifact. Each row keeps the <code>association_id</code> it carries,
+which is the point: an import that assigned fresh ids would leave every reference the document
+records pointing at the wrong series. A row whose array is absent, or a <code>NonSequentialTimeSeries</code>
+row (whose timestamp vector is not on the wire), raises <code>InvalidParameterError</code> and rolls the whole
+batch back.</p>
+<p>Infrastore never modifies the data to make an incoming document agree with what it already holds. A
+geometry disagreement between an added series and its own association row is likewise rejected at
+the add boundary (<code>InvalidParameterError</code>), loudly and without writing anything.</p>
 <pre><code class="language-python">store = Store.create(in_memory=True)
 store.add_time_series(
     owner_id=1, owner_type="Generator", owner_category=OwnerCategory.Component,

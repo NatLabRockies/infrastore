@@ -251,8 +251,11 @@ getters, and <code>transform_single_time_series!</code>, so all four forecast ty
 <li><strong>Bulk reads use a result handle.</strong> <code>bulk_read</code> reads many full <code>SingleTimeSeries</code> at once: the
 FFI fetches them in one decompress-once pass per dataset into a <code>InfraStoreBulkReadHandle</code>
 (<code>infrastore_store_bulk_read_single</code>), and Julia reads each element out, then frees the handle.
-Python's <code>store.bulk_read</code> exposes the same operation directly. Managed bulk <em>writes</em> already take
-the fast block-write path through the existing batch / <code>add_time_series_bulk</code> APIs.</li>
+Python's <code>store.bulk_read</code> exposes the same operation directly. <code>read_by_ids</code> addresses the same
+read by catalog association id and fills the same handle, so both reads decode by the same route:
+<code>infrastore_bulk_result_item_name</code> hands each item's name back beside its values, as
+<code>infrastore_bulk_result_item_type</code> does its type. Managed bulk <em>writes</em> already take the fast
+block-write path through the existing batch / <code>add_time_series_bulk</code> APIs.</li>
 </ul>
 <p><code>InfraStore.jl</code> loads the cdylib from the <code>INFRASTORE_LIB</code> environment variable when it is set, and
 otherwise from the <code>libinfrastore_ffi</code> artifact its <code>Artifacts.toml</code> pins to the matching GitHub

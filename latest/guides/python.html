@@ -233,7 +233,7 @@ element shape (such as cost-curve coefficients). The required <code>name</code> 
 carried on the object — the same array can be added under different names. Use
 <code>NonSequentialTimeSeries(timestamps, data, name)</code> for explicitly timestamped series.</p>
 <h2 id="add-a-series"><a class="header" href="#add-a-series">Add a Series</a></h2>
-<pre><code class="language-python">key = store.add_time_series(
+<pre><code class="language-python">added = store.add_time_series(
     owner_id=42,
     owner_type="Generator",
     owner_category=OwnerCategory.Component,
@@ -241,6 +241,8 @@ carried on the object — the same array can be added under different names. Use
     features={"model_year": 2030, "scenario": "high"},
     units="MW",
 )
+key = added.key   # TimeSeriesKey: re-find the series with it
+added.id          # the catalog row's id: one integer to keep in your own model
 </code></pre>
 <p><code>features</code> is a plain dict whose values are <code>int</code>, <code>float</code>, <code>bool</code>, or <code>str</code>. Adding a series whose
 <a href="../explanation/data-model.html#keys">key</a> already exists raises <code>DuplicateTimeSeriesError</code>. The
@@ -276,11 +278,12 @@ descriptor are a duplicate. See
 commits them in one catalog transaction, taking the block-sized HDF5 write path. It is the way to
 load a system: an order of magnitude faster than a loop of single adds, and same-shaped series land
 in the same packed dataset.</p>
-<pre><code class="language-python">keys = store.add_time_series_bulk([
+<pre><code class="language-python">added = store.add_time_series_bulk([
     {"owner_id": i, "owner_type": "Generator", "owner_category": OwnerCategory.Component,
      "time_series": series[i], "units": "MW"}
     for i in range(len(series))
-])   # keys in input order; all-or-nothing
+])   # one AddedTimeSeries per item, in input order; all-or-nothing
+keys = [a.key for a in added]
 </code></pre>
 <h3 id="transactions"><a class="header" href="#transactions">Transactions</a></h3>
 <p>Several operations that must take effect together — replacing a series is an add plus a remove — go

@@ -229,7 +229,7 @@ ts = SingleTimeSeries(
 </code></pre>
 <p>Reads return a <code>DateTime</code> in UTC either way; see
 <a href="../reference/julia-api.html#time-and-resolution-conversions">Time and resolution conversions</a>.</p>
-<pre><code class="language-julia">key = add_time_series!(
+<pre><code class="language-julia">added = add_time_series!(
     store,
     42,
     "Generator",
@@ -238,6 +238,8 @@ ts = SingleTimeSeries(
     features = Dict("model_year" =&gt; 2030),
     units = "MW",
 )
+key = added.key   # TimeSeriesKey
+added.id          # the catalog row's id: one integer to keep in your own model
 </code></pre>
 <p>Notes:</p>
 <ul>
@@ -247,7 +249,11 @@ ts = SingleTimeSeries(
 <code>Bool</code>, <code>String</code>). String features are supported and round-trip unchanged.</li>
 <li>Adding a duplicate <a href="../explanation/data-model.html#keys">key</a> throws <code>DuplicateTimeSeriesError</code>.</li>
 </ul>
-<p><code>add_time_series!</code> returns a <code>TimeSeriesKey</code> holding an opaque handle into the store.</p>
+<p><code>add_time_series!</code> returns an <code>AddedTimeSeries</code>: its <code>key</code> is a <code>TimeSeriesKey</code> holding an opaque
+handle into the store, and its <code>id</code> is the catalog row's id (see
+<a href="../explanation/data-model.html#association-ids">Association ids</a>). Every function taking a
+<code>TimeSeriesKey</code> also accepts the <code>AddedTimeSeries</code> directly, so <code>get_time_series(store, added)</code>
+works without unwrapping.</p>
 <p>Two more rules worth knowing up front. <strong>Stored instants and periods are millisecond-precision</strong>: a
 <code>Microsecond(1)</code> resolution, a <code>Millisecond(0)</code> one, or a negative period is refused with
 <code>InvalidParameterError</code> (query bounds are unconstrained). And a <code>Store</code> is <strong>not thread-safe</strong>:
@@ -284,7 +290,8 @@ adds, and same-shaped series land in the same packed dataset.</p>
 for (id, ts) in series
     add_time_series!(batch, id, "Generator", Component, ts; units = "MW")
 end
-keys = add_time_series_bulk!(store, batch)   # keys in input order; all-or-nothing
+added = add_time_series_bulk!(store, batch)   # Vector{AddedTimeSeries}, in input order; all-or-nothing
+keys = [a.key for a in added]
 </code></pre>
 <h3 id="transactions"><a class="header" href="#transactions">Transactions</a></h3>
 <p>Several operations that must take effect together — replacing a series is an add plus a remove — go
