@@ -1,0 +1,1336 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Julia API - infrastore Documentation</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Time-series storage for power-systems and energy simulations, with Rust, Python, and Julia bindings">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../custom.css">
+        <link rel="stylesheet" href="../pagetoc.css">
+        <link rel="stylesheet" href="../version-selector.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">infrastore Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/NatLabRockies/infrastore" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/NatLabRockies/infrastore/tree/v0.10.0/docs/src/reference/julia-api.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="julia-api"><a class="header" href="#julia-api">Julia API</a></h1>
+<p>The Julia package is <strong><code>InfraStore.jl</code></strong> (module <code>InfraStore</code>); it wraps the <a href="./c-abi.html">C ABI</a>
+cdylib. The library is resolved from the <code>INFRASTORE_LIB</code> environment variable (development builds),
+or else from the <code>libinfrastore_ffi</code> artifact that <code>Pkg</code> downloads at install time (see
+<a href="../how-to/integrate-julia.html">Integrate with Julia</a>).</p>
+<pre><code class="language-julia">using InfraStore
+</code></pre>
+<p>Exported names (types first, then functions):</p>
+<p><code>AddBatch</code>, <code>ArrayGroupRow</code>, <code>ArrayReferenceCounts</code>, <code>CompactionReport</code>, <code>Component</code>,
+<code>CompressionSettings</code>, <code>Deterministic</code>, <code>DeterministicSingleTimeSeries</code>, <code>ForecastEntry</code>,
+<code>ForecastParameters</code>, <code>ForecastReader</code>, <code>ForecastSummaryRow</code>, <code>ForecastTimeline</code>, <code>KeyInfo</code>,
+<code>KeyRow</code>, <code>NonSequentialTimeSeries</code>, <code>OwnerCategory</code>, <code>ParentChildAssociation</code>, <code>Probabilistic</code>,
+<code>Scenarios</code>, <code>SingleTimeSeries</code>, <code>StaticGrid</code>, <code>StaticGroup</code>, <code>StaticReader</code>, <code>StaticSummaryRow</code>,
+<code>Store</code>, <code>SupplementalAttribute</code>, <code>SupplementalAttributeAssociation</code>,
+<code>SupplementalAttributeSummaryRow</code>, <code>SupplementalAttributeTypeCount</code>, <code>TimeSeriesCounts</code>,
+<code>TimeSeriesCountsDetailed</code>, <code>TimeSeriesKey</code>, <code>TimeSeriesMetadata</code>, <code>TimeSeriesTypeCount</code>,
+<code>TransformOutcome</code>, <code>UnitSystem</code> (<code>NaturalUnits</code>, <code>ComponentBase</code>), <code>add_parent_child_association!</code>,
+<code>add_parent_child_associations!</code>, <code>add_supplemental_attribute_association!</code>,
+<code>add_supplemental_attribute_associations!</code>, <code>add_time_series!</code>, <code>add_time_series_bulk!</code>,
+<code>build_forecast_reader</code>, <code>build_static_reader</code>, <code>bulk_read</code>, <code>read_by_ids</code>, <code>catalog_mode</code>,
+<code>check_static_consistency</code>, <code>clear!</code>, <code>close!</code>, <code>compact!</code>, <code>copy_time_series!</code>,
+<code>count_array_references</code>, <code>count_components_with_attributes</code>,
+<code>export_supplemental_attribute_associations_openapi</code>, <code>export_time_series_associations_openapi</code>,
+<code>import_supplemental_attribute_associations_openapi!</code>, <code>import_time_series_associations_openapi!</code>,
+<code>count_parent_child_associations</code>, <code>count_supplemental_attribute_associations</code>,
+<code>count_supplemental_attributes</code>, <code>counts_by_type</code>, <code>flush!</code>, <code>forecast_entries</code>,
+<code>forecast_num_slots</code>, <code>forecast_read!</code>, <code>forecast_summary</code>, <code>forecast_timeline</code>, <code>forecast_values</code>,
+<code>get_array_by_hash</code>, <code>get_compression</code>, <code>get_counts</code>, <code>get_forecast_parameters</code>, <code>get_intervals</code>,
+<code>get_metadata</code>, <code>get_path</code>, <code>get_resolutions</code>, <code>get_time_series</code>, <code>get_time_series_key</code>,
+<code>get_time_series_keys</code>, <code>has_any_time_series</code>, <code>has_for_owner</code>, <code>has_parent_child_association</code>,
+<code>has_supplemental_attribute_association</code>, <code>has_time_series</code>, <code>in_transaction</code>, <code>init_logging</code>,
+<code>is_empty</code>, <code>key_info</code>, <code>list_array_groups</code>, <code>list_children</code>, <code>list_components_with_attributes</code>,
+<code>list_keys</code>, <code>list_names</code>, <code>list_owner_ids</code>, <code>list_owner_types</code>, <code>list_parent_child_associations</code>,
+<code>list_parents</code>, <code>list_supplemental_attribute_associations</code>, <code>list_supplemental_attribute_ids</code>,
+<code>list_time_series</code>, <code>num_distinct_arrays</code>, <code>open_copy</code>, <code>open_store</code>, <code>persist!</code>,
+<code>persist_catalog!</code>, <code>read_only</code>, <code>rollback_transaction!</code>, <code>transaction</code>, <code>begin_transaction!</code>,
+<code>commit_transaction!</code>, <code>remove_by_filter!</code>, <code>remove_parent_child_associations!</code>,
+<code>remove_supplemental_attribute_associations!</code>, <code>remove_time_series!</code>, <code>rename_time_series!</code>,
+<code>replace_owner!</code>, <code>replace_parent_child_component_id!</code>,
+<code>replace_supplemental_attribute_component_id!</code>, <code>static_grid</code>, <code>static_groups</code>, <code>static_read!</code>,
+<code>static_summary</code>, <code>static_timestamps</code>, <code>static_values</code>, <code>supplemental_attribute_counts_by_type</code>,
+<code>supplemental_attribute_summary</code>, <code>time_series_counts</code>, <code>transform_single_time_series!</code>,
+<code>verify_integrity</code>.</p>
+<h2 id="constructors"><a class="header" href="#constructors">Constructors</a></h2>
+<pre><code class="language-julia">Store(; in_memory::Union{Nothing,Bool}=nothing, path::Union{Nothing,AbstractString}=nothing,
+        compression::Union{Symbol,AbstractString}=:deflate,
+        compression_level::Integer=3, shuffle::Bool=true,
+        catalog::Union{Nothing,Symbol,AbstractString}=nothing,
+        overwrite::Bool=false) -&gt; Store
+open_store(path::AbstractString; read_only::Bool=false,
+           catalog::Union{Symbol,AbstractString}=:attached) -&gt; Store
+open_copy(src::AbstractString, dest::AbstractString;
+          catalog::Union{Symbol,AbstractString}=:attached) -&gt; Store
+catalog_mode(store::Store) -&gt; Symbol
+</code></pre>
+<p><code>in_memory</code> defaults to whatever <code>path</code> implies — in-memory without one, file-backed with one — and
+rarely needs setting; <code>path</code> together with <code>in_memory=true</code> throws <code>ArgumentError</code> (it used to be
+accepted and silently discarded everything written).</p>
+<p>A <code>Store</code> (and any reader built from it) is <strong>not thread-safe</strong>: the Rust core mutates the handle
+without synchronization, so concurrent calls from two tasks or threads are undefined behavior, not
+merely a race on results. Confine a store to one task, or guard every call with your own lock.</p>
+<ul>
+<li><code>Store()</code> — in-memory store.</li>
+<li><code>Store(in_memory=false, path="system.h5")</code> — persists to <code>system.h5</code> plus <code>system.h5.sqlite</code>.</li>
+<li><code>compression=:none</code> stores arrays uncompressed; <code>:deflate</code> (default) applies DEFLATE at
+<code>compression_level</code> (0–9) with optional byte <code>shuffle</code>. The policy is persisted with the store and
+reused on later appends; it is ignored for in-memory stores. An unknown <code>compression</code> throws
+<code>ArgumentError</code>.</li>
+<li><code>catalog=:attached</code> makes the catalog the <code>.sqlite</code> file, where every commit is durable;
+<code>catalog=:memory</code> holds it in RAM so it reaches disk only through <code>persist!</code> or
+<code>persist_catalog!</code>. Arrays stream to the HDF5 file either way. The default (<code>nothing</code>) matches the
+backend — <code>:memory</code> when <code>in_memory</code> is true, else <code>:attached</code> — so existing call sites are
+unchanged. An unknown <code>catalog</code> throws <code>ArgumentError</code>. See
+<a href="../explanation/storage-model.html#where-the-catalog-lives">Where the Catalog Lives</a>.</li>
+<li><code>Store(in_memory=false, path=...)</code> throws <code>StoreExistsError</code> if <code>path</code> or <code>$path.sqlite</code> already
+holds a store. Creating there would discard the arrays while keeping the catalog, leaving a store
+that reopens cleanly with every array missing — see
+<a href="../explanation/storage-model.html#protecting-a-saved-artifact">protecting a saved artifact</a>.
+<code>overwrite=true</code> discards both halves on purpose; it throws <code>ArgumentError</code> for an in-memory
+store, which has no artifact to replace.</li>
+<li><code>open_store(path; read_only=true)</code> — opens an existing on-disk pair.</li>
+<li><code>open_copy(src, dest)</code> — copies both halves to <code>dest</code> and opens the copy read-write, leaving <code>src</code>
+untouched. <strong>This is the safe way to load a store you intend to change.</strong> <code>open_store</code> defaults to
+read-write, and mutations then land in that file directly; HDF5 has no journal and no repair tool,
+so an interrupted write is unrecoverable. Change the copy and <code>persist!(store, src)</code> — one atomic
+rename replaces the original. Throws <code>StoreExistsError</code> if <code>dest</code> already holds a store. Has a
+do-block form.</li>
+<li><code>catalog_mode(store)</code> returns <code>:attached</code> or <code>:memory</code>.</li>
+</ul>
+<p>The store registers a finalizer; close it eagerly with <code>close!(store)</code>.</p>
+<h2 id="types"><a class="header" href="#types">Types</a></h2>
+<p>Each struct carries the association <code>name</code> (required) and an optional <code>application_data</code>. Every
+constructor takes <code>name</code> as the positional after <code>data</code> and <code>application_data=</code> as a keyword — e.g.
+<code>SingleTimeSeries(initial, resolution, data, name; application_data=nothing)</code>.</p>
+<p>Every data-carrying struct is parameterized <code>{T,N}</code> on the element type and dimensionality of its
+value array; <code>{T,N}</code> is inferred from <code>data</code> by the constructor (an <code>AbstractArray</code> argument — a
+view or a range — is normalized to a concrete <code>Array{T,N}</code>).</p>
+<pre><code class="language-julia">struct SingleTimeSeries{T,N}
+    initial_timestamp :: DateTime
+    resolution        :: Period          # e.g. Hour(1), Millisecond(500)
+    data              :: Array{T,N}      # any element type; dim 1 = time
+    name              :: String          # required association name
+    application_data  :: Union{Nothing,String}
+    element_type      :: Union{Nothing,String}   # canonical element_type, or nothing for plain scalars
+    units             :: Union{Nothing,String}
+    quantity_kind     :: Union{Nothing,String}
+    unit_system       :: Union{Nothing,UnitSystem}   # nothing = unspecified, not NaturalUnits
+    component_field   :: Union{Nothing,String}
+    time_reference    :: Union{Nothing,TimeReference}  # inferred from the timestamp; see below
+end
+SingleTimeSeries(initial_timestamp, resolution, data, name; application_data=nothing, element_type=nothing, units=nothing,
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=&lt;inferred&gt;)
+
+struct NonSequentialTimeSeries{T,N}
+    timestamps   :: Vector{DateTime}     # strictly increasing; one per row of dim 1
+    data         :: Array{T,N}
+    name         :: String
+    application_data  :: Union{Nothing,String}
+    element_type      :: Union{Nothing,String}   # canonical element_type, or nothing for plain scalars
+    units             :: Union{Nothing,String}
+    quantity_kind     :: Union{Nothing,String}
+    unit_system       :: Union{Nothing,UnitSystem}   # nothing = unspecified, not NaturalUnits
+    component_field   :: Union{Nothing,String}
+    time_reference    :: Union{Nothing,TimeReference}  # inferred from the timestamp; see below
+end
+NonSequentialTimeSeries(timestamps, data, name; application_data=nothing, element_type=nothing, units=nothing,
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=&lt;inferred&gt;)
+
+struct Deterministic{T,N}
+    initial_timestamp :: DateTime
+    resolution        :: Period
+    horizon           :: Period
+    interval          :: Period
+    count             :: Int
+    data              :: Array{T,N}      # (H, count, element_dims...)
+    name              :: String
+    application_data  :: Union{Nothing,String}
+    element_type      :: Union{Nothing,String}   # canonical element_type, or nothing for plain scalars
+    units             :: Union{Nothing,String}
+    quantity_kind     :: Union{Nothing,String}
+    unit_system       :: Union{Nothing,UnitSystem}   # nothing = unspecified, not NaturalUnits
+    component_field   :: Union{Nothing,String}
+    time_reference    :: Union{Nothing,TimeReference}  # inferred from the timestamp; see below
+end
+Deterministic(initial_timestamp, resolution, horizon, interval, count, data, name; application_data=nothing, element_type=nothing, units=nothing,
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=&lt;inferred&gt;)
+
+struct Probabilistic{T,N}
+    initial_timestamp :: DateTime
+    resolution        :: Period
+    horizon           :: Period
+    interval          :: Period
+    count             :: Int
+    percentiles       :: Vector{Float64}
+    data              :: Array{T,N}      # (num_percentiles, H, count, element_dims...)
+    name              :: String
+    application_data  :: Union{Nothing,String}
+    element_type      :: Union{Nothing,String}   # canonical element_type, or nothing for plain scalars
+    units             :: Union{Nothing,String}
+    quantity_kind     :: Union{Nothing,String}
+    unit_system       :: Union{Nothing,UnitSystem}   # nothing = unspecified, not NaturalUnits
+    component_field   :: Union{Nothing,String}
+    time_reference    :: Union{Nothing,TimeReference}  # inferred from the timestamp; see below
+end
+Probabilistic(initial_timestamp, resolution, horizon, interval, count, percentiles, data, name; application_data=nothing, element_type=nothing, units=nothing,
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=&lt;inferred&gt;)
+
+struct Scenarios{T,N}
+    initial_timestamp :: DateTime
+    resolution        :: Period
+    horizon           :: Period
+    interval          :: Period
+    count             :: Int
+    scenario_count    :: Int             # set from size(data, 1) by the constructor
+    data              :: Array{T,N}      # (scenario_count, H, count, element_dims...)
+    name              :: String
+    application_data  :: Union{Nothing,String}
+    element_type      :: Union{Nothing,String}   # canonical element_type, or nothing for plain scalars
+    units             :: Union{Nothing,String}
+    quantity_kind     :: Union{Nothing,String}
+    unit_system       :: Union{Nothing,UnitSystem}   # nothing = unspecified, not NaturalUnits
+    component_field   :: Union{Nothing,String}
+    time_reference    :: Union{Nothing,TimeReference}  # inferred from the timestamp; see below
+end
+Scenarios(initial_timestamp, resolution, horizon, interval, count, data, name; application_data=nothing, element_type=nothing, units=nothing,
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=&lt;inferred&gt;)
+# note: scenario_count is NOT a constructor argument
+
+# The seven descriptors after `name` are carried on the struct and become the
+# add_time_series! defaults, so a series built with units="MW" keeps them on add.
+# `unit_system` is a `UnitSystem`: `NaturalUnits` (the units named by `units`)
+# or `ComponentBase` (per-unit against the owning component's own base). The
+# store records the declaration only — it holds no base and rescales nothing —
+# and `nothing` means unspecified, which is deliberately not `NaturalUnits`.
+# `time_reference` is normally left to the constructor, which infers it from the
+# timestamp it was handed — see "Time references" below.
+
+# Marker type; never constructed and with no materialized struct. Derived via
+# transform_single_time_series! and read back as a Deterministic. You normally
+# do not request it: a Deterministic request matches it too. It surfaces as a
+# key's / row's time_series_type, so which forecasts are synthetic stays
+# inspectable, and passing it narrows a query to the derived ones.
+abstract type DeterministicSingleTimeSeries end
+
+mutable struct Store
+    handle :: Ptr{Cvoid}
+end
+
+mutable struct TimeSeriesKey
+    handle :: Ptr{Cvoid}                 # opaque; finalized automatically
+end
+
+@enum OwnerCategory begin
+    Component             = 0
+    SupplementalAttribute = 1
+end
+</code></pre>
+<p><code>application_data</code> is an opaque, package-owned payload (typically JSON) the binding can use to
+reconstruct a domain object on read; the store stores it verbatim and never interprets it.
+<code>add_time_series!</code> reads <code>name</code> off the object (it is not a call argument), so the same array can be
+stored under different names; its <code>application_data=</code> keyword defaults to the object's
+<code>application_data</code>. <code>data</code> keeps its Julia element type: the binding maps <code>T</code> to a stored dtype
+(<code>Float64</code>, <code>Float32</code>, the signed and unsigned integer widths, <code>Bool</code>) and converts to row-major
+bytes on the way down. An <code>element_type=</code> keyword declares what the elements <em>mean</em> when they are
+not plain numbers (<code>"tuple(3,f64)"</code>, <code>"piecewise_linear"</code>, … — see
+<a href="./element-types.html">Element types</a>); it defaults to the object's own <code>element_type</code>, which is
+<code>nothing</code> for plain scalars.</p>
+<h2 id="result-types"><a class="header" href="#result-types">Result Types</a></h2>
+<p>The catalog, metadata, and summary queries return <strong>structs</strong>, not <code>NamedTuple</code>s or <code>Dict</code>s. Each is
+immutable, compares and hashes by value (so results can go straight into a <code>Set</code> or <code>Dict</code>), and
+<code>show</code>s with its field names. Read a field with <code>x.field</code>; fields that do not apply to a row's time
+series type are <code>nothing</code>.</p>
+<p>Two conventions hold across every one of them: a <code>time_series_type</code> field holds the <strong>Julia type</strong>
+(<code>SingleTimeSeries</code>, <code>Deterministic</code>, …), ready to pass to <code>get_time_series</code>, and a reader group's
+<code>dtype</code> field holds the <strong>Julia element type</strong> (<code>Float64</code>, <code>Bool</code>, …). Metadata instead carries the
+store's canonical <code>element_type</code> <strong>string</strong>, which names both the meaning and (through it) the
+dtype. An <code>owner_category</code> field is an <code>OwnerCategory</code>, never a string.</p>
+<p>A requested type is always the bare one — <code>SingleTimeSeries</code>, never <code>SingleTimeSeries{Float64}</code>. A
+series is addressed by its identity (owner, category, type, name, resolution, interval, features),
+which carries no element type, so parameters on a <em>request</em> would have nothing to select on; passing
+them raises <code>InvalidParameterError</code> rather than being quietly ignored. The element type comes back
+on the result instead, in its own <code>{T,N}</code> and in a reader group's <code>dtype</code>.</p>
+<pre><code class="language-julia">struct AddedTimeSeries                       # every write: add_time_series!, add_time_series_bulk!
+    key :: TimeSeriesKey                     # names the series
+    id  :: Int64                             # the catalog row's id; assigned, and never reissued
+end                                          # accepted anywhere a TimeSeriesKey is
+
+struct TimeSeriesMetadata                    # get_metadata / list_time_series
+    owner_id          :: Int64
+    owner_type        :: String
+    owner_category    :: OwnerCategory
+    time_series_type  :: Type
+    name              :: String
+    data_hash         :: Vector{UInt8}       # 32-byte content hash
+    initial_timestamp :: Union{Nothing,DateTime}
+    resolution        :: Union{Nothing,Period}
+    horizon           :: Union{Nothing,Period}     # forecasts
+    interval          :: Union{Nothing,Period}     # forecasts
+    count             :: Union{Nothing,Int}        # forecasts
+    length            :: Union{Nothing,Int}        # static series
+    percentiles       :: Union{Nothing,Vector{Float64}}   # Probabilistic
+    element_type      :: String              # "f64", "tuple(3,f64)", "piecewise_linear", …
+    element_shape     :: Tuple{Vararg{Int}}  # per-timestep shape; () for scalars
+    features          :: Dict{String,Any}
+    units             :: Union{Nothing,String}
+    quantity_kind     :: Union{Nothing,String}
+    unit_system       :: Union{Nothing,UnitSystem}   # NaturalUnits | ComponentBase
+    time_reference    :: Union{Nothing,TimeReference}   # how the timestamps were spelled
+    component_field   :: Union{Nothing,String}       # e.g. "max_active_power"
+    application_data  :: Union{Nothing,String}
+end
+</code></pre>
+<p><code>TimeSeriesMetadata</code> is the Julia mirror of the Rust core's type of the same name, and the package's
+<strong>only</strong> metadata type: one struct for every time series type, reached either one at a time by
+<a href="#attribute-based-lookups"><code>get_metadata</code></a> (by key or by attributes) or in bulk by
+<a href="#store-wide-operations"><code>list_time_series</code></a>. The fields a type does not use are <code>nothing</code> rather
+than absent, so no field is silently dropped by the addressing path taken.</p>
+<div class="table-wrapper"><table><thead><tr><th>Struct</th><th>Returned by</th><th>Fields</th></tr></thead><tbody>
+<tr><td><code>KeyInfo</code></td><td><code>key_info</code></td><td><code>owner_id</code>, <code>owner_category</code>, <code>name</code>, <code>time_series_type</code>, <code>resolution</code>, <code>features</code></td></tr>
+<tr><td><code>KeyRow</code></td><td><code>list_keys</code></td><td><code>owner_id</code>, <code>owner_category</code>, <code>time_series_type</code>, <code>name</code>, <code>initial_timestamp</code>, <code>resolution</code>, <code>length</code>, <code>horizon</code>, <code>interval</code>, <code>count</code>, <code>features</code>, <code>time_reference</code></td></tr>
+<tr><td><code>ArrayGroupRow</code></td><td><code>list_array_groups</code></td><td>every <code>KeyRow</code> field, plus <code>data_hash</code> (the 32 bytes)</td></tr>
+<tr><td><code>TimeSeriesCounts</code></td><td><code>get_counts</code></td><td><code>components_with_time_series</code>, <code>static_time_series</code>, <code>forecasts</code></td></tr>
+<tr><td><code>TimeSeriesCountsDetailed</code></td><td><code>time_series_counts</code></td><td><code>components_with_time_series</code>, <code>supplemental_attributes_with_time_series</code>, <code>static_time_series_count</code>, <code>forecast_count</code></td></tr>
+<tr><td><code>TimeSeriesTypeCount</code></td><td><code>counts_by_type</code></td><td><code>time_series_type</code>, <code>count</code></td></tr>
+<tr><td><code>ArrayReferenceCounts</code></td><td><code>count_array_references</code></td><td><code>sts</code>, <code>dst</code></td></tr>
+<tr><td><code>StaticSummaryRow</code></td><td><code>static_summary</code></td><td><code>owner_type</code>, <code>owner_category</code>, <code>time_series_type</code>, <code>name</code>, <code>initial_timestamp</code>, <code>resolution</code>, <code>time_step_count</code>, <code>count</code></td></tr>
+<tr><td><code>ForecastSummaryRow</code></td><td><code>forecast_summary</code></td><td><code>owner_type</code>, <code>owner_category</code>, <code>time_series_type</code>, <code>name</code>, <code>initial_timestamp</code>, <code>resolution</code>, <code>horizon</code>, <code>interval</code>, <code>window_count</code>, <code>count</code></td></tr>
+<tr><td><code>SupplementalAttributeTypeCount</code></td><td><code>supplemental_attribute_counts_by_type</code></td><td><code>attribute_type</code>, <code>count</code></td></tr>
+<tr><td><code>SupplementalAttributeSummaryRow</code></td><td><code>supplemental_attribute_summary</code></td><td><code>component_type</code>, <code>attribute_type</code>, <code>count</code></td></tr>
+<tr><td><code>ForecastParameters</code></td><td><code>get_forecast_parameters</code></td><td><code>horizon</code>, <code>interval</code>, <code>count</code>, <code>resolution</code>, <code>initial_timestamp</code> (all <code>nothing</code> when nothing matches)</td></tr>
+<tr><td><code>StaticGrid</code></td><td><code>static_grid</code>, <code>check_static_consistency</code></td><td><code>initial_timestamp</code>, <code>resolution</code> (<code>nothing</code> for an irregular reader), <code>length</code>, <code>time_reference</code></td></tr>
+<tr><td><code>ForecastTimeline</code></td><td><code>forecast_timeline</code></td><td><code>initial_timestamp</code>, <code>resolution</code>, <code>interval</code>, <code>count</code>, <code>time_reference</code></td></tr>
+<tr><td><code>CompressionSettings</code></td><td><code>get_compression</code></td><td><code>compression</code> (<code>:deflate</code> / <code>:none</code>), <code>level</code>, <code>shuffle</code></td></tr>
+<tr><td><code>CompactionReport</code></td><td><code>compact!</code></td><td><code>slots_reclaimed</code>, <code>datasets_dropped</code>, <code>feature_sets_reclaimed</code>, <code>timestamp_sets_reclaimed</code>, <code>bytes_reclaimed</code></td></tr>
+</tbody></table>
+</div>
+<p><code>StaticGrid</code> is shared by <code>static_grid</code> (a reader's timeline) and <code>check_static_consistency</code> (one
+per resolution present) — the same concept, so the same type. Its <code>resolution</code> is <code>nothing</code> only for
+a <code>NonSequentialTimeSeries</code> reader, whose timeline is an explicit list of instants rather than a
+grid; enumerate it with <code>static_timestamps</code>.</p>
+<p><code>time_reference</code> is the one spelling the axis carries — a reader spans one timeline, so a cohort
+whose columns agree reports their reference, one whose columns merely agree on naming instants
+reports <code>UTCReference()</code>, and a cohort mixing zoneless with the rest never builds at all. It is
+<code>nothing</code> when the cohort records no spelling, and from <code>check_static_consistency</code>, which reports
+grids rather than readers. <code>nothing</code> is not <code>ZonelessReference()</code>: the second is the positive claim
+that the timestamps are wall clocks. Three- and four-argument constructors (<code>StaticGrid</code> and
+<code>ForecastTimeline</code> respectively) leave it unset.</p>
+<h2 id="static-series"><a class="header" href="#static-series">Static Series</a></h2>
+<pre><code class="language-julia">add_time_series!(
+    store::Store, owner_id, owner_type, owner_category::OwnerCategory,
+    ts;   # SingleTimeSeries, NonSequentialTimeSeries, or any dense forecast struct
+    features::AbstractDict = Dict(), element_type = ts.element_type, units = ts.units,
+    quantity_kind = ts.quantity_kind, unit_system = ts.unit_system,
+    component_field = ts.component_field, application_data = ts.application_data,
+    id = nothing,   # file under this catalog id (imports); `nothing` lets the catalog assign
+) -&gt; AddedTimeSeries   # `.key::TimeSeriesKey`, `.id::Int64`; usable wherever a key is
+
+get_time_series(store::Store, key::TimeSeriesKey; time_range=nothing) -&gt; SingleTimeSeries
+get_time_series(SingleTimeSeries, store::Store, key::TimeSeriesKey;
+               time_range=nothing) -&gt; SingleTimeSeries
+get_time_series(NonSequentialTimeSeries, store::Store, key::TimeSeriesKey;
+               time_range=nothing) -&gt; NonSequentialTimeSeries
+
+get_time_series(SingleTimeSeries, store, owner_id, owner_category, name;
+               resolution=nothing, features=Dict(), time_range=nothing) -&gt; SingleTimeSeries
+get_time_series(NonSequentialTimeSeries, store, owner_id, owner_category, name;
+               resolution=nothing, features=Dict(), time_range=nothing) -&gt; NonSequentialTimeSeries
+</code></pre>
+<p><code>time_range = (start::DateTime, stop::DateTime)</code> (exclusive end) slices the read on every form.
+Every read populates the returned struct's <code>application_data</code> field from the stored association, so
+a binding's reconstruction tag comes back with the data — no separate <code>get_metadata</code> call is needed.</p>
+<p><code>owner_id</code> is an integer identifier (<code>Int64</code>) and <code>owner_category</code> (<code>Component</code> /
+<code>SupplementalAttribute</code>) completes the owner identity — the owner is the pair
+<code>(owner_id, owner_category)</code>. <code>features</code> is serialized to JSON and must contain only JSON-scalar
+values (<code>Int</code>, <code>Float64</code>, <code>Bool</code>, <code>String</code>); a feature name that shadows a time-series or key field
+(<code>name</code>, <code>resolution</code>, <code>owner_id</code>, …) is rejected on add — see
+<a href="../explanation/data-model.html#reserved-feature-names">reserved feature names</a>. Pass the type as the
+first argument to <code>get_time_series</code> to read a non-sequential series back.</p>
+<p><code>get_time_series</code> supports two unified calling conventions for <strong>every</strong> type: pass the
+<code>TimeSeriesKey</code> returned by <code>add_time_series!</code> (key-based), or pass <code>owner_id, owner_category, name</code>
+plus optional <code>resolution</code> / <code>features</code> keywords (attribute-based, the same addressing used by
+<code>get_metadata</code> / <code>has_time_series</code> / <code>remove_time_series!</code>). Both forms return the same struct. The
+bare <code>get_time_series(store, key)</code> remains a convenience alias for <code>SingleTimeSeries</code>.</p>
+<p>To read every series' value at one timestamp in a loop (the simulation pattern), use a
+<a href="#staticreader"><code>StaticReader</code></a> rather than calling <code>get_time_series</code> per series.</p>
+<h3 id="bulk-reads"><a class="header" href="#bulk-reads">Bulk reads</a></h3>
+<pre><code class="language-julia">bulk_read(store::Store, keys::AbstractVector{TimeSeriesKey};
+          time_range::Union{Nothing,Tuple{Any,Any}}=nothing) -&gt; Vector
+# time_range slices every series to that window (default: each series in full);
+# the bounds are DateTime or, with TimeZones loaded, ZonedDateTime
+</code></pre>
+<p>Reads many whole series in one call, returning one per key <strong>in the same order</strong>, each as the struct
+matching its stored type (<code>SingleTimeSeries</code>, <code>NonSequentialTimeSeries</code>, <code>Deterministic</code>,
+<code>Probabilistic</code>, or <code>Scenarios</code>) — the result is a <code>Vector{Any}</code>, so narrow it yourself when every
+key is one type. Packed <code>SingleTimeSeries</code> are read and decompressed once per dataset instead of per
+series, so this is the efficient way to load many complete series (exploration, plotting). An empty
+key vector returns an empty vector without touching the store.</p>
+<pre><code class="language-julia">series = bulk_read(store, keys)   # keys :: Vector{TimeSeriesKey}
+</code></pre>
+<pre><code class="language-julia">read_by_ids(store::Store, ids::AbstractVector{&lt;:Integer}) -&gt; Vector
+</code></pre>
+<p>The same read addressed by catalog <a href="../explanation/data-model.html">association id</a> rather than by key
+— the read direction of the id every write reports on its <code>AddedTimeSeries</code>, for a caller that
+recorded ids in its own model instead of keeping an id-to-key map beside the store. Results follow
+the order the ids are given, repeats included, each decoded into the same struct <code>bulk_read</code> would
+return. An id naming no row throws <code>NotFoundError</code> (the whole call fails; the error does not say
+which id dangled — sift them with <code>association_exists</code> when that matters), and an empty id vector
+returns an empty vector without touching the store.</p>
+<pre><code class="language-julia">series = read_by_ids(store, [added.id, other.id])
+</code></pre>
+<h2 id="bulk-adds"><a class="header" href="#bulk-adds">Bulk Adds</a></h2>
+<pre><code class="language-julia">batch = AddBatch()
+add_time_series!(batch, owner_id, owner_type, owner_category, ts; ...)  # any series type
+add_time_series_bulk!(store::Store, batch::AddBatch) -&gt; Vector{AddedTimeSeries}   # in input order
+</code></pre>
+<p><code>AddBatch</code> accepts the same <code>add_time_series!</code> methods as <code>Store</code> (every series and forecast type)
+but only accumulates the requests; <code>add_time_series_bulk!</code> commits the whole batch in <strong>one</strong>
+metadata transaction, which is much faster than per-item adds when ingesting many series. The submit
+is all-or-nothing: on error nothing is committed. The batch is drained by the call in either case
+and may be reused. <code>length(batch)</code> returns the number of pending requests.</p>
+<h3 id="attribute-based-lookups"><a class="header" href="#attribute-based-lookups">Attribute-based lookups</a></h3>
+<pre><code class="language-julia">get_metadata(store, key::TimeSeriesKey) -&gt; TimeSeriesMetadata
+get_metadata(T::Type, store, owner_id, owner_category::OwnerCategory, name;
+             resolution=nothing, interval=nothing, features=Dict()) -&gt; TimeSeriesMetadata
+get_metadata(store, owner_id, owner_category::OwnerCategory, name;
+             resolution=nothing, features=Dict()) -&gt; TimeSeriesMetadata   # T = SingleTimeSeries
+has_time_series(store, owner_id, owner_category::OwnerCategory, name;
+                resolution=nothing, features=Dict()) -&gt; Bool
+remove_time_series!(store, owner_id, owner_category::OwnerCategory, name;
+                    resolution=nothing, features=Dict()) -&gt; Nothing
+</code></pre>
+<p><code>owner_category</code> (<code>Component</code> / <code>SupplementalAttribute</code>) is required: the owner identity is the pair
+<code>(owner_id, owner_category)</code>, so a component and a supplemental attribute may share a numeric
+<code>owner_id</code> and remain distinct.</p>
+<p><code>remove_time_series!</code> refuses to remove a <code>SingleTimeSeries</code> whose array still backs a
+<code>DeterministicSingleTimeSeries</code> when it is the last backing series (the DST is a view of that
+array); it raises <code>InvalidParameterError</code> — remove the derived forecast first, or use an
+owner-scoped <code>clear!</code>, which is exempt.</p>
+<p><code>get_metadata</code> returns the whole <a href="#result-types"><code>TimeSeriesMetadata</code></a> record — every stored type
+through the one function — and throws <code>NotFoundError</code> if absent. The attribute form takes the type
+as its first argument exactly like <code>get_time_series</code>: <code>SingleTimeSeries</code>, <code>NonSequentialTimeSeries</code>,
+<code>Deterministic</code>, <code>DeterministicSingleTimeSeries</code>, <code>Probabilistic</code>, or <code>Scenarios</code> — where
+<code>Deterministic</code> resolves a stored <code>DeterministicSingleTimeSeries</code> too, and the returned record's
+<code>time_series_type</code> reports which form was found. <code>interval</code> is only needed to disambiguate forecasts
+that differ solely by interval. Omitting the type reads a <code>SingleTimeSeries</code>, the same shorthand
+<code>has_time_series</code> and <code>remove_time_series!</code> use. Since every form returns the same struct,
+<code>application_data</code>, <code>element_type</code>, <code>owner_type</code>, and <code>percentiles</code> are available whichever type was
+asked for and whichever way the record was reached (for a forecast, <code>element_shape</code> is the stored
+array's trailing dims after its first axis).</p>
+<pre><code class="language-julia">get_metadata(store, 42, Component, "load"; resolution = Hour(1))
+get_metadata(Scenarios, store, 42, Component, "wind"; resolution = Hour(1))
+</code></pre>
+<pre><code class="language-julia">get_array_by_hash(store, data_hash::Vector{UInt8}, ::Type{T}=Float64) -&gt; Vector{T}
+</code></pre>
+<p>Fetches the flattened array for a 32-byte content hash, decoded as element type <code>T</code>. Combine with
+<code>get_metadata</code> (for the element type and shape) to read values without holding a <code>TimeSeriesKey</code>.
+Every <code>data_hash</code> in this API is these same 32 bytes, so any metadata record or <code>ArrayGroupRow</code>
+feeds it directly; <code>bytes2hex</code> gives the display form.</p>
+<h3 id="key-based-variants"><a class="header" href="#key-based-variants">Key-based variants</a></h3>
+<pre><code class="language-julia">has_time_series(store, key::TimeSeriesKey) -&gt; Bool
+remove_time_series!(store, key::TimeSeriesKey) -&gt; Nothing
+remove_time_series!(store, keys::Vector{TimeSeriesKey}) -&gt; Int
+</code></pre>
+<p>The vector form removes every key in one all-or-nothing transaction and returns the count; a single
+missing key aborts the whole batch.</p>
+<h3 id="enumerating-keys"><a class="header" href="#enumerating-keys">Enumerating keys</a></h3>
+<pre><code class="language-julia">get_time_series_keys(store, owner_id, owner_category::OwnerCategory) -&gt; Vector{TimeSeriesKey}
+get_time_series_key(T::Type, store, owner_id, owner_category::OwnerCategory, name;
+                    resolution=nothing, interval=nothing, features=Dict()) -&gt; TimeSeriesKey
+key_info(key::TimeSeriesKey) -&gt; KeyInfo
+# fields: owner_id, owner_category, name, time_series_type, resolution, features
+</code></pre>
+<p>These two are the ways to obtain a <code>TimeSeriesKey</code> for a series already stored (<code>add_time_series!</code>
+returns one at write time, and the readers carry them on <code>StaticGroup</code> / <code>ForecastEntry</code>).
+<code>get_time_series_key</code> addresses one series by attributes, <code>T</code> being any stored type — with
+<code>Deterministic</code> matching a stored <code>DeterministicSingleTimeSeries</code> too, the returned key naming the
+concrete form. It resolves against the catalog, so the handle always names something stored: a miss
+throws <code>NotFoundError</code> and a request matching several series throws <code>InvalidParameterError</code> listing
+the candidates. Note that <a href="#store-wide-operations"><code>list_keys</code></a> returns <code>KeyRow</code> <strong>description
+structs</strong>, not handles — use <code>get_time_series_key</code> (or <code>get_time_series_keys</code>) when you need
+something to pass to a key-based reader or <code>bulk_read</code>.</p>
+<p><code>get_time_series_keys</code> returns one key per stored association for the owner identified by the
+<code>(owner_id, owner_category)</code> pair, including <code>DeterministicSingleTimeSeries</code> rows derived by
+<code>transform_single_time_series!</code> — the way to read a transform-derived forecast by key (it returns no
+key of its own). The keys are opaque; <code>key_info</code> inspects one. <code>time_series_type</code> is the <strong>actual
+Julia type</strong> (<code>SingleTimeSeries</code>, <code>NonSequentialTimeSeries</code>, <code>Deterministic</code>,
+<code>DeterministicSingleTimeSeries</code>, <code>Probabilistic</code>, or <code>Scenarios</code>), as in InfrastructureSystems.jl —
+pass it straight to <code>get_time_series</code>. <code>features</code> is a <code>Dict</code> (empty when none) that round-trips the
+JSON-scalar feature values. For example:</p>
+<pre><code class="language-julia">for k in get_time_series_keys(store, 12345, Component)
+    info = key_info(k)
+    series = get_time_series(info.time_series_type, store, k)
+end
+</code></pre>
+<p><code>key_info</code> also returns <code>owner_category</code> (the <code>Component</code> / <code>SupplementalAttribute</code> half of the
+owner identity) alongside <code>owner_id</code>.</p>
+<p>Reading a <code>DeterministicSingleTimeSeries</code> (by key or attributes) returns a <code>Deterministic</code>, since
+the type has no materialized form.</p>
+<h2 id="forecasts"><a class="header" href="#forecasts">Forecasts</a></h2>
+<p>Dense forecasts are constructed as <code>Deterministic</code>, <code>Probabilistic</code>, or <code>Scenarios</code> structs (see
+<a href="#types">Types</a>) and added through the generic <code>add_time_series!</code>. Each struct wraps a native
+<code>AbstractArray</code> of any supported element type and dimensionality — the binding derives the stored
+dtype and dims and converts to row-major bytes, just like the static <code>add_time_series!</code> (see the
+<a href="../explanation/data-model.html#forecasts">data model</a> for the conventional shapes).</p>
+<p>The forecast <code>name</code> comes from the struct, e.g.
+<code>Deterministic(initial, resolution, horizon, interval, count, data, name)</code>.</p>
+<pre><code class="language-julia">add_time_series!(
+    store, owner_id, owner_type, owner_category::OwnerCategory,
+    ts::Union{Deterministic,Probabilistic,Scenarios};
+    features=Dict(), element_type=ts.element_type, units=ts.units,
+    quantity_kind=ts.quantity_kind, unit_system=ts.unit_system,
+    component_field=ts.component_field, application_data=ts.application_data,
+) -&gt; AddedTimeSeries
+</code></pre>
+<p>The descriptor keywords default to the struct's own fields, so a label set at construction survives
+the add; pass a keyword to override it for one association.</p>
+<p>A <code>DeterministicSingleTimeSeries</code> is not added directly. Derive one from every stored
+<code>SingleTimeSeries</code> (sharing the backing array) with:</p>
+<pre><code class="language-julia">transform_single_time_series!(store, horizon::Period, interval::Period;
+                              owner_category::Union{Nothing,OwnerCategory}=nothing,
+                              resolution::Union{Nothing,Period}=nothing,
+                              normalize_single_window::Bool=false,
+                              require_uniform_forecast_grid::Bool=false,
+                              dry_run::Bool=false) -&gt; TransformOutcome
+
+struct TransformOutcome
+    transformed         :: Int      # DSTs derived (or that would be, under dry_run)
+    sources             :: Int      # SingleTimeSeries in scope
+    interval            :: Period   # the interval actually stored
+    interval_normalized :: Bool     # true when a single-window request was stored as zero interval
+end
+</code></pre>
+<p><code>count</code> is derived from each series' length. <code>owner_category</code> restricts the transform to one owner
+category (both are transformed when it is <code>nothing</code>); <code>resolution</code> restricts it to the
+<code>SingleTimeSeries</code> at that resolution. The store performs the whole eligibility check — horizon fit
+and divisibility, interval divisibility, per-resolution grid uniformity, conflicts with existing
+forecasts — so callers need not pre-check per series.</p>
+<p>The two policy flags encode a <em>client's</em> contract rather than a storage invariant, and both default
+to permissive. <code>normalize_single_window</code> stores a single-window request (interval equal to a horizon
+spanning the whole series) as the zero interval rather than verbatim — the interval is part of the
+key, so this decides which form later lookups must use. <code>require_uniform_forecast_grid</code> demands that
+every resolution in scope, and any forecast already stored at the same <code>(resolution, interval)</code>,
+agree on the derived <code>count</code> and <code>initial_timestamp</code>. <strong>InfrastructureSystems.jl passes both as
+<code>true</code>.</strong> <code>dry_run</code> runs every check and reports the outcome without writing; it is legal against a
+read-only store.</p>
+<p><code>has_time_series</code> and <code>remove_time_series!</code> take the time series type as their first argument to
+address a type other than <code>SingleTimeSeries</code>, the same shape <code>get_metadata</code> and <code>get_time_series</code>
+use:</p>
+<pre><code class="language-julia">has_time_series(T::Type, store, owner_id, owner_category, name;
+                resolution=nothing, interval=nothing, features=Dict()) -&gt; Bool
+remove_time_series!(T::Type, store, owner_id, owner_category, name;
+                    resolution=nothing, interval=nothing, features=Dict())
+</code></pre>
+<p><code>interval</code> (a <code>Period</code>) pins the forecast interval — the only way to disambiguate two forecasts of
+one owner/name/type that differ solely by interval (e.g. day-ahead vs intra-day). Without it such a
+lookup is ambiguous and errors.</p>
+<h3 id="copying-an-association"><a class="header" href="#copying-an-association">Copying an association</a></h3>
+<pre><code class="language-julia">copy_time_series!(T::Type, store, owner_id, owner_category, name,
+                  dst_owner_id, dst_owner_type::AbstractString;
+                  new_name=nothing, resolution=nothing, interval=nothing,
+                  features=Dict()) -&gt; Nothing
+</code></pre>
+<p>Copies the time series identified by the source attributes onto <code>dst_owner_id</code> (of Julia/domain type
+<code>dst_owner_type</code>), optionally renaming it to <code>new_name</code>. Arrays are content-addressed, so this
+writes only a new association row against the same underlying array: no data is duplicated and the
+stored time series type is preserved — a <code>DeterministicSingleTimeSeries</code> stays a DST, whereas a
+read-then-write copy through <code>get_time_series</code> / <code>add_time_series!</code> would materialize it into a
+dense <code>Deterministic</code>. The copy keeps the source's <code>owner_category</code>. Throws if the destination
+already holds a matching series.</p>
+<pre><code class="language-julia">copy_time_series!(SingleTimeSeries, store, 42, Component, "load", 43, "Generator")   # → owner 43
+</code></pre>
+<h3 id="reading-forecast-values"><a class="header" href="#reading-forecast-values">Reading forecast values</a></h3>
+<p>The type-dispatched <code>get_time_series(Type, …)</code> functions return the corresponding struct, whose
+<code>data</code> field is a decoded N-dimensional Julia array (reshaped to the type's logical shape, with
+native Julia indexing). Pass <code>time_range = (start::DateTime, end::DateTime)</code> (exclusive end) to
+select a window sub-range.</p>
+<p>Like the static readers, forecasts support both calling conventions: attribute-based
+(<code>owner_id, owner_category, name</code> plus optional <code>resolution</code> / <code>interval</code> / <code>features</code>) or key-based
+(the <code>TimeSeriesKey</code> returned by <code>add_time_series!</code>).</p>
+<pre><code class="language-julia">get_time_series(Deterministic, store, owner_id, owner_category, name;
+                resolution=nothing, interval=nothing, features=Dict(),
+                time_range=nothing) -&gt; Deterministic
+get_time_series(Deterministic, store, key::TimeSeriesKey; time_range=nothing) -&gt; Deterministic
+                # data shape: (H, count, element_dims...)
+
+get_time_series(DeterministicSingleTimeSeries, store, owner_id, owner_category, name;
+                resolution=nothing, interval=nothing, features=Dict(),
+                time_range=nothing) -&gt; Deterministic
+get_time_series(DeterministicSingleTimeSeries, store, key::TimeSeriesKey;
+                time_range=nothing) -&gt; Deterministic
+
+get_time_series(Probabilistic, store, owner_id, owner_category, name;
+                resolution=nothing, interval=nothing, features=Dict(),
+                time_range=nothing) -&gt; Probabilistic
+get_time_series(Probabilistic, store, key::TimeSeriesKey; time_range=nothing) -&gt; Probabilistic
+                # data shape: (num_percentiles, H, count, element_dims...)
+
+get_time_series(Scenarios, store, owner_id, owner_category, name;
+                resolution=nothing, interval=nothing, features=Dict(),
+                time_range=nothing) -&gt; Scenarios
+get_time_series(Scenarios, store, key::TimeSeriesKey; time_range=nothing) -&gt; Scenarios
+                # data shape: (scenario_count, H, count, element_dims...)
+</code></pre>
+<p><code>interval</code> (a <code>Period</code>) pins the forecast interval; it is the only way to address one of two
+forecasts under the same owner/name/type that differ solely by interval. A read that leaves it
+<code>nothing</code> when two such forecasts exist raises <code>InvalidParameterError</code>.</p>
+<h4 id="reading-a-transformed-forecast"><a class="header" href="#reading-a-transformed-forecast">Reading a transformed forecast</a></h4>
+<p><strong>Always ask for <code>Deterministic</code>.</strong> It matches a directly-stored <code>Deterministic</code> <em>and</em> a
+<code>DeterministicSingleTimeSeries</code> derived by <code>transform_single_time_series!</code>, so how a forecast came
+to exist is not something you need to know to read it:</p>
+<pre><code class="language-julia">transform_single_time_series!(store, Hour(4), Hour(2))
+fc = get_time_series(Deterministic, store, 400, Component, "dst")   # a Deterministic
+</code></pre>
+<p><code>get_time_series(DeterministicSingleTimeSeries, …)</code> narrows to the derived forecasts. It returns a
+<code>Deterministic</code> too — the type has no materialized struct — so it is only worth naming when you are
+auditing which forecasts are synthetic rather than reading values.</p>
+<p>The Rust core resolves this in a single call — there is no guess-and-retry. A genuine miss raises
+<code>NotFoundError</code>.</p>
+<p>To find out which form you have, read the <code>time_series_type</code> on the resolved key or metadata:</p>
+<pre><code class="language-julia">k = get_time_series_key(Deterministic, store, 400, Component, "dst")
+key_info(k).time_series_type    # DeterministicSingleTimeSeries
+</code></pre>
+<p>The <strong>key-based</strong> readers carry the exact stored type in the key, so the question does not arise: a
+<code>DeterministicSingleTimeSeries</code> key reads back as a <code>Deterministic</code>.</p>
+<p>Alternatively, use <code>get_metadata</code> to obtain the <code>data_hash</code>, then <code>get_array_by_hash</code> for the raw
+flattened array.</p>
+<p>For the per-timestamp simulation access pattern (walk the timeline, read every series at each
+instant) prefer a reader — see <a href="#readers-per-timestamp-iteration">Readers</a> below.</p>
+<h2 id="readers-per-timestamp-iteration"><a class="header" href="#readers-per-timestamp-iteration">Readers (per-timestamp iteration)</a></h2>
+<p><code>get_time_series</code> returns a whole series or forecast struct. For the simulation access pattern —
+<em>walk every timestamp and, at each, read the value of every series</em> — use a <strong>reader</strong> instead. A
+reader is built once over a filter, pins one timeline, and reuses output buffers that each read
+overwrites in place, so a tight loop allocates almost nothing. There are two: <code>StaticReader</code> for the
+static types, and <code>ForecastReader</code> for forecasts. Both follow the same lifecycle: build → inspect
+the layout once → <code>*_read!(t)</code> in a loop → pull values per group/entry.</p>
+<h3 id="staticreader"><a class="header" href="#staticreader">StaticReader</a></h3>
+<p>Reads the value of every matching static series at one timestamp. Results are <strong>columnar</strong>: series
+are partitioned into <code>(dtype, element_shape)</code> groups, and each group's values come back as one dense
+<code>(num_columns, element_dims...)</code> array.</p>
+<pre><code class="language-julia">build_static_reader(store; resolution::Union{Nothing,Period}=nothing,
+                    time_series_type::Type=SingleTimeSeries, owner_id=nothing,
+                    owner_category=nothing, name=nothing, name_glob=nothing,
+                    features=Dict(), component_field=nothing) -&gt; StaticReader
+
+static_grid(reader)       -&gt; StaticGrid  # .initial_timestamp, .resolution (or nothing), .length
+static_timestamps(reader) -&gt; Vector{DateTime}  # every instant on the timeline, in order
+static_groups(reader)     -&gt; Vector{StaticGroup}  # each: .dtype, .element_shape, .keys
+static_read!(reader, t::DateTime) -&gt; reader  # fills buffers; errors if t is off the timeline
+static_values(reader, group_index::Integer) -&gt; Array
+       # (num_columns, element_dims...); column j is static_groups(reader)[group_index].keys[j]
+</code></pre>
+<p>All matched series must share one timeline — one grid (<code>initial_timestamp</code> + <code>length</code>) for
+<code>SingleTimeSeries</code>, one timestamp vector for <code>NonSequentialTimeSeries</code>. The build validates this and
+errors on divergence, so there is no presence mask — every column has a value at every valid
+timestamp.</p>
+<p><code>resolution</code> is required for <code>SingleTimeSeries</code> (one resolution per reader) and must be omitted for
+<code>time_series_type=NonSequentialTimeSeries</code>, which has none; <code>static_grid(reader).resolution</code> is then
+<code>nothing</code>. Iterating <code>static_timestamps</code> covers either kind, so one loop serves both:</p>
+<pre><code class="language-julia">reader = build_static_reader(store; resolution = Hour(1))
+# ...or, for irregular series:
+# reader = build_static_reader(store; time_series_type = NonSequentialTimeSeries)
+for t in static_timestamps(reader)
+    static_read!(reader, t)
+    for (gi, g) in enumerate(static_groups(reader))
+        vals = static_values(reader, gi)   # column j ↔ g.keys[j]
+    end
+end
+</code></pre>
+<h3 id="forecastreader"><a class="header" href="#forecastreader">ForecastReader</a></h3>
+<p>Reads the forecast <em>window</em> at one timestamp for every matching forecast of one type. The build
+filter must name a forecast type and pin a resolution; a <code>Deterministic</code> reader is abstract and also
+includes <code>DeterministicSingleTimeSeries</code> (read into identical <code>[H, *E]</code> windows). All matched
+forecasts must share one window timeline (<code>initial_timestamp</code> + <code>interval</code> + <code>count</code>).</p>
+<p><code>time_series_type</code> must be one of the four forecast types — <code>Deterministic</code>,
+<code>DeterministicSingleTimeSeries</code>, <code>Probabilistic</code>, or <code>Scenarios</code>. Any other type raises
+<code>InvalidParameterError</code>.</p>
+<pre><code class="language-julia">build_forecast_reader(store, time_series_type::Type; resolution::Period,
+                      owner_id=nothing, owner_category=nothing, name=nothing,
+                      name_glob=nothing, features=Dict(),
+                      component_field=nothing) -&gt; ForecastReader
+
+forecast_timeline(reader)  -&gt; ForecastTimeline
+       # (initial_timestamp::DateTime, resolution::Period, interval::Period, count::Int)
+forecast_entries(reader)   -&gt; Vector{ForecastEntry}  # each: .dtype, .window_shape, .key, .slot
+forecast_num_slots(reader) -&gt; Int                    # physical reads per timestamp (see below)
+forecast_read!(reader, t::DateTime) -&gt; reader        # fills buffers; errors if t is off the timeline
+forecast_values(reader, entry_index::Integer) -&gt; Array  # window of size .window_shape
+</code></pre>
+<p>Valid read timestamps are <code>initial_timestamp + k·interval</code> for <code>k in 0:count-1</code> (each names the
+window forecast <em>from</em> that instant). A window's shape is <code>[H, *E]</code> for <code>Deterministic</code> /
+<code>DeterministicSingleTimeSeries</code>, <code>[num_percentiles, H, *E]</code> for <code>Probabilistic</code>, and
+<code>[scenario_count, H, *E]</code> for <code>Scenarios</code>.</p>
+<pre><code class="language-julia">reader = build_forecast_reader(store, Deterministic; resolution = Hour(1))
+tl = forecast_timeline(reader)
+for k in 0:(tl.count - 1)
+    forecast_read!(reader, tl.initial_timestamp + tl.interval * k)
+    for (i, e) in enumerate(forecast_entries(reader))
+        window = forecast_values(reader, i)   # shape e.window_shape, for e.key's owner
+    end
+end
+</code></pre>
+<h4 id="window-read-deduplication"><a class="header" href="#window-read-deduplication">Window-read deduplication</a></h4>
+<p>Forecasts that reference the <strong>same backing array and read plan</strong> — deduplicated identical data, or
+several <code>DeterministicSingleTimeSeries</code> over one <code>SingleTimeSeries</code> — collapse to a single <em>window
+slot</em>. <code>forecast_read!</code> performs one backend (<code>.h5</code>) read per slot, not per entry, so a forecast
+shared by N owners is read once per timestamp. <code>forecast_num_slots(reader)</code> is that physical read
+count (<code>≤ length(forecast_entries(reader))</code>), and every <code>ForecastEntry.slot</code> (0-based) identifies
+the slot backing that entry; entries that share data report the same <code>slot</code>. Group entries by <code>slot</code>
+to also materialize each unique window only once on the Julia side:</p>
+<pre><code class="language-julia">forecast_read!(reader, t)
+windows = Dict{Int, Any}()
+for (i, e) in enumerate(forecast_entries(reader))
+    window = get!(() -&gt; forecast_values(reader, i), windows, e.slot)   # materialize once per slot
+    # apply `window` to e.key's owner
+end
+</code></pre>
+<h2 id="store-wide-operations"><a class="header" href="#store-wide-operations">Store-Wide Operations</a></h2>
+<pre><code class="language-julia">get_counts(store) -&gt; TimeSeriesCounts   # components_with_time_series, static_time_series, forecasts
+counts_by_type(store) -&gt; Vector{TimeSeriesTypeCount}   # (time_series_type, count) per stored type
+num_distinct_arrays(store) -&gt; Int   # distinct content hashes; shared arrays count once
+time_series_counts(store) -&gt; TimeSeriesCountsDetailed   # distinct owners per category + distinct arrays per kind
+list_owner_ids(store, owner_category; time_series_type=nothing, resolution=nothing) -&gt; Vector{Int}
+list_array_groups(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
+                  name=nothing, name_glob=nothing, resolution=nothing, interval=nothing,
+                  features=Dict(), component_field=nothing) -&gt; Vector{ArrayGroupRow}
+                                  # list_keys rows + `data_hash`; group by it to find shared arrays
+count_array_references(store, data_hash::Vector{UInt8}) -&gt; ArrayReferenceCounts  # (sts, dst) refs to a 32-byte hash
+static_summary(store) -&gt; Vector{StaticSummaryRow}   # grouped static rows with a `count`; build your own table
+forecast_summary(store) -&gt; Vector{ForecastSummaryRow}   # grouped forecast rows with a `count`
+get_forecast_parameters(store; resolution=nothing, interval=nothing) -&gt; ForecastParameters  # horizon, interval, count, resolution, initial_timestamp; fields `nothing` when none match
+check_static_consistency(store; resolution=nothing) -&gt; Vector{StaticGrid}  # one grid per resolution present (empty when none); throws if the series at one resolution disagree
+get_resolutions(store; time_series_type=nothing) -&gt; Vector{Period}  # distinct resolutions, in the core's stored (lexical-by-ISO) order
+get_intervals(store; time_series_type=nothing) -&gt; Vector{Period}    # distinct forecast intervals, same order; empty for static types
+get_path(store) -&gt; Union{Nothing,String}   # the .h5 path, or nothing for an in-memory store
+read_only(store) -&gt; Bool
+has_for_owner(store, owner_id, owner_category; time_series_type=nothing) -&gt; Bool
+                                  # does this owner have any series (of that type)? One index probe.
+list_names(store; &lt;list_keys filters&gt;) -&gt; Vector{String}        # distinct names, sorted
+list_owner_types(store; &lt;list_keys filters&gt;) -&gt; Vector{String}  # distinct owner types, sorted
+remove_by_filter!(store; &lt;list_keys filters&gt;) -&gt; Int
+                                  # remove every match in one all-or-nothing transaction; count removed
+rename_time_series!(store, key::TimeSeriesKey, new_name) -&gt; TimeSeriesKey  # same identity, new name
+get_compression(store) -&gt; CompressionSettings  # compression=:deflate|:none, level, shuffle; restored from file on open
+verify_integrity(store) -&gt; Int    # number of integrity errors; 0 == intact
+compact!(store) -&gt; CompactionReport   # reclaims both halves; on an on-disk store this rewrites the
+                                      # .h5 file from the live set and replaces it (single writer)
+flush!(store) -&gt; Nothing          # sync to disk; afterwards .h5 and .sqlite can be copied
+persist!(store, path) -&gt; Nothing  # write both halves to `path` + `$path.sqlite`, replacing them
+persist_catalog!(store) -&gt; Nothing  # write an in-memory catalog to this store's own $path.sqlite,
+                                    # stamped to match the .h5 already beside it. Copies no arrays:
+                                    # they are already in place. A checkpoint, not a mode switch;
+                                    # for catalog=:attached this is flush!.
+
+transaction(f, store)             # do-block: commit if `f` returns, roll back if it throws.
+                                  # Spans any number of operations; removals are reversible only
+                                  # inside one. Nests. Holds the SQLite write lock until it ends.
+begin_transaction!(store) -&gt; Nothing
+commit_transaction!(store) -&gt; Nothing    # errors if no transaction is open
+rollback_transaction!(store) -&gt; Nothing  # errors if no transaction is open
+in_transaction(store) -&gt; Bool
+clear!(store; owner_id=nothing, owner_category=nothing) -&gt; Nothing
+                                  # both `nothing`: remove every series in the store.
+                                  # Scope to one owner by passing BOTH keywords — they identify the
+                                  # (owner_id, owner_category) pair. `owner_id` without
+                                  # `owner_category` throws ArgumentError.
+replace_owner!(store, old_owner_id, new_owner_id, owner_category::OwnerCategory) -&gt; Int
+                                  # reassign one owner's series to a new id (same category); count moved
+close!(store) -&gt; Nothing
+</code></pre>
+<pre><code class="language-julia">list_keys(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
+          name=nothing, name_glob=nothing, resolution=nothing, interval=nothing,
+          features=Dict(), component_field=nothing) -&gt; Vector{KeyRow}
+</code></pre>
+<p><code>list_keys</code> lists the key of every stored series as <code>KeyRow</code> structs (identity plus the per-type
+descriptive snapshot: <code>initial_timestamp</code>, <code>resolution</code>, <code>length</code>, <code>horizon</code>, <code>interval</code>, <code>count</code>,
+<code>features</code>; fields that do not apply to a key's type are <code>nothing</code>). All nine filters are optional
+and independent, and combine as a conjunction; with none set the whole store is listed:</p>
+<ul>
+<li><code>owner_id</code>, <code>owner_category</code> — scope to one owner.</li>
+<li><code>time_series_type</code> — the Julia type (<code>SingleTimeSeries</code>, <code>Deterministic</code>, …), the same value the
+<code>time_series_type</code> field of a returned row carries. <code>Deterministic</code> additionally matches
+<code>DeterministicSingleTimeSeries</code> rows; each row still reports its own stored type, and passing
+<code>DeterministicSingleTimeSeries</code> selects only those.</li>
+<li><code>name</code> — exact association name.</li>
+<li><code>name_glob</code> — a SQLite <code>GLOB</code> pattern over the name (<code>*</code> and <code>?</code>, case-sensitive), e.g.
+<code>"wind_*"</code>. ANDed with <code>name</code> rather than replacing it: set both and a row must satisfy both.</li>
+<li><code>resolution</code> — a <code>Period</code>.</li>
+<li><code>interval</code> — a <code>Period</code>; forecasts only (static rows carry no interval and never match an interval
+filter).</li>
+<li><code>features</code> — match keys whose features include all the given entries (subset match).</li>
+<li><code>component_field</code> — exact, case-sensitive match on the owning component's field (e.g.
+<code>"max_active_power"</code>): every series that varies that field, alone or scoped to one owner. A row
+that declares no <code>component_field</code> matches no value, so this cannot select the rows that left it
+unset.</li>
+</ul>
+<p>Physical storage detail (<code>data_hash</code>, <code>element_type</code>, <code>application_data</code>, <code>percentiles</code>) is not on a
+key — read it via <code>get_metadata</code> / <code>list_time_series</code>.</p>
+<pre><code class="language-julia">has_any_time_series(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
+                    name=nothing, name_glob=nothing, resolution=nothing, interval=nothing,
+                    features=Dict(), component_field=nothing) -&gt; Bool
+</code></pre>
+<p><code>has_any_time_series</code> is the existence probe over the same nine filters: true iff <code>list_keys</code> with
+that filter would return at least one row, answered off the catalog indexes without hydrating or
+marshaling any rows, so it is safe for hot per-component loops. <code>features</code> is a <strong>subset</strong> match
+here, unlike the exact-key <code>has_time_series</code> forms, which compare the whole feature set by content
+hash. A <code>features</code> filter still stays on indexes: the requested set is probed as an exact set by
+hash first (one covering seek when the caller passes the complete feature set), with an indexed
+per-feature fallback for genuinely partial lists.</p>
+<p>The two matching rules are the thing to keep straight when a parent package resolves user queries:
+an attribute-addressed <code>get_time_series</code> / <code>has_time_series</code> / <code>remove_time_series!</code> must be given
+the <strong>complete</strong> feature map or it misses, while the list/filter forms accept a partial one and may
+return several rows — deciding what more than one match means is the caller's job.</p>
+<pre><code class="language-julia">is_empty(store) -&gt; Bool
+</code></pre>
+<p><code>is_empty</code> is the store-wide predicate: true iff the store holds nothing at all — no time series,
+and no associations in either catalog. It is one short-circuited existence probe per catalog table,
+so its cost does not grow with the store, and it is the store's own answer: as the catalog gains
+tables it stays correct, where a caller-side conjunction over <code>get_counts</code> and the
+<code>count_*_associations</code> functions both costs a full aggregation and silently goes stale.</p>
+<p><code>list_array_groups</code> takes the same nine filters and returns the same row fields as <code>list_keys</code>, but
+each row additionally carries <code>data_hash</code> — the 32-byte content hash of the array the row resolves
+to (a <code>Vector{UInt8}</code> hashes and compares by content, so it groups directly as a <code>Dict</code> key). Rows
+that share a stored array share their <code>data_hash</code>: both deduplicated identical arrays and a
+<code>SingleTimeSeries</code> together with any <code>DeterministicSingleTimeSeries</code> derived from it. <strong>Group rows
+by <code>data_hash</code> to discover which time series share their underlying data</strong> — the foundation for
+reading a shared series once (see <a href="#window-read-deduplication">Window-read deduplication</a>). It is
+one catalog query (the hash is read off each metadata row); there are no per-row <code>get_metadata</code>
+round-trips.</p>
+<p><code>count_array_references(store, data_hash)</code> returns an <code>ArrayReferenceCounts</code> (<code>sts</code>, <code>dst</code>) — how
+many <code>SingleTimeSeries</code> and <code>DeterministicSingleTimeSeries</code> associations reference the given 32-byte
+hash, across all owners. Because a DST shares its backing <code>SingleTimeSeries</code> array, a caller uses
+these counts to decide whether removing a <code>SingleTimeSeries</code> would orphan a derived DST.</p>
+<h2 id="associations"><a class="header" href="#associations">Associations</a></h2>
+<p>Two catalogs of relationships between entities the store does not otherwise model, replacing the
+association tables IS3.jl used to keep itself. Both are <strong>independent of time series</strong>: there are no
+foreign keys and no cascade (both endpoints live in the caller's object graph, so a cascade could
+never fire), so removing a time series never removes an association and vice versa; a caller that
+wants both makes both calls.</p>
+<p>Every query in a family takes that family's four optional keyword filters, ANDed; with none set they
+match every row, which is what makes a bare <code>list_*</code> call a whole-catalog export that the matching
+<code>add_*!</code> re-imports unchanged. The <code>*_types</code> keywords take a vector of <strong>concrete</strong> type names,
+matched as SQL <code>IN (…)</code>: expanding an abstract type into its subtypes stays on the Julia side, where
+the type hierarchy lives, and an empty vector matches nothing, unlike omitting the keyword, which
+matches everything. Every <code>remove_*!</code> returns the number of rows removed; removing nothing is <code>0</code>,
+not an error.</p>
+<h3 id="supplemental-attribute-associations"><a class="header" href="#supplemental-attribute-associations">Supplemental-attribute associations</a></h3>
+<p>Which supplemental attributes are attached to which components. One attribute may be attached to
+many components.</p>
+<pre><code class="language-julia">struct SupplementalAttributeAssociation
+    component_id::Int64
+    component_type::String
+    attribute_id::Int64
+    attribute_type::String
+end
+</code></pre>
+<p><code>SupplementalAttributeAssociation</code> overloads <code>==</code>, <code>hash</code>, and <code>show</code> (a compact
+<code>SupplementalAttributeAssociation(Generator 1 &lt;- GeographicInfo 100)</code>), so attachments work as
+<code>Dict</code>/<code>Set</code> members. In the <strong>catalog</strong>, identity is only the <code>(component_id, attribute_id)</code> pair —
+the type names are denormalized labels carried for filtering — so re-attaching the same pair under
+different type names throws <code>DuplicateAssociationError</code>.</p>
+<pre><code class="language-julia">add_supplemental_attribute_association!(store, association::SupplementalAttributeAssociation) -&gt; Int64
+                                  # the catalog id it was filed under
+add_supplemental_attribute_associations!(store, associations::AbstractVector{SupplementalAttributeAssociation}) -&gt; Vector{Int64}
+                                  # one all-or-nothing transaction; one id per
+                                  # input row, in order (count is `length`)
+has_supplemental_attribute_association(store; filters...) -&gt; Bool
+list_supplemental_attribute_associations(store; filters...) -&gt; Vector{SupplementalAttributeAssociation}
+                                  # insertion order
+list_supplemental_attribute_ids(store; filters...) -&gt; Vector{Int}
+                                  # distinct attribute ids, ascending
+list_components_with_attributes(store; filters...) -&gt; Vector{Int}
+                                  # distinct component ids, ascending
+remove_supplemental_attribute_associations!(store; filters...) -&gt; Int   # count removed
+replace_supplemental_attribute_component_id!(store, old_id, new_id) -&gt; Int   # rows updated
+count_supplemental_attribute_associations(store; filters...) -&gt; Int
+count_supplemental_attributes(store; filters...) -&gt; Int
+count_components_with_attributes(store; filters...) -&gt; Int
+supplemental_attribute_counts_by_type(store) -&gt; Vector{SupplementalAttributeTypeCount}   # (attribute_type, count)
+supplemental_attribute_summary(store) -&gt; Vector{SupplementalAttributeSummaryRow}
+                                  # (component_type, attribute_type, count), by attribute then component type
+</code></pre>
+<p>The four keyword filters are <code>component_id</code>, <code>component_types</code>, <code>attribute_id</code>, and
+<code>attribute_types</code>.</p>
+<p><code>list_supplemental_attribute_ids</code> is "the attributes attached to this component" when <code>component_id</code>
+is set; <code>list_components_with_attributes</code> is the other end, "the components carrying this attribute"
+when <code>attribute_id</code> is set. <code>count_supplemental_attributes</code> and <code>count_components_with_attributes</code>
+are those two queries counted, and <code>count_supplemental_attribute_associations</code> counts the matching
+rows themselves.</p>
+<p><code>replace_supplemental_attribute_component_id!</code> moves every attachment from component <code>old_id</code> to
+<code>new_id</code>, and throws <code>DuplicateAssociationError</code> if <code>new_id</code> already carries one of the attributes
+being moved.</p>
+<pre><code class="language-julia">store = Store(in_memory=true)
+add_supplemental_attribute_association!(
+    store, SupplementalAttributeAssociation(1, "Generator", 100, "GeographicInfo"))
+add_supplemental_attribute_association!(
+    store, SupplementalAttributeAssociation(2, "Load", 100, "GeographicInfo"))
+
+list_supplemental_attribute_ids(store; component_id=1)     # [100]
+list_components_with_attributes(store; attribute_id=100)   # [1, 2]
+
+remove_supplemental_attribute_associations!(store; component_id=1)
+# 1; component 1's time series are untouched
+</code></pre>
+<h3 id="parentchild-associations"><a class="header" href="#parentchild-associations">Parent/child associations</a></h3>
+<p>Directed edges between components — a generator (parent) wired to a bus (child), say. Both endpoints
+are always components; an attribute cannot appear here.</p>
+<pre><code class="language-julia">struct ParentChildAssociation
+    parent_id::Int64
+    parent_type::String
+    child_id::Int64
+    child_type::String
+end
+</code></pre>
+<p><code>ParentChildAssociation</code> overloads <code>==</code>, <code>hash</code>, and <code>show</code> (a compact
+<code>ParentChildAssociation(Generator 1 -&gt; Bus 7)</code>) the same way. In the <strong>catalog</strong>, identity is the
+<em>ordered</em> <code>(parent_id, child_id)</code> pair, so the reversed pair is a different edge, while repeating
+the same ordered pair under different type names throws <code>DuplicateAssociationError</code>. There is no
+relationship-kind column, so one ordered pair may be related at most once.</p>
+<p>This family is deliberately narrower than the supplemental one — no counts-by-type and no grouped
+summary — because there is no consumer for them yet; both are additive if one appears.</p>
+<pre><code class="language-julia">add_parent_child_association!(store, association::ParentChildAssociation) -&gt; Int64
+                                  # the catalog id it was filed under
+add_parent_child_associations!(store, associations::AbstractVector{ParentChildAssociation}) -&gt; Vector{Int64}
+                                  # one all-or-nothing transaction; one id per
+                                  # input row, in order (count is `length`)
+has_parent_child_association(store; filters...) -&gt; Bool
+list_parent_child_associations(store; filters...) -&gt; Vector{ParentChildAssociation}
+                                  # insertion order
+list_children(store; filters...) -&gt; Vector{Int}   # distinct child ids, ascending
+list_parents(store; filters...) -&gt; Vector{Int}    # distinct parent ids, ascending
+remove_parent_child_associations!(store; filters...) -&gt; Int   # count removed
+replace_parent_child_component_id!(store, old_id, new_id) -&gt; Int   # rows updated
+count_parent_child_associations(store; filters...) -&gt; Int
+</code></pre>
+<p>The four keyword filters are <code>parent_id</code>, <code>parent_types</code>, <code>child_id</code>, and <code>child_types</code>.</p>
+<p><code>replace_parent_child_component_id!</code> rewrites <code>old_id</code> to <code>new_id</code> on <strong>both</strong> ends of every edge,
+and throws <code>DuplicateAssociationError</code> if the rewrite would duplicate an edge <code>new_id</code> already has.</p>
+<pre><code class="language-julia">store = Store(in_memory=true)
+add_parent_child_association!(store, ParentChildAssociation(1, "Generator", 7, "Bus"))
+# The reversed pair is a different edge, not a duplicate.
+add_parent_child_association!(store, ParentChildAssociation(7, "Bus", 1, "Generator"))
+
+list_children(store; parent_id=1)   # [7]
+list_parents(store; child_id=7)     # [1]
+
+remove_parent_child_associations!(store; parent_types=["Bus"])   # 1
+</code></pre>
+<p>Neither association catalog is exposed over the <a href="./grpc-api.html">gRPC server</a> or the
+<a href="./cli.html"><code>infrastore</code> CLI</a>.</p>
+<h3 id="openapi-row-association-serde"><a class="header" href="#openapi-row-association-serde">OpenAPI-row association serde</a></h3>
+<p>Direct JSON serde of the two association catalogs, in the wire spelling
+<a href="https://github.com/Sienna-Platform/SiennaSchemas">SiennaSchemas</a> defines (<code>TimeSeries/*.json</code>,
+<code>Core/Associations/SupplementalAttributeAssociation.json</code>). Unlike <code>list_time_series</code> /
+<code>list_supplemental_attribute_associations</code>, which return Julia structs, these four functions
+exchange the wire JSON verbatim — the format a document author (e.g. PowerTableDataParser) reads and
+writes directly.</p>
+<pre><code class="language-julia">export_time_series_associations_openapi(store; filters...) -&gt; String
+import_time_series_associations_openapi!(store, json::AbstractString) -&gt; Int
+export_supplemental_attribute_associations_openapi(store) -&gt; String
+import_supplemental_attribute_associations_openapi!(store, json::AbstractString) -&gt; Int
+</code></pre>
+<p><code>export_time_series_associations_openapi</code> takes the same filter keywords as <code>list_time_series</code>.
+Every row's <code>uri</code> and <code>data_hash</code> are the hex-encoded content hash the store already has for that
+row — never a caller-supplied locator. With no filter this exports the whole catalog, sorted by
+identity.</p>
+<p><code>export_supplemental_attribute_associations_openapi</code> exports the whole
+<code>supplemental_attribute_associations</code> table, sorted by <code>(component_id, attribute_id)</code>;
+<code>import_supplemental_attribute_associations_openapi!</code> is its import half — a bulk, all-or-nothing
+insert (a duplicate anywhere in the batch throws <code>DuplicateAssociationError</code> and rolls the batch
+back), returning the number of rows inserted.</p>
+<p><code>import_time_series_associations_openapi!</code> is the time-series import half, and it writes <strong>rows
+only</strong>: the document carries locators, never values, so every row must name an array this store
+already holds — the arrays arrive with the artifact. Each row keeps the <code>association_id</code> it carries,
+which is the point: an import that assigned fresh ids would leave every reference the document
+records pointing at the wrong series. A row whose array is absent, or a <code>NonSequentialTimeSeries</code>
+row (whose <code>timestamps_hash</code> is store-internal and so not on the wire, leaving the document with no
+way to say which stored time axis the row sits on), throws <code>InvalidParameterError</code> and rolls the
+whole batch back.</p>
+<p>Infrastore never modifies the data to make an incoming document agree with what it already holds. A
+geometry disagreement between an added series and its own association row is likewise rejected at
+the add boundary (<code>InvalidParameterError</code>), loudly and without writing anything.</p>
+<h2 id="errors"><a class="header" href="#errors">Errors</a></h2>
+<p>All subtype <code>TimeSeriesException</code>:</p>
+<div class="table-wrapper"><table><thead><tr><th>Type</th><th>Mapped from FFI code</th></tr></thead><tbody>
+<tr><td><code>NotFoundError</code></td><td><code>INFRASTORE_ERR_NOT_FOUND</code></td></tr>
+<tr><td><code>DuplicateTimeSeriesError</code></td><td><code>INFRASTORE_ERR_DUPLICATE</code></td></tr>
+<tr><td><code>DuplicateAssociationError</code></td><td><code>INFRASTORE_ERR_DUPLICATE_ASSOCIATION</code></td></tr>
+<tr><td><code>InvalidParameterError</code></td><td><code>INFRASTORE_ERR_INVALID_PARAMETER</code> / <code>INFRASTORE_ERR_INVALID_UTF8</code> / <code>INFRASTORE_ERR_NULL_POINTER</code></td></tr>
+<tr><td><code>IntegrityError</code></td><td><code>INFRASTORE_ERR_INTEGRITY</code></td></tr>
+<tr><td><code>ReadOnlyStoreError</code></td><td><code>INFRASTORE_ERR_READ_ONLY</code></td></tr>
+<tr><td><code>IncompatibleFormatError</code></td><td><code>INFRASTORE_ERR_INCOMPATIBLE_FORMAT</code></td></tr>
+<tr><td><code>IOError</code></td><td><code>INFRASTORE_ERR_IO</code></td></tr>
+<tr><td><code>StoreExistsError</code></td><td><code>INFRASTORE_ERR_STORE_EXISTS</code></td></tr>
+<tr><td><code>MismatchedArtifactError</code></td><td><code>INFRASTORE_ERR_MISMATCHED_ARTIFACT</code></td></tr>
+<tr><td><code>GenericError</code></td><td>Any other non-zero code (carries the numeric <code>code</code>)</td></tr>
+</tbody></table>
+</div>
+<p>The message text comes from the FFI layer's thread-local error buffer.</p>
+<h2 id="base-interface"><a class="header" href="#base-interface">Base Interface</a></h2>
+<p>The package overloads <code>Base</code> so the wrapped types behave like native Julia values:</p>
+<ul>
+<li><code>==</code> and <code>hash</code> on <code>TimeSeriesKey</code> delegate to the Rust core's identity semantics (owner,
+category, type, name, resolution, interval, features), so keys work as <code>Dict</code>/<code>Set</code> members.</li>
+<li><code>show</code> renders compact one-liners for <code>Store</code>, <code>TimeSeriesKey</code>, and the five value types; every
+result struct (<code>TimeSeriesMetadata</code>, <code>KeyRow</code>, …) gets generated <code>==</code>/<code>hash</code>/<code>show</code>, and
+<code>AddBatch</code> defines <code>length</code>.</li>
+<li><code>length</code>, <code>eltype</code>, <code>getindex</code>, and <code>iterate</code> on <code>SingleTimeSeries</code> / <code>NonSequentialTimeSeries</code>
+delegate to the wrapped <code>data</code> array (element count, not time steps, for multi-dimensional
+values). Forecast types define <code>length</code> = window count.</li>
+<li>Do-block forms guarantee <code>close!</code> even on throw:</li>
+</ul>
+<pre><code class="language-julia">Store(in_memory=true) do store
+    add_time_series!(store, 1, "Generator", Component, ts)
+end
+
+open_store(path; read_only=true) do store
+    get_metadata(store, 1, Component, "load")
+end
+</code></pre>
+<h2 id="time-and-resolution-conversions"><a class="header" href="#time-and-resolution-conversions">Time and Resolution Conversions</a></h2>
+<ul>
+<li><code>DateTime</code> is converted to/from Unix milliseconds at the boundary. A bare <code>DateTime</code> carries no
+zone, so it names a <strong>wall clock</strong>, not an instant: it is stored as its own fields and recorded as
+<code>ZonelessReference()</code>. The stored instant is unchanged from the old UTC-by-convention reading —
+what is new is that the store now records that it <em>was</em> a convention.</li>
+<li>A <strong><code>TimeZones.ZonedDateTime</code> is accepted wherever a <code>DateTime</code> is</strong> — an initial timestamp, a
+timestamp vector, a <code>time_range</code> bound, a reader's <code>t</code> — and is converted to the instant it names,
+recording the spelling its zone names. TimeZones is a <strong>weak dependency</strong>: the conversion lives in
+the <code>InfraStoreTimeZonesExt</code> extension, which loads when you <code>using TimeZones</code>, so nobody else
+pays for the tz database. Passing one without loading TimeZones raises an <code>InvalidParameterError</code>
+saying so.</li>
+<li><strong>Reads always return a <code>DateTime</code></strong> holding the instant, whichever kind went in, with the
+spelling beside it as a <code>time_reference</code>. Widening the return type was rejected: it would make the
+type depend on package load order, and <code>zdt == dt</code> raises in Julia, so it would turn working
+comparisons against a <code>DateTime</code> literal into runtime errors.</li>
+<li>A vector of <code>ZonedDateTime</code>s is ordered by the <strong>instants</strong> it names, not by its local wall
+clocks, so the strictly-increasing rule is checked after conversion. It must also agree on one
+spelling — one series records one reference.</li>
+<li>Milliseconds are lossless in both directions: the store records every instant to the millisecond
+and refuses a finer one on write, so this boundary cannot truncate a series written under that
+rule. See <a href="../explanation/data-model.html#timestamp-precision">timestamp precision</a>. (An artifact
+written before the rule may hold finer instants; those still truncate here.)</li>
+<li><code>resolution</code> is passed as a <code>Period</code> and converted to an ISO-8601 duration string; reads return
+resolution as a <code>Period</code> (<code>Millisecond</code> for fixed durations).</li>
+</ul>
+<h3 id="time-references"><a class="header" href="#time-references">Time references</a></h3>
+<pre><code class="language-julia">abstract type TimeReference end
+struct UTCReference         &lt;: TimeReference end          # an instant, written as UTC
+struct FixedOffsetReference &lt;: TimeReference; minutes::Int end   # minutes east
+struct ZoneReference        &lt;: TimeReference; name::String end   # an IANA zone name
+struct ZonelessReference    &lt;: TimeReference end          # a wall clock, naming no instant
+
+is_zoneless(reference) -&gt; Bool     # false for `nothing`: unset groups with the zoned ones
+</code></pre>
+<p>An abstract type with subtypes rather than an <code>@enum</code> like <code>UnitSystem</code>, because two of the four
+carry a payload. The constructors infer one for you:</p>
+<div class="table-wrapper"><table><thead><tr><th>Input</th><th><code>time_reference</code></th></tr></thead><tbody>
+<tr><td><code>ZonedDateTime(..., tz"UTC")</code></td><td><code>UTCReference()</code></td></tr>
+<tr><td><code>ZonedDateTime(..., tz"-07:00")</code></td><td><code>FixedOffsetReference(-420)</code></td></tr>
+<tr><td><code>ZonedDateTime(..., tz"America/Denver")</code></td><td><code>ZoneReference("America/Denver")</code></td></tr>
+<tr><td>a bare <code>DateTime</code> or <code>Date</code></td><td><code>ZonelessReference()</code></td></tr>
+</tbody></table>
+</div>
+<p>The constructor signatures above write this default as <code>time_reference=&lt;inferred&gt;</code> rather than
+naming a value, because there is no Julia literal for it: omitting the keyword infers the spelling
+from the timestamp handed in, per the table above. Copying a literal <code>nothing</code> out of a signature
+would <em>suppress</em> that inference.</p>
+<p>Passing <code>time_reference=nothing</code> explicitly is a different claim from omitting the keyword: it
+records <em>unspecified</em>, which is also what a read hands back for a series that declared no spelling
+(one written by a native Rust caller, say). The two are never collapsed — a read that invented
+<code>ZonelessReference()</code> for an unspecified series would have <code>add_time_series!</code> write that invention
+back, since its default is the series' own reference.</p>
+<p>The two <code>FixedTimeZone</code> cases split on the zone's <em>name</em>, not its offset: <code>tz"UTC"</code> and <code>tz"+00:00"</code>
+place every instant identically forever, and telling them apart is the point of recording a spelling
+at all.</p>
+<pre><code class="language-julia">zoned_timestamp(instant::DateTime, reference::TimeReference) -&gt; ZonedDateTime
+zoned_timestamp(series) -&gt; ZonedDateTime          # SingleTimeSeries / the three forecasts
+zoned_timestamp(metadata::TimeSeriesMetadata) -&gt; ZonedDateTime
+zoned_timestamps(series::NonSequentialTimeSeries) -&gt; Vector{ZonedDateTime}
+</code></pre>
+<p>Fuses a read instant back together with the spelling it was written in. Requires <code>using TimeZones</code>
+(the methods live in the extension), and it is <strong>lossless</strong> — the instant plus the zone name
+reconstructs the exact value written, including which side of a fall-back hour it was on:</p>
+<pre><code class="language-julia">using TimeZones
+series = get_time_series(SingleTimeSeries, store, key)
+zoned_timestamp(series)   # 2024-01-01T00:00:00-07:00
+</code></pre>
+<p>Throws for a <code>ZonelessReference()</code> series, whose timestamps name no instant, and for one that
+recorded no reference at all.</p>
+<p>A <strong>query bound must be spelled the way the series is</strong>: a bare <code>DateTime</code> bound against a series
+that records instants, or a <code>ZonedDateTime</code> bound against a zoneless one, raises
+<code>InvalidParameterError</code> rather than being coerced, and so does a <code>time_range</code> whose two ends
+disagree. <code>list_keys</code>, <code>list_time_series</code>, <code>build_static_reader</code>, and the other filter-taking
+functions accept <code>zoneless=true|false</code> for building a coherent selection. See
+<a href="../explanation/data-model.html#time-references">Time references</a> for the full rules, including why a
+calendar <code>Month</code>/<code>Year</code> resolution still steps on the UTC calendar.</p>
+<p>Because a read always hands back a bare <code>DateTime</code>, the obvious round trip does <strong>not</strong> close on a
+series that records instants — the returned timestamp holds the instant, but its Julia type says
+wall clock:</p>
+<pre><code class="language-julia">t = series.initial_timestamp                                # a DateTime: a wall clock
+get_time_series(store, key; time_range=(t, t + Hour(3)))    # InvalidParameterError
+</code></pre>
+<p>Fuse the instant back together with the spelling that came with it, and the bound matches the
+series:</p>
+<pre><code class="language-julia">using TimeZones
+t = zoned_timestamp(series)                                 # or zoned_timestamp(metadata)
+get_time_series(store, key; time_range=(t, t + Hour(3)))    # reads
+</code></pre>
+<p>A Julia-only workflow never meets this, because a bare <code>DateTime</code> writes a zoneless series and a
+<code>DateTime</code> bound then matches it. It is a store written by Python, the CLI, or a native Rust caller
+— which record instants — that needs the zoned bound, and therefore <code>using TimeZones</code>.</p>
+<p><code>KeyInfo</code> deliberately carries <strong>no</strong> <code>time_reference</code>: a key handle is an identity handle and
+carries no descriptive snapshot fields at all (no <code>length</code>, no <code>initial_timestamp</code>). Read the
+spelling from <code>KeyRow</code> (<code>list_keys</code>), <code>TimeSeriesMetadata</code>, or the series itself.</p>
+<h2 id="tracing"><a class="header" href="#tracing">Tracing</a></h2>
+<pre><code class="language-julia">init_logging(level::AbstractString = "") -&gt; Int32  # the FFI status code
+</code></pre>
+<p>Initialize the Rust tracing subscriber. <code>level</code> is an
+<a href="https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html"><code>EnvFilter</code></a>
+directive string such as <code>"debug"</code> or <code>"infrastore_core=debug"</code>. Pass an empty string (the default)
+to read <code>RUST_LOG</code>; if that variable is also unset, no output is produced.</p>
+<p>The subscriber is initialized at most once per process — subsequent calls are no-ops. The module's
+<code>__init__</code> hook calls <code>init_logging("")</code> automatically when <code>RUST_LOG</code> is set, so the common case
+requires no code change:</p>
+<pre><code class="language-sh">export RUST_LOG=infrastore_core=debug
+julia --project=. myscript.jl
+</code></pre>
+<p>For programmatic control without environment variables:</p>
+<pre><code class="language-julia">using InfraStore
+init_logging("infrastore_core=debug")
+</code></pre>
+<p>See <a href="../guides/julia.html#diagnostics-and-tracing">Julia developer guide</a> for usage examples and a
+table of available span targets.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../reference/python-api.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../reference/c-abi.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../reference/python-api.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../reference/c-abi.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="../mermaid.min.js"></script>
+        <script src="../mermaid-init.js"></script>
+        <script src="../pagetoc.js"></script>
+        <script src="../version-selector.js"></script>
+
+
+
+    </div>
+    </body>
+</html>

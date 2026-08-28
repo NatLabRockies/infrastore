@@ -1,0 +1,711 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Julia - infrastore Documentation</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Time-series storage for power-systems and energy simulations, with Rust, Python, and Julia bindings">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../custom.css">
+        <link rel="stylesheet" href="../pagetoc.css">
+        <link rel="stylesheet" href="../version-selector.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">infrastore Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/NatLabRockies/infrastore" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/NatLabRockies/infrastore/tree/v0.10.0/docs/src/guides/julia.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="julia-developer-guide"><a class="header" href="#julia-developer-guide">Julia Developer Guide</a></h1>
+<p>This guide covers building on <code>InfraStore.jl</code>, the Julia package that wraps the
+<a href="../reference/c-abi.html">C ABI</a>. For exact signatures see the
+<a href="../reference/julia-api.html">Julia API reference</a>; to set up the package and the native library, see
+<a href="../how-to/integrate-julia.html">Integrate with Julia</a>.</p>
+<h2 id="load-the-package"><a class="header" href="#load-the-package">Load the Package</a></h2>
+<p><code>Pkg.add("InfraStore")</code> installs the package and downloads the prebuilt native library as an
+artifact, so in a consumer package nothing else is needed:</p>
+<pre><code class="language-julia">using Dates, InfraStore
+</code></pre>
+<p>Developing against a checkout, <code>INFRASTORE_LIB</code> points the package at a local build instead and
+takes precedence over the artifact; set it before the first store call:</p>
+<pre><code class="language-sh">cargo build -p infrastore-ffi --release
+export INFRASTORE_LIB=$PWD/target/release/libinfrastore_ffi.dylib  # .so on Linux
+</code></pre>
+<p>Exported names include <code>Store</code>, <code>SingleTimeSeries</code>, <code>NonSequentialTimeSeries</code>, the forecast structs
+(<code>Deterministic</code>, <code>Probabilistic</code>, <code>Scenarios</code>), <code>OwnerCategory</code> (<code>Component</code>,
+<code>SupplementalAttribute</code>), the <code>add_time_series!</code> / <code>get_time_series</code> / <code>get_metadata</code> family, and
+<code>transform_single_time_series!</code>. The store type is named <strong><code>Store</code></strong>.</p>
+<h2 id="open-or-create-a-store"><a class="header" href="#open-or-create-a-store">Open or Create a Store</a></h2>
+<pre><code class="language-julia"># In-memory.
+store = Store(in_memory=true)
+
+# On disk: writes system.h5 and system.h5.sqlite.
+store = Store(in_memory=false, path="system.h5")
+
+# Reopen read-only.
+store = open_store("system.h5"; read_only=true)
+</code></pre>
+<p>The store is finalized automatically, but you can release it eagerly with <code>close!(store)</code>.</p>
+<h2 id="add-a-series"><a class="header" href="#add-a-series">Add a Series</a></h2>
+<pre><code class="language-julia"># `name` ("load") is a required field on the struct.
+ts = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(100.0:123.0), "load")
+</code></pre>
+<p>A bare <code>DateTime</code> carries no zone, and this package reads one as <strong>UTC</strong>. If your timestamps are
+genuinely zoned, <code>using TimeZones</code> and pass a <code>ZonedDateTime</code> instead — it names an instant on its
+own, and is accepted anywhere a <code>DateTime</code> is:</p>
+<pre><code class="language-julia">using TimeZones
+ts = SingleTimeSeries(
+    ZonedDateTime(DateTime(2024, 1, 1), tz"America/Denver"),   # = 2024-01-01T07:00Z
+    Hour(1), collect(100.0:123.0), "load",
+)
+</code></pre>
+<p>Reads return a <code>DateTime</code> in UTC either way; see
+<a href="../reference/julia-api.html#time-and-resolution-conversions">Time and resolution conversions</a>.</p>
+<pre><code class="language-julia">added = add_time_series!(
+    store,
+    42,
+    "Generator",
+    Component,
+    ts;                                   # name comes from ts
+    features = Dict("model_year" =&gt; 2030),
+    units = "MW",
+)
+key = added.key   # TimeSeriesKey
+added.id          # the catalog row's id: one integer to keep in your own model
+</code></pre>
+<p>Notes:</p>
+<ul>
+<li><strong><code>owner_id</code> is an integer</strong> (<code>Int64</code>) — the component identifier, e.g. <code>42</code>.</li>
+<li><strong><code>resolution</code> is a <code>Period</code></strong> such as <code>Hour(1)</code> or <code>Minute(5)</code>.</li>
+<li><strong><code>features</code></strong> is a <code>Dict</code> serialized to JSON, so values must be JSON scalars (<code>Int</code>, <code>Float64</code>,
+<code>Bool</code>, <code>String</code>). String features are supported and round-trip unchanged.</li>
+<li>Adding a duplicate <a href="../explanation/data-model.html#keys">key</a> throws <code>DuplicateTimeSeriesError</code>.</li>
+</ul>
+<p><code>add_time_series!</code> returns an <code>AddedTimeSeries</code>: its <code>key</code> is a <code>TimeSeriesKey</code> holding an opaque
+handle into the store, and its <code>id</code> is the catalog row's id (see
+<a href="../explanation/data-model.html#association-ids">Association ids</a>). Every function taking a
+<code>TimeSeriesKey</code> also accepts the <code>AddedTimeSeries</code> directly, so <code>get_time_series(store, added)</code>
+works without unwrapping.</p>
+<p>Two more rules worth knowing up front. <strong>Stored instants and periods are millisecond-precision</strong>: a
+<code>Microsecond(1)</code> resolution, a <code>Millisecond(0)</code> one, or a negative period is refused with
+<code>InvalidParameterError</code> (query bounds are unconstrained). And a <code>Store</code> is <strong>not thread-safe</strong>:
+confine it, and any reader built from it, to one task, or guard every call with your own lock —
+concurrent calls are undefined behavior, not just a race on results.</p>
+<h3 id="descriptors"><a class="header" href="#descriptors">Descriptors</a></h3>
+<p>Beyond <code>units</code>, an association can carry <code>quantity_kind</code> (what the values measure — <code>"ActivePower"</code>;
+the one record of what per-unit values mean), <code>unit_system</code> (<code>NaturalUnits</code> or <code>ComponentBase</code>;
+<code>nothing</code> means <em>unspecified</em>, not natural units — the store rescales nothing), <code>component_field</code>
+(the field on the owning component these values vary — <code>"max_active_power"</code>; also a filter), and
+<code>application_data</code> (an opaque string returned verbatim — the package-owned slot). They can be set on
+the struct, where they become the <code>add_time_series!</code> defaults, or passed as keywords:</p>
+<pre><code class="language-julia">ts = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(100.0:123.0), "load";
+                      units = "MW", quantity_kind = "ActivePower",
+                      unit_system = NaturalUnits, component_field = "max_active_power",
+                      application_data = "{\"source\": \"weather_year_2012\"}")
+key = add_time_series!(store, 42, "Generator", Component, ts)   # keeps all five
+</code></pre>
+<p>A series also records a <code>time_reference</code> — how its timestamps were spelled — inferred from the
+timestamp it was built with. A bare <code>DateTime</code> is a wall clock (<code>ZonelessReference()</code>); a
+<code>ZonedDateTime</code> keeps its zone, so a Denver series renders correctly on both sides of every DST
+transition. Reads still return a <code>DateTime</code> holding the instant, with the reference beside it;
+<code>using TimeZones</code> adds <code>zoned_timestamp</code> to fuse them back together losslessly.</p>
+<p>None of them is part of the key or of either content hash, so two adds that differ only in a
+descriptor are a duplicate. See
+<a href="../explanation/data-model.html#optional-descriptors">Optional Descriptors</a> and
+<a href="../explanation/data-model.html#time-references">Time references</a>.</p>
+<h3 id="add-many-series-at-once"><a class="header" href="#add-many-series-at-once">Add many series at once</a></h3>
+<p><code>AddBatch</code> accepts the same <code>add_time_series!</code> calls as a <code>Store</code> but only accumulates them;
+<code>add_time_series_bulk!</code> commits the whole batch in one catalog transaction and takes the block-sized
+HDF5 write path. It is the way to load a system: an order of magnitude faster than a loop of single
+adds, and same-shaped series land in the same packed dataset.</p>
+<pre><code class="language-julia">batch = AddBatch()
+for (id, ts) in series
+    add_time_series!(batch, id, "Generator", Component, ts; units = "MW")
+end
+added = add_time_series_bulk!(store, batch)   # Vector{AddedTimeSeries}, in input order; all-or-nothing
+keys = [a.key for a in added]
+</code></pre>
+<h3 id="transactions"><a class="header" href="#transactions">Transactions</a></h3>
+<p>Several operations that must take effect together — replacing a series is an add plus a remove — go
+inside a transaction. Removals are reversible only there; outside one the array bytes are reclaimed
+immediately.</p>
+<pre><code class="language-julia">transaction(store) do
+    new_key = add_time_series!(store, 42, "Generator", Component, updated)
+    remove_time_series!(store, old_key)
+end   # committed if the block returns, rolled back if it throws
+</code></pre>
+<p>Blocks nest (each level is a savepoint), and the store holds the SQLite write lock until the
+outermost one ends. A transaction does not batch: use <code>add_time_series_bulk!</code> inside it for the
+writes themselves. <code>begin_transaction!</code> / <code>commit_transaction!</code> / <code>rollback_transaction!</code> are the
+explicit form.</p>
+<h2 id="read-a-series"><a class="header" href="#read-a-series">Read a Series</a></h2>
+<pre><code class="language-julia">got = get_time_series(store, key)
+@assert got.data == ts.data
+println(got.initial_timestamp, " ", got.resolution)   # resolution comes back as Millisecond
+</code></pre>
+<p>To read <strong>many whole series at once</strong> — e.g. loading everything for a plot — <code>bulk_read</code> takes a
+vector of keys and returns one struct per key in the same order (each of its stored type, so the
+result is a <code>Vector{Any}</code>), reading each packed dataset's column span once instead of re-reading
+every chunk per series:</p>
+<pre><code class="language-julia">series = bulk_read(store, keys)   # keys :: Vector{TimeSeriesKey}
+window = bulk_read(store, keys; time_range = (t0, t1))   # the same slice of every key
+</code></pre>
+<h2 id="attribute-based-lookups"><a class="header" href="#attribute-based-lookups">Attribute-Based Lookups</a></h2>
+<p>Beyond key handles, <code>InfraStore.jl</code> can resolve a series directly from its attributes — convenient
+when a caller keeps its own identifiers (as an InfrastructureSystems.jl-side store does):</p>
+<pre><code class="language-julia">meta = get_metadata(
+    store,
+    42,
+    Component,        # owner_category; the owner is the (owner_id, owner_category) pair
+    "load";
+    resolution = Hour(1),
+    features = Dict("model_year" =&gt; 2030),
+)
+# meta :: TimeSeriesMetadata — the whole record: owner_id/owner_type/owner_category,
+#          name, time_series_type, data_hash, initial_timestamp, resolution, length,
+#          horizon/interval/count, percentiles, element_type, element_shape, features,
+#          units, quantity_kind, unit_system, component_field, application_data
+
+# Any other stored type: pass it first, exactly as get_time_series does. Omitting
+# the type reads a SingleTimeSeries.
+scen = get_metadata(Scenarios, store, 42, Component, "wind"; resolution = Hour(1))
+
+values = get_array_by_hash(store, meta.data_hash)     # Vector{Float64}; pass ::Type{T} for other dtypes
+
+# get_time_series itself resolves by attributes too (pass the type as the first argument):
+got = get_time_series(SingleTimeSeries, store, 42, Component, "load";
+                      resolution = Hour(1), features = Dict("model_year" =&gt; 2030))
+
+present = has_time_series(store, 42, Component, "load";
+                          resolution = Hour(1), features = Dict("model_year" =&gt; 2030))
+remove_time_series!(store, 42, Component, "load";
+                    resolution = Hour(1), features = Dict("model_year" =&gt; 2030))
+</code></pre>
+<p>These attribute forms match the feature map <strong>exactly</strong> — the series above was added with
+<code>model_year = 2030</code>, so omitting <code>features</code> here is a <code>NotFoundError</code>, not a wildcard. The
+list/filter forms (<code>list_keys</code>, <code>has_any_time_series</code>, <code>remove_by_filter!</code>) match features as a
+subset instead and may return several rows; a package that resolves partial user queries lists, then
+decides what more than one match means.</p>
+<p><code>get_time_series</code>, <code>has_time_series</code>, and <code>remove_time_series!</code> all accept either a <code>TimeSeriesKey</code>
+or <code>(owner_id, owner_category, name; resolution, features)</code> attributes — the conventions are
+interchangeable for every time series type, static or forecast.</p>
+<h2 id="forecasts"><a class="header" href="#forecasts">Forecasts</a></h2>
+<p><code>InfraStore.jl</code> exposes <code>Deterministic</code>, <code>Probabilistic</code>, and <code>Scenarios</code> structs that wrap a native
+<code>AbstractArray</code> in the type's logical shape (the wrapper derives the dtype and dims and serializes
+the buffer row-major). Construct one and add it through the generic <code>add_time_series!</code>:</p>
+<pre><code class="language-julia">data = zeros(Float64, 24, 7)   # (horizon_count, count)
+fc = Deterministic(DateTime(2024, 1, 1), Hour(1), Hour(24), Hour(24), 7, data, "load_fc")
+key = add_time_series!(
+    store,
+    42,
+    "Generator",
+    Component,
+    fc;                         # name comes from fc
+    units = "MW",
+)
+
+got = get_time_series(Deterministic, store, 42, Component, "load_fc"; resolution = Hour(1))
+values = got.data   # Float64 matrix, shape (24, 7)
+
+# Same forecast, read by the key returned from add_time_series! — forecasts and
+# static series both support the key-based and attribute-based conventions.
+got_by_key = get_time_series(Deterministic, store, key)
+</code></pre>
+<p><code>Probabilistic(initial_timestamp, resolution, horizon, interval, count, percentiles, data, name)</code>
+carries the percentile vector, and
+<code>Scenarios(initial_timestamp, resolution, horizon, interval, count, data, name)</code> takes
+<code>scenario_count</code> from <code>data</code>'s leading axis. Every forecast constructor also accepts a
+<code>application_data=</code> keyword. Read the corresponding type back with
+<code>get_time_series(Probabilistic, …)</code> / <code>get_time_series(Scenarios, …)</code>.</p>
+<p>If two forecasts of one owner/name/type differ only by <code>interval</code> (say day-ahead and intra-day),
+pass <code>interval=</code> to pin the one you want; without it the read is ambiguous and throws
+<code>InvalidParameterError</code>:</p>
+<pre><code class="language-julia">got = get_time_series(Deterministic, store, 42, Component, "load_fc";
+                      resolution = Hour(1), interval = Hour(6))
+</code></pre>
+<p>A <code>DeterministicSingleTimeSeries</code> is not added directly — derive one from the stored
+<code>SingleTimeSeries</code> with <code>transform_single_time_series!</code>, which returns a <code>TransformOutcome</code> whose
+<code>transformed</code> field is the count. It optionally restricts the transform to one <code>owner_category</code>
+and/or one <code>resolution</code>, and <code>dry_run = true</code> runs every check without writing:</p>
+<pre><code class="language-julia">n = transform_single_time_series!(store, Hour(24), Hour(24)).transformed
+outcome = transform_single_time_series!(store, Hour(24), Hour(24);
+                                        owner_category = Component, resolution = Hour(1),
+                                        normalize_single_window = true,
+                                        require_uniform_forecast_grid = true)
+</code></pre>
+<p>The two policy flags reproduce InfrastructureSystems.jl's rules (it passes both as <code>true</code>); see the
+<a href="../reference/julia-api.html#forecasts">reference</a> for what each enforces.</p>
+<p>Requesting <code>Deterministic</code> also matches a transformed <code>DeterministicSingleTimeSeries</code>, so you read a
+forecast the same way whether it was added densely or derived (either returns a <code>Deterministic</code>,
+since a DST has no materialized struct):</p>
+<pre><code class="language-julia">fc = get_time_series(Deterministic, store, 42, Component, "load")
+</code></pre>
+<p>A genuine miss throws <code>NotFoundError</code>. To check which form you actually have, inspect the
+<code>time_series_type</code> on the key or metadata — or pass <code>DeterministicSingleTimeSeries</code> to select only
+the derived ones.</p>
+<p><code>transform_single_time_series!</code> returns no keys, so to read a derived forecast by key, enumerate the
+owner's keys with <code>get_time_series_keys(store, owner_id, owner_category)</code> (the owner is the
+<code>(owner_id, owner_category)</code> pair) and use <code>key_info</code>, whose <code>time_series_type</code> is the actual Julia
+type — pass it straight to <code>get_time_series</code> (a <code>DeterministicSingleTimeSeries</code> reads back as a
+<code>Deterministic</code>):</p>
+<pre><code class="language-julia">for k in get_time_series_keys(store, 42, Component)
+    info = key_info(k)
+    series = get_time_series(info.time_series_type, store, k)
+end
+</code></pre>
+<p>To address one series rather than enumerate an owner, <code>get_time_series_key</code> resolves attributes to a
+key — for any stored type, and validated against the catalog (a miss or an ambiguous match throws):</p>
+<pre><code class="language-julia">k = get_time_series_key(Scenarios, store, 42, Component, "wind"; resolution = Hour(1))
+window = get_time_series(Scenarios, store, k)
+</code></pre>
+<p>(<code>list_keys</code> returns <code>KeyRow</code> description structs, not handles; use these two when you need a key to
+pass to a reader or <code>bulk_read</code>.)</p>
+<p><code>has_time_series</code>, <code>remove_time_series!</code>, and <code>copy_time_series!</code> take the time series type as their
+first argument to address anything other than a <code>SingleTimeSeries</code> (and take the same <code>resolution</code> /
+<code>interval</code> / <code>features</code> keywords). <code>copy_time_series!</code> re-points a stored series at another owner
+without duplicating data — it writes one association row against the same content-addressed array,
+preserving the stored type (a DST stays a DST):</p>
+<pre><code class="language-julia">has_time_series(Scenarios, store, 42, Component, "wind"; resolution = Hour(1))
+copy_time_series!(SingleTimeSeries, store, 42, Component, "load", 43, "Generator")
+</code></pre>
+<p>Every <code>time_series_type</code> filter keyword takes the Julia type as well:</p>
+<pre><code class="language-julia">list_keys(store; time_series_type = Deterministic)
+get_resolutions(store; time_series_type = SingleTimeSeries)
+</code></pre>
+<p>The low-level <code>get_metadata</code> + <code>get_array_by_hash</code> path is still available for raw access. See the
+<a href="../reference/julia-api.html#forecasts">Julia API reference</a>.</p>
+<h2 id="per-timestamp-reads-simulation-loop"><a class="header" href="#per-timestamp-reads-simulation-loop">Per-Timestamp Reads (Simulation Loop)</a></h2>
+<p><code>get_time_series</code> hands back a whole series or forecast. Simulations instead walk the timeline and,
+at each timestamp, want the value of <em>every</em> series at that instant. For that, build a <strong>reader</strong>
+once and drive it in a loop — it pins one resolution and reuses its output buffers, so the loop
+allocates almost nothing. <code>StaticReader</code> serves <code>SingleTimeSeries</code>; <code>ForecastReader</code> serves
+forecasts. (Full signatures:
+<a href="../reference/julia-api.html#readers-per-timestamp-iteration">Julia API reference</a>.)</p>
+<h3 id="static-series"><a class="header" href="#static-series">Static series</a></h3>
+<pre><code class="language-julia">reader = build_static_reader(store; resolution = Hour(1))
+grid = static_grid(reader)                 # StaticGrid: initial_timestamp, resolution, length
+for k in 0:(grid.length - 1)
+    static_read!(reader, grid.initial_timestamp + grid.resolution * k)
+    for (gi, g) in enumerate(static_groups(reader))
+        vals = static_values(reader, gi)   # (num_columns, element_dims...); column j ↔ g.keys[j]
+    end
+end
+</code></pre>
+<p>Series are grouped by <code>(dtype, element_shape)</code>; each group's <code>static_values</code> is one dense array
+whose columns line up with the group's <code>keys</code>. All matched series must share one grid
+(<code>initial_timestamp</code> + <code>length</code>), validated at build.</p>
+<h3 id="forecasts-1"><a class="header" href="#forecasts-1">Forecasts</a></h3>
+<pre><code class="language-julia">reader = build_forecast_reader(store, Deterministic; resolution = Hour(1))
+tl = forecast_timeline(reader)             # ForecastTimeline: initial_timestamp, resolution, interval, count
+for k in 0:(tl.count - 1)
+    forecast_read!(reader, tl.initial_timestamp + tl.interval * k)
+    for (i, e) in enumerate(forecast_entries(reader))
+        window = forecast_values(reader, i)   # shape e.window_shape, for e.key
+    end
+end
+</code></pre>
+<p>A <code>Deterministic</code> reader is abstract — it also includes any <code>DeterministicSingleTimeSeries</code> (read
+into identical windows).</p>
+<h3 id="shared-forecasts-are-read-once"><a class="header" href="#shared-forecasts-are-read-once">Shared forecasts are read once</a></h3>
+<p>Forecasts that share a backing array (deduplicated identical data, or several
+<code>DeterministicSingleTimeSeries</code> over one <code>SingleTimeSeries</code>) collapse to a single <strong>window slot</strong>.
+<code>forecast_read!</code> reads each slot from the <code>.h5</code> file once per timestamp, so a forecast shared by 10
+components costs one read, not ten. <code>forecast_num_slots(reader)</code> is the physical read count, and
+each <code>ForecastEntry.slot</code> says which slot an entry uses — group by <code>slot</code> to materialize each unique
+window only once:</p>
+<pre><code class="language-julia">forecast_read!(reader, t)
+windows = Dict{Int, Any}()
+for (i, e) in enumerate(forecast_entries(reader))
+    w = get!(() -&gt; forecast_values(reader, i), windows, e.slot)
+    # apply w to e.key's owner
+end
+</code></pre>
+<h2 id="store-wide-operations"><a class="header" href="#store-wide-operations">Store-Wide Operations</a></h2>
+<pre><code class="language-julia">counts = get_counts(store)        # TimeSeriesCounts: components_with_time_series, static_time_series, forecasts
+nerr   = verify_integrity(store)  # 0 == every referenced array and time axis matches its hash
+report = compact!(store)          # CompactionReport; rewrites the .h5 from the live set, so a
+                                  # delete actually shrinks the file. Nothing else may have the
+                                  # store open while it runs.
+</code></pre>
+<h2 id="associations"><a class="header" href="#associations">Associations</a></h2>
+<p>Two catalog tables record relationships between entities the store does not otherwise model, wholly
+independently of time series: which supplemental attributes are attached to which components, and
+directed parent/child edges between components. Removing a time series never touches either, and
+vice versa — see
+<a href="../explanation/data-model.html#associations-between-entities">Associations Between Entities</a>.</p>
+<p>Filter keywords are all optional and ANDed; passing none matches everything.</p>
+<pre><code class="language-julia">add_supplemental_attribute_association!(
+    store, SupplementalAttributeAssociation(42, "Generator", 100, "GeographicInfo"))
+
+# Bulk add is one all-or-nothing transaction.
+add_supplemental_attribute_associations!(store, [
+    SupplementalAttributeAssociation(43, "Generator", 100, "GeographicInfo"),
+    SupplementalAttributeAssociation(43, "Generator", 101, "Outage"),
+])
+
+# Queries run in both directions, returning distinct ids in ascending order.
+list_supplemental_attribute_ids(store; component_id=43)      # [100, 101]
+list_components_with_attributes(store; attribute_id=100)     # [42, 43]
+has_supplemental_attribute_association(store; component_id=42, attribute_id=100)  # true
+
+# `*_types` filters take CONCRETE type names, so expand an abstract type yourself —
+# `get_all_subtype_names` in InfrastructureSystems.jl is the usual source. An empty
+# vector is a deliberate "none of these" and matches nothing.
+list_supplemental_attribute_ids(store; component_id=43, attribute_types=["Outage"])  # [101]
+
+count_supplemental_attributes(store)         # 2, distinct attributes
+count_components_with_attributes(store)      # 2, distinct components
+supplemental_attribute_counts_by_type(store)
+# [SupplementalAttributeTypeCount("GeographicInfo", 2), SupplementalAttributeTypeCount("Outage", 1)]
+supplemental_attribute_summary(store)
+# [SupplementalAttributeSummaryRow("Generator", "GeographicInfo", 2), ...]
+</code></pre>
+<p>Identity is the <code>(component_id, attribute_id)</code> pair. The type names ride along for filtering and are
+not part of it, so re-attaching the same pair under different type names is still a duplicate:</p>
+<pre><code class="language-julia">try
+    add_supplemental_attribute_association!(
+        store, SupplementalAttributeAssociation(42, "Load", 100, "Outage"))
+catch e
+    e isa InfraStore.DuplicateAssociationError || rethrow()
+    @info e.msg   # attribute 100 is already attached to component 42
+end
+
+# Removal returns a count. Matching nothing returns 0 rather than throwing, so assert on
+# the count yourself if you expected a hit.
+remove_supplemental_attribute_associations!(store; component_id=43)   # 2
+</code></pre>
+<p>Parent/child edges work the same way, except that identity is the <strong>ordered</strong> pair — the reverse of
+an edge is a different edge — and both endpoints are always components:</p>
+<pre><code class="language-julia">add_parent_child_association!(store, ParentChildAssociation(42, "Generator", 7, "Bus"))
+add_parent_child_associations!(store, [ParentChildAssociation(43, "Generator", 7, "Bus")])
+
+list_children(store; parent_id=42)      # [7]
+list_parents(store; child_id=7)         # [42, 43]
+count_parent_child_associations(store)  # 2
+
+# Renumbering a component rewrites both ends of every edge.
+replace_parent_child_component_id!(store, 42, 99)   # 1
+list_parents(store; child_id=7)                     # [43, 99]
+</code></pre>
+<p>Neither table is reachable over gRPC or the <code>infrastore</code> CLI.</p>
+<h2 id="persist-to-disk"><a class="header" href="#persist-to-disk">Persist to Disk</a></h2>
+<pre><code class="language-julia">flush!(store)   # sync HDF5 + SQLite; afterwards system.h5 + system.h5.sqlite can be copied
+</code></pre>
+<p>Keep the <code>.h5</code> and <code>.h5.sqlite</code> files together.</p>
+<p>To change a store you did not build in this process, <strong>open a copy</strong>: <code>open_store</code> defaults to
+read-write, and HDF5 has no journal, so an interrupted in-place write is unrecoverable.</p>
+<pre><code class="language-julia">store = open_copy(src, joinpath(scratch, "time_series.h5"))   # src is never opened for writing
+...
+persist!(store, src)                                          # one atomic rename replaces it
+</code></pre>
+<p><code>open_store(path; read_only=true)</code> is the right call when nothing will be written.</p>
+<h3 id="where-the-catalog-lives"><a class="header" href="#where-the-catalog-lives">Where the Catalog Lives</a></h3>
+<p>By default the catalog <em>is</em> <code>system.h5.sqlite</code>, and every commit is durable. Passing
+<code>catalog=:memory</code> keeps it in RAM instead, so it reaches disk only via <code>persist!</code>:</p>
+<pre><code class="language-julia"># Build in a scratch directory; nothing is durable until the explicit save.
+store = Store(; in_memory=false, path=joinpath(scratch, "time_series.h5"), catalog=:memory)
+add_time_series!(store, 42, "Generator", Component, ts)
+persist!(store, destination)     # writes both halves as a matched pair
+persist_catalog!(store)          # or: land only the .sqlite half beside the arrays already at path
+</code></pre>
+<p>Arrays still stream to the HDF5 file, so this does not require the data to fit in memory. It suits
+building a store beside volatile in-process state — a crash loses that state anyway, so journaling
+the scratch catalog buys nothing. <code>catalog_mode(store)</code> reports which mode a store is in.</p>
+<p><code>open_store(path; catalog=:memory)</code> loads an existing catalog into RAM the same way. Note that the
+HDF5 half is still opened <strong>in place</strong>, so mutations land in the original file; open a copy if you
+mean to leave the source untouched until an explicit save.</p>
+<p><code>persist!</code> stages both halves and renames them into place, and stamps the pair so that a save
+interrupted between the two renames is caught on the next open rather than read as a valid store. It
+does replace the destination, though, so a failed save may have destroyed what was there — recover
+by calling <code>persist!</code> again on the still-live store rather than assuming the target survived.</p>
+<h2 id="error-handling"><a class="header" href="#error-handling">Error Handling</a></h2>
+<p>Errors subtype <code>InfraStore.TimeSeriesException</code>. The exception types are not exported, so reference
+them module-qualified. Catch broadly or narrowly:</p>
+<pre><code class="language-julia">try
+    add_time_series!(store, 42, "Generator", Component, ts)
+catch e
+    if e isa InfraStore.DuplicateTimeSeriesError
+        @warn "already present"
+    else
+        rethrow()
+    end
+end
+</code></pre>
+<p>The available types are <code>InfraStore.NotFoundError</code>, <code>InfraStore.DuplicateTimeSeriesError</code>,
+<code>InfraStore.DuplicateAssociationError</code>, <code>InfraStore.InvalidParameterError</code>,
+<code>InfraStore.IntegrityError</code>, <code>InfraStore.ReadOnlyStoreError</code>, <code>InfraStore.IOError</code>,
+<code>InfraStore.StoreExistsError</code> (creating over an existing artifact),
+<code>InfraStore.MismatchedArtifactError</code> (the <code>.h5</code> and <code>.sqlite</code> halves came from two saves),
+<code>InfraStore.IncompatibleFormatError</code> (the on-disk store was written by an incompatible data format
+version), and <code>InfraStore.GenericError</code> (which carries the raw FFI status <code>code</code>). See the
+<a href="../reference/julia-api.html#errors">reference</a> for the full table.</p>
+<h2 id="infrastructuresystemsjl-integration-notes"><a class="header" href="#infrastructuresystemsjl-integration-notes">InfrastructureSystems.jl Integration Notes</a></h2>
+<p><a href="./embedding.html">Embedding in a Parent Package</a> is the language-neutral version of this section —
+the store lifecycle, id mapping, and lookup semantics a package like InfrastructureSystems.jl has to
+honor. The Julia-specific points:</p>
+<ul>
+<li>Owners are integer component identifiers (<code>Int64</code>), matching InfrastructureSystems.jl
+component/attribute IDs.</li>
+<li><code>OwnerCategory</code> distinguishes <code>Component</code> from <code>SupplementalAttribute</code> and is part of the owner
+identity: the owner is the <code>(owner_id, owner_category)</code> pair, so a component and a supplemental
+attribute may share a numeric id and stay distinct. Owner-scoped calls take the category alongside
+the id.</li>
+<li>The attribute-based accessors (<code>get_metadata</code>, <code>has_time_series</code>, <code>remove_time_series!</code>) plus
+<code>get_array_by_hash</code> let an InfrastructureSystems.jl-side store keep its own key objects and reach
+the array layer without holding a <code>TimeSeriesKey</code>.</li>
+<li>For the simulation read pattern — iterate every component's value at each timestamp, reading a
+forecast shared across components only once — use the readers
+(<a href="#per-timestamp-reads-simulation-loop">Per-Timestamp Reads</a>). The <code>ForecastEntry.slot</code> /
+<code>forecast_num_slots</code> surface lets the wrapping store dedup its own per-component work, mirroring
+the store's one-read-per-shared-array behavior.</li>
+</ul>
+<p>See <a href="../explanation/bindings.html#infrastructuresystemsjl-integration">Language Bindings</a> for how this
+maps onto the FFI.</p>
+<h2 id="diagnostics-and-tracing"><a class="header" href="#diagnostics-and-tracing">Diagnostics and tracing</a></h2>
+<p>The store emits structured tracing spans for every significant operation. To see them, initialize a
+subscriber before your first store call.</p>
+<p><strong>Via environment variable</strong> — set <code>RUST_LOG</code> before loading the package. The module's <code>__init__</code>
+hook calls <code>init_logging("")</code> automatically, which reads <code>RUST_LOG</code> if set:</p>
+<pre><code class="language-sh"># shell
+export RUST_LOG=infrastore_core=debug
+julia --project=. myscript.jl
+</code></pre>
+<p><strong>Programmatically</strong> — call <code>init_logging</code> with a filter directive string:</p>
+<pre><code class="language-julia">using InfraStore
+
+init_logging("infrastore_core=debug")
+
+store = Store(in_memory=true)
+add_time_series!(store, ...)   # spans appear on stderr
+</code></pre>
+<p><code>init_logging</code> is a no-op if a subscriber is already registered (including the automatic one from
+<code>RUST_LOG</code>). The filter syntax is the same as <code>RUST_LOG</code>: comma-separated <code>target=level</code> pairs, or a
+bare level such as <code>"debug"</code> to match everything. Useful targets:</p>
+<div class="table-wrapper"><table><thead><tr><th>Target</th><th>What it covers</th></tr></thead><tbody>
+<tr><td><code>infrastore_core</code></td><td>All store operations — <code>add</code>, <code>get</code>, <code>remove</code> and HDF5 I/O</td></tr>
+</tbody></table>
+</div>
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../guides/python.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../guides/server.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../guides/python.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../guides/server.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="../mermaid.min.js"></script>
+        <script src="../mermaid-init.js"></script>
+        <script src="../pagetoc.js"></script>
+        <script src="../version-selector.js"></script>
+
+
+
+    </div>
+    </body>
+</html>

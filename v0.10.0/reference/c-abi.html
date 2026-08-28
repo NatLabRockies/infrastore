@@ -1,0 +1,1313 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>C ABI - infrastore Documentation</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Time-series storage for power-systems and energy simulations, with Rust, Python, and Julia bindings">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../custom.css">
+        <link rel="stylesheet" href="../pagetoc.css">
+        <link rel="stylesheet" href="../version-selector.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">infrastore Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/NatLabRockies/infrastore" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/NatLabRockies/infrastore/tree/v0.10.0/docs/src/reference/c-abi.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="c-abi"><a class="header" href="#c-abi">C ABI</a></h1>
+<p><code>infrastore-ffi</code> compiles a <code>cdylib</code> (<code>libinfrastore_ffi.{dylib,so,dll}</code>) exposing a C-compatible
+API over <code>Store</code>. The header <code>crates/infrastore-ffi/include/infrastore.h</code> is generated by cbindgen —
+do not hand-edit it. The <a href="./julia-api.html">Julia binding</a> is the primary consumer.</p>
+<h2 id="conventions"><a class="header" href="#conventions">Conventions</a></h2>
+<ul>
+<li><strong>Return codes.</strong> Every function returns <code>int32_t</code>. <code>INFRASTORE_OK</code> (0) is success; any other
+value is an error. Retrieve the human-readable detail with <code>infrastore_last_error_message</code>.</li>
+<li><strong>Opaque handles.</strong> <code>InfraStore</code> and <code>InfraStoreKey</code> are incomplete struct types; you only ever
+hold pointers. Free them with <code>infrastore_store_free</code> and <code>infrastore_key_free</code>.</li>
+<li><strong>Out-parameters.</strong> Results are written through caller-provided pointers (<code>**out</code>, <code>*out_len</code>, …).</li>
+<li><strong>Caller-owned buffers.</strong> Returned arrays come back through an out-pointer + length and must be
+freed: <code>f64</code> percentile buffers (<code>double **</code>) with <code>infrastore_buffer_free_f64</code>, raw element-byte
+buffers (<code>uint8_t **</code>) with <code>infrastore_buffer_free_u8</code>, timestamp and shape buffers
+(<code>int64_t **</code>) with <code>infrastore_buffer_free_i64</code>, and the <code>u64</code> dims buffer from
+<code>infrastore_store_get_forecast</code> (<code>uint64_t **</code>) with <code>infrastore_buffer_free_u64</code>.</li>
+<li><strong>Typed arrays.</strong> Add functions take an <code>element_type</code> string (a dtype spelling such as <code>"f64"</code>,
+or a composite kind such as <code>"tuple(3,f64)"</code> / <code>"piecewise_linear"</code> — see
+<a href="./element-types.html">Element types</a>), <code>ndims</code> plus a <code>dims_ptr</code> shape array (<code>[length, k1, …]</code>),
+and the raw little-endian <code>data_ptr</code> of <code>data_byte_len</code> bytes. The physical dtype the bytes are
+encoded in is derived from the element type. Reads return the dtype code
+(<code>0=f64, 1=f32, 2=i64, 3=i32, 4=u64, 5=bool, 6=i16, 7=i8, 8=u32, 9=u16, 10=u8</code>) and a raw byte
+buffer for the caller to decode, plus an optional <code>out_element_type</code> string saying what those
+bytes mean; <code>infrastore_store_get_single</code> follows the same dtype-generic convention.</li>
+<li><strong><code>owner_category</code></strong> is an <code>int32_t</code> (<code>0 = Component</code>, <code>1 = SupplementalAttribute</code>) passed to the
+add functions. The owner identity is the pair <code>(owner_id, owner_category)</code> — a component and a
+supplemental attribute may share a numeric <code>owner_id</code> and stay distinct — and the category is
+recorded with the association at add time.</li>
+<li><strong><code>application_data</code></strong> is an optional opaque, package-owned payload (typically JSON) passed
+verbatim to the add functions and stored uninterpreted. Element typing does not go here — that is
+<code>element_type</code>.</li>
+<li><strong>Strings</strong> are null-terminated UTF-8. Optional string arguments (<code>application_data</code>,
+<code>features_json</code>, <code>units</code>, <code>quantity_kind</code>, <code>unit_system</code>, <code>time_reference</code>, <code>component_field</code>,
+<code>name_glob</code>) accept <code>NULL</code>.</li>
+<li><strong><code>time_reference</code></strong> records how a series' timestamps were <em>spelled</em>: <code>"utc"</code>, <code>"zoneless"</code>, a
+fixed offset (<code>"-07:00"</code>), or an IANA zone name (<code>"America/Denver"</code>). An unparseable value fails
+with <code>INFRASTORE_ERR_INVALID_PARAMETER</code> rather than degrading to unset. Zone <em>existence</em> is not
+checked here — the caller's own tz database is the one that should warn. Timestamps stay Unix
+milliseconds either way, so <code>time_range_zoneless</code> is what tells a wall-clock bound from an instant
+one, and the store refuses a bound whose spelling the series cannot answer rather than coercing
+it. The <code>zoneless</code> filter argument on the list/filter exports is a tri-state <code>int32_t</code>: negative
+means no filter, <code>0</code> selects the instant-bearing rows (including those with no reference), and <code>1</code>
+selects the wall-clock rows. See <a href="../explanation/data-model.html#time-references">Time references</a>.</li>
+<li><strong>Features</strong> are passed as a JSON object string whose values are int / float / bool / string. An
+add call whose feature names shadow a time-series or key field (<code>name</code>, <code>resolution</code>, <code>owner_id</code>,
+…) fails with <code>INFRASTORE_ERR_INVALID_PARAMETER</code>; see
+<a href="../explanation/data-model.html#reserved-feature-names">reserved feature names</a>.</li>
+<li><strong>Timestamps</strong> are <code>int64_t</code> Unix milliseconds. <strong>Resolutions/horizons/intervals</strong> are ISO-8601
+duration strings (e.g. <code>"PT1H"</code>, <code>"P1M"</code>, <code>"P1Y"</code>); a <code>NULL</code> (or empty) string means unset. On
+output they are owned <code>char *</code> strings — free each with <code>infrastore_string_free</code>.</li>
+</ul>
+<h2 id="status-codes"><a class="header" href="#status-codes">Status Codes</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Macro</th><th>Value</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>INFRASTORE_OK</code></td><td>0</td><td>Success</td></tr>
+<tr><td><code>INFRASTORE_ERR_NULL_POINTER</code></td><td>1</td><td>A required pointer was <code>NULL</code></td></tr>
+<tr><td><code>INFRASTORE_ERR_INVALID_UTF8</code></td><td>2</td><td>A string argument was not UTF-8</td></tr>
+<tr><td><code>INFRASTORE_ERR_INVALID_PARAMETER</code></td><td>3</td><td>A bad argument value</td></tr>
+<tr><td><code>INFRASTORE_ERR_NOT_FOUND</code></td><td>4</td><td>No matching series / array</td></tr>
+<tr><td><code>INFRASTORE_ERR_DUPLICATE</code></td><td>5</td><td>Key already exists</td></tr>
+<tr><td><code>INFRASTORE_ERR_INTEGRITY</code></td><td>6</td><td>On-disk inconsistency</td></tr>
+<tr><td><code>INFRASTORE_ERR_READ_ONLY</code></td><td>7</td><td>Write on a read-only store</td></tr>
+<tr><td><code>INFRASTORE_ERR_IO</code></td><td>8</td><td>I/O failure</td></tr>
+<tr><td><code>INFRASTORE_ERR_INCOMPATIBLE_FORMAT</code></td><td>9</td><td>The store on disk was written in a different, incompatible on-disk format than this build reads. There is no in-place upgrade.</td></tr>
+<tr><td><code>INFRASTORE_ERR_DUPLICATE_ASSOCIATION</code></td><td>10</td><td>An attachment or parent/child edge with the same identity already exists. Distinct from <code>INFRASTORE_ERR_DUPLICATE</code>, which is about time-series identity.</td></tr>
+<tr><td><code>INFRASTORE_ERR_STORE_EXISTS</code></td><td>11</td><td>A store already exists where one was about to be created. Creating there would discard its arrays while keeping its catalog. Use <code>infrastore_store_create_replacing</code> to discard it on purpose.</td></tr>
+<tr><td><code>INFRASTORE_ERR_MISMATCHED_ARTIFACT</code></td><td>12</td><td>The HDF5 file and its <code>.sqlite</code> catalog do not carry the same generation stamp: they are halves of two different saves.</td></tr>
+<tr><td><code>INFRASTORE_ERR_INTERNAL</code></td><td>99</td><td>Unexpected internal error</td></tr>
+</tbody></table>
+</div>
+<h2 id="lifecycle"><a class="header" href="#lifecycle">Lifecycle</a></h2>
+<pre><code class="language-c">int32_t infrastore_store_create(const char *path, bool in_memory, struct InfraStore **out);
+/* compression_kind: 0 = none, 1 = DEFLATE (deflate_level 0-9 + shuffle). */
+int32_t infrastore_store_create_with_compression(const char *path, bool in_memory, uint8_t compression_kind,
+                                         uint8_t deflate_level, bool shuffle, struct InfraStore **out);
+int32_t infrastore_store_open(const char *path, bool read_only, struct InfraStore **out);
+/* catalog_mode: 0 = attached (&lt;path&gt;.sqlite), 1 = in memory (written only by
+   infrastore_store_persist). in_memory=true admits only catalog_mode=1. */
+int32_t infrastore_store_create_with_catalog(const char *path, bool in_memory, uint8_t compression_kind,
+                                         uint8_t deflate_level, bool shuffle, uint8_t catalog_mode,
+                                         struct InfraStore **out);
+int32_t infrastore_store_open_with_catalog(const char *path, bool read_only, uint8_t catalog_mode,
+                                         struct InfraStore **out);
+/* The create entry points above fail with INFRASTORE_ERR_STORE_EXISTS when either half of a
+   store is already at `path`. This one discards it first — both halves plus the catalog's
+   -wal/-shm sidecars — and is destructive and not atomic. */
+int32_t infrastore_store_create_replacing(const char *path, uint8_t compression_kind,
+                                         uint8_t deflate_level, bool shuffle, uint8_t catalog_mode,
+                                         struct InfraStore **out);
+/* Copy both halves of the store at `src` to `dest` and open the copy read-write, leaving `src`
+   untouched. The safe way to load a store you intend to change: mutating an artifact in place is
+   unrecoverable if interrupted, since HDF5 has no journal. INFRASTORE_ERR_STORE_EXISTS if `dest`
+   already holds a store. */
+int32_t infrastore_store_open_copy(const char *src, const char *dest, uint8_t catalog_mode,
+                                         struct InfraStore **out);
+int32_t infrastore_store_catalog_mode(const struct InfraStore *handle, uint8_t *out);
+void    infrastore_store_free(struct InfraStore *handle);
+void    infrastore_key_free(struct InfraStoreKey *key);
+/* Frees any owned `char *` this library returns (resolutions, horizons, intervals, …). */
+void    infrastore_string_free(char *s);
+void    infrastore_buffer_free_f64(double *ptr, uint64_t len);
+void    infrastore_buffer_free_u8(uint8_t *ptr, uint64_t len);
+void    infrastore_buffer_free_i64(int64_t *ptr, uint64_t len);
+void    infrastore_buffer_free_u64(uint64_t *ptr, uint64_t len);
+</code></pre>
+<h2 id="singletimeseries"><a class="header" href="#singletimeseries">SingleTimeSeries</a></h2>
+<p>Both read functions here take an optional time slice: with <code>time_range_present</code> set to <code>true</code>, only
+the steps whose timestamp falls in <code>[time_range_start_ms, time_range_end_ms)</code> are returned, and the
+returned <code>out_initial_ts_unix_ms</code> and shape describe the slice rather than the stored series. Pass
+<code>false</code> — with any millisecond values — for the whole series. The same three arguments appear in the
+same position on <code>infrastore_store_get_non_sequential</code> and on the forecast readers below.</p>
+<pre><code class="language-c">int32_t infrastore_store_add_single(struct InfraStore *handle,
+                            int64_t owner_id, const char *owner_type,
+                            int32_t owner_category,           /* 0=Component, 1=SupplementalAttribute */
+                            const char *name,
+                            int64_t initial_ts_unix_ms, const char *resolution,  /* ISO-8601 */
+                            const char *element_type, /* e.g. "f64", "piecewise_linear" */
+                            uint64_t ndims, const uint64_t *dims_ptr,
+                            const uint8_t *data_ptr, uint64_t data_byte_len,
+                            const char *application_data,         /* optional */
+                            const char *features_json,        /* optional */
+                            const char *units,                /* optional */
+                            const char *quantity_kind,        /* optional */
+                            const char *unit_system,          /* optional: "natural_units" | "component_base" */
+                            const char *time_reference,       /* optional: "utc" | "zoneless" | "-07:00" | IANA name */
+                            const char *component_field,      /* optional: e.g. "max_active_power" */
+                            struct InfraStoreKey **out_key,           /* owned; infrastore_key_free */
+                            int64_t *out_id);                         /* optional (NULL skips): the id filed under */
+
+int32_t infrastore_store_get_single(const struct InfraStore *handle, const struct InfraStoreKey *key,
+                            bool time_range_present,          /* false = whole series */
+                            bool time_range_zoneless,         /* how the caller spelled the bounds */
+                            int64_t time_range_start_ms, int64_t time_range_end_ms,  /* start inclusive, end exclusive */
+                            int64_t *out_initial_ts_unix_ms,
+                            char **out_resolution,            /* ISO-8601; infrastore_string_free */
+                            int32_t *out_dtype,
+                            int64_t **out_shape, uint64_t *out_shape_len,  /* infrastore_buffer_free_i64 */
+                            uint8_t **out_data, uint64_t *out_data_byte_len,  /* infrastore_buffer_free_u8 */
+                            char **out_application_data,   /* optional (NULL skips); owned, infrastore_string_free */
+                            char **out_element_type,   /* optional (NULL skips); owned, same free */
+                            char **out_units,          /* optional (NULL skips); owned, same free */
+                            char **out_quantity_kind,  /* optional (NULL skips); owned, same free */
+                            char **out_unit_system,    /* optional (NULL skips); owned, same free */
+                            char **out_time_reference, /* optional (NULL skips); owned, same free */
+                            char **out_component_field); /* optional (NULL skips); owned, same free */
+
+int32_t infrastore_store_remove(struct InfraStore *handle, const struct InfraStoreKey *key);
+/* All-or-nothing batched remove: on any error (including one missing key)
+   nothing is removed. *out_removed receives the count on success. */
+int32_t infrastore_store_remove_bulk(struct InfraStore *handle,
+                             const struct InfraStoreKey *const *keys, uint64_t len,
+                             uint64_t *out_removed);
+int32_t infrastore_store_has(const struct InfraStore *handle, const struct InfraStoreKey *key, bool *out_present);
+
+/* Key identity comparison and hashing (consistent with each other; the hash is
+   stable only within one process). */
+int32_t infrastore_key_eq(const struct InfraStoreKey *a, const struct InfraStoreKey *b, bool *out_eq);
+int32_t infrastore_key_identity_hash(const struct InfraStoreKey *key, uint64_t *out_hash);
+</code></pre>
+<h2 id="nonsequentialtimeseries"><a class="header" href="#nonsequentialtimeseries">NonSequentialTimeSeries</a></h2>
+<p><code>infrastore_store_add_non_sequential</code> takes an explicit <code>int64_t</code> Unix-millisecond timestamp array
+alongside the typed data buffer. <code>infrastore_store_get_non_sequential</code> returns owned timestamp,
+shape, and raw-byte buffers (free with <code>infrastore_buffer_free_i64</code>, <code>infrastore_buffer_free_i64</code>,
+and <code>infrastore_buffer_free_u8</code>) plus the dtype code and, in <code>out_element_type</code>, the canonical
+element-type string. The shape is the full <code>[length, *element_shape]</code> array shape (the first dim is
+time, so callers can recover an N-dimensional per-step element shape). <code>out_application_data</code> is the
+optional opaque package-owned payload, returned as an owned C string of its full length (NULL when
+unset; free with <code>infrastore_string_free</code>) — the same convention as <code>infrastore_store_get_single</code>.
+Earlier revisions copied it into a caller-sized buffer, which invited silent truncation.</p>
+<pre><code class="language-c">int32_t infrastore_store_add_non_sequential(struct InfraStore *handle,
+                                    int64_t owner_id, const char *owner_type,
+                                    int32_t owner_category, const char *name,
+                                    const int64_t *timestamps_unix_ms, uint64_t timestamps_len,
+                                    const char *element_type,
+                                    uint64_t ndims, const uint64_t *dims_ptr,
+                                    const uint8_t *data_ptr, uint64_t data_byte_len,
+                                    const char *application_data, const char *features_json,
+                                    const char *units,
+                                    const char *quantity_kind, const char *unit_system,
+                                    const char *time_reference,
+                                    const char *component_field,
+                                    struct InfraStoreKey **out_key,
+                                    int64_t *out_id);                 /* optional (NULL skips) */
+
+int32_t infrastore_store_get_non_sequential(const struct InfraStore *handle, const struct InfraStoreKey *key,
+                                    bool time_range_present,          /* false = every point */
+                                    bool time_range_zoneless,         /* how the caller spelled the bounds */
+                                    int64_t time_range_start_ms, int64_t time_range_end_ms,  /* start inclusive, end exclusive */
+                                    int64_t **out_timestamps, uint64_t *out_timestamps_len,
+                                    int32_t *out_dtype,
+                                    int64_t **out_shape, uint64_t *out_shape_len,  /* infrastore_buffer_free_i64 */
+                                    uint8_t **out_data, uint64_t *out_data_byte_len,  /* infrastore_buffer_free_u8 */
+                                    char **out_application_data,           /* optional (NULL skips); owned, infrastore_string_free */
+                                    char **out_element_type,  /* optional (NULL skips); owned, same free */
+                                    char **out_units,         /* optional (NULL skips); owned, same free */
+                                    char **out_quantity_kind, /* optional (NULL skips); owned, same free */
+                                    char **out_unit_system,   /* optional (NULL skips); owned, same free */
+                                    char **out_time_reference, /* optional (NULL skips); owned, same free */
+                                    char **out_component_field); /* optional (NULL skips); owned, same free */
+</code></pre>
+<h2 id="attribute-based-access"><a class="header" href="#attribute-based-access">Attribute-Based Access</a></h2>
+<p>Resolve a series by its attributes instead of a key handle. A <code>NULL</code>/empty <code>resolution</code> means unset.</p>
+<pre><code class="language-c">int32_t infrastore_store_has_by_attrs(const struct InfraStore *handle,
+                              int64_t owner_id, int32_t owner_category, const char *name,
+                              const char *resolution, const char *features_json, bool *out_present);
+
+/* Name-less existence query: true iff owner_id has any series, optionally
+   filtered to a single ts_type (use_type selects whether ts_type applies). */
+int32_t infrastore_store_has_for_owner(const struct InfraStore *handle,
+                               int64_t owner_id, int32_t owner_category,
+                               int32_t ts_type, bool use_type, bool *out_present);
+
+/* Filter-based existence probe: true iff any association matches the filter —
+   the same all-optional, independent predicates as infrastore_store_list_keys
+   (features_json is a subset match), answered off the catalog indexes without
+   hydrating rows — except a non-empty features_json, whose subset match falls
+   back to a full listing internally. Distinct from infrastore_store_has_typed,
+   which matches one exact key identity (feature set compared by content hash)
+   and stays on the index path. */
+int32_t infrastore_store_has_any_by_filter(const struct InfraStore *handle,
+                                   bool has_owner, int64_t owner_id,
+                                   bool has_owner_category, int32_t owner_category,
+                                   bool has_time_series_type, int32_t time_series_type,
+                                   const char *name, const char *name_glob,  /* GLOB pattern; NULL = unset */
+                                   const char *resolution, const char *interval,  /* ISO-8601; NULL = unset */
+                                   const char *features_json, const char *component_field, int32_t zoneless,
+                                   bool *out_present);
+
+int32_t infrastore_store_remove_by_attrs(struct InfraStore *handle,
+                                 int64_t owner_id, int32_t owner_category, const char *name,
+                                 const char *resolution, const char *features_json);
+
+int32_t infrastore_store_get_array_by_hash(const struct InfraStore *handle, const uint8_t *data_hash,
+                                   int32_t *out_dtype,
+                                   uint8_t **out_data, uint64_t *out_byte_len); /* infrastore_buffer_free_u8 */
+
+/* Count SingleTimeSeries (*out_sts) and DeterministicSingleTimeSeries (*out_dst)
+   associations that reference the 32-byte content hash data_hash, across all
+   owners — one catalog query to decide whether removing a SingleTimeSeries would
+   orphan a DST that shares its backing array. */
+int32_t infrastore_store_count_array_references(const struct InfraStore *handle, const uint8_t *data_hash,
+                                        uint64_t *out_sts, uint64_t *out_dst);
+
+/* Build a key handle from attributes for any ts_type, so an attribute-addressed
+   caller can reuse the key-based readers (infrastore_store_get_single,
+   infrastore_store_get_non_sequential, infrastore_store_get_forecast_by_key). A NULL resolution
+   or interval means unset. The returned key is owned; free it with infrastore_key_free. */
+int32_t infrastore_make_key_from_attrs(int64_t owner_id, int32_t owner_category, const char *name,
+                               int32_t ts_type,
+                               const char *resolution, const char *interval,  /* ISO-8601; NULL = unset */
+                               const char *features_json,
+                               struct InfraStoreKey **out_key);
+
+/* List every key for owner_id (one per association, including derived
+   DeterministicSingleTimeSeries rows). Ownership is two-tiered: free each InfraStoreKey
+   with infrastore_key_free, then free the array with infrastore_keys_buffer_free. An owner with
+   no series yields *out_keys = NULL and *out_len = 0. */
+int32_t infrastore_store_get_time_series_keys(const struct InfraStore *handle,
+                                      int64_t owner_id, int32_t owner_category,
+                                      struct InfraStoreKey ***out_keys, uint64_t *out_len);
+void    infrastore_keys_buffer_free(struct InfraStoreKey **ptr, uint64_t len);
+
+/* Inspect an opaque key: type code, resolution (an owned ISO-8601 string, NULL
+   when unset — free with infrastore_string_free), owner id, owner category (0 = Component,
+   1 = SupplementalAttribute), name, and features (a JSON object string, "{}" when
+   empty — the shape the attribute-addressed entry points accept). The name and
+   features strings use probe-then-fetch — pass NULL buffers / 0 caps to read the
+   required lengths, then call again with len+1-byte buffers. `out_resolution`
+   does not: it is a fresh allocation on every call that passes it, so pass NULL
+   on the probe call rather than leaking the string it would return. */
+int32_t infrastore_key_attributes(const struct InfraStoreKey *key,
+                          int32_t *out_type, char **out_resolution,  /* optional (NULL skips); ISO-8601; infrastore_string_free */
+                          int64_t *out_owner_id, int32_t *out_owner_category,
+                          char *name_buf, uint64_t name_cap, uint64_t *out_name_len,
+                          char *features_buf, uint64_t features_cap, uint64_t *out_features_len);
+
+/* The whole metadata record for a key, as a JSON object with the shape of one
+   infrastore_store_list_time_series element: owner_id, owner_type, owner_category,
+   time_series_type, name, data_hash (64-char hex), initial_timestamp_ms, resolution,
+   horizon, interval, count, length, percentiles, element_type, element_shape, features,
+   units, quantity_kind, unit_system, time_reference, component_field, application_data — fields that do not apply
+   to the key's
+   type are null. One export
+   covers every time series type, static and forecast alike. Probe-then-fetch:
+   call with buf = NULL, cap = 0 to learn *out_len, then again with an
+   out_len+1-byte buffer. INFRASTORE_ERR_NOT_FOUND if the key names nothing stored. */
+int32_t infrastore_store_get_metadata_by_key(const struct InfraStore *handle,
+                                     const struct InfraStoreKey *key,
+                                     char *buf, uint64_t cap, uint64_t *out_len);
+
+/* Resolve attributes plus a requested type to the key of the one matching stored
+   series. requested_type is any stored type code (0..5); 2 = Deterministic also
+   matches a stored DeterministicSingleTimeSeries, and the key names the concrete
+   stored type either way. Unlike
+   infrastore_make_key_from_attrs, which builds an identity without consulting the
+   catalog, this validates: INFRASTORE_ERR_NOT_FOUND on a miss and
+   INFRASTORE_ERR_INVALID_PARAMETER when several series match (narrow with a concrete
+   type, resolution, and/or interval). The name is historical — it is not
+   forecast-specific. Free the key with infrastore_key_free. */
+int32_t infrastore_store_resolve_forecast_key(const struct InfraStore *handle,
+                                      int64_t owner_id, int32_t owner_category,
+                                      const char *name,
+                                      const char *resolution, const char *interval,
+                                      const char *features_json,
+                                      int32_t requested_type,
+                                      struct InfraStoreKey **out_key);
+</code></pre>
+<p><code>infrastore_store_get_metadata_by_key</code> + <code>infrastore_store_get_array_by_hash</code> is the read path used
+by bindings that maintain their own key objects (such as an InfrastructureSystems.jl-side store).
+<code>infrastore_make_key_from_attrs</code> bridges the two addressing styles: it materializes a
+<code>InfraStoreKey</code> from attributes that the key-based read functions accept directly, which is how a
+binding reaches the metadata of an attribute-addressed series.
+<code>infrastore_store_get_time_series_keys</code> enumerates an owner's keys (the only way to obtain a key for
+a transform-derived <code>DeterministicSingleTimeSeries</code>), and <code>infrastore_key_attributes</code> reads back an
+opaque key's type, name, features, and addressing so the caller can pick the matching key-based
+reader.</p>
+<h2 id="forecasts"><a class="header" href="#forecasts">Forecasts</a></h2>
+<p>The forecast types are created and read through the C ABI. <code>ts_type</code> is the <code>TimeSeriesType</code>
+discriminant — <code>0 = SingleTimeSeries</code>, <code>1 = NonSequentialTimeSeries</code>, <code>2 = Deterministic</code>,
+<code>3 = DeterministicSingleTimeSeries</code>, <code>4 = Probabilistic</code>, <code>5 = Scenarios</code>. As a <em>request</em> it is read
+per <a href="#requested-forecast-types">the matching rule</a> below. Forecast values are dtype-generic raw
+little-endian byte buffers with explicit dimensions — the same <code>element_type</code>, <code>ndims</code>, <code>dims_ptr</code>,
+<code>data_ptr</code>, <code>data_byte_len</code> convention as the static add functions (see the
+<a href="../explanation/data-model.html#forecasts">data model</a> for the conventional shapes); the store records
+the windowing parameters in metadata and does not interpret the layout. A
+<code>DeterministicSingleTimeSeries</code> (<code>3</code>) is read like any other forecast but cannot be written through
+<code>infrastore_store_add_forecast</code> — it is derived via <code>infrastore_store_transform_single_time_series</code>.</p>
+<p>The C ABI keeps these per-type add functions as low-level transport (the higher-level bindings layer
+the generic <code>add_time_series</code> over them). <code>infrastore_store_add_forecast</code> accepts only <code>ts_type</code>
+<code>2 = Deterministic</code> or <code>5 = Scenarios</code>; <code>infrastore_store_add_probabilistic</code> adds the percentile
+vector for <code>Probabilistic</code>. <code>DeterministicSingleTimeSeries</code> (<code>3</code>) is <strong>not</strong> addable through
+<code>infrastore_store_add_forecast</code> — it errors and directs you to
+<code>infrastore_store_transform_single_time_series</code>, which derives a <code>DeterministicSingleTimeSeries</code>
+from every stored <code>SingleTimeSeries</code> (sharing the backing array) and writes the number transformed
+to <code>*out_count</code>:</p>
+<pre><code class="language-c">int32_t infrastore_store_add_forecast(struct InfraStore *handle,
+                              int64_t owner_id, const char *owner_type, int32_t owner_category,
+                              const char *name, int32_t ts_type,
+                              int64_t initial_ts_unix_ms,
+                              const char *resolution, const char *horizon, const char *interval,  /* ISO-8601 */
+                              uint64_t count,
+                              const char *element_type,
+                              uint64_t ndims, const uint64_t *dims_ptr,
+                              const uint8_t *data_ptr, uint64_t data_byte_len,
+                              const char *application_data,          /* optional */
+                              const char *features_json, const char *units,
+                              const char *quantity_kind,        /* optional */
+                              const char *unit_system,          /* optional: "natural_units" | "component_base" */
+                            const char *time_reference,       /* optional: "utc" | "zoneless" | "-07:00" | IANA name */
+                              const char *component_field,      /* optional: e.g. "max_active_power" */
+                              struct InfraStoreKey **out_key,
+                              int64_t *out_id);                 /* optional (NULL skips) */
+
+int32_t infrastore_store_add_probabilistic(struct InfraStore *handle,
+                                   int64_t owner_id, const char *owner_type,
+                                   int32_t owner_category, const char *name,
+                                   int64_t initial_ts_unix_ms,
+                                   const char *resolution, const char *horizon, const char *interval,  /* ISO-8601 */
+                                   uint64_t count,
+                                   const double *percentiles_ptr, uint64_t percentiles_len,
+                                   const char *element_type,
+                              uint64_t ndims, const uint64_t *dims_ptr,
+                                   const uint8_t *data_ptr, uint64_t data_byte_len,
+                                   const char *application_data,     /* optional */
+                                   const char *features_json, const char *units,
+                                   const char *quantity_kind,        /* optional */
+                                   const char *unit_system,          /* optional: "natural_units" | "component_base" */
+                            const char *time_reference,       /* optional: "utc" | "zoneless" | "-07:00" | IANA name */
+                                   const char *component_field,      /* optional: e.g. "max_active_power" */
+                                   struct InfraStoreKey **out_key,
+                                   int64_t *out_id);                 /* optional (NULL skips) */
+
+int32_t infrastore_store_transform_single_time_series(struct InfraStore *handle,
+                                              const char *horizon, const char *interval,  /* ISO-8601 */
+                                              int32_t owner_category,  /* &lt;0 = all categories; else 0=Component, 1=SupplementalAttribute */
+                                              const char *resolution,  /* NULL = all resolutions */
+                                              bool normalize_single_window,      /* store the zero interval for a single window */
+                                              bool require_uniform_forecast_grid, /* every resolution must agree on count + initial_timestamp */
+                                              bool dry_run,                      /* check only; legal on a read-only store */
+                                              uint64_t *out_count,
+                                              uint64_t *out_sources,   /* optional (NULL skips): matched before idempotent skips */
+                                              char *out_interval,      /* optional (NULL skips): ISO-8601, INTERVAL_BUF_LEN bytes */
+                                              bool *out_interval_normalized,   /* optional (NULL skips) */
+                                              int64_t **out_ids);              /* optional (NULL skips): infrastore_buffer_free_i64 */
+</code></pre>
+<p>Every writer takes an optional <code>out_id</code>, which receives the catalog id the row was filed under; pass
+<code>NULL</code> to skip it. No writer takes an id as <em>input</em>: the catalog always assigns. The one entry point
+that files rows under ids a caller supplies is
+<code>infrastore_store_import_time_series_associations_openapi</code>, replaying a document that already
+recorded them — see <a href="../explanation/data-model.html#association-ids">Association ids</a>.</p>
+<p><code>infrastore_store_transform_single_time_series</code> reports the rest of its outcome through four
+optional out-parameters, each skippable with <code>NULL</code>: <code>out_sources</code> is how many <code>SingleTimeSeries</code>
+matched <em>before</em> idempotent skips, so zero distinguishes "nothing to transform" from "everything was
+already derived"; <code>out_interval</code> receives the ISO-8601 interval actually stored, NUL-terminated (an
+ISO period is bounded, so this takes a fixed <code>INTERVAL_BUF_LEN</code>-byte buffer rather than a probe
+pass); <code>out_interval_normalized</code> is non-zero when the request described a single window; and
+<code>out_ids</code> receives the id of each view written, <code>*out_count</code> of them in write order, to free with
+<code>infrastore_buffer_free_i64</code>. When nothing was written — a dry run, or a re-run that finds every
+view already derived — <code>*out_ids</code> is set to <code>NULL</code>. On a dry run <code>*out_count</code> still reports the
+count a committing run <em>would</em> produce, so a caller must check the pointer rather than the count
+before indexing it.</p>
+<p>Its two policy flags are the <code>TransformPolicy</code> of the core API. Both <code>false</code> is the permissive
+default; InfrastructureSystems.jl passes both <code>true</code>. <code>normalize_single_window</code> selects the
+single-window encoding — non-zero stores the zero interval, which is what InfrastructureSystems.jl
+looks up by, and zero stores the requested interval verbatim. <code>require_uniform_forecast_grid</code>
+requires every resolution in scope, plus any forecast already stored at the same
+<code>(resolution, interval)</code>, to agree on the derived window <code>count</code> and <code>initial_timestamp</code>. <code>dry_run</code>
+runs every check and reports what a committing run would produce without writing, and is legal
+against a read-only store.</p>
+<p><code>infrastore_store_get_forecast</code> is the forecast read function: it resolves a forecast by attributes
+and returns the decoded data buffer, its out-dimensions, the metadata, and — for <code>Probabilistic</code> —
+the percentile vector. A stored <code>DeterministicSingleTimeSeries</code> is synthesized into <code>Deterministic</code>
+<em>values</em> (its dense windows are materialized from the backing <code>SingleTimeSeries</code>), but it remains a
+distinct stored type for addressing purposes.</p>
+<h4 id="requested-forecast-types"><a class="header" href="#requested-forecast-types">Requested forecast types</a></h4>
+<p>Its <code>ts_type</code> argument is a <strong>read request</strong>, not merely a stored-type filter:</p>
+<ul>
+<li><code>2 = Deterministic</code> matches a stored <code>Deterministic</code> <strong>or</strong> a stored
+<code>DeterministicSingleTimeSeries</code>. A DST is a synthetic view that reads back as a <code>Deterministic</code>,
+so a caller addresses a deterministic forecast without knowing which form the store holds. The
+catalog resolves this authoritatively (no client-side guess-and-retry) and reports the concrete
+stored type through <code>*out_matched_type</code>. An ambiguous request returns
+<code>INFRASTORE_ERR_INVALID_PARAMETER</code>; a genuine miss returns the usual not-found error.</li>
+<li><code>3 = DeterministicSingleTimeSeries</code> narrows to the derived form alone — for callers auditing which
+forecasts are synthetic rather than reading values.</li>
+<li><code>4 = Probabilistic</code> and <code>5 = Scenarios</code> match only themselves. The non-forecast codes <code>0</code> and <code>1</code>
+are rejected with <code>INFRASTORE_ERR_INVALID_PARAMETER</code>.</li>
+</ul>
+<p><code>*out_matched_type</code> always receives the <strong>concrete</strong> <code>TimeSeriesType</code> that was matched — so a stored
+<code>DeterministicSingleTimeSeries</code> reports <code>3</code>, never <code>2</code>, and the <code>100</code> sentinel is never returned.</p>
+<p>When <code>time_range_present</code> is <code>true</code>, only the windows whose start timestamp falls in
+<code>[time_range_start_ms, time_range_end_ms)</code> are returned; pass <code>false</code> to retrieve all windows. The
+caller owns the returned buffers: free <code>*out_data</code> with <code>infrastore_buffer_free_u8</code>, <code>*out_dims</code>
+with <code>infrastore_buffer_free_u64</code>, <code>*out_percentiles</code> (non-NULL only for <code>Probabilistic</code>) with
+<code>infrastore_buffer_free_f64</code>, and each of the <code>*out_resolution</code> / <code>*out_horizon</code> / <code>*out_interval</code>
+ISO-8601 strings with <code>infrastore_string_free</code>.</p>
+<pre><code class="language-c">int32_t infrastore_store_get_forecast(const struct InfraStore *handle,
+                              int64_t owner_id, int32_t owner_category,
+                              const char *name,
+                              int32_t ts_type,  /* 2..5; 2 also matches a stored DST */
+                              const char *resolution, const char *interval,  /* ISO-8601 filters; NULL = none */
+                              const char *features_json,
+                              bool time_range_present,
+                              bool time_range_zoneless,         /* how the caller spelled the bounds */
+                              int64_t time_range_start_ms, int64_t time_range_end_ms,
+                              int64_t *out_initial_ts_unix_ms,
+                              char **out_resolution, char **out_horizon, char **out_interval,  /* ISO-8601; infrastore_string_free */
+                              uint64_t *out_count, uint64_t *out_scenario_count,
+                              uint64_t *out_ndims, uint64_t **out_dims,  /* dims: infrastore_buffer_free_u64 */
+                              int32_t *out_dtype,
+                              uint8_t **out_data, uint64_t *out_data_byte_len, /* infrastore_buffer_free_u8 */
+                              double **out_percentiles, uint64_t *out_percentiles_len, /* infrastore_buffer_free_f64 */
+                              int32_t *out_matched_type,  /* concrete matched TimeSeriesType */
+                              char **out_application_data,   /* optional (NULL skips); owned, infrastore_string_free */
+                              char **out_element_type,   /* optional (NULL skips); owned, same free */
+                              char **out_units,          /* optional (NULL skips); owned, same free */
+                              char **out_quantity_kind,  /* optional (NULL skips); owned, same free */
+                              char **out_unit_system,    /* optional (NULL skips); owned, same free */
+                            char **out_time_reference, /* optional (NULL skips); owned, same free */
+                              char **out_component_field); /* optional (NULL skips); owned, same free */
+</code></pre>
+<p><code>infrastore_store_get_forecast_by_key</code> is the key-based counterpart: it takes a <code>InfraStoreKey</code>
+handle (the type comes from the key) instead of the
+<code>owner_id, name, ts_type, resolution, interval, features_json</code> arguments, and produces identical
+outputs with the same buffer-ownership rules. Because the key already names the concrete stored type
+there is no family to resolve: <code>*out_matched_type</code> is simply the key's type (a
+<code>DeterministicSingleTimeSeries</code> key reports <code>3</code>, though its values are decoded into a dense
+<code>Deterministic</code> window array). There is no key-level equivalent of the <code>100</code> sentinel — use
+<code>infrastore_store_get_forecast</code> for a family request.</p>
+<pre><code class="language-c">int32_t infrastore_store_get_forecast_by_key(const struct InfraStore *handle, const struct InfraStoreKey *key,
+                                     bool time_range_present,
+                                     bool time_range_zoneless,         /* how the caller spelled the bounds */
+                                     int64_t time_range_start_ms, int64_t time_range_end_ms,
+                                     int64_t *out_initial_ts_unix_ms,
+                                     char **out_resolution, char **out_horizon, char **out_interval,  /* ISO-8601; infrastore_string_free */
+                                     uint64_t *out_count, uint64_t *out_scenario_count,
+                                     uint64_t *out_ndims, uint64_t **out_dims, /* infrastore_buffer_free_u64 */
+                                     int32_t *out_dtype,
+                                     uint8_t **out_data, uint64_t *out_data_byte_len, /* infrastore_buffer_free_u8 */
+                                     double **out_percentiles, uint64_t *out_percentiles_len, /* infrastore_buffer_free_f64 */
+                                     int32_t *out_matched_type,
+                                     char **out_application_data,   /* optional (NULL skips); owned, infrastore_string_free */
+                                     char **out_element_type,   /* optional (NULL skips); owned, same free */
+                                     char **out_units,          /* optional (NULL skips); owned, same free */
+                                     char **out_quantity_kind,  /* optional (NULL skips); owned, same free */
+                                     char **out_unit_system,    /* optional (NULL skips); owned, same free */
+                            char **out_time_reference, /* optional (NULL skips); owned, same free */
+                                     char **out_component_field); /* optional (NULL skips); owned, same free */
+</code></pre>
+<p>Forecast metadata is read with the same <code>infrastore_store_get_metadata_by_key</code> as everything else —
+build the key with <code>infrastore_make_key_from_attrs</code>, passing the forecast <code>ts_type</code> and, when a name
+carries several forecasts differing only by interval, the <code>interval</code>. The returned row carries the
+windowing parameters (<code>horizon</code>, <code>interval</code>, <code>count</code>), the content hash, and the <code>percentiles</code> of a
+<code>Probabilistic</code>, without decoding the array.</p>
+<pre><code class="language-c">int32_t infrastore_store_has_typed(const struct InfraStore *handle,
+                           int64_t owner_id, int32_t owner_category, const char *name,
+                           int32_t ts_type,
+                           const char *resolution, const char *interval,  /* ISO-8601; NULL = unset */
+                           const char *features_json,
+                           bool *out_present);
+int32_t infrastore_store_remove_typed(struct InfraStore *handle,
+                              int64_t owner_id, int32_t owner_category, const char *name,
+                              int32_t ts_type,
+                              const char *resolution, const char *interval,  /* ISO-8601; NULL = unset */
+                              const char *features_json);
+</code></pre>
+<p><code>infrastore_store_copy_time_series</code> copies one association onto another owner (optionally under a
+new name). Arrays are content-addressed, so only a new association row is written — no array data is
+duplicated, and the stored type is preserved (a <code>DeterministicSingleTimeSeries</code> stays one rather
+than being materialized into a dense <code>Deterministic</code>). The copy keeps the source's owner category.
+The leading <code>owner_id</code> / <code>owner_category</code> / <code>name</code> / <code>ts_type</code> / <code>resolution</code> / <code>interval</code> /
+<code>features_json</code> arguments identify the <strong>source</strong> series, exactly as for
+<code>infrastore_store_remove_typed</code>; a <code>NULL</code> <code>new_name</code> keeps the source name.</p>
+<pre><code class="language-c">int32_t infrastore_store_copy_time_series(struct InfraStore *handle,
+                                  /* source series: */
+                                  int64_t owner_id, int32_t owner_category, const char *name,
+                                  int32_t ts_type,
+                                  const char *resolution, const char *interval,  /* ISO-8601; NULL = unset */
+                                  const char *features_json,
+                                  /* destination: */
+                                  int64_t dst_owner_id, const char *dst_owner_type,
+                                  const char *new_name);  /* NULL = keep the source name */
+</code></pre>
+<h2 id="readers"><a class="header" href="#readers">Readers</a></h2>
+<p>The per-timestamp read path is exposed as two opaque reader handles — <code>InfraStoreStaticReaderHandle</code>
+for <code>SingleTimeSeries</code> and <code>InfraStoreForecastReaderHandle</code> for forecasts. A reader is built once
+over a filter (the same <code>has_owner</code> / <code>owner_id</code> / <code>has_owner_category</code> / <code>owner_category</code> / <code>name</code>
+/ <code>resolution</code> / <code>features_json</code> convention as the attribute-based access, with a forecast reader
+also taking a <code>ts_type</code>), then driven per timestamp. The lifecycle is: <strong>build → read the layout
+once → <code>*_read</code> in a loop → fetch values per group/entry → free</strong>. Each reader pins one resolution
+and owns reusable buffers that each read overwrites in place.</p>
+<p>Ownership rules: the <code>*_grid</code> / <code>*_timeline</code> resolution/interval out-strings (<code>char **</code>) are owned —
+free each with <code>infrastore_string_free</code>. Keys from <code>*_group_key</code> / <code>*_entry_key</code> are owned
+<code>InfraStoreKey *</code> — free with <code>infrastore_key_free</code>. The <code>*_values</code> buffers (<code>const uint8_t **</code>) are
+<strong>borrowed</strong>: they point into reader memory, stay valid only until the next read or <code>*_free</code>, and
+must not be freed. Group/entry shapes follow the probe-then-fetch convention — call <code>*_info</code> with
+<code>shape_buf = NULL</code> / <code>shape_cap = 0</code> to learn <code>*out_shape_len</code>, then again with a buffer of that
+length. <code>*_read</code> errors (never clamps) if <code>at_unix_ms</code> is off the reader's grid/timeline.</p>
+<h3 id="staticreader"><a class="header" href="#staticreader">StaticReader</a></h3>
+<p>Reads every matching static series at one timestamp, partitioned into <code>(dtype, element_shape)</code>
+groups; each group's values are one dense <code>[num_columns, *element_shape]</code> little-endian buffer whose
+column <code>j</code> is the key from <code>infrastore_static_reader_group_key(reader, group_idx, j, …)</code>.</p>
+<pre><code class="language-c">int32_t infrastore_store_build_static_reader(const struct InfraStore *handle,
+                                     int32_t time_series_type,
+                                     bool has_owner, int64_t owner_id,
+                                     bool has_owner_category, int32_t owner_category,
+                                     const char *name, const char *name_glob,
+                                     const char *resolution,
+                                     const char *features_json, const char *component_field, int32_t zoneless,
+                                     struct InfraStoreStaticReaderHandle **out_reader);
+
+int32_t infrastore_static_reader_grid(const struct InfraStoreStaticReaderHandle *reader,
+                              int64_t *out_initial_ms, char **out_resolution,  /* null, or free with infrastore_string_free */
+                              uint64_t *out_length);
+int32_t infrastore_static_reader_time_reference(const struct InfraStoreStaticReaderHandle *reader,
+                              char **out_time_reference);  /* null, or free with infrastore_string_free */
+int32_t infrastore_static_reader_timestamps(const struct InfraStoreStaticReaderHandle *reader,
+                              int64_t *buf, uint64_t cap, uint64_t *out_len);  /* probe with buf=NULL, cap=0 */
+int32_t infrastore_static_reader_num_groups(const struct InfraStoreStaticReaderHandle *reader, uint64_t *out_n);
+int32_t infrastore_static_reader_group_info(const struct InfraStoreStaticReaderHandle *reader, uint64_t group_idx,
+                                    int32_t *out_dtype, uint64_t *out_num_columns,
+                                    int64_t *shape_buf, uint64_t shape_cap, uint64_t *out_shape_len);
+int32_t infrastore_static_reader_group_key(const struct InfraStoreStaticReaderHandle *reader,
+                                   uint64_t group_idx, uint64_t col_idx,
+                                   struct InfraStoreKey **out_key);  /* free with infrastore_key_free */
+int32_t infrastore_static_reader_read(struct InfraStoreStaticReaderHandle *reader,
+                              const struct InfraStore *store, int64_t at_unix_ms);
+int32_t infrastore_static_reader_group_values(const struct InfraStoreStaticReaderHandle *reader, uint64_t group_idx,
+                                      const uint8_t **out_ptr,  /* borrowed; valid until next read/free */
+                                      uint64_t *out_byte_len);
+void infrastore_static_reader_free(struct InfraStoreStaticReaderHandle *reader);
+</code></pre>
+<p><code>time_series_type</code> picks the two shapes a reader can take. For <code>SingleTimeSeries</code> (<code>0</code>),
+<code>resolution</code> must be a non-empty ISO-8601 period — one resolution per reader — and all matched
+series must share one grid (<code>initial_timestamp</code> + <code>length</code>). For <code>NonSequentialTimeSeries</code> (<code>1</code>),
+<code>resolution</code> must be <strong>null</strong> (an irregular series has none) and all matched series must instead
+share one timestamp vector; <code>infrastore_static_reader_grid</code> then reports <code>*out_resolution</code> as null,
+and <code>infrastore_static_reader_timestamps</code> is how the timeline is read. Any other discriminant is
+rejected. Either way the build validates the uniformity and errors on divergence, so every column
+has a value at every valid timestamp (no presence mask).</p>
+<p><code>infrastore_static_reader_time_reference</code> reports the one spelling the axis carries — <code>"utc"</code>,
+<code>"zoneless"</code>, a fixed offset such as <code>"-07:00"</code>, or an IANA zone name — as an owned string the
+caller frees with <code>infrastore_string_free</code>. It is <strong>null</strong> when the cohort records no spelling,
+which is not the same claim as <code>"zoneless"</code>: the second says the timestamps are wall clocks. A
+cohort whose columns agree reports their reference; one whose columns merely agree on naming
+instants reports <code>"utc"</code>; one mixing zoneless with the rest never builds at all. Reading the axis
+without it leaves a C consumer unable to tell a wall-clock timeline from an unspecified or a UTC
+one. <code>infrastore_forecast_reader_time_reference</code> is the window-timeline counterpart, on the same
+terms.</p>
+<h3 id="forecastreader"><a class="header" href="#forecastreader">ForecastReader</a></h3>
+<p>Reads the forecast window at one timestamp for every matching forecast of one type. The build
+<code>ts_type</code> names the forecast type; a <code>Deterministic</code> reader (<code>2</code>) also includes
+<code>DeterministicSingleTimeSeries</code> (<code>3</code>), read into identical <code>[H, *E]</code> windows — the same rule
+<code>infrastore_store_get_forecast</code> applies. All matched forecasts must share one window timeline
+(<code>initial_timestamp</code> + <code>interval</code> + <code>count</code>). Each entry's window is a little-endian buffer of its
+<code>*_entry_info</code> shape.</p>
+<pre><code class="language-c">int32_t infrastore_store_build_forecast_reader(const struct InfraStore *handle,
+                                       bool has_owner, int64_t owner_id,
+                                       bool has_owner_category, int32_t owner_category,
+                                       int32_t time_series_type,
+                                       const char *name, const char *name_glob,
+                                       const char *resolution,
+                                       const char *features_json, const char *component_field, int32_t zoneless,
+                                       struct InfraStoreForecastReaderHandle **out_reader);
+
+int32_t infrastore_forecast_reader_timeline(const struct InfraStoreForecastReaderHandle *reader,
+                                    int64_t *out_initial_ms,
+                                    char **out_resolution, char **out_interval,  /* free each with infrastore_string_free */
+                                    uint64_t *out_count);
+int32_t infrastore_forecast_reader_time_reference(const struct InfraStoreForecastReaderHandle *reader,
+                                    char **out_time_reference);  /* null, or free with infrastore_string_free */
+int32_t infrastore_forecast_reader_num_entries(const struct InfraStoreForecastReaderHandle *reader, uint64_t *out_n);
+int32_t infrastore_forecast_reader_num_slots(const struct InfraStoreForecastReaderHandle *reader, uint64_t *out_n);
+int32_t infrastore_forecast_reader_entry_slot(const struct InfraStoreForecastReaderHandle *reader,
+                                      uint64_t entry_idx, uint64_t *out_slot);
+int32_t infrastore_forecast_reader_entry_info(const struct InfraStoreForecastReaderHandle *reader, uint64_t entry_idx,
+                                      int32_t *out_dtype,
+                                      int64_t *shape_buf, uint64_t shape_cap, uint64_t *out_shape_len);
+int32_t infrastore_forecast_reader_entry_key(const struct InfraStoreForecastReaderHandle *reader,
+                                     uint64_t entry_idx, struct InfraStoreKey **out_key);  /* free with infrastore_key_free */
+int32_t infrastore_forecast_reader_read(struct InfraStoreForecastReaderHandle *reader,
+                                const struct InfraStore *store, int64_t at_unix_ms);
+int32_t infrastore_forecast_reader_entry_values(const struct InfraStoreForecastReaderHandle *reader, uint64_t entry_idx,
+                                        const uint8_t **out_ptr,  /* borrowed; valid until next read/free */
+                                        uint64_t *out_byte_len);
+void infrastore_forecast_reader_free(struct InfraStoreForecastReaderHandle *reader);
+</code></pre>
+<p><strong>Window-read deduplication.</strong> Forecasts that reference the same backing array and read plan
+(deduplicated identical data, or several <code>DeterministicSingleTimeSeries</code> over one
+<code>SingleTimeSeries</code>) collapse to a single <em>window slot</em>. <code>infrastore_forecast_reader_read</code> performs
+one backend read per slot, not per entry, so a forecast shared by N owners is read once per
+timestamp. <code>infrastore_forecast_reader_num_slots</code> is that physical read count, and
+<code>infrastore_forecast_reader_entry_slot</code> gives the 0-based slot backing each entry (entries that
+share data report the same slot) — group entries by slot to also decode each unique window only
+once.</p>
+<h2 id="bulk-adds"><a class="header" href="#bulk-adds">Bulk Adds</a></h2>
+<p>A batch accumulates add requests client-side (no store I/O); <code>infrastore_store_add_batch</code> commits
+them all in <strong>one</strong> metadata transaction, which is much faster than per-item adds when ingesting
+many series. It is also the fast HDF5 write path: same-shaped <code>SingleTimeSeries</code> are packed into
+batch-sized datasets so the timestamp-major chunks are filled whole rather than a column at a time.
+The <code>infrastore_batch_add_*</code> functions take the same arguments as their <code>infrastore_store_add_*</code>
+counterparts minus the store handle and <code>out_key</code>; data buffers are copied into the batch, so they
+only need to stay valid for the call. The submit is all-or-nothing and drains the batch in either
+case (on error nothing was committed and the batch is left empty). On success the caller owns the
+key-handle array: free each key with <code>infrastore_key_free</code>, then the buffer with
+<code>infrastore_keys_buffer_free</code> (same contract as <code>infrastore_store_get_time_series_keys</code>). The batch
+handle itself is reusable after submit and must eventually be released with <code>infrastore_batch_free</code>.</p>
+<pre><code class="language-c">struct InfraStoreBatch *infrastore_batch_new(void);
+void            infrastore_batch_free(struct InfraStoreBatch *batch);
+
+int32_t infrastore_batch_add_single(struct InfraStoreBatch *batch, /* infrastore_store_add_single args sans handle/out_key */ ...);
+int32_t infrastore_batch_add_non_sequential(struct InfraStoreBatch *batch, ...);
+int32_t infrastore_batch_add_forecast(struct InfraStoreBatch *batch, ...);       /* 2=Deterministic, 5=Scenarios */
+int32_t infrastore_batch_add_probabilistic(struct InfraStoreBatch *batch, ...);
+
+int32_t infrastore_store_add_batch(struct InfraStore *handle, struct InfraStoreBatch *batch,
+                           struct InfraStoreKey ***out_keys, uint64_t *out_len);
+</code></pre>
+<h2 id="bulk-reads"><a class="header" href="#bulk-reads">Bulk Reads</a></h2>
+<p><code>infrastore_store_bulk_read_single</code> reads many full <code>SingleTimeSeries</code> in one call, reading each
+packed dataset's column span once instead of re-reading every chunk per series — the efficient way
+to load many whole series (e.g. for exploration or plotting), where a single full-series read
+otherwise touches every chunk under the timestamp-major layout. Every key must identify a
+<code>SingleTimeSeries</code>; otherwise the call fails with <code>INFRASTORE_ERR_INVALID_PARAMETER</code>. The results
+are held in a <code>InfraStoreBulkReadHandle</code> (input order preserved) and read out element-by-element
+with <code>infrastore_bulk_result_get_single</code>, whose out-parameters match <code>infrastore_store_get_single</code> —
+the caller owns the returned resolution string and the shape/data buffers and frees them with
+<code>infrastore_string_free</code>, <code>infrastore_buffer_free_i64</code>, and <code>infrastore_buffer_free_u8</code>. The handle
+is not consumed by a read (elements may be read more than once) and must be released with
+<code>infrastore_bulk_result_free</code>.</p>
+<pre><code class="language-c">int32_t infrastore_store_bulk_read_single(const struct InfraStore *handle,
+                                  const struct InfraStoreKey *const *keys, uint64_t n,
+                                  struct InfraStoreBulkReadHandle **out_result);
+int64_t infrastore_bulk_result_len(const struct InfraStoreBulkReadHandle *result);   /* -1 if null */
+int32_t infrastore_bulk_result_get_single(const struct InfraStoreBulkReadHandle *result, uint64_t index,
+                                  /* same out-params as infrastore_store_get_single */ ...);
+void    infrastore_bulk_result_free(struct InfraStoreBulkReadHandle *result);
+</code></pre>
+<p><code>infrastore_store_read_by_ids</code> is the same read addressed by catalog
+<a href="../explanation/data-model.html">association id</a> rather than by key — the read direction of the id
+every write hands back through its <code>out_id</code>, for a consumer that recorded ids in its own model
+instead of an id-to-key map. It fills the same <code>InfraStoreBulkReadHandle</code>, so the results come out
+through the same accessors; results follow the order the ids are given (repeats honoured in place),
+and an id naming no row fails the whole call with <code>INFRASTORE_ERR_NOT_FOUND</code> rather than being
+skipped. The handle carries each item's name whichever way the read was addressed, and
+<code>infrastore_bulk_result_item_name</code> hands item <code>index</code>'s back as an owned C string, freed with
+<code>infrastore_string_free</code> — the companion to <code>infrastore_bulk_result_item_type</code>, and how both reads
+label what they decode.</p>
+<pre><code class="language-c">int32_t infrastore_store_read_by_ids(const struct InfraStore *handle, const int64_t *ids,
+                             uint64_t n, struct InfraStoreBulkReadHandle **out_result);
+int32_t infrastore_bulk_result_item_name(const struct InfraStoreBulkReadHandle *result,
+                                 uint64_t index, char **out_name);
+</code></pre>
+<h2 id="store-wide-operations"><a class="header" href="#store-wide-operations">Store-Wide Operations</a></h2>
+<pre><code class="language-c">/* True iff the store holds nothing at all — no time series, and no associations
+   in any catalog. One short-circuited existence probe per catalog table, so it is
+   O(1) in store size and stays correct as the catalog gains tables; prefer it to
+   a caller-side conjunction over the counting entry points below, which is
+   neither. */
+int32_t infrastore_store_is_empty(const struct InfraStore *handle, bool *out);
+
+int32_t infrastore_store_counts(const struct InfraStore *handle, int64_t *out_components_with_time_series,
+                        int64_t *out_static_time_series, int64_t *out_forecasts);
+/* Association count per type as a JSON array of {time_series_type, count};
+   probe-then-fetch. */
+int32_t infrastore_store_counts_by_type(const struct InfraStore *handle,
+                                char *buf, uint64_t cap, uint64_t *out_len);
+/* Distinct stored arrays (content hashes); shared arrays count once. */
+int32_t infrastore_store_num_distinct_arrays(const struct InfraStore *handle, int64_t *out_count);
+/* Grouped static / forecast summaries as JSON arrays (one object per group with a
+   `count` field); probe-then-fetch. */
+int32_t infrastore_store_static_summary(const struct InfraStore *handle,
+                                char *buf, uint64_t cap, uint64_t *out_len);
+int32_t infrastore_store_forecast_summary(const struct InfraStore *handle,
+                                  char *buf, uint64_t cap, uint64_t *out_len);
+/* Distinct owners per category + distinct arrays per kind (static/forecast). */
+int32_t infrastore_store_counts_detailed(const struct InfraStore *handle, int64_t *out_components,
+                                 int64_t *out_supplemental_attributes,
+                                 int64_t *out_static_time_series, int64_t *out_forecasts);
+/* Distinct owner ids of owner_category as a JSON array; optional type/resolution
+   filters (NULL resolution = none). Probe-then-fetch. */
+int32_t infrastore_store_list_owner_ids(const struct InfraStore *handle, int32_t owner_category,
+                                bool has_time_series_type, int32_t time_series_type,
+                                const char *resolution, char *buf, uint64_t cap, uint64_t *out_len);
+/* out_present = false when no matching forecast. The out_horizon/out_interval/
+   out_resolution ISO-8601 strings are NULL when absent (free with infrastore_string_free);
+   out_count and out_initial_ms are -1 when absent. filter_* NULL = no filter. */
+int32_t infrastore_store_get_forecast_parameters(const struct InfraStore *handle,
+                                         const char *filter_resolution, const char *filter_interval,
+                                         bool *out_present, char **out_horizon,
+                                         char **out_interval, int64_t *out_count,
+                                         char **out_resolution, int64_t *out_initial_ms);
+/* Per-resolution static grids as a JSON array of {"resolution","initial_timestamp_ms",
+   "length"} objects, ordered by resolution (empty array when no SingleTimeSeries);
+   error when the series at one resolution disagree. filter_resolution NULL = every
+   resolution, else scope to that ISO-8601 grid. Probe-then-fetch (buf=NULL, cap=0 to size). */
+int32_t infrastore_store_check_static_consistency(const struct InfraStore *handle,
+                                          const char *filter_resolution, char *buf,
+                                          uint64_t cap, uint64_t *out_len);
+/* Distinct resolutions as a JSON array of ISO-8601 duration strings, ascending;
+   optional type filter. Probe-then-fetch (buf=NULL, cap=0 to size). */
+int32_t infrastore_store_get_resolutions(const struct InfraStore *handle,
+                                 bool has_time_series_type, int32_t time_series_type,
+                                 char *buf, uint64_t cap, uint64_t *out_len);
+/* out_kind: 0 = none, 1 = DEFLATE (out_level 0-9 + out_shuffle). */
+int32_t infrastore_store_get_compression(const struct InfraStore *handle, uint8_t *out_kind,
+                                 uint8_t *out_level, bool *out_shuffle);
+int32_t infrastore_store_verify(const struct InfraStore *handle, uint64_t *out_error_count);
+/* Compacts and returns the report as a JSON object {slots_reclaimed, datasets_dropped,
+   feature_sets_reclaimed, timestamp_sets_reclaimed, bytes_reclaimed}. Owned allocation:
+   free with infrastore_string_free. On an on-disk store this rewrites the .h5 file and
+   replaces it, so the call must run exactly once (no probe-then-fetch). */
+int32_t infrastore_store_compact(struct InfraStore *handle, char **out_json, uint64_t *out_len);
+int32_t infrastore_store_flush(struct InfraStore *handle);
+/* Cross-operation transactions. Adds, removals, and transforms between a begin and
+   its matching commit either all take effect or none do; removals are reversible
+   only inside one. Calls nest -- only the outermost commit is durable. This is
+   store state, not a borrowed guard, so nothing has to survive the ABI boundary.
+   Holds the SQLite write lock until the outermost commit/rollback. */
+int32_t infrastore_store_begin_transaction(struct InfraStore *handle);
+int32_t infrastore_store_commit_transaction(struct InfraStore *handle);
+int32_t infrastore_store_rollback_transaction(struct InfraStore *handle);
+int32_t infrastore_store_in_transaction(struct InfraStore *handle, bool *out);
+/* Persist the store's data to `path` (HDF5) and `&lt;path&gt;.sqlite` (metadata),
+   materializing an in-memory store to disk. Existing target files are overwritten. */
+int32_t infrastore_store_persist(struct InfraStore *handle, const char *path);
+/* Write an in-memory catalog to this store's own &lt;path&gt;.sqlite, stamped to match the HDF5 file
+   already beside it. Unlike infrastore_store_persist, copies no arrays: they are already in
+   place. A checkpoint, not a mode switch. For catalog_mode=0 this is infrastore_store_flush. */
+int32_t infrastore_store_persist_catalog(struct InfraStore *handle);
+/* has_owner=false clears all; when true, the owner is the pair (owner_id, owner_category). */
+int32_t infrastore_store_clear(struct InfraStore *handle, bool has_owner, int64_t owner_id,
+                       int32_t owner_category); /* owner_category: 0=Component, 1=SupplementalAttribute */
+/* Reassign every time series owned by old_owner_id (in owner_category) to
+   new_owner_id; *out_updated (when non-NULL) receives the number of associations
+   changed. */
+int32_t infrastore_store_replace_owner(struct InfraStore *handle,
+                               int64_t old_owner_id, int64_t new_owner_id,
+                               int32_t owner_category, uint64_t *out_updated);
+/* List keys as a JSON array (identity + per-type descriptive snapshot, no physical
+   storage detail). The filters are independent; with none set the whole store is
+   listed. `interval` (ISO-8601; NULL = unset) matches forecasts only — static
+   rows carry no interval. `name_glob` (NULL = unset) is a SQLite GLOB pattern
+   over the name (`*`/`?`, case-sensitive) and is ANDed with `name` rather than
+   replacing it. `component_field` (NULL = unset) matches the owning
+   component's field exactly and case-sensitively; a row that declares none
+   matches no value. The JSON comes back as an *owned* allocation through
+   out_json (free with infrastore_string_free), with out_len its byte length —
+   NOT probe-then-fetch, because a listing's size scales with the catalog and
+   probing would run the query and serialize the rows twice. */
+int32_t infrastore_store_list_keys(const struct InfraStore *handle,
+                           bool has_owner, int64_t owner_id,
+                           bool has_owner_category, int32_t owner_category,
+                           bool has_time_series_type, int32_t time_series_type,
+                           const char *name, const char *name_glob,
+                           const char *resolution, const char *interval,
+                           const char *features_json, const char *component_field, int32_t zoneless,
+                           char **out_json, uint64_t *out_len);
+/* Like infrastore_store_list_keys, but each row is annotated with the hex content hash of
+   the array it resolves to (keys_to_json's shape plus a `data_hash` field); rows
+   that share a stored array share their `data_hash`, so a caller can group time
+   series by their underlying data in one query. Same filters, and the same
+   owned-string return, as infrastore_store_list_keys. */
+int32_t infrastore_store_list_array_groups(const struct InfraStore *handle,
+                                   bool has_owner, int64_t owner_id,
+                                   bool has_owner_category, int32_t owner_category,
+                                   bool has_time_series_type, int32_t time_series_type,
+                                   const char *name, const char *name_glob,
+                                   const char *resolution, const char *interval,
+                                   const char *features_json, const char *component_field, int32_t zoneless,
+                                   char **out_json, uint64_t *out_len);
+</code></pre>
+<h2 id="associations"><a class="header" href="#associations">Associations</a></h2>
+<p>Two catalogs of relationships between entities the store does not otherwise model. Both are
+independent of time series: there are no foreign keys and no cascade (both endpoints live in the
+caller's object graph, so a cascade could never fire), so removing a time series never removes an
+association and vice versa; a caller that wants both makes both calls.</p>
+<p>Each family's query predicate crosses the boundary as <strong>one JSON object string</strong> rather than a set
+of positional arguments, because half its fields are string lists. Every field is optional and the
+set ones are ANDed:</p>
+<pre><code class="language-json">{ "component_id": 1, "component_types": ["Generator", "Load"],
+  "attribute_id": 100, "attribute_types": ["GeographicInfo"] }
+
+{ "parent_id": 1, "parent_types": ["Generator"],
+  "child_id": 7, "child_types": ["Bus"] }
+</code></pre>
+<p>A <code>NULL</code> (or empty) <code>filter_json</code> is the empty filter and matches <strong>every</strong> row — which is what
+makes a bulk export/import round trip one call each way. The <code>*_types</code> lists hold <strong>concrete</strong> type
+names, rendered as SQL <code>IN (…)</code>; expanding an abstract type into its subtypes stays in the calling
+language, and an empty list matches nothing. An unknown field or malformed JSON is
+<code>INFRASTORE_ERR_INVALID_PARAMETER</code>. Every remove function reports its count through <code>out_removed</code>
+and treats removing nothing as success, not an error.</p>
+<p>The list functions use the probe-then-fetch convention: call with <code>buf = NULL, cap = 0</code> to learn the
+length via <code>out_len</code>, then again with a <code>len + 1</code>-byte buffer. (<code>infrastore_store_list_keys</code>,
+<code>infrastore_store_list_array_groups</code>, and
+<code>infrastore_store_list_supplemental_attribute_associations</code> are the exceptions in this header — they
+return an owned string instead, because a no-filter call exports the whole catalog or table.)</p>
+<h3 id="supplemental-attribute-associations"><a class="header" href="#supplemental-attribute-associations">Supplemental-attribute associations</a></h3>
+<p>Which supplemental attributes are attached to which components. Identity is the
+<code>(component_id, attribute_id)</code> pair; the type names are denormalized labels, so re-attaching the
+same pair under different type names is still a duplicate. One attribute may be attached to many
+components.</p>
+<pre><code class="language-c">/* Attach supplemental attribute (attribute_id, attribute_type) to component
+   (component_id, component_type). INFRASTORE_ERR_DUPLICATE_ASSOCIATION if that component
+   already carries that attribute, whatever type names are supplied. */
+int32_t infrastore_store_add_supplemental_attribute_association(struct InfraStore *handle,
+                                                        int64_t component_id,
+                                                        const char *component_type,
+                                                        int64_t attribute_id,
+                                                        const char *attribute_type);
+
+/* Attach many in one all-or-nothing transaction, from a JSON array of objects with
+   component_id, component_type, attribute_id, and attribute_type. The import half
+   of the round trip whose export is infrastore_store_list_supplemental_attribute_associations
+   with a NULL filter. *out_added (when non-NULL) receives the number inserted. */
+int32_t infrastore_store_add_supplemental_attribute_associations(struct InfraStore *handle,
+                                                         const char *associations_json,
+                                                         uint64_t *out_added,   /* optional */
+                                                         int64_t **out_ids);    /* optional; owned,
+                                                            infrastore_buffer_free_i64 */
+
+/* Whether any attachment matches filter_json (NULL = any). */
+int32_t infrastore_store_has_supplemental_attribute_association(const struct InfraStore *handle,
+                                                        const char *filter_json,
+                                                        bool *out_found);
+
+/* Matching attachments as a JSON array, in insertion order; each object carries
+   component_id, component_type, attribute_id, attribute_type. Returns the JSON
+   through out_json as an OWNED allocation, freed with infrastore_string_free
+   (a no-filter call exports the whole table, so this follows the owned-string
+   convention rather than probe-then-fetch). */
+int32_t infrastore_store_list_supplemental_attribute_associations(const struct InfraStore *handle,
+                                                          const char *filter_json,
+                                                          char **out_json, uint64_t *out_len);
+
+/* Distinct attribute ids of the matching rows, ascending, as a JSON array — the
+   attributes attached to a component when component_id is set. Probe-then-fetch. */
+int32_t infrastore_store_list_supplemental_attribute_ids(const struct InfraStore *handle,
+                                                 const char *filter_json,
+                                                 char *buf, uint64_t cap,
+                                                 uint64_t *out_len);
+
+/* Distinct component ids of the matching rows, ascending, as a JSON array — the
+   components carrying an attribute when attribute_id is set. Probe-then-fetch. */
+int32_t infrastore_store_list_components_with_attributes(const struct InfraStore *handle,
+                                                 const char *filter_json,
+                                                 char *buf, uint64_t cap,
+                                                 uint64_t *out_len);
+
+/* Remove every matching attachment; *out_removed (when non-NULL) receives the
+   count. Removing nothing is success, not an error. */
+int32_t infrastore_store_remove_supplemental_attribute_associations(struct InfraStore *handle,
+                                                            const char *filter_json,
+                                                            uint64_t *out_removed);
+
+/* Move every attachment from component old_id to new_id; *out_updated (when
+   non-NULL) receives the rows changed. INFRASTORE_ERR_DUPLICATE_ASSOCIATION if new_id
+   already carries one of the attributes being moved. */
+int32_t infrastore_store_replace_supplemental_attribute_component_id(struct InfraStore *handle,
+                                                             int64_t old_id, int64_t new_id,
+                                                             uint64_t *out_updated);
+
+/* Attachment counts through out_count. kind selects what is counted:
+   0 = rows matching the filter, 1 = distinct attributes among them,
+   2 = distinct components among them. */
+int32_t infrastore_store_count_supplemental_attribute_associations(const struct InfraStore *handle,
+                                                           const char *filter_json,
+                                                           int32_t kind, int64_t *out_count);
+
+/* Grouped counts as JSON arrays: by attribute type, as {"type": …, "count": …}
+   ordered by type; and by both type names, as
+   {"component_type": …, "attribute_type": …, "count": …} ordered by attribute type
+   then component type. Probe-then-fetch. */
+int32_t infrastore_store_supplemental_attribute_counts_by_type(const struct InfraStore *handle,
+                                                       char *buf, uint64_t cap,
+                                                       uint64_t *out_len);
+int32_t infrastore_store_supplemental_attribute_summary(const struct InfraStore *handle,
+                                                char *buf, uint64_t cap,
+                                                uint64_t *out_len);
+</code></pre>
+<pre><code class="language-c">/* The attribute ids attached to component 1. */
+const char *filter = "{\"component_id\":1}";
+uint64_t len = 0;
+infrastore_store_list_supplemental_attribute_ids(store, filter, NULL, 0, &amp;len);
+char *json = malloc(len + 1);
+infrastore_store_list_supplemental_attribute_ids(store, filter, json, len + 1, &amp;len); /* e.g. "[100]" */
+free(json);
+</code></pre>
+<h3 id="parentchild-associations"><a class="header" href="#parentchild-associations">Parent/child associations</a></h3>
+<p>Directed edges between components — a generator (parent) connected to a bus (child), say. Both
+endpoints are always components. Identity is the <em>ordered</em> <code>(parent_id, child_id)</code> pair, so the
+reversed pair is a different edge, and with no relationship-kind column one ordered pair may be
+related at most once.</p>
+<p>This family is deliberately narrower than the supplemental one — no counts-by-type and no grouped
+summary — because there is no consumer for them yet; both are additive if one appears.</p>
+<pre><code class="language-c">/* Record a directed edge from component (parent_id, parent_type) to component
+   (child_id, child_type). INFRASTORE_ERR_DUPLICATE_ASSOCIATION if that ordered pair is
+   already related; the reversed pair is a different edge. */
+int32_t infrastore_store_add_parent_child_association(struct InfraStore *handle,
+                                              int64_t parent_id, const char *parent_type,
+                                              int64_t child_id, const char *child_type);
+
+/* Record many edges in one all-or-nothing transaction, from a JSON array of objects
+   with parent_id, parent_type, child_id, and child_type. *out_added (when non-NULL)
+   receives the number inserted. */
+int32_t infrastore_store_add_parent_child_associations(struct InfraStore *handle,
+                                               const char *associations_json,
+                                               uint64_t *out_added,   /* optional */
+                                               int64_t **out_ids);    /* optional; owned,
+                                                  infrastore_buffer_free_i64 */
+
+/* Whether any edge matches filter_json (NULL = any). */
+int32_t infrastore_store_has_parent_child_association(const struct InfraStore *handle,
+                                              const char *filter_json,
+                                              bool *out_found);
+
+/* Matching edges as a JSON array, in insertion order; each object carries
+   parent_id, parent_type, child_id, child_type. Probe-then-fetch. */
+int32_t infrastore_store_list_parent_child_associations(const struct InfraStore *handle,
+                                                const char *filter_json,
+                                                char *buf, uint64_t cap,
+                                                uint64_t *out_len);
+
+/* Distinct ids on one end of the matching edges, ascending, as a JSON array.
+   endpoint is 0 for parents and 1 for children — so endpoint = 1 with parent_id
+   set is "the children of this component". Probe-then-fetch. */
+int32_t infrastore_store_list_parent_child_ids(const struct InfraStore *handle,
+                                       const char *filter_json, int32_t endpoint,
+                                       char *buf, uint64_t cap, uint64_t *out_len);
+
+/* Remove every matching edge; *out_removed (when non-NULL) receives the count.
+   Removing nothing is success, not an error. */
+int32_t infrastore_store_remove_parent_child_associations(struct InfraStore *handle,
+                                                  const char *filter_json,
+                                                  uint64_t *out_removed);
+
+/* Rewrite component old_id to new_id on BOTH ends of every edge; *out_updated
+   (when non-NULL) receives the rows changed. INFRASTORE_ERR_DUPLICATE_ASSOCIATION if the
+   rewrite would duplicate an edge new_id already has. */
+int32_t infrastore_store_replace_parent_child_component_id(struct InfraStore *handle,
+                                                   int64_t old_id, int64_t new_id,
+                                                   uint64_t *out_updated);
+
+/* Number of edges matching filter_json, through out_count. */
+int32_t infrastore_store_count_parent_child_associations(const struct InfraStore *handle,
+                                                 const char *filter_json,
+                                                 int64_t *out_count);
+</code></pre>
+<pre><code class="language-c">/* The children of component 1. */
+const char *filter = "{\"parent_id\":1}";
+uint64_t len = 0;
+infrastore_store_list_parent_child_ids(store, filter, 1 /* children */, NULL, 0, &amp;len);
+char *json = malloc(len + 1);
+infrastore_store_list_parent_child_ids(store, filter, 1, json, len + 1, &amp;len);   /* e.g. "[7]" */
+free(json);
+</code></pre>
+<p>Neither association catalog is exposed over the <a href="./grpc-api.html">gRPC server</a> or the
+<a href="./cli.html"><code>infrastore</code> CLI</a>.</p>
+<h2 id="openapi-row-association-serde"><a class="header" href="#openapi-row-association-serde">OpenAPI-row Association Serde</a></h2>
+<p>Direct JSON serde of the two association catalogs, in the wire spelling
+<a href="https://github.com/Sienna-Platform/SiennaSchemas">SiennaSchemas</a> defines (<code>TimeSeries/*.json</code>,
+<code>Core/Associations/SupplementalAttributeAssociation.json</code>). The two exports use the owned-string
+convention.</p>
+<pre><code class="language-c">/* Export time_series_associations matching the filter as a sorted OpenAPI-row
+   JSON array. Each row's uri and data_hash are the hex-encoded content hash
+   the store already has for that row -- never a caller-supplied locator.
+   Filters match infrastore_store_list_keys. Returns the JSON through out_json
+   as an OWNED allocation, freed with infrastore_string_free. */
+int32_t infrastore_store_export_time_series_associations_openapi(const struct InfraStore *handle,
+                                                          bool has_owner, int64_t owner_id,
+                                                          bool has_owner_category, int32_t owner_category,
+                                                          bool has_time_series_type, int32_t time_series_type,
+                                                          const char *name, const char *resolution,
+                                                          const char *interval, const char *features_json,
+                                                          const char *component_field, int32_t zoneless,
+                                                          char **out_json, uint64_t *out_len);
+
+/* Bulk-ingest a JSON array of time-series association OpenAPI rows in one
+   all-or-nothing transaction -- the import half of the round trip whose export
+   is infrastore_store_export_time_series_associations_openapi. Rows only: every
+   row must name an array this store already holds, and each keeps the
+   association_id it carries. *out_added (when non-NULL) receives the number
+   inserted. */
+int32_t infrastore_store_import_time_series_associations_openapi(
+    struct InfraStore *handle, const char *json, uint64_t *out_added);
+
+/* Export the whole supplemental_attribute_associations table as an OpenAPI-row
+   JSON array, sorted by (component_id, attribute_id). Owned-string return. */
+int32_t infrastore_store_export_supplemental_attribute_associations_openapi(
+    const struct InfraStore *handle, char **out_json, uint64_t *out_len);
+
+/* Bulk-ingest a JSON array of supplemental-attribute association OpenAPI rows in
+   one all-or-nothing transaction -- the import half of the round trip whose
+   export is infrastore_store_export_supplemental_attribute_associations_openapi.
+   *out_added (when non-NULL) receives the number inserted. */
+int32_t infrastore_store_import_supplemental_attribute_associations_openapi(
+    struct InfraStore *handle, const char *json, uint64_t *out_added);
+</code></pre>
+<p>A catalog row's <code>data_hash</code> is <code>NOT NULL</code>, and infrastore fills a row's <code>uri</code>/<code>data_hash</code> wire
+fields with that same content hash, hex-encoded, on export. The time-series import writes <em>rows</em>
+only: infrastore never modifies the data to make an incoming document agree with what it already
+holds, so a row naming an array this store does not hold is refused
+(<code>INFRASTORE_ERR_INVALID_PARAMETER</code>) rather than written as a dangling reference, and a
+<code>NonSequentialTimeSeries</code> row is refused outright because the wire form carries no
+<code>timestamps_hash</code>, so the document does not say which stored time axis the row sits on. A geometry
+disagreement between an added series and its own association row is likewise rejected at the add
+boundary, loudly and without writing anything.</p>
+<h2 id="error-messages"><a class="header" href="#error-messages">Error Messages</a></h2>
+<pre><code class="language-c">int32_t infrastore_last_error_message(char *buf, uint64_t buf_len, uint64_t *needed);
+</code></pre>
+<p>Copies the thread-local error message (UTF-8, null-terminated) into <code>buf</code>. <code>*needed</code> receives the
+length excluding the NUL. If <code>buf_len</code> is too small, the message is truncated but <code>INFRASTORE_OK</code> is
+still returned — call once with <code>buf = NULL, buf_len = 0</code> to learn the needed size, then again with
+a buffer of <code>*needed + 1</code>. This is the pattern <code>TimeSeries.jl</code> uses.</p>
+<h2 id="building"><a class="header" href="#building">Building</a></h2>
+<pre><code class="language-sh">cargo build -p infrastore-ffi --release
+# Library at: target/release/libinfrastore_ffi.{dylib,so,dll}
+</code></pre>
+<p>Point consumers at it via the <code>INFRASTORE_LIB</code> environment variable (see the
+<a href="../how-to/integrate-julia.html">Julia how-to</a>).</p>
+<h2 id="tracing"><a class="header" href="#tracing">Tracing</a></h2>
+<pre><code class="language-c">int32_t infrastore_store_init_logging(const char *filter);
+</code></pre>
+<p>Initialize the Rust tracing subscriber. <code>filter</code> is a null-terminated UTF-8
+<a href="https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html"><code>EnvFilter</code></a>
+directive string (e.g. <code>"debug"</code> or <code>"infrastore_core=debug"</code>). Pass <code>NULL</code> to read the <code>RUST_LOG</code>
+environment variable; if that variable is also unset, no output is produced.</p>
+<p>The subscriber is initialized at most once per process — subsequent calls are no-ops. Returns
+<code>INFRASTORE_OK</code> on success or <code>INFRASTORE_ERR_INVALID_UTF8</code> if <code>filter</code> is not valid UTF-8.</p>
+<p>The <a href="./julia-api.html">Julia binding</a> calls this automatically from its <code>__init__</code> hook when
+<code>RUST_LOG</code> is set, and exposes <code>init_logging</code> for explicit control.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../reference/julia-api.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../reference/grpc-api.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../reference/julia-api.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../reference/grpc-api.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="../mermaid.min.js"></script>
+        <script src="../mermaid-init.js"></script>
+        <script src="../pagetoc.js"></script>
+        <script src="../version-selector.js"></script>
+
+
+
+    </div>
+    </body>
+</html>
