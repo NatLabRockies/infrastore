@@ -4612,6 +4612,104 @@ pub unsafe extern "C" fn infrastore_store_bulk_read(
     INFRASTORE_OK
 }
 
+/// Read many series named by their catalog association `id`, in the order the
+/// ids are given. The id-addressed counterpart of `infrastore_store_bulk_read`:
+/// results come back in the same `InfraStoreBulkReadHandle`, so a caller reads
+/// them out with the same `infrastore_bulk_result_*` accessors, and repeats in
+/// `ids` are honoured in place.
+///
+/// The read direction of the id every write hands back through its `out_id`: a
+/// caller that recorded ids in its own model resolves them here instead of
+/// keeping an id-to-key map beside the store. Returns
+/// `INFRASTORE_ERR_NOT_FOUND` if any id names no row — unlike
+/// `infrastore_store_association_exists`, which asks the question, this call is
+/// already committed to reading and a stale reference is a failure. The error
+/// does not say *which* id dangled.
+///
+/// # Safety
+///
+/// `ids` must point to `n` readable `i64`s (it may be null only when `n` is 0).
+/// On `INFRASTORE_OK` the returned handle must be released exactly once with
+/// `infrastore_bulk_result_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_store_read_by_ids(
+    handle: *const InfraStoreHandle,
+    ids: *const i64,
+    n: u64,
+    out_result: *mut *mut InfraStoreBulkReadHandle,
+) -> i32 {
+    clear_error();
+    let store = deref_handle!(ref handle);
+    if out_result.is_null() {
+        set_error("out_result pointer is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let count = n as usize;
+    if count != 0 && ids.is_null() {
+        set_error("ids pointer is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let id_slice = if count == 0 {
+        &[][..]
+    } else {
+        unsafe { slice::from_raw_parts(ids, count) }
+    };
+    let items = match store.inner.read_by_ids(id_slice) {
+        Ok(d) => d,
+        Err(e) => return map_core_error(e),
+    };
+    unsafe { *out_result = Box::into_raw(Box::new(InfraStoreBulkReadHandle { items })) };
+    INFRASTORE_OK
+}
+
+/// Write the name of bulk-read item `index` into `out_name` as an owned C
+/// string. The keyed bulk read already knows each name from the key it passed
+/// in; `infrastore_store_read_by_ids` does not, so this is how an id-addressed
+/// caller labels what it got back.
+///
+/// # Safety
+///
+/// `result` must be a live bulk-read handle, `index` less than its length, and
+/// `out_name` valid for writing one pointer. `*out_name` is an owned string --
+/// never null on success -- and must be freed exactly once with
+/// `infrastore_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_bulk_result_item_name(
+    result: *const InfraStoreBulkReadHandle,
+    index: u64,
+    out_name: *mut *mut c_char,
+) -> i32 {
+    clear_error();
+    let result = match unsafe { result.as_ref() } {
+        Some(r) => r,
+        None => {
+            set_error("bulk-read result handle is null");
+            return INFRASTORE_ERR_NULL_POINTER;
+        }
+    };
+    if out_name.is_null() {
+        set_error("out_name pointer is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let item = match result.items.get(index as usize) {
+        Some(d) => d,
+        None => {
+            set_error("bulk-read index out of bounds");
+            return INFRASTORE_ERR_INVALID_PARAMETER;
+        }
+    };
+    match std::ffi::CString::new(item.name()) {
+        Ok(c) => {
+            unsafe { *out_name = c.into_raw() };
+            INFRASTORE_OK
+        }
+        Err(e) => {
+            set_error(format!("series name contained an interior NUL: {e}"));
+            INFRASTORE_ERR_INTERNAL
+        }
+    }
+}
+
 /// Write the [`time_series_type_to_int`] discriminant of bulk-read item `index` into
 /// `out_type` (`0`=SingleTimeSeries, `1`=NonSequentialTimeSeries,
 /// `2`=Deterministic, `4`=Probabilistic, `5`=Scenarios — a bulk read never
@@ -7740,6 +7838,45 @@ pub unsafe extern "C" fn infrastore_store_export_supplemental_attribute_associat
         Err(e) => return map_core_error(e),
     };
     unsafe { write_owned_str_out(json, out_json, out_len) }
+}
+
+/// Bulk-ingest a JSON array of time-series association OpenAPI rows in one
+/// all-or-nothing transaction — the import half of the round trip whose export
+/// is `infrastore_store_export_time_series_associations_openapi`. When non-null,
+/// `out_added` receives the number inserted.
+///
+/// Rows only: the document carries locators, never values, so every row must
+/// name an array this store already holds, and each row keeps the
+/// `association_id` it carries. A row whose array is absent, or a
+/// `NonSequentialTimeSeries` row (whose timestamp vector is not on the wire),
+/// is refused with `INFRASTORE_ERR_INVALID_PARAMETER`; an `association_id`
+/// already in use is `INFRASTORE_ERR_DUPLICATE_ASSOCIATION_ID`.
+///
+/// # Safety
+///
+/// `handle` must be a live read-write store handle and `json` a valid, null-terminated UTF-8
+/// string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_store_import_time_series_associations_openapi(
+    handle: *mut InfraStoreHandle,
+    json: *const c_char,
+    out_added: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = deref_handle!(mut handle);
+    let json = match unsafe { cstr_to_str(json) } {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    match store.inner.import_time_series_associations_openapi(json) {
+        Ok(n) => {
+            if !out_added.is_null() {
+                unsafe { *out_added = n as u64 };
+            }
+            INFRASTORE_OK
+        }
+        Err(e) => map_core_error(e),
+    }
 }
 
 /// Bulk-ingest a JSON array of supplemental-attribute association OpenAPI rows
@@ -11452,5 +11589,245 @@ mod abi_tests {
             INFRASTORE_ERR_MISMATCHED_ARTIFACT
         );
         assert!(store.is_null());
+    }
+
+    /// Add one f64 series under an explicit association id, returning the id
+    /// the store actually filed it under.
+    fn abi_add_f64_with_id(
+        store: *mut InfraStoreHandle,
+        owner: i64,
+        name: &str,
+        vals: &[f64],
+        id: i64,
+    ) -> i64 {
+        let owner_type = CString::new("Generator").unwrap();
+        let name_c = CString::new(name).unwrap();
+        let res = CString::new(HOUR).unwrap();
+        let bytes = to_le(vals);
+        let dims = [vals.len() as u64];
+        let mut key: *mut InfraStoreKeyHandle = ptr::null_mut();
+        let mut out_id = 0i64;
+        let rc = unsafe {
+            infrastore_store_add_single(
+                store,
+                owner,
+                owner_type.as_ptr(),
+                0,
+                name_c.as_ptr(),
+                T0_MS,
+                res.as_ptr(),
+                F64_ET.as_ptr(),
+                1,
+                dims.as_ptr(),
+                bytes.as_ptr(),
+                bytes.len() as u64,
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                id,
+                &mut key,
+                &mut out_id,
+            )
+        };
+        assert_eq!(rc, INFRASTORE_OK, "add failed: {}", last_error());
+        unsafe { infrastore_key_free(key) };
+        out_id
+    }
+
+    /// Item `index`'s name, through the getter `read_by_ids` callers rely on.
+    fn abi_bulk_item_name(result: *mut InfraStoreBulkReadHandle, index: u64) -> String {
+        let mut out: *mut c_char = ptr::null_mut();
+        assert_eq!(
+            unsafe { infrastore_bulk_result_item_name(result, index, &mut out) },
+            INFRASTORE_OK,
+            "item_name failed: {}",
+            last_error()
+        );
+        assert!(!out.is_null());
+        let s = unsafe { CStr::from_ptr(out) }.to_str().unwrap().to_string();
+        unsafe { infrastore_string_free(out) };
+        s
+    }
+
+    /// The first f64 value of bulk item `index`.
+    fn abi_bulk_first_value(result: *mut InfraStoreBulkReadHandle, index: u64) -> f64 {
+        let mut initial = 0i64;
+        let mut resolution: *mut c_char = ptr::null_mut();
+        let mut dtype = -1i32;
+        let mut shape: *mut i64 = ptr::null_mut();
+        let mut shape_len = 0u64;
+        let mut data: *mut u8 = ptr::null_mut();
+        let mut data_len = 0u64;
+        assert_eq!(
+            unsafe {
+                infrastore_bulk_result_get_single(
+                    result,
+                    index,
+                    &mut initial,
+                    &mut resolution,
+                    &mut dtype,
+                    &mut shape,
+                    &mut shape_len,
+                    &mut data,
+                    &mut data_len,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                )
+            },
+            INFRASTORE_OK,
+            "get_single failed: {}",
+            last_error()
+        );
+        let bytes = unsafe { slice::from_raw_parts(data, data_len as usize) };
+        let value = f64::from_le_bytes(bytes[..8].try_into().unwrap());
+        unsafe {
+            infrastore_string_free(resolution);
+            infrastore_buffer_free_i64(shape, shape_len);
+            infrastore_buffer_free_u8(data, data_len);
+        }
+        value
+    }
+
+    /// `infrastore_store_read_by_ids` follows the order it was given, repeats
+    /// included, and labels each item with its own name — the id-addressed
+    /// counterpart of the keyed bulk read, which reads names off its keys.
+    #[test]
+    fn abi_read_by_ids_follows_the_order_it_was_given() {
+        let store = abi_create_in_memory();
+        let a = abi_add_f64_with_id(store, 1, "a", &[1.0, 2.0, 3.0], 0);
+        let b = abi_add_f64_with_id(store, 2, "b", &[10.0, 11.0, 12.0], 0);
+        let c = abi_add_f64_with_id(store, 3, "c", &[100.0, 101.0, 102.0], 0);
+
+        let asked = [c, a, c, b];
+        let mut result: *mut InfraStoreBulkReadHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                infrastore_store_read_by_ids(store, asked.as_ptr(), asked.len() as u64, &mut result)
+            },
+            INFRASTORE_OK,
+            "read_by_ids failed: {}",
+            last_error()
+        );
+        assert_eq!(unsafe { infrastore_bulk_result_len(result) }, 4);
+        let names: Vec<String> = (0..4).map(|i| abi_bulk_item_name(result, i)).collect();
+        assert_eq!(names, vec!["c", "a", "c", "b"]);
+        let firsts: Vec<f64> = (0..4).map(|i| abi_bulk_first_value(result, i)).collect();
+        assert_eq!(firsts, vec![100.0, 1.0, 100.0, 10.0]);
+        unsafe { infrastore_bulk_result_free(result) };
+
+        // An id naming no row fails the whole call with the code a caller
+        // switches on, and hands back no handle.
+        let missing = [a, 9_999];
+        let mut bad: *mut InfraStoreBulkReadHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe { infrastore_store_read_by_ids(store, missing.as_ptr(), 2, &mut bad) },
+            INFRASTORE_ERR_NOT_FOUND
+        );
+        assert!(bad.is_null());
+
+        // An empty request is a valid one: an empty handle, not an error.
+        let mut empty: *mut InfraStoreBulkReadHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe { infrastore_store_read_by_ids(store, ptr::null(), 0, &mut empty) },
+            INFRASTORE_OK
+        );
+        assert_eq!(unsafe { infrastore_bulk_result_len(empty) }, 0);
+        unsafe { infrastore_bulk_result_free(empty) };
+
+        assert_eq!(
+            unsafe { infrastore_store_read_by_ids(store, ptr::null(), 1, &mut empty) },
+            INFRASTORE_ERR_NULL_POINTER
+        );
+
+        unsafe { infrastore_store_free(store) };
+    }
+
+    /// Export one store's time-series rows and import them into another that
+    /// already holds the arrays: the ids survive, which is the point of putting
+    /// them on the wire. A store holding no such array refuses the document.
+    #[test]
+    fn abi_time_series_openapi_rows_round_trip_with_their_ids() {
+        let source = abi_create_in_memory();
+        let id = abi_add_f64_with_id(source, 1, "load", &[1.0, 2.0, 3.0], 700);
+        assert_eq!(id, 700);
+
+        let mut json: *mut c_char = ptr::null_mut();
+        let mut json_len = 0u64;
+        assert_eq!(
+            unsafe {
+                infrastore_store_export_time_series_associations_openapi(
+                    source,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    0,
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    -1,
+                    &mut json,
+                    &mut json_len,
+                )
+            },
+            INFRASTORE_OK,
+            "export failed: {}",
+            last_error()
+        );
+
+        // Arrays are content-addressed, so "the artifact brought the values" is
+        // a store already holding the same bytes under an identity of its own.
+        let target = abi_create_in_memory();
+        abi_add_f64_with_id(target, 9, "anchor", &[1.0, 2.0, 3.0], 0);
+        let mut added = 0u64;
+        assert_eq!(
+            unsafe {
+                infrastore_store_import_time_series_associations_openapi(target, json, &mut added)
+            },
+            INFRASTORE_OK,
+            "import failed: {}",
+            last_error()
+        );
+        assert_eq!(added, 1);
+        let mut present = false;
+        assert_eq!(
+            unsafe { infrastore_store_association_exists(target, 700, &mut present) },
+            INFRASTORE_OK
+        );
+        assert!(present, "the id did not survive the import");
+
+        // A store holding none of the arrays refuses the rows rather than
+        // writing dangling references.
+        let empty = abi_create_in_memory();
+        assert_eq!(
+            unsafe {
+                infrastore_store_import_time_series_associations_openapi(
+                    empty,
+                    json,
+                    ptr::null_mut(),
+                )
+            },
+            INFRASTORE_ERR_INVALID_PARAMETER
+        );
+        assert!(last_error().contains("does not hold"), "{}", last_error());
+
+        unsafe {
+            infrastore_string_free(json);
+            infrastore_store_free(source);
+            infrastore_store_free(target);
+            infrastore_store_free(empty);
+        }
     }
 }

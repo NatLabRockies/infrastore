@@ -48,9 +48,9 @@ Every catalog row also carries an **`id`** — an `INTEGER PRIMARY KEY AUTOINCRE
 reissued once its row is deleted — which a consumer stores in its own object model to reference a
 series later (a generator's `operation_cost` naming the series that varies it). Writes return it
 (`AddedTimeSeries` in the Rust core, Python, and Julia; an `out_id` across the C ABI), reads resolve
-it (`get_metadata_by_id`, `association_exists`, `bulk_read_by_ids`), and it crosses the gRPC wire
-and the OpenAPI one — where the schema spells it `association_id`, a rename `openapi.rs` applies the
-same way it maps `unit_system` between the store's snake_case and the schema's SCREAMING_CASE. It is
+it (`get_metadata_by_id`, `association_exists`, `read_by_ids`), and it crosses the gRPC wire and the
+OpenAPI one — where the schema spells it `association_id`, a rename `openapi.rs` applies the same
+way it maps `unit_system` between the store's snake_case and the schema's SCREAMING_CASE. It is
 descriptive — outside `TimeSeriesKey` and both content hashes — but unlike the descriptors above it
 describes the _row_ rather than the data: it is per-store, so `merge` assigns fresh ids and `diff`
 ignores it, while `rename`/`reassign`/`compact`/`persist_to` all preserve it. A caller may supply

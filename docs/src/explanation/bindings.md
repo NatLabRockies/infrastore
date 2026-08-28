@@ -75,8 +75,11 @@ The conventions that shape the Julia API:
 - **Bulk reads use a result handle.** `bulk_read` reads many full `SingleTimeSeries` at once: the
   FFI fetches them in one decompress-once pass per dataset into a `InfraStoreBulkReadHandle`
   (`infrastore_store_bulk_read_single`), and Julia reads each element out, then frees the handle.
-  Python's `store.bulk_read` exposes the same operation directly. Managed bulk _writes_ already take
-  the fast block-write path through the existing batch / `add_time_series_bulk` APIs.
+  Python's `store.bulk_read` exposes the same operation directly. `read_by_ids` addresses the same
+  read by catalog association id and fills the same handle; because it has no keys to read names
+  off, `infrastore_bulk_result_item_name` hands each item's name back beside its values. Managed
+  bulk _writes_ already take the fast block-write path through the existing batch /
+  `add_time_series_bulk` APIs.
 
 `InfraStore.jl` loads the cdylib from the `INFRASTORE_LIB` environment variable when it is set, and
 otherwise from the `libinfrastore_ffi` artifact its `Artifacts.toml` pins to the matching GitHub

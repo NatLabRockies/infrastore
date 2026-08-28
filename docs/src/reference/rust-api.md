@@ -125,6 +125,11 @@ impl Store {
     // types reuse the per-key path. Returns a `TimeSeriesData` per key, in order.
     pub fn bulk_read(&self, keys: &[&KeyIdentity]) -> Result<Vec<TimeSeriesData>>;
 
+    // The same read, addressed by catalog association id instead of by key.
+    // Results follow the order the ids are given, repeats included;
+    // `NotFound` if any id names no row.
+    pub fn read_by_ids(&self, ids: &[i64]) -> Result<Vec<TimeSeriesData>>;
+
     pub fn transform_single_time_series(
         &mut self,
         horizon: impl Into<Period>,
@@ -495,7 +500,10 @@ the underlying packed array. The low-level pair still works for direct array acc
 `get_time_series` returns a whole series or forecast. To read **many whole series at once** (e.g.
 exploration or plotting), `bulk_read` takes a slice of keys and reads packed `SingleTimeSeries` in
 one decompress-once pass per dataset — far cheaper than a `get_time_series` per key under the
-timestamp-major chunking, where a single full-series read touches every chunk. For the
+timestamp-major chunking, where a single full-series read touches every chunk. `read_by_ids` is the
+same read addressed by catalog [association id](../explanation/data-model.md) rather than by key,
+for a consumer that recorded ids in its own model: results follow the order the ids are given, and
+an id naming no row fails the read with `NotFound` rather than being skipped. For the
 timestamp-oriented access pattern — _walk the timeline and read every series' value at each instant_
 — build a **reader** instead. A reader is built once over a [`ListFilter`](#listfilter), pins one
 resolution, and holds reusable buffers that each read overwrites in place, so a tight loop allocates

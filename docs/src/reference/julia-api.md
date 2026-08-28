@@ -22,24 +22,24 @@ Exported names (types first, then functions):
 `TransformOutcome`, `UnitSystem` (`NaturalUnits`, `ComponentBase`), `add_parent_child_association!`,
 `add_parent_child_associations!`, `add_supplemental_attribute_association!`,
 `add_supplemental_attribute_associations!`, `add_time_series!`, `add_time_series_bulk!`,
-`build_forecast_reader`, `build_static_reader`, `bulk_read`, `catalog_mode`,
+`build_forecast_reader`, `build_static_reader`, `bulk_read`, `read_by_ids`, `catalog_mode`,
 `check_static_consistency`, `clear!`, `close!`, `compact!`, `copy_time_series!`,
 `count_array_references`, `count_components_with_attributes`,
 `export_supplemental_attribute_associations_openapi`, `export_time_series_associations_openapi`,
-`import_supplemental_attribute_associations_openapi!`, `count_parent_child_associations`,
-`count_supplemental_attribute_associations`, `count_supplemental_attributes`, `counts_by_type`,
-`flush!`, `forecast_entries`, `forecast_num_slots`, `forecast_read!`, `forecast_summary`,
-`forecast_timeline`, `forecast_values`, `get_array_by_hash`, `get_compression`, `get_counts`,
-`get_forecast_parameters`, `get_intervals`, `get_metadata`, `get_path`, `get_resolutions`,
-`get_time_series`, `get_time_series_key`, `get_time_series_keys`, `has_any_time_series`,
-`has_for_owner`, `has_parent_child_association`, `has_supplemental_attribute_association`,
-`has_time_series`, `in_transaction`, `init_logging`, `is_empty`, `key_info`, `list_array_groups`,
-`list_children`, `list_components_with_attributes`, `list_keys`, `list_names`, `list_owner_ids`,
-`list_owner_types`, `list_parent_child_associations`, `list_parents`,
-`list_supplemental_attribute_associations`, `list_supplemental_attribute_ids`, `list_time_series`,
-`num_distinct_arrays`, `open_copy`, `open_store`, `persist!`, `persist_catalog!`, `read_only`,
-`rollback_transaction!`, `transaction`, `begin_transaction!`, `commit_transaction!`,
-`remove_by_filter!`, `remove_parent_child_associations!`,
+`import_supplemental_attribute_associations_openapi!`, `import_time_series_associations_openapi!`,
+`count_parent_child_associations`, `count_supplemental_attribute_associations`,
+`count_supplemental_attributes`, `counts_by_type`, `flush!`, `forecast_entries`,
+`forecast_num_slots`, `forecast_read!`, `forecast_summary`, `forecast_timeline`, `forecast_values`,
+`get_array_by_hash`, `get_compression`, `get_counts`, `get_forecast_parameters`, `get_intervals`,
+`get_metadata`, `get_path`, `get_resolutions`, `get_time_series`, `get_time_series_key`,
+`get_time_series_keys`, `has_any_time_series`, `has_for_owner`, `has_parent_child_association`,
+`has_supplemental_attribute_association`, `has_time_series`, `in_transaction`, `init_logging`,
+`is_empty`, `key_info`, `list_array_groups`, `list_children`, `list_components_with_attributes`,
+`list_keys`, `list_names`, `list_owner_ids`, `list_owner_types`, `list_parent_child_associations`,
+`list_parents`, `list_supplemental_attribute_associations`, `list_supplemental_attribute_ids`,
+`list_time_series`, `num_distinct_arrays`, `open_copy`, `open_store`, `persist!`,
+`persist_catalog!`, `read_only`, `rollback_transaction!`, `transaction`, `begin_transaction!`,
+`commit_transaction!`, `remove_by_filter!`, `remove_parent_child_associations!`,
 `remove_supplemental_attribute_associations!`, `remove_time_series!`, `rename_time_series!`,
 `replace_owner!`, `replace_parent_child_component_id!`,
 `replace_supplemental_attribute_component_id!`, `static_grid`, `static_groups`, `static_read!`,
@@ -388,6 +388,22 @@ key vector returns an empty vector without touching the store.
 
 ```julia
 series = bulk_read(store, keys)   # keys :: Vector{TimeSeriesKey}
+```
+
+```julia
+read_by_ids(store::Store, ids::AbstractVector{<:Integer}) -> Vector
+```
+
+The same read addressed by catalog [association id](../explanation/data-model.md) rather than by key
+— the read direction of the id every write reports on its `AddedTimeSeries`, for a caller that
+recorded ids in its own model instead of keeping an id-to-key map beside the store. Results follow
+the order the ids are given, repeats included, each decoded into the same struct `bulk_read` would
+return. An id naming no row throws `NotFoundError` (the whole call fails; the error does not say
+which id dangled — sift them with `association_exists` when that matters), and an empty id vector
+returns an empty vector without touching the store.
+
+```julia
+series = read_by_ids(store, [added.id, other.id])
 ```
 
 ## Bulk Adds
@@ -1062,12 +1078,13 @@ Neither association catalog is exposed over the [gRPC server](./grpc-api.md) or 
 Direct JSON serde of the two association catalogs, in the wire spelling
 [SiennaSchemas](https://github.com/Sienna-Platform/SiennaSchemas) defines (`TimeSeries/*.json`,
 `Core/Associations/SupplementalAttributeAssociation.json`). Unlike `list_time_series` /
-`list_supplemental_attribute_associations`, which return Julia structs, these three functions
+`list_supplemental_attribute_associations`, which return Julia structs, these four functions
 exchange the wire JSON verbatim — the format a document author (e.g. PowerTableDataParser) reads and
 writes directly.
 
 ```julia
 export_time_series_associations_openapi(store; filters...) -> String
+import_time_series_associations_openapi!(store, json::AbstractString) -> Int
 export_supplemental_attribute_associations_openapi(store) -> String
 import_supplemental_attribute_associations_openapi!(store, json::AbstractString) -> Int
 ```
@@ -1083,10 +1100,17 @@ identity.
 insert (a duplicate anywhere in the batch throws `DuplicateAssociationError` and rolls the batch
 back), returning the number of rows inserted.
 
-There is no corresponding time-series _import_: infrastore never modifies the associations table or
-the data to make an incoming document agree with what it already holds. A geometry disagreement
-between an added series and its own association row is rejected at the add boundary instead
-(`InvalidParameterError`), loudly and without writing anything.
+`import_time_series_associations_openapi!` is the time-series import half, and it writes **rows
+only**: the document carries locators, never values, so every row must name an array this store
+already holds — the arrays arrive with the artifact. Each row keeps the `association_id` it carries,
+which is the point: an import that assigned fresh ids would leave every reference the document
+records pointing at the wrong series. A row whose array is absent, or a `NonSequentialTimeSeries`
+row (whose timestamp vector is not on the wire), throws `InvalidParameterError` and rolls the whole
+batch back.
+
+Infrastore never modifies the data to make an incoming document agree with what it already holds. A
+geometry disagreement between an added series and its own association row is likewise rejected at
+the add boundary (`InvalidParameterError`), loudly and without writing anything.
 
 ## Errors
 

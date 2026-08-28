@@ -1535,6 +1535,49 @@ int32_t infrastore_store_bulk_read(const struct InfraStore *handle,
                                    struct InfraStoreBulkReadHandle **out_result);
 
 /**
+ * Read many series named by their catalog association `id`, in the order the
+ * ids are given. The id-addressed counterpart of `infrastore_store_bulk_read`:
+ * results come back in the same `InfraStoreBulkReadHandle`, so a caller reads
+ * them out with the same `infrastore_bulk_result_*` accessors, and repeats in
+ * `ids` are honoured in place.
+ *
+ * The read direction of the id every write hands back through its `out_id`: a
+ * caller that recorded ids in its own model resolves them here instead of
+ * keeping an id-to-key map beside the store. Returns
+ * `INFRASTORE_ERR_NOT_FOUND` if any id names no row — unlike
+ * `infrastore_store_association_exists`, which asks the question, this call is
+ * already committed to reading and a stale reference is a failure. The error
+ * does not say *which* id dangled.
+ *
+ * # Safety
+ *
+ * `ids` must point to `n` readable `i64`s (it may be null only when `n` is 0).
+ * On `INFRASTORE_OK` the returned handle must be released exactly once with
+ * `infrastore_bulk_result_free`.
+ */
+int32_t infrastore_store_read_by_ids(const struct InfraStore *handle,
+                                     const int64_t *ids,
+                                     uint64_t n,
+                                     struct InfraStoreBulkReadHandle **out_result);
+
+/**
+ * Write the name of bulk-read item `index` into `out_name` as an owned C
+ * string. The keyed bulk read already knows each name from the key it passed
+ * in; `infrastore_store_read_by_ids` does not, so this is how an id-addressed
+ * caller labels what it got back.
+ *
+ * # Safety
+ *
+ * `result` must be a live bulk-read handle, `index` less than its length, and
+ * `out_name` valid for writing one pointer. `*out_name` is an owned string --
+ * never null on success -- and must be freed exactly once with
+ * `infrastore_string_free`.
+ */
+int32_t infrastore_bulk_result_item_name(const struct InfraStoreBulkReadHandle *result,
+                                         uint64_t index,
+                                         char **out_name);
+
+/**
  * Write the [`time_series_type_to_int`] discriminant of bulk-read item `index` into
  * `out_type` (`0`=SingleTimeSeries, `1`=NonSequentialTimeSeries,
  * `2`=Deterministic, `4`=Probabilistic, `5`=Scenarios — a bulk read never
@@ -2597,6 +2640,28 @@ int32_t infrastore_store_export_time_series_associations_openapi(const struct In
 int32_t infrastore_store_export_supplemental_attribute_associations_openapi(const struct InfraStore *handle,
                                                                             char **out_json,
                                                                             uint64_t *out_len);
+
+/**
+ * Bulk-ingest a JSON array of time-series association OpenAPI rows in one
+ * all-or-nothing transaction — the import half of the round trip whose export
+ * is `infrastore_store_export_time_series_associations_openapi`. When non-null,
+ * `out_added` receives the number inserted.
+ *
+ * Rows only: the document carries locators, never values, so every row must
+ * name an array this store already holds, and each row keeps the
+ * `association_id` it carries. A row whose array is absent, or a
+ * `NonSequentialTimeSeries` row (whose timestamp vector is not on the wire),
+ * is refused with `INFRASTORE_ERR_INVALID_PARAMETER`; an `association_id`
+ * already in use is `INFRASTORE_ERR_DUPLICATE_ASSOCIATION_ID`.
+ *
+ * # Safety
+ *
+ * `handle` must be a live read-write store handle and `json` a valid, null-terminated UTF-8
+ * string.
+ */
+int32_t infrastore_store_import_time_series_associations_openapi(struct InfraStore *handle,
+                                                                 const char *json,
+                                                                 uint64_t *out_added);
 
 /**
  * Bulk-ingest a JSON array of supplemental-attribute association OpenAPI rows

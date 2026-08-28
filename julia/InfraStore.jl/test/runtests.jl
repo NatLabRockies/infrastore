@@ -2295,8 +2295,9 @@ end
 
 # ---- OpenAPI-row association serde ------------------------------------------
 #
-# `export_time_series_associations_openapi`/`export_supplemental_attribute_associations_openapi`/
-# `import_supplemental_attribute_associations_openapi!` wrap the three Rust
+# `export_time_series_associations_openapi`/`import_time_series_associations_openapi!`/
+# `export_supplemental_attribute_associations_openapi`/
+# `import_supplemental_attribute_associations_openapi!` wrap the four Rust
 # core `openapi` methods. The golden tests below reproduce two of the
 # checked-in fixtures at `conformance/openapi_row_fixtures/` (the core's own
 # golden tests pin the rest).
@@ -2352,6 +2353,54 @@ end
         @test InfraStore.JSON.parse(json) ==
             [_openapi_fixture("supplemental_attribute_association")]
         close!(store)
+    end
+
+    @testset "time-series export/import round trips with its ids" begin
+        t0 = DateTime(2030, 1, 1)
+        source = Store(in_memory=true)
+        expected = Dict{Int, String}()
+        for (owner, name) in [(1, "load"), (2, "wind")]
+            added = add_time_series!(
+                source, owner, "Generator", Component,
+                SingleTimeSeries(t0, Hour(1), fill(0.0, 4), name);
+                id=owner * 100,
+            )
+            expected[added.id] = name
+        end
+        exported = export_time_series_associations_openapi(source)
+
+        # Arrays are content-addressed, so "the artifact brought the values" is
+        # a store already holding the same bytes under an identity of its own.
+        target = Store(in_memory=true)
+        add_time_series!(
+            target, 9, "Anchor", Component,
+            SingleTimeSeries(t0, Hour(1), fill(0.0, 4), "anchor"),
+        )
+        @test import_time_series_associations_openapi!(target, exported) == 2
+        for (id, name) in expected
+            @test get_metadata_by_id(target, id).name == name
+        end
+
+        close!(source)
+        close!(target)
+    end
+
+    @testset "time-series import refuses a row whose array is absent" begin
+        source = Store(in_memory=true)
+        add_time_series!(
+            source, 1, "Generator", Component,
+            SingleTimeSeries(DateTime(2030, 1, 1), Hour(1), fill(0.0, 4), "load"),
+        )
+        exported = export_time_series_associations_openapi(source)
+
+        empty_store = Store(in_memory=true)
+        @test_throws InfraStore.InvalidParameterError import_time_series_associations_openapi!(
+            empty_store, exported
+        )
+        @test isempty(list_time_series(empty_store))
+
+        close!(source)
+        close!(empty_store)
     end
 
     @testset "supplemental-attribute export/import round trips" begin
@@ -4631,6 +4680,36 @@ end
     @test_throws InfraStore.DuplicateAssociationIdError add_time_series!(
         store, 4, "Generator", Component, sts("load"); id=500
     )
+
+    close!(store)
+end
+
+@testset "association ids: read_by_ids follows the order it was given" begin
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+    store = Store(in_memory=true)
+
+    ids = Int[]
+    for (name, base) in [("a", 1.0), ("b", 10.0), ("c", 100.0)]
+        added = add_time_series!(
+            store, 1, "Generator", Component,
+            SingleTimeSeries(t0, res, collect(base .+ (0.0:2.0)), name),
+        )
+        push!(ids, added.id)
+    end
+
+    # Reversed, with a repeat: neither the catalog's order nor uniqueness is
+    # assumed, and each row comes back labelled with its own name.
+    got = read_by_ids(store, [ids[3], ids[1], ids[3], ids[2]])
+    @test length(got) == 4
+    @test all(g isa SingleTimeSeries for g in got)
+    @test [g.data[1] for g in got] == [100.0, 1.0, 100.0, 10.0]
+    @test [g.name for g in got] == ["c", "a", "c", "b"]
+
+    # An id naming no row fails the read outright — this call is already
+    # committed to reading, unlike `association_exists`.
+    @test_throws InfraStore.NotFoundError read_by_ids(store, [ids[1], 9999])
+    @test isempty(read_by_ids(store, Int[]))
 
     close!(store)
 end

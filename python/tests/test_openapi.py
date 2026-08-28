@@ -1,5 +1,6 @@
 """Direct JSON serde of the two association catalogs in the OpenAPI wire
 spelling: `export_time_series_associations_openapi`,
+`import_time_series_associations_openapi`,
 `export_supplemental_attribute_associations_openapi`, and
 `import_supplemental_attribute_associations_openapi`.
 
@@ -16,6 +17,7 @@ import numpy as np
 import pytest
 import infrastore
 from infrastore import (
+    NonSequentialTimeSeries,
     OwnerCategory,
     SingleTimeSeries,
     Store,
@@ -141,3 +143,72 @@ class TestSupplementalAttributeExportImport:
         with pytest.raises(infrastore.DuplicateAssociationError):
             store.import_supplemental_attribute_associations_openapi(json.dumps([row, row]))
         assert store.export_supplemental_attribute_associations_openapi() == "[]"
+
+
+class TestTimeSeriesImport:
+    """The rows-only import half: the document carries locators, so the arrays
+    have to already be in the target store, and the ids it carries are kept."""
+
+    def _source(self):
+        store = Store.create(in_memory=True)
+        expected = {}
+        for owner, name in [(1, "load"), (2, "wind")]:
+            added = store.add_time_series(
+                owner_id=owner, owner_type="Generator",
+                owner_category=OwnerCategory.Component,
+                time_series=SingleTimeSeries(
+                    T0, HOUR, np.zeros(4, dtype=np.float64), name
+                ),
+                id=owner * 100,
+            )
+            expected[added.id] = name
+        return store, expected
+
+    def _target_holding_the_arrays(self):
+        # Arrays are content-addressed, so "the artifact brought the values" is
+        # a store already holding the same bytes under an identity of its own.
+        store = Store.create(in_memory=True)
+        store.add_time_series(
+            owner_id=9, owner_type="Anchor", owner_category=OwnerCategory.Component,
+            time_series=SingleTimeSeries(
+                T0, HOUR, np.zeros(4, dtype=np.float64), "anchor"
+            ),
+        )
+        return store
+
+    def test_round_trips_with_its_ids(self):
+        source, expected = self._source()
+        exported = source.export_time_series_associations_openapi()
+
+        target = self._target_holding_the_arrays()
+        assert target.import_time_series_associations_openapi(exported) == 2
+        for id_, name in expected.items():
+            meta = target.get_metadata_by_id(id_)
+            assert meta is not None, f"id {id_} did not survive the import"
+            assert meta["name"] == name
+
+    def test_rejects_a_row_whose_array_is_absent(self):
+        source, _ = self._source()
+        exported = source.export_time_series_associations_openapi()
+
+        empty = Store.create(in_memory=True)
+        with pytest.raises(infrastore.InvalidParameterError):
+            empty.import_time_series_associations_openapi(exported)
+        assert empty.list_time_series() == []
+
+    def test_rejects_an_irregular_row(self):
+        store = Store.create(in_memory=True)
+        store.add_time_series(
+            owner_id=1, owner_type="Generator", owner_category=OwnerCategory.Component,
+            time_series=NonSequentialTimeSeries(
+                [T0, T0 + 5 * HOUR], np.array([1.0, 2.0], dtype=np.float64), "events"
+            ),
+        )
+        exported = store.export_time_series_associations_openapi()
+        with pytest.raises(infrastore.InvalidParameterError):
+            store.import_time_series_associations_openapi(exported)
+
+    def test_rejects_malformed_json(self):
+        store = Store.create(in_memory=True)
+        with pytest.raises(infrastore.StorageError):
+            store.import_time_series_associations_openapi("{not valid json")

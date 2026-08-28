@@ -306,7 +306,7 @@ Writes report the id they used, and reads take one:
 | Write     | `add_time_series` → `AddedTimeSeries` | `.id` on the result  | `.id` on the result  |
 | Resolve   | `get_metadata_by_id`                  | `get_metadata_by_id` | `get_metadata_by_id` |
 | Validate  | `association_exists`                  | `association_exists` | `association_exists` |
-| Read      | `bulk_read_by_ids`                    | `read_by_ids`        | —                    |
+| Read      | `read_by_ids`                         | `read_by_ids`        | `read_by_ids`        |
 
 `association_exists` fetches no row, so a consumer can check every reference in its model on load
 rather than discovering a dangling one mid-simulation.
