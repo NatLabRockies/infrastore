@@ -29,13 +29,20 @@
 //! a different thing from natural units, so the two must stay distinguishable
 //! through the round trip.
 //!
-//! `time_reference` is deliberately **absent** from this wire form, unlike every
-//! other descriptor. The schema this exports against is vendored from
-//! SiennaSchemas (`conformance/sienna_schemas/`), which has no such field yet,
-//! and emitting one would ship a wire change ahead of the spec that defines it.
-//! The reference is available everywhere else — the catalog, the metadata
-//! getters, the proto, and every binding — so an exporter that needs it today
-//! reads it from there; add it here in the same change that lands it upstream.
+//! Two fields run **ahead of the vendored schema** (SiennaSchemas,
+//! `conformance/sienna_schemas/`, which is adding them): `time_reference`, the
+//! catalog spelling of [`TimeReference`] (`"utc"`, `"zoneless"`, an offset, or
+//! a zone name), and `array_shape`, the stored array's full native shape —
+//! `[length, *element_shape]` in the catalog's own terms, where the schema's
+//! `element_shape` is only the per-step trailing shape (see
+//! [`wire_element_shape`]). Both exist so that a row imported from a document
+//! is *identical* to the row that was exported: the forecast layouts are
+//! conventions the caller owns, not rules the store enforces, so the native
+//! shape cannot be reconstructed from `horizon`/`count`/`percentiles` and has
+//! to travel. The schemas do not close their objects, so a reader that does
+//! not know the two fields ignores them; an import that finds `array_shape`
+//! absent falls back to the schema fields, which is exact for the static
+//! types and a best effort for forecasts.
 //!
 //! A time-series row also carries **`association_id`**, the wire spelling of
 //! [`TimeSeriesMetadata::id`], required by the schema on all six types.
@@ -73,6 +80,7 @@ use crate::error::Result;
 use crate::metadata::{SupplementalAttributeAssociation, SupplementalAttributeFilter};
 use crate::store::{ListFilter, Store};
 use crate::types::metadata::{FeatureValue, Features, TimeSeriesMetadata, UnitSystem};
+use crate::types::time_reference::TimeReference;
 use crate::types::time_series::TimeSeriesType;
 
 // ============================================================================
@@ -239,6 +247,20 @@ fn ts_row_to_json(meta: &TimeSeriesMetadata) -> Value {
         "element_shape".into(),
         Value::from(wire_element_shape(meta).to_vec()),
     );
+    // The native shape, so the import reproduces the catalog row exactly
+    // (module docs). `length` is the array's first axis for every type.
+    if let Some(length) = meta.length {
+        let mut array_shape = Vec::with_capacity(meta.element_shape.len() + 1);
+        array_shape.push(length);
+        array_shape.extend_from_slice(&meta.element_shape);
+        row.insert("array_shape".into(), Value::from(array_shape));
+    }
+    if let Some(reference) = &meta.time_reference {
+        row.insert(
+            "time_reference".into(),
+            Value::from(reference.as_storage_string()),
+        );
+    }
 
     if let Some(units) = &meta.units {
         row.insert("units".into(), Value::from(units.clone()));
@@ -341,6 +363,12 @@ struct RawTsRow {
     data_hash: Option<String>,
     element_type: String,
     element_shape: Vec<usize>,
+    /// The native `[length, *element_shape]` (module docs); absent in a
+    /// document from a producer that predates it.
+    #[serde(default)]
+    array_shape: Option<Vec<usize>>,
+    #[serde(default)]
+    time_reference: Option<String>,
     /// The store's `id`, under the schema's spelling.
     #[serde(default)]
     association_id: Option<i64>,
@@ -500,6 +528,28 @@ impl RawTsRow {
             Some(i) => Some(parse_period(i, "interval")?),
             None => None,
         };
+        let time_reference = match &self.time_reference {
+            Some(t) => Some(
+                TimeReference::parse(t)
+                    .map_err(|e| wire_err(format!("row '{}': time_reference: {e}", self.name)))?,
+            ),
+            None => None,
+        };
+        // The native shape when the document carries it; the schema's own
+        // fields otherwise (module docs).
+        let (length, element_shape) = match self.array_shape {
+            Some(shape) => {
+                let Some((&length, element_shape)) = shape.split_first() else {
+                    return Err(wire_err(format!(
+                        "row '{}': array_shape must have at least the time axis",
+                        self.name
+                    )));
+                };
+                (Some(length), element_shape.to_vec())
+            }
+            // A `Scenarios` row spells its array length `scenario_count`.
+            None => (self.length.or(self.scenario_count), self.element_shape),
+        };
         Ok(TimeSeriesMetadata {
             owner_id: self.owner_id,
             owner_type: self.owner_type,
@@ -509,8 +559,7 @@ impl RawTsRow {
             data_hash,
             initial_timestamp,
             resolution,
-            // A `Scenarios` row spells its array length `scenario_count`.
-            length: self.length.or(self.scenario_count),
+            length,
             horizon,
             interval,
             count: self.count,
@@ -519,12 +568,11 @@ impl RawTsRow {
             units: self.units,
             quantity_kind: self.quantity_kind,
             unit_system,
-            // Not on the wire yet -- see the module docs.
-            time_reference: None,
+            time_reference,
             component_field: self.component_field,
             percentiles: self.percentiles,
             element_type,
-            element_shape: self.element_shape,
+            element_shape,
             application_data: self.application_data,
             id: self.association_id,
         })

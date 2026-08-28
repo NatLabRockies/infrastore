@@ -65,7 +65,7 @@ Reads return a `DateTime` in UTC either way; see
 [Time and resolution conversions](../reference/julia-api.md#time-and-resolution-conversions).
 
 ```julia
-key = add_time_series!(
+added = add_time_series!(
     store,
     42,
     "Generator",
@@ -74,6 +74,8 @@ key = add_time_series!(
     features = Dict("model_year" => 2030),
     units = "MW",
 )
+key = added.key   # TimeSeriesKey
+added.id          # the catalog row's id: one integer to keep in your own model
 ```
 
 Notes:
@@ -84,7 +86,11 @@ Notes:
   `Bool`, `String`). String features are supported and round-trip unchanged.
 - Adding a duplicate [key](../explanation/data-model.md#keys) throws `DuplicateTimeSeriesError`.
 
-`add_time_series!` returns a `TimeSeriesKey` holding an opaque handle into the store.
+`add_time_series!` returns an `AddedTimeSeries`: its `key` is a `TimeSeriesKey` holding an opaque
+handle into the store, and its `id` is the catalog row's id (see
+[Association ids](../explanation/data-model.md#association-ids)). Every function taking a
+`TimeSeriesKey` also accepts the `AddedTimeSeries` directly, so `get_time_series(store, added)`
+works without unwrapping.
 
 Two more rules worth knowing up front. **Stored instants and periods are millisecond-precision**: a
 `Microsecond(1)` resolution, a `Millisecond(0)` one, or a negative period is refused with
@@ -132,7 +138,8 @@ batch = AddBatch()
 for (id, ts) in series
     add_time_series!(batch, id, "Generator", Component, ts; units = "MW")
 end
-keys = add_time_series_bulk!(store, batch)   # keys in input order; all-or-nothing
+added = add_time_series_bulk!(store, batch)   # Vector{AddedTimeSeries}, in input order; all-or-nothing
+keys = [a.key for a in added]
 ```
 
 ### Transactions

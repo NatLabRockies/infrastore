@@ -296,6 +296,14 @@ at the wrong series. That wire form spells the field `association_id` — in a d
 beside components and supplemental attributes, an unqualified `id` would not say which id it is —
 and the schema requires it on every time-series row.
 
+The same round trip carries two fields that run ahead of the vendored schema, which is adding them:
+`array_shape`, the stored array's full native shape (`[length, *element_shape]` in the catalog's
+terms, where the schema's `element_shape` is only the per-step trailing shape), and
+`time_reference`. Both exist so an imported row is _identical_ to the exported one — the forecast
+layouts above are conventions the caller owns, so the native shape cannot be rebuilt from `horizon`
+and `count`, and the reference is not on the schema at all. A reader that does not know them ignores
+them, and an import that finds them absent falls back to the schema's own fields.
+
 Each of the three catalog tables keeps its own independent counter, so an id is only meaningful
 alongside the table it came from.
 

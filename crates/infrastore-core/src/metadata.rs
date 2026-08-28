@@ -45,6 +45,10 @@ fn value_kind(value: &rusqlite::types::Value) -> &'static str {
         rusqlite::types::Value::Blob(_) => "a blob",
     }
 }
+/// Ids per `IN (...)` list in [`MetadataStore::list_by_ids`]. Well under
+/// SQLite's default 32766 bound variables even with the predicate bound three
+/// times, and large enough that a chunk is a bulk read in its own right.
+const IDS_PER_QUERY: usize = 500;
 
 /// Pages copied per step by [`MetadataStore::open_path_into_memory`]. The
 /// online-backup API requires a positive step size; this one is large enough
@@ -1781,10 +1785,23 @@ impl MetadataStore {
     /// One query rather than one per id, which is what makes a bulk read by
     /// reference cost the same as a bulk read by key.
     pub fn list_by_ids(&self, ids: &[i64]) -> Result<Vec<TimeSeriesMetadata>> {
-        self.list(&MetadataFilter {
-            ids: Some(ids.to_vec()),
-            ..Default::default()
-        })
+        // Each id is one bound `?`, and `list_inner` binds the predicate more
+        // than once per statement, so a model-sized set (tens of thousands of
+        // references) would trip SQLite's variable limit — and every distinct
+        // set size would be a distinct statement in the prepare cache. Sorted
+        // and deduplicated first, so the chunks concatenate in id order (which
+        // is catalog order) and no row appears twice.
+        let mut sorted = ids.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        let mut rows = Vec::with_capacity(sorted.len());
+        for chunk in sorted.chunks(IDS_PER_QUERY) {
+            rows.extend(self.list(&MetadataFilter {
+                ids: Some(chunk.to_vec()),
+                ..Default::default()
+            })?);
+        }
+        Ok(rows)
     }
 
     /// Whether a row is filed under `id`.
@@ -2397,6 +2414,60 @@ impl MetadataStore {
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
+    }
+
+    /// Refuse an explicit id that the table could ever have issued.
+    ///
+    /// "Never reissued" is a promise about *assigned* ids: `AUTOINCREMENT` only
+    /// ratchets `sqlite_sequence` upward, so a deleted row's id is never handed
+    /// out again. An explicit id is not covered by that mechanism — the primary
+    /// key only refuses an id a *live* row holds, so a caller could re-file a
+    /// deleted id and a stale reference in some consumer's model would quietly
+    /// resolve to the new series. This closes that hole: every explicit id must
+    /// sit above the table's high-water mark, which is also what
+    /// [`TimeSeriesError::DuplicateAssociationId`] already documents.
+    ///
+    /// Checked once per batch against the mark as it stands *before* the batch
+    /// writes, so a document's rows may arrive in any order; a duplicate within
+    /// the batch still lands on the primary key. Zero and negative ids are
+    /// refused up front: the C ABI spells "assign one" as `0`, and a negative
+    /// never comes from a catalog.
+    fn check_explicit_ids(tx: &Connection, table: &str, ids: &[i64]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        if let Some(bad) = ids.iter().find(|&&id| id <= 0) {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "association id {bad} is not a valid explicit id; ids are positive integers"
+            )));
+        }
+        let high_water: i64 = tx
+            .query_row(
+                "SELECT seq FROM sqlite_sequence WHERE name = ?1",
+                [table],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        match ids.iter().find(|&&id| id <= high_water) {
+            Some(&id) => Err(TimeSeriesError::DuplicateAssociationId(id)),
+            None => Ok(()),
+        }
+    }
+
+    /// [`Self::check_explicit_ids`] over `time_series_associations`.
+    pub fn check_explicit_time_series_ids(tx: &Connection, ids: &[i64]) -> Result<()> {
+        Self::check_explicit_ids(tx, "time_series_associations", ids)
+    }
+
+    /// [`Self::check_explicit_ids`] over `supplemental_attribute_associations`.
+    pub fn check_explicit_supplemental_attribute_ids(tx: &Connection, ids: &[i64]) -> Result<()> {
+        Self::check_explicit_ids(tx, SUPPLEMENTAL_ATTRIBUTE_TABLE.name, ids)
+    }
+
+    /// [`Self::check_explicit_ids`] over `parent_child_associations`.
+    pub fn check_explicit_parent_child_ids(tx: &Connection, ids: &[i64]) -> Result<()> {
+        Self::check_explicit_ids(tx, PARENT_CHILD_TABLE.name, ids)
     }
 
     /// Insert one endpoint pair and return the id it was filed under.

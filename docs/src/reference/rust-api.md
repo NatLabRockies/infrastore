@@ -93,11 +93,14 @@ impl Store {
         data: TimeSeriesData,
         features: Features,
         units: Option<String>,
-    ) -> Result<TimeSeriesKey>;
+    ) -> Result<AddedTimeSeries>;   // `.key` names the series, `.id` is the catalog row's id
+    // The same write from a prebuilt request (sets `application_data`, an
+    // explicit `id`, …).
+    pub fn add(&mut self, request: AddRequest) -> Result<AddedTimeSeries>;
 
     // A managed batch: packed series are written into batch-sized datasets that
     // fill whole HDF5 chunks (the optimized bulk-write path).
-    pub fn add_time_series_bulk(&mut self, items: Vec<AddRequest>) -> Result<Vec<TimeSeriesKey>>;
+    pub fn add_time_series_bulk(&mut self, items: Vec<AddRequest>) -> Result<Vec<AddedTimeSeries>>;
 
     // Begin a buffered bulk add. Requests pushed onto the returned guard are
     // accumulated in memory and written together by `BulkAdd::commit` (same
@@ -1238,6 +1241,34 @@ pub struct AddRequest {
     pub features: Features,
     pub units: Option<String>,
     pub application_data: Option<String>,
+    pub id: Option<i64>,   // `None` (the default) lets the catalog assign; see `with_id`
+    // …plus the other descriptors (`quantity_kind`, `unit_system`,
+    // `time_reference`, `component_field`), all `Option` and defaulting to unset
+}
+
+impl AddRequest {
+    pub fn new(owner_id: i64, owner_type: &str, owner_category: OwnerCategory,
+               data: TimeSeriesData) -> Self;              // everything else unset
+    pub fn with_features(self, features: Features) -> Self;
+    pub fn with_id(self, id: i64) -> Self;                  // file under this id
+}
+```
+
+An explicit `id` is for an import that must keep the references a document recorded. It has to lie
+above the catalog's counter — `DuplicateAssociationId` otherwise, so a document's ids fit a fresh
+store but not one that has issued ids of its own, and a deleted id can never be re-filed — and a
+batch supplies one for every request or for none (`InvalidParameter` for a mix).
+
+### `AddedTimeSeries`
+
+What every write returns: the key naming the series, and the catalog id it was filed under. The id
+is deliberately not on `TimeSeriesKey`, because a key is also an _argument_ (to `get`, to `remove`)
+where an id would mean nothing. See [Association ids](../explanation/data-model.md#association-ids).
+
+```rust
+pub struct AddedTimeSeries {
+    pub key: TimeSeriesKey,
+    pub id: i64,
 }
 ```
 
@@ -1262,7 +1293,7 @@ impl BulkAdd<'_> {
     ) -> &mut Self;                                             // application_data = None
     pub fn len(&self) -> usize;          // requests buffered so far
     pub fn is_empty(&self) -> bool;
-    pub fn commit(self) -> Result<Vec<TimeSeriesKey>>;          // keys in push order
+    pub fn commit(self) -> Result<Vec<AddedTimeSeries>>;        // in push order
 }
 ```
 

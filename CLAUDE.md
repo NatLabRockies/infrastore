@@ -54,11 +54,14 @@ same way it maps `unit_system` between the store's snake_case and the schema's S
 descriptive — outside `TimeSeriesKey` and both content hashes — but unlike the descriptors above it
 describes the _row_ rather than the data: it is per-store, so `merge` assigns fresh ids and `diff`
 ignores it, while `rename`/`reassign`/`compact`/`persist_to` all preserve it. A caller may supply
-one explicitly (all-or-none within a batch) so an imported document keeps the references it
-recorded; `import_time_series_associations_openapi` is the rows-only import that does so, refusing a
-row whose array is absent and refusing `NonSequentialTimeSeries` outright (its timestamp vector is
-not on the wire). The two association catalogs carry ids on the same terms, with independent
-counters, and equality on both association types deliberately excludes the id.
+one explicitly (all-or-none within a batch, and only above the catalog's high-water mark, so a
+deleted id can no more be re-filed by hand than reissued) so an imported document keeps the
+references it recorded; `import_time_series_associations_openapi` is the rows-only import that does
+so, refusing a row whose array is absent, a `DeterministicSingleTimeSeries` whose source
+`SingleTimeSeries` is neither in the document nor already stored, and `NonSequentialTimeSeries`
+outright (its timestamp vector is not on the wire). The two association catalogs carry ids on the
+same terms, with independent counters, and equality on both association types deliberately excludes
+the id.
 
 Metadata getters surface `element_shape` and `features` in every binding. Alongside `units`, a
 series carries two further unit descriptors in every binding: `quantity_kind` (free-form, QUDT

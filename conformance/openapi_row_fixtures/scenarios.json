@@ -12,6 +12,12 @@
   "element_shape": [
     5
   ],
+  "array_shape": [
+    5,
+    4,
+    24,
+    5
+  ],
   "units": "MW",
   "quantity_kind": "ActivePower",
   "unit_system": "NATURAL_UNITS",

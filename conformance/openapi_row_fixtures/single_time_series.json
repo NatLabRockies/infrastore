@@ -13,6 +13,9 @@
   "association_id": 3,
   "element_type": "f64",
   "element_shape": [],
+  "array_shape": [
+    8760
+  ],
   "units": "MW",
   "quantity_kind": "ActivePower",
   "unit_system": "NATURAL_UNITS",

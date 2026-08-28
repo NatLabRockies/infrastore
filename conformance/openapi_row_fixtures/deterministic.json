@@ -13,6 +13,10 @@
   "association_id": 5,
   "element_type": "f64",
   "element_shape": [],
+  "array_shape": [
+    24,
+    365
+  ],
   "units": "pu",
   "quantity_kind": "ActivePower",
   "unit_system": "COMPONENT_BASE",

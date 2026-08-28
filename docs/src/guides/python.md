@@ -64,7 +64,7 @@ carried on the object — the same array can be added under different names. Use
 ## Add a Series
 
 ```python
-key = store.add_time_series(
+added = store.add_time_series(
     owner_id=42,
     owner_type="Generator",
     owner_category=OwnerCategory.Component,
@@ -72,6 +72,8 @@ key = store.add_time_series(
     features={"model_year": 2030, "scenario": "high"},
     units="MW",
 )
+key = added.key   # TimeSeriesKey: re-find the series with it
+added.id          # the catalog row's id: one integer to keep in your own model
 ```
 
 `features` is a plain dict whose values are `int`, `float`, `bool`, or `str`. Adding a series whose
@@ -118,11 +120,12 @@ load a system: an order of magnitude faster than a loop of single adds, and same
 in the same packed dataset.
 
 ```python
-keys = store.add_time_series_bulk([
+added = store.add_time_series_bulk([
     {"owner_id": i, "owner_type": "Generator", "owner_category": OwnerCategory.Component,
      "time_series": series[i], "units": "MW"}
     for i in range(len(series))
-])   # keys in input order; all-or-nothing
+])   # one AddedTimeSeries per item, in input order; all-or-nothing
+keys = [a.key for a in added]
 ```
 
 ### Transactions

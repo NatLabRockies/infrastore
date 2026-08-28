@@ -10,6 +10,9 @@
   "association_id": 4,
   "element_type": "bool",
   "element_shape": [],
+  "array_shape": [
+    42
+  ],
   "application_data": "{\"module\":\"PowerSystems\"}",
   "length": 42
 }

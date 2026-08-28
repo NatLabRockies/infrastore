@@ -588,6 +588,99 @@ fn a_batch_may_not_mix_supplied_and_assigned_ids() {
         .unwrap();
 }
 
+/// An explicit id cannot re-file a deleted id either. "Never reissued" would
+/// be a promise about assigned ids only if the primary key were the sole guard:
+/// it refuses an id a *live* row holds and nothing else, so an import carrying
+/// a retired id would make a stale reference resolve to a different series. An
+/// explicit id must therefore sit above the counter, which is also what the
+/// `DuplicateAssociationId` message has said all along.
+#[test]
+fn an_explicit_id_cannot_reissue_a_deleted_one() {
+    let mut store = create_store(None, true).unwrap();
+    let added = store
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series("first")),
+        ))
+        .unwrap();
+    store.remove_time_series(&key("first")).unwrap();
+
+    let err = store
+        .add(
+            AddRequest::new(
+                2,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(series("second")),
+            )
+            .with_id(added.id),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, TimeSeriesError::DuplicateAssociationId(id) if id == added.id),
+        "a retired id must be refused as taken, got {err:?}",
+    );
+    assert!(!store.association_exists(added.id).unwrap());
+
+    // The floor is the counter *before* the batch, so a document's ids may
+    // arrive in any order as long as all of them are new.
+    let added = store
+        .add_time_series_bulk(vec![
+            AddRequest::new(
+                2,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(series("high")),
+            )
+            .with_id(20),
+            AddRequest::new(
+                2,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(series("low")),
+            )
+            .with_id(10),
+        ])
+        .unwrap();
+    assert_eq!(added.iter().map(|a| a.id).collect::<Vec<_>>(), vec![20, 10]);
+
+    // Zero is the C ABI's "assign one" and never a real id.
+    let err = store
+        .add(
+            AddRequest::new(
+                3,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(series("zero")),
+            )
+            .with_id(0),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, TimeSeriesError::InvalidParameter(_)),
+        "{err:?}"
+    );
+
+    // The same rule over an association catalog's own counter.
+    let id = store
+        .add_supplemental_attribute_association(attach(1, 1))
+        .unwrap();
+    store
+        .remove_supplemental_attribute_associations(&SupplementalAttributeFilter::default())
+        .unwrap();
+    let mut retired = attach(2, 2);
+    retired.id = Some(id);
+    let err = store
+        .add_supplemental_attribute_association(retired)
+        .unwrap_err();
+    assert!(
+        matches!(err, TimeSeriesError::DuplicateAssociationId(got) if got == id),
+        "{err:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The two association catalogs
 // ---------------------------------------------------------------------------
@@ -1197,6 +1290,251 @@ fn a_document_round_trips_with_its_ids() {
             .unwrap_or_else(|| panic!("id {id} did not survive the import"));
         assert_eq!(&meta.name, name);
     }
+}
+/// A read by reference scales past one `IN (...)` list. Each id is a bound
+/// variable, and the predicate is bound more than once per statement, so a
+/// model-sized set once tripped SQLite's variable limit where the keyed read
+/// of the same series did not.
+#[test]
+fn a_read_by_ids_spans_many_query_chunks() {
+    let mut store = create_store(None, true).unwrap();
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let mut bulk = store.bulk_add();
+    for i in 0..1_200 {
+        let data = TypedArray::from_f64(vec![2], &[i as f64, 0.0]);
+        bulk.push(AddRequest::new(
+            i,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+                initial,
+                Duration::hours(1),
+                data,
+                "load",
+            )),
+        ));
+    }
+    let added = bulk.commit().unwrap();
+    // Reversed, so the answer's order is visibly the caller's, not the catalog's.
+    let asked: Vec<i64> = added.iter().rev().map(|a| a.id).collect();
+    let got = store.bulk_read_by_ids(&asked).unwrap();
+    assert_eq!(got.len(), 1_200);
+    let firsts: Vec<f64> = got
+        .iter()
+        .map(|d| d.as_single().unwrap().data.to_f64_vec().unwrap()[0])
+        .collect();
+    let expected: Vec<f64> = (0..1_200).rev().map(|i| i as f64).collect();
+    assert_eq!(firsts, expected);
+}
+
+/// A row that went through the document comes back *identical* — including the
+/// native array shape a forecast stores (which the schema's per-step
+/// `element_shape` strips) and the time reference. Neither can be rebuilt from
+/// the schema's own fields: the forecast layouts are the caller's conventions,
+/// and the reference is not on the schema at all.
+#[test]
+fn an_imported_row_is_identical_to_the_exported_one() {
+    let mut source = create_store(None, true).unwrap();
+    let initial = Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap();
+    let values: Vec<f64> = (0..24 * 365).map(|i| i as f64).collect();
+    let forecast = infrastore_core::Deterministic::new(
+        initial,
+        Duration::hours(1),
+        Duration::days(1),
+        Duration::hours(1),
+        365,
+        TypedArray::from_f64(vec![24, 365], &values),
+        "forecast",
+    )
+    .unwrap()
+    .with_time_reference(infrastore_core::TimeReference::Zone(
+        "America/Denver".into(),
+    ));
+    let added = source
+        .add(
+            AddRequest::new(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::Deterministic(forecast),
+            )
+            .with_id(100),
+        )
+        .unwrap();
+    let original = source.get_metadata_by_id(added.id).unwrap().unwrap();
+    assert_eq!(
+        original.element_shape,
+        vec![365],
+        "the native shape is what the catalog holds"
+    );
+    let json = source
+        .export_time_series_associations_openapi(&ListFilter::default())
+        .unwrap();
+    assert!(json.contains("\"array_shape\":[24,365]"), "{json}");
+    assert!(
+        json.contains("\"time_reference\":\"America/Denver\""),
+        "{json}"
+    );
+
+    let mut target = create_store(None, true).unwrap();
+    // The array, under another owner, so only the row is missing.
+    target
+        .add(AddRequest::new(
+            9,
+            "Anchor",
+            OwnerCategory::Component,
+            TimeSeriesData::Deterministic(
+                infrastore_core::Deterministic::new(
+                    initial,
+                    Duration::hours(1),
+                    Duration::days(1),
+                    Duration::hours(1),
+                    365,
+                    TypedArray::from_f64(vec![24, 365], &values),
+                    "anchor",
+                )
+                .unwrap(),
+            ),
+        ))
+        .unwrap();
+    target
+        .import_time_series_associations_openapi(&json)
+        .unwrap();
+    let imported = target.get_metadata_by_id(added.id).unwrap().unwrap();
+    assert_eq!(imported, original);
+}
+
+/// An import is held to the same all-or-none id rule as a bulk add. Rows are
+/// not inserted in document order (views go last), so a mixed document's
+/// outcome would depend on an order the document's author never saw.
+#[test]
+fn an_import_refuses_a_document_that_mixes_supplied_and_missing_ids() {
+    let mut source = create_store(None, true).unwrap();
+    for (owner, name) in [(1, "load"), (2, "wind")] {
+        source
+            .add(AddRequest::new(
+                owner,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(series(name)),
+            ))
+            .unwrap();
+    }
+    let json = source
+        .export_time_series_associations_openapi(&ListFilter::default())
+        .unwrap();
+    let mut rows: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+    rows[1].as_object_mut().unwrap().remove("association_id");
+    let mixed = serde_json::to_string(&rows).unwrap();
+
+    let mut target = create_store(None, true).unwrap();
+    target
+        .add(AddRequest::new(
+            9,
+            "Anchor",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series("anchor")),
+        ))
+        .unwrap();
+    let err = target
+        .import_time_series_associations_openapi(&mixed)
+        .unwrap_err();
+    match err {
+        TimeSeriesError::InvalidParameter(msg) => {
+            assert!(msg.contains("1 of 2 rows"), "{msg}");
+        }
+        other => panic!("expected InvalidParameter, got {other:?}"),
+    }
+    assert_eq!(
+        target
+            .list_time_series(ListFilter::default())
+            .unwrap()
+            .len(),
+        1,
+        "nothing from the document may land",
+    );
+}
+
+/// A `DeterministicSingleTimeSeries` row is a view of a `SingleTimeSeries`;
+/// importing the view without its source would create a state the sweep never
+/// produces. The source may arrive in the same document or already be stored;
+/// what it may not be is absent.
+#[test]
+fn an_import_refuses_a_view_without_its_source() {
+    let mut source = create_store(None, true).unwrap();
+    // High ids, so the document fits a target that has issued ids of its own.
+    source
+        .add(
+            AddRequest::new(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(long_series("load")),
+            )
+            .with_id(100),
+        )
+        .unwrap();
+    source
+        .transform_single_time_series(
+            Duration::hours(6),
+            Duration::hours(6),
+            None,
+            None,
+            TransformPolicy::default(),
+        )
+        .unwrap();
+    let json = source
+        .export_time_series_associations_openapi(&ListFilter::default())
+        .unwrap();
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+    assert_eq!(rows.len(), 2);
+    let only_view: Vec<&serde_json::Value> = rows
+        .iter()
+        .filter(|r| r["time_series_type"] == "DeterministicSingleTimeSeries")
+        .collect();
+    assert_eq!(only_view.len(), 1);
+    let view_only_json = serde_json::to_string(&only_view).unwrap();
+
+    // The array is present (another owner holds the same values), so only
+    // the source check stands between the view and the catalog.
+    let mut target = create_store(None, true).unwrap();
+    target
+        .add(AddRequest::new(
+            9,
+            "Anchor",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(long_series("anchor")),
+        ))
+        .unwrap();
+    let err = target
+        .import_time_series_associations_openapi(&view_only_json)
+        .unwrap_err();
+    match err {
+        TimeSeriesError::InvalidParameter(msg) => {
+            assert!(
+                msg.contains("neither in this document nor already stored"),
+                "{msg}"
+            );
+        }
+        other => panic!("expected InvalidParameter, got {other:?}"),
+    }
+    assert_eq!(
+        target
+            .list_time_series(ListFilter::default())
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // With the source in the same document — in either order — it lands.
+    let mut reversed = rows.clone();
+    reversed.reverse();
+    assert_eq!(
+        target
+            .import_time_series_associations_openapi(&serde_json::to_string(&reversed).unwrap())
+            .unwrap(),
+        2
+    );
 }
 
 /// An import refuses a row naming an array the store does not hold, rather than

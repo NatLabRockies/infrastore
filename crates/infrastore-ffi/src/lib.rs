@@ -4932,6 +4932,12 @@ pub const INTERVAL_BUF_LEN: u64 = 64;
 ///   bounded, so the caller passes a fixed buffer of `INTERVAL_BUF_LEN` bytes.
 /// - `out_interval_normalized` — non-zero when the request described a single
 ///   window (see `normalize_single_window`).
+/// - `out_ids` — the catalog id of each view written, in the order they were
+///   written; free with `infrastore_buffer_free_i64(ptr, *out_count)`. Set to
+///   null when nothing was written — a dry run or an idempotent re-run — and a
+///   null pointer must never be indexed, whatever `*out_count` says: on a dry
+///   run `*out_count` is the count a committing run *would* produce, and no
+///   ids exist for it yet. Check the pointer, not the count.
 ///
 /// The two policy flags are `TransformPolicy` (see the core docs); both false
 /// is the permissive default, and InfrastructureSystems.jl passes both true:
@@ -5025,9 +5031,11 @@ pub unsafe extern "C" fn infrastore_store_transform_single_time_series(
                     );
                 }
                 if !out_ids.is_null() {
-                    // `*out_count` elements, in the order they were written.
-                    // Null for a dry run and for an idempotent re-run, which
-                    // both write nothing — `*out_count` says so first.
+                    // `*out_count` elements, in the order they were written,
+                    // or null when nothing was. A dry run is the case to watch:
+                    // it reports the *planned* count in `*out_count` while
+                    // writing nothing, so the pointer, not the count, is the
+                    // caller's signal (documented above).
                     let ids: Vec<i64> = outcome.written.iter().map(|a| a.id).collect();
                     *out_ids = if ids.is_empty() {
                         ptr::null_mut()

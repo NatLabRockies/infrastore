@@ -169,7 +169,8 @@ def add_time_series(
     unit_system: str | None = None,   # "natural_units" | "component_base"
     time_reference: str | None = None,   # "utc" | "zoneless" | "-07:00" | "America/Denver"
     component_field: str | None = None,  # e.g. "max_active_power"
-) -> TimeSeriesKey: ...
+    id: int | None = None,               # file under this catalog id (imports); default: assign
+) -> AddedTimeSeries: ...
 # `time_reference` is normally omitted: it is inferred from the datetime the
 # series was built with (see "Time references" below). Pass it to override.
 # An unrecognized `unit_system` raises InvalidParameterError rather than
@@ -180,13 +181,24 @@ def add_time_series(
 # A `features` key that shadows a time-series or key field (`name`, `resolution`,
 # `owner_id`, ...) raises InvalidParameterError.
 
-def add_time_series_bulk(self, items: list[dict]) -> list[TimeSeriesKey]: ...
+def add_time_series_bulk(self, items: list[dict]) -> list[AddedTimeSeries]: ...
 # Each item dict mirrors add_time_series's parameters: required `owner_id`,
 # `owner_type`, `owner_category`, `time_series`; optional `features`, `units`,
 # `element_type`, `application_data`, `quantity_kind`, `unit_system`,
-# `time_reference`, `component_field`.
+# `time_reference`, `component_field`, `id` (all items or none).
 # All items commit in ONE metadata transaction (all-or-nothing), which is much
-# faster than looping over add_time_series. Keys are returned in input order.
+# faster than looping over add_time_series. Results are in input order.
+
+class AddedTimeSeries:
+    key: TimeSeriesKey   # names the series
+    id: int              # the catalog row's id — store it to reference the series later
+# Hashable and comparable; the id is never reissued once its row is deleted. An
+# explicit `id=` on a write must lie above the catalog's counter (a document's
+# own ids fit a fresh store), else DuplicateAssociationIdError.
+
+def get_metadata_by_id(self, id: int) -> dict | None: ...   # None when no row has the id
+def association_exists(self, id: int) -> bool: ...          # no row fetched
+def read_by_ids(self, ids: list[int]) -> list[TimeSeriesData]: ...   # in the order given
 
 def transform_single_time_series(
     self,

@@ -1242,6 +1242,7 @@ impl Store {
         // Stage backend writes so we can roll them back on metadata error.
         let mut staged_hashes: Vec<[u8; 32]> = Vec::with_capacity(items.len());
         let tx = self.metadata.savepoint()?;
+        MetadataStore::check_explicit_time_series_ids(&tx, &explicit_ids(&items))?;
         let mut added = Vec::with_capacity(items.len());
         // Feature sets and timestamp vectors are shared, and a batch typically
         // spans only a handful of distinct ones; write each once rather than
@@ -1367,6 +1368,7 @@ impl Store {
 
         // Insert associations in input order; roll the whole batch back on error.
         let tx = self.metadata.savepoint()?;
+        MetadataStore::check_explicit_time_series_ids(&tx, &explicit_ids(&items))?;
         let mut shared_sets = SharedSetCache::default();
         let mut ids = Vec::with_capacity(parts.len());
         for p in &parts {
@@ -1756,6 +1758,7 @@ impl Store {
             ..src
         };
         let tx = self.metadata.savepoint()?;
+        MetadataStore::check_explicit_time_series_ids(&tx, id.as_slice())?;
         check_forecast_family_free(&tx, &meta, "derive")?;
         let assigned = MetadataStore::insert(&tx, &meta)?;
         tx.commit()?;
@@ -1814,6 +1817,20 @@ impl Store {
             }
         }
 
+        // The same all-or-none rule as a bulk add: the schema requires
+        // `association_id` on every row, so a document missing some is not one
+        // this store wrote, and mixing assigned with supplied ids would make the
+        // outcome depend on insertion order (which, with views deferred below,
+        // is not even the document's own order).
+        let explicit = rows.iter().filter(|m| m.id.is_some()).count();
+        if explicit != 0 && explicit != rows.len() {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "{explicit} of {} rows carry an association_id and the rest do not; a \
+                 document either supplies one for every row or for none",
+                rows.len()
+            )));
+        }
+
         // Views last: a `DeterministicSingleTimeSeries` is a view of a
         // `SingleTimeSeries`, and `check_forecast_family_free` reads the rows
         // already inserted, so the order within one batch is load-bearing
@@ -1823,9 +1840,39 @@ impl Store {
             .partition(|m| m.time_series_type == TimeSeriesType::DeterministicSingleTimeSeries);
 
         let tx = self.metadata.savepoint()?;
+        let ids: Vec<i64> = plain
+            .iter()
+            .chain(views.iter())
+            .filter_map(|m| m.id)
+            .collect();
+        MetadataStore::check_explicit_time_series_ids(&tx, &ids)?;
         let mut shared_sets = SharedSetCache::default();
         let mut inserted = 0usize;
-        for meta in plain.iter().chain(views.iter()) {
+        for meta in &plain {
+            insert_association(&tx, meta, &mut shared_sets)?;
+            inserted += 1;
+        }
+        for meta in &views {
+            // A view without its source is a state `transform_single_time_series`
+            // never produces, and one a later remove of the shared array's other
+            // holder would leave dangling. The plain rows are already in, so
+            // one family probe covers "in this document" and "already stored".
+            let has_source = crate::metadata::forecast_family_conflict(
+                &tx,
+                meta.owner_id,
+                meta.owner_category,
+                &meta.name,
+                meta.resolution,
+                &crate::hash::features_hash(&meta.features),
+                TimeSeriesType::SingleTimeSeries,
+            )?;
+            if !has_source {
+                return Err(TimeSeriesError::InvalidParameter(format!(
+                    "cannot import DeterministicSingleTimeSeries '{}' (owner {}): it is a view \
+                     of a SingleTimeSeries that is neither in this document nor already stored",
+                    meta.name, meta.owner_id,
+                )));
+            }
             insert_association(&tx, meta, &mut shared_sets)?;
             inserted += 1;
         }
@@ -3351,6 +3398,7 @@ impl Store {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
         let tx = self.metadata.savepoint()?;
+        MetadataStore::check_explicit_supplemental_attribute_ids(&tx, assoc.id.as_slice())?;
         let id = MetadataStore::insert_supplemental_attribute_association(&tx, &assoc)?;
         tx.commit()?;
         Ok(id)
@@ -3370,6 +3418,8 @@ impl Store {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
         let tx = self.metadata.savepoint()?;
+        let explicit: Vec<i64> = assocs.iter().filter_map(|a| a.id).collect();
+        MetadataStore::check_explicit_supplemental_attribute_ids(&tx, &explicit)?;
         let mut ids = Vec::with_capacity(assocs.len());
         for assoc in &assocs {
             ids.push(MetadataStore::insert_supplemental_attribute_association(
@@ -3502,6 +3552,7 @@ impl Store {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
         let tx = self.metadata.savepoint()?;
+        MetadataStore::check_explicit_parent_child_ids(&tx, assoc.id.as_slice())?;
         let id = MetadataStore::insert_parent_child_association(&tx, &assoc)?;
         tx.commit()?;
         Ok(id)
@@ -3517,6 +3568,8 @@ impl Store {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
         let tx = self.metadata.savepoint()?;
+        let explicit: Vec<i64> = assocs.iter().filter_map(|a| a.id).collect();
+        MetadataStore::check_explicit_parent_child_ids(&tx, &explicit)?;
         let mut ids = Vec::with_capacity(assocs.len());
         for assoc in &assocs {
             ids.push(MetadataStore::insert_parent_child_association(&tx, assoc)?);
@@ -4543,9 +4596,16 @@ fn validate_id_mode(items: &[AddRequest]) -> Result<()> {
         return Ok(());
     }
     Err(TimeSeriesError::InvalidParameter(format!(
-        "{explicit} of {} requests supply an explicit id and the rest do not; a batch must          either supply an id for every request (importing a document's own ids) or for none          of them (letting the catalog assign)",
+        "{explicit} of {} requests supply an explicit id and the rest do not; a batch must \
+         either supply an id for every request (importing a document's own ids) or for none \
+         of them (letting the catalog assign)",
         items.len()
     )))
+}
+
+/// The ids a batch supplies explicitly, for the high-water check.
+fn explicit_ids(items: &[AddRequest]) -> Vec<i64> {
+    items.iter().filter_map(|i| i.id).collect()
 }
 
 /// Insert one association, enforcing the Deterministic/DeterministicSingleTimeSeries

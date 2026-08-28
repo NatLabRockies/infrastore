@@ -262,6 +262,11 @@ them raises `InvalidParameterError` rather than being quietly ignored. The eleme
 on the result instead, in its own `{T,N}` and in a reader group's `dtype`.
 
 ```julia
+struct AddedTimeSeries                       # every write: add_time_series!, add_time_series_bulk!, add_derived_view!
+    key :: TimeSeriesKey                     # names the series
+    id  :: Int64                             # the catalog row's id; never reissued once the row is deleted
+end                                          # accepted anywhere a TimeSeriesKey is
+
 struct TimeSeriesMetadata                    # get_metadata / list_time_series
     owner_id          :: Int64
     owner_type        :: String
@@ -335,7 +340,8 @@ add_time_series!(
     features::AbstractDict = Dict(), element_type = ts.element_type, units = ts.units,
     quantity_kind = ts.quantity_kind, unit_system = ts.unit_system,
     component_field = ts.component_field, application_data = ts.application_data,
-) -> TimeSeriesKey
+    id = nothing,   # file under this catalog id (imports); `nothing` lets the catalog assign
+) -> AddedTimeSeries   # `.key::TimeSeriesKey`, `.id::Int64`; usable wherever a key is
 
 get_time_series(store::Store, key::TimeSeriesKey; time_range=nothing) -> SingleTimeSeries
 get_time_series(SingleTimeSeries, store::Store, key::TimeSeriesKey;
@@ -395,7 +401,7 @@ series = bulk_read(store, keys)   # keys :: Vector{TimeSeriesKey}
 ```julia
 batch = AddBatch()
 add_time_series!(batch, owner_id, owner_type, owner_category, ts; ...)  # any series type
-add_time_series_bulk!(store::Store, batch::AddBatch) -> Vector{TimeSeriesKey}
+add_time_series_bulk!(store::Store, batch::AddBatch) -> Vector{AddedTimeSeries}   # in input order
 ```
 
 `AddBatch` accepts the same `add_time_series!` methods as `Store` (every series and forecast type)
@@ -524,7 +530,8 @@ add_time_series!(
     features=Dict(), element_type=ts.element_type, units=ts.units,
     quantity_kind=ts.quantity_kind, unit_system=ts.unit_system,
     component_field=ts.component_field, application_data=ts.application_data,
-) -> TimeSeriesKey
+    id=nothing,
+) -> AddedTimeSeries
 ```
 
 The descriptor keywords default to the struct's own fields, so a label set at construction survives

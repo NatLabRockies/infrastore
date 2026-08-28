@@ -2334,7 +2334,12 @@ end
         # dropped from both sides.
         @test row["association_id"] == 1
         want = _openapi_fixture("single_time_series")
-        drop_id(d) = Dict(k => v for (k, v) in d if k != "association_id")
+        # A bare `DateTime` is a wall clock, so the export carries the
+        # `zoneless` reference the fixture (built by the Rust core, which
+        # infers nothing) leaves unspecified. Right value, not the fixture's.
+        @test row["time_reference"] == "zoneless"
+        drop_id(d) =
+            Dict(k => v for (k, v) in d if k ∉ ("association_id", "time_reference"))
         @test drop_id(row) == drop_id(want)
 
         close!(store)

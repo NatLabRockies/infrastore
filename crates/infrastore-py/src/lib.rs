@@ -1281,8 +1281,7 @@ impl PyAddedTimeSeries {
     }
 
     fn __hash__(&self) -> u64 {
-        use std::hash::{BuildHasher, RandomState};
-        RandomState::new().hash_one(self.id)
+        hash_of(&self.id)
     }
 }
 

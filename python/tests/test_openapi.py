@@ -62,6 +62,11 @@ class TestTimeSeriesExport:
         # rows were written first. Presence is asserted here and the value
         # dropped from both sides.
         assert row.pop("association_id") == 1
+        # ``time_reference`` is inferred from the datetime's tzinfo here, where
+        # the fixture (built from the Rust core, which infers nothing) leaves
+        # the reference unspecified. The value is right; it is not the
+        # fixture's to carry.
+        assert row.pop("time_reference") == "utc"
         want = fixture("single_time_series")
         want.pop("association_id")
         assert row == want

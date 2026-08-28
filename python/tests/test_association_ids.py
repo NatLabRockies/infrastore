@@ -15,6 +15,7 @@ import pytest
 
 from infrastore import (
     AddedTimeSeries,
+    DuplicateAssociationIdError,
     InvalidParameterError,
     NotFoundError,
     OwnerCategory,
@@ -65,6 +66,23 @@ class TestWriting:
         added = store.add_time_series_bulk(items)
         assert [a.id for a in added] == [1, 2, 3]
         assert [a.key.owner_id for a in added] == [0, 1, 2]
+
+    def test_a_result_hashes_stably(self):
+        # Regression: ``__hash__`` once seeded a fresh hasher per call, so the
+        # same object hashed differently each time and never found itself in
+        # a set or dict.
+        store = Store.create(in_memory=True)
+        added = _add(store, "load")
+        assert hash(added) == hash(added)
+        assert added in {added}
+        assert {added: "x"}[added] == "x"
+
+    def test_an_explicit_id_cannot_reissue_a_deleted_one(self):
+        store = Store.create(in_memory=True)
+        added = _add(store, "first")
+        store.remove_time_series(added.key)
+        with pytest.raises(DuplicateAssociationIdError):
+            _add(store, "second", owner=2, id=added.id)
 
     def test_an_explicit_id_is_honored_and_ratchets_the_counter(self):
         store = Store.create(in_memory=True)
