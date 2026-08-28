@@ -29,20 +29,22 @@
 //! a different thing from natural units, so the two must stay distinguishable
 //! through the round trip.
 //!
-//! Two fields run **ahead of the vendored schema** (SiennaSchemas,
-//! `conformance/sienna_schemas/`, which is adding them): `time_reference`, the
-//! catalog spelling of [`TimeReference`] (`"utc"`, `"zoneless"`, an offset, or
-//! a zone name), and `array_shape`, the stored array's full native shape —
+//! Two fields reached the schema after the rest, and the vendored copy carries
+//! them from an **un-merged** SiennaSchemas branch — see
+//! `conformance/sienna_schemas/SOURCE.md` for which commit: `time_reference`,
+//! the catalog spelling of [`TimeReference`] (`"utc"`, `"zoneless"`, an offset,
+//! or a zone name), and `array_shape`, the stored array's full native shape —
 //! `[length, *element_shape]` in the catalog's own terms, where the schema's
 //! `element_shape` is only the per-step trailing shape (see
 //! [`wire_element_shape`]). Both exist so that a row imported from a document
 //! is *identical* to the row that was exported: the forecast layouts are
 //! conventions the caller owns, not rules the store enforces, so the native
 //! shape cannot be reconstructed from `horizon`/`count`/`percentiles` and has
-//! to travel. The schemas do not close their objects, so a reader that does
-//! not know the two fields ignores them; an import that finds `array_shape`
-//! absent falls back to the schema fields, which is exact for the static
-//! types and a best effort for forecasts.
+//! to travel. Neither is required, and the schemas do not close their objects,
+//! so a producer predating them writes rows without them and a reader that does
+//! not know them ignores them; an import that finds `array_shape` absent falls
+//! back to the schema fields, which is exact for the static types and a best
+//! effort for forecasts.
 //!
 //! A time-series row also carries **`association_id`**, the wire spelling of
 //! [`TimeSeriesMetadata::id`], required by the schema on all six types.

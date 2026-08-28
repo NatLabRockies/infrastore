@@ -271,6 +271,13 @@ pub type Features = BTreeMap<String, FeatureValue>;
 /// reader can scan it.
 pub const RESERVED_FEATURE_NAMES: &[&str] = &[
     "application_data",
+    // Neither names a metadata field: `array_shape` is the wire spelling of the
+    // stored array's native shape, and `association_id` the wire spelling of
+    // `id`. Both are reserved for the same reason as `dtype` below -- they name
+    // a field of the row as a consumer sees it, which is what the shadowing
+    // rule is about, and the OpenAPI schema's own reserved list carries them.
+    "array_shape",
+    "association_id",
     "component_field",
     "count",
     "data",
@@ -309,6 +316,11 @@ pub const RESERVED_FEATURE_NAMES: &[&str] = &[
     "timestamps",
     "unit_system",
     "units",
+    // Names no column and no struct field: it is the wire form's locator for
+    // the dense data. Reserved because the shadowing runs the other way here --
+    // a feature named `uri` is accepted on write, and the exported document
+    // then fails the schema's own propertyNames rule on the features map.
+    "uri",
 ];
 
 /// Whether `name` is one of the [`RESERVED_FEATURE_NAMES`].

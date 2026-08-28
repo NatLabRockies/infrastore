@@ -26,6 +26,7 @@
 
 use std::path::{Path, PathBuf};
 
+use infrastore_core::types::metadata::RESERVED_FEATURE_NAMES;
 use jsonschema::{Draft, Retrieve, Uri, Validator};
 use serde_json::Value;
 
@@ -193,5 +194,52 @@ fn supplemental_attribute_association_fixture_conforms() {
         &instance,
         "supplemental_attribute_association.json",
         "SupplementalAttributeAssociation.json",
+    );
+}
+
+/// The reserved feature names are maintained by hand in two repositories --
+/// [`RESERVED_FEATURE_NAMES`] here and `TimeSeriesFeatures.propertyNames.not.enum`
+/// in the vendored `TimeSeries/common.json`. They had already drifted once, in
+/// both directions at once, which is what this test exists to catch.
+///
+/// The two directions are not equally harmful. A name the schema reserves and
+/// the core does not is the one that breaks a document: the store accepts the
+/// feature, and the export it produces then fails validation on the features
+/// map. The reverse only makes the store stricter than the wire contract. The
+/// assertion is equality anyway, because holding them equal is what keeps the
+/// harmful direction from reappearing unnoticed -- and because a core-only
+/// reservation is a field the schema should learn about too.
+#[test]
+fn the_reserved_feature_names_match_the_vendored_schema() {
+    let common = read_json(&schemas_dir().join("TimeSeries").join("common.json"));
+    let schema_names: Vec<&str> =
+        common["definitions"]["TimeSeriesFeatures"]["propertyNames"]["not"]["enum"]
+            .as_array()
+            .expect("TimeSeriesFeatures.propertyNames.not.enum is an array")
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .expect("every reserved name in the schema is a string")
+            })
+            .collect();
+
+    let schema_only: Vec<&&str> = schema_names
+        .iter()
+        .filter(|n| !RESERVED_FEATURE_NAMES.contains(n))
+        .collect();
+    let core_only: Vec<&&str> = RESERVED_FEATURE_NAMES
+        .iter()
+        .filter(|n| !schema_names.contains(n))
+        .collect();
+
+    assert!(
+        schema_only.is_empty() && core_only.is_empty(),
+        "the reserved feature names drifted from the vendored schema.\n\
+         reserved by the schema, not by the core: {schema_only:?} -- the store would accept \
+         these features and then export a document the schema rejects; add them to \
+         RESERVED_FEATURE_NAMES.\n\
+         reserved by the core, not by the schema: {core_only:?} -- harmless for reads, but the \
+         schema should carry them too; upstream them, or refresh the vendored copy with \
+         scripts/sync_sienna_schemas.sh if it is simply stale."
     );
 }
