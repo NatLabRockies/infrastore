@@ -193,31 +193,36 @@ is the contract.
 ## Integrity Verification
 
 Because the stored hash and the stored data are independent on disk, they can be cross-checked.
-`verify_integrity` walks every indexed column, recomputes `array_hash` from the stored values, and
-reports any mismatch between the recorded hash and the recomputed one — detecting silent corruption.
-See [`verify_integrity`](../reference/rust-api.md#store).
+`verify_integrity` takes the catalog as the statement of what should be there, then checks the HDF5
+half against it: it collects every array and every explicit timestamp vector the catalog references,
+reads each one back, recomputes `array_hash` / `timestamps_hash` from the stored values, and reports
+any mismatch between the recorded hash and the recomputed one — detecting silent corruption. A
+reference the file cannot satisfy is reported too, as a dangling one. See
+[`verify_integrity`](../reference/rust-api.md#store).
 
 ### What it does not cover
 
-The check is scoped to the **array half** of the store. It reads what the HDF5 side knows about and
-rehashes it; it never opens the SQLite catalog. A clean report is therefore a statement about the
-arrays, not about the store as a whole. Three things fall outside it:
+The check runs from the catalog into the HDF5 file, and only in that direction. It never checks the
+catalog against _itself_, so a clean report is a statement about the stored content, not about the
+store as a whole. Three things fall outside it:
 
-- a `data_hash` in the catalog that names no stored array — a truncated or corrupted catalog, or a
-  catalog paired with the wrong `.h5` file. Every read of the affected key fails, and
-  `verify_integrity` reports nothing.
-- a catalog row whose `dtype`, `element_shape`, or `length` misdescribes the array it points at.
+- a catalog row whose `dtype`, `element_shape`, or `length` misdescribes the array it points at. The
+  hash addresses the array's own content, so an array that matches its hash passes the check while
+  the row goes on lying about it.
 - a missing catalog entirely. The two artifacts are one logical store, but nothing enforces that:
   opening read-write with the `.sqlite` half deleted silently recreates it empty, and the resulting
-  store — zero time series, every array still present and now unreachable — verifies clean.
+  store — zero time series, every array still present and now unreachable — verifies clean, because
+  a catalog that references nothing is a clean bill of health here.
+- anything the catalog does not reference. The sweep never reaches it, whatever state it is in; an
+  unreachable array is the expected state after a delete, and `compact` is what reports it.
 
-This is a deliberate scope rather than an oversight: the array side is where silent bit-level
-corruption happens, and it is the half no other call examines. The catalog has its own purpose-built
-checks — `check_static_consistency` for per-resolution grid agreement, and `compact` for the
-unreachable arrays and feature sets a delete leaves behind, which it reclaims and reports (an
-expected state, documented in the [file format](../reference/file-format.md), not corruption).
-SQLite also enforces a good deal itself: the `NOT NULL` and `CHECK` constraints, and the two unique
-indexes that guarantee identity uniqueness.
+This is a deliberate scope rather than an oversight: content corruption is what happens silently,
+and the catalog has its own purpose-built checks — `check_static_consistency` for per-resolution
+grid agreement, and `compact` for the unreachable arrays and feature sets a delete leaves behind,
+which it reclaims and reports (an expected state, documented in the
+[file format](../reference/file-format.md), not corruption). SQLite also enforces a good deal
+itself: the `NOT NULL` and `CHECK` constraints, and the two unique indexes that guarantee identity
+uniqueness.
 
 If you need end-to-end assurance that a copied or restored store is intact, the operational rule in
 the [file format](../reference/file-format.md) is the one that matters: move, copy, and delete the

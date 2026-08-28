@@ -384,6 +384,34 @@ fn write_all(ds: &h5::Dataset, dtype: Dtype, bytes: &[u8]) -> Result<()> {
     }
 }
 
+/// Fill a dataset that was just created, unlinking it if the write fails.
+///
+/// HDF5 links a dataset into its group when it is *created*, not when it is
+/// first written, so a failed write — a full filesystem, most plainly — leaves
+/// a fill-valued object behind under a name that claims to address content it
+/// does not hold. The in-memory index never records it, but a reopen rebuilds
+/// that index by scanning the group's links (`rebuild_index`) and would adopt
+/// it as live: reads of the affected hash would then hand back zeros, and a
+/// re-add would skip the write as already-present. Dropping the link on the way
+/// out keeps a failed write invisible, so the whole put stays all-or-nothing.
+///
+/// The unlink's own result is discarded: the write error is what explains the
+/// state, and there is nothing useful to say about failing to tidy up after it.
+fn write_or_unlink(
+    group: &Group,
+    name: &str,
+    ds: h5::Dataset,
+    write: impl FnOnce(&h5::Dataset) -> Result<()>,
+) -> Result<()> {
+    let written = write(&ds);
+    if written.is_err() {
+        // The handle keeps the object alive past the unlink, so it goes first.
+        drop(ds);
+        let _ = group.unlink(name);
+    }
+    written
+}
+
 /// Create a dataset of `dtype` with the given shape/chunking/filters.
 /// `chunks = None` → compact when small enough, else contiguous.
 fn create_ds(
@@ -777,10 +805,12 @@ impl Inner {
             )?
         };
         if !millis.is_empty() {
-            ds.write_raw(millis).map_err(map_h5)?;
+            write_or_unlink(&self.timestamps, &name, ds, |ds| {
+                ds.write_raw(millis).map_err(map_h5)
+            })?;
         }
-        // Indexed only once the dataset is on disk, so a failed write leaves the
-        // index saying what the file says.
+        // Indexed only once the dataset is on disk, and a failed write takes its
+        // half-made dataset with it, so the index says what the file says.
         self.timestamp_hashes.insert(*hash);
         Ok(true)
     }
@@ -1081,7 +1111,9 @@ impl Inner {
             )?
         };
         if !data.bytes.is_empty() {
-            write_all(&ds, data.dtype, &data.bytes)?;
+            write_or_unlink(&single, &var, ds, |ds| {
+                write_all(ds, data.dtype, &data.bytes)
+            })?;
         }
         self.standalone_vars.insert(var.clone());
         self.by_hash.insert(*hash, Location::Standalone { var });
@@ -1863,6 +1895,40 @@ mod tests {
                 .unwrap()
                 .ok()
         );
+    }
+
+    #[test]
+    fn a_failed_write_unlinks_the_dataset_it_half_made() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.h5");
+        let hash = [7u8; 32];
+        let name = timestamps_dataset_name(&hash);
+        {
+            let mut be = Hdf5Backend::create(&path, Compression::default()).unwrap();
+            let inner = be.inner.get_mut().expect("mutex poisoned");
+            let ds = create_ds(
+                &inner.timestamps,
+                &name,
+                Dtype::I64,
+                &[4],
+                None,
+                Compression::None,
+            )
+            .unwrap();
+            // Linked the moment it is created, before a single value reaches
+            // it: that gap is the whole exposure.
+            assert!(inner.timestamps.member_names().unwrap().contains(&name));
+            let failed = write_or_unlink(&inner.timestamps, &name, ds, |_| {
+                Err(TimeSeriesError::InvalidParameter("no space left".into()))
+            });
+            assert!(failed.is_err());
+            assert!(!inner.timestamps.member_names().unwrap().contains(&name));
+        }
+        // A reopen rebuilds the index by scanning this group's links, so had the
+        // half-made dataset survived it would have been adopted as a live axis
+        // whose stored values are the fill value.
+        let be = Hdf5Backend::open(&path, true).unwrap();
+        assert!(be.timestamp_hashes().unwrap().is_empty());
     }
 
     #[test]

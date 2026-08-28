@@ -3893,29 +3893,32 @@ impl Store {
     /// Recompute every stored array's content hash and report the ones that
     /// disagree with the hash recorded alongside them.
     ///
-    /// # Scope: the array half only
+    /// # Scope: the content the catalog points at
     ///
     /// A persisted store is two artifacts — the HDF5 file and its companion
-    /// `<path>.sqlite` catalog — but this checks only the first. It reads each
-    /// array the HDF5 side knows about, rehashes it, and compares, and does the
-    /// same for the explicit time axes, which live in that same half. It does
-    /// **not** open, parse, or cross-reference the catalog, so an empty report is
-    /// not a statement that the store as a whole is sound. In particular these
-    /// are all invisible to it:
+    /// `<path>.sqlite` catalog. This takes the catalog as the statement of what
+    /// *should* be there and checks the HDF5 half against it: it collects every
+    /// array and every explicit time axis the catalog references, reads each one
+    /// back, rehashes it, and compares. So it does cross-reference the two —
+    /// what it never does is check the catalog against *itself*, and an empty
+    /// report is not a statement that the store as a whole is sound. In
+    /// particular these are invisible to it:
     ///
-    /// - a `data_hash` in the catalog that names no stored array (a truncated or
-    ///   corrupted catalog, or a catalog paired with the wrong HDF5 file) —
-    ///   every read of the affected key fails, but this reports no error;
     /// - a catalog row whose `dtype`, `element_shape`, or `length` misdescribes
-    ///   the array it points at;
+    ///   the array it points at — the hash addresses the array's own content, so
+    ///   an array that matches its hash still passes while the row lies about it;
     /// - a missing catalog: opening read-write with the `.sqlite` half deleted
     ///   silently recreates it empty, and the resulting store — zero time series,
-    ///   every array still on disk and now unreachable — verifies clean.
+    ///   every array still on disk and now unreachable — verifies clean, because
+    ///   a catalog that references nothing is a clean bill of health here;
+    /// - anything about a stored array or axis the catalog does *not* reference:
+    ///   the sweep never reaches it, whatever state it is in.
     ///
-    /// What it does catch is the array-side corruption it is named for: a stored
-    /// value perturbed behind its recorded hash — an array's or a time axis's
-    /// alike — a time axis a row names and the file does not hold, and a read
-    /// failure on any indexed array.
+    /// What it does catch is the corruption it is named for: a stored value
+    /// perturbed behind its recorded hash — an array's or a time axis's alike —
+    /// something the catalog names and the file does not hold (a truncated
+    /// catalog, or one paired with the wrong HDF5 file, shows up this way), and
+    /// a read failure on either.
     ///
     /// For catalog-side checks use the purpose-built calls instead:
     /// [`Self::check_static_consistency`] verifies that every series at a given

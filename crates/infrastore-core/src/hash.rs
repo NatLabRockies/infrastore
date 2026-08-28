@@ -2,9 +2,11 @@
 //!
 //! Stability of these hashes is part of the public on-disk contract. Any change
 //! here that perturbs a stored hash is a format-breaking change and must bump
-//! [`crate::DATA_FORMAT_VERSION`]. The `golden_hash_pin` integration test pins
-//! the SHA-256 of one fixed array as a tripwire; it does not cover every dtype,
-//! shape, or the feature-map domain, so it is not a substitute for that rule.
+//! [`crate::DATA_FORMAT_VERSION`]. Two tripwires pin the SHA-256 of one fixed
+//! input each: the `golden_hash_pin` integration test for an array, and
+//! `golden_timestamps_hash_pin` below for a timestamp vector. Neither covers
+//! every dtype or shape, nor the feature-map domain, so they are not a
+//! substitute for that rule.
 
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
@@ -380,6 +382,25 @@ mod tests {
         // Domain separation: a timestamp vector never collides with a feature
         // set or an array, whatever the payload bytes.
         assert_ne!(timestamps_hash(&[]), features_hash(&Features::new()));
+    }
+
+    #[test]
+    fn golden_timestamps_hash_pin() {
+        // The equality/inequality tests above hold under any self-consistent
+        // encoding, so none of them notices the tag, the count's width, the
+        // byte order, or the millisecond serialization changing. This pins the
+        // exact digest of a fixed axis, because that digest is a *locator*: it
+        // names the `tsv_...` dataset the vector lives in and the `nsts_...`
+        // pool the cohort's arrays are packed into. Drift here is a
+        // format-breaking change and must bump `DATA_FORMAT_VERSION`.
+        use chrono::{Duration, TimeZone};
+        let t0 = Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap();
+        let axis: Vec<DateTime<Utc>> = (0..4).map(|k| t0 + Duration::hours(k)).collect();
+        assert_eq!(
+            hash_hex(&timestamps_hash(&axis)),
+            "853b7f6c37834ba2087d5e0322d0b0b36c6b9e0952342121ee27f16c4dc4df1e",
+            "timestamps hash drifted; bump DATA_FORMAT_VERSION if intentional",
+        );
     }
 
     #[test]
