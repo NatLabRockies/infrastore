@@ -255,12 +255,13 @@ entry in `keys`, and clients must send the chosen key in the `x-api-key` header.
 A persisted store is **two files that travel together**: an HDF5 file and a SQLite catalog at
 `<store-path>.sqlite`. Copying, moving, or deleting one without the other corrupts the store.
 
-The HDF5 file carries the attributes `data_format_version = "0.18.0"` and
+The HDF5 file carries the attributes `data_format_version = "0.19.0"` and
 `storage_backend = "hdf5"`; a file without the latter is not opened. Packed datasets are named
 `sts_{dtype}_{shape}_{length}_{resolution}`, chunked `(1, num_arrays)` so per-timestep reads across
 all components are contiguous; a sibling `u8` dataset `<dataset>_h` holds each column's SHA-256 hex
 hash as raw bytes, with an all-zero row marking a free slot. Standalone arrays are stored as
-`arr_{hex_hash}`.
+`arr_{hex_hash}`, and the explicit time axis a cohort of `NonSequentialTimeSeries` shares as
+`timestamps/tsv_{hex_hash}` — one `i64` dataset of unix milliseconds per distinct vector.
 
 Deletion frees packed slots for reuse rather than shrinking the file — HDF5 cannot reclaim the space
 in place, so reclaiming it is an explicit `Store::compact()`. The exact bytes are specified in the

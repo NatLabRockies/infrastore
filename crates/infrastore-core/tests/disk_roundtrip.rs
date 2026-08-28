@@ -1961,3 +1961,150 @@ fn a_file_that_will_not_open_is_not_reported_as_a_store_needing_migration() {
     );
     assert!(message.contains("netcdf"), "{message}");
 }
+
+// ---------------------------------------------------------------------------
+// Explicit timestamp vectors live in the array file
+// ---------------------------------------------------------------------------
+
+/// Build a store holding `count` irregular series on one time axis, and return
+/// the axis.
+fn irregular_store(path: &std::path::Path, count: i64) -> Vec<chrono::DateTime<Utc>> {
+    let stamps: Vec<_> = (0..6)
+        .map(|k| Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap() + Duration::minutes(k * 7))
+        .collect();
+    let mut store = create_store(Some(path), false).unwrap();
+    for owner in 1..=count {
+        let values: Vec<f64> = (0..stamps.len()).map(|i| owner as f64 + i as f64).collect();
+        let ns = NonSequentialTimeSeries::new(
+            stamps.clone(),
+            TypedArray::from_f64(vec![values.len()], &values),
+            "outage",
+        )
+        .unwrap();
+        store
+            .add_time_series(
+                owner,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::NonSequentialTimeSeries(ns),
+                Features::new(),
+            )
+            .unwrap();
+    }
+    store.flush().unwrap();
+    stamps
+}
+
+/// The names of the datasets in the file's `timestamps` group.
+fn timestamp_datasets(path: &std::path::Path) -> Vec<String> {
+    let f = hdf5_metno::File::open(path).unwrap();
+    let mut names = f
+        .group("time_series/timestamps")
+        .unwrap()
+        .member_names()
+        .unwrap();
+    names.sort();
+    names
+}
+
+/// A time axis is data: it is in the HDF5 file, as plain `i64` milliseconds any
+/// HDF5 tool can read, once for the whole cohort — and the catalog holds nothing
+/// but the hash that names it.
+#[test]
+fn a_shared_time_axis_is_one_i64_dataset_in_the_array_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.h5");
+    let stamps = irregular_store(&path, 4);
+
+    let names = timestamp_datasets(&path);
+    assert_eq!(names.len(), 1, "four series on one axis: {names:?}");
+    assert!(names[0].starts_with("tsv_"), "{names:?}");
+
+    let f = hdf5_metno::File::open(&path).unwrap();
+    let ds = f
+        .dataset(&format!("time_series/timestamps/{}", names[0]))
+        .unwrap();
+    let millis = ds.read_raw::<i64>().unwrap();
+    let expected: Vec<i64> = stamps.iter().map(|t| t.timestamp_millis()).collect();
+    assert_eq!(millis, expected);
+
+    // Nothing of the vector is in the catalog: the column that used to resolve
+    // into a `timestamp_sets` table is a bare locator now, and that table is
+    // gone.
+    let conn = rusqlite::Connection::open(sqlite_path_of(&path)).unwrap();
+    let tables: Vec<String> = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<std::result::Result<_, _>>()
+        .unwrap();
+    assert!(!tables.iter().any(|t| t == "timestamp_sets"), "{tables:?}");
+}
+
+/// Removing every series on an axis leaves the axis behind — vectors are shared,
+/// so a deletion cannot cascade — and a compaction is what takes it out of the
+/// file.
+#[test]
+fn compaction_unlinks_a_time_axis_nothing_references() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.h5");
+    irregular_store(&path, 3);
+
+    let mut store = open_store(path.as_path(), false).unwrap();
+    let keys = store.list_keys(ListFilter::new()).unwrap();
+    assert_eq!(keys.len(), 3);
+    // Two of three go: the axis is still referenced, so nothing is reclaimed.
+    for key in &keys[..2] {
+        store.remove_time_series(key.identity()).unwrap();
+    }
+    assert_eq!(store.compact().unwrap().timestamp_sets_reclaimed, 0);
+    assert_eq!(timestamp_datasets(&path).len(), 1);
+    // The survivor still reads back on it.
+    match store.get_time_series(keys[2].identity(), None).unwrap() {
+        TimeSeriesData::NonSequentialTimeSeries(ns) => assert_eq!(ns.timestamps.len(), 6),
+        other => panic!("expected a NonSequentialTimeSeries, got {other:?}"),
+    }
+
+    // The last reference goes, and now the dataset does too — once, and then not
+    // again.
+    store.remove_time_series(keys[2].identity()).unwrap();
+    assert_eq!(store.compact().unwrap().timestamp_sets_reclaimed, 1);
+    assert_eq!(store.compact().unwrap().timestamp_sets_reclaimed, 0);
+    drop(store);
+    assert!(timestamp_datasets(&path).is_empty());
+}
+
+/// A row naming a time axis the file does not hold is corruption, not an empty
+/// timeline: `verify_integrity` names it, and a read of the series fails rather
+/// than handing back a vectorless row.
+#[test]
+fn a_missing_time_axis_is_reported_and_refuses_the_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.h5");
+    irregular_store(&path, 2);
+
+    // Unlink the vector behind the catalog's back.
+    {
+        let f = hdf5_metno::File::open_rw(&path).unwrap();
+        let group = f.group("time_series/timestamps").unwrap();
+        for name in group.member_names().unwrap() {
+            group.unlink(&name).unwrap();
+        }
+    }
+
+    let store = open_store(path.as_path(), true).unwrap();
+    let report = store.verify_integrity().unwrap();
+    assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
+    assert!(
+        report.errors[0].contains("timestamp vector"),
+        "{:?}",
+        report.errors
+    );
+
+    let err = store.list_time_series(ListFilter::new()).unwrap_err();
+    assert!(
+        matches!(err, TimeSeriesError::IntegrityError(ref m) if m.contains("timestamp vector")),
+        "{err:?}"
+    );
+}

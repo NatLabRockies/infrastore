@@ -69,16 +69,19 @@ source's array.
 ## The Timestamps Hash
 
 A `NonSequentialTimeSeries` carries its timestamps explicitly, and those are content-addressed too,
-by `timestamps_hash`: a domain tag followed by the vector's canonical encoding — the same bytes the
-catalog stores, so the hash addresses the stored form rather than a second serialization of it. Two
-vectors hash equal exactly when they hold the same instants in the same order.
+by `timestamps_hash`: a domain tag, the count, then each instant as a unix millisecond count — the
+same values the store writes, so the hash addresses the stored form rather than a second
+serialization of it. Two vectors hash equal exactly when they hold the same instants in the same
+order.
 
 Like the features hash, it does double duty:
 
-- **It keys the stored vector.** The `timestamp_sets` table is keyed by it, so a time axis shared by
-  a thousand irregular series is stored **once**. Sharing is again the common case, not the rare
-  one: irregular series in this domain sit on a schedule — outage windows, market intervals, event
-  times — that many components observe together.
+- **It names the stored vector.** Each distinct time axis is one `tsv_{timestamps_hash}` dataset in
+  the HDF5 file, so an axis shared by a thousand irregular series is stored **once**. Sharing is
+  again the common case, not the rare one: irregular series in this domain sit on a schedule —
+  outage windows, market intervals, event times — that many components observe together. Unlike the
+  features hash, this one addresses something in the _array_ half of the artifact: a timestamp
+  vector is data, and the catalog holds only its hash.
 - **It is the cohort key of the packed array layout.** Column-packing is only meaningful for arrays
   on a common time axis, since the chunking is timestamp-major; the interned hash is precisely the
   answer to "do these two series share one?", so the arrays of a cohort pool into one

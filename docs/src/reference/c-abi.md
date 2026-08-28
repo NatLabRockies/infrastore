@@ -1137,9 +1137,10 @@ fields with that same content hash, hex-encoded, on export. The time-series impo
 only: infrastore never modifies the data to make an incoming document agree with what it already
 holds, so a row naming an array this store does not hold is refused
 (`INFRASTORE_ERR_INVALID_PARAMETER`) rather than written as a dangling reference, and a
-`NonSequentialTimeSeries` row is refused outright because its timestamp vector is not on the wire. A
-geometry disagreement between an added series and its own association row is likewise rejected at
-the add boundary, loudly and without writing anything.
+`NonSequentialTimeSeries` row is refused outright because the wire form carries no
+`timestamps_hash`, so the document does not say which stored time axis the row sits on. A geometry
+disagreement between an added series and its own association row is likewise rejected at the add
+boundary, loudly and without writing anything.
 
 ## Error Messages
 
