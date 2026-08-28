@@ -404,17 +404,12 @@ fn wire_err(msg: impl Into<String>) -> crate::error::TimeSeriesError {
     crate::error::TimeSeriesError::InvalidParameter(msg.into())
 }
 
-/// A 64-character lowercase-or-uppercase hex string as 32 bytes, or `None` for
-/// anything else — including a `uri` that is a locator rather than a hash.
+/// A 64-character hex string as 32 bytes, or `None` for anything else —
+/// including a `uri` that is a locator rather than a hash. The storage
+/// layer's parser, with its error (which names a dataset, not a document)
+/// folded to `None`.
 fn hash_from_hex(s: &str) -> Option<[u8; 32]> {
-    if s.len() != 64 {
-        return None;
-    }
-    let mut out = [0u8; 32];
-    for (i, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(s.get(i * 2..i * 2 + 2)?, 16).ok()?;
-    }
-    Some(out)
+    crate::storage::common::hex_to_hash(s).ok()
 }
 
 fn parse_period(s: &str, field: &str) -> Result<crate::types::period::Period> {

@@ -80,8 +80,7 @@ function add_derived_view!(
             _period_to_iso(interval)::Cstring,
             normalize_single_window::Bool,
             require_uniform_forecast_grid::Bool,
-            # The C ABI spells "assign one" as a non-positive id.
-            Int64(id === nothing ? 0 : id)::Int64,
+            _c_id(id)::Int64,
             out_key::Ref{Ptr{Cvoid}},
             out_id::Ref{Int64},
         )::Int32

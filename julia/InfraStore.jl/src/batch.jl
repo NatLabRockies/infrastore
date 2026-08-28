@@ -80,8 +80,7 @@ function add_time_series!(
             _time_reference_str(_audit_zone(_time_reference(time_reference)))
         )::Cstring,
         _opt_string_arg(component_field)::Cstring,
-        # The C ABI spells "assign one" as a non-positive id.
-        Int64(id === nothing ? 0 : id)::Int64,
+        _c_id(id)::Int64,
     )::Int32
     _check(code)
     batch.count += 1
@@ -130,8 +129,7 @@ function add_time_series!(
             _time_reference_str(_audit_zone(_time_reference(time_reference)))
         )::Cstring,
         _opt_string_arg(component_field)::Cstring,
-        # The C ABI spells "assign one" as a non-positive id.
-        Int64(id === nothing ? 0 : id)::Int64,
+        _c_id(id)::Int64,
     )::Int32
     _check(code)
     batch.count += 1
@@ -272,8 +270,7 @@ function _batch_add_dense_forecast!(
             _time_reference_str(_audit_zone(_time_reference(time_reference)))
         )::Cstring,
         _opt_string_arg(component_field)::Cstring,
-        # The C ABI spells "assign one" as a non-positive id.
-        Int64(id === nothing ? 0 : id)::Int64,
+        _c_id(id)::Int64,
     )::Int32
     _check(code)
     batch.count += 1
@@ -326,8 +323,7 @@ function add_time_series!(
             _time_reference_str(_audit_zone(_time_reference(time_reference)))
         )::Cstring,
         _opt_string_arg(component_field)::Cstring,
-        # The C ABI spells "assign one" as a non-positive id.
-        Int64(id === nothing ? 0 : id)::Int64,
+        _c_id(id)::Int64,
     )::Int32
     _check(code)
     batch.count += 1

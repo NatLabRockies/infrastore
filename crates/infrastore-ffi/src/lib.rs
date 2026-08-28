@@ -125,6 +125,14 @@ fn set_error(msg: impl Into<String>) {
     LAST_ERROR.with(|e| *e.borrow_mut() = Some(msg.into()));
 }
 
+/// The C ABI's spelling of "let the catalog assign an id": any non-positive
+/// `association_id` argument. A positive one is filed as given (and must sit
+/// above the catalog's counter — see `DuplicateAssociationId`). One place, so
+/// every writer reads the argument the same way.
+fn explicit_id(association_id: i64) -> Option<i64> {
+    (association_id > 0).then_some(association_id)
+}
+
 fn clear_error() {
     LAST_ERROR.with(|e| *e.borrow_mut() = None);
 }
@@ -1010,7 +1018,7 @@ unsafe fn build_single_request(
         // C has no `Option<i64>`, so a non-positive `association_id` is the
         // "assign one" spelling. The catalog's ids start at 1 and only ever
         // increase, so no real id is excluded by the sentinel.
-        id: (association_id > 0).then_some(association_id),
+        id: explicit_id(association_id),
     })
 }
 
@@ -1202,7 +1210,7 @@ unsafe fn build_non_sequential_request(
         // C has no `Option<i64>`, so a non-positive `association_id` is the
         // "assign one" spelling. The catalog's ids start at 1 and only ever
         // increase, so no real id is excluded by the sentinel.
-        id: (association_id > 0).then_some(association_id),
+        id: explicit_id(association_id),
     })
 }
 
@@ -2969,7 +2977,7 @@ pub unsafe extern "C" fn infrastore_store_add_derived_view(
         horizon,
         interval,
         policy,
-        (association_id > 0).then_some(association_id),
+        explicit_id(association_id),
     ) {
         Ok(added) => {
             if !out_key.is_null() {
@@ -3591,7 +3599,7 @@ unsafe fn build_forecast_request(
         // C has no `Option<i64>`, so a non-positive `association_id` is the
         // "assign one" spelling. The catalog's ids start at 1 and only ever
         // increase, so no real id is excluded by the sentinel.
-        id: (association_id > 0).then_some(association_id),
+        id: explicit_id(association_id),
     })
 }
 
@@ -3787,7 +3795,7 @@ unsafe fn build_probabilistic_request(
         // C has no `Option<i64>`, so a non-positive `association_id` is the
         // "assign one" spelling. The catalog's ids start at 1 and only ever
         // increase, so no real id is excluded by the sentinel.
-        id: (association_id > 0).then_some(association_id),
+        id: explicit_id(association_id),
     })
 }
 
@@ -7090,7 +7098,7 @@ pub unsafe extern "C" fn infrastore_store_add_supplemental_attribute_association
             attribute_id,
             attribute_type,
             // Non-positive means "assign one", as on the time-series adds.
-            id: (association_id > 0).then_some(association_id),
+            id: explicit_id(association_id),
         },
     ) {
         Ok(id) => {
@@ -7501,7 +7509,7 @@ pub unsafe extern "C" fn infrastore_store_add_parent_child_association(
             child_id,
             child_type,
             // Non-positive means "assign one", as on the time-series adds.
-            id: (association_id > 0).then_some(association_id),
+            id: explicit_id(association_id),
         }) {
         Ok(id) => {
             if !out_id.is_null() {

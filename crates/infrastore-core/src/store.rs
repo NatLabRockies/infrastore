@@ -1748,15 +1748,7 @@ impl Store {
             plan.check_compatible_with(&existing)?;
         }
 
-        let meta = TimeSeriesMetadata {
-            time_series_type: TimeSeriesType::DeterministicSingleTimeSeries,
-            horizon: Some(plan.horizon),
-            interval: Some(interval),
-            count: Some(count),
-            // The view is its own row; `..src` would carry the source's id.
-            id,
-            ..src
-        };
+        let meta = derived_view_row(src, plan.horizon, interval, count, id);
         let tx = self.metadata.savepoint()?;
         MetadataStore::check_explicit_time_series_ids(&tx, id.as_slice())?;
         check_forecast_family_free(&tx, &meta, "derive")?;
@@ -2986,18 +2978,13 @@ impl Store {
                     horizon.to_iso8601(),
                 )));
             }
-            new_metas.push(TimeSeriesMetadata {
-                time_series_type: TimeSeriesType::DeterministicSingleTimeSeries,
-                horizon: Some(horizon),
-                interval: Some(interval),
-                count: Some(count),
-                // A derived view is its own catalog row, so it gets its own id.
-                // `..src` would otherwise carry the *source's* id here — it is
-                // `Some` on anything read back from the catalog — and the
-                // primary key would reject the insert.
-                id: None,
-                ..src.clone()
-            });
+            new_metas.push(derived_view_row(
+                src.clone(),
+                horizon,
+                interval,
+                count,
+                None,
+            ));
         }
 
         if policy.dry_run {
@@ -4601,6 +4588,31 @@ fn validate_id_mode(items: &[AddRequest]) -> Result<()> {
          of them (letting the catalog assign)",
         items.len()
     )))
+}
+
+/// The catalog row for a `DeterministicSingleTimeSeries` view of `src`, as
+/// both [`Store::transform_single_time_series`] and [`Store::add_derived_view`]
+/// write it: the source's own descriptors under the forecast geometry the
+/// plan derived.
+///
+/// `id` is set explicitly rather than inherited: a view is its own row, and
+/// `..src` would otherwise carry the *source's* id — `Some` on anything read
+/// back from the catalog — straight into a primary-key collision.
+fn derived_view_row(
+    src: TimeSeriesMetadata,
+    horizon: Period,
+    interval: Period,
+    count: usize,
+    id: Option<i64>,
+) -> TimeSeriesMetadata {
+    TimeSeriesMetadata {
+        time_series_type: TimeSeriesType::DeterministicSingleTimeSeries,
+        horizon: Some(horizon),
+        interval: Some(interval),
+        count: Some(count),
+        id,
+        ..src
+    }
 }
 
 /// The ids a batch supplies explicitly, for the high-water check.

@@ -35,6 +35,10 @@ struct AddedTimeSeries
     id::Int64
 end
 
+# The C ABI spells "let the catalog assign an id" as a non-positive
+# `association_id`; `nothing` is the Julia spelling of the same request.
+_c_id(id::Union{Nothing, Integer}) = Int64(id === nothing ? 0 : id)
+
 function _finalize_key(k::TimeSeriesKey)
     if k.handle != C_NULL
         @ccall lib_path().infrastore_key_free(k::Ptr{Cvoid})::Cvoid

@@ -339,8 +339,7 @@ for (fname, T, sym) in (
                 association.$type1::Cstring,
                 association.$id2::Int64,
                 association.$type2::Cstring,
-                # The C ABI spells "assign one" as a non-positive id.
-                Int64(association.id === nothing ? 0 : association.id)::Int64,
+                _c_id(association.id)::Int64,
                 out_id::Ref{Int64},
             )::Int32
         )
