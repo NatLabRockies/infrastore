@@ -10,9 +10,9 @@
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{
-    FeatureValue, Features, ListFilter, OwnerCategory, Scenarios, SingleTimeSeries, Store,
-    SupplementalAttributeAssociation, TimeSeriesData, TimeSeriesError, TransformPolicy, TypedArray,
-    UnitSystem, create_store,
+    Dtype, ElementType, FeatureValue, Features, ListFilter, OwnerCategory, Period, Scenarios,
+    SingleTimeSeries, Store, SupplementalAttributeAssociation, TimeReference, TimeSeriesData,
+    TimeSeriesError, TransformPolicy, TypedArray, UnitSystem, create_store,
 };
 
 // ---- shared helpers ---------------------------------------------------------
@@ -670,4 +670,629 @@ fn add_bulk_rejects_geometry_mismatch_and_leaves_the_whole_batch_untouched() {
         "a rejected bulk add must leave the catalog untouched, including the rows before the \
          offending one"
     );
+}
+
+// ---- full-surface time-series round trip ------------------------------------
+//
+// The golden tests above pin the *export* spelling of all six types, and the
+// id tests in `association_ids.rs` pin one `Deterministic` row through an
+// import. Neither covers the rest of the descriptive surface on the way back
+// in: before these, no test had ever seen `units`, `quantity_kind`,
+// `unit_system`, `component_field`, `application_data`, `percentiles`, a
+// non-`f64` dtype, a non-scalar `element_type`, a calendar `Period`, a
+// sub-second `initial_timestamp`, or three of the four `TimeReference`
+// spellings survive `import_time_series_associations_openapi`. `Probabilistic`
+// and `Scenarios` rows had never been imported at all.
+
+/// One fully-populated row per importable [`TimeSeriesData`] variant, as
+/// `(owner_id, owner_type, data, features)`.
+///
+/// Used twice: once to build the source store (under the real owners, with
+/// explicit ids) and once to stock the import target with the same *arrays*
+/// under owners of its own — arrays are content-addressed, so re-adding the
+/// identical `TypedArray` under a different owner is exactly "the artifact
+/// brought the values". Only `owner_id`/`owner_type` differ between the two
+/// uses, so the hashes cannot drift apart.
+///
+/// The `DeterministicSingleTimeSeries` row is deliberately absent: it is
+/// derived by [`Store::transform_single_time_series`] from the first entry
+/// here, and shares that entry's array.
+fn full_surface_rows() -> Vec<(i64, &'static str, TimeSeriesData, Features)> {
+    // The DST source, and the one row carrying every descriptive field plus
+    // all four `FeatureValue` kinds at once.
+    let single = SingleTimeSeries::new(
+        ts(2030, 1, 1, 0, 0, 0),
+        Duration::hours(1),
+        TypedArray::from_f64(vec![24], &(0..24).map(|i| i as f64).collect::<Vec<_>>()),
+        "max_active_power",
+    )
+    .with_units("MW")
+    .with_quantity_kind("ActivePower")
+    .with_unit_system(UnitSystem::NaturalUnits)
+    .with_component_field("max_active_power")
+    .with_application_data(r#"{"module":"PowerSystems"}"#)
+    .with_time_reference(TimeReference::Zone("America/Denver".into()));
+
+    // A tuple element type over a non-`f64` dtype, a fixed offset, the other
+    // unit system, and an `initial_timestamp` with a millisecond remainder —
+    // the branch of `format_initial_timestamp` that renders three fractional
+    // digits, which every fixture's whole-second timestamp misses.
+    let tupled = SingleTimeSeries::new(
+        ts(2030, 6, 15, 12, 0, 0) + Duration::milliseconds(250),
+        Duration::minutes(15),
+        TypedArray::from_slice(vec![12, 2], &(0..24i32).collect::<Vec<_>>())
+            .expect("i32 tuple array should build"),
+        "reactive_power",
+    )
+    .with_element_type(ElementType::Tuple {
+        arity: 2,
+        dtype: Dtype::I32,
+    })
+    .with_units("pu")
+    .with_quantity_kind("ReactivePower")
+    .with_unit_system(UnitSystem::ComponentBase)
+    .with_component_field("max_reactive_power")
+    .with_time_reference(TimeReference::FixedOffset(-420));
+
+    // The only calendar `Period` on the wire (`P1M`), a `bool` dtype, and the
+    // wall-clock spelling.
+    let sparse = SingleTimeSeries::new(
+        ts(2030, 1, 1, 0, 0, 0),
+        Period::months(1),
+        TypedArray::from_slice(
+            vec![12],
+            &[
+                true, false, true, false, true, false, true, false, true, false, true, false,
+            ],
+        )
+        .expect("bool array should build"),
+        "monthly_outage",
+    )
+    .with_time_reference(TimeReference::Zoneless);
+
+    // horizon PT4H / resolution PT1H = 4 steps, count 6, per-step [2] for the
+    // linear-function element type.
+    let deterministic = infrastore_core::Deterministic::new(
+        ts(2030, 1, 1, 0, 0, 0),
+        Duration::hours(1),
+        Duration::hours(4),
+        Duration::hours(1),
+        6,
+        TypedArray::from_f64(
+            vec![4, 6, 2],
+            &(0..48).map(|i| i as f64).collect::<Vec<_>>(),
+        ),
+        "cost_forecast",
+    )
+    .expect("deterministic should construct")
+    .with_element_type(ElementType::LinearFunction)
+    .with_units("USD/MWh")
+    .with_quantity_kind("EnergyPrice")
+    .with_unit_system(UnitSystem::ComponentBase)
+    .with_component_field("operation_cost")
+    .with_application_data(r#"{"cost":"linear"}"#)
+    .with_time_reference(TimeReference::Utc);
+
+    // 3 percentiles, horizon PT1H / resolution PT15M = 4 steps, count 8,
+    // per-step [3] for the quadratic-function element type.
+    let probabilistic = infrastore_core::Probabilistic::new(
+        ts(2030, 6, 15, 0, 0, 0),
+        Duration::minutes(15),
+        Duration::hours(1),
+        Duration::hours(1),
+        8,
+        vec![5.0, 50.0, 95.0],
+        TypedArray::from_f64(
+            vec![3, 4, 8, 3],
+            &(0..288).map(|i| i as f64).collect::<Vec<_>>(),
+        ),
+        "power_forecast",
+    )
+    .expect("probabilistic should construct")
+    .with_element_type(ElementType::QuadraticFunction)
+    .with_units("MW")
+    .with_quantity_kind("ActivePower")
+    .with_unit_system(UnitSystem::NaturalUnits)
+    .with_component_field("max_active_power")
+    .with_application_data(r#"{"ensemble":"weather"}"#)
+    .with_time_reference(TimeReference::Utc);
+
+    // scenario_count 5, horizon PT4H / resolution PT1H = 4 steps, count 6,
+    // scalar `f32` with no per-step dims — and every optional descriptor left
+    // unset, `time_reference` included, so the import has to keep "absent"
+    // absent rather than filling in a default.
+    let scenarios = Scenarios::new(
+        ts(2030, 6, 15, 0, 0, 0),
+        Duration::hours(1),
+        Duration::hours(4),
+        Duration::hours(1),
+        6,
+        5,
+        TypedArray::from_slice(
+            vec![5, 4, 6],
+            &(0..120).map(|i| i as f32).collect::<Vec<_>>(),
+        )
+        .expect("f32 array should build"),
+        "scenario_power",
+    )
+    .expect("scenarios should construct");
+
+    vec![
+        (
+            7,
+            "ThermalStandard",
+            TimeSeriesData::SingleTimeSeries(single),
+            features_of(&[
+                ("scenario", FeatureValue::Str("high_load".into())),
+                ("year", FeatureValue::Int(2030)),
+                ("weight", FeatureValue::Float(0.5)),
+                ("vintage", FeatureValue::Bool(true)),
+            ]),
+        ),
+        (
+            8,
+            "RenewableDispatch",
+            TimeSeriesData::SingleTimeSeries(tupled),
+            Features::new(),
+        ),
+        (
+            11,
+            "Bus",
+            TimeSeriesData::SingleTimeSeries(sparse),
+            Features::new(),
+        ),
+        (
+            7,
+            "ThermalStandard",
+            TimeSeriesData::Deterministic(deterministic),
+            features_of(&[
+                ("vintage", FeatureValue::Bool(true)),
+                ("weight", FeatureValue::Float(0.5)),
+            ]),
+        ),
+        (
+            9,
+            "RenewableDispatch",
+            TimeSeriesData::Probabilistic(probabilistic),
+            features_of(&[("model", FeatureValue::Str("ensemble".into()))]),
+        ),
+        (
+            9,
+            "RenewableDispatch",
+            TimeSeriesData::Scenarios(scenarios),
+            Features::new(),
+        ),
+    ]
+}
+
+/// The source store: the six rows above under explicit ids from 1001 up, plus
+/// the `DeterministicSingleTimeSeries` derived from the first.
+///
+/// The ids are explicit and high on purpose. An import refuses any id at or
+/// below the target catalog's high-water mark (a deleted id must not be
+/// re-filable by hand), and the target is stocked with anchor rows first, so
+/// auto-assigned source ids starting at 1 would collide with them.
+fn full_surface_source() -> Store {
+    let mut store = create_store(None, true).expect("in-memory store should initialize");
+    let mut rows = full_surface_rows().into_iter();
+
+    // The DST source goes in alone and is transformed before anything else is
+    // added: `transform_single_time_series` sweeps every SingleTimeSeries in
+    // scope, so the two later statics must not be present yet.
+    let (owner_id, owner_type, data, features) = rows.next().expect("at least one row");
+    store
+        .add(
+            infrastore_core::AddRequest::new(owner_id, owner_type, OwnerCategory::Component, data)
+                .with_features(features)
+                .with_id(1001),
+        )
+        .expect("the DST source should add");
+    store
+        .transform_single_time_series(
+            Duration::hours(2),
+            Duration::hours(1),
+            None,
+            None,
+            TransformPolicy::default(),
+        )
+        .expect("transform should derive one DeterministicSingleTimeSeries row");
+
+    // 1002 went to the derived view, so the rest continue from 1003.
+    for (offset, (owner_id, owner_type, data, features)) in rows.enumerate() {
+        store
+            .add(
+                infrastore_core::AddRequest::new(
+                    owner_id,
+                    owner_type,
+                    OwnerCategory::Component,
+                    data,
+                )
+                .with_features(features)
+                .with_id(1003 + offset as i64),
+            )
+            .expect("fixture row should add");
+    }
+    store
+}
+
+/// A store holding every array the source's rows name, under owners of its
+/// own, so only the rows are missing. `owner_type` is `"Anchor"` throughout,
+/// which is how the assertions tell the pre-existing rows from the imported
+/// ones in the target's own export.
+fn full_surface_anchor_target() -> Store {
+    let mut store = create_store(None, true).expect("in-memory store should initialize");
+    for (index, (_, _, data, _)) in full_surface_rows().into_iter().enumerate() {
+        store
+            .add(infrastore_core::AddRequest::new(
+                900 + index as i64,
+                "Anchor",
+                OwnerCategory::Component,
+                data,
+            ))
+            .expect("anchor row should add");
+    }
+    store
+}
+
+/// Every optional field the wire form can carry must actually appear in an
+/// export of the full-surface store — otherwise the round-trip assertion below
+/// would pass vacuously on a field that silently stopped being written.
+#[test]
+fn the_full_surface_export_spells_every_optional_field() {
+    let source = full_surface_source();
+    let json = source
+        .export_time_series_associations_openapi(&ListFilter::new())
+        .expect("export should succeed");
+
+    for spelling in [
+        // All four `TimeReference` variants.
+        r#""time_reference":"America/Denver""#,
+        r#""time_reference":"utc""#,
+        r#""time_reference":"zoneless""#,
+        r#""time_reference":"-07:00""#,
+        // Both unit systems, in the schema's SCREAMING_CASE.
+        r#""unit_system":"NATURAL_UNITS""#,
+        r#""unit_system":"COMPONENT_BASE""#,
+        // The remaining descriptive fields.
+        r#""units":"USD/MWh""#,
+        r#""quantity_kind":"ReactivePower""#,
+        r#""component_field":"operation_cost""#,
+        r#""application_data":"{\"ensemble\":\"weather\"}""#,
+        // Element types beyond the `f64` scalar default.
+        r#""element_type":"tuple(2,i32)""#,
+        r#""element_type":"linear_function""#,
+        r#""element_type":"quadratic_function""#,
+        r#""element_type":"bool""#,
+        r#""element_type":"f32""#,
+        // A calendar period, which no fixture carries.
+        r#""resolution":"P1M""#,
+        // The millisecond branch of `format_initial_timestamp`.
+        r#""initial_timestamp":"2030-06-15T12:00:00.250Z""#,
+        // Per-type geometry.
+        r#""percentiles":[5.0,50.0,95.0]"#,
+        r#""scenario_count":5"#,
+        // All four `FeatureValue` kinds, in the plain scalar spelling.
+        r#""scenario":"high_load""#,
+        r#""year":2030"#,
+        r#""weight":0.5"#,
+        r#""vintage":true"#,
+    ] {
+        assert!(
+            json.contains(spelling),
+            "export is missing {spelling}; export was {json}"
+        );
+    }
+
+    // A descriptor left unset is *absent*, never `null` — the distinction the
+    // module docs call out for `unit_system`, and the one an importer that
+    // fills in defaults would erase. The `Scenarios` row sets none of them.
+    assert!(
+        !json.contains("null"),
+        "no field is ever written as null: {json}"
+    );
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&json).expect("export is a JSON array");
+    let scenarios = rows
+        .iter()
+        .find(|row| row["name"] == "scenario_power")
+        .expect("the Scenarios row is in the export");
+    for absent in [
+        "units",
+        "quantity_kind",
+        "unit_system",
+        "component_field",
+        "application_data",
+        "time_reference",
+    ] {
+        assert!(
+            scenarios.get(absent).is_none(),
+            "{absent} is unset on the Scenarios row, so its object must omit it: {scenarios}"
+        );
+    }
+}
+
+/// The whole surface survives `export -> import -> export`, byte for byte, and
+/// every row comes back as the identical [`TimeSeriesMetadata`].
+///
+/// This is the time-series analogue of
+/// `supplemental_attribute_export_import_round_trips_byte_equal`, and it is the
+/// assertion that keeps a newly-added descriptive column from being exported
+/// but dropped on the way back in.
+#[test]
+fn the_full_surface_round_trips_byte_equal_with_identical_metadata() {
+    let source = full_surface_source();
+    let exported = source
+        .export_time_series_associations_openapi(&ListFilter::new())
+        .expect("export should succeed");
+
+    let mut target = full_surface_anchor_target();
+    let anchors = target
+        .list_time_series(ListFilter::new())
+        .expect("listing should succeed")
+        .len();
+    assert_eq!(
+        target
+            .import_time_series_associations_openapi(&exported)
+            .expect("import should succeed"),
+        7,
+        "six added rows plus the derived DeterministicSingleTimeSeries",
+    );
+
+    // Re-export the target and drop the anchor rows: what is left is the same
+    // rows in the same identity order, so the two documents must be identical.
+    let reexported = target
+        .export_time_series_associations_openapi(&ListFilter::new())
+        .expect("re-export should succeed");
+    let all_rows: Vec<serde_json::Value> =
+        serde_json::from_str(&reexported).expect("re-export is a JSON array");
+    assert_eq!(all_rows.len(), anchors + 7);
+    let imported_rows: Vec<serde_json::Value> = all_rows
+        .into_iter()
+        .filter(|row| row["owner_type"] != "Anchor")
+        .collect();
+    assert_eq!(
+        serde_json::to_string(&imported_rows).expect("rows re-serialize"),
+        exported,
+        "the document a store re-exports must be the document it imported",
+    );
+
+    // And the rows themselves, not just their wire spelling: every column the
+    // catalog holds, compared by value, resolved through the id the document
+    // carried.
+    let originals = source
+        .list_time_series(ListFilter::new())
+        .expect("listing should succeed");
+    assert_eq!(originals.len(), 7);
+    for original in originals {
+        let id = original.id.expect("a catalog row always carries its id");
+        let imported = target
+            .get_metadata_by_id(id)
+            .expect("lookup should succeed")
+            .unwrap_or_else(|| panic!("id {id} did not survive the import"));
+        assert_eq!(imported, original, "row {id} changed across the round trip");
+    }
+}
+
+// ---- the wire-form paths an infrastore-produced document never takes --------
+
+/// A document from a producer that predates `array_shape` still imports, and
+/// for a *static* row it reconstructs the catalog's shape exactly: `length`
+/// and the per-step `element_shape` are both on the schema, and a static
+/// series has no axes between them.
+#[test]
+fn an_import_without_array_shape_is_exact_for_a_static_row() {
+    let source = full_surface_source();
+    let exported = source
+        .export_time_series_associations_openapi(&ListFilter::new())
+        .expect("export should succeed");
+    let rows: Vec<serde_json::Value> =
+        serde_json::from_str(&exported).expect("export is a JSON array");
+
+    // The tuple-typed static: per-step dims [2], so `element_shape` is the one
+    // field that has to carry them.
+    let mut row = rows
+        .iter()
+        .find(|r| r["name"] == "reactive_power")
+        .expect("the tuple-typed static is in the export")
+        .clone();
+    let original = source
+        .get_metadata_by_id(row["association_id"].as_i64().expect("an id"))
+        .expect("lookup should succeed")
+        .expect("the row exists");
+    assert_eq!(original.element_shape, vec![2]);
+    assert_eq!(original.length, Some(12));
+
+    let stripped = row.as_object_mut().expect("a row is an object");
+    assert!(stripped.remove("array_shape").is_some());
+    let document = serde_json::to_string(&vec![row]).expect("the row re-serializes");
+
+    let mut target = full_surface_anchor_target();
+    assert_eq!(
+        target
+            .import_time_series_associations_openapi(&document)
+            .expect("import should succeed"),
+        1
+    );
+    let imported = target
+        .get_metadata_by_id(original.id.expect("an id"))
+        .expect("lookup should succeed")
+        .expect("the row landed");
+    assert_eq!(
+        imported, original,
+        "a static row's native shape is recoverable from length + element_shape alone",
+    );
+}
+
+/// The same document shape for a *forecast* is a documented best effort, not an
+/// identity: the schema carries no `length` for a `Deterministic`, and the
+/// window axes between the time axis and the per-step dims are the caller's
+/// layout convention rather than anything the store can rederive. The row still
+/// lands — it is a legal document — but with the shape columns the schema could
+/// express, which is what `array_shape` exists to avoid.
+#[test]
+fn an_import_without_array_shape_is_lossy_for_a_forecast_row() {
+    let source = full_surface_source();
+    let exported = source
+        .export_time_series_associations_openapi(&ListFilter::new())
+        .expect("export should succeed");
+    let rows: Vec<serde_json::Value> =
+        serde_json::from_str(&exported).expect("export is a JSON array");
+
+    let mut row = rows
+        .iter()
+        .find(|r| r["name"] == "cost_forecast")
+        .expect("the deterministic row is in the export")
+        .clone();
+    let original = source
+        .get_metadata_by_id(row["association_id"].as_i64().expect("an id"))
+        .expect("lookup should succeed")
+        .expect("the row exists");
+    // What the catalog holds: the native `[4, 6, 2]` minus its first axis.
+    assert_eq!(original.length, Some(4));
+    assert_eq!(original.element_shape, vec![6, 2]);
+
+    let stripped = row.as_object_mut().expect("a row is an object");
+    assert!(stripped.remove("array_shape").is_some());
+    let document = serde_json::to_string(&vec![row]).expect("the row re-serializes");
+
+    let mut target = full_surface_anchor_target();
+    assert_eq!(
+        target
+            .import_time_series_associations_openapi(&document)
+            .expect("import should succeed"),
+        1
+    );
+    let imported = target
+        .get_metadata_by_id(original.id.expect("an id"))
+        .expect("lookup should succeed")
+        .expect("the row landed");
+    assert_ne!(
+        imported, original,
+        "the forecast shape cannot survive intact"
+    );
+    // Only the two shape columns differ; everything descriptive is intact.
+    assert_eq!(
+        imported.length, None,
+        "no `length` on a Deterministic's schema"
+    );
+    assert_eq!(
+        imported.element_shape,
+        vec![2],
+        "only the per-step dims the schema's element_shape carries",
+    );
+    assert_eq!(imported.units, original.units);
+    assert_eq!(imported.time_reference, original.time_reference);
+    assert_eq!(imported.count, original.count);
+}
+
+/// `uri` is a locator with no required format and `data_hash` is the content
+/// hash, so a document from another producer may spell them differently. The
+/// import resolves the array by `data_hash` first and falls back to `uri` only
+/// when the row omits it — a distinction nothing could observe on an
+/// infrastore-produced document, where the two are the same string.
+#[test]
+fn an_import_resolves_the_array_by_data_hash_before_uri() {
+    let source = full_surface_source();
+    let exported = source
+        .export_time_series_associations_openapi(&ListFilter::new())
+        .expect("export should succeed");
+    let rows: Vec<serde_json::Value> =
+        serde_json::from_str(&exported).expect("export is a JSON array");
+    let row = rows
+        .iter()
+        .find(|r| r["name"] == "monthly_outage")
+        .expect("the sparse static is in the export")
+        .clone();
+    let original = source
+        .get_metadata_by_id(row["association_id"].as_i64().expect("an id"))
+        .expect("lookup should succeed")
+        .expect("the row exists");
+
+    let with_uri = |uri: Option<&str>, data_hash: Option<&str>| -> String {
+        let mut row = row.clone();
+        let object = row.as_object_mut().expect("a row is an object");
+        match uri {
+            Some(value) => {
+                object.insert("uri".into(), serde_json::Value::from(value));
+            }
+            None => {
+                object.remove("uri");
+            }
+        }
+        match data_hash {
+            Some(value) => {
+                object.insert("data_hash".into(), serde_json::Value::from(value));
+            }
+            None => {
+                object.remove("data_hash");
+            }
+        }
+        serde_json::to_string(&vec![row]).expect("the row re-serializes")
+    };
+    let hash = row["data_hash"].as_str().expect("a hex hash").to_string();
+
+    // An opaque locator plus the real hash: resolved, and the row is identical.
+    let mut target = full_surface_anchor_target();
+    assert_eq!(
+        target
+            .import_time_series_associations_openapi(&with_uri(
+                Some("s3://bucket/arrays/monthly_outage.h5"),
+                Some(&hash),
+            ))
+            .expect("import should succeed"),
+        1
+    );
+    assert_eq!(
+        target
+            .get_metadata_by_id(original.id.expect("an id"))
+            .expect("lookup should succeed")
+            .expect("the row landed"),
+        original,
+    );
+
+    // No `data_hash` at all: the schema makes it optional, so a hash-shaped
+    // `uri` is the fallback.
+    let mut target = full_surface_anchor_target();
+    assert_eq!(
+        target
+            .import_time_series_associations_openapi(&with_uri(Some(&hash), None))
+            .expect("import should succeed"),
+        1
+    );
+    assert_eq!(
+        target
+            .get_metadata_by_id(original.id.expect("an id"))
+            .expect("lookup should succeed")
+            .expect("the row landed"),
+        original,
+    );
+
+    // A malformed `data_hash` is a document error, named as such — it is never
+    // silently skipped in favour of the `uri` beside it.
+    let mut target = full_surface_anchor_target();
+    let err = target
+        .import_time_series_associations_openapi(&with_uri(Some(&hash), Some("not-a-hash")))
+        .expect_err("a malformed data_hash is refused");
+    match err {
+        TimeSeriesError::InvalidParameter(msg) => {
+            assert!(msg.contains("data_hash"), "{msg}");
+            assert!(msg.contains("64-character hex"), "{msg}");
+        }
+        other => panic!("expected InvalidParameter, got {other:?}"),
+    }
+
+    // Neither field names an array: refused with the message that says so,
+    // rather than a dangling row.
+    let mut target = full_surface_anchor_target();
+    let err = target
+        .import_time_series_associations_openapi(&with_uri(
+            Some("s3://bucket/arrays/monthly_outage.h5"),
+            None,
+        ))
+        .expect_err("a locator-only row is refused");
+    match err {
+        TimeSeriesError::InvalidParameter(msg) => {
+            assert!(msg.contains("neither data_hash nor uri"), "{msg}");
+        }
+        other => panic!("expected InvalidParameter, got {other:?}"),
+    }
 }
