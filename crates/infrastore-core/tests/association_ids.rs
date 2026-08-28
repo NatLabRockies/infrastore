@@ -240,7 +240,9 @@ fn an_id_is_not_reused_after_its_row_is_deleted() {
 }
 
 /// Each table counts independently: an id is only meaningful together with the
-/// table it came from, and the three sequences are never meant to coincide.
+/// table it came from. The assertions below are that all three *do* start at 1
+/// — equal values across tables are the ordinary case and say nothing, which is
+/// the whole reason an id has to be carried with the table that issued it.
 #[test]
 fn the_three_tables_have_independent_id_streams() {
     let dir = tempfile::tempdir().unwrap();
@@ -296,7 +298,7 @@ fn the_three_tables_have_independent_id_streams() {
 }
 
 // ---------------------------------------------------------------------------
-// Explicit ids, and the row-level paths that must not carry one over
+// Assignment, and the row-level paths that must not carry an id over
 // ---------------------------------------------------------------------------
 
 /// A stored row always reports its id; a request that did not ask for one gets
@@ -1501,6 +1503,77 @@ fn an_import_refuses_a_view_without_its_source() {
             .import_time_series_associations_openapi(&serde_json::to_string(&reversed).unwrap())
             .unwrap(),
         2
+    );
+}
+
+/// A row must describe the array it names, not merely name one that exists.
+///
+/// Holding the array proves nothing about this row's columns: a document is
+/// free to point at a real array and declare a geometry it was never hashed
+/// from. The row would then report a length or element shape the bytes do not
+/// have — metadata and data disagreeing on a static read, and a forecast read
+/// failing later with nothing pointing back at the import.
+#[test]
+fn an_import_refuses_a_row_that_misdescribes_its_array() {
+    let mut source = create_store(None, true).unwrap();
+    // Above the target's anchor row, so the closing import turns on the shape
+    // check alone rather than on an id the target has already issued.
+    advance_ids(&mut source, 10);
+    source
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series("load")),
+        ))
+        .unwrap();
+    let json = source
+        .export_time_series_associations_openapi(&ListFilter::default())
+        .unwrap();
+
+    // Rewrite the document's declared shape, leaving the hash it names alone.
+    let mut rows: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+    rows[0]["array_shape"] = serde_json::json!([2]);
+    rows[0]["length"] = serde_json::json!(2);
+    let doctored = serde_json::to_string(&rows).unwrap();
+
+    // A target holding the real array, so only the geometry check stands
+    // between the row and the catalog.
+    let mut target = create_store(None, true).unwrap();
+    target
+        .add(AddRequest::new(
+            9,
+            "Anchor",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series("anchor")),
+        ))
+        .unwrap();
+    let err = target
+        .import_time_series_associations_openapi(&doctored)
+        .unwrap_err();
+    match err {
+        TimeSeriesError::InvalidParameter(msg) => {
+            assert!(msg.contains("declares shape [2]"), "{msg}");
+            assert!(msg.contains("holds with shape [3]"), "{msg}");
+        }
+        other => panic!("expected InvalidParameter, got {other:?}"),
+    }
+    // Only the anchor; nothing was written.
+    assert_eq!(
+        target
+            .list_time_series(ListFilter::default())
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // The undoctored document imports, so the check is the shape and not the
+    // rewrite itself.
+    assert_eq!(
+        target
+            .import_time_series_associations_openapi(&json)
+            .unwrap(),
+        1
     );
 }
 

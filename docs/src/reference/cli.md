@@ -46,9 +46,11 @@ $ infrastore --store s.h5 -f json --yes remove --all --owner-id 42 | jq .removed
 ```
 
 Each command's document names what it did — `{"removed": N}`, `{"added": N, "store": …}`,
-`{"merged": N, …}` — and a `--dry-run` reports `{"dry_run": true, "would_remove": N, …}` instead. A
-filter that matches nothing still reports its zero rather than printing nothing, so `jq .removed`
-reads `0` instead of failing on an empty document.
+`{"merged": N, …}` — and a `--dry-run` reports `{"dry_run": true, "would_remove": N, …}` instead.
+The writing commands also name the catalog ids they created: `add` carries a `series` array of
+`{id, time_series_type, name, owner_id}` objects, and `attach` / `link` an `ids` array. A filter
+that matches nothing still reports its zero rather than printing nothing, so `jq .removed` reads `0`
+instead of failing on an empty document.
 
 `csv` renders these status lines as prose alongside `table`: a status line has no rows to tabulate,
 and a one-row CSV of it would give scripts a shape that changes every time the message is reworded.
@@ -322,6 +324,10 @@ infrastore --store demo.h5 reassign --old 42 --new 43
 `parent_id,parent_type,child_id,child_type` CSV. The header is mandatory and its names are checked:
 the four columns are two interchangeable-looking `(id, type)` pairs, so a file with the pairs
 swapped would import cleanly and silently invert every relationship.
+
+Both report the catalog ids they created, in input order: `ids` on the JSON document and an `ids:`
+line under `table` (which elides the tail past twenty). Those are the durable handles for the rows
+just written, so reporting only a count would leave a caller re-reading the catalog to find them.
 
 `detach` and `unlink` with no filter would empty the whole catalog, so they require `--all` to say
 you meant it. `reassign` is the association counterpart of `replace-owner`, which moves time series;

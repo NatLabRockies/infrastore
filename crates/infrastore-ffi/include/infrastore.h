@@ -333,7 +333,10 @@ void infrastore_store_free(struct InfraStore *handle);
  *
  * Required string pointers must reference null-terminated UTF-8 strings; optional string
  * pointers may be null. `dims_ptr` must reference `ndims` elements when `ndims` is nonzero;
- * `data_ptr` must reference `data_byte_len` bytes.
+ * `data_ptr` must reference `data_byte_len` bytes. `out_key`, when non-null, must be valid
+ * for writing one pointer.
+ * `out_id`, when non-null, must be valid for writing one `i64`, and receives the catalog
+ * id the row was filed under.
  */
 int32_t infrastore_store_add_single(struct InfraStore *handle,
                                     int64_t owner_id,
@@ -365,7 +368,10 @@ int32_t infrastore_store_add_single(struct InfraStore *handle,
  * Required string pointers must reference null-terminated UTF-8 strings; optional string
  * pointers may be null. `timestamps_unix_ms` must reference `timestamps_len` elements,
  * `dims_ptr` must reference `ndims` elements when `ndims` is nonzero; `data_ptr` must
- * reference `data_byte_len` bytes.
+ * reference `data_byte_len` bytes. `out_key`, when non-null, must be valid for writing one
+ * pointer.
+ * `out_id`, when non-null, must be valid for writing one `i64`, and receives the catalog
+ * id the row was filed under.
  */
 int32_t infrastore_store_add_non_sequential(struct InfraStore *handle,
                                             int64_t owner_id,
@@ -1183,6 +1189,8 @@ int32_t infrastore_store_count_array_references(const struct InfraStore *handle,
  *
  * Optional strings may be null. `data_ptr` must reference `data_len` elements and `out_key`
  * must be valid for writing one pointer.
+ * `out_id`, when non-null, must be valid for writing one `i64`, and receives the catalog
+ * id the row was filed under.
  */
 int32_t infrastore_store_add_forecast(struct InfraStore *handle,
                                       int64_t owner_id,
@@ -1218,7 +1226,10 @@ int32_t infrastore_store_add_forecast(struct InfraStore *handle,
  * # Safety
  *
  * Optional strings may be null. `percentiles_ptr` and `data_ptr` must reference their
- * respective element counts.
+ * respective element counts. `out_key`, when non-null, must be valid for writing one
+ * pointer.
+ * `out_id`, when non-null, must be valid for writing one `i64`, and receives the catalog
+ * id the row was filed under.
  */
 int32_t infrastore_store_add_probabilistic(struct InfraStore *handle,
                                            int64_t owner_id,
@@ -2305,6 +2316,8 @@ int32_t infrastore_store_replace_owner(struct InfraStore *handle,
  *
  * `component_type` and `attribute_type` must point to valid, null-terminated UTF-8 strings
  * that stay valid for the call.
+ * `out_id`, when non-null, must be valid for writing one `i64`, and receives the catalog
+ * id the row was filed under.
  */
 int32_t infrastore_store_add_supplemental_attribute_association(struct InfraStore *handle,
                                                                 int64_t component_id,
@@ -2317,17 +2330,26 @@ int32_t infrastore_store_add_supplemental_attribute_association(struct InfraStor
  * Attach many in one all-or-nothing transaction, from a JSON array of objects
  * with `component_id`, `component_type`, `attribute_id`, and `attribute_type`.
  * This is the import half of the bulk round trip whose export is
- * `infrastore_store_list_supplemental_attribute_associations` with a null filter. When
- * non-null, `out_added` receives the number inserted.
+ * `infrastore_store_list_supplemental_attribute_associations` with a null filter.
+ *
+ * `out_added` receives the number inserted and `out_ids` the catalog id of
+ * each, in input order — the ids are the durable handles this write creates,
+ * so returning only a count would leave a caller re-listing the table to find
+ * what it just wrote. Either may be null to skip it.
  *
  * # Safety
  *
  * `handle` must be a live read-write store handle and `associations_json` a valid, null-
- * terminated UTF-8 string.
+ * terminated UTF-8 string. `out_added`, when non-null, must be valid for writing one
+ * `uint64_t`. `out_ids`, when non-null, must be valid for writing one pointer; on
+ * `INFRASTORE_OK` it receives an array of `*out_added` ids that the caller owns and must
+ * release with `infrastore_buffer_free_i64(*out_ids, *out_added)`. An empty batch writes
+ * null there, which needs no release.
  */
 int32_t infrastore_store_add_supplemental_attribute_associations(struct InfraStore *handle,
                                                                  const char *associations_json,
-                                                                 uint64_t *out_added);
+                                                                 uint64_t *out_added,
+                                                                 int64_t **out_ids);
 
 /**
  * Whether any attachment matches `filter_json`. Recognized filter fields, all
@@ -2478,6 +2500,8 @@ int32_t infrastore_store_supplemental_attribute_summary(const struct InfraStore 
  *
  * `parent_type` and `child_type` must point to valid, null-terminated UTF-8 strings that stay
  * valid for the call.
+ * `out_id`, when non-null, must be valid for writing one `i64`, and receives the catalog
+ * id the row was filed under.
  */
 int32_t infrastore_store_add_parent_child_association(struct InfraStore *handle,
                                                       int64_t parent_id,
@@ -2488,17 +2512,25 @@ int32_t infrastore_store_add_parent_child_association(struct InfraStore *handle,
 
 /**
  * Record many edges in one all-or-nothing transaction, from a JSON array of
- * objects with `parent_id`, `parent_type`, `child_id`, and `child_type`. When
- * non-null, `out_added` receives the number inserted.
+ * objects with `parent_id`, `parent_type`, `child_id`, and `child_type`.
+ *
+ * `out_added` and `out_ids` mean exactly what they mean on
+ * `infrastore_store_add_supplemental_attribute_associations`, over this
+ * table's own id stream.
  *
  * # Safety
  *
  * `handle` must be a live read-write store handle and `associations_json` a valid, null-
- * terminated UTF-8 string.
+ * terminated UTF-8 string. `out_added`, when non-null, must be valid for writing one
+ * `uint64_t`. `out_ids`, when non-null, must be valid for writing one pointer; on
+ * `INFRASTORE_OK` it receives an array of `*out_added` ids that the caller owns and must
+ * release with `infrastore_buffer_free_i64(*out_ids, *out_added)`. An empty batch writes
+ * null there, which needs no release.
  */
 int32_t infrastore_store_add_parent_child_associations(struct InfraStore *handle,
                                                        const char *associations_json,
-                                                       uint64_t *out_added);
+                                                       uint64_t *out_added,
+                                                       int64_t **out_ids);
 
 /**
  * Whether any edge matches `filter_json`. Recognized filter fields, all

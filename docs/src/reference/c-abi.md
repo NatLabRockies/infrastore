@@ -934,7 +934,9 @@ int32_t infrastore_store_add_supplemental_attribute_association(struct InfraStor
    with a NULL filter. *out_added (when non-NULL) receives the number inserted. */
 int32_t infrastore_store_add_supplemental_attribute_associations(struct InfraStore *handle,
                                                          const char *associations_json,
-                                                         uint64_t *out_added);
+                                                         uint64_t *out_added,   /* optional */
+                                                         int64_t **out_ids);    /* optional; owned,
+                                                            infrastore_buffer_free_i64 */
 
 /* Whether any attachment matches filter_json (NULL = any). */
 int32_t infrastore_store_has_supplemental_attribute_association(const struct InfraStore *handle,
@@ -1029,7 +1031,9 @@ int32_t infrastore_store_add_parent_child_association(struct InfraStore *handle,
    receives the number inserted. */
 int32_t infrastore_store_add_parent_child_associations(struct InfraStore *handle,
                                                const char *associations_json,
-                                               uint64_t *out_added);
+                                               uint64_t *out_added,   /* optional */
+                                               int64_t **out_ids);    /* optional; owned,
+                                                  infrastore_buffer_free_i64 */
 
 /* Whether any edge matches filter_json (NULL = any). */
 int32_t infrastore_store_has_parent_child_association(const struct InfraStore *handle,

@@ -358,12 +358,22 @@ for (fname, T, sym) in (
     @eval function $fname(store::Store, associations::AbstractVector{$T})
         payload = JSON.json([_assoc_json(a) for a in associations])
         out = Ref{UInt64}(0)
+        out_ids = Ref{Ptr{Int64}}(C_NULL)
         _check(
             @ccall lib_path().$sym(
-                store::Ptr{Cvoid}, payload::Cstring, out::Ref{UInt64}
+                store::Ptr{Cvoid}, payload::Cstring, out::Ref{UInt64},
+                out_ids::Ref{Ptr{Int64}},
             )::Int32
         )
-        return Int(out[])
+        n = Int(out[])
+        n == 0 && return Int64[]
+        # The ids are the durable handles this write created; copy them out of
+        # the owned buffer before releasing it.
+        try
+            return copy(unsafe_wrap(Array, out_ids[], n; own=false))
+        finally
+            _free_i64(out_ids[], n)
+        end
     end
 end
 
@@ -399,19 +409,22 @@ Attach a supplemental attribute to a component, returning the catalog id the
 attachment was filed under. Throws `DuplicateAssociationError` if that component
 already carries that attribute, whatever type names are supplied.
 
-Set the association's `id` field to file it under a specific id instead of an
-assigned one, which is what a writer replaying a recorded model needs; that
-throws if the id is already taken. This table's ids are independent of the other
-catalogs'.
+The catalog assigns the id; the association's own `id` field — which a listing
+populates — is ignored on the way in, so a row read from one store and attached
+to another is filed under a fresh id there. This table's ids are independent of
+the other catalogs'.
 """ add_supplemental_attribute_association!
 
 @doc """
-    add_supplemental_attribute_associations!(store, associations) -> Int
+    add_supplemental_attribute_associations!(store, associations) -> Vector{Int64}
 
-Attach many in one all-or-nothing transaction, returning the number inserted. A
-duplicate anywhere in the batch rolls the whole batch back. This is the import
-half of the round trip whose export is
+Attach many in one all-or-nothing transaction, returning the catalog id of each
+in input order. A duplicate anywhere in the batch rolls the whole batch back.
+This is the import half of the round trip whose export is
 [`list_supplemental_attribute_associations`](@ref) with no filter.
+
+The ids are what this write creates for the caller to hold, so it returns them
+rather than a count; the count is `length` of the result.
 """ add_supplemental_attribute_associations!
 
 @doc """
@@ -489,10 +502,11 @@ reversed pair is a different edge.
 """ add_parent_child_association!
 
 @doc """
-    add_parent_child_associations!(store, associations) -> Int
+    add_parent_child_associations!(store, associations) -> Vector{Int64}
 
-Record many edges in one all-or-nothing transaction, returning the number
-inserted.
+Record many edges in one all-or-nothing transaction, returning the catalog id of
+each in input order, over this table's own id stream. The count is `length` of
+the result.
 """ add_parent_child_associations!
 
 @doc """

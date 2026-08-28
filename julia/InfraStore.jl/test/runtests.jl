@@ -2165,8 +2165,12 @@ end
     # Bulk import/export round trip (IS3's from_records/to_records).
     exported = list_supplemental_attribute_associations(store)
     target = Store(in_memory=true)
-    @test add_supplemental_attribute_associations!(target, exported) == length(exported)
+    # The bulk add returns the ids it created, not a count: they are the
+    # handles the caller stores. The target assigns its own, from 1.
+    ids = add_supplemental_attribute_associations!(target, exported)
+    @test ids == collect(Int64, 1:length(exported))
     @test list_supplemental_attribute_associations(target) == exported
+    @test [r.id for r in list_supplemental_attribute_associations(target)] == ids
 
     # Base overloads: structural equality, hash, compact show.
     @test attach(1, 100) == attach(1, 100)
@@ -2214,8 +2218,10 @@ end
     # Bulk round trip and the show/equality overloads.
     exported = list_parent_child_associations(store)
     target = Store(in_memory=true)
-    @test add_parent_child_associations!(target, exported) == length(exported)
+    ids = add_parent_child_associations!(target, exported)
+    @test ids == collect(Int64, 1:length(exported))
     @test list_parent_child_associations(target) == exported
+    @test [r.id for r in list_parent_child_associations(target)] == ids
     @test hash(edge(1, 7)) == hash(edge(1, 7))
     @test occursin("Generator 1 -> Bus 7", sprint(show, edge(1, 7)))
 

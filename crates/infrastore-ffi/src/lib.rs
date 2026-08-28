@@ -1026,7 +1026,10 @@ unsafe fn build_single_request(
 ///
 /// Required string pointers must reference null-terminated UTF-8 strings; optional string
 /// pointers may be null. `dims_ptr` must reference `ndims` elements when `ndims` is nonzero;
-/// `data_ptr` must reference `data_byte_len` bytes.
+/// `data_ptr` must reference `data_byte_len` bytes. `out_key`, when non-null, must be valid
+/// for writing one pointer.
+/// `out_id`, when non-null, must be valid for writing one `i64`, and receives the catalog
+/// id the row was filed under.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_add_single(
@@ -1201,7 +1204,10 @@ unsafe fn build_non_sequential_request(
 /// Required string pointers must reference null-terminated UTF-8 strings; optional string
 /// pointers may be null. `timestamps_unix_ms` must reference `timestamps_len` elements,
 /// `dims_ptr` must reference `ndims` elements when `ndims` is nonzero; `data_ptr` must
-/// reference `data_byte_len` bytes.
+/// reference `data_byte_len` bytes. `out_key`, when non-null, must be valid for writing one
+/// pointer.
+/// `out_id`, when non-null, must be valid for writing one `i64`, and receives the catalog
+/// id the row was filed under.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_add_non_sequential(
@@ -3351,6 +3357,8 @@ unsafe fn build_typed_key_from_attrs(
 ///
 /// Optional strings may be null. `data_ptr` must reference `data_len` elements and `out_key`
 /// must be valid for writing one pointer.
+/// `out_id`, when non-null, must be valid for writing one `i64`, and receives the catalog
+/// id the row was filed under.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_add_forecast(
@@ -3573,7 +3581,10 @@ unsafe fn build_forecast_request(
 /// # Safety
 ///
 /// Optional strings may be null. `percentiles_ptr` and `data_ptr` must reference their
-/// respective element counts.
+/// respective element counts. `out_key`, when non-null, must be valid for writing one
+/// pointer.
+/// `out_id`, when non-null, must be valid for writing one `i64`, and receives the catalog
+/// id the row was filed under.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_add_probabilistic(
@@ -6989,6 +7000,32 @@ unsafe fn assoc_rows_from_json<T: serde::de::DeserializeOwned>(
     })
 }
 
+/// Hand a bulk write's assigned ids back through its optional out-parameters.
+///
+/// The same shape `infrastore_store_add_batch` uses: `out_added` takes the
+/// count, `out_ids` an owned buffer of exactly that many ids in input order,
+/// released with `infrastore_buffer_free_i64`. An empty batch writes null,
+/// so there is nothing to free.
+///
+/// # Safety
+///
+/// Each of `out_added` and `out_ids` must be null or valid for writing one
+/// value of its type.
+unsafe fn write_assigned_ids(ids: Vec<i64>, out_added: *mut u64, out_ids: *mut *mut i64) {
+    let len = ids.len() as u64;
+    if !out_added.is_null() {
+        unsafe { *out_added = len };
+    }
+    if !out_ids.is_null() {
+        let ptr = if ids.is_empty() {
+            ptr::null_mut()
+        } else {
+            vec_into_raw(ids).0
+        };
+        unsafe { *out_ids = ptr };
+    }
+}
+
 /// Serialize a result set and write it into the caller's buffer.
 unsafe fn write_json_out<T: serde::Serialize>(
     value: &T,
@@ -7019,6 +7056,8 @@ unsafe fn write_json_out<T: serde::Serialize>(
 ///
 /// `component_type` and `attribute_type` must point to valid, null-terminated UTF-8 strings
 /// that stay valid for the call.
+/// `out_id`, when non-null, must be valid for writing one `i64`, and receives the catalog
+/// id the row was filed under.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_add_supplemental_attribute_association(
     handle: *mut InfraStoreHandle,
@@ -7061,18 +7100,27 @@ pub unsafe extern "C" fn infrastore_store_add_supplemental_attribute_association
 /// Attach many in one all-or-nothing transaction, from a JSON array of objects
 /// with `component_id`, `component_type`, `attribute_id`, and `attribute_type`.
 /// This is the import half of the bulk round trip whose export is
-/// `infrastore_store_list_supplemental_attribute_associations` with a null filter. When
-/// non-null, `out_added` receives the number inserted.
+/// `infrastore_store_list_supplemental_attribute_associations` with a null filter.
+///
+/// `out_added` receives the number inserted and `out_ids` the catalog id of
+/// each, in input order — the ids are the durable handles this write creates,
+/// so returning only a count would leave a caller re-listing the table to find
+/// what it just wrote. Either may be null to skip it.
 ///
 /// # Safety
 ///
 /// `handle` must be a live read-write store handle and `associations_json` a valid, null-
-/// terminated UTF-8 string.
+/// terminated UTF-8 string. `out_added`, when non-null, must be valid for writing one
+/// `uint64_t`. `out_ids`, when non-null, must be valid for writing one pointer; on
+/// `INFRASTORE_OK` it receives an array of `*out_added` ids that the caller owns and must
+/// release with `infrastore_buffer_free_i64(*out_ids, *out_added)`. An empty batch writes
+/// null there, which needs no release.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_add_supplemental_attribute_associations(
     handle: *mut InfraStoreHandle,
     associations_json: *const c_char,
     out_added: *mut u64,
+    out_ids: *mut *mut i64,
 ) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
@@ -7083,9 +7131,7 @@ pub unsafe extern "C" fn infrastore_store_add_supplemental_attribute_association
         };
     match store.inner.add_supplemental_attribute_associations(assocs) {
         Ok(ids) => {
-            if !out_added.is_null() {
-                unsafe { *out_added = ids.len() as u64 };
-            }
+            unsafe { write_assigned_ids(ids, out_added, out_ids) };
             INFRASTORE_OK
         }
         Err(e) => map_core_error(e),
@@ -7428,6 +7474,8 @@ pub unsafe extern "C" fn infrastore_store_supplemental_attribute_summary(
 ///
 /// `parent_type` and `child_type` must point to valid, null-terminated UTF-8 strings that stay
 /// valid for the call.
+/// `out_id`, when non-null, must be valid for writing one `i64`, and receives the catalog
+/// id the row was filed under.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_add_parent_child_association(
     handle: *mut InfraStoreHandle,
@@ -7468,18 +7516,26 @@ pub unsafe extern "C" fn infrastore_store_add_parent_child_association(
 }
 
 /// Record many edges in one all-or-nothing transaction, from a JSON array of
-/// objects with `parent_id`, `parent_type`, `child_id`, and `child_type`. When
-/// non-null, `out_added` receives the number inserted.
+/// objects with `parent_id`, `parent_type`, `child_id`, and `child_type`.
+///
+/// `out_added` and `out_ids` mean exactly what they mean on
+/// `infrastore_store_add_supplemental_attribute_associations`, over this
+/// table's own id stream.
 ///
 /// # Safety
 ///
 /// `handle` must be a live read-write store handle and `associations_json` a valid, null-
-/// terminated UTF-8 string.
+/// terminated UTF-8 string. `out_added`, when non-null, must be valid for writing one
+/// `uint64_t`. `out_ids`, when non-null, must be valid for writing one pointer; on
+/// `INFRASTORE_OK` it receives an array of `*out_added` ids that the caller owns and must
+/// release with `infrastore_buffer_free_i64(*out_ids, *out_added)`. An empty batch writes
+/// null there, which needs no release.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_add_parent_child_associations(
     handle: *mut InfraStoreHandle,
     associations_json: *const c_char,
     out_added: *mut u64,
+    out_ids: *mut *mut i64,
 ) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
@@ -7490,9 +7546,7 @@ pub unsafe extern "C" fn infrastore_store_add_parent_child_associations(
         };
     match store.inner.add_parent_child_associations(assocs) {
         Ok(ids) => {
-            if !out_added.is_null() {
-                unsafe { *out_added = ids.len() as u64 };
-            }
+            unsafe { write_assigned_ids(ids, out_added, out_ids) };
             INFRASTORE_OK
         }
         Err(e) => map_core_error(e),

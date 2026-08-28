@@ -1383,7 +1383,15 @@ fn attachments_and_links_can_be_written_from_the_cli() {
         "component_id,component_type,attribute_id,attribute_type\n\
          43,Generator,8,GeographicInfo\n44,Bus,9,GeographicInfo\n",
     );
-    run(&store, &["attach", "--from", batch.to_str().unwrap()]);
+    // A write reports the ids it created — the durable handles for the rows it
+    // just wrote — not only how many there were.
+    let attached = json_stdout(&store, &["attach", "--from", batch.to_str().unwrap()]);
+    assert_eq!(attached["attached"], 2, "{attached}");
+    assert_eq!(
+        attached["ids"].as_array().unwrap().len(),
+        2,
+        "attach must report one id per row: {attached}"
+    );
     assert_eq!(
         data_lines(&run(&store, &["-f", "csv", "attributes"])).len(),
         3
@@ -1685,7 +1693,20 @@ fn every_mutating_command_emits_json_on_stdout_under_f_json() {
             "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H"}"#,
     );
     let d = desc.to_str().unwrap();
-    assert_eq!(json_stdout(&store, &["add", "--descriptor", d])["added"], 1);
+    let added = json_stdout(&store, &["add", "--descriptor", d]);
+    assert_eq!(added["added"], 1, "{added}");
+    // `--id` on `get`/`info` resolves what `add` reports, so `add` has to
+    // report it: the docs promise the id comes from here.
+    let series = added["series"].as_array().unwrap();
+    assert_eq!(series.len(), 1, "{added}");
+    let id = series[0]["id"]
+        .as_i64()
+        .expect("add reports the catalog id");
+    assert_eq!(series[0]["name"], "load", "{added}");
+    assert_eq!(
+        json_stdout(&store, &["info", "--id", &id.to_string()])["name"],
+        "load",
+    );
     // `add --dry-run` reports the *plan*, so it keeps the `{"items": [...]}`
     // shape every listing uses rather than the `{"dry_run": true}` status the
     // other write commands report — its output is rows, not a status line.

@@ -975,9 +975,11 @@ the type names are denormalized labels carried for filtering — so re-attaching
 different type names throws `DuplicateAssociationError`.
 
 ```julia
-add_supplemental_attribute_association!(store, association::SupplementalAttributeAssociation) -> Nothing
-add_supplemental_attribute_associations!(store, associations::AbstractVector{SupplementalAttributeAssociation}) -> Int
-                                  # one all-or-nothing transaction; count inserted
+add_supplemental_attribute_association!(store, association::SupplementalAttributeAssociation) -> Int64
+                                  # the catalog id it was filed under
+add_supplemental_attribute_associations!(store, associations::AbstractVector{SupplementalAttributeAssociation}) -> Vector{Int64}
+                                  # one all-or-nothing transaction; one id per
+                                  # input row, in order (count is `length`)
 has_supplemental_attribute_association(store; filters...) -> Bool
 list_supplemental_attribute_associations(store; filters...) -> Vector{SupplementalAttributeAssociation}
                                   # insertion order
@@ -1046,9 +1048,11 @@ This family is deliberately narrower than the supplemental one — no counts-by-
 summary — because there is no consumer for them yet; both are additive if one appears.
 
 ```julia
-add_parent_child_association!(store, association::ParentChildAssociation) -> Nothing
-add_parent_child_associations!(store, associations::AbstractVector{ParentChildAssociation}) -> Int
-                                  # one all-or-nothing transaction; count inserted
+add_parent_child_association!(store, association::ParentChildAssociation) -> Int64
+                                  # the catalog id it was filed under
+add_parent_child_associations!(store, associations::AbstractVector{ParentChildAssociation}) -> Vector{Int64}
+                                  # one all-or-nothing transaction; one id per
+                                  # input row, in order (count is `length`)
 has_parent_child_association(store; filters...) -> Bool
 list_parent_child_associations(store; filters...) -> Vector{ParentChildAssociation}
                                   # insertion order

@@ -294,19 +294,22 @@ pub fn attach(store_path: &Path, args: &AttachArgs<'_>) -> Result<(), String> {
         );
     }
     let mut store = store_access::open_writable(store_path)?;
-    let n = store
+    // The ids are what this write creates for the caller to hold, so both
+    // output forms carry them; `attached` stays the count it always was.
+    let ids = store
         .add_supplemental_attribute_associations(rows)
-        .map_err(|e| e.to_string())?
-        .len();
+        .map_err(|e| e.to_string())?;
+    let n = ids.len();
     store.flush().map_err(|e| e.to_string())?;
     report(
         args.format,
-        || json!({ "attached": n }),
+        || json!({ "attached": n, "ids": ids }),
         || {
             println!(
                 "{}",
                 color::header(&format!("Attached {n} supplemental attribute(s)."))
             );
+            println!("ids: {}", crate::output::join_ids(&ids));
         },
     )
 }
@@ -438,16 +441,17 @@ pub fn link(store_path: &Path, args: &LinkArgs<'_>) -> Result<(), String> {
         );
     }
     let mut store = store_access::open_writable(store_path)?;
-    let n = store
+    let ids = store
         .add_parent_child_associations(rows)
-        .map_err(|e| e.to_string())?
-        .len();
+        .map_err(|e| e.to_string())?;
+    let n = ids.len();
     store.flush().map_err(|e| e.to_string())?;
     report(
         args.format,
-        || json!({ "linked": n }),
+        || json!({ "linked": n, "ids": ids }),
         || {
             println!("{}", color::header(&format!("Added {n} link(s).")));
+            println!("ids: {}", crate::output::join_ids(&ids));
         },
     )
 }

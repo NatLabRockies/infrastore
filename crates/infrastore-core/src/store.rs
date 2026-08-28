@@ -1756,6 +1756,11 @@ impl Store {
     ///   store opens cleanly, lists the series, and reads nothing — which is
     ///   the failure [`TimeSeriesError::StoreExists`] exists to prevent,
     ///   arriving by a different door.
+    /// - Each row's declared geometry must be the array's. `[length,
+    ///   *element_shape]` is the native shape, so it is checked against the one
+    ///   the backend holds: a document naming a real array under a length or
+    ///   element shape it was not hashed from would otherwise file a row whose
+    ///   metadata and data disagree.
     /// - `NonSequentialTimeSeries` is refused. Its timestamp vector is
     ///   content-addressed in the catalog and deliberately absent from the wire
     ///   form, so no document can reconstruct one.
@@ -1786,6 +1791,30 @@ impl Store {
                     meta.owner_id,
                     crate::hash::hash_hex(&meta.data_hash),
                 )));
+            }
+            // Holding the array is not the same as the row describing it. The
+            // hash proves nothing about *this* row's columns: a document is
+            // free to name a real array and declare a length or element shape
+            // that is not the one it was hashed from, and the row would then
+            // report a geometry the bytes do not have — a static read handing
+            // back metadata and data that disagree, a forecast read failing
+            // somewhere later with no mention of the import. A declared dtype
+            // that lies is already refused on the read path (`check_dtype`);
+            // this is the half that was silent.
+            if let Some(length) = meta.length {
+                let mut declared = Vec::with_capacity(meta.element_shape.len() + 1);
+                declared.push(length);
+                declared.extend_from_slice(&meta.element_shape);
+                let stored = self.backend.array_shape(&meta.data_hash)?;
+                if declared != stored {
+                    return Err(TimeSeriesError::InvalidParameter(format!(
+                        "cannot import '{}' (owner {}): it declares shape {declared:?} for \
+                         array {}, which this store holds with shape {stored:?}",
+                        meta.name,
+                        meta.owner_id,
+                        crate::hash::hash_hex(&meta.data_hash),
+                    )));
+                }
             }
         }
 

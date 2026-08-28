@@ -317,8 +317,10 @@ CREATE TABLE IF NOT EXISTS catalog_identity (generation TEXT NOT NULL);
 --     touches these rows and vice versa; a consumer wanting both effects makes
 --     both calls.
 --   * Independent id streams. Each table has its own `sqlite_sequence` row, so
---     an id is only meaningful together with the table it came from; the three
---     counters never coincide and are never meant to.
+--     an id is only meaningful together with the table it came from. Equal
+--     values across two tables are the common case, not a collision — each
+--     counter starts at 1 — and mean nothing; only uniqueness *within* a table
+--     is guaranteed.
 
 -- Which supplemental attributes are attached to which components. Columns match
 -- infrasys' table of the same name, whose logic this replaces (IS3.jl kept an

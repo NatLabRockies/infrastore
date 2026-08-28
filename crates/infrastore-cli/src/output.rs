@@ -38,6 +38,28 @@ impl std::fmt::Display for Format {
     }
 }
 
+/// Comma-separate a write's assigned catalog ids for the human output form.
+///
+/// A bulk `attach` or `link` of a few rows should show what it filed them
+/// under; a load of thousands should not paper the terminal with them, so this
+/// elides the tail the way the per-series listing does.
+pub fn join_ids(ids: &[i64]) -> String {
+    const SHOWN: usize = 20;
+    if ids.is_empty() {
+        return "(none)".to_string();
+    }
+    let head = ids
+        .iter()
+        .take(SHOWN)
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    match ids.len().checked_sub(SHOWN) {
+        Some(rest) if rest > 0 => format!("{head}, … ({rest} more)"),
+        _ => head,
+    }
+}
+
 /// Render a header + rows as a rounded console table. Header cells are colored
 /// green + bold when stdout is a color-capable terminal.
 pub fn display_table_dyn(headers: &[String], rows: &[Vec<String>]) {
