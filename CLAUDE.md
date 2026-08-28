@@ -53,15 +53,18 @@ OpenAPI one — where the schema spells it `association_id`, a rename `openapi.r
 way it maps `unit_system` between the store's snake_case and the schema's SCREAMING_CASE. It is
 descriptive — outside `TimeSeriesKey` and both content hashes — but unlike the descriptors above it
 describes the _row_ rather than the data: it is per-store, so `merge` assigns fresh ids and `diff`
-ignores it, while `rename`/`reassign`/`compact`/`persist_to` all preserve it. A caller may supply
-one explicitly (all-or-none within a batch, and only above the catalog's high-water mark, so a
-deleted id can no more be re-filed by hand than reissued) so an imported document keeps the
-references it recorded; `import_time_series_associations_openapi` is the rows-only import that does
-so, refusing a row whose array is absent, a `DeterministicSingleTimeSeries` whose source
-`SingleTimeSeries` is neither in the document nor already stored, and `NonSequentialTimeSeries`
-outright (its timestamp vector is not on the wire). The two association catalogs carry ids on the
-same terms, with independent counters, and equality on both association types deliberately excludes
-the id.
+ignores it, while `rename`/`reassign`/`compact`/`persist_to` all preserve it. **No `add_*` accepts
+an id** — not `add_time_series`, a bulk add, `add_derived_view`, or either association catalog's
+attach/link — because "never reissued" is a guarantee of `AUTOINCREMENT`, and a caller free to name
+an id could re-file a retired one. The single exception is the rows-only import
+`import_time_series_associations_openapi` (`Store::import_association_rows`), which files each row
+under the `association_id` the document recorded so its references survive: all-or-none across the
+batch, and only above the catalog's high-water mark. It refuses a row whose array is absent, a
+`DeterministicSingleTimeSeries` whose source `SingleTimeSeries` is neither in the document nor
+already stored, and `NonSequentialTimeSeries` outright (its timestamp vector is not on the wire).
+Neither association catalog's wire form carries an id, so both always assign — their row types carry
+an `id` field that a listing populates and an add ignores — with independent counters, and equality
+on both association types deliberately excludes the id.
 
 Metadata getters surface `element_shape` and `features` in every binding. Alongside `units`, a
 series carries two further unit descriptors in every binding: `quantity_kind` (free-form, QUDT

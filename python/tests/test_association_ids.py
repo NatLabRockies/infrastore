@@ -15,7 +15,6 @@ import pytest
 
 from infrastore import (
     AddedTimeSeries,
-    DuplicateAssociationIdError,
     InvalidParameterError,
     NotFoundError,
     OwnerCategory,
@@ -77,47 +76,29 @@ class TestWriting:
         assert added in {added}
         assert {added: "x"}[added] == "x"
 
-    def test_an_explicit_id_cannot_reissue_a_deleted_one(self):
+    def test_an_add_never_takes_an_id(self):
+        """The catalog assigns; no add surface accepts an id.
+
+        The one writer that files rows under ids a caller supplies is the
+        OpenAPI row import, which replays a document that already recorded
+        them. Everything else lets the catalog assign, so an id a caller is
+        holding cannot be pushed back in through an add.
+        """
         store = Store.create(in_memory=True)
-        added = _add(store, "first")
+        with pytest.raises(TypeError):
+            _add(store, "load", id=500)
+
+        added = _add(store, "load")
         store.remove_time_series(added.key)
-        with pytest.raises(DuplicateAssociationIdError):
-            _add(store, "second", owner=2, id=added.id)
+        # The id is retired rather than free: the next add gets a new one.
+        assert _add(store, "second", owner=2).id == added.id + 1
 
-    def test_an_explicit_id_is_honored_and_ratchets_the_counter(self):
+    def test_an_identity_collision_still_says_so(self):
         store = Store.create(in_memory=True)
-        assert _add(store, "imported", id=500).id == 500
-        # The next assigned id starts past the explicit one rather than
-        # colliding with it.
-        assert _add(store, "assigned").id == 501
-
-    def test_a_taken_id_is_a_distinct_error_from_a_duplicate_series(self):
-        store = Store.create(in_memory=True)
-        _add(store, "load", id=7)
-
-        with pytest.raises(TimeSeriesError) as taken:
-            _add(store, "other", owner=2, id=7)
-        assert "already in use" in str(taken.value)
-
-        # The identity collision keeps saying what it always said.
+        _add(store, "load")
         with pytest.raises(TimeSeriesError) as dup:
             _add(store, "load")
         assert "already in use" not in str(dup.value)
-
-    def test_a_batch_may_not_mix_supplied_and_assigned_ids(self):
-        store = Store.create(in_memory=True)
-        base = {
-            "owner_id": 1,
-            "owner_type": "Generator",
-            "owner_category": OwnerCategory.Component,
-        }
-        with pytest.raises(InvalidParameterError):
-            store.add_time_series_bulk(
-                [
-                    {**base, "time_series": _sts("a"), "id": 10},
-                    {**base, "time_series": _sts("b")},
-                ]
-            )
 
     def test_id_is_not_a_usable_feature_name(self):
         store = Store.create(in_memory=True)
@@ -186,13 +167,13 @@ class TestDerivedViews:
         assert meta["time_series_type"] == "DeterministicSingleTimeSeries"
         assert meta["data_hash"] == store.get_metadata_by_id(source.id)["data_hash"]
 
-    def test_a_view_can_be_filed_under_a_given_id(self):
+    def test_a_view_takes_no_id_either(self):
         store = Store.create(in_memory=True)
         source = self._long(store)
-        view = store.add_derived_view(
-            source.key, timedelta(hours=6), timedelta(hours=6), id=4242
-        )
-        assert view.id == 4242
+        with pytest.raises(TypeError):
+            store.add_derived_view(
+                source.key, timedelta(hours=6), timedelta(hours=6), id=4242
+            )
 
 
 class TestAssociations:
@@ -210,6 +191,24 @@ class TestAssociations:
 
         rows = store.list_supplemental_attribute_associations()
         assert [r.id for r in rows] == [1, 2, 3]
+
+    def test_an_attachments_id_is_assigned_not_carried(self):
+        """A row listed from one store, attached to another, is filed afresh.
+
+        ``SupplementalAttributeAssociation`` carries an ``id`` because a
+        listing populates one, but the constructor takes none and an add
+        ignores it: this catalog's wire form has no id, so there is never a
+        document reference to preserve.
+        """
+        source = Store.create(in_memory=True)
+        source.add_supplemental_attribute_associations(
+            [self._attach(1, 100), self._attach(2, 100)]
+        )
+        (_, second) = source.list_supplemental_attribute_associations()
+        assert second.id == 2
+
+        target = Store.create(in_memory=True)
+        assert target.add_supplemental_attribute_association(second) == 1
 
     def test_an_id_is_outside_equality_and_hashing(self):
         """A row read back must equal the value that wrote it.

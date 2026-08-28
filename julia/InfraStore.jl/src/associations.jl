@@ -27,7 +27,10 @@ is still a duplicate.
 `id` is the catalog row's own number, `nothing` for a value that has not been
 through the catalog. It is *outside* identity — two values describing the same
 attachment are equal and hash alike whether or not either has been stored — so
-a row read back compares equal to the value that wrote it.
+a row read back compares equal to the value that wrote it. It is also an output
+only: the constructor takes none, and an add ignores whatever a listed row
+carries, so attaching a row read from one store to another files it under a
+fresh id there.
 """
 struct SupplementalAttributeAssociation
     component_id::Int64
@@ -326,9 +329,9 @@ for (fname, T, sym) in (
     (:add_parent_child_association!, ParentChildAssociation,
         :infrastore_store_add_parent_child_association),
 )
-    # The identity fields, never the row's own `id` -- which the struct now
-    # carries as a fifth field, and which is an *argument* here rather than one
-    # of the four endpoint columns.
+    # The identity fields, never the row's own `id`, which is not an input: the
+    # catalog assigns it and hands it back through `out_id`. A row read from one
+    # store and added to another is filed under a fresh id there.
     id1, type1, id2, type2 = _identity_fields(T)
     @eval function $fname(store::Store, association::$T)
         out_id = Ref{Int64}(0)
@@ -339,7 +342,6 @@ for (fname, T, sym) in (
                 association.$type1::Cstring,
                 association.$id2::Int64,
                 association.$type2::Cstring,
-                _c_id(association.id)::Int64,
                 out_id::Ref{Int64},
             )::Int32
         )

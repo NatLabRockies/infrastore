@@ -37,16 +37,16 @@ end
 
 """
     add_derived_view!(store, source, horizon, interval; normalize_single_window=false,
-                      require_uniform_forecast_grid=false, id=nothing) -> AddedTimeSeries
+                      require_uniform_forecast_grid=false) -> AddedTimeSeries
 
 Derive one `DeterministicSingleTimeSeries` view of the stored `SingleTimeSeries`
 named by `source`.
 
 The single-series form of [`transform_single_time_series!`](@ref), which sweeps
-every eligible series in the store. Two callers want this instead: one deriving
-a view over a series it just added, and a writer replaying a recorded model,
-which passes `id` so the reference that model holds is preserved rather than
-reassigned.
+every eligible series in the store. This is for a caller deriving a view over a
+series it just added, without re-examining the rest of the store. As on every
+add, the catalog assigns the row's id and the returned `AddedTimeSeries` reports
+it.
 
 A view carries no array of its own — it shares its source's data — so this
 writes one catalog row and no array bytes, and a caller recreating one never
@@ -68,7 +68,6 @@ function add_derived_view!(
     interval::Period;
     normalize_single_window::Bool=false,
     require_uniform_forecast_grid::Bool=false,
-    id::Union{Nothing, Integer}=nothing,
 )
     out_key = Ref{Ptr{Cvoid}}(C_NULL)
     out_id = Ref{Int64}(0)
@@ -80,7 +79,6 @@ function add_derived_view!(
             _period_to_iso(interval)::Cstring,
             normalize_single_window::Bool,
             require_uniform_forecast_grid::Bool,
-            _c_id(id)::Int64,
             out_key::Ref{Ptr{Cvoid}},
             out_id::Ref{Int64},
         )::Int32

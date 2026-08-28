@@ -590,6 +590,8 @@ pub fn merge(
     let datas = source.bulk_read(&refs).map_err(|e| e.to_string())?;
     drop(source);
 
+    // A merge re-adds the source's rows, so the destination assigns them fresh
+    // ids from its own stream — a source id may well already be taken there.
     let requests: Vec<infrastore_core::AddRequest> = metas
         .iter()
         .zip(datas)
@@ -599,10 +601,6 @@ pub fn merge(
             owner_category: m.owner_category,
             data,
             features: m.features.clone(),
-            // A merge deliberately drops the source's id. The destination has
-            // its own id stream, so a source id may already be taken there;
-            // the rows are re-added and assigned fresh ids.
-            id: None,
         })
         .collect();
 

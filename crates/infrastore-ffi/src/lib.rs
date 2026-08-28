@@ -125,14 +125,6 @@ fn set_error(msg: impl Into<String>) {
     LAST_ERROR.with(|e| *e.borrow_mut() = Some(msg.into()));
 }
 
-/// The C ABI's spelling of "let the catalog assign an id": any non-positive
-/// `association_id` argument. A positive one is filed as given (and must sit
-/// above the catalog's counter — see `DuplicateAssociationId`). One place, so
-/// every writer reads the argument the same way.
-fn explicit_id(association_id: i64) -> Option<i64> {
-    (association_id > 0).then_some(association_id)
-}
-
 fn clear_error() {
     LAST_ERROR.with(|e| *e.borrow_mut() = None);
 }
@@ -948,7 +940,6 @@ unsafe fn build_single_request(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
-    association_id: i64,
 ) -> Result<core_lib::AddRequest, i32> {
     if data_ptr.is_null() {
         set_error("data_ptr is null");
@@ -1015,10 +1006,6 @@ unsafe fn build_single_request(
         owner_category,
         data,
         features,
-        // C has no `Option<i64>`, so a non-positive `association_id` is the
-        // "assign one" spelling. The catalog's ids start at 1 and only ever
-        // increase, so no real id is excluded by the sentinel.
-        id: explicit_id(association_id),
     })
 }
 
@@ -1062,7 +1049,6 @@ pub unsafe extern "C" fn infrastore_store_add_single(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
-    association_id: i64,
     out_key: *mut *mut InfraStoreKeyHandle,
     out_id: *mut i64,
 ) -> i32 {
@@ -1098,7 +1084,6 @@ pub unsafe extern "C" fn infrastore_store_add_single(
             unit_system,
             time_reference,
             component_field,
-            association_id,
         )
     } {
         Ok(r) => r,
@@ -1144,7 +1129,6 @@ unsafe fn build_non_sequential_request(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
-    association_id: i64,
 ) -> Result<core_lib::AddRequest, i32> {
     if timestamps_unix_ms.is_null() || data_ptr.is_null() {
         set_error("an input pointer is null");
@@ -1207,10 +1191,6 @@ unsafe fn build_non_sequential_request(
         owner_category,
         data,
         features,
-        // C has no `Option<i64>`, so a non-positive `association_id` is the
-        // "assign one" spelling. The catalog's ids start at 1 and only ever
-        // increase, so no real id is excluded by the sentinel.
-        id: explicit_id(association_id),
     })
 }
 
@@ -1244,7 +1224,6 @@ pub unsafe extern "C" fn infrastore_store_add_non_sequential(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
-    association_id: i64,
     out_key: *mut *mut InfraStoreKeyHandle,
     out_id: *mut i64,
 ) -> i32 {
@@ -1280,7 +1259,6 @@ pub unsafe extern "C" fn infrastore_store_add_non_sequential(
             unit_system,
             time_reference,
             component_field,
-            association_id,
         )
     } {
         Ok(r) => r,
@@ -2926,10 +2904,6 @@ pub unsafe extern "C" fn infrastore_store_association_exists(
 /// disagreeing would produce two different series. `dry_run` has no counterpart
 /// here and is not accepted — this entry point writes or fails.
 ///
-/// `association_id` files the view under a specific id when positive, which is
-/// what an importer replaying a recorded view needs; non-positive assigns one,
-/// as on every other add.
-///
 /// # Safety
 ///
 /// `handle` must be a live store handle and `source` a live key handle naming a
@@ -2946,7 +2920,6 @@ pub unsafe extern "C" fn infrastore_store_add_derived_view(
     interval: *const c_char,
     normalize_single_window: bool,
     require_uniform_forecast_grid: bool,
-    association_id: i64,
     out_key: *mut *mut InfraStoreKeyHandle,
     out_id: *mut i64,
 ) -> i32 {
@@ -2972,13 +2945,10 @@ pub unsafe extern "C" fn infrastore_store_add_derived_view(
         require_uniform_forecast_grid,
         dry_run: false,
     };
-    match store.inner.add_derived_view(
-        &source.inner,
-        horizon,
-        interval,
-        policy,
-        explicit_id(association_id),
-    ) {
+    match store
+        .inner
+        .add_derived_view(&source.inner, horizon, interval, policy)
+    {
         Ok(added) => {
             if !out_key.is_null() {
                 unsafe {
@@ -3407,7 +3377,6 @@ pub unsafe extern "C" fn infrastore_store_add_forecast(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
-    association_id: i64,
     out_key: *mut *mut InfraStoreKeyHandle,
     out_id: *mut i64,
 ) -> i32 {
@@ -3441,7 +3410,6 @@ pub unsafe extern "C" fn infrastore_store_add_forecast(
             unit_system,
             time_reference,
             component_field,
-            association_id,
         )
     } {
         Ok(r) => r,
@@ -3489,7 +3457,6 @@ unsafe fn build_forecast_request(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
-    association_id: i64,
 ) -> Result<core_lib::AddRequest, i32> {
     if data_ptr.is_null() {
         set_error("data_ptr is null");
@@ -3596,10 +3563,6 @@ unsafe fn build_forecast_request(
         owner_category,
         data,
         features,
-        // C has no `Option<i64>`, so a non-positive `association_id` is the
-        // "assign one" spelling. The catalog's ids start at 1 and only ever
-        // increase, so no real id is excluded by the sentinel.
-        id: explicit_id(association_id),
     })
 }
 
@@ -3638,7 +3601,6 @@ pub unsafe extern "C" fn infrastore_store_add_probabilistic(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
-    association_id: i64,
     out_key: *mut *mut InfraStoreKeyHandle,
     out_id: *mut i64,
 ) -> i32 {
@@ -3673,7 +3635,6 @@ pub unsafe extern "C" fn infrastore_store_add_probabilistic(
             unit_system,
             time_reference,
             component_field,
-            association_id,
         )
     } {
         Ok(r) => r,
@@ -3722,7 +3683,6 @@ unsafe fn build_probabilistic_request(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
-    association_id: i64,
 ) -> Result<core_lib::AddRequest, i32> {
     if data_ptr.is_null() || percentiles_ptr.is_null() {
         set_error("a required pointer is null");
@@ -3792,10 +3752,6 @@ unsafe fn build_probabilistic_request(
         owner_category,
         data,
         features,
-        // C has no `Option<i64>`, so a non-positive `association_id` is the
-        // "assign one" spelling. The catalog's ids start at 1 and only ever
-        // increase, so no real id is excluded by the sentinel.
-        id: explicit_id(association_id),
     })
 }
 
@@ -3862,7 +3818,6 @@ pub unsafe extern "C" fn infrastore_batch_add_single(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
-    association_id: i64,
 ) -> i32 {
     clear_error();
     let batch = match unsafe { batch.as_mut() } {
@@ -3892,7 +3847,6 @@ pub unsafe extern "C" fn infrastore_batch_add_single(
             unit_system,
             time_reference,
             component_field,
-            association_id,
         )
     } {
         Ok(req) => {
@@ -3934,7 +3888,6 @@ pub unsafe extern "C" fn infrastore_batch_add_non_sequential(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
-    association_id: i64,
 ) -> i32 {
     clear_error();
     let batch = match unsafe { batch.as_mut() } {
@@ -3964,7 +3917,6 @@ pub unsafe extern "C" fn infrastore_batch_add_non_sequential(
             unit_system,
             time_reference,
             component_field,
-            association_id,
         )
     } {
         Ok(req) => {
@@ -4010,7 +3962,6 @@ pub unsafe extern "C" fn infrastore_batch_add_forecast(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
-    association_id: i64,
 ) -> i32 {
     clear_error();
     let batch = match unsafe { batch.as_mut() } {
@@ -4044,7 +3995,6 @@ pub unsafe extern "C" fn infrastore_batch_add_forecast(
             unit_system,
             time_reference,
             component_field,
-            association_id,
         )
     } {
         Ok(req) => {
@@ -4091,7 +4041,6 @@ pub unsafe extern "C" fn infrastore_batch_add_probabilistic(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
-    association_id: i64,
 ) -> i32 {
     clear_error();
     let batch = match unsafe { batch.as_mut() } {
@@ -4126,7 +4075,6 @@ pub unsafe extern "C" fn infrastore_batch_add_probabilistic(
             unit_system,
             time_reference,
             component_field,
-            association_id,
         )
     } {
         Ok(req) => {
@@ -7078,7 +7026,6 @@ pub unsafe extern "C" fn infrastore_store_add_supplemental_attribute_association
     component_type: *const c_char,
     attribute_id: i64,
     attribute_type: *const c_char,
-    association_id: i64,
     out_id: *mut i64,
 ) -> i32 {
     clear_error();
@@ -7097,8 +7044,8 @@ pub unsafe extern "C" fn infrastore_store_add_supplemental_attribute_association
             component_type,
             attribute_id,
             attribute_type,
-            // Non-positive means "assign one", as on the time-series adds.
-            id: explicit_id(association_id),
+            // The catalog assigns; this table's wire form carries no id.
+            id: None,
         },
     ) {
         Ok(id) => {
@@ -7488,7 +7435,6 @@ pub unsafe extern "C" fn infrastore_store_add_parent_child_association(
     parent_type: *const c_char,
     child_id: i64,
     child_type: *const c_char,
-    association_id: i64,
     out_id: *mut i64,
 ) -> i32 {
     clear_error();
@@ -7508,8 +7454,8 @@ pub unsafe extern "C" fn infrastore_store_add_parent_child_association(
             parent_type,
             child_id,
             child_type,
-            // Non-positive means "assign one", as on the time-series adds.
-            id: explicit_id(association_id),
+            // The catalog assigns; this table's wire form carries no id.
+            id: None,
         }) {
         Ok(id) => {
             if !out_id.is_null() {
@@ -9603,7 +9549,6 @@ mod abi_tests {
                 ptr::null(),
                 ptr::null(),
                 ptr::null(),
-                0,
                 &mut key,
                 ptr::null_mut(),
             )
@@ -9661,7 +9606,6 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     ptr::null(),
-                    0,
                     &mut key,
                     ptr::null_mut(),
                 )
@@ -10639,7 +10583,6 @@ mod abi_tests {
                 ptr::null(),
                 ptr::null(),
                 ptr::null(),
-                0,
                 &mut key,
                 ptr::null_mut(),
             )
@@ -10703,7 +10646,6 @@ mod abi_tests {
                 ptr::null(),
                 ptr::null(),
                 ptr::null(),
-                0,
                 &mut key,
                 ptr::null_mut(),
             )
@@ -11032,7 +10974,6 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     ptr::null(),
-                    0,
                     &mut key,
                     ptr::null_mut(),
                 )
@@ -11607,15 +11548,8 @@ mod abi_tests {
         assert!(store.is_null());
     }
 
-    /// Add one f64 series under an explicit association id, returning the id
-    /// the store actually filed it under.
-    fn abi_add_f64_with_id(
-        store: *mut InfraStoreHandle,
-        owner: i64,
-        name: &str,
-        vals: &[f64],
-        id: i64,
-    ) -> i64 {
+    /// Add one f64 series, returning the association id the catalog assigned.
+    fn abi_add_f64_id(store: *mut InfraStoreHandle, owner: i64, name: &str, vals: &[f64]) -> i64 {
         let owner_type = CString::new("Generator").unwrap();
         let name_c = CString::new(name).unwrap();
         let res = CString::new(HOUR).unwrap();
@@ -11644,7 +11578,6 @@ mod abi_tests {
                 ptr::null(),
                 ptr::null(),
                 ptr::null(),
-                id,
                 &mut key,
                 &mut out_id,
             )
@@ -11652,6 +11585,33 @@ mod abi_tests {
         assert_eq!(rc, INFRASTORE_OK, "add failed: {}", last_error());
         unsafe { infrastore_key_free(key) };
         out_id
+    }
+
+    /// Add and drop `n` throwaway rows, so the next id `store` assigns clears
+    /// `n`. Ids are assigned and never chosen, so a document whose ids must sit
+    /// above an importing store's high-water mark is arranged this way.
+    fn abi_advance_ids(store: *mut InfraStoreHandle, n: i64) {
+        let res = CString::new(HOUR).unwrap();
+        for i in 0..n {
+            let name = format!("__spacer{i}");
+            abi_add_f64_id(store, -1, &name, &[i as f64, 0.0, 0.0]);
+            let name_c = CString::new(name).unwrap();
+            assert_eq!(
+                unsafe {
+                    infrastore_store_remove_by_attrs(
+                        store,
+                        -1,
+                        0,
+                        name_c.as_ptr(),
+                        res.as_ptr(),
+                        ptr::null(),
+                    )
+                },
+                INFRASTORE_OK,
+                "spacer remove failed: {}",
+                last_error()
+            );
+        }
     }
 
     /// Item `index`'s name, through the getter `read_by_ids` callers rely on.
@@ -11719,9 +11679,9 @@ mod abi_tests {
     #[test]
     fn abi_read_by_ids_follows_the_order_it_was_given() {
         let store = abi_create_in_memory();
-        let a = abi_add_f64_with_id(store, 1, "a", &[1.0, 2.0, 3.0], 0);
-        let b = abi_add_f64_with_id(store, 2, "b", &[10.0, 11.0, 12.0], 0);
-        let c = abi_add_f64_with_id(store, 3, "c", &[100.0, 101.0, 102.0], 0);
+        let a = abi_add_f64_id(store, 1, "a", &[1.0, 2.0, 3.0]);
+        let b = abi_add_f64_id(store, 2, "b", &[10.0, 11.0, 12.0]);
+        let c = abi_add_f64_id(store, 3, "c", &[100.0, 101.0, 102.0]);
 
         let asked = [c, a, c, b];
         let mut result: *mut InfraStoreBulkReadHandle = ptr::null_mut();
@@ -11773,7 +11733,9 @@ mod abi_tests {
     #[test]
     fn abi_time_series_openapi_rows_round_trip_with_their_ids() {
         let source = abi_create_in_memory();
-        let id = abi_add_f64_with_id(source, 1, "load", &[1.0, 2.0, 3.0], 700);
+        // Above whatever the target will have assigned its own anchor row.
+        abi_advance_ids(source, 699);
+        let id = abi_add_f64_id(source, 1, "load", &[1.0, 2.0, 3.0]);
         assert_eq!(id, 700);
 
         let mut json: *mut c_char = ptr::null_mut();
@@ -11806,7 +11768,7 @@ mod abi_tests {
         // Arrays are content-addressed, so "the artifact brought the values" is
         // a store already holding the same bytes under an identity of its own.
         let target = abi_create_in_memory();
-        abi_add_f64_with_id(target, 9, "anchor", &[1.0, 2.0, 3.0], 0);
+        abi_add_f64_id(target, 9, "anchor", &[1.0, 2.0, 3.0]);
         let mut added = 0u64;
         assert_eq!(
             unsafe {

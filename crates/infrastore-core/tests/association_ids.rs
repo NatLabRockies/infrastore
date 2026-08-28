@@ -42,6 +42,28 @@ fn key(name: &str) -> KeyIdentity {
     }
 }
 
+/// Add and drop `n` throwaway rows, so the next id `store` assigns clears `n`.
+///
+/// Ids are assigned and never chosen, so a document whose ids have to sit above
+/// an importing store's high-water mark is arranged by advancing the exporter's
+/// counter rather than by naming ids on the way in.
+fn advance_ids(store: &mut infrastore_core::Store, n: usize) {
+    for i in 0..n {
+        let name = format!("__spacer{i}");
+        store
+            .add(AddRequest::new(
+                999,
+                "Spacer",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(series(&name)),
+            ))
+            .unwrap();
+        let mut k = key(&name);
+        k.owner_id = 999;
+        store.remove_time_series(&k).unwrap();
+    }
+}
+
 /// The `.sqlite` sidecar beside an HDF5 store.
 fn sidecar(store_path: &std::path::Path) -> std::path::PathBuf {
     let mut p = store_path.as_os_str().to_owned();
@@ -299,23 +321,77 @@ fn a_stored_row_reports_the_id_the_catalog_gave_it() {
     );
 }
 
-/// An explicit id is honored, and the catalog's counter ratchets past it — so a
-/// later assigned id cannot land on top of one the caller already placed.
+/// An add never files a row under an id the caller picked. `AddRequest` names
+/// none, and the association rows' `id` field — which a listing populates — is
+/// ignored on the way back in, so a row read from one store and re-added to
+/// another is filed under a fresh id rather than carrying the old one over.
 #[test]
-fn an_explicit_id_is_honored_and_ratchets_the_counter() {
+fn an_add_always_lets_the_catalog_assign() {
     let mut store = create_store(None, true).unwrap();
     store
-        .add(
-            AddRequest::new(
-                1,
-                "Generator",
-                OwnerCategory::Component,
-                TimeSeriesData::SingleTimeSeries(series("imported")),
-            )
-            .with_id(500),
-        )
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series("first")),
+        ))
         .unwrap();
-    store
+    assert_eq!(store.get_metadata(&key("first")).unwrap().id, Some(1));
+
+    // An attachment read back from another store still carries that store's id.
+    let mut elsewhere = attach(1, 100);
+    elsewhere.id = Some(500);
+    assert_eq!(
+        store
+            .add_supplemental_attribute_association(elsewhere)
+            .unwrap(),
+        1,
+        "the id on the way in is ignored; this catalog assigns its own",
+    );
+
+    let mut edge = ParentChildAssociation {
+        parent_id: 1,
+        parent_type: "Generator".into(),
+        child_id: 2,
+        child_type: "Bus".into(),
+        id: Some(500),
+    };
+    assert_eq!(store.add_parent_child_association(edge.clone()).unwrap(), 1);
+    edge.child_id = 3;
+    assert_eq!(store.add_parent_child_association(edge).unwrap(), 2);
+}
+
+/// An import's explicit id is honored, and the catalog's counter ratchets past
+/// it — so a later assigned id cannot land on top of one the document placed.
+#[test]
+fn an_imported_id_is_honored_and_ratchets_the_counter() {
+    let mut source = create_store(None, true).unwrap();
+    advance_ids(&mut source, 500);
+    source
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series("imported")),
+        ))
+        .unwrap();
+    let json = source
+        .export_time_series_associations_openapi(&ListFilter::default())
+        .unwrap();
+
+    let mut target = create_store(None, true).unwrap();
+    target
+        .add(AddRequest::new(
+            9,
+            "Anchor",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series("anchor")),
+        ))
+        .unwrap();
+    target
+        .import_time_series_associations_openapi(&json)
+        .unwrap();
+    target
         .add(AddRequest::new(
             1,
             "Generator",
@@ -324,11 +400,11 @@ fn an_explicit_id_is_honored_and_ratchets_the_counter() {
         ))
         .unwrap();
 
-    assert_eq!(store.get_metadata(&key("imported")).unwrap().id, Some(500));
+    assert_eq!(target.get_metadata(&key("imported")).unwrap().id, Some(501));
     assert_eq!(
-        store.get_metadata(&key("assigned")).unwrap().id,
-        Some(501),
-        "an assigned id must start past the explicit one, not collide with it",
+        target.get_metadata(&key("assigned")).unwrap().id,
+        Some(502),
+        "an assigned id must start past the imported one, not collide with it",
     );
 }
 
@@ -338,38 +414,41 @@ fn an_explicit_id_is_honored_and_ratchets_the_counter() {
 /// collision means the import's ids do not fit this store.
 #[test]
 fn an_id_collision_and_an_identity_collision_are_different_errors() {
-    let mut store = create_store(None, true).unwrap();
-    store
-        .add(
-            AddRequest::new(
-                1,
-                "Generator",
-                OwnerCategory::Component,
-                TimeSeriesData::SingleTimeSeries(series("load")),
-            )
-            .with_id(7),
-        )
+    // A document exported from a store whose ids start at 1.
+    let mut source = create_store(None, true).unwrap();
+    source
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series("load")),
+        ))
+        .unwrap();
+    let json = source
+        .export_time_series_associations_openapi(&ListFilter::default())
         .unwrap();
 
-    // Same id, different series.
-    let err = store
-        .add(
-            AddRequest::new(
-                2,
-                "Generator",
-                OwnerCategory::Component,
-                TimeSeriesData::SingleTimeSeries(series("other")),
-            )
-            .with_id(7),
-        )
+    // The target already holds the array, under a row that took id 1 — so the
+    // document's own id 1 is at the high-water mark and cannot be re-filed.
+    let mut target = create_store(None, true).unwrap();
+    target
+        .add(AddRequest::new(
+            9,
+            "Anchor",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series("anchor")),
+        ))
+        .unwrap();
+    let err = target
+        .import_time_series_associations_openapi(&json)
         .unwrap_err();
     match err {
-        TimeSeriesError::DuplicateAssociationId(id) => assert_eq!(id, 7),
+        TimeSeriesError::DuplicateAssociationId(id) => assert_eq!(id, 1),
         other => panic!("expected DuplicateAssociationId, got {other:?}"),
     }
 
-    // Same series, no id: still the identity collision it always was.
-    let err = store
+    // Same series added twice: still the identity collision it always was.
+    let err = source
         .add(AddRequest::new(
             1,
             "Generator",
@@ -540,145 +619,66 @@ fn a_write_reports_the_id_it_used() {
     }
 }
 
-/// A batch either supplies every id or none. Half of each has no coherent
-/// meaning — whether an explicit id collides with an assigned one would depend
-/// on the order the items happened to be in.
-#[test]
-fn a_batch_may_not_mix_supplied_and_assigned_ids() {
-    let mut store = create_store(None, true).unwrap();
-    let err = store
-        .add_time_series_bulk(vec![
-            AddRequest::new(
-                1,
-                "Generator",
-                OwnerCategory::Component,
-                TimeSeriesData::SingleTimeSeries(series("supplied")),
-            )
-            .with_id(10),
-            AddRequest::new(
-                1,
-                "Generator",
-                OwnerCategory::Component,
-                TimeSeriesData::SingleTimeSeries(series("assigned")),
-            ),
-        ])
-        .unwrap_err();
-    assert!(
-        matches!(err, TimeSeriesError::InvalidParameter(_)),
-        "a mixed batch must be refused, got {err:?}",
-    );
-    // All-or-none both pass.
-    store
-        .add_time_series_bulk(vec![
-            AddRequest::new(
-                1,
-                "Generator",
-                OwnerCategory::Component,
-                TimeSeriesData::SingleTimeSeries(series("one")),
-            )
-            .with_id(10),
-            AddRequest::new(
-                1,
-                "Generator",
-                OwnerCategory::Component,
-                TimeSeriesData::SingleTimeSeries(series("two")),
-            )
-            .with_id(11),
-        ])
-        .unwrap();
-}
-
-/// An explicit id cannot re-file a deleted id either. "Never reissued" would
+/// An imported id cannot re-file a deleted id either. "Never reissued" would
 /// be a promise about assigned ids only if the primary key were the sole guard:
-/// it refuses an id a *live* row holds and nothing else, so an import carrying
+/// it refuses an id a *live* row holds and nothing else, so a document carrying
 /// a retired id would make a stale reference resolve to a different series. An
-/// explicit id must therefore sit above the counter, which is also what the
+/// imported id must therefore sit above the counter, which is also what the
 /// `DuplicateAssociationId` message has said all along.
 #[test]
-fn an_explicit_id_cannot_reissue_a_deleted_one() {
-    let mut store = create_store(None, true).unwrap();
-    let added = store
+fn an_imported_id_cannot_reissue_a_deleted_one() {
+    // Source rows at 1 and 2; the document names both.
+    let mut source = create_store(None, true).unwrap();
+    for name in ["first", "second"] {
+        source
+            .add(AddRequest::new(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(series(name)),
+            ))
+            .unwrap();
+    }
+    let json = source
+        .export_time_series_associations_openapi(&ListFilter::default())
+        .unwrap();
+
+    // A target that issued id 1 and then deleted that row. The id is retired,
+    // not free: the primary key would accept it, and the high-water mark is
+    // what refuses it.
+    let mut target = create_store(None, true).unwrap();
+    let anchor = target
         .add(AddRequest::new(
-            1,
-            "Generator",
+            9,
+            "Anchor",
             OwnerCategory::Component,
-            TimeSeriesData::SingleTimeSeries(series("first")),
+            TimeSeriesData::SingleTimeSeries(series("anchor")),
         ))
         .unwrap();
-    store.remove_time_series(&key("first")).unwrap();
+    let mut anchor_key = key("anchor");
+    anchor_key.owner_id = 9;
+    target.remove_time_series(&anchor_key).unwrap();
+    assert_eq!(anchor.id, 1);
 
-    let err = store
-        .add(
-            AddRequest::new(
-                2,
-                "Generator",
-                OwnerCategory::Component,
-                TimeSeriesData::SingleTimeSeries(series("second")),
-            )
-            .with_id(added.id),
-        )
+    // The array is gone with the row, so put it back under another owner; the
+    // rows being imported are the ones that do not exist yet.
+    target
+        .add(AddRequest::new(
+            8,
+            "Anchor",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series("anchor")),
+        ))
+        .unwrap();
+
+    let err = target
+        .import_time_series_associations_openapi(&json)
         .unwrap_err();
     assert!(
-        matches!(err, TimeSeriesError::DuplicateAssociationId(id) if id == added.id),
+        matches!(err, TimeSeriesError::DuplicateAssociationId(id) if id == anchor.id),
         "a retired id must be refused as taken, got {err:?}",
     );
-    assert!(!store.association_exists(added.id).unwrap());
-
-    // The floor is the counter *before* the batch, so a document's ids may
-    // arrive in any order as long as all of them are new.
-    let added = store
-        .add_time_series_bulk(vec![
-            AddRequest::new(
-                2,
-                "Generator",
-                OwnerCategory::Component,
-                TimeSeriesData::SingleTimeSeries(series("high")),
-            )
-            .with_id(20),
-            AddRequest::new(
-                2,
-                "Generator",
-                OwnerCategory::Component,
-                TimeSeriesData::SingleTimeSeries(series("low")),
-            )
-            .with_id(10),
-        ])
-        .unwrap();
-    assert_eq!(added.iter().map(|a| a.id).collect::<Vec<_>>(), vec![20, 10]);
-
-    // Zero is the C ABI's "assign one" and never a real id.
-    let err = store
-        .add(
-            AddRequest::new(
-                3,
-                "Generator",
-                OwnerCategory::Component,
-                TimeSeriesData::SingleTimeSeries(series("zero")),
-            )
-            .with_id(0),
-        )
-        .unwrap_err();
-    assert!(
-        matches!(err, TimeSeriesError::InvalidParameter(_)),
-        "{err:?}"
-    );
-
-    // The same rule over an association catalog's own counter.
-    let id = store
-        .add_supplemental_attribute_association(attach(1, 1))
-        .unwrap();
-    store
-        .remove_supplemental_attribute_associations(&SupplementalAttributeFilter::default())
-        .unwrap();
-    let mut retired = attach(2, 2);
-    retired.id = Some(id);
-    let err = store
-        .add_supplemental_attribute_association(retired)
-        .unwrap_err();
-    assert!(
-        matches!(err, TimeSeriesError::DuplicateAssociationId(got) if got == id),
-        "{err:?}"
-    );
+    assert!(!target.association_exists(anchor.id).unwrap());
 }
 
 // ---------------------------------------------------------------------------
@@ -710,20 +710,24 @@ fn attaching_reports_its_id() {
         .unwrap();
     assert_eq!(ids, vec![2, 3], "bulk ids come back in input order");
 
-    let mut explicit = attach(4, 100);
-    explicit.id = Some(90);
+    // A row that already carries an id — a listing from another store, say — is
+    // filed under a fresh one anyway. This catalog's wire form has no id, so
+    // there is never a document reference to preserve.
+    let mut carried = attach(4, 100);
+    carried.id = Some(90);
     assert_eq!(
         store
-            .add_supplemental_attribute_association(explicit)
+            .add_supplemental_attribute_association(carried)
             .unwrap(),
-        90,
+        4,
+        "the id on the way in is ignored",
     );
 
     let rows = store
         .list_supplemental_attribute_associations(&SupplementalAttributeFilter::default())
         .unwrap();
     let seen: Vec<Option<i64>> = rows.iter().map(|r| r.id).collect();
-    assert_eq!(seen, vec![Some(1), Some(2), Some(3), Some(90)]);
+    assert_eq!(seen, vec![Some(1), Some(2), Some(3), Some(4)]);
 }
 
 /// Two associations describing the same attachment are equal and hash alike
@@ -988,7 +992,6 @@ fn a_derived_view_adds_a_row_and_no_array() {
             Duration::hours(6),
             Duration::hours(6),
             TransformPolicy::default(),
-            None,
         )
         .unwrap();
 
@@ -1005,32 +1008,6 @@ fn a_derived_view_adds_a_row_and_no_array() {
         TimeSeriesType::DeterministicSingleTimeSeries,
     );
     assert_ne!(view.id, source.id);
-}
-
-/// An importer can name the view's id, which is the whole point: the reference
-/// a document recorded is preserved rather than reassigned.
-#[test]
-fn a_derived_view_can_be_filed_under_a_given_id() {
-    let mut store = create_store(None, true).unwrap();
-    let source = add_long(&mut store, "load");
-    let view = store
-        .add_derived_view(
-            source.identity(),
-            Duration::hours(6),
-            Duration::hours(6),
-            TransformPolicy::default(),
-            Some(4_242),
-        )
-        .unwrap();
-    assert_eq!(view.id, 4_242);
-    assert_eq!(
-        store
-            .get_metadata_by_id(4_242)
-            .unwrap()
-            .unwrap()
-            .time_series_type,
-        TimeSeriesType::DeterministicSingleTimeSeries,
-    );
 }
 
 /// Deriving one view directly produces the same row the whole-store sweep
@@ -1056,7 +1033,6 @@ fn a_directly_derived_view_matches_a_swept_one() {
                 Duration::hours(24),
                 Duration::hours(24),
                 policy,
-                None,
             )
             .unwrap();
         store
@@ -1111,7 +1087,6 @@ fn a_derived_view_is_refused_where_the_sweep_would_refuse_it() {
             Duration::hours(48),
             Duration::hours(6),
             TransformPolicy::default(),
-            None,
         )
         .unwrap_err();
     assert!(
@@ -1129,7 +1104,6 @@ fn a_derived_view_is_refused_where_the_sweep_would_refuse_it() {
                 dry_run: true,
                 ..TransformPolicy::default()
             },
-            None,
         )
         .unwrap_err();
     assert!(
@@ -1145,7 +1119,6 @@ fn a_derived_view_is_refused_where_the_sweep_would_refuse_it() {
             Duration::hours(6),
             Duration::hours(6),
             TransformPolicy::default(),
-            None,
         )
         .unwrap();
     let err = store
@@ -1154,7 +1127,6 @@ fn a_derived_view_is_refused_where_the_sweep_would_refuse_it() {
             Duration::hours(12),
             Duration::hours(6),
             TransformPolicy::default(),
-            None,
         )
         .unwrap_err();
     assert!(
@@ -1240,18 +1212,17 @@ fn the_sweep_reports_the_views_it_wrote() {
 #[test]
 fn a_document_round_trips_with_its_ids() {
     let mut source = create_store(None, true).unwrap();
+    // Ids above whatever the target will have issued for its own rows.
+    advance_ids(&mut source, 100);
     let mut expected = Vec::new();
     for (owner, name) in [(1, "load"), (2, "wind"), (3, "solar")] {
         let added = source
-            .add(
-                AddRequest::new(
-                    owner,
-                    "Generator",
-                    OwnerCategory::Component,
-                    TimeSeriesData::SingleTimeSeries(series(name)),
-                )
-                .with_id(owner * 100),
-            )
+            .add(AddRequest::new(
+                owner,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(series(name)),
+            ))
             .unwrap();
         expected.push((name.to_string(), added.id));
     }
@@ -1259,7 +1230,7 @@ fn a_document_round_trips_with_its_ids() {
         .export_time_series_associations_openapi(&ListFilter::default())
         .unwrap();
     assert!(
-        json.contains("\"association_id\":100"),
+        json.contains("\"association_id\":101"),
         "the wire form must carry the id, under the schema's spelling",
     );
 
@@ -1350,16 +1321,14 @@ fn an_imported_row_is_identical_to_the_exported_one() {
     .with_time_reference(infrastore_core::TimeReference::Zone(
         "America/Denver".into(),
     ));
+    advance_ids(&mut source, 100);
     let added = source
-        .add(
-            AddRequest::new(
-                1,
-                "Generator",
-                OwnerCategory::Component,
-                TimeSeriesData::Deterministic(forecast),
-            )
-            .with_id(100),
-        )
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::Deterministic(forecast),
+        ))
         .unwrap();
     let original = source.get_metadata_by_id(added.id).unwrap().unwrap();
     assert_eq!(
@@ -1463,16 +1432,14 @@ fn an_import_refuses_a_document_that_mixes_supplied_and_missing_ids() {
 fn an_import_refuses_a_view_without_its_source() {
     let mut source = create_store(None, true).unwrap();
     // High ids, so the document fits a target that has issued ids of its own.
+    advance_ids(&mut source, 100);
     source
-        .add(
-            AddRequest::new(
-                1,
-                "Generator",
-                OwnerCategory::Component,
-                TimeSeriesData::SingleTimeSeries(long_series("load")),
-            )
-            .with_id(100),
-        )
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(long_series("load")),
+        ))
         .unwrap();
     source
         .transform_single_time_series(

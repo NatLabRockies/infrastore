@@ -132,7 +132,6 @@ int32_t infrastore_store_add_single(struct InfraStore *handle,
                             const char *unit_system,          /* optional: "natural_units" | "component_base" */
                             const char *time_reference,       /* optional: "utc" | "zoneless" | "-07:00" | IANA name */
                             const char *component_field,      /* optional: e.g. "max_active_power" */
-                            int64_t association_id,           /* 0 = let the catalog assign; else must exceed its counter */
                             struct InfraStoreKey **out_key,           /* owned; infrastore_key_free */
                             int64_t *out_id);                         /* optional (NULL skips): the id filed under */
 
@@ -192,7 +191,6 @@ int32_t infrastore_store_add_non_sequential(struct InfraStore *handle,
                                     const char *quantity_kind, const char *unit_system,
                                     const char *time_reference,
                                     const char *component_field,
-                                    int64_t association_id,           /* 0 = assign */
                                     struct InfraStoreKey **out_key,
                                     int64_t *out_id);                 /* optional (NULL skips) */
 
@@ -373,7 +371,6 @@ int32_t infrastore_store_add_forecast(struct InfraStore *handle,
                               const char *unit_system,          /* optional: "natural_units" | "component_base" */
                             const char *time_reference,       /* optional: "utc" | "zoneless" | "-07:00" | IANA name */
                               const char *component_field,      /* optional: e.g. "max_active_power" */
-                              int64_t association_id,           /* 0 = assign */
                               struct InfraStoreKey **out_key,
                               int64_t *out_id);                 /* optional (NULL skips) */
 
@@ -393,7 +390,6 @@ int32_t infrastore_store_add_probabilistic(struct InfraStore *handle,
                                    const char *unit_system,          /* optional: "natural_units" | "component_base" */
                             const char *time_reference,       /* optional: "utc" | "zoneless" | "-07:00" | IANA name */
                                    const char *component_field,      /* optional: e.g. "max_active_power" */
-                                   int64_t association_id,           /* 0 = assign */
                                    struct InfraStoreKey **out_key,
                                    int64_t *out_id);                 /* optional (NULL skips) */
 
@@ -411,11 +407,11 @@ int32_t infrastore_store_transform_single_time_series(struct InfraStore *handle,
                                               int64_t **out_ids);              /* optional (NULL skips): infrastore_buffer_free_i64 */
 ```
 
-Every writer takes an `association_id` and an optional `out_id`. Pass `0` to let the catalog assign
-the id (the normal case) and read what it chose from `*out_id`; pass a positive id to file the row
-under it — an import keeping a document's own references — which must lie above the catalog's
-counter, so it fails with `DuplicateAssociationId` in a store that has already issued ids of its
-own, and a deleted id can never be re-filed by hand any more than it can be reissued.
+Every writer takes an optional `out_id`, which receives the catalog id the row was filed under; pass
+`NULL` to skip it. No writer takes an id as _input_: the catalog always assigns. The one entry point
+that files rows under ids a caller supplies is
+`infrastore_store_import_time_series_associations_openapi`, replaying a document that already
+recorded them — see [Association ids](../explanation/data-model.md#association-ids).
 
 `infrastore_store_transform_single_time_series` reports the rest of its outcome through four
 optional out-parameters, each skippable with `NULL`: `out_sources` is how many `SingleTimeSeries`

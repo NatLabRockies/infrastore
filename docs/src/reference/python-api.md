@@ -169,7 +169,6 @@ def add_time_series(
     unit_system: str | None = None,   # "natural_units" | "component_base"
     time_reference: str | None = None,   # "utc" | "zoneless" | "-07:00" | "America/Denver"
     component_field: str | None = None,  # e.g. "max_active_power"
-    id: int | None = None,               # file under this catalog id (imports); default: assign
 ) -> AddedTimeSeries: ...
 # `time_reference` is normally omitted: it is inferred from the datetime the
 # series was built with (see "Time references" below). Pass it to override.
@@ -185,16 +184,17 @@ def add_time_series_bulk(self, items: list[dict]) -> list[AddedTimeSeries]: ...
 # Each item dict mirrors add_time_series's parameters: required `owner_id`,
 # `owner_type`, `owner_category`, `time_series`; optional `features`, `units`,
 # `element_type`, `application_data`, `quantity_kind`, `unit_system`,
-# `time_reference`, `component_field`, `id` (all items or none).
+# `time_reference`, `component_field`.
 # All items commit in ONE metadata transaction (all-or-nothing), which is much
 # faster than looping over add_time_series. Results are in input order.
 
 class AddedTimeSeries:
     key: TimeSeriesKey   # names the series
     id: int              # the catalog row's id — store it to reference the series later
-# Hashable and comparable; the id is never reissued once its row is deleted. An
-# explicit `id=` on a write must lie above the catalog's counter (a document's
-# own ids fit a fresh store), else DuplicateAssociationIdError.
+# Hashable and comparable; the id is never reissued once its row is deleted.
+# No add takes an id — the catalog assigns, and this reports what it chose. The
+# one writer that files rows under supplied ids is
+# import_time_series_associations_openapi.
 
 def get_metadata_by_id(self, id: int) -> dict | None: ...   # None when no row has the id
 def association_exists(self, id: int) -> bool: ...          # no row fetched
@@ -798,11 +798,15 @@ SupplementalAttributeAssociation(
 )
 ```
 
-Read-only properties: `component_id`, `component_type`, `attribute_id`, `attribute_type`. The object
-is hashable and compares structurally, so attachments work in sets and as dict keys. In the
-**catalog**, though, identity is only the `(component_id, attribute_id)` pair — the type names are
-denormalized labels carried for filtering — so re-attaching the same pair under different type names
-raises `DuplicateAssociationError`.
+Read-only properties: `component_id`, `component_type`, `attribute_id`, `attribute_type`, and `id` —
+the catalog row's own number, `None` on a value that has not been through the catalog. The object is
+hashable and compares structurally (the `id` stays out of both), so attachments work in sets and as
+dict keys. In the **catalog**, though, identity is only the `(component_id, attribute_id)` pair —
+the type names are denormalized labels carried for filtering — so re-attaching the same pair under
+different type names raises `DuplicateAssociationError`.
+
+The `id` is an output only. The constructor takes none, and an add ignores whatever a listed row
+carries, so attaching a row read from one store to another files it under a fresh id there.
 
 ```python
 def add_supplemental_attribute_association(
@@ -888,11 +892,12 @@ ParentChildAssociation(
 )
 ```
 
-Read-only properties: `parent_id`, `parent_type`, `child_id`, `child_type`; hashable and
-structurally comparable like the attachment object. In the **catalog**, identity is the _ordered_
-`(parent_id, child_id)` pair, so the reversed pair is a different edge, while repeating the same
-ordered pair under different type names raises `DuplicateAssociationError`. There is no
-relationship-kind column, so one ordered pair may be related at most once.
+Read-only properties: `parent_id`, `parent_type`, `child_id`, `child_type`, and `id`; hashable and
+structurally comparable like the attachment object, with the same output-only `id`. In the
+**catalog**, identity is the _ordered_ `(parent_id, child_id)` pair, so the reversed pair is a
+different edge, while repeating the same ordered pair under different type names raises
+`DuplicateAssociationError`. There is no relationship-kind column, so one ordered pair may be
+related at most once.
 
 This family is deliberately narrower than the supplemental one — no counts-by-type and no grouped
 summary — because there is no consumer for them yet; both are additive if one appears.

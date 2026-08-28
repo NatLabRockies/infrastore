@@ -354,7 +354,6 @@ int32_t infrastore_store_add_single(struct InfraStore *handle,
                                     const char *unit_system,
                                     const char *time_reference,
                                     const char *component_field,
-                                    int64_t association_id,
                                     struct InfraStoreKey **out_key,
                                     int64_t *out_id);
 
@@ -387,7 +386,6 @@ int32_t infrastore_store_add_non_sequential(struct InfraStore *handle,
                                             const char *unit_system,
                                             const char *time_reference,
                                             const char *component_field,
-                                            int64_t association_id,
                                             struct InfraStoreKey **out_key,
                                             int64_t *out_id);
 
@@ -1040,10 +1038,6 @@ int32_t infrastore_store_association_exists(const struct InfraStore *handle,
  * disagreeing would produce two different series. `dry_run` has no counterpart
  * here and is not accepted — this entry point writes or fails.
  *
- * `association_id` files the view under a specific id when positive, which is
- * what an importer replaying a recorded view needs; non-positive assigns one,
- * as on every other add.
- *
  * # Safety
  *
  * `handle` must be a live store handle and `source` a live key handle naming a
@@ -1059,7 +1053,6 @@ int32_t infrastore_store_add_derived_view(struct InfraStore *handle,
                                           const char *interval,
                                           bool normalize_single_window,
                                           bool require_uniform_forecast_grid,
-                                          int64_t association_id,
                                           struct InfraStoreKey **out_key,
                                           int64_t *out_id);
 
@@ -1214,7 +1207,6 @@ int32_t infrastore_store_add_forecast(struct InfraStore *handle,
                                       const char *unit_system,
                                       const char *time_reference,
                                       const char *component_field,
-                                      int64_t association_id,
                                       struct InfraStoreKey **out_key,
                                       int64_t *out_id);
 
@@ -1252,7 +1244,6 @@ int32_t infrastore_store_add_probabilistic(struct InfraStore *handle,
                                            const char *unit_system,
                                            const char *time_reference,
                                            const char *component_field,
-                                           int64_t association_id,
                                            struct InfraStoreKey **out_key,
                                            int64_t *out_id);
 
@@ -1306,8 +1297,7 @@ int32_t infrastore_batch_add_single(struct InfraStoreBatch *batch,
                                     const char *quantity_kind,
                                     const char *unit_system,
                                     const char *time_reference,
-                                    const char *component_field,
-                                    int64_t association_id);
+                                    const char *component_field);
 
 /**
  * Append a NonSequentialTimeSeries to a batch. Arguments match
@@ -1338,8 +1328,7 @@ int32_t infrastore_batch_add_non_sequential(struct InfraStoreBatch *batch,
                                             const char *quantity_kind,
                                             const char *unit_system,
                                             const char *time_reference,
-                                            const char *component_field,
-                                            int64_t association_id);
+                                            const char *component_field);
 
 /**
  * Append a dense forecast (`ts_type` 2=Deterministic or 5=Scenarios) to a
@@ -1374,8 +1363,7 @@ int32_t infrastore_batch_add_forecast(struct InfraStoreBatch *batch,
                                       const char *quantity_kind,
                                       const char *unit_system,
                                       const char *time_reference,
-                                      const char *component_field,
-                                      int64_t association_id);
+                                      const char *component_field);
 
 /**
  * Append a `Probabilistic` forecast to a batch. Arguments match
@@ -1411,8 +1399,7 @@ int32_t infrastore_batch_add_probabilistic(struct InfraStoreBatch *batch,
                                            const char *quantity_kind,
                                            const char *unit_system,
                                            const char *time_reference,
-                                           const char *component_field,
-                                           int64_t association_id);
+                                           const char *component_field);
 
 /**
  * Submit every request in `batch` through one all-or-nothing bulk add. On
@@ -2324,7 +2311,6 @@ int32_t infrastore_store_add_supplemental_attribute_association(struct InfraStor
                                                                 const char *component_type,
                                                                 int64_t attribute_id,
                                                                 const char *attribute_type,
-                                                                int64_t association_id,
                                                                 int64_t *out_id);
 
 /**
@@ -2498,7 +2484,6 @@ int32_t infrastore_store_add_parent_child_association(struct InfraStore *handle,
                                                       const char *parent_type,
                                                       int64_t child_id,
                                                       const char *child_type,
-                                                      int64_t association_id,
                                                       int64_t *out_id);
 
 /**

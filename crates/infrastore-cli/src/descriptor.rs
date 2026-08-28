@@ -625,7 +625,6 @@ impl Descriptor {
             owner_category,
             data,
             features: self.features()?,
-            id: None,
         })
     }
 
@@ -766,7 +765,6 @@ impl Descriptor {
                 owner_category,
                 data,
                 features: features.clone(),
-                id: None,
             });
         }
         Ok(out)

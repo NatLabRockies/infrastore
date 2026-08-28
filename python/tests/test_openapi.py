@@ -156,6 +156,18 @@ class TestTimeSeriesImport:
 
     def _source(self):
         store = Store.create(in_memory=True)
+        # Ids are assigned, never chosen, so the way to put this document's
+        # rows above the target's high-water mark is to run the exporter's
+        # counter up first.
+        for i in range(100):
+            spacer = store.add_time_series(
+                owner_id=-1, owner_type="Spacer",
+                owner_category=OwnerCategory.Component,
+                time_series=SingleTimeSeries(
+                    T0, HOUR, np.full(4, float(i), dtype=np.float64), f"__spacer{i}"
+                ),
+            )
+            store.remove_time_series(spacer.key)
         expected = {}
         for owner, name in [(1, "load"), (2, "wind")]:
             added = store.add_time_series(
@@ -164,7 +176,6 @@ class TestTimeSeriesImport:
                 time_series=SingleTimeSeries(
                     T0, HOUR, np.zeros(4, dtype=np.float64), name
                 ),
-                id=owner * 100,
             )
             expected[added.id] = name
         return store, expected
@@ -191,6 +202,26 @@ class TestTimeSeriesImport:
             meta = target.get_metadata_by_id(id_)
             assert meta is not None, f"id {id_} did not survive the import"
             assert meta["name"] == name
+
+    def test_rejects_an_id_at_or_below_the_targets_high_water_mark(self):
+        """The import is the only door a caller-supplied id comes through, so
+        the "never reissued" guarantee is enforced here: an id the destination
+        catalog could already have issued is refused rather than re-filed."""
+        source = Store.create(in_memory=True)
+        source.add_time_series(
+            owner_id=1, owner_type="Generator",
+            owner_category=OwnerCategory.Component,
+            time_series=SingleTimeSeries(
+                T0, HOUR, np.zeros(4, dtype=np.float64), "load"
+            ),
+        )
+        exported = source.export_time_series_associations_openapi()
+
+        # The target's own anchor row took id 1, which is the id the document
+        # names, so the document does not fit this store.
+        target = self._target_holding_the_arrays()
+        with pytest.raises(infrastore.DuplicateAssociationIdError):
+            target.import_time_series_associations_openapi(exported)
 
     def test_rejects_a_row_whose_array_is_absent(self):
         source, _ = self._source()

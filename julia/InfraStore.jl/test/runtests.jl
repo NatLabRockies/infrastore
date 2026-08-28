@@ -2363,12 +2363,21 @@ end
     @testset "time-series export/import round trips with its ids" begin
         t0 = DateTime(2030, 1, 1)
         source = Store(in_memory=true)
+        # Ids are assigned and never chosen, so the way to put this document's
+        # rows above the target's high-water mark is to run the exporter's
+        # counter up first.
+        for i in 1:100
+            spacer = add_time_series!(
+                source, -1, "Spacer", Component,
+                SingleTimeSeries(t0, Hour(1), fill(Float64(i), 4), "__spacer$i"),
+            )
+            remove_time_series!(source, spacer)
+        end
         expected = Dict{Int, String}()
         for (owner, name) in [(1, "load"), (2, "wind")]
             added = add_time_series!(
                 source, owner, "Generator", Component,
-                SingleTimeSeries(t0, Hour(1), fill(0.0, 4), name);
-                id=owner * 100,
+                SingleTimeSeries(t0, Hour(1), fill(0.0, 4), name),
             )
             expected[added.id] = name
         end
@@ -2385,6 +2394,32 @@ end
         for (id, name) in expected
             @test get_metadata_by_id(target, id).name == name
         end
+
+        close!(source)
+        close!(target)
+    end
+
+    @testset "time-series import refuses an id the target could have issued" begin
+        # The import is the only door a caller-supplied id comes through, so
+        # "never reissued" is enforced here: an id at or below the destination
+        # catalog's high-water mark is refused rather than re-filed.
+        t0 = DateTime(2030, 1, 1)
+        source = Store(in_memory=true)
+        add_time_series!(
+            source, 1, "Generator", Component,
+            SingleTimeSeries(t0, Hour(1), fill(0.0, 4), "load"),
+        )
+        exported = export_time_series_associations_openapi(source)
+
+        # The target's own anchor row took id 1 — the id the document names.
+        target = Store(in_memory=true)
+        add_time_series!(
+            target, 9, "Anchor", Component,
+            SingleTimeSeries(t0, Hour(1), fill(0.0, 4), "anchor"),
+        )
+        @test_throws InfraStore.DuplicateAssociationIdError import_time_series_associations_openapi!(
+            target, exported
+        )
 
         close!(source)
         close!(target)
@@ -4659,11 +4694,12 @@ end
     @test added.id == 1
     @test get_metadata(store, added).id == added.id
 
-    # An explicit id is honored, and the catalog's counter ratchets past it, so
-    # the next assigned id cannot land on top of one the caller placed.
-    imported = add_time_series!(store, 2, "Generator", Component, sts("load"); id=500)
-    @test imported.id == 500
-    @test add_time_series!(store, 3, "Generator", Component, sts("load")).id == 501
+    # No add takes an id: the catalog assigns, and ids run in add order. The
+    # one writer that files rows under ids it was given is the OpenAPI import.
+    @test_throws MethodError add_time_series!(
+        store, 2, "Generator", Component, sts("load"); id=500
+    )
+    @test add_time_series!(store, 2, "Generator", Component, sts("load")).id == 2
 
     # An id resolves to its row; one nothing was filed under resolves to
     # `nothing`, because a caller checking a reference it persisted is asking a
@@ -4680,11 +4716,6 @@ end
     replacement = add_time_series!(store, 1, "Generator", Component, sts("load"))
     @test replacement.id != added.id
     @test !association_exists(store, added.id)
-
-    # A taken id is its own error, distinct from a duplicate series.
-    @test_throws InfraStore.DuplicateAssociationIdError add_time_series!(
-        store, 4, "Generator", Component, sts("load"); id=500
-    )
 
     close!(store)
 end
@@ -4719,7 +4750,7 @@ end
     close!(store)
 end
 
-@testset "association ids: writes report them, and a view can be given one" begin
+@testset "association ids: writes report them, and a view gets its own" begin
     t0 = DateTime(2024, 1, 1)
     res = Hour(1)
     store = Store(in_memory=true)
@@ -4748,12 +4779,12 @@ end
     @test get_metadata(store, view).time_series_type === DeterministicSingleTimeSeries
     @test get_metadata(store, view).data_hash == get_metadata(store, long).data_hash
 
-    # …and an importer can name that id.
+    # …and a view takes no id either; the catalog assigns it like any other row.
     other = add_time_series!(
         store, 11, "Generator", Component,
         SingleTimeSeries(t0, res, collect(1.0:24.0), "load"),
     )
-    @test add_derived_view!(store, other, Hour(6), Hour(6); id=4242).id == 4242
+    @test_throws MethodError add_derived_view!(store, other, Hour(6), Hour(6); id=4242)
 
     close!(store)
 end

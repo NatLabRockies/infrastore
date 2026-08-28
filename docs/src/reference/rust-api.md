@@ -1249,7 +1249,6 @@ pub struct AddRequest {
     pub features: Features,
     pub units: Option<String>,
     pub application_data: Option<String>,
-    pub id: Option<i64>,   // `None` (the default) lets the catalog assign; see `with_id`
     // …plus the other descriptors (`quantity_kind`, `unit_system`,
     // `time_reference`, `component_field`), all `Option` and defaulting to unset
 }
@@ -1258,14 +1257,14 @@ impl AddRequest {
     pub fn new(owner_id: i64, owner_type: &str, owner_category: OwnerCategory,
                data: TimeSeriesData) -> Self;              // everything else unset
     pub fn with_features(self, features: Features) -> Self;
-    pub fn with_id(self, id: i64) -> Self;                  // file under this id
 }
 ```
 
-An explicit `id` is for an import that must keep the references a document recorded. It has to lie
-above the catalog's counter — `DuplicateAssociationId` otherwise, so a document's ids fit a fresh
-store but not one that has issued ids of its own, and a deleted id can never be re-filed — and a
-batch supplies one for every request or for none (`InvalidParameter` for a mix).
+A request names no catalog id. Every add — this one, `add_time_series`, `add_derived_view`, and both
+association catalogs' — lets the catalog assign, and reports the id it chose on `AddedTimeSeries`.
+The one writer that files rows under ids a caller supplies is `import_association_rows`, replaying a
+document that already recorded them; see
+[Association ids](../explanation/data-model.md#association-ids).
 
 ### `AddedTimeSeries`
 

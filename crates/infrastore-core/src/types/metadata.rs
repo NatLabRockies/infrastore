@@ -458,12 +458,16 @@ pub struct TimeSeriesMetadata {
     /// The direction decides what `None` means:
     ///
     /// * **Reading** — always `Some`. Every stored row has an id.
-    /// * **Writing** — `None` asks the catalog to assign one, which is what
-    ///   almost every caller wants. `Some` supplies the id explicitly, for a
-    ///   writer importing a document that already recorded it and needs the
-    ///   reference preserved. Explicit ids only ratchet the catalog's counter
-    ///   *upward*, so one at or below the current high-water mark collides and
-    ///   is refused with [`TimeSeriesError::DuplicateAssociationId`].
+    /// * **Writing** — the catalog assigns, and every add ignores whatever this
+    ///   field holds; [`crate::AddedTimeSeries`] reports the id it chose. One
+    ///   writer is the exception:
+    ///   [`Store::import_association_rows`](crate::Store::import_association_rows)
+    ///   files each row under the `Some` it carries, so a document that already
+    ///   recorded its ids keeps the references it wrote down. That import wants
+    ///   all-or-none across a batch, and explicit ids only ratchet the catalog's
+    ///   counter *upward*, so one at or below the current high-water mark
+    ///   collides and is refused with
+    ///   [`TimeSeriesError::DuplicateAssociationId`].
     ///
     /// Descriptive, so it sits outside [`crate::TimeSeriesKey`] and outside
     /// both content hashes: two series differing only in it are the same

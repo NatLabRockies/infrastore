@@ -273,10 +273,11 @@ pub struct SupplementalAttributeAssociation {
     pub attribute_type: String,
     /// The catalog row's `id`, or `None`.
     ///
-    /// `Some` on anything read back; on the way in, `None` asks the catalog to
-    /// assign and `Some` supplies one explicitly (for an import preserving a
-    /// document's own ids). See [`crate::TimeSeriesMetadata::id`], which this
-    /// mirrors — including that the two tables' id streams are independent.
+    /// `Some` on anything read back; ignored on the way in, because this
+    /// catalog's wire form carries no id and so has nothing to preserve — an
+    /// attachment is always filed under an assigned id. See
+    /// [`crate::TimeSeriesMetadata::id`], whose one import exception has no
+    /// counterpart here, and note that the tables' id streams are independent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<i64>,
 }
@@ -2416,12 +2417,18 @@ impl MetadataStore {
             .map_err(Into::into)
     }
 
-    /// Refuse an explicit id that the table could ever have issued.
+    /// Refuse an explicit id that `time_series_associations` could ever have
+    /// issued.
+    ///
+    /// Only one caller supplies ids —
+    /// [`Store::import_association_rows`](crate::Store::import_association_rows),
+    /// replaying a document that recorded them. Every ordinary add lets the
+    /// catalog assign, so this is the whole of the explicit-id surface.
     ///
     /// "Never reissued" is a promise about *assigned* ids: `AUTOINCREMENT` only
     /// ratchets `sqlite_sequence` upward, so a deleted row's id is never handed
     /// out again. An explicit id is not covered by that mechanism — the primary
-    /// key only refuses an id a *live* row holds, so a caller could re-file a
+    /// key only refuses an id a *live* row holds, so an import could re-file a
     /// deleted id and a stale reference in some consumer's model would quietly
     /// resolve to the new series. This closes that hole: every explicit id must
     /// sit above the table's high-water mark, which is also what
@@ -2430,9 +2437,8 @@ impl MetadataStore {
     /// Checked once per batch against the mark as it stands *before* the batch
     /// writes, so a document's rows may arrive in any order; a duplicate within
     /// the batch still lands on the primary key. Zero and negative ids are
-    /// refused up front: the C ABI spells "assign one" as `0`, and a negative
-    /// never comes from a catalog.
-    fn check_explicit_ids(tx: &Connection, table: &str, ids: &[i64]) -> Result<()> {
+    /// refused up front: no catalog ever issues one.
+    pub fn check_explicit_time_series_ids(tx: &Connection, ids: &[i64]) -> Result<()> {
         if ids.is_empty() {
             return Ok(());
         }
@@ -2444,7 +2450,7 @@ impl MetadataStore {
         let high_water: i64 = tx
             .query_row(
                 "SELECT seq FROM sqlite_sequence WHERE name = ?1",
-                [table],
+                ["time_series_associations"],
                 |r| r.get(0),
             )
             .optional()?
@@ -2455,31 +2461,16 @@ impl MetadataStore {
         }
     }
 
-    /// [`Self::check_explicit_ids`] over `time_series_associations`.
-    pub fn check_explicit_time_series_ids(tx: &Connection, ids: &[i64]) -> Result<()> {
-        Self::check_explicit_ids(tx, "time_series_associations", ids)
-    }
-
-    /// [`Self::check_explicit_ids`] over `supplemental_attribute_associations`.
-    pub fn check_explicit_supplemental_attribute_ids(tx: &Connection, ids: &[i64]) -> Result<()> {
-        Self::check_explicit_ids(tx, SUPPLEMENTAL_ATTRIBUTE_TABLE.name, ids)
-    }
-
-    /// [`Self::check_explicit_ids`] over `parent_child_associations`.
-    pub fn check_explicit_parent_child_ids(tx: &Connection, ids: &[i64]) -> Result<()> {
-        Self::check_explicit_ids(tx, PARENT_CHILD_TABLE.name, ids)
-    }
-
-    /// Insert one endpoint pair and return the id it was filed under.
+    /// Insert one endpoint pair and return the id the catalog filed it under.
     ///
-    /// `id` binds `NULL` to let the catalog assign, exactly as the time-series
-    /// insert does, and `RETURNING` reads back what landed rather than relying
-    /// on `last_insert_rowid()` being untouched by whatever runs next.
-    #[allow(clippy::too_many_arguments)]
+    /// Neither association catalog takes a caller-supplied id — no wire form
+    /// carries one, so there is nothing to preserve — so the id column is left
+    /// out of the insert entirely and `AUTOINCREMENT` assigns. `RETURNING`
+    /// reads back what landed rather than relying on `last_insert_rowid()`
+    /// being untouched by whatever runs next.
     fn assoc_insert(
         tx: &Connection,
         table: AssocTable,
-        id: Option<i64>,
         left_id: i64,
         left_type: &str,
         right_id: i64,
@@ -2487,26 +2478,14 @@ impl MetadataStore {
         detail: &str,
     ) -> Result<i64> {
         let sql = format!(
-            "INSERT INTO {} (id, {}, {}, {}, {}) VALUES (?1, ?2, ?3, ?4, ?5) RETURNING id",
+            "INSERT INTO {} ({}, {}, {}, {}) VALUES (?1, ?2, ?3, ?4) RETURNING id",
             table.name, table.left_id, table.left_type, table.right_id, table.right_type
         );
         let mut stmt = tx.prepare_cached(&sql)?;
-        stmt.query_row(
-            params![id, left_id, left_type, right_id, right_type],
-            |row| row.get::<_, i64>(0),
-        )
-        .map_err(|e| match (&e, id) {
-            // An explicit id that is already taken is a different failure from
-            // the endpoint pair colliding, and `detail` describes only the
-            // latter. Told apart by the extended code, as on the time-series
-            // insert.
-            (rusqlite::Error::SqliteFailure(err, _), Some(id))
-                if err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY =>
-            {
-                TimeSeriesError::DuplicateAssociationId(id)
-            }
-            _ => map_association_violation(e, detail),
+        stmt.query_row(params![left_id, left_type, right_id, right_type], |row| {
+            row.get::<_, i64>(0)
         })
+        .map_err(|e| map_association_violation(e, detail))
     }
 
     fn assoc_delete(tx: &Connection, table: AssocTable, filter: &EndpointFilter) -> Result<usize> {
@@ -2525,7 +2504,6 @@ impl MetadataStore {
         Self::assoc_insert(
             tx,
             SUPPLEMENTAL_ATTRIBUTE_TABLE,
-            assoc.id,
             assoc.component_id,
             &assoc.component_type,
             assoc.attribute_id,
@@ -2718,7 +2696,6 @@ impl MetadataStore {
         Self::assoc_insert(
             tx,
             PARENT_CHILD_TABLE,
-            assoc.id,
             assoc.parent_id,
             &assoc.parent_type,
             assoc.child_id,

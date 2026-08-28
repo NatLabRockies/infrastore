@@ -2107,7 +2107,7 @@ impl PyStore {
     /// `element_type` declares what the array's elements mean in the store's own
     /// vocabulary (`"tuple(3,f64)"`, `"piecewise_linear"`, …). Omit it for plain
     /// numbers, where it defaults to the array's own dtype spelling.
-    #[pyo3(signature = (owner_id, owner_type, owner_category, time_series, *, features=None, units=None, element_type=None, application_data=None, quantity_kind=None, unit_system=None, time_reference=None, component_field=None, id=None))]
+    #[pyo3(signature = (owner_id, owner_type, owner_category, time_series, *, features=None, units=None, element_type=None, application_data=None, quantity_kind=None, unit_system=None, time_reference=None, component_field=None))]
     #[allow(clippy::too_many_arguments)]
     fn add_time_series(
         &mut self,
@@ -2123,7 +2123,6 @@ impl PyStore {
         unit_system: Option<String>,
         time_reference: Option<String>,
         component_field: Option<String>,
-        id: Option<i64>,
     ) -> PyResult<PyAddedTimeSeries> {
         let features = features_from_dict(features)?;
         let mut data = extract_time_series_data(time_series)?;
@@ -2159,10 +2158,8 @@ impl PyStore {
         if let Some(et) = element_type {
             data.set_element_type(parse_element_type(&et)?);
         }
-        let mut request =
-            core_lib::AddRequest::new(owner_id, owner_type, owner_category.into(), data)
-                .with_features(features);
-        request.id = id;
+        let request = core_lib::AddRequest::new(owner_id, owner_type, owner_category.into(), data)
+            .with_features(features);
         let added = self.store_mut()?.add(request).map_err(map_err)?;
         Ok(PyAddedTimeSeries::from_core(added))
     }
@@ -2240,10 +2237,6 @@ impl PyStore {
                 Some(e) if !e.is_none() => Some(parse_element_type(&e.extract::<String>()?)?),
                 _ => None,
             };
-            let association_id: Option<i64> = match item.get_item("id")? {
-                Some(i) if !i.is_none() => Some(i.extract()?),
-                _ => None,
-            };
             let mut data = extract_time_series_data(&time_series)?;
             // As in `add_time_series`: a key the item omits leaves the series'
             // own descriptor alone rather than clearing it.
@@ -2274,7 +2267,6 @@ impl PyStore {
                 owner_category: owner_category.into(),
                 data,
                 features,
-                id: association_id,
             });
         }
         Ok(self
@@ -2962,15 +2954,15 @@ impl PyStore {
     ///
     /// The single-series form of `transform_single_time_series`, which sweeps
     /// the whole store. A view shares its source's array, so this writes one
-    /// catalog row and no array data. Pass `id` to file it under a specific
-    /// catalog id, for a writer replaying a document that recorded one.
+    /// catalog row and no array data. The catalog assigns the row's id and the
+    /// returned `AddedTimeSeries` reports it.
     ///
     /// `normalize_single_window` must match what the sweep would use:
     /// `interval` is part of a series' identity, so the two paths disagreeing
     /// would produce two different series.
     #[pyo3(signature = (
         source, horizon, interval, *,
-        normalize_single_window=false, require_uniform_forecast_grid=false, id=None
+        normalize_single_window=false, require_uniform_forecast_grid=false
     ))]
     fn add_derived_view(
         &mut self,
@@ -2979,7 +2971,6 @@ impl PyStore {
         interval: &Bound<'_, PyAny>,
         normalize_single_window: bool,
         require_uniform_forecast_grid: bool,
-        id: Option<i64>,
     ) -> PyResult<PyAddedTimeSeries> {
         let horizon = pyany_to_period(horizon)?;
         let interval = pyany_to_period(interval)?;
@@ -2990,7 +2981,7 @@ impl PyStore {
         };
         let added = self
             .store_mut()?
-            .add_derived_view(&source.inner, horizon, interval, policy, id)
+            .add_derived_view(&source.inner, horizon, interval, policy)
             .map_err(map_err)?;
         Ok(PyAddedTimeSeries::from_core(added))
     }

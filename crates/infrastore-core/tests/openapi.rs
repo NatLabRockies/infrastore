@@ -21,6 +21,39 @@ fn ts(y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> DateTime<Utc> {
     Utc.with_ymd_and_hms(y, mo, d, h, mi, s).unwrap()
 }
 
+/// Add and drop `n` throwaway rows, so the next id `store` assigns clears `n`.
+/// See `full_surface_source` for why a document's ids have to start high.
+fn advance_ids(store: &mut Store, n: usize) {
+    for i in 0..n {
+        let name = format!("__spacer{i}");
+        let data = SingleTimeSeries::new(
+            ts(2020, 1, 1, 0, 0, 0),
+            Duration::hours(1),
+            zeros(vec![2]),
+            &name,
+        );
+        store
+            .add(infrastore_core::AddRequest::new(
+                -1,
+                "Spacer",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(data),
+            ))
+            .expect("spacer should add");
+        store
+            .remove_time_series(&infrastore_core::KeyIdentity {
+                owner_id: -1,
+                owner_category: OwnerCategory::Component,
+                time_series_type: infrastore_core::TimeSeriesType::SingleTimeSeries,
+                name,
+                resolution: Some(Period::fixed(Duration::hours(1))),
+                interval: None,
+                features: Features::new(),
+            })
+            .expect("spacer should remove");
+    }
+}
+
 fn zeros(shape: Vec<usize>) -> TypedArray {
     let n: usize = shape.iter().product();
     TypedArray::from_f64(shape, &vec![0.0; n])
@@ -649,7 +682,6 @@ fn add_bulk_rejects_geometry_mismatch_and_leaves_the_whole_batch_untouched() {
             owner_category: OwnerCategory::Component,
             data: TimeSeriesData::SingleTimeSeries(clean),
             features: Features::new(),
-            id: None,
         },
         infrastore_core::AddRequest {
             owner_id: 1,
@@ -657,7 +689,6 @@ fn add_bulk_rejects_geometry_mismatch_and_leaves_the_whole_batch_untouched() {
             owner_category: OwnerCategory::Component,
             data: TimeSeriesData::SingleTimeSeries(broken),
             features: Features::new(),
-            id: None,
         },
     ];
     let err = store.add_time_series_bulk(items).unwrap_err();
@@ -865,15 +896,18 @@ fn full_surface_rows() -> Vec<(i64, &'static str, TimeSeriesData, Features)> {
     ]
 }
 
-/// The source store: the six rows above under explicit ids from 1001 up, plus
-/// the `DeterministicSingleTimeSeries` derived from the first.
+/// The source store: the six rows above, plus the
+/// `DeterministicSingleTimeSeries` derived from the first.
 ///
-/// The ids are explicit and high on purpose. An import refuses any id at or
-/// below the target catalog's high-water mark (a deleted id must not be
-/// re-filable by hand), and the target is stocked with anchor rows first, so
-/// auto-assigned source ids starting at 1 would collide with them.
+/// The counter is run up before anything real is added, so the ids land high.
+/// An import refuses any id at or below the target catalog's high-water mark (a
+/// deleted id must not be re-filable by hand), and the target is stocked with
+/// anchor rows first, so source ids starting at 1 would collide with them. Ids
+/// are assigned rather than chosen, so the way to place a document's rows above
+/// an importing store's mark is to advance the exporter's counter.
 fn full_surface_source() -> Store {
     let mut store = create_store(None, true).expect("in-memory store should initialize");
+    advance_ids(&mut store, 1000);
     let mut rows = full_surface_rows().into_iter();
 
     // The DST source goes in alone and is transformed before anything else is
@@ -883,8 +917,7 @@ fn full_surface_source() -> Store {
     store
         .add(
             infrastore_core::AddRequest::new(owner_id, owner_type, OwnerCategory::Component, data)
-                .with_features(features)
-                .with_id(1001),
+                .with_features(features),
         )
         .expect("the DST source should add");
     store
@@ -897,8 +930,8 @@ fn full_surface_source() -> Store {
         )
         .expect("transform should derive one DeterministicSingleTimeSeries row");
 
-    // 1002 went to the derived view, so the rest continue from 1003.
-    for (offset, (owner_id, owner_type, data, features)) in rows.enumerate() {
+    // The derived view took the next id; the rest continue from there.
+    for (owner_id, owner_type, data, features) in rows {
         store
             .add(
                 infrastore_core::AddRequest::new(
@@ -907,8 +940,7 @@ fn full_surface_source() -> Store {
                     OwnerCategory::Component,
                     data,
                 )
-                .with_features(features)
-                .with_id(1003 + offset as i64),
+                .with_features(features),
             )
             .expect("fixture row should add");
     }

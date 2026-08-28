@@ -150,6 +150,13 @@ impl From<ListFilter> for MetadataFilter {
 }
 
 /// Single item in a bulk add.
+///
+/// A request names no catalog id. Every add — this one, the wide positional
+/// forms, and the association catalogs' — lets the catalog assign, and the id
+/// it chose comes back on [`AddedTimeSeries`]. The one place a caller supplies
+/// ids is [`Store::import_association_rows`], where the document being replayed
+/// already recorded them and the references have to survive; see
+/// [`TimeSeriesMetadata::id`].
 #[derive(Debug, Clone)]
 pub struct AddRequest {
     pub owner_id: i64,
@@ -157,10 +164,6 @@ pub struct AddRequest {
     pub owner_category: OwnerCategory,
     pub data: TimeSeriesData,
     pub features: Features,
-    /// The catalog id to file this association under, or `None` to let the
-    /// catalog assign one. See [`TimeSeriesMetadata::id`]; set it with
-    /// [`Self::with_id`].
-    pub id: Option<i64>,
 }
 
 impl AddRequest {
@@ -185,26 +188,12 @@ impl AddRequest {
             owner_category,
             data,
             features: Features::new(),
-            id: None,
         }
     }
 
     /// Set the feature set.
     pub fn with_features(mut self, features: Features) -> Self {
         self.features = features;
-        self
-    }
-
-    /// File this association under `id` rather than letting the catalog assign
-    /// one.
-    ///
-    /// For a writer importing a document that already recorded the id and needs
-    /// the reference preserved — not for ordinary adds, which should leave the
-    /// catalog to assign. Ids only ratchet upward, so a document's own ids fit
-    /// a fresh store; against one that has already assigned ids of its own they
-    /// collide with [`TimeSeriesError::DuplicateAssociationId`].
-    pub fn with_id(mut self, id: i64) -> Self {
-        self.id = Some(id);
         self
     }
 }
@@ -1189,9 +1178,6 @@ impl Store {
             owner_category,
             data,
             features,
-            // The wide positional forms are the "just add this" surface; a
-            // caller supplying its own id uses `AddRequest::with_id`.
-            id: None,
         }])
         .map(|mut added| added.remove(0))
     }
@@ -1229,7 +1215,6 @@ impl Store {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
-        validate_id_mode(&items)?;
 
         // Derive (and validate) every item's parts before writing anything, so a
         // bad request part-way through the batch cannot leave an array behind.
@@ -1242,7 +1227,6 @@ impl Store {
         // Stage backend writes so we can roll them back on metadata error.
         let mut staged_hashes: Vec<[u8; 32]> = Vec::with_capacity(items.len());
         let tx = self.metadata.savepoint()?;
-        MetadataStore::check_explicit_time_series_ids(&tx, &explicit_ids(&items))?;
         let mut added = Vec::with_capacity(items.len());
         // Feature sets and timestamp vectors are shared, and a batch typically
         // spans only a handful of distinct ones; write each once rather than
@@ -1325,7 +1309,6 @@ impl Store {
         if items.is_empty() {
             return Ok(Vec::new());
         }
-        validate_id_mode(&items)?;
 
         // Derive parts (validates + hashes) for every item, aligned to `items`.
         let mut parts: Vec<RequestParts> = items
@@ -1368,7 +1351,6 @@ impl Store {
 
         // Insert associations in input order; roll the whole batch back on error.
         let tx = self.metadata.savepoint()?;
-        MetadataStore::check_explicit_time_series_ids(&tx, &explicit_ids(&items))?;
         let mut shared_sets = SharedSetCache::default();
         let mut ids = Vec::with_capacity(parts.len());
         for p in &parts {
@@ -1656,14 +1638,15 @@ impl Store {
     }
 
     /// Derive a `DeterministicSingleTimeSeries` view of one stored
-    /// `SingleTimeSeries`, filing it under `id` (or an assigned one).
+    /// `SingleTimeSeries`.
     ///
     /// The single-series counterpart of
     /// [`Self::transform_single_time_series`], which sweeps every eligible
-    /// series in the store. Two callers want this instead: one deriving a view
-    /// over a series it just added, without re-examining the rest of the store,
-    /// and an importer replaying a document that already recorded the view — and
-    /// its id — so the reference is preserved rather than reassigned.
+    /// series in the store. This is for a caller deriving a view over a series
+    /// it just added, without re-examining the rest of the store. Like every
+    /// other add, the catalog assigns the row's id and
+    /// [`AddedTimeSeries::id`] reports it; a document replaying views under
+    /// ids it recorded goes through [`Self::import_association_rows`].
     ///
     /// A view carries no array of its own. It shares its source's `data_hash`
     /// and inherits every descriptive column from it, so this writes one catalog
@@ -1687,7 +1670,6 @@ impl Store {
     /// - [`TimeSeriesError::DuplicateTimeSeries`] if the view already exists.
     ///   `horizon` is not part of the identity, so this fires for a view at this
     ///   interval whatever horizon it was derived with.
-    /// - [`TimeSeriesError::DuplicateAssociationId`] if `id` is already taken.
     #[tracing::instrument(
         skip(self, source, horizon, interval, policy),
         fields(owner = source.owner_id, name = %source.name)
@@ -1698,7 +1680,6 @@ impl Store {
         horizon: impl Into<Period>,
         interval: impl Into<Period>,
         policy: TransformPolicy,
-        id: Option<i64>,
     ) -> Result<AddedTimeSeries> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
@@ -1748,9 +1729,8 @@ impl Store {
             plan.check_compatible_with(&existing)?;
         }
 
-        let meta = derived_view_row(src, plan.horizon, interval, count, id);
+        let meta = derived_view_row(src, plan.horizon, interval, count);
         let tx = self.metadata.savepoint()?;
-        MetadataStore::check_explicit_time_series_ids(&tx, id.as_slice())?;
         check_forecast_family_free(&tx, &meta, "derive")?;
         let assigned = MetadataStore::insert(&tx, &meta)?;
         tx.commit()?;
@@ -2978,13 +2958,7 @@ impl Store {
                     horizon.to_iso8601(),
                 )));
             }
-            new_metas.push(derived_view_row(
-                src.clone(),
-                horizon,
-                interval,
-                count,
-                None,
-            ));
+            new_metas.push(derived_view_row(src.clone(), horizon, interval, count));
         }
 
         if policy.dry_run {
@@ -3374,9 +3348,9 @@ impl Store {
     /// [`TimeSeriesError::DuplicateAssociation`] if that component already
     /// carries that attribute, whatever type names are supplied.
     ///
-    /// Set `assoc.id` to file it under a specific id instead of an assigned one;
-    /// that collides with [`TimeSeriesError::DuplicateAssociationId`] if the id
-    /// is taken. This table's ids are independent of the other two catalogs'.
+    /// The catalog assigns the id; `assoc.id` is ignored on the way in, so a row
+    /// read back from one store and attached to another is filed under a fresh
+    /// id there. This table's ids are independent of the other two catalogs'.
     pub fn add_supplemental_attribute_association(
         &mut self,
         assoc: SupplementalAttributeAssociation,
@@ -3385,7 +3359,6 @@ impl Store {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
         let tx = self.metadata.savepoint()?;
-        MetadataStore::check_explicit_supplemental_attribute_ids(&tx, assoc.id.as_slice())?;
         let id = MetadataStore::insert_supplemental_attribute_association(&tx, &assoc)?;
         tx.commit()?;
         Ok(id)
@@ -3405,8 +3378,6 @@ impl Store {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
         let tx = self.metadata.savepoint()?;
-        let explicit: Vec<i64> = assocs.iter().filter_map(|a| a.id).collect();
-        MetadataStore::check_explicit_supplemental_attribute_ids(&tx, &explicit)?;
         let mut ids = Vec::with_capacity(assocs.len());
         for assoc in &assocs {
             ids.push(MetadataStore::insert_supplemental_attribute_association(
@@ -3531,15 +3502,14 @@ impl Store {
     /// Record a parent/child edge. Fails with
     /// [`TimeSeriesError::DuplicateAssociation`] if that ordered pair is already
     /// related.
-    /// Record a directed edge, returning the catalog id it was filed under. See
-    /// [`Self::add_supplemental_attribute_association`] for the explicit-id
-    /// behavior, which is the same here over this table's own id stream.
+    /// Record a directed edge, returning the catalog id it was filed under. As
+    /// on [`Self::add_supplemental_attribute_association`], the catalog assigns
+    /// it and `assoc.id` is ignored, over this table's own id stream.
     pub fn add_parent_child_association(&mut self, assoc: ParentChildAssociation) -> Result<i64> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
         let tx = self.metadata.savepoint()?;
-        MetadataStore::check_explicit_parent_child_ids(&tx, assoc.id.as_slice())?;
         let id = MetadataStore::insert_parent_child_association(&tx, &assoc)?;
         tx.commit()?;
         Ok(id)
@@ -3555,8 +3525,6 @@ impl Store {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
         let tx = self.metadata.savepoint()?;
-        let explicit: Vec<i64> = assocs.iter().filter_map(|a| a.id).collect();
-        MetadataStore::check_explicit_parent_child_ids(&tx, &explicit)?;
         let mut ids = Vec::with_capacity(assocs.len());
         for assoc in &assocs {
             ids.push(MetadataStore::insert_parent_child_association(&tx, assoc)?);
@@ -4186,9 +4154,6 @@ impl BulkAdd<'_> {
             owner_category,
             data,
             features,
-            // The wide positional forms are the "just add this" surface; a
-            // caller supplying its own id uses `AddRequest::with_id`.
-            id: None,
         })
     }
 
@@ -4307,7 +4272,7 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
                     element_type,
                     element_shape: single.data.element_shape().to_vec(),
                     application_data: item.data.application_data().map(str::to_owned),
-                    id: item.id,
+                    id: None,
                 },
                 TimeSeriesKey::Single(SingleTimeSeriesKey::new(
                     item.owner_id,
@@ -4354,7 +4319,7 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
                     element_type,
                     element_shape: non_sequential.data.element_shape().to_vec(),
                     application_data: item.data.application_data().map(str::to_owned),
-                    id: item.id,
+                    id: None,
                 },
                 TimeSeriesKey::NonSequential(NonSequentialTimeSeriesKey::new(
                     item.owner_id,
@@ -4567,57 +4532,28 @@ fn request_array(item: &AddRequest) -> &TypedArray {
     }
 }
 
-/// Refuse a batch that mixes caller-supplied ids with ones the catalog would
-/// assign.
-///
-/// The two modes are individually fine and jointly a trap. Ids only ratchet
-/// upward, so an assigned id lands one past the current high-water mark — which
-/// a *later* explicit id in the same batch can then collide with, or step over,
-/// depending only on the order the items happen to be in. A batch is either
-/// importing ids or letting the catalog assign them; there is no coherent
-/// meaning for half of each, so the cheap check is worth more than the
-/// flexibility.
-fn validate_id_mode(items: &[AddRequest]) -> Result<()> {
-    let explicit = items.iter().filter(|i| i.id.is_some()).count();
-    if explicit == 0 || explicit == items.len() {
-        return Ok(());
-    }
-    Err(TimeSeriesError::InvalidParameter(format!(
-        "{explicit} of {} requests supply an explicit id and the rest do not; a batch must \
-         either supply an id for every request (importing a document's own ids) or for none \
-         of them (letting the catalog assign)",
-        items.len()
-    )))
-}
-
 /// The catalog row for a `DeterministicSingleTimeSeries` view of `src`, as
 /// both [`Store::transform_single_time_series`] and [`Store::add_derived_view`]
 /// write it: the source's own descriptors under the forecast geometry the
 /// plan derived.
 ///
-/// `id` is set explicitly rather than inherited: a view is its own row, and
-/// `..src` would otherwise carry the *source's* id — `Some` on anything read
-/// back from the catalog — straight into a primary-key collision.
+/// `id` is cleared rather than inherited: a view is its own row, and `..src`
+/// would otherwise carry the *source's* id — `Some` on anything read back from
+/// the catalog — straight into a primary-key collision.
 fn derived_view_row(
     src: TimeSeriesMetadata,
     horizon: Period,
     interval: Period,
     count: usize,
-    id: Option<i64>,
 ) -> TimeSeriesMetadata {
     TimeSeriesMetadata {
         time_series_type: TimeSeriesType::DeterministicSingleTimeSeries,
         horizon: Some(horizon),
         interval: Some(interval),
         count: Some(count),
-        id,
+        id: None,
         ..src
     }
-}
-
-/// The ids a batch supplies explicitly, for the high-water check.
-fn explicit_ids(items: &[AddRequest]) -> Vec<i64> {
-    items.iter().filter_map(|i| i.id).collect()
 }
 
 /// Insert one association, enforcing the Deterministic/DeterministicSingleTimeSeries
@@ -5016,7 +4952,7 @@ fn forecast_metadata(
         element_type,
         element_shape: data.element_shape().to_vec(),
         application_data: item.data.application_data().map(str::to_owned),
-        id: item.id,
+        id: None,
     }
 }
 

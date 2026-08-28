@@ -264,7 +264,7 @@ on the result instead, in its own `{T,N}` and in a reader group's `dtype`.
 ```julia
 struct AddedTimeSeries                       # every write: add_time_series!, add_time_series_bulk!, add_derived_view!
     key :: TimeSeriesKey                     # names the series
-    id  :: Int64                             # the catalog row's id; never reissued once the row is deleted
+    id  :: Int64                             # the catalog row's id; assigned, and never reissued
 end                                          # accepted anywhere a TimeSeriesKey is
 
 struct TimeSeriesMetadata                    # get_metadata / list_time_series
@@ -546,7 +546,6 @@ add_time_series!(
     features=Dict(), element_type=ts.element_type, units=ts.units,
     quantity_kind=ts.quantity_kind, unit_system=ts.unit_system,
     component_field=ts.component_field, application_data=ts.application_data,
-    id=nothing,
 ) -> AddedTimeSeries
 ```
 

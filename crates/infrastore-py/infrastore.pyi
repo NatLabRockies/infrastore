@@ -377,7 +377,6 @@ class Store:
         unit_system: str | None = None,
         time_reference: str | None = None,
         component_field: str | None = None,
-        id: int | None = None,
     ) -> AddedTimeSeries: ...
     def add_time_series_bulk(
         self, items: list[dict[str, Any]]
@@ -393,7 +392,6 @@ class Store:
         *,
         normalize_single_window: bool = False,
         require_uniform_forecast_grid: bool = False,
-        id: int | None = None,
     ) -> AddedTimeSeries: ...
     def transform_single_time_series(
         self,
