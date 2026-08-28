@@ -21,6 +21,12 @@
 //!   block rather than the whole array; anything else takes one whole-array
 //!   chunk.
 //!
+//! * **Timestamp vectors**: the explicit time axis of a
+//!   `NonSequentialTimeSeries`, interned once per distinct vector as an `i64`
+//!   dataset of unix milliseconds named `tsv_{hexhash}`, in its own group. It is
+//!   the cohort key a pool of irregular arrays is packed by, and it lives with
+//!   the arrays because it is data of the same kind — see [`crate::timestamps`].
+//!
 //! `shape` encodes the element shape: `s` = scalar, `3` = `[3]`, `3x2` = `[3, 2]`.
 
 use crate::error::{Result, TimeSeriesError};
@@ -103,6 +109,13 @@ pub(crate) fn standalone_chunks(data: &TypedArray, window_axis: Option<usize>) -
 
 pub(crate) const ROOT_GROUP: &str = "time_series";
 pub(crate) const SINGLE_GROUP: &str = "single";
+/// Group holding the explicit timestamp vectors, one dataset per distinct time
+/// axis. Its own group rather than a prefix in [`SINGLE_GROUP`]: these are not
+/// series arrays, and the array index is built by scanning that group's members.
+pub(crate) const TIMESTAMPS_GROUP: &str = "timestamps";
+/// Dataset prefix for one explicit timestamp vector, followed by the hex of its
+/// [`crate::hash::timestamps_hash`].
+pub(crate) const TIMESTAMPS_PREFIX: &str = "tsv_";
 pub(crate) const HASH_SUFFIX: &str = "_h";
 pub(crate) const STANDALONE_PREFIX: &str = "arr_";
 /// Dataset prefix for a packed pool of `SingleTimeSeries` / DST arrays.
@@ -120,9 +133,10 @@ pub(crate) const COMPRESSION_ATTR: &str = "compression";
 /// column at the same instant". For a regular series that axis is pinned by the
 /// resolution (plus the grid check the reader enforces); an irregular series
 /// carries its axis explicitly, and two of them share one exactly when their
-/// timestamp vectors are equal — which the catalog already answers, since it
-/// content-addresses those vectors (`timestamp_sets`). So the interned hash
-/// *is* the cohort key, and this enum is the two spellings of "which time axis".
+/// timestamp vectors are equal — which the content hash of the vector already
+/// answers, since the store interns each distinct axis under it (see
+/// [`TIMESTAMPS_GROUP`]). So the interned hash *is* the cohort key, and this
+/// enum is the two spellings of "which time axis".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum PackGroup {
     /// `SingleTimeSeries` and `DeterministicSingleTimeSeries`, grouped by the

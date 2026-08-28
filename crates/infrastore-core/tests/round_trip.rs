@@ -1053,7 +1053,9 @@ fn a_shared_timestamp_vector_is_stored_once_and_swept_when_orphaned() {
 /// The size guard behind interning: a catalog holding many irregular series on
 /// one long time axis must scale with the *number of distinct axes*, not with
 /// rows × timestamps. Storing the vector inline as RFC3339 JSON (24 bytes per
-/// timestamp, as this store used to) would put ~2.4 MB in the catalog here.
+/// timestamp, as this store used to) would put ~2.4 MB in the catalog here. The
+/// vectors now live in the HDF5 file, so the catalog holds one 32-byte hash per
+/// row and nothing else of the axis.
 #[test]
 fn the_catalog_does_not_scale_with_rows_times_timestamps() {
     let dir = tempfile::tempdir().unwrap();
@@ -1102,10 +1104,10 @@ fn the_catalog_does_not_scale_with_rows_times_timestamps() {
     }
 }
 
-/// More distinct time axes than the catalog's decode memo can hold, read in an
-/// order that churns it. Each series must come back on *its own* axis: a memo
-/// that returned another vector for a hash would corrupt every irregular read
-/// that hit it, and only a working-set-exceeding test can catch that.
+/// More distinct time axes than the read memo can hold, read in an order that
+/// churns it. Each series must come back on *its own* axis: a memo that returned
+/// another vector for a hash would corrupt every irregular read that hit it, and
+/// only a working-set-exceeding test can catch that.
 #[test]
 fn many_distinct_time_axes_survive_the_decode_memo() {
     let mut store = create_store(None, true).unwrap();

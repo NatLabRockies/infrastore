@@ -21,7 +21,7 @@ carries netcdf-c's `_NCProperties` attribute, and `Store::open` accepts only fil
 The HDF5 root carries four global attributes:
 
 ```text
-data_format_version = "0.18.0"
+data_format_version = "0.19.0"
 compression         = "deflate:3:shuffle"
 storage_backend     = "hdf5"
 catalog_generation  = "9f2c1ab4e70d5836c41b9e2af0d7c358"
@@ -57,40 +57,49 @@ Opening a store whose recorded version differs from the version this build reads
 the check is exact equality and there is no in-place upgrade path: regenerate the store with the
 matching build.
 
-(`0.18.0` made the `id` column of all three catalog tables — `time_series_associations`,
-`supplemental_attribute_associations`, and `parent_child_associations` — an
-`INTEGER PRIMARY KEY AUTOINCREMENT` rather than a bare rowid alias, so an id is never reissued once
-its row is deleted. It is the one bump that adds no column and changes no value, and it still cannot
-be additive: `AUTOINCREMENT` is part of a table's declaration and there is no `ALTER TABLE` for it,
-so applying this DDL to an older catalog would leave all three tables on recycled ids while
-reporting success. Recycled ids matter because the id is an external reference — a consumer stores
-it in its own model — and reuse makes a stale reference resolve to a different, valid row; `0.17.0`
-added the metadata column `time_reference`, which records how a series' timestamps were _spelled_ —
-an instant in UTC, an instant at a fixed offset, an instant in a named IANA zone, or a wall clock
-naming no instant. It also changes how stored timestamps are _interpreted_: a row marked `zoneless`
-holds wall clocks the store keeps as if UTC, which an older reader would hand back as instants. See
+(`0.19.0` moved a `NonSequentialTimeSeries`'s timestamps out of the SQLite catalog and into the HDF5
+file: the `timestamp_sets` table is gone, and each distinct time axis is now an `i64` dataset of
+unix milliseconds under `time_series/timestamps/`, named by the same content hash the association
+row already carried. The hash domain changed with it — `timestamps_hash` is now the SHA-256 of those
+milliseconds rather than of the delta-varint blob the table held — so the `nsts_…` pool names change
+too. The timestamps are data, and belong in the half of the artifact built for data: a store may
+hold many distinct axes, each of them long, and a JSON document round trip needs them to travel with
+the artifact rather than be locked inside the catalog; `0.18.0` made the `id` column of all three
+catalog tables — `time_series_associations`, `supplemental_attribute_associations`, and
+`parent_child_associations` — an `INTEGER PRIMARY KEY AUTOINCREMENT` rather than a bare rowid alias,
+so an id is never reissued once its row is deleted. It is the one bump that adds no column and
+changes no value, and it still cannot be additive: `AUTOINCREMENT` is part of a table's declaration
+and there is no `ALTER TABLE` for it, so applying this DDL to an older catalog would leave all three
+tables on recycled ids while reporting success. Recycled ids matter because the id is an external
+reference — a consumer stores it in its own model — and reuse makes a stale reference resolve to a
+different, valid row; `0.17.0` added the metadata column `time_reference`, which records how a
+series' timestamps were _spelled_ — an instant in UTC, an instant at a fixed offset, an instant in a
+named IANA zone, or a wall clock naming no instant. It also changes how stored timestamps are
+_interpreted_: a row marked `zoneless` holds wall clocks the store keeps as if UTC, which an older
+reader would hand back as instants. See
 [Time references](../explanation/data-model.md#time-references); `0.16.0` added the metadata column
 `component_field`; `0.15.0` renamed the metadata column `ext` to `application_data` and added the
 `quantity_kind` and `unit_system` columns; unlike a new _table_, new _columns_ are not picked up by
 the idempotent `CREATE TABLE IF NOT EXISTS` DDL, so a store one version behind is rejected on open;
 `0.14.0` moved a `NonSequentialTimeSeries`'s timestamps out of the association row: the
-`timestamps_json` TEXT column became a `timestamps_hash` BLOB resolving into the new
-content-addressed [`timestamp_sets`](#timestamp_sets) table, and irregular arrays that share a time
-axis are now column-packed into `nsts_…` datasets keyed by that hash instead of one standalone
-`arr_…` dataset each; `0.13.0` replaced the `dtype` column with `element_type`, which names the
-_logical_ element type and derives the physical dtype from it — see
-[Element types](./element-types.md); `0.12.0` changed `owner_category` and `time_series_type` from
-TEXT names to small INTEGER codes — see [Discriminant encoding](#discriminant-encoding) below;
-`0.11.0` renamed the metadata column `logical_type` to `ext` — an opaque, package-owned extension
-payload (typically JSON) the store stores verbatim and never interprets; `0.10.0` replaced the
-per-association `features` table with the content-addressed `feature_sets` table below, so a feature
-map is stored once and shared by every association that uses it — dropping the `association_id`
-foreign key and its `ON DELETE CASCADE`; `0.9.0` changed the packed-dataset chunking to
-timestamp-major `(1, cols, *element_shape)` and made the column count `cols` per-dataset (sized to
-the writing batch) instead of a fixed 1,000, optimizing reads across series by timestamp and bulk
-writes; `0.8.0` added the forecast `interval` to the association uniqueness key — so two forecasts
-of one variable that differ only by interval are now distinct series — widening both unique indexes
-(the `NULL`-folding index now `COALESCE`s `interval` as well as `resolution`); `0.7.0` made
+`timestamps_json` TEXT column became a `timestamps_hash` BLOB resolving into a then-new
+content-addressed `timestamp_sets` catalog table (which `0.19.0` replaced with the HDF5 datasets
+described above), and irregular arrays that share a time axis are now column-packed into `nsts_…`
+datasets keyed by that hash instead of one standalone `arr_…` dataset each; `0.13.0` replaced the
+`dtype` column with `element_type`, which names the _logical_ element type and derives the physical
+dtype from it — see [Element types](./element-types.md); `0.12.0` changed `owner_category` and
+`time_series_type` from TEXT names to small INTEGER codes — see
+[Discriminant encoding](#discriminant-encoding) below; `0.11.0` renamed the metadata column
+`logical_type` to `ext` — an opaque, package-owned extension payload (typically JSON) the store
+stores verbatim and never interprets; `0.10.0` replaced the per-association `features` table with
+the content-addressed `feature_sets` table below, so a feature map is stored once and shared by
+every association that uses it — dropping the `association_id` foreign key and its
+`ON DELETE CASCADE`; `0.9.0` changed the packed-dataset chunking to timestamp-major
+`(1, cols, *element_shape)` and made the column count `cols` per-dataset (sized to the writing
+batch) instead of a fixed 1,000, optimizing reads across series by timestamp and bulk writes;
+`0.8.0` added the forecast `interval` to the association uniqueness key — so two forecasts of one
+variable that differ only by interval are now distinct series — widening both unique indexes (the
+`NULL`-folding index now `COALESCE`s `interval` as well as `resolution`); `0.7.0` made
 `resolution`/`horizon`/`interval` calendar-aware [periods](../explanation/data-model.md): they are
 now encoded as ISO-8601 duration strings (e.g. `PT1H`, `P1M`, `P1Y`) rather than integer
 milliseconds, in both the packed dataset names and the SQLite columns, so irregular periods
@@ -138,21 +147,25 @@ against it and a mismatch is an integrity error.
 
 ## HDF5 Layout
 
-Arrays live under a two-level group hierarchy, in one of **two storage modes**:
+Arrays live under a two-level group hierarchy, in one of **two storage modes**, with the explicit
+time axes in a sibling group of their own:
 
 ```text
 <name>.h5
-├── attribute  data_format_version = "0.18.0"
+├── attribute  data_format_version = "0.19.0"
 ├── attribute  compression         = "deflate:3:shuffle"
 ├── attribute  storage_backend     = "hdf5"
 └── group      time_series/
-    └── group  single/
-        ├── dset  sts_{dtype}_{shape}_{length}_{res}      packed  (length, cols, *element_shape)
-        ├── dset  sts_{dtype}_{shape}_{length}_{res}_h    u8  (cols, 64)   # per-column hex hashes
-        ├── dset  sts_{dtype}_{shape}_{length}_{res}__1   packed spill dataset
-        ├── dset  nsts_{dtype}_{shape}_{length}_{tshash}  packed irregular cohort
-        ├── dset  nsts_{dtype}_{shape}_{length}_{tshash}_h  u8  (cols, 64)
-        ├── dset  arr_{hex_hash}                          standalone  [length, *element_shape]
+    ├── group  single/
+    │   ├── dset  sts_{dtype}_{shape}_{length}_{res}      packed  (length, cols, *element_shape)
+    │   ├── dset  sts_{dtype}_{shape}_{length}_{res}_h    u8  (cols, 64)   # per-column hex hashes
+    │   ├── dset  sts_{dtype}_{shape}_{length}_{res}__1   packed spill dataset
+    │   ├── dset  nsts_{dtype}_{shape}_{length}_{tshash}  packed irregular cohort
+    │   ├── dset  nsts_{dtype}_{shape}_{length}_{tshash}_h  u8  (cols, 64)
+    │   ├── dset  arr_{hex_hash}                          standalone  [length, *element_shape]
+    │   └── ...
+    └── group  timestamps/
+        ├── dset  tsv_{hex_hash}                          i64  [n]   # unix milliseconds
         └── ...
 ```
 
@@ -185,8 +198,8 @@ Used for every **static** series: `SingleTimeSeries`, the underlying array of a
 The trailing element is what pins the **time axis**, which is what makes packing meaningful at all:
 the chunking is timestamp-major, so row `t` of a dataset is "every column at the same instant". A
 regular series takes its axis from the resolution; an irregular one carries the axis explicitly, and
-two of them share one exactly when their timestamp vectors are equal — which the catalog already
-answers by content-addressing those vectors (see [`timestamp_sets`](#timestamp_sets)). The full
+two of them share one exactly when their timestamp vectors are equal — which the store already
+answers by content-addressing those vectors (see [Timestamp vectors](#timestamp-vectors)). The full
 64-char hash is used, not a prefix: the name is parsed back into the pool key when the index is
 rebuilt at open, so a truncated form could let two distinct time axes collide into one pool.
 
@@ -216,11 +229,12 @@ typed, multi-dimensional variable named `arr_{hex_hash}` in the `time_series/sin
 no column packing and no companion hash variable — the variable name carries the hash.
 
 - **A lone `NonSequentialTimeSeries`** is shaped `[length, *element_shape]` and chunked as a single
-  whole-array chunk. It stores its explicit, strictly-increasing timestamps in the catalog, not in
-  the array. Packing is only a win once a cohort is several columns wide — a packed dataset spreads
-  one array over `length` chunks — so a series alone on its time axis stays standalone. Whether a
-  given array is packed or standalone is a write-time choice with no effect on reads (they resolve
-  by content hash and handle either), and one cohort can hold columns of both.
+  whole-array chunk. Its explicit, strictly-increasing timestamps are not in the array: they are a
+  shared time axis, stored once in the `timestamps` group below. Packing is only a win once a cohort
+  is several columns wide — a packed dataset spreads one array over `length` chunks — so a series
+  alone on its time axis stays standalone. Whether a given array is packed or standalone is a
+  write-time choice with no effect on reads (they resolve by content hash and handle either), and
+  one cohort can hold columns of both.
 - **Dense forecasts** are shaped `[H, count, *element_shape]` (`Deterministic`),
   `[num_percentiles, H, count, *element_shape]` (`Probabilistic`), or
   `[num_scenarios, H, count, *element_shape]` (`Scenarios`), where `count` is the number of forecast
@@ -231,6 +245,32 @@ no column packing and no companion hash variable — the variable name carries t
   block width so sweeping the window timeline decompresses each block exactly once. The chunk width
   is not recorded anywhere: it is a write-time storage choice that reads transparently regardless of
   the width a store was written with, so it does not affect the data-format version.
+
+### Timestamp vectors
+
+The explicit time axis of a `NonSequentialTimeSeries` lives in `time_series/timestamps/`, one
+dataset per **distinct vector**, named `tsv_{hex_hash}` after the vector's content hash — the same
+hash the association row carries in `timestamps_hash` and the `nsts_…` pool name carries as
+`{tshash}`. Each is a 1-D `i64` dataset of **unix milliseconds**, one element per timestamp, and
+carries the file's compression policy once it is big enough to be chunked (short vectors go in the
+object header, unfiltered, exactly as small standalone arrays do).
+
+Milliseconds are the store's precision floor for every instant it records, so this is exact for
+anything a write accepts; a finer timestamp is refused rather than truncated. Ordinary numbers in an
+ordinary dataset: `h5py` reads a time axis with no help from this library.
+
+Storing it here rather than in the catalog is what makes the timestamps **data**. Irregular series
+in a power-systems model overwhelmingly share one axis — event times, an outage schedule, a market
+timeline — so a thousand components sampled at the same instants hold one copy between them; but a
+store may hold many distinct axes, each of them long, and a `.sqlite` file is the wrong place for
+bulk numeric arrays. It also means the vectors travel with the artifact: a document round trip that
+carries locators rather than values still finds the timestamps where it finds the arrays. (Before
+`0.19.0` they were a delta-varint blob in a `timestamp_sets` catalog table.)
+
+Vectors are shared, so removing one series never deletes one; see
+[Deletion and compaction](#deletion-and-compaction). `verify_integrity` reads each referenced vector
+back and rehashes it, exactly as it does an array — the name records the hash, so a dataset
+perturbed behind it is caught rather than silently served.
 
 ### Compression
 
@@ -262,14 +302,17 @@ regardless of the filter, so stores written with different settings stay mutuall
   dataset rather than re-indexing it.
 - **Feature sets and timestamp vectors:** because both are shared, deleting an association never
   deletes either; removing the last association that referenced one leaves it unreachable.
-  `compact()` deletes unreachable rows and reports the counts as `feature_sets_reclaimed` and
-  `timestamp_sets_reclaimed`.
+  `compact()` deletes them — the feature set as a catalog row, the timestamp vector as an unlinked
+  HDF5 dataset — and reports the counts as `feature_sets_reclaimed` and `timestamp_sets_reclaimed`.
+  Clearing a store is the exception: it orphans every one of both by construction, so it drops them
+  outright rather than leaving a cleared store's worth of them for a compaction.
 
 `compact()` on an on-disk store **rewrites the `.h5` file**, because that is the only way HDF5 gives
 the freed space back:
 
-1. The catalog is swept of unreachable feature sets and timestamp vectors, then read for the live
-   set — the catalog, not the file, is what makes an array live.
+1. The catalog is swept of unreachable feature sets, and the file of unreachable timestamp vectors;
+   the catalog is then read for the live set — the catalog, not the file, is what makes an array or
+   a time axis live.
 2. Every live array is written into a fresh file at `<store>.h5.repack`, sibling to the original so
    the two share a filesystem. Layouts are planned from scratch: packed pools are created at exactly
    their cohort width rather than the growth-sized width an incremental write reserves.
@@ -278,10 +321,10 @@ the freed space back:
    `.repack` file, which the next compaction deletes.
 
 What the new file therefore lacks: freed packed slots, unreferenced datasets (an interrupted bulk
-add's leftovers, or tombstones left by a store written before deletion unlinked), and the slack in
-over-wide packed pools. The `.sqlite` half is not touched — arrays are content-addressed, so a
-different physical layout is invisible to it — and `data_format_version` is unchanged, because the
-rewrite emits the same format.
+add's leftovers, unreferenced timestamp vectors, or tombstones left by a store written before
+deletion unlinked), and the slack in over-wide packed pools. The `.sqlite` half is not touched —
+arrays are content-addressed, so a different physical layout is invisible to it — and
+`data_format_version` is unchanged, because the rewrite emits the same format.
 
 Compaction assumes the process running it is the file's only user. On Unix another process holding
 the file open keeps reading the pre-compaction inode; on Windows its lock makes the rename fail, and
@@ -310,7 +353,7 @@ One row per association between an owner and a stored array.
 | `horizon`           | TEXT    | ISO-8601 forecast horizon; `NULL` for non-forecasts                 |
 | `interval`          | TEXT    | ISO-8601 forecast interval; `NULL` for non-forecasts                |
 | `count`             | INTEGER | Forecast window count; `NULL` for non-forecasts                     |
-| `timestamps_hash`   | BLOB    | 32-byte SHA-256 of the timestamp vector (`NonSequentialTimeSeries`) |
+| `timestamps_hash`   | BLOB    | 32-byte hash of the timestamp vector; see below                     |
 | `units`             | TEXT    | Free-form units label                                               |
 | `quantity_kind`     | TEXT    | What the values measure (QUDT `QuantityKind` name); `NULL` if unset |
 | `unit_system`       | TEXT    | `natural_units` or `component_base`; `NULL` means _unspecified_     |
@@ -325,6 +368,11 @@ One row per association between an owner and a stored array.
 
 The two content-address hashes are the last two columns. Column order is not load-bearing — every
 statement names its columns — so the layout is chosen for readability.
+
+`timestamps_hash` is set only on `NonSequentialTimeSeries` rows and is `NULL` on every other type.
+It is a locator, not a value: the vector itself lives in the HDF5 file (see
+[Timestamp vectors](#timestamp-vectors)), and the same hash is the cohort key the `nsts_…` pools are
+named by.
 
 #### `time_reference`
 
@@ -382,54 +430,6 @@ Removing the last association that referenced a set instead leaves it unreachabl
 deletion semantics as the HDF5 side's unreachable standalone variables. `Store::compact` sweeps
 unreachable sets and reports the count as `feature_sets_reclaimed`; clearing a store drops them all
 outright.
-
-### `timestamp_sets`
-
-The explicit timestamp vector of a `NonSequentialTimeSeries`, content-addressed exactly as feature
-sets are. The association row carries only the 32-byte `timestamps_hash`.
-
-| Column            | Type | Notes                                    |
-| ----------------- | ---- | ---------------------------------------- |
-| `timestamps_hash` | BLOB | 32-byte SHA-256 of `data`; `PRIMARY KEY` |
-| `data`            | BLOB | The vector in the compact encoding below |
-
-Three things this buys, in descending order of how much they matter:
-
-- **The vector is stored once per distinct time axis.** Irregular series in a power-systems model
-  overwhelmingly share one — event times, an outage schedule, a market timeline — so a thousand
-  components sampled at the same instants hold one copy between them.
-- **The association table stays narrow.** The vector used to live inline as an RFC 3339 JSON array
-  (24 bytes per timestamp, ~210 KB for a year of hourly data), which pushed those rows into SQLite
-  overflow pages and made every scan-shaped catalog query read and parse megabytes it had no use
-  for. A listing now decodes each distinct vector once, as it already did for features.
-- **It is the cohort key the packed HDF5 layout groups irregular arrays by** (see
-  [Packed mode](#packed-mode)).
-
-`data` is not human-readable, deliberately — the readable projection below covers hand inspection of
-everything else. Its layout is:
-
-```text
-[0]      version   u8       currently 1
-[1]      unit      u8       delta unit: 0=ns, 1=µs, 2=ms, 3=s, 4=min, 5=hour, 6=day
-then     count     uvarint  number of timestamps
-if count > 0:
-  base_secs        svarint  seconds since the Unix epoch (zigzag)
-  base_nanos       uvarint  sub-second nanoseconds of the first timestamp
-  delta_1..delta_n svarint  successive differences, in `unit`s (zigzag)
-```
-
-Varints are LEB128; signed values are zigzag-encoded first. The unit is the coarsest one that
-divides every delta, which is what makes the encoding cheap: irregularity in this domain is usually
-coarse (event times on whole seconds or minutes, a regular grid with gaps), so a year of hourly
-timestamps becomes 8,760 single-byte deltas — ~8.8 KB against ~210 KB for the JSON form. A vector
-with genuine microsecond jitter degrades to ~4–5 bytes per timestamp, still well under JSON.
-Precision is nanoseconds over chrono's full range; the base timestamp is stored as its own
-`(seconds, nanoseconds)` pair and later ones are reconstructed by accumulating deltas in 128-bit
-arithmetic. The one thing not preserved is a leap second after the first position, which normalizes
-into the following second.
-
-Like `feature_sets`, there is **no foreign key** and **no cascade**: rows are shared.
-`Store::compact` sweeps unreachable vectors and reports the count as `timestamp_sets_reclaimed`.
 
 ### `supplemental_attribute_associations`
 
@@ -728,3 +728,7 @@ the relevant `sts_…_h` dataset; that row index is the column index into the `s
 that a packed pool which fills up spills into `{name}__1`, `{name}__2`, so the dataset holding a
 given array is not derivable from its metadata — scan the `_h` datasets, or let `infrastore info` /
 `infrastore arrays` report the resolved `dataset` and `column`.
+
+A `NonSequentialTimeSeries` row's time axis needs no scan: hex-encode its `timestamps_hash` and read
+`time_series/timestamps/tsv_<hex_hash>`, an `i64` vector of unix milliseconds in the row's own
+order.

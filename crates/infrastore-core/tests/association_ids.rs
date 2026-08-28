@@ -1489,7 +1489,7 @@ fn an_import_refuses_an_irregular_row() {
         .unwrap_err();
     match err {
         TimeSeriesError::InvalidParameter(msg) => {
-            assert!(msg.contains("timestamp vector"), "{msg}");
+            assert!(msg.contains("timestamps_hash"), "{msg}");
         }
         other => panic!("expected InvalidParameter, got {other:?}"),
     }

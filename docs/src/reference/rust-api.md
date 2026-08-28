@@ -384,9 +384,10 @@ can be moved between threads, but sharing one requires external synchronization 
 - **`count_array_references`** — `(sts, dst)` association counts referencing one `data_hash`, so a
   caller can tell whether removing a `SingleTimeSeries` would orphan a
   `DeterministicSingleTimeSeries` derived from (and sharing) its array.
-- **`verify_integrity`** — Recomputes each stored array's hash and reports mismatches. Covers the
-  HDF5 half only: the SQLite catalog is not inspected, so an empty report does not mean the store as
-  a whole is sound. See
+- **`verify_integrity`** — Reads back every array and timestamp vector the catalog references,
+  recomputes its hash, and reports mismatches and dangling references. It checks the HDF5 half
+  against the catalog, never the catalog against itself, so an empty report does not mean the store
+  as a whole is sound. See
   [content addressing](../explanation/content-addressing.md#what-it-does-not-cover).
 - **`flush`** — Issues `H5Fflush` so the files can be copied for persistence without closing.
 - **`persist_to`** — Writes both halves of the artifact to `path` and `<path>.sqlite`, overwriting

@@ -344,8 +344,10 @@ For an on-disk store compaction rewrites the `.h5` file from the catalog's live
 set, so these count things that were in the old file and are not in the new one:
 `slots_reclaimed` are packed-column slots a removal had freed,
 `datasets_dropped` are datasets nothing referenced any more, and
-`bytes_reclaimed` is how much smaller the file got. `feature_sets_reclaimed` and
-`timestamp_sets_reclaimed` are the catalog's orphaned content-addressed rows.
+`bytes_reclaimed` is how much smaller the file got. `feature_sets_reclaimed`
+counts the catalog's orphaned feature sets and `timestamp_sets_reclaimed` the
+file's orphaned timestamp vectors: both are shared, so removing one series never
+deletes either, and a compaction is what reclaims the unreachable ones.
 
 An in-memory store has no file to rewrite: `bytes_reclaimed` and
 `datasets_dropped` are always `0` there.

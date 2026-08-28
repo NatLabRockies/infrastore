@@ -8,4 +8,4 @@
 /// new *column* does, because `CREATE TABLE IF NOT EXISTS` leaves an existing
 /// table's columns alone and every statement naming the new one would then
 /// fail.
-pub const DATA_FORMAT_VERSION: &str = "0.18.0";
+pub const DATA_FORMAT_VERSION: &str = "0.19.0";

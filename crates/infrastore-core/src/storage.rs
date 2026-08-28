@@ -6,6 +6,8 @@
 
 use std::ops::Range;
 
+use chrono::{DateTime, Utc};
+
 use crate::error::{Result, TimeSeriesError};
 use crate::types::array::{Dtype, TypedArray};
 
@@ -153,11 +155,11 @@ pub struct CompactionReport {
     /// removing an association cannot cascade-delete them; they accumulate as
     /// unreachable rows until a compaction sweeps them.
     pub feature_sets_reclaimed: usize,
-    /// Content-addressed timestamp vectors in the SQLite catalog that no
-    /// association referenced any more, and were deleted. Shared and swept for
-    /// exactly the same reasons as `feature_sets_reclaimed`: removing the last
+    /// Content-addressed timestamp vectors in the array file that no association
+    /// referenced any more, and were deleted. Shared and swept for exactly the
+    /// same reasons as `feature_sets_reclaimed`: removing the last
     /// `NonSequentialTimeSeries` on a time axis leaves that axis behind as an
-    /// unreachable row until a compaction reclaims it.
+    /// unreachable dataset until a compaction reclaims it.
     pub timestamp_sets_reclaimed: usize,
     /// How much smaller the HDF5 file got, in bytes (saturating: a rewrite that
     /// happened to grow the file reports 0). Always 0 for an in-memory store.
@@ -408,6 +410,36 @@ pub(crate) trait StorageBackend: Send + Sync {
 
     /// True iff the backend currently stores `hash`.
     fn contains(&self, hash: &[u8; 32]) -> Result<bool>;
+
+    // ---- explicit timestamp vectors ---------------------------------------
+    //
+    // A `NonSequentialTimeSeries` carries its time axis explicitly, and many
+    // series share one. The axis is content-addressed by
+    // [`crate::hash::timestamps_hash`] and stored once per distinct vector,
+    // beside the arrays rather than in the catalog: it is data of the same kind,
+    // it can be long, and a store can hold many of them. The catalog keeps only
+    // the hash, which doubles as the [`PackGroup::Irregular`] cohort key.
+
+    /// Store `timestamps` under `hash`. Storing a vector the backend already
+    /// holds is a no-op returning `false` (content addressing: equal hash
+    /// implies equal vector); a write of new content returns `true`, so the
+    /// caller can stage it for rollback.
+    fn put_timestamps(&mut self, hash: &[u8; 32], timestamps: &[DateTime<Utc>]) -> Result<bool>;
+
+    /// The timestamp vector stored under `hash`, or [`TimeSeriesError::NotFound`].
+    fn get_timestamps(&self, hash: &[u8; 32]) -> Result<Vec<DateTime<Utc>>>;
+
+    /// Remove the timestamp vector stored under `hash`. No-op if absent.
+    ///
+    /// Vectors are shared, so this is never driven by removing one association:
+    /// [`crate::Store::compact`] sweeps the ones the catalog no longer
+    /// references, exactly as it does unreachable arrays.
+    fn remove_timestamps(&mut self, hash: &[u8; 32]) -> Result<()>;
+
+    /// Every timestamp vector the backend holds, by content hash.
+    /// [`crate::Store::compact`] diffs this against the set the catalog still
+    /// references to find the orphans.
+    fn timestamp_hashes(&self) -> Result<Vec<[u8; 32]>>;
 
     /// Where `hash`'s array physically lives, for outside inspection of the
     /// backing file. The default reports [`ArrayLocation::InMemory`], which is

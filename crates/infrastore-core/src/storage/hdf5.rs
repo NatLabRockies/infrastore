@@ -24,6 +24,11 @@
 //!   layout: the data lives in the object header, no chunk B-tree, no filter
 //!   pipeline. (Compact datasets cannot be compressed; arrays that small gain
 //!   little from DEFLATE anyway.)
+//! * The explicit timestamp vectors of the `NonSequentialTimeSeries` live in a
+//!   sibling `timestamps` group, one `tsv_{hexhash}` dataset of `i64` unix
+//!   milliseconds per distinct time axis. They sit outside the array group
+//!   because they are not series arrays and the array index is built by scanning
+//!   that group's members.
 //! * No per-variable dimension objects — HDF5 dataspaces carry the shape.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -32,6 +37,7 @@ use std::path::Path;
 use std::str::FromStr;
 use std::sync::Mutex;
 
+use chrono::{DateTime, Utc};
 use hdf5_metno as h5;
 
 use h5::types::VarLenUnicode;
@@ -44,9 +50,9 @@ use crate::types::array::{Dtype, TypedArray};
 use crate::version::DATA_FORMAT_VERSION;
 
 use super::common::{
-    COMPRESSION_ATTR, HASH_SUFFIX, PackGroup, ROOT_GROUP, SINGLE_GROUP, STANDALONE_PREFIX,
-    dataset_base_name, element_block_bytes, hex_to_hash, parse_dataset_name, resolve_dataset_cols,
-    spill_name, standalone_chunks,
+    COMPRESSION_ATTR, HASH_SUFFIX, MAX_CHUNK_BYTES, PackGroup, ROOT_GROUP, SINGLE_GROUP,
+    STANDALONE_PREFIX, TIMESTAMPS_GROUP, TIMESTAMPS_PREFIX, dataset_base_name, element_block_bytes,
+    hex_to_hash, parse_dataset_name, resolve_dataset_cols, spill_name, standalone_chunks,
 };
 use super::{ArrayLocation, BackendStats, CompactionReport, IntegrityReport, StorageBackend};
 
@@ -378,6 +384,34 @@ fn write_all(ds: &h5::Dataset, dtype: Dtype, bytes: &[u8]) -> Result<()> {
     }
 }
 
+/// Fill a dataset that was just created, unlinking it if the write fails.
+///
+/// HDF5 links a dataset into its group when it is *created*, not when it is
+/// first written, so a failed write — a full filesystem, most plainly — leaves
+/// a fill-valued object behind under a name that claims to address content it
+/// does not hold. The in-memory index never records it, but a reopen rebuilds
+/// that index by scanning the group's links (`rebuild_index`) and would adopt
+/// it as live: reads of the affected hash would then hand back zeros, and a
+/// re-add would skip the write as already-present. Dropping the link on the way
+/// out keeps a failed write invisible, so the whole put stays all-or-nothing.
+///
+/// The unlink's own result is discarded: the write error is what explains the
+/// state, and there is nothing useful to say about failing to tidy up after it.
+fn write_or_unlink(
+    group: &Group,
+    name: &str,
+    ds: h5::Dataset,
+    write: impl FnOnce(&h5::Dataset) -> Result<()>,
+) -> Result<()> {
+    let written = write(&ds);
+    if written.is_err() {
+        // The handle keeps the object alive past the unlink, so it goes first.
+        drop(ds);
+        let _ = group.unlink(name);
+    }
+    written
+}
+
 /// Create a dataset of `dtype` with the given shape/chunking/filters.
 /// `chunks = None` → compact when small enough, else contiguous.
 fn create_ds(
@@ -449,6 +483,11 @@ fn replace_str_attr(file: &h5::File, name: &str, value: &str) -> Result<()> {
     write_str_attr(file, name, value)
 }
 
+/// The dataset holding the timestamp vector content-addressed by `hash`.
+fn timestamps_dataset_name(hash: &[u8; 32]) -> String {
+    format!("{TIMESTAMPS_PREFIX}{}", hash_hex(hash))
+}
+
 fn read_str_attr(file: &h5::File, name: &str) -> Option<String> {
     file.attr(name)
         .ok()?
@@ -493,6 +532,8 @@ struct Inner {
     file: h5::File,
     /// The `/time_series/single` group, held open for the file's lifetime.
     single: Group,
+    /// The `/time_series/timestamps` group, held open likewise.
+    timestamps: Group,
     /// Open dataset handles, cached for the file's lifetime. HDF5's raw-data
     /// chunk cache lives per *open dataset handle* — reopening a dataset on
     /// every read would discard the cache and re-inflate every touched chunk
@@ -505,6 +546,9 @@ struct Inner {
     dataset_groups: HashMap<DatasetGroupKey, Vec<String>>,
     standalone_vars: HashSet<String>,
     by_hash: HashMap<[u8; 32], Location>,
+    /// Content hashes of the timestamp vectors present in the file, so a
+    /// re-store of a known axis is answered without touching HDF5.
+    timestamp_hashes: HashSet<[u8; 32]>,
     compression: Compression,
 }
 
@@ -525,16 +569,19 @@ impl Hdf5Backend {
         write_str_attr(&file, BACKEND_ATTR, BACKEND_NAME)?;
         let ts = file.create_group(ROOT_GROUP).map_err(map_h5)?;
         let single = ts.create_group(SINGLE_GROUP).map_err(map_h5)?;
+        let timestamps = ts.create_group(TIMESTAMPS_GROUP).map_err(map_h5)?;
         Ok(Self {
             inner: Mutex::new(Inner {
                 file,
                 single,
+                timestamps,
                 handles: std::cell::RefCell::new(HashMap::new()),
                 read_only: false,
                 datasets: HashMap::new(),
                 dataset_groups: HashMap::new(),
                 standalone_vars: HashSet::new(),
                 by_hash: HashMap::new(),
+                timestamp_hashes: HashSet::new(),
                 compression,
             }),
         })
@@ -560,16 +607,21 @@ impl Hdf5Backend {
         let single = file
             .group(&format!("{ROOT_GROUP}/{SINGLE_GROUP}"))
             .map_err(map_h5)?;
+        let timestamps = file
+            .group(&format!("{ROOT_GROUP}/{TIMESTAMPS_GROUP}"))
+            .map_err(map_h5)?;
         let mut backend = Self {
             inner: Mutex::new(Inner {
                 file,
                 single,
+                timestamps,
                 handles: std::cell::RefCell::new(HashMap::new()),
                 read_only,
                 datasets: HashMap::new(),
                 dataset_groups: HashMap::new(),
                 standalone_vars: HashSet::new(),
                 by_hash: HashMap::new(),
+                timestamp_hashes: HashSet::new(),
                 compression,
             }),
         };
@@ -677,6 +729,14 @@ impl Hdf5Backend {
         for names in inner.dataset_groups.values_mut() {
             names.sort();
         }
+        for name in inner.timestamps.member_names().map_err(map_h5)? {
+            let hex = name.strip_prefix(TIMESTAMPS_PREFIX).ok_or_else(|| {
+                TimeSeriesError::IntegrityError(format!(
+                    "unexpected object {name} in the {TIMESTAMPS_GROUP} group"
+                ))
+            })?;
+            inner.timestamp_hashes.insert(hex_to_hash(hex)?);
+        }
         Ok(())
     }
 }
@@ -705,6 +765,66 @@ impl Inner {
             .borrow_mut()
             .insert(name.to_string(), ds.clone());
         Ok(ds)
+    }
+
+    /// Write one explicit timestamp vector as its own `i64` dataset.
+    ///
+    /// Same physical policy as a standalone array: a short vector goes in the
+    /// object header (compact, unfiltered), a long one is chunked and filtered
+    /// with the store's compression. The chunk is a bounded run of the vector
+    /// rather than the whole of it, so a multi-megabyte axis does not force a
+    /// multi-megabyte chunk through the cache on every read.
+    fn put_timestamps_locked(&mut self, hash: &[u8; 32], millis: &[i64]) -> Result<bool> {
+        self.ensure_writable()?;
+        if self.timestamp_hashes.contains(hash) {
+            return Ok(false);
+        }
+        let name = timestamps_dataset_name(hash);
+        let shape = [millis.len()];
+        let nbytes = std::mem::size_of_val(millis);
+        let ds = if nbytes <= COMPACT_MAX_BYTES {
+            create_ds(
+                &self.timestamps,
+                &name,
+                Dtype::I64,
+                &shape,
+                None,
+                Compression::None,
+            )?
+        } else {
+            let chunk = millis
+                .len()
+                .min(MAX_CHUNK_BYTES / std::mem::size_of::<i64>());
+            create_ds(
+                &self.timestamps,
+                &name,
+                Dtype::I64,
+                &shape,
+                Some(&[chunk]),
+                self.compression,
+            )?
+        };
+        if !millis.is_empty() {
+            write_or_unlink(&self.timestamps, &name, ds, |ds| {
+                ds.write_raw(millis).map_err(map_h5)
+            })?;
+        }
+        // Indexed only once the dataset is on disk, and a failed write takes its
+        // half-made dataset with it, so the index says what the file says.
+        self.timestamp_hashes.insert(*hash);
+        Ok(true)
+    }
+
+    fn get_timestamps_locked(&self, hash: &[u8; 32]) -> Result<Vec<i64>> {
+        if !self.timestamp_hashes.contains(hash) {
+            return Err(TimeSeriesError::NotFound);
+        }
+        let name = timestamps_dataset_name(hash);
+        let ds = self
+            .timestamps
+            .dataset(&name)
+            .map_err(|_| TimeSeriesError::NotFound)?;
+        ds.read_raw::<i64>().map_err(map_h5)
     }
 
     fn ensure_writable_dataset(
@@ -991,7 +1111,9 @@ impl Inner {
             )?
         };
         if !data.bytes.is_empty() {
-            write_all(&ds, data.dtype, &data.bytes)?;
+            write_or_unlink(&single, &var, ds, |ds| {
+                write_all(ds, data.dtype, &data.bytes)
+            })?;
         }
         self.standalone_vars.insert(var.clone());
         self.by_hash.insert(*hash, Location::Standalone { var });
@@ -1533,6 +1655,44 @@ impl StorageBackend for Hdf5Backend {
         Ok(inner.by_hash.contains_key(hash))
     }
 
+    fn put_timestamps(&mut self, hash: &[u8; 32], timestamps: &[DateTime<Utc>]) -> Result<bool> {
+        let millis = crate::timestamps::to_millis(timestamps);
+        self.inner
+            .get_mut()
+            .expect("mutex poisoned")
+            .put_timestamps_locked(hash, &millis)
+    }
+
+    fn get_timestamps(&self, hash: &[u8; 32]) -> Result<Vec<DateTime<Utc>>> {
+        let millis = self
+            .inner
+            .lock()
+            .expect("mutex poisoned")
+            .get_timestamps_locked(hash)?;
+        crate::timestamps::from_millis(&millis)
+    }
+
+    fn remove_timestamps(&mut self, hash: &[u8; 32]) -> Result<()> {
+        let inner = self.inner.get_mut().expect("mutex poisoned");
+        inner.ensure_writable()?;
+        if !inner.timestamp_hashes.remove(hash) {
+            return Ok(());
+        }
+        // Unlink outright, as a standalone array is: the space comes back only
+        // when `Store::compact` rewrites the file, but the object is unreachable
+        // at once and stays so across a reopen, which rebuilds this index by
+        // scanning the group's links.
+        inner
+            .timestamps
+            .unlink(&timestamps_dataset_name(hash))
+            .map_err(map_h5)
+    }
+
+    fn timestamp_hashes(&self) -> Result<Vec<[u8; 32]>> {
+        let inner = self.inner.lock().expect("mutex poisoned");
+        Ok(inner.timestamp_hashes.iter().copied().collect())
+    }
+
     fn locate(&self, hash: &[u8; 32]) -> Result<ArrayLocation> {
         let inner = self.inner.lock().expect("mutex poisoned");
         // Both layouts live in the same group; `path` makes the name absolute
@@ -1735,6 +1895,40 @@ mod tests {
                 .unwrap()
                 .ok()
         );
+    }
+
+    #[test]
+    fn a_failed_write_unlinks_the_dataset_it_half_made() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.h5");
+        let hash = [7u8; 32];
+        let name = timestamps_dataset_name(&hash);
+        {
+            let mut be = Hdf5Backend::create(&path, Compression::default()).unwrap();
+            let inner = be.inner.get_mut().expect("mutex poisoned");
+            let ds = create_ds(
+                &inner.timestamps,
+                &name,
+                Dtype::I64,
+                &[4],
+                None,
+                Compression::None,
+            )
+            .unwrap();
+            // Linked the moment it is created, before a single value reaches
+            // it: that gap is the whole exposure.
+            assert!(inner.timestamps.member_names().unwrap().contains(&name));
+            let failed = write_or_unlink(&inner.timestamps, &name, ds, |_| {
+                Err(TimeSeriesError::InvalidParameter("no space left".into()))
+            });
+            assert!(failed.is_err());
+            assert!(!inner.timestamps.member_names().unwrap().contains(&name));
+        }
+        // A reopen rebuilds the index by scanning this group's links, so had the
+        // half-made dataset survived it would have been adopted as a live axis
+        // whose stored values are the fill value.
+        let be = Hdf5Backend::open(&path, true).unwrap();
+        assert!(be.timestamp_hashes().unwrap().is_empty());
     }
 
     #[test]

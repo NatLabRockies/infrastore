@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::ops::Range;
 
+use chrono::{DateTime, Utc};
+
 use crate::error::{Result, TimeSeriesError};
 use crate::hash::array_hash;
 use crate::types::array::{Dtype, TypedArray};
@@ -17,6 +19,10 @@ use super::{ArrayLayout, CompactionReport, IntegrityReport, PackGroup, StorageBa
 pub(crate) struct MemoryBackend {
     arrays: HashMap<[u8; 32], TypedArray>,
     tombstoned: HashSet<[u8; 32]>,
+    /// Explicit timestamp vectors, held in the stored form the on-disk backend
+    /// writes (unix milliseconds) rather than as `DateTime`s, so an in-memory
+    /// store and a persisted one hand back byte-identical values.
+    timestamps: HashMap<[u8; 32], Vec<i64>>,
 }
 
 impl MemoryBackend {
@@ -90,6 +96,29 @@ impl StorageBackend for MemoryBackend {
 
     fn contains(&self, hash: &[u8; 32]) -> Result<bool> {
         Ok(self.arrays.contains_key(hash))
+    }
+
+    fn put_timestamps(&mut self, hash: &[u8; 32], timestamps: &[DateTime<Utc>]) -> Result<bool> {
+        if self.timestamps.contains_key(hash) {
+            return Ok(false);
+        }
+        self.timestamps
+            .insert(*hash, crate::timestamps::to_millis(timestamps));
+        Ok(true)
+    }
+
+    fn get_timestamps(&self, hash: &[u8; 32]) -> Result<Vec<DateTime<Utc>>> {
+        let millis = self.timestamps.get(hash).ok_or(TimeSeriesError::NotFound)?;
+        crate::timestamps::from_millis(millis)
+    }
+
+    fn remove_timestamps(&mut self, hash: &[u8; 32]) -> Result<()> {
+        self.timestamps.remove(hash);
+        Ok(())
+    }
+
+    fn timestamp_hashes(&self) -> Result<Vec<[u8; 32]>> {
+        Ok(self.timestamps.keys().copied().collect())
     }
 
     fn compact(&mut self) -> Result<CompactionReport> {

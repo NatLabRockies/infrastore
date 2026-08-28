@@ -283,7 +283,8 @@ variants as distinct types (`NotFound`, `DuplicateTimeSeries`, `DuplicateAssocia
 ## Testing an Integration
 
 - Use `in_memory=True` stores in unit tests; they exercise the same core.
-- `verify_integrity` re-hashes every array; `is_empty` is the cheap "nothing here" probe.
+- `verify_integrity` re-hashes every array and time axis the catalog references; `is_empty` is the
+  cheap "nothing here" probe.
 - The `infrastore` CLI reads any artifact your package writes. `infrastore list` and
   `infrastore info` are the fastest way to see what a consumer actually stored, and
   `infrastore diff --against` compares two artifacts by hash without reading arrays — a usable CI

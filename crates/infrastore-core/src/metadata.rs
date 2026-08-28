@@ -17,6 +17,7 @@ use crate::types::period::Period;
 
 use crate::error::{Result, TimeSeriesError};
 use crate::hash::{features_hash, timestamps_hash};
+use crate::storage::StorageBackend;
 use crate::types::element_type::ElementType;
 use crate::types::key::{KeyIdentity, TimeSeriesKey};
 use crate::types::metadata::{
@@ -28,6 +29,12 @@ use crate::types::time_series::TimeSeriesType;
 /// The arrays the catalog references, paired with one diagnostic per row too
 /// malformed to name one. Returned by [`MetadataStore::referenced_arrays`].
 pub type ReferencedArrays = (Vec<([u8; 32], ElementType)>, Vec<String>);
+
+/// The timestamp vectors the catalog references, paired with one diagnostic per
+/// row too malformed to name one. The same shape as [`ReferencedArrays`], for
+/// the same reason: a sweep must not act on a catalog it cannot read, and a
+/// verification must report that rather than fail.
+pub type ReferencedTimestamps = (HashSet<[u8; 32]>, Vec<String>);
 
 /// A catalog row paired with its `INTEGER PRIMARY KEY` (SQLite rowid). Used
 /// internally by [`Self::list_inner`]; public APIs surface metadata without
@@ -76,28 +83,27 @@ pub struct MetadataStore {
     timestamps_cache: RefCell<TimestampCache>,
 }
 
-/// Decoded timestamp vectors, memoized by content hash.
+/// Timestamp vectors read back from the array file, memoized by content hash.
 ///
 /// The read paths resolve one association at a time — `get_by_key` per key —
-/// so a bulk read of N `NonSequentialTimeSeries` on one time axis decoded that
+/// so a bulk read of N `NonSequentialTimeSeries` on one time axis fetched that
 /// axis N times. Measured on 200 series over a 7,508-instant year, that was
-/// ~70% of the whole call: 108 µs of decoding per series, for bytes it had
-/// already decoded 199 times.
+/// ~70% of the whole call, for a vector it had already read 199 times.
 ///
-/// This can be a plain memo with no invalidation because `timestamp_sets` rows
-/// are **content-addressed and immutable**: a hash always maps to the same
-/// bytes, so an entry can never go stale. The only thing it needs is a size
-/// bound, and a small one suffices — the cache exists to collapse "one axis,
-/// decoded once per row", not to be a general row cache. A store holds a
-/// handful of distinct axes; series that do not share one miss anyway, and pay
-/// exactly what they paid before.
+/// This can be a plain memo with no invalidation because timestamp vectors are
+/// **content-addressed and immutable**: a hash always maps to the same values,
+/// so an entry can never go stale. The only thing it needs is a size bound, and
+/// a small one suffices — the cache exists to collapse "one axis, read once per
+/// row", not to be a general row cache. A store holds a handful of distinct
+/// axes; series that do not share one miss anyway, and pay exactly what they
+/// paid before.
 ///
-/// One consequence worth naming: a hit is served without touching the catalog,
-/// so if a `timestamp_sets` row were deleted *after* this process read it, the
-/// integrity error [`MetadataStore::list_inner`] raises for a missing vector
-/// would not fire for the rest of the session. Nothing in the store deletes a
-/// referenced row (`compact` sweeps only unreferenced ones), so that state is
-/// already corruption; the cache narrows when it is reported, not whether.
+/// One consequence worth naming: a hit is served without touching the store, so
+/// if a vector were deleted *after* this process read it, the integrity error
+/// [`MetadataStore::list_inner`] raises for a missing one would not fire for the
+/// rest of the session. Nothing deletes a referenced vector (`compact` sweeps
+/// only unreferenced ones), so that state is already corruption; the cache
+/// narrows when it is reported, not whether.
 #[derive(Debug, Default)]
 struct TimestampCache {
     /// Least-recently used first. A linear scan is right at this size.
@@ -571,15 +577,25 @@ pub struct MetadataFilter {
 /// row. Scoped to a single transaction: it records what *this* batch wrote, and
 /// carries no meaning once that transaction ends.
 ///
-/// Two shared tables hang off an association row — its feature set and, for a
-/// `NonSequentialTimeSeries`, its timestamp vector — and both are written the
-/// same way, so one cache covers both. The timestamp half is what keeps a bulk
-/// add of ten thousand irregular series on one time axis from issuing ten
-/// thousand no-op `INSERT OR IGNORE`s of the same (potentially large) blob.
+/// Two content-addressed sets hang off an association row — its feature set,
+/// written into the catalog beside the row, and, for a
+/// `NonSequentialTimeSeries`, its timestamp vector, written into the array file
+/// before it. Both are shared, so one cache covers both. The timestamp half is
+/// what keeps a bulk add of ten thousand irregular series on one time axis from
+/// asking the backend ten thousand times for the same (potentially long) vector.
 #[derive(Debug, Default)]
 pub struct SharedSetCache {
     features: HashSet<[u8; 32]>,
     timestamps: HashSet<[u8; 32]>,
+}
+
+impl SharedSetCache {
+    /// Record that this batch is writing the timestamp vector `hash`, returning
+    /// true the first time it sees it. The write itself is the caller's — the
+    /// vector lives in the array file, which the catalog has no handle on.
+    pub fn note_timestamps(&mut self, hash: [u8; 32]) -> bool {
+        self.timestamps.insert(hash)
+    }
 }
 
 /// The full identity of one stored association: everything the uniqueness
@@ -1066,10 +1082,10 @@ impl MetadataStore {
         //     branch that could drift between the two.
         //   * `RETURNING` instead of `last_insert_rowid()`. That function is
         //     per-connection and reports the most recent insert on it, so
-        //     reading it here was only correct because the feature-set and
-        //     timestamp-set inserts below happen *after* it. Both write to
-        //     rowid tables and would clobber it. Nothing should have to
-        //     preserve that ordering to keep this function correct.
+        //     reading it here was only correct because the feature-set insert
+        //     below happens *after* it: it writes to a rowid table and would
+        //     clobber it. Nothing should have to preserve that ordering to keep
+        //     this function correct.
         let mut insert_stmt = tx.prepare_cached(
             "INSERT INTO time_series_associations
              (id, owner_id, owner_type, owner_category, time_series_type, name, data_hash,
@@ -1150,32 +1166,8 @@ impl MetadataStore {
         if cache.features.insert(f_hash) {
             Self::insert_feature_set(tx, &f_hash, &meta.features)?;
         }
-        if let (Some(hash), Some(timestamps)) = (timestamps_hash, meta.timestamps.as_deref())
-            && cache.timestamps.insert(hash)
-        {
-            Self::insert_timestamp_set(tx, &hash, timestamps)?;
-        }
 
         Ok(id)
-    }
-
-    /// Record a timestamp vector under its content hash, if it is not already
-    /// stored. `OR IGNORE` for the same reason feature sets use it: equal hash
-    /// implies equal vector (SHA-256 of the canonical encoding), so an ignored
-    /// conflict cannot hide a *different* vector under the same hash.
-    fn insert_timestamp_set(
-        tx: &Connection,
-        hash: &[u8; 32],
-        timestamps: &[DateTime<Utc>],
-    ) -> Result<()> {
-        tx.prepare_cached(
-            "INSERT OR IGNORE INTO timestamp_sets (timestamps_hash, data) VALUES (?1, ?2)",
-        )?
-        .execute(params![
-            hash.as_slice(),
-            crate::timestamps::encode(timestamps)
-        ])?;
-        Ok(())
     }
 
     /// Record a feature set under its content hash, if it is not already stored.
@@ -1229,23 +1221,46 @@ impl MetadataStore {
         Ok(n)
     }
 
-    /// The timestamp-vector counterpart of [`Self::sweep_orphan_feature_sets`]:
-    /// delete the vectors no association references any more. Removing the last
-    /// `NonSequentialTimeSeries` on a time axis leaves its vector behind (they
-    /// are shared, so deletion cannot cascade); this reclaims it.
+    /// The timestamp-vector counterpart of [`Self::sweep_orphan_feature_sets`],
+    /// stopping one step short of it: the vectors live in the array file, not
+    /// the catalog, so this reports which ones are still referenced and
+    /// [`crate::Store::compact`] deletes the rest.
     ///
-    /// The `NOT IN` subquery must exclude NULLs explicitly: every non-irregular
-    /// row has a NULL `timestamps_hash`, and `x NOT IN (…NULL…)` is never true,
-    /// so without the guard a store holding any other type would sweep nothing.
-    pub fn sweep_orphan_timestamp_sets(tx: &Connection) -> Result<usize> {
-        let n = tx.execute(
-            "DELETE FROM timestamp_sets
-             WHERE timestamps_hash NOT IN
-                   (SELECT DISTINCT timestamps_hash FROM time_series_associations
-                    WHERE timestamps_hash IS NOT NULL)",
-            [],
+    /// Removing the last `NonSequentialTimeSeries` on a time axis leaves its
+    /// vector behind — vectors are shared, so a deletion cannot cascade — and
+    /// that is what the sweep reclaims.
+    pub fn referenced_timestamp_hashes(&self) -> Result<ReferencedTimestamps> {
+        // Read as a dynamic value for the same reason `referenced_arrays` does:
+        // SQLite is dynamically typed, so a corrupted row can hold anything in a
+        // BLOB column, and a typed getter would fail the whole query instead of
+        // letting the caller report that one row.
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT timestamps_hash FROM time_series_associations
+             WHERE timestamps_hash IS NOT NULL",
         )?;
-        Ok(n)
+        let mut out = HashSet::new();
+        let mut problems = Vec::new();
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let value: rusqlite::types::Value = row.get(0)?;
+            let rusqlite::types::Value::Blob(bytes) = value else {
+                problems.push(format!(
+                    "malformed catalog row: timestamps_hash is {}, expected a 32-byte blob",
+                    value_kind(&value)
+                ));
+                continue;
+            };
+            match bytes_to_hash32(&bytes) {
+                Some(hash) => {
+                    out.insert(hash);
+                }
+                None => problems.push(format!(
+                    "malformed catalog row: timestamps_hash is {} bytes, expected 32",
+                    bytes.len()
+                )),
+            }
+        }
+        Ok((out, problems))
     }
 
     /// Delete an association by primary-key tuple. Returns the number of rows
@@ -1393,18 +1408,46 @@ impl MetadataStore {
             .filter_map(|bytes| bytes_to_hash32(&bytes))
             .collect::<Vec<_>>();
         tx.execute("DELETE FROM time_series_associations", [])?;
-        // Clearing the store empties it, so every feature set and timestamp
-        // vector is unreachable by construction. Drop them here rather than
-        // leaving the whole catalog's worth of orphans for a compaction that a
-        // cleared store may never get.
+        // Clearing the store empties it, so every feature set is unreachable by
+        // construction. Drop them here rather than leaving the whole catalog's
+        // worth of orphans for a compaction that a cleared store may never get.
+        // The timestamp vectors are unreachable on the same terms, but they live
+        // in the array file, which this connection has no handle on:
+        // `Store::clear_time_series` sweeps them once this commits.
         tx.execute("DELETE FROM feature_sets", [])?;
-        tx.execute("DELETE FROM timestamp_sets", [])?;
         Ok(hashes)
     }
 
-    pub fn list(&self, filter: &MetadataFilter) -> Result<Vec<TimeSeriesMetadata>> {
+    pub fn list(
+        &self,
+        filter: &MetadataFilter,
+        vectors: &dyn StorageBackend,
+    ) -> Result<Vec<TimeSeriesMetadata>> {
         Ok(self
-            .list_inner(filter, true)?
+            .list_inner(filter, Some(vectors))?
+            .0
+            .into_iter()
+            .map(|(_, m)| m)
+            .collect())
+    }
+
+    /// Like [`Self::list`], but without hydrating the timestamp vectors.
+    ///
+    /// For callers that only need each row's *identity* — building a
+    /// [`TimeSeriesKey`], which never carries the vector. An irregular series
+    /// comes back with `timestamps: None` and its axis unread, which is what
+    /// keeps a key listing from fetching every axis the match spans out of the
+    /// array file only to discard it.
+    ///
+    /// Not for a caller that will write the row back: [`Self::insert`] derives
+    /// `timestamps_hash` from `timestamps`, so re-inserting an unhydrated row
+    /// would drop its time axis.
+    pub fn list_without_timestamps(
+        &self,
+        filter: &MetadataFilter,
+    ) -> Result<Vec<TimeSeriesMetadata>> {
+        Ok(self
+            .list_inner(filter, None)?
             .0
             .into_iter()
             .map(|(_, m)| m)
@@ -1424,7 +1467,7 @@ impl MetadataStore {
         &self,
         filter: &MetadataFilter,
     ) -> Result<(Vec<TimeSeriesMetadata>, Vec<[u8; 32]>)> {
-        let (rows, cohorts) = self.list_inner(filter, false)?;
+        let (rows, cohorts) = self.list_inner(filter, None)?;
         Ok((rows.into_iter().map(|(_, m)| m).collect(), cohorts))
     }
 
@@ -1434,7 +1477,7 @@ impl MetadataStore {
     fn list_inner(
         &self,
         filter: &MetadataFilter,
-        hydrate_timestamps: bool,
+        vectors: Option<&dyn StorageBackend>,
     ) -> Result<(Vec<IdentifiedRow>, Vec<[u8; 32]>)> {
         let (where_clause, params_vec) = filter.to_sql();
         let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec
@@ -1457,58 +1500,46 @@ impl MetadataStore {
 
         // Hydrate timestamp vectors the same way features are hydrated below,
         // and for the same reason: they are content-addressed, so each DISTINCT
-        // vector is fetched and decoded once no matter how many matched rows
-        // share it. Skipped outright unless some row actually carries one —
-        // only `NonSequentialTimeSeries` does, so a store without them never
-        // runs this query at all — and skipped entirely for a caller that only
-        // wants to know *which* vectors are referenced.
+        // vector is fetched once no matter how many matched rows share it.
+        // Skipped outright unless some row actually carries one — only
+        // `NonSequentialTimeSeries` does, so a store without them never asks the
+        // backend at all — and skipped entirely for a caller that only wants to
+        // know *which* vectors are referenced (`vectors` is then `None`).
+        //
+        // Unlike the feature sets below, these do not live in the catalog: they
+        // are data, stored beside the arrays (see `crate::timestamps`), so the
+        // fetch is a read of the array file rather than a second SQL statement.
         let mut timestamps_by_hash: HashMap<[u8; 32], Vec<DateTime<Utc>>> = HashMap::new();
-        if hydrate_timestamps {
-            // Serve what the memo already holds and go to the catalog only for
-            // the rest. A keyed read resolves one row at a time, so this is what
-            // stops a sweep over a cohort from decoding its shared axis once per
-            // key; with everything cached the query below does not run at all.
-            // A set, not a list: a listing may span as many distinct axes as it
-            // has rows, and a linear membership scan would make this quadratic
-            // in exactly the case the memo cannot help with.
-            let mut wanted: HashSet<[u8; 32]> = HashSet::new();
+        if let Some(vectors) = vectors {
+            // Serve what the memo already holds and go to the file only for the
+            // rest. A keyed read resolves one row at a time, so this is what
+            // stops a sweep over a cohort from re-reading its shared axis once
+            // per key.
             for (_, row) in &rows {
                 let Some(hash) = row.timestamps_hash else {
                     continue;
                 };
-                if timestamps_by_hash.contains_key(&hash) || wanted.contains(&hash) {
+                if timestamps_by_hash.contains_key(&hash) {
                     continue;
                 }
-                match self.cached_timestamps(&hash) {
-                    Some(timestamps) => {
-                        timestamps_by_hash.insert(hash, timestamps);
-                    }
-                    None => {
-                        wanted.insert(hash);
-                    }
-                }
-            }
-            if !wanted.is_empty() {
-                let ts_sql = format!(
-                    "SELECT ts.timestamps_hash, ts.data FROM timestamp_sets ts
-                     WHERE ts.timestamps_hash IN
-                           (SELECT timestamps_hash FROM time_series_associations {where_clause})"
-                );
-                let mut ts_stmt = self.conn.prepare_cached(&ts_sql)?;
-                let mut ts_rows = ts_stmt.query(param_refs.as_slice())?;
-                while let Some(row) = ts_rows.next()? {
-                    let hash = bytes_to_hash32(&row.get::<_, Vec<u8>>(0)?).ok_or_else(|| {
-                        TimeSeriesError::IntegrityError("timestamps_hash is not 32 bytes".into())
-                    })?;
-                    // The predicate returns every referenced vector, including
-                    // ones already served from the memo; decode only the rest.
-                    if !wanted.contains(&hash) {
-                        continue;
-                    }
-                    let timestamps = crate::timestamps::decode(&row.get::<_, Vec<u8>>(1)?)?;
-                    self.cache_timestamps(hash, &timestamps);
-                    timestamps_by_hash.insert(hash, timestamps);
-                }
+                let timestamps = match self.cached_timestamps(&hash) {
+                    Some(timestamps) => timestamps,
+                    // A row naming a vector the store does not hold is a
+                    // damaged artifact, not an empty timeline. Left out of the
+                    // map so it is reported below against the row that named
+                    // it, rather than as the bare `NotFound` the backend
+                    // raises; any *other* failure already says what went wrong
+                    // and is passed through.
+                    None => match vectors.get_timestamps(&hash) {
+                        Ok(timestamps) => {
+                            self.cache_timestamps(hash, &timestamps);
+                            timestamps
+                        }
+                        Err(TimeSeriesError::NotFound) => continue,
+                        Err(e) => return Err(e),
+                    },
+                };
+                timestamps_by_hash.insert(hash, timestamps);
             }
         }
 
@@ -1564,18 +1595,16 @@ impl MetadataStore {
                     if seen_cohorts.insert(hash) {
                         cohorts.push(hash);
                     }
-                    if !hydrate_timestamps {
+                    if vectors.is_none() {
                         None
                     } else {
-                        // A row naming a vector the table does not hold is a
-                        // damaged catalog, not an empty timeline: the series
-                        // cannot be read at all without its timestamps, so say
-                        // so here rather than handing back a row that fails
-                        // obscurely later.
+                        // The series cannot be read at all without its
+                        // timestamps, so say so here rather than handing back a
+                        // row that fails obscurely later.
                         Some(timestamps_by_hash.get(&hash).cloned().ok_or_else(|| {
                             TimeSeriesError::IntegrityError(format!(
                                 "association '{}' (owner {}) references timestamp vector {}, \
-                                 which the catalog does not hold",
+                                 which the store does not hold",
                                 partial.name,
                                 partial.owner_id,
                                 crate::hash::hash_hex(&hash)
@@ -1590,20 +1619,20 @@ impl MetadataStore {
         Ok((out, cohorts))
     }
 
-    /// The timestamp vector stored under `hash`.
+    /// The timestamp vector stored under `hash`, memoized.
     ///
-    /// [`TimeSeriesError::NotFound`] if the catalog holds no such vector, which
-    /// for a hash read off an association row means the two are out of step.
-    pub fn timestamps_for_hash(&self, hash: &[u8; 32]) -> Result<Vec<DateTime<Utc>>> {
+    /// [`TimeSeriesError::NotFound`] if the store holds no such vector, which
+    /// for a hash read off an association row means the two halves of the
+    /// artifact are out of step.
+    pub fn timestamps_for_hash(
+        &self,
+        hash: &[u8; 32],
+        vectors: &dyn StorageBackend,
+    ) -> Result<Vec<DateTime<Utc>>> {
         if let Some(timestamps) = self.cached_timestamps(hash) {
             return Ok(timestamps);
         }
-        let data: Option<Vec<u8>> = self
-            .conn
-            .prepare_cached("SELECT data FROM timestamp_sets WHERE timestamps_hash = ?1")?
-            .query_row(params![hash.as_slice()], |r| r.get(0))
-            .optional()?;
-        let timestamps = crate::timestamps::decode(&data.ok_or(TimeSeriesError::NotFound)?)?;
+        let timestamps = vectors.get_timestamps(hash)?;
         self.cache_timestamps(*hash, &timestamps);
         Ok(timestamps)
     }
@@ -1675,12 +1704,19 @@ impl MetadataStore {
         owner_id: i64,
         owner_category: OwnerCategory,
     ) -> Result<Vec<TimeSeriesKey>> {
-        let metas = self.list(&MetadataFilter {
-            owner_id: Some(owner_id),
-            owner_category: Some(owner_category),
-            ..Default::default()
-        })?;
-        metas.iter().map(TimeSeriesKey::from_metadata).collect()
+        // No timestamp hydration: a key never carries the vector, only the
+        // series' identity, so the rows come back with it left unfilled.
+        let (rows, _) = self.list_inner(
+            &MetadataFilter {
+                owner_id: Some(owner_id),
+                owner_category: Some(owner_category),
+                ..Default::default()
+            },
+            None,
+        )?;
+        rows.iter()
+            .map(|(_, meta)| TimeSeriesKey::from_metadata(meta))
+            .collect()
     }
 
     /// True iff at least one association matches `filter` — the existence
@@ -1772,11 +1808,18 @@ impl MetadataStore {
     /// `None` rather than [`TimeSeriesError::NotFound`] because a caller
     /// validating references it stored earlier is *asking* whether one still
     /// resolves; a dangling reference is the answer, not an error.
-    pub fn get_by_id(&self, id: i64) -> Result<Option<TimeSeriesMetadata>> {
-        let mut matches = self.list(&MetadataFilter {
-            ids: Some(vec![id]),
-            ..Default::default()
-        })?;
+    pub fn get_by_id(
+        &self,
+        id: i64,
+        vectors: &dyn StorageBackend,
+    ) -> Result<Option<TimeSeriesMetadata>> {
+        let mut matches = self.list(
+            &MetadataFilter {
+                ids: Some(vec![id]),
+                ..Default::default()
+            },
+            vectors,
+        )?;
         Ok(matches.pop())
     }
 
@@ -1785,7 +1828,11 @@ impl MetadataStore {
     ///
     /// One query rather than one per id, which is what makes a bulk read by
     /// reference cost the same as a bulk read by key.
-    pub fn list_by_ids(&self, ids: &[i64]) -> Result<Vec<TimeSeriesMetadata>> {
+    pub fn list_by_ids(
+        &self,
+        ids: &[i64],
+        vectors: &dyn StorageBackend,
+    ) -> Result<Vec<TimeSeriesMetadata>> {
         // Each id is one bound `?`, and `list_inner` binds the predicate more
         // than once per statement, so a model-sized set (tens of thousands of
         // references) would trip SQLite's variable limit — and every distinct
@@ -1797,10 +1844,13 @@ impl MetadataStore {
         sorted.dedup();
         let mut rows = Vec::with_capacity(sorted.len());
         for chunk in sorted.chunks(IDS_PER_QUERY) {
-            rows.extend(self.list(&MetadataFilter {
-                ids: Some(chunk.to_vec()),
-                ..Default::default()
-            })?);
+            rows.extend(self.list(
+                &MetadataFilter {
+                    ids: Some(chunk.to_vec()),
+                    ..Default::default()
+                },
+                vectors,
+            )?);
         }
         Ok(rows)
     }
@@ -1819,25 +1869,32 @@ impl MetadataStore {
         Ok(found.is_some())
     }
 
-    pub fn get_by_key(&self, key: &KeyIdentity) -> Result<TimeSeriesMetadata> {
-        let mut matches = self.list(&MetadataFilter {
-            owner_id: Some(key.owner_id),
-            owner_category: Some(key.owner_category),
-            time_series_type: Some(TypeMatch::Exact(key.time_series_type)),
-            name: Some(key.name.clone()),
-            resolution: key.resolution,
-            interval: key.interval,
-            // Pinpoint the row via the unique index rather than an in-memory
-            // subset scan; the exact `retain` below guards against the
-            // (astronomically unlikely) hash collision.
-            features: None,
-            features_hash: Some(features_hash(&key.features)),
-            owner_type: None,
-            name_glob: None,
-            component_field: None,
-            zoneless: None,
-            ids: None,
-        })?;
+    pub fn get_by_key(
+        &self,
+        key: &KeyIdentity,
+        vectors: &dyn StorageBackend,
+    ) -> Result<TimeSeriesMetadata> {
+        let mut matches = self.list(
+            &MetadataFilter {
+                owner_id: Some(key.owner_id),
+                owner_category: Some(key.owner_category),
+                time_series_type: Some(TypeMatch::Exact(key.time_series_type)),
+                name: Some(key.name.clone()),
+                resolution: key.resolution,
+                interval: key.interval,
+                // Pinpoint the row via the unique index rather than an in-memory
+                // subset scan; the exact `retain` below guards against the
+                // (astronomically unlikely) hash collision.
+                features: None,
+                features_hash: Some(features_hash(&key.features)),
+                owner_type: None,
+                name_glob: None,
+                component_field: None,
+                zoneless: None,
+                ids: None,
+            },
+            vectors,
+        )?;
         matches.retain(|m| m.features == key.features);
         match matches.len() {
             0 => Err(TimeSeriesError::NotFound),
@@ -2809,9 +2866,9 @@ impl MetadataStore {
     /// does exactly this) then drops those rows with no error.
     ///
     /// Excluded deliberately: `schema_version` and `catalog_identity` are
-    /// bookkeeping and never empty; `feature_sets` and `timestamp_sets` are
-    /// content-addressed side tables that only ever hold rows referenced from
-    /// `time_series_associations`, so they are covered by probing it.
+    /// bookkeeping and never empty; `feature_sets` is a content-addressed side
+    /// table that only ever holds rows referenced from
+    /// `time_series_associations`, so it is covered by probing it.
     pub fn is_empty(&self) -> Result<bool> {
         if self.exists(&MetadataFilter::default())? {
             return Ok(false);
@@ -3033,8 +3090,8 @@ struct MetaRow {
     horizon: Option<Period>,
     interval: Option<Period>,
     count: Option<usize>,
-    /// The row's `timestamps_hash` column; the vector itself is hydrated from
-    /// `timestamp_sets` by the caller, which batches that lookup across rows.
+    /// The row's `timestamps_hash` column; the vector itself lives in the array
+    /// file and is hydrated by the caller, which batches that lookup across rows.
     timestamps_hash: Option<[u8; 32]>,
     units: Option<String>,
     quantity_kind: Option<String>,
@@ -3299,6 +3356,19 @@ pub fn references_to_in_tx(tx: &Connection, data_hash: &[u8; 32]) -> Result<i64>
     let count: i64 = tx
         .prepare_cached("SELECT COUNT(*) FROM time_series_associations WHERE data_hash = ?1")?
         .query_row(params![data_hash.as_slice()], |row| row.get(0))?;
+    Ok(count)
+}
+
+/// Count the associations sitting on the explicit time axis `timestamps_hash`,
+/// inside an in-flight transaction.
+///
+/// The timestamp-vector counterpart of [`references_to_in_tx`], and the reason
+/// it is a separate function rather than a parameter: an axis is referenced
+/// through its own column, so an array's reference count says nothing about it.
+pub fn timestamp_references_in_tx(tx: &Connection, timestamps_hash: &[u8; 32]) -> Result<i64> {
+    let count: i64 = tx
+        .prepare_cached("SELECT COUNT(*) FROM time_series_associations WHERE timestamps_hash = ?1")?
+        .query_row(params![timestamps_hash.as_slice()], |row| row.get(0))?;
     Ok(count)
 }
 

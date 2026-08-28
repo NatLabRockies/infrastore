@@ -83,8 +83,9 @@ Packed mode holds every **static** series. `SingleTimeSeries` (and the array beh
 `DeterministicSingleTimeSeries`) pool by resolution into `sts_…` datasets; `NonSequentialTimeSeries`
 pool by their _timestamp vector_ into `nsts_…` datasets, because the chunking is timestamp-major and
 so only means something for arrays on a common time axis. An irregular series carries that axis
-explicitly, and the catalog already content-addresses it, so the interned hash is the cohort key —
-which is what lets a `StaticReader` sweep irregular series the same way it sweeps regular ones.
+explicitly, and the store content-addresses it — one `tsv_{hash}` dataset of unix milliseconds per
+distinct axis, in the file's own `timestamps` group — so the interned hash is the cohort key, which
+is what lets a `StaticReader` sweep irregular series the same way it sweeps regular ones.
 
 **Standalone mode** holds the dense forecast arrays (`Deterministic`, `Probabilistic`, `Scenarios`)
 and any `NonSequentialTimeSeries` alone on its time axis — a pool spreads one array over `length`
@@ -339,11 +340,13 @@ Because the file is replaced, compaction assumes the compacting process is its o
 the store's single-writer model in general; the difference is that here a concurrent reader on Unix
 silently keeps reading the pre-compaction file, and on Windows the rename fails outright.
 
-**On the catalog side, compaction sweeps.** Because feature sets are shared, deleting an association
-cannot cascade into them: removing the last association that referenced a set leaves it unreachable.
-`compact()` deletes those rows and reports the count as `feature_sets_reclaimed` (and
-`timestamp_sets_reclaimed` for timestamp vectors), before the rewrite, so the rewrite's liveness
-scan sees the swept catalog. (Clearing the whole store is the exception that needs no sweep: it
-orphans every set by construction, so it drops them all outright.)
+**Compaction also sweeps the shared sets.** Because feature sets and timestamp vectors are shared,
+deleting an association cannot cascade into them: removing the last association that referenced one
+leaves it unreachable. `compact()` deletes both — the feature set as a catalog row, the timestamp
+vector as an unlinked dataset — and reports the counts as `feature_sets_reclaimed` and
+`timestamp_sets_reclaimed`, before the rewrite, so the rewrite's liveness scan sees what survived.
+(Clearing is the exception on both counts: it orphans every feature set and every axis by
+construction, so it reclaims them outright rather than waiting for a compaction a cleared store may
+never get.)
 
 See [`compact`](../reference/rust-api.md#store).

@@ -2,9 +2,11 @@
 //!
 //! Stability of these hashes is part of the public on-disk contract. Any change
 //! here that perturbs a stored hash is a format-breaking change and must bump
-//! [`crate::DATA_FORMAT_VERSION`]. The `golden_hash_pin` integration test pins
-//! the SHA-256 of one fixed array as a tripwire; it does not cover every dtype,
-//! shape, or the feature-map domain, so it is not a substitute for that rule.
+//! [`crate::DATA_FORMAT_VERSION`]. Two tripwires pin the SHA-256 of one fixed
+//! input each: the `golden_hash_pin` integration test for an array, and
+//! `golden_timestamps_hash_pin` below for a timestamp vector. Neither covers
+//! every dtype or shape, nor the feature-map domain, so they are not a
+//! substitute for that rule.
 
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
@@ -153,10 +155,15 @@ pub fn features_hash(features: &Features) -> [u8; 32] {
 
 /// Compute the canonical content hash for an explicit timestamp vector.
 ///
-/// Domain: the canonical encoding from [`crate::timestamps`], which is exactly
-/// what the `timestamp_sets` row holds — so the hash addresses the stored bytes
-/// rather than a second, parallel serialization of the same values. Two vectors
-/// hash equal iff they hold the same timestamps in the same order.
+/// Domain: a tag, the count as u64 LE, then each timestamp as its unix
+/// millisecond count in `i64` LE — which is exactly the vector's stored form
+/// (see [`crate::timestamps`]), so the hash addresses the stored values rather
+/// than a second, parallel serialization of them. Two vectors hash equal iff
+/// they hold the same timestamps in the same order.
+///
+/// Milliseconds are the store's precision floor, enforced on every write, so
+/// this is exact for any vector a store can hold. A caller hashing one the store
+/// would refuse gets the flooring that write is about to reject.
 ///
 /// This is what lets many `NonSequentialTimeSeries` share one stored time axis,
 /// and it doubles as the cohort key the packed on-disk layout groups their
@@ -164,7 +171,15 @@ pub fn features_hash(features: &Features) -> [u8; 32] {
 pub fn timestamps_hash(timestamps: &[DateTime<Utc>]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"timestamps\0");
-    hasher.update(crate::timestamps::encode(timestamps));
+    hasher.update((timestamps.len() as u64).to_le_bytes());
+    // Built as one buffer and fed in one `update`, for the reason
+    // `update_f64_canonical_nans` documents: a per-element `update` makes
+    // hashing scale with the element count rather than the size.
+    let mut bytes = Vec::with_capacity(timestamps.len() * size_of::<i64>());
+    for millis in crate::timestamps::to_millis(timestamps) {
+        bytes.extend_from_slice(&millis.to_le_bytes());
+    }
+    hasher.update(&bytes);
     let digest = hasher.finalize();
     let mut out = [0u8; 32];
     out.copy_from_slice(&digest);
@@ -367,6 +382,25 @@ mod tests {
         // Domain separation: a timestamp vector never collides with a feature
         // set or an array, whatever the payload bytes.
         assert_ne!(timestamps_hash(&[]), features_hash(&Features::new()));
+    }
+
+    #[test]
+    fn golden_timestamps_hash_pin() {
+        // The equality/inequality tests above hold under any self-consistent
+        // encoding, so none of them notices the tag, the count's width, the
+        // byte order, or the millisecond serialization changing. This pins the
+        // exact digest of a fixed axis, because that digest is a *locator*: it
+        // names the `tsv_...` dataset the vector lives in and the `nsts_...`
+        // pool the cohort's arrays are packed into. Drift here is a
+        // format-breaking change and must bump `DATA_FORMAT_VERSION`.
+        use chrono::{Duration, TimeZone};
+        let t0 = Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap();
+        let axis: Vec<DateTime<Utc>> = (0..4).map(|k| t0 + Duration::hours(k)).collect();
+        assert_eq!(
+            hash_hex(&timestamps_hash(&axis)),
+            "853b7f6c37834ba2087d5e0322d0b0b36c6b9e0952342121ee27f16c4dc4df1e",
+            "timestamps hash drifted; bump DATA_FORMAT_VERSION if intentional",
+        );
     }
 
     #[test]

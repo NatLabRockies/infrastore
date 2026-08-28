@@ -316,21 +316,24 @@ cargo run -p infrastore-server -- --config my_server.toml
   milliseconds; every _instant_ the store records (a `SingleTimeSeries` or forecast
   `initial_timestamp`, every entry of a `NonSequentialTimeSeries` vector) is held to the same floor,
   enforced on the write path in `Store`'s `validate_data` and refused with `InvalidParameter` rather
-  than truncated. The reason is cross-binding: the C ABI and Julia exchange instants as `i64` Unix
-  milliseconds and Python's `datetime` is microsecond, so a finer instant is silently truncated at
-  some boundaries and not others. Reads stay permissive so a pre-rule artifact still reads back
-  exactly, which is why the rule does not bump `DATA_FORMAT_VERSION`. Query bounds (`time_range`, a
-  reader's `when`) are deliberately unconstrained.
+  than truncated. A leap second is refused by the same rule: unix milliseconds cannot express one,
+  so storing it would fold it onto the following second and make two distinct instants one. The
+  reason is cross-binding: the C ABI and Julia exchange instants as `i64` Unix milliseconds and
+  Python's `datetime` is microsecond, so a finer instant is silently truncated at some boundaries
+  and not others. Reads stay permissive so a pre-rule artifact still reads back exactly, which is
+  why the rule does not bump `DATA_FORMAT_VERSION`. Query bounds (`time_range`, a reader's `when`)
+  are deliberately unconstrained.
 - `DATA_FORMAT_VERSION` in `crates/infrastore-core/src/version.rs` is the on-disk compatibility
   contract. Any incompatible HDF5 layout, SQLite schema, dtype encoding, or hashing change must bump
   it and update format documentation and compatibility tests.
 - Packed arrays use datasets named `sts_{dtype}_{shape}_{length}_{resolution}` for regular series
   and `nsts_{dtype}_{shape}_{length}_{timestamps_hash}` for the irregular ones sharing a time axis,
   each with a companion `<dataset>_h` hash dataset. Standalone arrays use `arr_{hex_hash}`. A
-  `NonSequentialTimeSeries`'s timestamps live in the content-addressed `timestamp_sets` catalog
-  table, keyed by the same hash that pools its array. See
-  `crates/infrastore-core/src/storage/hdf5.rs` for the implementation and
-  `docs/src/reference/file-format.md` for the user-facing specification; keep them synchronized.
+  `NonSequentialTimeSeries`'s timestamps live in the HDF5 file too, as one `tsv_{hex_hash}` `i64`
+  dataset of unix milliseconds per distinct time axis under `time_series/timestamps/`, keyed by the
+  same content hash that pools its array. See `crates/infrastore-core/src/storage/hdf5.rs` for the
+  implementation and `docs/src/reference/file-format.md` for the user-facing specification; keep
+  them synchronized.
 - Deletion frees a packed column (slot reusable, hash row and column data zero-filled) or unlinks a
   standalone dataset. HDF5 cannot return the space in place, so the file only shrinks when
   `Store::compact` rewrites it: an on-disk compaction materializes the catalog's live arrays into a

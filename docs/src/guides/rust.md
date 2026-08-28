@@ -325,7 +325,7 @@ store.clear_time_series(Some((42, OwnerCategory::Component)))?;  // all series f
 store.clear_time_series(None)?;        // everything
 
 let report = store.compact()?;         // reports reusable slots
-let integrity = store.verify_integrity()?;  // arrays only; catalog not checked
+let integrity = store.verify_integrity()?;  // stored content vs. the hashes the catalog names
 assert!(integrity.errors.is_empty());
 ```
 
