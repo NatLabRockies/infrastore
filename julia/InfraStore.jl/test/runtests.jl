@@ -59,7 +59,7 @@ end
     for i in 0:4
         vals = collect((i * 10.0):(i * 10.0 + 11.0))   # length 12, distinct per series
         ts = SingleTimeSeries(initial, resolution, vals, "load")
-        push!(keys, add_time_series!(store, i + 1, "Generator", Component, ts))
+        push!(keys, add_time_series!(store, i + 1, "Generator", Component, ts).key)
     end
 
     series = bulk_read(store, keys)
@@ -1864,7 +1864,7 @@ end
     @test pmd.units == "MWp"
 
     # bulk_read dispatches on stored type.
-    mixed = bulk_read(store, TimeSeriesKey[k, kf])
+    mixed = bulk_read(store, TimeSeriesKey[k.key, kf.key])
     @test mixed[1] isa SingleTimeSeries
     @test mixed[1].data == full.data
     @test mixed[2] isa Deterministic
@@ -1978,7 +1978,7 @@ end
 
     store = Store(in_memory=true)
     sts = SingleTimeSeries(t0, res, collect(1.0:8.0), "load")
-    k = add_time_series!(store, 1, "Generator", Component, sts)
+    k = add_time_series!(store, 1, "Generator", Component, sts).key
 
     # time_range on the typed key alias and the attribute-addressed forms.
     sliced = get_time_series(
@@ -2165,8 +2165,12 @@ end
     # Bulk import/export round trip (IS3's from_records/to_records).
     exported = list_supplemental_attribute_associations(store)
     target = Store(in_memory=true)
-    @test add_supplemental_attribute_associations!(target, exported) == length(exported)
+    # The bulk add returns the ids it created, not a count: they are the
+    # handles the caller stores. The target assigns its own, from 1.
+    ids = add_supplemental_attribute_associations!(target, exported)
+    @test ids == collect(Int64, 1:length(exported))
     @test list_supplemental_attribute_associations(target) == exported
+    @test [r.id for r in list_supplemental_attribute_associations(target)] == ids
 
     # Base overloads: structural equality, hash, compact show.
     @test attach(1, 100) == attach(1, 100)
@@ -2214,8 +2218,10 @@ end
     # Bulk round trip and the show/equality overloads.
     exported = list_parent_child_associations(store)
     target = Store(in_memory=true)
-    @test add_parent_child_associations!(target, exported) == length(exported)
+    ids = add_parent_child_associations!(target, exported)
+    @test ids == collect(Int64, 1:length(exported))
     @test list_parent_child_associations(target) == exported
+    @test [r.id for r in list_parent_child_associations(target)] == ids
     @test hash(edge(1, 7)) == hash(edge(1, 7))
     @test occursin("Generator 1 -> Bus 7", sprint(show, edge(1, 7)))
 
@@ -2295,8 +2301,9 @@ end
 
 # ---- OpenAPI-row association serde ------------------------------------------
 #
-# `export_time_series_associations_openapi`/`export_supplemental_attribute_associations_openapi`/
-# `import_supplemental_attribute_associations_openapi!` wrap the three Rust
+# `export_time_series_associations_openapi`/`import_time_series_associations_openapi!`/
+# `export_supplemental_attribute_associations_openapi`/
+# `import_supplemental_attribute_associations_openapi!` wrap the four Rust
 # core `openapi` methods. The golden tests below reproduce two of the
 # checked-in fixtures at `conformance/openapi_row_fixtures/` (the core's own
 # golden tests pin the rest).
@@ -2328,8 +2335,19 @@ end
         rows = InfraStore.JSON.parse(json)
         @test length(rows) == 1
         row = rows[1]
+        # The schema requires `association_id`, so the fixture carries one --
+        # but its *value* is the store's own bookkeeping, depending on how many
+        # rows were written first. Presence is asserted here and the value
+        # dropped from both sides.
+        @test row["association_id"] == 1
         want = _openapi_fixture("single_time_series")
-        @test row == want
+        # A bare `DateTime` is a wall clock, so the export carries the
+        # `zoneless` reference the fixture (built by the Rust core, which
+        # infers nothing) leaves unspecified. Right value, not the fixture's.
+        @test row["time_reference"] == "zoneless"
+        drop_id(d) =
+            Dict(k => v for (k, v) in d if k ∉ ("association_id", "time_reference"))
+        @test drop_id(row) == drop_id(want)
 
         close!(store)
     end
@@ -2346,6 +2364,89 @@ end
         @test InfraStore.JSON.parse(json) ==
             [_openapi_fixture("supplemental_attribute_association")]
         close!(store)
+    end
+
+    @testset "time-series export/import round trips with its ids" begin
+        t0 = DateTime(2030, 1, 1)
+        source = Store(in_memory=true)
+        # Ids are assigned and never chosen, so the way to put this document's
+        # rows above the target's high-water mark is to run the exporter's
+        # counter up first.
+        for i in 1:100
+            spacer = add_time_series!(
+                source, -1, "Spacer", Component,
+                SingleTimeSeries(t0, Hour(1), fill(Float64(i), 4), "__spacer$i"),
+            )
+            remove_time_series!(source, spacer)
+        end
+        expected = Dict{Int, String}()
+        for (owner, name) in [(1, "load"), (2, "wind")]
+            added = add_time_series!(
+                source, owner, "Generator", Component,
+                SingleTimeSeries(t0, Hour(1), fill(0.0, 4), name),
+            )
+            expected[added.id] = name
+        end
+        exported = export_time_series_associations_openapi(source)
+
+        # Arrays are content-addressed, so "the artifact brought the values" is
+        # a store already holding the same bytes under an identity of its own.
+        target = Store(in_memory=true)
+        add_time_series!(
+            target, 9, "Anchor", Component,
+            SingleTimeSeries(t0, Hour(1), fill(0.0, 4), "anchor"),
+        )
+        @test import_time_series_associations_openapi!(target, exported) == 2
+        for (id, name) in expected
+            @test get_metadata_by_id(target, id).name == name
+        end
+
+        close!(source)
+        close!(target)
+    end
+
+    @testset "time-series import refuses an id the target could have issued" begin
+        # The import is the only door a caller-supplied id comes through, so
+        # "never reissued" is enforced here: an id at or below the destination
+        # catalog's high-water mark is refused rather than re-filed.
+        t0 = DateTime(2030, 1, 1)
+        source = Store(in_memory=true)
+        add_time_series!(
+            source, 1, "Generator", Component,
+            SingleTimeSeries(t0, Hour(1), fill(0.0, 4), "load"),
+        )
+        exported = export_time_series_associations_openapi(source)
+
+        # The target's own anchor row took id 1 — the id the document names.
+        target = Store(in_memory=true)
+        add_time_series!(
+            target, 9, "Anchor", Component,
+            SingleTimeSeries(t0, Hour(1), fill(0.0, 4), "anchor"),
+        )
+        @test_throws InfraStore.DuplicateAssociationIdError import_time_series_associations_openapi!(
+            target, exported
+        )
+
+        close!(source)
+        close!(target)
+    end
+
+    @testset "time-series import refuses a row whose array is absent" begin
+        source = Store(in_memory=true)
+        add_time_series!(
+            source, 1, "Generator", Component,
+            SingleTimeSeries(DateTime(2030, 1, 1), Hour(1), fill(0.0, 4), "load"),
+        )
+        exported = export_time_series_associations_openapi(source)
+
+        empty_store = Store(in_memory=true)
+        @test_throws InfraStore.InvalidParameterError import_time_series_associations_openapi!(
+            empty_store, exported
+        )
+        @test isempty(list_time_series(empty_store))
+
+        close!(source)
+        close!(empty_store)
     end
 
     @testset "supplemental-attribute export/import round trips" begin
@@ -3896,7 +3997,7 @@ end
     res = Hour(1)
     hor, ivl, count = Hour(2), Hour(1), 3
 
-    ks = TimeSeriesKey[]
+    ks = AddedTimeSeries[]
     push!(
         ks,
         add_time_series!(store, 1, "Generator", Component,
@@ -4584,4 +4685,119 @@ if (
 else
     @warn "TimeZones is not loadable here, so the ZonedDateTime tests were SKIPPED. " *
         "Run them with: julia --project=julia/InfraStore.jl -e 'using Pkg; Pkg.test()'"
+end
+
+@testset "association ids: the handle a caller stores in its own model" begin
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+    sts(name, base=0.0) = SingleTimeSeries(t0, res, collect(base .+ (1.0:4.0)), name)
+
+    store = Store(in_memory=true)
+
+    # A write reports the id its row was filed under, and a read agrees.
+    added = add_time_series!(store, 1, "Generator", Component, sts("load"))
+    @test added isa AddedTimeSeries
+    @test added.id == 1
+    @test get_metadata(store, added).id == added.id
+
+    # No add takes an id: the catalog assigns, and ids run in add order. The
+    # one writer that files rows under ids it was given is the OpenAPI import.
+    @test_throws MethodError add_time_series!(
+        store, 2, "Generator", Component, sts("load"); id=500
+    )
+    @test add_time_series!(store, 2, "Generator", Component, sts("load")).id == 2
+
+    # An id resolves to its row; one nothing was filed under resolves to
+    # `nothing`, because a caller checking a reference it persisted is asking a
+    # question rather than making a demand.
+    @test get_metadata_by_id(store, added.id).name == "load"
+    @test association_exists(store, added.id)
+    @test get_metadata_by_id(store, 9999) === nothing
+    @test !association_exists(store, 9999)
+
+    # A removed row's id stops resolving and is never handed out again, so a
+    # stale reference can never come to mean a different series.
+    remove_time_series!(store, added)
+    @test !association_exists(store, added.id)
+    replacement = add_time_series!(store, 1, "Generator", Component, sts("load"))
+    @test replacement.id != added.id
+    @test !association_exists(store, added.id)
+
+    close!(store)
+end
+
+@testset "association ids: read_by_ids follows the order it was given" begin
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+    store = Store(in_memory=true)
+
+    ids = Int[]
+    for (name, base) in [("a", 1.0), ("b", 10.0), ("c", 100.0)]
+        added = add_time_series!(
+            store, 1, "Generator", Component,
+            SingleTimeSeries(t0, res, collect(base .+ (0.0:2.0)), name),
+        )
+        push!(ids, added.id)
+    end
+
+    # Reversed, with a repeat: neither the catalog's order nor uniqueness is
+    # assumed, and each row comes back labelled with its own name.
+    got = read_by_ids(store, [ids[3], ids[1], ids[3], ids[2]])
+    @test length(got) == 4
+    @test all(g isa SingleTimeSeries for g in got)
+    @test [g.data[1] for g in got] == [100.0, 1.0, 100.0, 10.0]
+    @test [g.name for g in got] == ["c", "a", "c", "b"]
+
+    # An id naming no row fails the read outright — this call is already
+    # committed to reading, unlike `association_exists`.
+    @test_throws InfraStore.NotFoundError read_by_ids(store, [ids[1], 9999])
+    @test isempty(read_by_ids(store, Int[]))
+
+    close!(store)
+end
+
+@testset "association ids: writes report them" begin
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+    store = Store(in_memory=true)
+
+    # The bulk form reports one id per item, in input order.
+    batch = AddBatch()
+    for i in 1:3
+        add_time_series!(
+            batch, i, "Generator", Component,
+            SingleTimeSeries(t0, res, collect(1.0:4.0), "load"),
+        )
+    end
+    added = add_time_series_bulk!(store, batch)
+    @test [a.id for a in added] == [1, 2, 3]
+    @test all(get_metadata(store, a).id == a.id for a in added)
+
+    close!(store)
+end
+
+@testset "association ids: attachments report theirs, outside identity" begin
+    store = Store(in_memory=true)
+
+    @test add_supplemental_attribute_association!(
+        store, SupplementalAttributeAssociation(1, "Generator", 100, "GeographicInfo")
+    ) == 1
+
+    fresh = SupplementalAttributeAssociation(2, "Generator", 100, "GeographicInfo")
+    @test add_supplemental_attribute_association!(store, fresh) == 2
+
+    rows = list_supplemental_attribute_associations(store)
+    @test [r.id for r in rows] == [1, 2]
+
+    # A row read back must equal the value that wrote it: identity is the
+    # endpoint pair, so the id sits outside `==` and `hash` — and `hash` must
+    # agree with `==` for every Set and Dict these land in.
+    stored = rows[2]
+    @test stored.id == 2
+    @test fresh.id === nothing
+    @test stored == fresh
+    @test hash(stored) == hash(fresh)
+    @test stored in Set([fresh])
+
+    close!(store)
 end

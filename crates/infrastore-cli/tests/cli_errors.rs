@@ -3151,3 +3151,58 @@ fn assume_timezone_applies_to_a_time_range_bound() {
     );
     assert!(err.contains("names no time zone"), "{err}");
 }
+
+// ---- association ids -------------------------------------------------------
+
+/// `list` and `info` report the catalog id, and `--id` addresses a series by it.
+///
+/// The id is the handle a caller persists elsewhere — a generator's cost
+/// function naming the series that varies it — so the CLI has to both hand it
+/// out and take it back.
+#[test]
+fn a_series_can_be_addressed_by_its_catalog_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("system.h5");
+    seeded_store(dir.path(), &store, "load");
+
+    let listed = run(&store, &["-f", "json", "list"]);
+    let rows: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    let id = rows["items"][0]["id"]
+        .as_i64()
+        .expect("list reports the id");
+    assert_eq!(id, 1, "the first row of a fresh catalog is id 1");
+
+    let info = run(&store, &["-f", "json", "info", "--id", "1"]);
+    let row: serde_json::Value = serde_json::from_str(&info).unwrap();
+    assert_eq!(row["id"], 1);
+    assert_eq!(row["name"], "load");
+}
+
+/// A stale id fails with a message that says why it will stay stale, rather
+/// than resolving to whatever now occupies that row number.
+#[test]
+fn an_unknown_id_is_refused_with_the_reason_it_stays_stale() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("system.h5");
+    seeded_store(dir.path(), &store, "load");
+
+    let err = run_err(&store, &["info", "--id", "99"]);
+    assert!(err.contains("no association has id 99"), "{err}");
+    assert!(err.contains("never reissued"), "{err}");
+}
+
+/// `--id` is a point lookup, not a predicate: it refuses to be combined with
+/// the narrowing flags, and refuses to stand in for them where a command works
+/// over a set.
+#[test]
+fn the_id_selector_is_a_point_lookup_not_a_filter() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("system.h5");
+    seeded_store(dir.path(), &store, "load");
+
+    let err = run_err(&store, &["info", "--id", "1", "--name", "load"]);
+    assert!(err.contains("already names exactly one"), "{err}");
+
+    let err = run_err(&store, &["list", "--id", "1"]);
+    assert!(err.contains("cannot select a set"), "{err}");
+}

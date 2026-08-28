@@ -67,9 +67,12 @@ let key = store.add_time_series(
 )?;
 ```
 
-`add_time_series` returns a [`TimeSeriesKey`](../reference/rust-api.md#timeserieskey) — keep it to
-re-find the series, or rebuild it from its fields later. Adding a series whose key already exists
-returns `TimeSeriesError::DuplicateTimeSeries`.
+`add_time_series` returns an [`AddedTimeSeries`](../reference/rust-api.md#addedtimeseries): its
+`key` is the [`TimeSeriesKey`](../reference/rust-api.md#timeserieskey) — keep it to re-find the
+series, or rebuild it from its fields later — and its `id` is the catalog row's id, the one integer
+to store in your own object model when it needs to point at the series (see
+[Association ids](../explanation/data-model.md#association-ids)). Adding a series whose key already
+exists returns `TimeSeriesError::DuplicateTimeSeries`.
 
 ### Bulk inserts
 
@@ -79,7 +82,7 @@ batch atomically — any error rolls back every array and association in the cal
 ```rust
 use infrastore_core::AddRequest;
 
-let keys = store.add_time_series_bulk(vec![
+let added = store.add_time_series_bulk(vec![
     AddRequest {
         owner_id: 42,
         owner_type: "Generator".into(),
@@ -88,9 +91,12 @@ let keys = store.add_time_series_bulk(vec![
         features: Features::new(),
         units: Some("MW".into()),
         application_data: None,                             // opaque package-owned payload (e.g. JSON)
+        ..AddRequest::new(42, "Generator", OwnerCategory::Component,
+                          TimeSeriesData::SingleTimeSeries(ts_b))   // the remaining descriptors unset
     },
-    // ...
+    // ...or just AddRequest::new(...).with_features(...)
 ])?;
+let keys: Vec<_> = added.iter().map(|a| a.key.clone()).collect();   // one AddedTimeSeries per request
 ```
 
 A bulk insert is also the **fast write path**: packed `SingleTimeSeries` are grouped by shape and

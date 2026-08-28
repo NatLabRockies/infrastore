@@ -1383,7 +1383,15 @@ fn attachments_and_links_can_be_written_from_the_cli() {
         "component_id,component_type,attribute_id,attribute_type\n\
          43,Generator,8,GeographicInfo\n44,Bus,9,GeographicInfo\n",
     );
-    run(&store, &["attach", "--from", batch.to_str().unwrap()]);
+    // A write reports the ids it created — the durable handles for the rows it
+    // just wrote — not only how many there were.
+    let attached = json_stdout(&store, &["attach", "--from", batch.to_str().unwrap()]);
+    assert_eq!(attached["attached"], 2, "{attached}");
+    assert_eq!(
+        attached["ids"].as_array().unwrap().len(),
+        2,
+        "attach must report one id per row: {attached}"
+    );
     assert_eq!(
         data_lines(&run(&store, &["-f", "csv", "attributes"])).len(),
         3
@@ -1685,7 +1693,20 @@ fn every_mutating_command_emits_json_on_stdout_under_f_json() {
             "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H"}"#,
     );
     let d = desc.to_str().unwrap();
-    assert_eq!(json_stdout(&store, &["add", "--descriptor", d])["added"], 1);
+    let added = json_stdout(&store, &["add", "--descriptor", d]);
+    assert_eq!(added["added"], 1, "{added}");
+    // `--id` on `get`/`info` resolves what `add` reports, so `add` has to
+    // report it: the docs promise the id comes from here.
+    let series = added["series"].as_array().unwrap();
+    assert_eq!(series.len(), 1, "{added}");
+    let id = series[0]["id"]
+        .as_i64()
+        .expect("add reports the catalog id");
+    assert_eq!(series[0]["name"], "load", "{added}");
+    assert_eq!(
+        json_stdout(&store, &["info", "--id", &id.to_string()])["name"],
+        "load",
+    );
     // `add --dry-run` reports the *plan*, so it keeps the `{"items": [...]}`
     // shape every listing uses rather than the `{"dry_run": true}` status the
     // other write commands report — its output is rows, not a status line.
@@ -3595,4 +3616,50 @@ fn a_descriptor_zone_the_database_does_not_know_is_warned_about_and_stored() {
     // `store-info` still reports it, which is the pre-existing surface.
     let info = run(&store, &["store-info"]);
     assert!(info.contains("unrecognized"), "{info}");
+}
+
+/// Two stores holding the same series compare clean even though their catalog
+/// ids differ.
+///
+/// An id names a row in one catalog, not a series, so two stores built in
+/// different orders assign them differently. `diff` pairs on identity and
+/// content hash and never reads the id — this pins that, since "diff ignores
+/// the id" is now a documented guarantee rather than an accident of the code.
+#[test]
+fn diff_ignores_catalog_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    let left = dir.path().join("left.h5");
+    let right = dir.path().join("right.h5");
+
+    write(dir.path(), "a.csv", "value\n1\n2\n3\n");
+    write(dir.path(), "b.csv", "value\n4\n5\n6\n");
+    let descriptor = |name: &str, csv: &str| {
+        format!(
+            r#"{{"owner_id": 42, "owner_type": "Generator", "name": "{name}",
+                 "type": "SingleTimeSeries", "element_type": "f64", "csv": "{csv}",
+                 "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H"}}"#
+        )
+    };
+    let a = write(dir.path(), "a.json", &descriptor("alpha", "a.csv"));
+    let b = write(dir.path(), "b.json", &descriptor("beta", "b.csv"));
+
+    // Same two series, opposite insertion orders, so the ids are swapped.
+    run(&left, &["add", "--descriptor", a.to_str().unwrap()]);
+    run(&left, &["add", "--descriptor", b.to_str().unwrap()]);
+    run(&right, &["add", "--descriptor", b.to_str().unwrap()]);
+    run(&right, &["add", "--descriptor", a.to_str().unwrap()]);
+
+    let id_of = |store: &Path, name: &str| -> i64 {
+        let listed = run(store, &["-f", "json", "list", "--name", name]);
+        let rows: serde_json::Value = serde_json::from_str(&listed).unwrap();
+        rows["items"][0]["id"].as_i64().unwrap()
+    };
+    assert_ne!(
+        id_of(&left, "alpha"),
+        id_of(&right, "alpha"),
+        "the two stores must disagree about the id for this test to mean anything",
+    );
+
+    let same = run(&left, &["diff", "--against", right.to_str().unwrap()]);
+    assert!(same.contains("0 added, 0 removed, 0 changed"), "{same}");
 }

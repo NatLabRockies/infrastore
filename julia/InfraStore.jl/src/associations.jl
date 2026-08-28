@@ -23,12 +23,30 @@ A supplemental attribute attached to a component.
 Identity is the `(component_id, attribute_id)` pair: the type names are labels
 carried for filtering, so re-attaching the same pair under different type names
 is still a duplicate.
+
+`id` is the catalog row's own number, `nothing` for a value that has not been
+through the catalog. It is *outside* identity — two values describing the same
+attachment are equal and hash alike whether or not either has been stored — so
+a row read back compares equal to the value that wrote it. It is also an output
+only: the constructor takes none, and an add ignores whatever a listed row
+carries, so attaching a row read from one store to another files it under a
+fresh id there.
 """
 struct SupplementalAttributeAssociation
     component_id::Int64
     component_type::String
     attribute_id::Int64
     attribute_type::String
+    id::Union{Nothing, Int64}
+end
+
+function SupplementalAttributeAssociation(
+    component_id::Integer, component_type::AbstractString,
+    attribute_id::Integer, attribute_type::AbstractString,
+)
+    return SupplementalAttributeAssociation(
+        component_id, component_type, attribute_id, attribute_type, nothing
+    )
 end
 
 """
@@ -39,25 +57,46 @@ a bus (child).
 
 Identity is the *ordered* `(parent_id, child_id)` pair, so the reversed pair is
 a different edge. Both endpoints are always components.
+
+`id` is the catalog row's own number, outside identity — see
+[`SupplementalAttributeAssociation`](@ref).
 """
 struct ParentChildAssociation
     parent_id::Int64
     parent_type::String
     child_id::Int64
     child_type::String
+    id::Union{Nothing, Int64}
+end
+
+function ParentChildAssociation(
+    parent_id::Integer, parent_type::AbstractString,
+    child_id::Integer, child_type::AbstractString,
+)
+    return ParentChildAssociation(parent_id, parent_type, child_id, child_type, nothing)
 end
 
 # Both rows are (id, type, id, type) quadruples, so identity, hashing, display,
 # and JSON marshalling are one implementation over the field layout.
 const _AssocRow = Union{SupplementalAttributeAssociation, ParentChildAssociation}
 
+# Every generic helper below walks a row's *identity* fields -- the two
+# `(id, type)` endpoint pairs -- and never `id`, the catalog's own row number.
+#
+# Equality and hashing must exclude it or a row read back would stop comparing
+# equal to the value that wrote it, and `hash` would disagree with `==` for
+# every `Set` and `Dict` these land in. The JSON and filter helpers must exclude
+# it too: the wire form is defined over the endpoints, and `id` is not a filter
+# column.
+_identity_fields(::Type{T}) where {T <: _AssocRow} = filter(!=(:id), fieldnames(T))
+
 function Base.:(==)(a::T, b::T) where {T <: _AssocRow}
-    return all(getfield(a, i) == getfield(b, i) for i in 1:fieldcount(T))
+    return all(getfield(a, f) == getfield(b, f) for f in _identity_fields(T))
 end
 
 function Base.hash(a::_AssocRow, h::UInt)
-    for i in 1:fieldcount(typeof(a))
-        h = hash(getfield(a, i), h)
+    for f in _identity_fields(typeof(a))
+        h = hash(getfield(a, f), h)
     end
     return h
 end
@@ -75,19 +114,21 @@ function Base.show(io::IO, a::T) where {T <: _AssocRow}
 end
 
 function _assoc_json(a::T) where {T <: _AssocRow}
-    return Dict{String, Any}(String(f) => getfield(a, f) for f in fieldnames(T))
+    return Dict{String, Any}(String(f) => getfield(a, f) for f in _identity_fields(T))
 end
 
 _assoc_field(::Type{T}, v) where {T <: Integer} = T(v)
 _assoc_field(::Type{String}, v) = String(v)
 
 function _decode_assoc(::Type{T}, r::AbstractDict) where {T <: _AssocRow}
-    return T(
-        (
-            _assoc_field(ft, r[String(f)]) for
-            (f, ft) in zip(fieldnames(T), fieldtypes(T))
-        )...,
+    identity = _identity_fields(T)
+    values = (
+        _assoc_field(ft, r[String(f)]) for (f, ft) in zip(identity, fieldtypes(T))
     )
+    # A listing carries the row's id; a payload written without one reads as an
+    # unstored value rather than failing.
+    id = get(r, "id", nothing)
+    return T(values..., id === nothing ? nothing : Int64(id))
 end
 
 # Build a filter payload for the FFI. Returns `C_NULL` when nothing is set, so
@@ -109,7 +150,7 @@ end
 # `component_types`, a list of concrete type names.
 
 function _filter_fields(::Type{T}) where {T}
-    return map(f -> endswith(String(f), "_id") ? f : Symbol(f, "s"), fieldnames(T))
+    return map(f -> endswith(String(f), "_id") ? f : Symbol(f, "s"), _identity_fields(T))
 end
 
 _is_id_field(f::Symbol) = endswith(String(f), "_id")
@@ -288,8 +329,12 @@ for (fname, T, sym) in (
     (:add_parent_child_association!, ParentChildAssociation,
         :infrastore_store_add_parent_child_association),
 )
-    id1, type1, id2, type2 = fieldnames(T)
+    # The identity fields, never the row's own `id`, which is not an input: the
+    # catalog assigns it and hands it back through `out_id`. A row read from one
+    # store and added to another is filed under a fresh id there.
+    id1, type1, id2, type2 = _identity_fields(T)
     @eval function $fname(store::Store, association::$T)
+        out_id = Ref{Int64}(0)
         _check(
             @ccall lib_path().$sym(
                 store::Ptr{Cvoid},
@@ -297,9 +342,10 @@ for (fname, T, sym) in (
                 association.$type1::Cstring,
                 association.$id2::Int64,
                 association.$type2::Cstring,
+                out_id::Ref{Int64},
             )::Int32
         )
-        return nothing
+        return out_id[]
     end
 end
 
@@ -312,12 +358,22 @@ for (fname, T, sym) in (
     @eval function $fname(store::Store, associations::AbstractVector{$T})
         payload = JSON.json([_assoc_json(a) for a in associations])
         out = Ref{UInt64}(0)
+        out_ids = Ref{Ptr{Int64}}(C_NULL)
         _check(
             @ccall lib_path().$sym(
-                store::Ptr{Cvoid}, payload::Cstring, out::Ref{UInt64}
+                store::Ptr{Cvoid}, payload::Cstring, out::Ref{UInt64},
+                out_ids::Ref{Ptr{Int64}},
             )::Int32
         )
-        return Int(out[])
+        n = Int(out[])
+        n == 0 && return Int64[]
+        # The ids are the durable handles this write created; copy them out of
+        # the owned buffer before releasing it.
+        try
+            return copy(unsafe_wrap(Array, out_ids[], n; own=false))
+        finally
+            _free_i64(out_ids[], n)
+        end
     end
 end
 
@@ -349,18 +405,26 @@ end
 @doc """
     add_supplemental_attribute_association!(store, association)
 
-Attach a supplemental attribute to a component. Throws
-`DuplicateAssociationError` if that component already carries that attribute,
-whatever type names are supplied.
+Attach a supplemental attribute to a component, returning the catalog id the
+attachment was filed under. Throws `DuplicateAssociationError` if that component
+already carries that attribute, whatever type names are supplied.
+
+The catalog assigns the id; the association's own `id` field — which a listing
+populates — is ignored on the way in, so a row read from one store and attached
+to another is filed under a fresh id there. This table's ids are independent of
+the other catalogs'.
 """ add_supplemental_attribute_association!
 
 @doc """
-    add_supplemental_attribute_associations!(store, associations) -> Int
+    add_supplemental_attribute_associations!(store, associations) -> Vector{Int64}
 
-Attach many in one all-or-nothing transaction, returning the number inserted. A
-duplicate anywhere in the batch rolls the whole batch back. This is the import
-half of the round trip whose export is
+Attach many in one all-or-nothing transaction, returning the catalog id of each
+in input order. A duplicate anywhere in the batch rolls the whole batch back.
+This is the import half of the round trip whose export is
 [`list_supplemental_attribute_associations`](@ref) with no filter.
+
+The ids are what this write creates for the caller to hold, so it returns them
+rather than a count; the count is `length` of the result.
 """ add_supplemental_attribute_associations!
 
 @doc """
@@ -438,10 +502,11 @@ reversed pair is a different edge.
 """ add_parent_child_association!
 
 @doc """
-    add_parent_child_associations!(store, associations) -> Int
+    add_parent_child_associations!(store, associations) -> Vector{Int64}
 
-Record many edges in one all-or-nothing transaction, returning the number
-inserted.
+Record many edges in one all-or-nothing transaction, returning the catalog id of
+each in input order, over this table's own id stream. The count is `length` of
+the result.
 """ add_parent_child_associations!
 
 @doc """

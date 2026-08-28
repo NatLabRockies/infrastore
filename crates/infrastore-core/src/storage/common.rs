@@ -85,7 +85,7 @@ pub(crate) fn window_block_cols(dtype: Dtype, shape: &[usize], count_axis: usize
 }
 
 /// The HDF5 chunk shape for a standalone array. `None` → one whole-array chunk
-/// (the historical layout, used for irregular series). `Some(axis)` → full on
+/// (used for irregular series). `Some(axis)` → full on
 /// every axis except `axis`, which is blocked to [`window_block_cols`] windows.
 pub(crate) fn standalone_chunks(data: &TypedArray, window_axis: Option<usize>) -> Vec<usize> {
     match window_axis {
@@ -257,9 +257,15 @@ pub(crate) fn hex_to_hash(s: &str) -> Result<[u8; 32]> {
         )));
     }
     let mut out = [0u8; 32];
-    for i in 0..32 {
-        out[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16)
-            .map_err(|_| TimeSeriesError::IntegrityError(format!("bad hex byte at {i} in {s}")))?;
+    for (i, byte) in out.iter_mut().enumerate() {
+        // `get` rather than indexing: 64 *bytes* of non-ASCII can split a
+        // character, and that is a bad hex string, not a panic.
+        *byte = s
+            .get(i * 2..i * 2 + 2)
+            .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+            .ok_or_else(|| {
+                TimeSeriesError::IntegrityError(format!("bad hex byte at {i} in {s}"))
+            })?;
     }
     Ok(out)
 }

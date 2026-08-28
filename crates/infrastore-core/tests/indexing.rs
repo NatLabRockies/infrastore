@@ -31,6 +31,7 @@ fn add_single(store: &mut Store, owner: i64, s: SingleTimeSeries) -> TimeSeriesK
             Features::new(),
         )
         .unwrap()
+        .key
 }
 
 /// Read a `SingleTimeSeries` window, returning `(length, initial_timestamp, values)`.

@@ -543,10 +543,10 @@ fn non_sequential_round_trip_and_time_slice() {
         .unwrap();
 
     assert_eq!(
-        key.time_series_type(),
+        key.key.time_series_type(),
         TimeSeriesType::NonSequentialTimeSeries
     );
-    assert_eq!(key.resolution(), None);
+    assert_eq!(key.key.resolution(), None);
     let metadata = store.get_metadata(key.identity()).unwrap();
     assert_eq!(metadata.timestamps, Some(timestamps.clone()));
     assert_eq!(metadata.resolution, None);

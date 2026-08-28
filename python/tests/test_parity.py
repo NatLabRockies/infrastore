@@ -49,7 +49,7 @@ def _sts(name: str, data: np.ndarray, initial: datetime = T0) -> SingleTimeSerie
 
 
 def _add(store: Store, owner: int, ts, **kwargs):
-    return store.add_time_series(owner, OWNER_TYPE, OWNER_CAT, ts, **kwargs)
+    return store.add_time_series(owner, OWNER_TYPE, OWNER_CAT, ts, **kwargs).key
 
 
 # ---------------------------------------------------------------------------
@@ -914,7 +914,7 @@ def test_non_sequential_at_every_dtype():
             OWNER_TYPE,
             OWNER_CAT,
             NonSequentialTimeSeries(timestamps, values, name),
-        )
+        ).key
         got = store.get_time_series(key)
         assert got.timestamps == timestamps
         arr = np.asarray(got.data)
@@ -1119,7 +1119,7 @@ def test_non_sequential_timestamps_keep_millisecond_spacing():
         NonSequentialTimeSeries(
             timestamps, np.arange(4, dtype=np.float64), "precise"
         ),
-    )
+    ).key
     got = store.get_time_series(key)
     assert got.timestamps == timestamps, (
         "millisecond spacing must survive; a second-quantized encoding would "
@@ -1168,7 +1168,7 @@ def test_a_century_spanning_non_sequential_series_round_trips(tmp_path):
         OWNER_TYPE,
         OWNER_CAT,
         NonSequentialTimeSeries(timestamps, values, "century"),
-    )
+    ).key
     store.flush()
     store.close()
 

@@ -11,6 +11,7 @@
 //!     IntegrityError, ReadOnlyStoreError, IoError, ConnectionError,
 //!     IncompatibleFormatError, IncompatibleForecastError, StorageError,
 //!     DuplicateAssociationError,
+//!     DuplicateAssociationIdError,
 //! )
 //! ```
 
@@ -32,6 +33,7 @@ create_exception!(infrastore, TimeSeriesError, PyException);
 create_exception!(infrastore, NotFoundError, TimeSeriesError);
 create_exception!(infrastore, DuplicateTimeSeriesError, TimeSeriesError);
 create_exception!(infrastore, DuplicateAssociationError, TimeSeriesError);
+create_exception!(infrastore, DuplicateAssociationIdError, TimeSeriesError);
 create_exception!(infrastore, InvalidParameterError, TimeSeriesError);
 create_exception!(infrastore, IntegrityError, TimeSeriesError);
 create_exception!(infrastore, ReadOnlyStoreError, TimeSeriesError);
@@ -51,6 +53,7 @@ fn map_err(e: core_lib::TimeSeriesError) -> PyErr {
             DuplicateTimeSeriesError::new_err("a time series with that key already exists")
         }
         E::DuplicateAssociation(m) => DuplicateAssociationError::new_err(m),
+        ref e @ E::DuplicateAssociationId(_) => DuplicateAssociationIdError::new_err(e.to_string()),
         E::InvalidParameter(m) => InvalidParameterError::new_err(m),
         E::IntegrityError(m) => IntegrityError::new_err(m),
         E::ReadOnlyStore => ReadOnlyStoreError::new_err("store is read-only"),
@@ -1245,6 +1248,54 @@ impl PyNonSequentialTimeSeries {
     }
 }
 
+// ---- AddedTimeSeries ------------------------------------------------------
+
+/// What a write reports: the key naming the series, and the catalog id it was
+/// filed under.
+///
+/// The id is deliberately not a field on `TimeSeriesKey` — a key is also an
+/// argument to `get`/`remove`, where an id means nothing — so a write hands
+/// back the pair instead.
+// Only ever returned, never accepted as an argument, so it needs no
+// `FromPyObject` conversion.
+#[pyclass(name = "AddedTimeSeries", module = "infrastore", skip_from_py_object)]
+#[derive(Clone)]
+pub struct PyAddedTimeSeries {
+    #[pyo3(get)]
+    key: PyTimeSeriesKey,
+    #[pyo3(get)]
+    id: i64,
+}
+
+#[pymethods]
+impl PyAddedTimeSeries {
+    fn __repr__(&self) -> String {
+        format!(
+            "AddedTimeSeries(id={}, name={:?}, owner_id={})",
+            self.id, self.key.inner.name, self.key.inner.owner_id,
+        )
+    }
+
+    fn __eq__(&self, other: &Self) -> bool {
+        self.id == other.id && self.key.inner == other.key.inner
+    }
+
+    fn __hash__(&self) -> u64 {
+        hash_of(&self.id)
+    }
+}
+
+impl PyAddedTimeSeries {
+    fn from_core(added: core_lib::AddedTimeSeries) -> Self {
+        Self {
+            key: PyTimeSeriesKey {
+                inner: added.key.identity().clone(),
+            },
+            id: added.id,
+        }
+    }
+}
+
 // ---- TimeSeriesKey --------------------------------------------------------
 
 #[pyclass(name = "TimeSeriesKey", module = "infrastore", from_py_object)]
@@ -1356,6 +1407,7 @@ impl PySupplementalAttributeAssociation {
                 component_type,
                 attribute_id,
                 attribute_type,
+                id: None,
             },
         }
     }
@@ -1378,6 +1430,15 @@ impl PySupplementalAttributeAssociation {
     #[getter]
     fn attribute_type(&self) -> String {
         self.inner.attribute_type.clone()
+    }
+
+    /// The catalog row's id, or `None` for a value that has not been through
+    /// the catalog. Outside equality and hashing: identity is the
+    /// `(component_id, attribute_id)` pair, so a row read back compares equal
+    /// to the value that wrote it.
+    #[getter]
+    fn id(&self) -> Option<i64> {
+        self.inner.id
     }
 
     fn __repr__(&self) -> String {
@@ -1428,6 +1489,7 @@ impl PyParentChildAssociation {
                 parent_type,
                 child_id,
                 child_type,
+                id: None,
             },
         }
     }
@@ -1450,6 +1512,13 @@ impl PyParentChildAssociation {
     #[getter]
     fn child_type(&self) -> String {
         self.inner.child_type.clone()
+    }
+
+    /// The catalog row's id, or `None`. See
+    /// `SupplementalAttributeAssociation.id`.
+    #[getter]
+    fn id(&self) -> Option<i64> {
+        self.inner.id
     }
 
     fn __repr__(&self) -> String {
@@ -2054,7 +2123,7 @@ impl PyStore {
         unit_system: Option<String>,
         time_reference: Option<String>,
         component_field: Option<String>,
-    ) -> PyResult<PyTimeSeriesKey> {
+    ) -> PyResult<PyAddedTimeSeries> {
         let features = features_from_dict(features)?;
         let mut data = extract_time_series_data(time_series)?;
         // These describe the series, so they are set on it, not on the request —
@@ -2091,10 +2160,8 @@ impl PyStore {
         }
         let request = core_lib::AddRequest::new(owner_id, owner_type, owner_category.into(), data)
             .with_features(features);
-        let key = self.store_mut()?.add(request).map_err(map_err)?;
-        Ok(PyTimeSeriesKey {
-            inner: key.identity().clone(),
-        })
+        let added = self.store_mut()?.add(request).map_err(map_err)?;
+        Ok(PyAddedTimeSeries::from_core(added))
     }
 
     /// Add many time series in one call, committing the metadata catalog once
@@ -2112,11 +2179,18 @@ impl PyStore {
     /// every other typo, along with whatever it was carrying.
     ///
     /// All-or-nothing: if any item fails, the entire batch is rolled back.
-    /// Returns the new keys in input order.
+    /// Returns an `AddedTimeSeries` per item, in input order.
+    ///
+    /// An item may carry `id` to file its association under a specific catalog
+    /// id, for a writer replaying a document that recorded one. Either every
+    /// item supplies an id or none does; a mixed batch is refused, because an
+    /// assigned id is drawn from the same counter an explicit one advances, so
+    /// whether the two collide would depend on the order the items happen to be
+    /// in.
     fn add_time_series_bulk(
         &mut self,
         items: Vec<Bound<'_, PyDict>>,
-    ) -> PyResult<Vec<PyTimeSeriesKey>> {
+    ) -> PyResult<Vec<PyAddedTimeSeries>> {
         let mut requests = Vec::with_capacity(items.len());
         for (index, item) in items.iter().enumerate() {
             reject_unknown_item_keys(item, index)?;
@@ -2195,15 +2269,12 @@ impl PyStore {
                 features,
             });
         }
-        let keys = self
+        Ok(self
             .store_mut()?
             .add_time_series_bulk(requests)
-            .map_err(map_err)?;
-        Ok(keys
+            .map_err(map_err)?
             .into_iter()
-            .map(|k| PyTimeSeriesKey {
-                inner: k.identity().clone(),
-            })
+            .map(PyAddedTimeSeries::from_core)
             .collect())
     }
 
@@ -2835,6 +2906,49 @@ impl PyStore {
         metadata_to_dict(py, &m)
     }
 
+    /// The metadata row filed under `id`, or `None` if the catalog holds no
+    /// such row.
+    ///
+    /// The read direction of the id every write hands back: a caller that
+    /// recorded ids in its own model resolves them here rather than keeping an
+    /// id-to-key map beside the store. `None` rather than an exception, because
+    /// a caller validating references it stored earlier is asking whether one
+    /// still resolves, and a stale reference is an answer.
+    fn get_metadata_by_id<'py>(
+        &self,
+        py: Python<'py>,
+        id: i64,
+    ) -> PyResult<Option<Bound<'py, PyDict>>> {
+        match self.store()?.get_metadata_by_id(id).map_err(map_err)? {
+            Some(m) => Ok(Some(metadata_to_dict(py, &m)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Whether an association is filed under `id`.
+    ///
+    /// A primary-key probe that fetches no row, so a caller can check every
+    /// reference in its model on load instead of discovering a dangling one
+    /// mid-run.
+    fn association_exists(&self, id: i64) -> PyResult<bool> {
+        self.store()?.association_exists(id).map_err(map_err)
+    }
+
+    /// Read many series by catalog id, in the order the ids are given.
+    ///
+    /// Repeats are allowed and returned once each, in place. Raises
+    /// `NotFoundError` if any id names no row — unlike `association_exists`,
+    /// this call is already committed to reading, so a stale reference is a
+    /// failure rather than an answer.
+    fn read_by_ids(&self, py: Python<'_>, ids: Vec<i64>) -> PyResult<Vec<Py<PyAny>>> {
+        self.store()?
+            .read_by_ids(&ids)
+            .map_err(map_err)?
+            .into_iter()
+            .map(|d| time_series_data_to_py(py, d))
+            .collect()
+    }
+
     /// List the `TimeSeriesKey`s matching the filter.
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
@@ -3026,7 +3140,7 @@ impl PyStore {
             )
             .map_err(map_err)?;
         Ok(PyTimeSeriesKey {
-            inner: k.identity().clone(),
+            inner: k.key.identity().clone(),
         })
     }
 
@@ -3268,23 +3382,27 @@ impl PyStore {
     /// Attach a supplemental attribute to a component. Raises
     /// `DuplicateAssociationError` if that component already carries that
     /// attribute, whatever type names are supplied.
+    /// Attach a supplemental attribute to a component, returning the catalog id
+    /// the attachment was filed under.
     fn add_supplemental_attribute_association(
         &mut self,
         association: &PySupplementalAttributeAssociation,
-    ) -> PyResult<()> {
+    ) -> PyResult<i64> {
         self.store_mut()?
             .add_supplemental_attribute_association(association.inner.clone())
             .map_err(map_err)
     }
 
-    /// Attach many in one all-or-nothing transaction, returning the number
-    /// inserted. A duplicate anywhere in the batch rolls the batch back. This is
-    /// the import half of the bulk round trip whose export is
+    /// Attach many in one all-or-nothing transaction, returning the catalog id
+    /// of each in input order. A duplicate anywhere in the batch rolls the batch
+    /// back. This is the import half of the bulk round trip whose export is
     /// `list_supplemental_attribute_associations()` with no filter.
+    ///
+    /// The count is `len()` on the result.
     fn add_supplemental_attribute_associations(
         &mut self,
         associations: Vec<PySupplementalAttributeAssociation>,
-    ) -> PyResult<usize> {
+    ) -> PyResult<Vec<i64>> {
         let assocs = associations.into_iter().map(|a| a.inner).collect();
         self.store_mut()?
             .add_supplemental_attribute_associations(assocs)
@@ -3507,23 +3625,24 @@ impl PyStore {
     // Directed edges between components. Same independence from time series as
     // the attachments above.
 
-    /// Record a parent/child edge. Raises `DuplicateAssociationError` if that
-    /// ordered pair is already related; the reversed pair is a different edge.
+    /// Record a parent/child edge, returning the catalog id it was filed under.
+    /// Raises `DuplicateAssociationError` if that ordered pair is already
+    /// related; the reversed pair is a different edge.
     fn add_parent_child_association(
         &mut self,
         association: &PyParentChildAssociation,
-    ) -> PyResult<()> {
+    ) -> PyResult<i64> {
         self.store_mut()?
             .add_parent_child_association(association.inner.clone())
             .map_err(map_err)
     }
 
-    /// Record many edges in one all-or-nothing transaction, returning the number
-    /// inserted.
+    /// Record many edges in one all-or-nothing transaction, returning the
+    /// catalog id of each in input order. The count is `len()` on the result.
     fn add_parent_child_associations(
         &mut self,
         associations: Vec<PyParentChildAssociation>,
-    ) -> PyResult<usize> {
+    ) -> PyResult<Vec<i64>> {
         let assocs = associations.into_iter().map(|a| a.inner).collect();
         self.store_mut()?
             .add_parent_child_associations(assocs)
@@ -3683,6 +3802,24 @@ impl PyStore {
             .map_err(map_err)
     }
 
+    /// Bulk-ingest a JSON array of time-series association OpenAPI rows in one
+    /// all-or-nothing transaction, returning the number inserted. This is the
+    /// import half of the round trip whose export is
+    /// `export_time_series_associations_openapi()`.
+    ///
+    /// Rows only: the document carries locators, never values, so every row
+    /// must name an array this store already holds, and each row keeps the
+    /// `association_id` it carries — an import that assigned fresh ids would
+    /// leave every reference the document records pointing at the wrong
+    /// series. A row whose array is absent, or a `NonSequentialTimeSeries` row
+    /// (whose timestamp vector is not on the wire), raises
+    /// `InvalidParameterError`.
+    fn import_time_series_associations_openapi(&mut self, json: &str) -> PyResult<usize> {
+        self.store_mut()?
+            .import_time_series_associations_openapi(json)
+            .map_err(map_err)
+    }
+
     /// Export the whole `supplemental_attribute_associations` table as an
     /// OpenAPI-row JSON array, sorted by `(component_id, attribute_id)`.
     fn export_supplemental_attribute_associations_openapi(&self) -> PyResult<String> {
@@ -3789,7 +3926,7 @@ fn pyany_to_requested_type_opt(
 
 /// Decode a 64-character lowercase-or-uppercase hex string into a 32-byte hash.
 /// Every key `add_time_series_bulk` reads out of one item dict.
-const BULK_ITEM_KEYS: [&str; 12] = [
+const BULK_ITEM_KEYS: [&str; 13] = [
     "owner_id",
     "owner_type",
     "owner_category",
@@ -3802,6 +3939,7 @@ const BULK_ITEM_KEYS: [&str; 12] = [
     "unit_system",
     "time_reference",
     "component_field",
+    "id",
 ];
 
 /// Refuse an item carrying a key the bulk add does not read.
@@ -3975,6 +4113,9 @@ fn metadata_to_dict<'py>(
     d.set_item("time_series_type", m.time_series_type.as_str())?;
     d.set_item("name", &m.name)?;
     d.set_item("data_hash", core_lib::hash_hex(&m.data_hash))?;
+    // Always set on a row read out of the catalog; `None` only for metadata a
+    // caller built itself.
+    d.set_item("id", m.id)?;
     d.set_item(
         "initial_timestamp",
         m.initial_timestamp
@@ -4174,6 +4315,7 @@ fn infrastore(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyProbabilistic>()?;
     m.add_class::<PyScenarios>()?;
     m.add_class::<PyTimeSeriesKey>()?;
+    m.add_class::<PyAddedTimeSeries>()?;
     m.add_class::<PyTimeSeriesType>()?;
     m.add_class::<PyOwnerCategory>()?;
     m.add_class::<PySupplementalAttributeAssociation>()?;
@@ -4190,6 +4332,10 @@ fn infrastore(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add(
         "DuplicateAssociationError",
         py.get_type::<DuplicateAssociationError>(),
+    )?;
+    m.add(
+        "DuplicateAssociationIdError",
+        py.get_type::<DuplicateAssociationIdError>(),
     )?;
     m.add(
         "InvalidParameterError",

@@ -281,6 +281,7 @@ pub fn metadata_to_pb(m: &TimeSeriesMetadata) -> pb::TimeSeriesMetadata {
         element_type: m.element_type.to_string(),
         element_shape: m.element_shape.iter().map(|d| *d as u64).collect(),
         application_data: m.application_data.clone(),
+        id: m.id,
         percentiles: m.percentiles.clone().unwrap_or_default(),
     }
 }
@@ -366,6 +367,7 @@ pub fn metadata_from_pb(m: pb::TimeSeriesMetadata) -> Result<TimeSeriesMetadata,
         })?,
         element_shape: m.element_shape.iter().map(|d| *d as usize).collect(),
         application_data: m.application_data,
+        id: m.id,
     })
 }
 
@@ -866,6 +868,7 @@ mod tests {
             element_type: "f64".into(),
             element_shape: Vec::new(),
             application_data: None,
+            id: None,
             percentiles: Vec::new(),
         }
     }
@@ -1201,6 +1204,7 @@ mod convert_coverage_tests {
                 element_type: ElementType::Scalar(dtype),
                 element_shape: vec![],
                 application_data: None,
+                id: None,
             };
             let pb = metadata_to_pb(&meta);
             assert_eq!(pb.element_type, dtype.as_str(), "{dtype:?}");
@@ -1349,6 +1353,7 @@ mod convert_coverage_tests {
             element_type: ElementType::default(),
             element_shape: vec![],
             application_data: None,
+            id: None,
         };
 
         let pb = metadata_to_pb(&meta);
@@ -1393,6 +1398,7 @@ mod convert_coverage_tests {
             element_type: ElementType::default(),
             element_shape: vec![],
             application_data: None,
+            id: None,
         };
         let pb = metadata_to_pb(&meta);
         assert_eq!(pb.resolution.as_deref(), Some("P1Y"));
@@ -1718,6 +1724,7 @@ mod convert_coverage_tests {
             element_type: ElementType::default(),
             element_shape: vec![],
             application_data: Some("QuadraticFunctionData".into()),
+            id: None,
         };
 
         let pb = metadata_to_pb(&meta);
@@ -1920,6 +1927,7 @@ mod convert_coverage_tests {
             element_type: ElementType::default(),
             element_shape: vec![],
             application_data: None,
+            id: None,
         });
         pb.data_hash = vec![0u8; 31];
         assert!(matches!(

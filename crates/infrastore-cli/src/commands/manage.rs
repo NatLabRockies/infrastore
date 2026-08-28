@@ -506,13 +506,10 @@ pub fn init(
     }
     let mut store = store_access::open_writable_with(store_path, compression, catalog)?;
     // Lands the catalog beside the arrays whichever mode was chosen, so the
-    // command leaves a complete artifact rather than a half of one. See
+    // command leaves a complete artifact rather than a half of one. Deferring
+    // it to a later `infrastore persist` is not an option: "later" is another
+    // process, and this process's catalog does not outlive it. See
     // `CatalogChoice`.
-    //
-    // This is also why the in-memory hint that used to follow is gone: it told
-    // the caller to run `infrastore persist` later, but "later" is another
-    // process, and this process's catalog does not outlive it. Following that
-    // advice saved an empty catalog over the arrays.
     store.persist_catalog().map_err(|e| e.to_string())?;
     report(
         format,
@@ -593,6 +590,8 @@ pub fn merge(
     let datas = source.bulk_read(&refs).map_err(|e| e.to_string())?;
     drop(source);
 
+    // A merge re-adds the source's rows, so the destination assigns them fresh
+    // ids from its own stream — a source id may well already be taken there.
     let requests: Vec<infrastore_core::AddRequest> = metas
         .iter()
         .zip(datas)

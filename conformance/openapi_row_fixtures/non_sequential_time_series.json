@@ -7,8 +7,12 @@
   "features": {},
   "uri": "b00a0feab825646758c1978697c88af5f087595b10527d6d9150d0d34448e3ec",
   "data_hash": "b00a0feab825646758c1978697c88af5f087595b10527d6d9150d0d34448e3ec",
+  "association_id": 4,
   "element_type": "bool",
   "element_shape": [],
+  "array_shape": [
+    42
+  ],
   "application_data": "{\"module\":\"PowerSystems\"}",
   "length": 42
 }

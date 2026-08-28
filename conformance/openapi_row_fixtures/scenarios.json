@@ -7,8 +7,15 @@
   "features": {},
   "uri": "320147891d8cf1ab1ee193cc328fc934fa6101ab9498231f502cbbd56cd49324",
   "data_hash": "320147891d8cf1ab1ee193cc328fc934fa6101ab9498231f502cbbd56cd49324",
+  "association_id": 7,
   "element_type": "f64",
   "element_shape": [
+    5
+  ],
+  "array_shape": [
+    5,
+    4,
+    24,
     5
   ],
   "units": "MW",

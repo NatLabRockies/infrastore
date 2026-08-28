@@ -39,9 +39,9 @@ pub use metadata::{
 pub use reader::{ForecastEntry, ForecastReader, StaticGroup, StaticReader, WindowSlot};
 pub use storage::{ArrayLocation, CompactionReport, Compression, IntegrityReport};
 pub use store::{
-    AddRequest, BulkAdd, CatalogMode, ForecastParameters, ListFilter, StaticConsistency, Store,
-    TimeSeriesCounts, TimeSeriesCountsDetailed, TransformOutcome, TransformPolicy,
-    catalog_sqlite_path,
+    AddRequest, AddedTimeSeries, BulkAdd, CatalogMode, ForecastParameters, ListFilter,
+    StaticConsistency, Store, TimeSeriesCounts, TimeSeriesCountsDetailed, TransformOutcome,
+    TransformPolicy, catalog_sqlite_path,
 };
 pub use types::{
     array::{Dtype, Element, TypedArray},

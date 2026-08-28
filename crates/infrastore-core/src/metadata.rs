@@ -45,6 +45,10 @@ fn value_kind(value: &rusqlite::types::Value) -> &'static str {
         rusqlite::types::Value::Blob(_) => "a blob",
     }
 }
+/// Ids per `IN (...)` list in [`MetadataStore::list_by_ids`]. Well under
+/// SQLite's default 32766 bound variables even with the predicate bound three
+/// times, and large enough that a chunk is a bulk read in its own right.
+const IDS_PER_QUERY: usize = 500;
 
 /// Pages copied per step by [`MetadataStore::open_path_into_memory`]. The
 /// online-backup API requires a positive step size; this one is large enough
@@ -246,18 +250,63 @@ impl EndpointFilter {
     }
 }
 
+/// One row of either association table, as the shared SQL returns it: the
+/// catalog `id`, then the left endpoint's `(id, type)` and the right's. Named
+/// because both tables share the same shape, so both `assoc_list` callers
+/// destructure the same tuple.
+type AssocRow = (i64, i64, String, i64, String);
+
 /// One row of `supplemental_attribute_associations`: a supplemental attribute
 /// attached to a component.
 ///
 /// Identity is the `(component_id, attribute_id)` pair. The type names are
 /// denormalized labels carried for filtering and reporting, so re-attaching the
 /// same pair under different type names is still a duplicate.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// [`Self::id`] is excluded from equality and hashing — see the `PartialEq` impl
+/// below.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SupplementalAttributeAssociation {
     pub component_id: i64,
     pub component_type: String,
     pub attribute_id: i64,
     pub attribute_type: String,
+    /// The catalog row's `id`, or `None`.
+    ///
+    /// `Some` on anything read back; ignored on the way in, because this
+    /// catalog's wire form carries no id and so has nothing to preserve — an
+    /// attachment is always filed under an assigned id. See
+    /// [`crate::TimeSeriesMetadata::id`], whose one import exception has no
+    /// counterpart here, and note that the tables' id streams are independent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<i64>,
+}
+
+/// Equality and hashing are over the endpoint pair and its labels, never the
+/// `id`. Written out rather than derived, because deriving would quietly change
+/// what these types mean: identity here is the `(component_id, attribute_id)`
+/// pair — the doc above says so and the unique index enforces it — so two
+/// values describing the same attachment must stay equal whether or not either
+/// has been through the catalog. Folding the id in would also break `Hash`'s
+/// contract with `Eq` for every set and map these land in.
+impl PartialEq for SupplementalAttributeAssociation {
+    fn eq(&self, other: &Self) -> bool {
+        self.component_id == other.component_id
+            && self.component_type == other.component_type
+            && self.attribute_id == other.attribute_id
+            && self.attribute_type == other.attribute_type
+    }
+}
+
+impl Eq for SupplementalAttributeAssociation {}
+
+impl std::hash::Hash for SupplementalAttributeAssociation {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.component_id.hash(state);
+        self.component_type.hash(state);
+        self.attribute_id.hash(state);
+        self.attribute_type.hash(state);
+    }
 }
 
 /// One row of `parent_child_associations`: a directed edge between two
@@ -265,12 +314,39 @@ pub struct SupplementalAttributeAssociation {
 ///
 /// Identity is the `(parent_id, child_id)` pair. Both endpoints are always
 /// components — an attribute cannot appear here.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// [`Self::id`] is excluded from equality and hashing, for the reasons given on
+/// [`SupplementalAttributeAssociation`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParentChildAssociation {
     pub parent_id: i64,
     pub parent_type: String,
     pub child_id: i64,
     pub child_type: String,
+    /// The catalog row's `id`, or `None`. See
+    /// [`SupplementalAttributeAssociation::id`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<i64>,
+}
+
+impl PartialEq for ParentChildAssociation {
+    fn eq(&self, other: &Self) -> bool {
+        self.parent_id == other.parent_id
+            && self.parent_type == other.parent_type
+            && self.child_id == other.child_id
+            && self.child_type == other.child_type
+    }
+}
+
+impl Eq for ParentChildAssociation {}
+
+impl std::hash::Hash for ParentChildAssociation {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.parent_id.hash(state);
+        self.parent_type.hash(state);
+        self.child_id.hash(state);
+        self.child_type.hash(state);
+    }
 }
 
 /// One grouped row of the supplemental-attribute summary: a distinct
@@ -475,6 +551,19 @@ pub struct MetadataFilter {
     /// avoiding a feature fetch+compare for siblings that share the other key
     /// columns. Distinct from `features` (an in-memory subset filter).
     pub features_hash: Option<[u8; 32]>,
+    /// Restrict to these catalog ids — a primary-key lookup, not a scan.
+    ///
+    /// Internal to this layer, deliberately: the public [`crate::ListFilter`]
+    /// has no counterpart, because a filter field invites scan-shaped use of
+    /// what is a point lookup. It is here so the by-id reads share
+    /// [`Self::list_inner`]'s feature and timestamp hydration instead of
+    /// growing a second copy of it, and so a bulk by-id read is one query
+    /// rather than one per id.
+    ///
+    /// `Some(vec![])` matches nothing, which is what a caller asking for no ids
+    /// means; it is spelled as a false predicate rather than an empty `IN ()`,
+    /// which is not valid SQLite.
+    pub ids: Option<Vec<i64>>,
 }
 
 /// Remembers which content-addressed sets a batch of inserts has already
@@ -648,6 +737,21 @@ impl MetadataFilter {
     fn to_sql(&self) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
         let mut sql = String::from("WHERE 1=1");
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(ref ids) = self.ids {
+            if ids.is_empty() {
+                sql.push_str(" AND 0");
+            } else {
+                sql.push_str(" AND id IN (");
+                for (i, id) in ids.iter().enumerate() {
+                    if i > 0 {
+                        sql.push(',');
+                    }
+                    sql.push('?');
+                    params_vec.push(Box::new(*id));
+                }
+                sql.push(')');
+            }
+        }
         if let Some(owner_id) = self.owner_id {
             sql.push_str(" AND owner_id = ?");
             params_vec.push(Box::new(owner_id));
@@ -952,53 +1056,91 @@ impl MetadataStore {
 
         // `prepare_cached` so bulk adds parse each INSERT's SQL once per
         // connection instead of once per row.
+        //
+        // `id` is bound rather than omitted, and `RETURNING id` reads back what
+        // landed. Both choices are deliberate:
+        //
+        //   * Binding `NULL` into an `INTEGER PRIMARY KEY` is how SQLite is
+        //     asked to assign one, so a caller-supplied id and an assigned one
+        //     are the same statement -- no second prepared statement, and no
+        //     branch that could drift between the two.
+        //   * `RETURNING` instead of `last_insert_rowid()`. That function is
+        //     per-connection and reports the most recent insert on it, so
+        //     reading it here was only correct because the feature-set and
+        //     timestamp-set inserts below happen *after* it. Both write to
+        //     rowid tables and would clobber it. Nothing should have to
+        //     preserve that ordering to keep this function correct.
         let mut insert_stmt = tx.prepare_cached(
             "INSERT INTO time_series_associations
-             (owner_id, owner_type, owner_category, time_series_type, name, data_hash,
+             (id, owner_id, owner_type, owner_category, time_series_type, name, data_hash,
               initial_timestamp, resolution, length, horizon, interval, count,
               timestamps_hash, units, quantity_kind, unit_system, time_reference,
               component_field, percentiles_json, element_type, element_shape,
               application_data, features_hash)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                     ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+                     ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
+             RETURNING id",
         )?;
-        let result = insert_stmt.execute(params![
-            meta.owner_id,
-            meta.owner_type,
-            meta.owner_category.code(),
-            meta.time_series_type.code(),
-            meta.name,
-            meta.data_hash.as_slice(),
-            initial_ts,
-            resolution_iso,
-            meta.length.map(|l| l as i64),
-            horizon_iso,
-            interval_iso,
-            meta.count.map(|c| c as i64),
-            timestamps_hash.map(|h| h.to_vec()),
-            meta.units,
-            meta.quantity_kind,
-            meta.unit_system.map(|u| u.as_str()),
-            meta.time_reference
-                .as_ref()
-                .map(TimeReference::as_storage_string),
-            meta.component_field,
-            percentiles_json,
-            meta.element_type.to_string(),
-            element_shape_json,
-            meta.application_data,
-            f_hash.as_slice(),
-        ]);
+        let result = insert_stmt.query_row(
+            params![
+                meta.id,
+                meta.owner_id,
+                meta.owner_type,
+                meta.owner_category.code(),
+                meta.time_series_type.code(),
+                meta.name,
+                meta.data_hash.as_slice(),
+                initial_ts,
+                resolution_iso,
+                meta.length.map(|l| l as i64),
+                horizon_iso,
+                interval_iso,
+                meta.count.map(|c| c as i64),
+                timestamps_hash.map(|h| h.to_vec()),
+                meta.units,
+                meta.quantity_kind,
+                meta.unit_system.map(|u| u.as_str()),
+                meta.time_reference
+                    .as_ref()
+                    .map(TimeReference::as_storage_string),
+                meta.component_field,
+                percentiles_json,
+                meta.element_type.to_string(),
+                element_shape_json,
+                meta.application_data,
+                f_hash.as_slice(),
+            ],
+            |row| row.get::<_, i64>(0),
+        );
 
         let id = match result {
-            Ok(_) => tx.last_insert_rowid(),
+            Ok(id) => id,
             Err(rusqlite::Error::SqliteFailure(err, _))
                 if err.code == rusqlite::ErrorCode::ConstraintViolation =>
             {
-                // The unique index covers (owner_id, owner_category,
-                // time_series_type, name, resolution, interval, features_hash).
-                // Surface the spec error.
-                return Err(TimeSeriesError::DuplicateTimeSeries);
+                // Two different collisions arrive here as the same primary
+                // result code, and they mean opposite things to the caller, so
+                // the extended code is what tells them apart.
+                //
+                //   * PRIMARYKEY -- the caller supplied an explicit `id` that
+                //     is already taken. Only reachable when `meta.id` is
+                //     `Some`; an assigned id cannot collide by construction.
+                //   * UNIQUE -- the identity tuple collided on the index over
+                //     (owner_id, owner_category, time_series_type, name,
+                //     resolution, interval, features_hash).
+                //
+                // Anything else constraint-shaped is left as the raw error
+                // rather than guessed at: reporting a wrong one of these two
+                // sends a caller looking in the wrong place entirely.
+                return Err(match (err.extended_code, meta.id) {
+                    (rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY, Some(id)) => {
+                        TimeSeriesError::DuplicateAssociationId(id)
+                    }
+                    (rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE, _) => {
+                        TimeSeriesError::DuplicateTimeSeries
+                    }
+                    _ => rusqlite::Error::SqliteFailure(err, None).into(),
+                });
             }
             Err(e) => return Err(e.into()),
         };
@@ -1625,6 +1767,58 @@ impl MetadataStore {
         Ok(found.is_some())
     }
 
+    /// The row filed under `id`, or `None` if the catalog holds no such row.
+    ///
+    /// `None` rather than [`TimeSeriesError::NotFound`] because a caller
+    /// validating references it stored earlier is *asking* whether one still
+    /// resolves; a dangling reference is the answer, not an error.
+    pub fn get_by_id(&self, id: i64) -> Result<Option<TimeSeriesMetadata>> {
+        let mut matches = self.list(&MetadataFilter {
+            ids: Some(vec![id]),
+            ..Default::default()
+        })?;
+        Ok(matches.pop())
+    }
+
+    /// Every row named by `ids`, in catalog order and without duplicates —
+    /// callers that need them in *their* order reorder by [`TimeSeriesMetadata::id`].
+    ///
+    /// One query rather than one per id, which is what makes a bulk read by
+    /// reference cost the same as a bulk read by key.
+    pub fn list_by_ids(&self, ids: &[i64]) -> Result<Vec<TimeSeriesMetadata>> {
+        // Each id is one bound `?`, and `list_inner` binds the predicate more
+        // than once per statement, so a model-sized set (tens of thousands of
+        // references) would trip SQLite's variable limit — and every distinct
+        // set size would be a distinct statement in the prepare cache. Sorted
+        // and deduplicated first, so the chunks concatenate in id order (which
+        // is catalog order) and no row appears twice.
+        let mut sorted = ids.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        let mut rows = Vec::with_capacity(sorted.len());
+        for chunk in sorted.chunks(IDS_PER_QUERY) {
+            rows.extend(self.list(&MetadataFilter {
+                ids: Some(chunk.to_vec()),
+                ..Default::default()
+            })?);
+        }
+        Ok(rows)
+    }
+
+    /// Whether a row is filed under `id`.
+    ///
+    /// A primary-key probe: one statement, no row fetched, no metadata
+    /// hydrated. Cheap enough for a consumer to validate every reference in its
+    /// model on load.
+    pub fn exists_by_id(&self, id: i64) -> Result<bool> {
+        let found: Option<i64> = self
+            .conn
+            .prepare_cached("SELECT 1 FROM time_series_associations WHERE id = ?1 LIMIT 1")?
+            .query_row([id], |row| row.get(0))
+            .optional()?;
+        Ok(found.is_some())
+    }
+
     pub fn get_by_key(&self, key: &KeyIdentity) -> Result<TimeSeriesMetadata> {
         let mut matches = self.list(&MetadataFilter {
             owner_id: Some(key.owner_id),
@@ -1642,6 +1836,7 @@ impl MetadataStore {
             name_glob: None,
             component_field: None,
             zoneless: None,
+            ids: None,
         })?;
         matches.retain(|m| m.features == key.features);
         match matches.len() {
@@ -2126,12 +2321,8 @@ impl MetadataStore {
         }
     }
 
-    /// Both endpoint pairs of every matching row, in insertion order.
-    fn assoc_list(
-        &self,
-        table: AssocTable,
-        filter: &EndpointFilter,
-    ) -> Result<Vec<(i64, String, i64, String)>> {
+    /// Every matching row's id and both endpoint pairs, in insertion order.
+    fn assoc_list(&self, table: AssocTable, filter: &EndpointFilter) -> Result<Vec<AssocRow>> {
         if !self.assoc_present(table) {
             return Ok(Vec::new());
         }
@@ -2140,12 +2331,12 @@ impl MetadataStore {
         // Ordered by rowid so a bulk export/import round trip preserves the
         // order the caller inserted in.
         let sql = format!(
-            "SELECT {}, {}, {}, {} FROM {} {where_clause} ORDER BY id",
+            "SELECT id, {}, {}, {}, {} FROM {} {where_clause} ORDER BY id",
             table.left_id, table.left_type, table.right_id, table.right_type, table.name
         );
         let mut stmt = self.conn.prepare_cached(&sql)?;
         let rows = stmt.query_map(param_refs.as_slice(), |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
@@ -2226,6 +2417,57 @@ impl MetadataStore {
             .map_err(Into::into)
     }
 
+    /// Refuse an explicit id that `time_series_associations` could ever have
+    /// issued.
+    ///
+    /// Only one caller supplies ids —
+    /// [`Store::import_association_rows`](crate::Store::import_association_rows),
+    /// replaying a document that recorded them. Every ordinary add lets the
+    /// catalog assign, so this is the whole of the explicit-id surface.
+    ///
+    /// "Never reissued" is a promise about *assigned* ids: `AUTOINCREMENT` only
+    /// ratchets `sqlite_sequence` upward, so a deleted row's id is never handed
+    /// out again. An explicit id is not covered by that mechanism — the primary
+    /// key only refuses an id a *live* row holds, so an import could re-file a
+    /// deleted id and a stale reference in some consumer's model would quietly
+    /// resolve to the new series. This closes that hole: every explicit id must
+    /// sit above the table's high-water mark, which is also what
+    /// [`TimeSeriesError::DuplicateAssociationId`] already documents.
+    ///
+    /// Checked once per batch against the mark as it stands *before* the batch
+    /// writes, so a document's rows may arrive in any order; a duplicate within
+    /// the batch still lands on the primary key. Zero and negative ids are
+    /// refused up front: no catalog ever issues one.
+    pub fn check_explicit_time_series_ids(tx: &Connection, ids: &[i64]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        if let Some(bad) = ids.iter().find(|&&id| id <= 0) {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "association id {bad} is not a valid explicit id; ids are positive integers"
+            )));
+        }
+        let high_water: i64 = tx
+            .query_row(
+                "SELECT seq FROM sqlite_sequence WHERE name = ?1",
+                ["time_series_associations"],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        match ids.iter().find(|&&id| id <= high_water) {
+            Some(&id) => Err(TimeSeriesError::DuplicateAssociationId(id)),
+            None => Ok(()),
+        }
+    }
+
+    /// Insert one endpoint pair and return the id the catalog filed it under.
+    ///
+    /// Neither association catalog takes a caller-supplied id — no wire form
+    /// carries one, so there is nothing to preserve — so the id column is left
+    /// out of the insert entirely and `AUTOINCREMENT` assigns. `RETURNING`
+    /// reads back what landed rather than relying on `last_insert_rowid()`
+    /// being untouched by whatever runs next.
     fn assoc_insert(
         tx: &Connection,
         table: AssocTable,
@@ -2236,13 +2478,14 @@ impl MetadataStore {
         detail: &str,
     ) -> Result<i64> {
         let sql = format!(
-            "INSERT INTO {} ({}, {}, {}, {}) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO {} ({}, {}, {}, {}) VALUES (?1, ?2, ?3, ?4) RETURNING id",
             table.name, table.left_id, table.left_type, table.right_id, table.right_type
         );
         let mut stmt = tx.prepare_cached(&sql)?;
-        stmt.execute(params![left_id, left_type, right_id, right_type])
-            .map_err(|e| map_association_violation(e, detail))?;
-        Ok(tx.last_insert_rowid())
+        stmt.query_row(params![left_id, left_type, right_id, right_type], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(|e| map_association_violation(e, detail))
     }
 
     fn assoc_delete(tx: &Connection, table: AssocTable, filter: &EndpointFilter) -> Result<usize> {
@@ -2338,12 +2581,13 @@ impl MetadataStore {
             .assoc_list(SUPPLEMENTAL_ATTRIBUTE_TABLE, &filter.endpoints())?
             .into_iter()
             .map(
-                |(component_id, component_type, attribute_id, attribute_type)| {
+                |(id, component_id, component_type, attribute_id, attribute_type)| {
                     SupplementalAttributeAssociation {
                         component_id,
                         component_type,
                         attribute_id,
                         attribute_type,
+                        id: Some(id),
                     }
                 },
             )
@@ -2522,11 +2766,12 @@ impl MetadataStore {
             .assoc_list(PARENT_CHILD_TABLE, &filter.endpoints())?
             .into_iter()
             .map(
-                |(parent_id, parent_type, child_id, child_type)| ParentChildAssociation {
+                |(id, parent_id, parent_type, child_id, child_type)| ParentChildAssociation {
                     parent_id,
                     parent_type,
                     child_id,
                     child_type,
+                    id: Some(id),
                 },
             )
             .collect())
@@ -2662,7 +2907,7 @@ fn map_unique_violation(e: rusqlite::Error) -> TimeSeriesError {
 /// A WAL-mode database needs its `-shm` index to be read, and SQLite creates
 /// that sidecar even for a read-only connection. Where the file cannot be
 /// created — a read-only mount, a directory the process may not write, an
-/// archive served to a reader — the open fails outright, which used to make a
+/// archive served to a reader — the open fails outright, which would make a
 /// perfectly readable store unopenable for the two callers that read one
 /// without writing: a `read_only` [`Store::open`] and the load-into-memory of
 /// [`MetadataStore::open_path_into_memory`].
@@ -2771,9 +3016,10 @@ fn collect_data_hashes(
 }
 
 struct MetaRow {
-    /// The catalog's `INTEGER PRIMARY KEY` (SQLite rowid). Not part of
-    /// [`TimeSeriesMetadata`] — that type's identity is the key tuple, not a
-    /// storage-assigned id — but used internally by [`Self::list_inner`].
+    /// The catalog's `INTEGER PRIMARY KEY`. Carried onto
+    /// [`TimeSeriesMetadata::id`] as `Some`, since a stored row always has one,
+    /// and used directly by [`Self::list_inner`] for the callers that want the
+    /// id beside the metadata rather than inside it.
     id: i64,
     owner_id: i64,
     owner_type: String,
@@ -2831,6 +3077,9 @@ impl MetaRow {
             element_type: self.element_type,
             element_shape: self.element_shape,
             application_data: self.application_data,
+            // A row that came out of the catalog always has an id; `None` is
+            // reserved for the write direction, where it means "assign one".
+            id: Some(self.id),
         }
     }
 }

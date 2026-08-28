@@ -34,6 +34,7 @@ fn add(store: &mut Store, owner: i64, data: TimeSeriesData) -> TimeSeriesKey {
             data,
         ))
         .unwrap()
+        .key
 }
 
 fn sts(name: &str, data: TypedArray) -> TimeSeriesData {

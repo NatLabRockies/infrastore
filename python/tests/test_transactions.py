@@ -40,7 +40,7 @@ def add(store: Store, owner_id: int, base: float):
         owner_type="Generator",
         owner_category=OwnerCategory.Component,
         time_series=series(base),
-    )
+    ).key
 
 
 def test_rollback_undoes_a_mixed_add_and_remove_span():

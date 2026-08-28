@@ -46,9 +46,11 @@ $ infrastore --store s.h5 -f json --yes remove --all --owner-id 42 | jq .removed
 ```
 
 Each command's document names what it did — `{"removed": N}`, `{"added": N, "store": …}`,
-`{"merged": N, …}` — and a `--dry-run` reports `{"dry_run": true, "would_remove": N, …}` instead. A
-filter that matches nothing still reports its zero rather than printing nothing, so `jq .removed`
-reads `0` instead of failing on an empty document.
+`{"merged": N, …}` — and a `--dry-run` reports `{"dry_run": true, "would_remove": N, …}` instead.
+The writing commands also name the catalog ids they created: `add` carries a `series` array of
+`{id, time_series_type, name, owner_id}` objects, and `attach` / `link` an `ids` array. A filter
+that matches nothing still reports its zero rather than printing nothing, so `jq .removed` reads `0`
+instead of failing on an empty document.
 
 `csv` renders these status lines as prose alongside `table`: a status line has no rows to tabulate,
 and a one-row CSV of it would give scripts a shape that changes every time the message is reworded.
@@ -323,6 +325,10 @@ infrastore --store demo.h5 reassign --old 42 --new 43
 the four columns are two interchangeable-looking `(id, type)` pairs, so a file with the pairs
 swapped would import cleanly and silently invert every relationship.
 
+Both report the catalog ids they created, in input order: `ids` on the JSON document and an `ids:`
+line under `table` (which elides the tail past twenty). Those are the durable handles for the rows
+just written, so reporting only a count would leave a caller re-reading the catalog to find them.
+
 `detach` and `unlink` with no filter would empty the whole catalog, so they require `--all` to say
 you meant it. `reassign` is the association counterpart of `replace-owner`, which moves time series;
 with neither `--attributes` nor `--links` it moves both catalogs, which is what a renumbered
@@ -482,6 +488,7 @@ value:
 
 | Flag                    | Meaning                                                                    |
 | ----------------------- | -------------------------------------------------------------------------- |
+| `--id <N>`              | Catalog association ID. A point lookup — see below.                        |
 | `--owner-id <I>`        | Owner identifier (`i64` integer).                                          |
 | `--owner-category <C>`  | Restrict to `Component` or `SupplementalAttribute`; omit to match either.  |
 | `--name <N>`            | Series name (exact match).                                                 |
@@ -491,6 +498,19 @@ value:
 | `--resolution <DUR>`    | Resolution as an ISO-8601 duration, e.g. `PT1H`, `PT15M`, `P1M`.           |
 | `--feature key=value`   | Feature filter; repeatable. Values are inferred as int/float/bool/string.  |
 | `--spelling <S>`        | `zoned` or `zoneless`: which timestamp spelling to keep.                   |
+
+`--id` is different in kind from the flags under it. The others narrow a set; `--id` names exactly
+one row, by the catalog id that `add`, `list`, and `info` report. So it cannot be combined with them
+(the error says as much), and it cannot stand in for them on a command that works over a set —
+`list --id 3` is refused rather than quietly returning one row. Use it where a caller has stored an
+id in its own model and wants that series back:
+
+```sh
+infrastore --store system.h5 -f json info --id 214
+```
+
+An id that names no row is an error saying so, and saying that it will stay that way: ids are never
+reissued, so a reference that stops resolving cannot later come to mean a different series.
 
 `--spelling` is the constructive half of the time-reference coherence rule. `zoneless` keeps the
 wall-clock series; `zoned` keeps the ones that record instants, including those that declare no

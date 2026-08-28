@@ -37,7 +37,7 @@ end
 
 # The association name carried on a key handle (`KeyIdentity.name`); read off
 # the key itself, so no store access is involved.
-_key_name(key::TimeSeriesKey) = key_info(key).name
+_key_name(key::TimeSeriesRef) = key_info(key).name
 
 """
     get_time_series_keys(store, owner_id, owner_category) -> Vector{TimeSeriesKey}
@@ -260,6 +260,8 @@ function _decode_metadata(r::AbstractDict)
         _row_time_reference(r),
         r["component_field"] === nothing ? nothing : String(r["component_field"]),
         r["application_data"] === nothing ? nothing : String(r["application_data"]),
+        # Always present on a row that came from the catalog.
+        r["id"] === nothing ? nothing : Int64(r["id"]),
     )
 end
 
@@ -484,7 +486,7 @@ returning its [`KeyInfo`](@ref). `time_series_type` is the Julia type (one of
 `DeterministicSingleTimeSeries`, `Probabilistic`, `Scenarios`) — pass it straight
 to `get_time_series(time_series_type, store, key)`.
 """
-function key_info(key::TimeSeriesKey)
+function key_info(key::TimeSeriesRef)
     out_type = Ref{Int32}(0)
     out_res = Ref{Ptr{Cchar}}(C_NULL)
     out_owner = Ref{Int64}(0)
@@ -544,7 +546,7 @@ end
 function get_time_series(
     ::Type{T},
     store::Store,
-    key::TimeSeriesKey;
+    key::TimeSeriesRef;
     time_range::TimeRangeArg=nothing,
 ) where {T <: SingleTimeSeries}
     _check_request_type(T)
@@ -610,7 +612,7 @@ function get_time_series(
     return get_time_series(NonSequentialTimeSeries, store, key; time_range=time_range)
 end
 
-function remove_time_series!(store::Store, key::TimeSeriesKey)
+function remove_time_series!(store::Store, key::TimeSeriesRef)
     code = @ccall lib_path().infrastore_store_remove(
         store::Ptr{Cvoid}, key::Ptr{Cvoid}
     )::Int32
@@ -619,14 +621,14 @@ function remove_time_series!(store::Store, key::TimeSeriesKey)
 end
 
 """
-    remove_time_series!(store, keys::Vector{TimeSeriesKey}) -> Int
+    remove_time_series!(store, keys::AbstractVector{<:TimeSeriesRef}) -> Int
 
 Remove several time series in one all-or-nothing transaction, returning the
 number removed. On any error (including a single missing key) nothing is
 removed.
 """
-function remove_time_series!(store::Store, keys::Vector{TimeSeriesKey})
-    handles = Ptr{Cvoid}[k.handle for k in keys]
+function remove_time_series!(store::Store, keys::AbstractVector{<:TimeSeriesRef})
+    handles = Ptr{Cvoid}[_key(k).handle for k in keys]
     out_removed = Ref{UInt64}(0)
     code = GC.@preserve keys @ccall lib_path().infrastore_store_remove_bulk(
         store::Ptr{Cvoid},
@@ -638,7 +640,7 @@ function remove_time_series!(store::Store, keys::Vector{TimeSeriesKey})
     return Int(out_removed[])
 end
 
-function has_time_series(store::Store, key::TimeSeriesKey)
+function has_time_series(store::Store, key::TimeSeriesRef)
     out = Ref{Bool}(false)
     code = @ccall lib_path().infrastore_store_has(
         store::Ptr{Cvoid}, key::Ptr{Cvoid}, out::Ref{Bool}

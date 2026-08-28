@@ -24,6 +24,37 @@ const PER_SERIES_LIST_MAX: usize = 20;
 /// The `--descriptor` value that means "read the JSON from stdin".
 const STDIN: &str = "-";
 
+/// One written series, as both output forms report it.
+///
+/// The `id` is the point: it is the durable handle a caller records in its own
+/// model, and `--id` on `get`/`info` is how it comes back. A load that printed
+/// only names would leave the caller re-listing the store to find what it just
+/// wrote.
+struct AddedRow {
+    id: i64,
+    time_series_type: &'static str,
+    name: String,
+    owner_id: i64,
+}
+
+impl AddedRow {
+    fn line(&self) -> String {
+        format!(
+            "added {} '{}' (owner {}) as id {}",
+            self.time_series_type, self.name, self.owner_id, self.id
+        )
+    }
+
+    fn json(&self) -> Value {
+        json!({
+            "id": self.id,
+            "time_series_type": self.time_series_type,
+            "name": self.name,
+            "owner_id": self.owner_id,
+        })
+    }
+}
+
 /// A descriptor written as flags instead of a file.
 ///
 /// Deliberately a mirror of [`Descriptor`]'s fields rather than a second, terser
@@ -237,7 +268,7 @@ pub fn run(store_path: &Path, opts: &Options<'_>) -> Result<(), String> {
     };
     let mut progress = Progress::new(descriptors.len(), opts.quiet);
     let mut pending: Vec<AddRequest> = Vec::new();
-    let mut added: Vec<String> = Vec::new();
+    let mut added: Vec<AddedRow> = Vec::new();
     let mut total = 0usize;
 
     // The load runs to completion or to its first error; either way the catalog
@@ -276,13 +307,11 @@ pub fn run(store_path: &Path, opts: &Options<'_>) -> Result<(), String> {
         //
         // On the failure path too, and that is the point. Creating the store
         // stamps the HDF5 half immediately, while an in-memory catalog writes no
-        // `.sqlite` until this call — so returning early on a mid-load error
-        // used to leave a stamped array file with no catalog beside it. That is
-        // the `MismatchedArtifact` state, and it is terminal: the store cannot
-        // be opened again, not even by the corrected re-run, and the user's only
-        // recovery is to delete the file. Every batch that did commit is
-        // all-or-nothing, so what we write here is a valid store holding exactly
-        // the batches that succeeded.
+        // `.sqlite` until this call, so returning early on a mid-load error
+        // would leave a stamped array file with no catalog beside it — the
+        // terminal `MismatchedArtifact` state, recoverable only by deleting the
+        // file. Every batch that did commit is all-or-nothing, so what we write
+        // here is a valid store holding exactly the batches that succeeded.
         let persisted = store.persist_catalog().map_err(|e| e.to_string());
         // The load error is the one that explains what went wrong; a persist
         // failure on top of it is a consequence, not the cause.
@@ -304,14 +333,14 @@ pub fn run(store_path: &Path, opts: &Options<'_>) -> Result<(), String> {
                 "added": total,
                 "store": store_path.display().to_string(),
                 // Same threshold as the human listing: a bulk load of 100k series
-                // should report its count, not echo every identity back.
-                "series": listed.then(|| added.clone()),
+                // should report its count, not echo every row back.
+                "series": listed.then(|| added.iter().map(AddedRow::json).collect::<Vec<_>>()),
             })
         },
         || {
             if listed {
-                for line in &added {
-                    println!("{line}");
+                for row in &added {
+                    println!("{}", row.line());
                 }
             }
             println!(
@@ -330,7 +359,7 @@ fn flush(
     store: &mut Store,
     pending: &mut Vec<AddRequest>,
     replace: bool,
-    added: &mut Vec<String>,
+    added: &mut Vec<AddedRow>,
 ) -> Result<usize, String> {
     if pending.is_empty() {
         return Ok(0);
@@ -350,13 +379,13 @@ fn flush(
     let keys = store
         .add_time_series_bulk(requests)
         .map_err(|e| e.to_string())?;
-    for k in &keys {
-        added.push(format!(
-            "added {} '{}' (owner {})",
-            k.time_series_type().as_str(),
-            k.name(),
-            k.owner_id()
-        ));
+    for a in &keys {
+        added.push(AddedRow {
+            id: a.id,
+            time_series_type: a.key.time_series_type().as_str(),
+            name: a.key.name().to_string(),
+            owner_id: a.key.owner_id(),
+        });
     }
     Ok(keys.len())
 }

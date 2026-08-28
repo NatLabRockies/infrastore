@@ -44,6 +44,28 @@ over gRPC: `supplemental_attribute_associations` (component ↔ supplemental att
 surface — counts, counts-by-type, grouped summary) and `parent_child_associations` (directed
 component ↔ component edges, e.g. a generator connected to a bus, deliberately narrower until a
 consumer needs more). Both are independent of time series in both directions, and of each other.
+Every catalog row also carries an **`id`** — an `INTEGER PRIMARY KEY AUTOINCREMENT`, so it is never
+reissued once its row is deleted — which a consumer stores in its own object model to reference a
+series later (a generator's `operation_cost` naming the series that varies it). Writes return it
+(`AddedTimeSeries` in the Rust core, Python, and Julia; an `out_id` across the C ABI), reads resolve
+it (`get_metadata_by_id`, `association_exists`, `read_by_ids`), and it crosses the gRPC wire and the
+OpenAPI one — where the schema spells it `association_id`, a rename `openapi.rs` applies the same
+way it maps `unit_system` between the store's snake_case and the schema's SCREAMING_CASE. It is
+descriptive — outside `TimeSeriesKey` and both content hashes — but unlike the descriptors above it
+describes the _row_ rather than the data: it is per-store, so `merge` assigns fresh ids and `diff`
+ignores it, while `rename`/`reassign`/`compact`/`persist_to` all preserve it. **No `add_*` accepts
+an id** — not `add_time_series`, a bulk add, or either association catalog's attach/link — because
+"never reissued" is a guarantee of `AUTOINCREMENT`, and a caller free to name an id could re-file a
+retired one. The single exception is the rows-only import `import_time_series_associations_openapi`
+(`Store::import_association_rows`), which files each row under the `association_id` the document
+recorded so its references survive: all-or-none across the batch, and only above the catalog's
+high-water mark. It refuses a row whose array is absent, a `DeterministicSingleTimeSeries` whose
+source `SingleTimeSeries` is neither in the document nor already stored, and
+`NonSequentialTimeSeries` outright (its timestamp vector is not on the wire). Neither association
+catalog's wire form carries an id, so both always assign — their row types carry an `id` field that
+a listing populates and an add ignores — with independent counters, and equality on both association
+types deliberately excludes the id.
+
 Metadata getters surface `element_shape` and `features` in every binding. Alongside `units`, a
 series carries two further unit descriptors in every binding: `quantity_kind` (free-form, QUDT
 `QuantityKind` local names recommended — it separates active from reactive power, which dimensional

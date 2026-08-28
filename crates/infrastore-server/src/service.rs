@@ -114,19 +114,16 @@ pub struct CatalogStoreService {
 
 /// Default ceiling on the number of keys one `BulkRead` may name.
 ///
-/// `BulkRead` is the one RPC whose response size the *caller* chooses: every
-/// other read is bounded by what the store holds, but this one returns a full
-/// copy of a series per key and does not collapse duplicates (pinned by
-/// `bulk_read_returns_duplicate_keys_once_each` — items correspond positionally
-/// to the keys asked for). A key encodes in well under 70 bytes, so a request
-/// inside tonic's 4 MiB decode limit could name a couple of hundred thousand of
-/// them, and the handler materialized every one before writing any response: a
-/// 900 KB request measured an 822 MB response off a 16 KB store. With
-/// `auth = "none"`, the default, that is unauthenticated.
+/// `BulkRead` is the one RPC whose response size the *caller* chooses: it
+/// returns a full copy of a series per key and does not collapse duplicates
+/// (items correspond positionally to the keys asked for, pinned by
+/// `bulk_read_returns_duplicate_keys_once_each`). Unbounded, a request inside
+/// tonic's 4 MiB decode limit can name a couple of hundred thousand keys and
+/// amplify a 900 KB request into an 822 MB response off a 16 KB store —
+/// unauthenticated under the default `auth = "none"`.
 ///
-/// Generous enough for real batching and small enough that the amplification
-/// factor is no longer the caller's to choose. Operators serving very large
-/// stores can raise it; see `[server] max_bulk_read_keys`.
+/// Operators serving very large stores can raise it; see
+/// `[server] max_bulk_read_keys`.
 pub const DEFAULT_MAX_BULK_READ_KEYS: usize = 4096;
 
 impl CatalogStoreService {

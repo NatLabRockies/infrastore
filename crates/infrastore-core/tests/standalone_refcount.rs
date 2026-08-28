@@ -105,6 +105,7 @@ fn add(store: &mut Store, owner: i64, data: TimeSeriesData) -> TimeSeriesKey {
             Features::new(),
         )
         .unwrap()
+        .key
 }
 
 /// The core shared-then-decrement cycle for one standalone-backed builder:

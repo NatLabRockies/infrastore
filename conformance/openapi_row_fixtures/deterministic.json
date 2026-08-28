@@ -10,8 +10,13 @@
   },
   "uri": "a12833691846225366aa8400a270fc2d86557251a500c5b2ddeb3cf076e1dc82",
   "data_hash": "a12833691846225366aa8400a270fc2d86557251a500c5b2ddeb3cf076e1dc82",
+  "association_id": 5,
   "element_type": "f64",
   "element_shape": [],
+  "array_shape": [
+    24,
+    365
+  ],
   "units": "pu",
   "quantity_kind": "ActivePower",
   "unit_system": "COMPONENT_BASE",

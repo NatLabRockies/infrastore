@@ -101,6 +101,8 @@ function transform_single_time_series!(
         out_sources::Ref{UInt64},
         out_interval::Ptr{UInt8},
         out_normalized::Ref{Bool},
+        # The ids of the views just written; not surfaced yet.
+        C_NULL::Ptr{Ptr{Int64}},
     )::Int32
     _check(code)
     return TransformOutcome(
@@ -433,7 +435,7 @@ end
 # (`infrastore_store_get_forecast_by_key`), so the time series type comes from the key.
 function _get_forecast_raw(
     store::Store,
-    key::TimeSeriesKey;
+    key::TimeSeriesRef;
     time_range::TimeRangeArg=nothing,
 )
     time_range_present, time_range_zoneless, range_start_ms, range_end_ms = _time_range_args(
@@ -663,7 +665,7 @@ so decoding one as another does not merely mislabel the result, it misreads it.
 function get_time_series(
     ::Type{T},
     store::Store,
-    key::TimeSeriesKey;
+    key::TimeSeriesRef;
     time_range::TimeRangeArg=nothing,
 ) where {T <: _ForecastRequest}
     # `Deterministic{Float64,3} <: Deterministic`, so a parameterized spelling

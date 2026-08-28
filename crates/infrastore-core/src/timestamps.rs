@@ -67,19 +67,13 @@ use crate::error::{Result, TimeSeriesError};
 /// records the unit in `units`.
 ///
 /// Enforced on the **write path only** ([`crate::Store::add`] and every path
-/// that funnels through it). Reads stay permissive, so an artifact written
-/// before this rule keeps reading back exactly as it was written — which is why
-/// the rule does not bump [`crate::DATA_FORMAT_VERSION`]: the on-disk format is
-/// unchanged, only what a new write accepts.
+/// that funnels through it). Reads stay permissive, which is why this does not
+/// bump [`crate::DATA_FORMAT_VERSION`]: the on-disk format is unchanged, only
+/// what a new write accepts.
 ///
 /// A leap second is spelled by chrono as a sub-second component at or above one
 /// second; the modulo below reads its *fractional* part, so a leap second on a
 /// whole millisecond is accepted like any other instant.
-///
-/// `label` is a closure rather than a `&str` because one caller runs this per
-/// *timestamp* of a `NonSequentialTimeSeries`: building the label eagerly would
-/// allocate a `String` for every entry of a vector that may hold millions, all
-/// of them thrown away on the overwhelmingly common all-pass path.
 pub(crate) fn require_millisecond_precision(
     t: DateTime<Utc>,
     label: impl FnOnce() -> String,

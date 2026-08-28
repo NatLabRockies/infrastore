@@ -14,7 +14,11 @@
 /// mismatch is the error worth reporting, and it must get there first.
 pub const DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS time_series_associations (
-    id                INTEGER PRIMARY KEY,
+    -- This id is an *external* reference: a consumer stores it in its own
+    -- object model (a generator's cost function naming the series that varies
+    -- it) and expects it to keep meaning the same row, which AUTOINCREMENT
+    -- guarantees by never reissuing one a delete freed.
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
     owner_id          INTEGER NOT NULL,
     owner_type        TEXT    NOT NULL,
     -- `owner_category` and `time_series_type` are stored as small INTEGER
@@ -312,12 +316,11 @@ CREATE TABLE IF NOT EXISTS catalog_identity (generation TEXT NOT NULL);
 --   * Independent of `time_series_associations`. Removing a time series never
 --     touches these rows and vice versa; a consumer wanting both effects makes
 --     both calls.
---   * Added additively, without bumping DATA_FORMAT_VERSION. The DDL is
---     idempotent, so an older store gains both tables on its first writable
---     open and older code ignores them. A read-only open of an older store
---     cannot run DDL, so every read of these tables tolerates the table being
---     absent (see `MetadataStore::has_supplemental_attribute_table` and
---     `has_parent_child_table`).
+--   * Independent id streams. Each table has its own `sqlite_sequence` row, so
+--     an id is only meaningful together with the table it came from. Equal
+--     values across two tables are the common case, not a collision — each
+--     counter starts at 1 — and mean nothing; only uniqueness *within* a table
+--     is guaranteed.
 
 -- Which supplemental attributes are attached to which components. Columns match
 -- infrasys' table of the same name, whose logic this replaces (IS3.jl kept an
@@ -327,7 +330,8 @@ CREATE TABLE IF NOT EXISTS catalog_identity (generation TEXT NOT NULL);
 -- denormalized labels carried for filtering, not part of identity. One
 -- component may carry an attribute at most once.
 CREATE TABLE IF NOT EXISTS supplemental_attribute_associations (
-    id             INTEGER PRIMARY KEY,
+    -- AUTOINCREMENT for the reason given on `time_series_associations.id`.
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
     component_id   INTEGER NOT NULL,
     component_type TEXT    NOT NULL,
     attribute_id   INTEGER NOT NULL,
@@ -350,7 +354,8 @@ CREATE INDEX IF NOT EXISTS idx_sa_assoc_attribute
 -- there is no relationship-kind column, so a second kind of edge between the
 -- same two components would need one added (and the unique index widened).
 CREATE TABLE IF NOT EXISTS parent_child_associations (
-    id          INTEGER PRIMARY KEY,
+    -- AUTOINCREMENT for the reason given on `time_series_associations.id`.
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
     parent_id   INTEGER NOT NULL,
     parent_type TEXT    NOT NULL,
     child_id    INTEGER NOT NULL,

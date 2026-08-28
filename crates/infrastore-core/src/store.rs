@@ -142,11 +142,21 @@ impl From<ListFilter> for MetadataFilter {
             interval: value.interval,
             features: value.features,
             features_hash: None,
+            // `ListFilter` has no id predicate by design; by-id reads are point
+            // lookups with their own entry points.
+            ids: None,
         }
     }
 }
 
 /// Single item in a bulk add.
+///
+/// A request names no catalog id. Every add — this one, the wide positional
+/// forms, and the association catalogs' — lets the catalog assign, and the id
+/// it chose comes back on [`AddedTimeSeries`]. The one place a caller supplies
+/// ids is [`Store::import_association_rows`], where the document being replayed
+/// already recorded them and the references have to survive; see
+/// [`TimeSeriesMetadata::id`].
 #[derive(Debug, Clone)]
 pub struct AddRequest {
     pub owner_id: i64,
@@ -185,6 +195,40 @@ impl AddRequest {
     pub fn with_features(mut self, features: Features) -> Self {
         self.features = features;
         self
+    }
+}
+
+/// One association as it was written: the key that names it, and the catalog
+/// id it was filed under.
+///
+/// The id is deliberately *not* on [`TimeSeriesKey`]. A key is also an input —
+/// to `get`, to `remove` — where an id would be meaningless, and the snapshot
+/// key variants compare by all their fields, so folding it in would make two
+/// keys for the same series in two stores compare unequal. This pairs them
+/// instead, and leaves room to report more about a write without changing the
+/// signature again.
+///
+/// The id is valid only once the enclosing transaction commits: a rollback
+/// returns it to the catalog's counter rather than stranding it, so an id read
+/// out of a span that later rolls back may name a different row.
+/// Equality and hashing follow [`TimeSeriesKey`]'s: identity plus the id. Two
+/// results naming the same series in two different stores are *not* equal,
+/// which is the honest answer — the id is the row, and the rows are different.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct AddedTimeSeries {
+    pub key: TimeSeriesKey,
+    pub id: i64,
+}
+
+impl AddedTimeSeries {
+    /// The identifying tuple of the series just written, forwarded from
+    /// [`Self::key`].
+    ///
+    /// The overwhelmingly common thing to do with a write's result is read the
+    /// series back, which takes a [`KeyIdentity`]; forwarding keeps that one
+    /// step rather than two.
+    pub fn identity(&self) -> &KeyIdentity {
+        self.key.identity()
     }
 }
 
@@ -271,6 +315,16 @@ pub struct TransformOutcome {
     /// True when the requested `interval` equalled the horizon and that horizon
     /// spanned the whole series, so the interval was normalized to zero.
     pub interval_normalized: bool,
+    /// The views this call wrote, in the order they were written — each with the
+    /// catalog id it was filed under, so a caller can reference a view it just
+    /// derived without listing the store to find it again.
+    ///
+    /// Empty for a dry run, which writes nothing: [`Self::transformed`] still
+    /// reports what *would* have been written, and is the field to read there.
+    /// Also empty, with `transformed` zero, when every eligible series already
+    /// had its view — the sweep is idempotent, and a series it skipped was not
+    /// written by this call.
+    pub written: Vec<AddedTimeSeries>,
 }
 
 /// The window parameters `transform_single_time_series` will write, derived
@@ -1117,7 +1171,7 @@ impl Store {
         owner_category: OwnerCategory,
         data: TimeSeriesData,
         features: Features,
-    ) -> Result<TimeSeriesKey> {
+    ) -> Result<AddedTimeSeries> {
         self.add_per_column(vec![AddRequest {
             owner_id,
             owner_type: owner_type.to_string(),
@@ -1125,7 +1179,7 @@ impl Store {
             data,
             features,
         }])
-        .map(|mut keys| keys.remove(0))
+        .map(|mut added| added.remove(0))
     }
 
     /// Add one time series from an [`AddRequest`]. Equivalent to
@@ -1133,9 +1187,9 @@ impl Store {
     /// `units`, `quantity_kind`, `unit_system`, `component_field`, and
     /// `application_data`, since those travel on the [`TimeSeriesData`] itself.
     /// Routed through the same per-column path.
-    pub fn add(&mut self, request: AddRequest) -> Result<TimeSeriesKey> {
+    pub fn add(&mut self, request: AddRequest) -> Result<AddedTimeSeries> {
         self.add_per_column(vec![request])
-            .map(|mut keys| keys.remove(0))
+            .map(|mut added| added.remove(0))
     }
 
     /// Bulk insert. All-or-nothing: any error rolls back every association and
@@ -1146,7 +1200,7 @@ impl Store {
     /// datasets that fill whole chunks. A one-at-a-time un-managed loop should use
     /// [`Self::add_time_series`], which packs incrementally into shared datasets.
     #[tracing::instrument(skip(self, items), fields(count = items.len()))]
-    pub fn add_time_series_bulk(&mut self, items: Vec<AddRequest>) -> Result<Vec<TimeSeriesKey>> {
+    pub fn add_time_series_bulk(&mut self, items: Vec<AddRequest>) -> Result<Vec<AddedTimeSeries>> {
         self.flush_bulk_add(items)
     }
 
@@ -1157,7 +1211,7 @@ impl Store {
     /// at the cost of a per-column read-modify-write under the timestamp-major
     /// chunking. All-or-nothing, like [`Self::add_time_series_bulk`].
     #[tracing::instrument(skip(self, items), fields(count = items.len()))]
-    fn add_per_column(&mut self, items: Vec<AddRequest>) -> Result<Vec<TimeSeriesKey>> {
+    fn add_per_column(&mut self, items: Vec<AddRequest>) -> Result<Vec<AddedTimeSeries>> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
@@ -1173,7 +1227,7 @@ impl Store {
         // Stage backend writes so we can roll them back on metadata error.
         let mut staged_hashes: Vec<[u8; 32]> = Vec::with_capacity(items.len());
         let tx = self.metadata.savepoint()?;
-        let mut keys = Vec::with_capacity(items.len());
+        let mut added = Vec::with_capacity(items.len());
         // Feature sets and timestamp vectors are shared, and a batch typically
         // spans only a handful of distinct ones; write each once rather than
         // once per item.
@@ -1203,8 +1257,8 @@ impl Store {
             }
 
             match insert_association(&tx, &meta, &mut shared_sets) {
-                Ok(()) => {
-                    keys.push(key);
+                Ok(id) => {
+                    added.push(AddedTimeSeries { key, id });
                 }
                 Err(e) => {
                     // Rollback metadata via Drop; also undo any array puts we
@@ -1225,8 +1279,8 @@ impl Store {
         for hash in staged_hashes {
             self.note_array_written(hash);
         }
-        tracing::debug!(count = keys.len(), "transaction committed");
-        Ok(keys)
+        tracing::debug!(count = added.len(), "transaction committed");
+        Ok(added)
     }
 
     /// Begin a buffered bulk add. Requests pushed onto the returned [`BulkAdd`]
@@ -1248,7 +1302,7 @@ impl Store {
     /// transaction. All-or-nothing: any metadata error rolls the transaction back
     /// and removes every array staged in this call.
     #[tracing::instrument(skip(self, items), fields(count = items.len()))]
-    fn flush_bulk_add(&mut self, items: Vec<AddRequest>) -> Result<Vec<TimeSeriesKey>> {
+    fn flush_bulk_add(&mut self, items: Vec<AddRequest>) -> Result<Vec<AddedTimeSeries>> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
@@ -1298,13 +1352,17 @@ impl Store {
         // Insert associations in input order; roll the whole batch back on error.
         let tx = self.metadata.savepoint()?;
         let mut shared_sets = SharedSetCache::default();
+        let mut ids = Vec::with_capacity(parts.len());
         for p in &parts {
-            if let Err(e) = insert_association(&tx, &p.meta, &mut shared_sets) {
-                drop(tx);
-                for staged in &staged_hashes {
-                    let _ = self.backend.remove_array(staged);
+            match insert_association(&tx, &p.meta, &mut shared_sets) {
+                Ok(id) => ids.push(id),
+                Err(e) => {
+                    drop(tx);
+                    for staged in &staged_hashes {
+                        let _ = self.backend.remove_array(staged);
+                    }
+                    return Err(e);
                 }
-                return Err(e);
             }
         }
         tx.commit()?;
@@ -1312,7 +1370,11 @@ impl Store {
             self.note_array_written(hash);
         }
         tracing::debug!(count = parts.len(), "bulk-add transaction committed");
-        Ok(parts.into_iter().map(|p| p.key).collect())
+        Ok(parts
+            .into_iter()
+            .zip(ids)
+            .map(|(p, id)| AddedTimeSeries { key: p.key, id })
+            .collect())
     }
 
     #[tracing::instrument(skip(self, key), fields(owner = key.owner_id, name = %key.name))]
@@ -1533,7 +1595,7 @@ impl Store {
         dst_owner_id: i64,
         dst_owner_type: &str,
         new_name: Option<&str>,
-    ) -> Result<TimeSeriesKey> {
+    ) -> Result<AddedTimeSeries> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
@@ -1544,6 +1606,12 @@ impl Store {
         if let Some(name) = new_name {
             meta.name = name.to_string();
         }
+        // The copy is its own catalog row and gets its own id. `meta` came from
+        // a read, so its `id` is the *source's* — carrying it over would make
+        // this an explicit-id insert of an id that is by definition already
+        // taken, and the primary key would reject it. Every column the copy
+        // does keep is descriptive; this one describes the row.
+        meta.id = None;
 
         let dst = KeyIdentity {
             owner_id: meta.owner_id,
@@ -1560,10 +1628,153 @@ impl Store {
 
         let tx = self.metadata.savepoint()?;
         check_forecast_family_free(&tx, &meta, "copy")?;
-        MetadataStore::insert(&tx, &meta)?;
+        let id = MetadataStore::insert(&tx, &meta)?;
         tx.commit()?;
 
-        TimeSeriesKey::from_metadata(&meta)
+        Ok(AddedTimeSeries {
+            key: TimeSeriesKey::from_metadata(&meta)?,
+            id,
+        })
+    }
+
+    /// Insert association rows verbatim, filing each under the `id` it carries.
+    ///
+    /// The write half of the OpenAPI document round trip (see
+    /// [`Self::import_time_series_associations_openapi`], which owns the wire
+    /// spelling and calls this). Rows only: every row must name an array the
+    /// store already holds, because the document carries locators, never
+    /// values. The arrays arrive with the artifact.
+    ///
+    /// All-or-nothing, and validated before anything is written:
+    ///
+    /// - Each row's `data_hash` must be present in the backend. A row naming an
+    ///   array the store does not hold would be a dangling association — the
+    ///   store opens cleanly, lists the series, and reads nothing — which is
+    ///   the failure [`TimeSeriesError::StoreExists`] exists to prevent,
+    ///   arriving by a different door.
+    /// - Each row's declared geometry must be the array's. `[length,
+    ///   *element_shape]` is the native shape, so it is checked against the one
+    ///   the backend holds: a document naming a real array under a length or
+    ///   element shape it was not hashed from would otherwise file a row whose
+    ///   metadata and data disagree.
+    /// - `NonSequentialTimeSeries` is refused. Its timestamp vector is
+    ///   content-addressed in the catalog and deliberately absent from the wire
+    ///   form, so no document can reconstruct one.
+    /// - A `DeterministicSingleTimeSeries` is a view of a `SingleTimeSeries`,
+    ///   so its source must be present — in this batch or already stored. Views
+    ///   are therefore written last, after the rows they may depend on.
+    ///
+    /// Returns the number of rows inserted.
+    pub fn import_association_rows(&mut self, rows: Vec<TimeSeriesMetadata>) -> Result<usize> {
+        if self.read_only {
+            return Err(TimeSeriesError::ReadOnlyStore);
+        }
+        for meta in &rows {
+            if meta.time_series_type == TimeSeriesType::NonSequentialTimeSeries {
+                return Err(TimeSeriesError::InvalidParameter(format!(
+                    "cannot import NonSequentialTimeSeries '{}': its timestamp vector is \
+                     content-addressed in the catalog and is not carried by the wire form, \
+                     so no document holds enough to reconstruct the row",
+                    meta.name,
+                )));
+            }
+            if !self.backend.contains(&meta.data_hash)? {
+                return Err(TimeSeriesError::InvalidParameter(format!(
+                    "cannot import '{}' (owner {}): it names array {}, which this store does \
+                     not hold. An import writes rows only — the arrays arrive with the \
+                     artifact — so the row would be a dangling reference",
+                    meta.name,
+                    meta.owner_id,
+                    crate::hash::hash_hex(&meta.data_hash),
+                )));
+            }
+            // Holding the array is not the same as the row describing it. The
+            // hash proves nothing about *this* row's columns: a document is
+            // free to name a real array and declare a length or element shape
+            // that is not the one it was hashed from, and the row would then
+            // report a geometry the bytes do not have — a static read handing
+            // back metadata and data that disagree, a forecast read failing
+            // somewhere later with no mention of the import. A declared dtype
+            // that lies is already refused on the read path (`check_dtype`);
+            // this is the half that was silent.
+            if let Some(length) = meta.length {
+                let mut declared = Vec::with_capacity(meta.element_shape.len() + 1);
+                declared.push(length);
+                declared.extend_from_slice(&meta.element_shape);
+                let stored = self.backend.array_shape(&meta.data_hash)?;
+                if declared != stored {
+                    return Err(TimeSeriesError::InvalidParameter(format!(
+                        "cannot import '{}' (owner {}): it declares shape {declared:?} for \
+                         array {}, which this store holds with shape {stored:?}",
+                        meta.name,
+                        meta.owner_id,
+                        crate::hash::hash_hex(&meta.data_hash),
+                    )));
+                }
+            }
+        }
+
+        // The same all-or-none rule as a bulk add: the schema requires
+        // `association_id` on every row, so a document missing some is not one
+        // this store wrote, and mixing assigned with supplied ids would make the
+        // outcome depend on insertion order (which, with views deferred below,
+        // is not even the document's own order).
+        let explicit = rows.iter().filter(|m| m.id.is_some()).count();
+        if explicit != 0 && explicit != rows.len() {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "{explicit} of {} rows carry an association_id and the rest do not; a \
+                 document either supplies one for every row or for none",
+                rows.len()
+            )));
+        }
+
+        // Views last: a `DeterministicSingleTimeSeries` is a view of a
+        // `SingleTimeSeries`, and `check_forecast_family_free` reads the rows
+        // already inserted, so the order within one batch is load-bearing
+        // rather than cosmetic.
+        let (views, plain): (Vec<_>, Vec<_>) = rows
+            .into_iter()
+            .partition(|m| m.time_series_type == TimeSeriesType::DeterministicSingleTimeSeries);
+
+        let tx = self.metadata.savepoint()?;
+        let ids: Vec<i64> = plain
+            .iter()
+            .chain(views.iter())
+            .filter_map(|m| m.id)
+            .collect();
+        MetadataStore::check_explicit_time_series_ids(&tx, &ids)?;
+        let mut shared_sets = SharedSetCache::default();
+        let mut inserted = 0usize;
+        for meta in &plain {
+            insert_association(&tx, meta, &mut shared_sets)?;
+            inserted += 1;
+        }
+        for meta in &views {
+            // A view without its source is a state `transform_single_time_series`
+            // never produces, and one a later remove of the shared array's other
+            // holder would leave dangling. The plain rows are already in, so
+            // one family probe covers "in this document" and "already stored".
+            let has_source = crate::metadata::forecast_family_conflict(
+                &tx,
+                meta.owner_id,
+                meta.owner_category,
+                &meta.name,
+                meta.resolution,
+                &crate::hash::features_hash(&meta.features),
+                TimeSeriesType::SingleTimeSeries,
+            )?;
+            if !has_source {
+                return Err(TimeSeriesError::InvalidParameter(format!(
+                    "cannot import DeterministicSingleTimeSeries '{}' (owner {}): it is a view \
+                     of a SingleTimeSeries that is neither in this document nor already stored",
+                    meta.name, meta.owner_id,
+                )));
+            }
+            insert_association(&tx, meta, &mut shared_sets)?;
+            inserted += 1;
+        }
+        tx.commit()?;
+        Ok(inserted)
     }
 
     /// Read one series, optionally sliced to `time_range`.
@@ -2176,7 +2387,50 @@ impl Store {
             .iter()
             .map(|k| self.metadata.get_by_key(k))
             .collect::<Result<_>>()?;
+        self.bulk_read_metas(&metas)
+    }
 
+    /// Read every series named by its catalog `id`, in the order the ids are
+    /// given.
+    ///
+    /// The read-direction counterpart of the id a write hands back: a consumer
+    /// that recorded ids in its own model (a generator's cost function naming
+    /// the series that varies it) resolves them here without keeping an
+    /// id-to-key map of its own.
+    ///
+    /// [`TimeSeriesError::NotFound`] if any id names no row — unlike
+    /// [`Self::association_exists`], which asks the question, this one is
+    /// already committed to reading and a missing id means the caller's
+    /// reference is stale. The error does not say *which* id dangled; a caller
+    /// that needs to know sifts them with [`Self::association_exists`], which
+    /// is the cheaper call for exactly that.
+    ///
+    /// One catalog query for the whole set, so this costs what the keyed bulk
+    /// read costs.
+    #[tracing::instrument(skip(self, ids), fields(count = ids.len()))]
+    pub fn read_by_ids(&self, ids: &[i64]) -> Result<Vec<TimeSeriesData>> {
+        let found = self.metadata.list_by_ids(ids)?;
+        // The catalog returns each row once, in its own order; the caller asked
+        // for a specific order and may have repeated an id.
+        let by_id: HashMap<i64, &TimeSeriesMetadata> = found
+            .iter()
+            .filter_map(|m| m.id.map(|id| (id, m)))
+            .collect();
+        let metas: Vec<TimeSeriesMetadata> = ids
+            .iter()
+            .map(|id| {
+                by_id
+                    .get(id)
+                    .map(|m| (*m).clone())
+                    .ok_or(TimeSeriesError::NotFound)
+            })
+            .collect::<Result<_>>()?;
+        self.bulk_read_metas(&metas)
+    }
+
+    /// The shared body of [`Self::bulk_read`] and [`Self::read_by_ids`],
+    /// working from rows both have already resolved.
+    fn bulk_read_metas(&self, metas: &[TimeSeriesMetadata]) -> Result<Vec<TimeSeriesData>> {
         // Batch the packed SingleTimeSeries reads; everything else is standalone
         // and reuses the per-key reconstruction.
         let (single_hashes, single_dtypes): (Vec<[u8; 32]>, Vec<Dtype>) = metas
@@ -2189,12 +2443,12 @@ impl Store {
             .read_arrays(&single_hashes, &single_dtypes)?
             .into_iter();
 
-        let mut out = Vec::with_capacity(keys.len());
-        for meta in &metas {
+        let mut out = Vec::with_capacity(metas.len());
+        for meta in metas {
             if meta.time_series_type == TimeSeriesType::SingleTimeSeries {
                 let data = single_arrays.next().ok_or_else(|| {
                     TimeSeriesError::IntegrityError(
-                        "bulk_read: fewer arrays returned than SingleTimeSeries keys".into(),
+                        "bulk_read: fewer arrays returned than SingleTimeSeries rows".into(),
                     )
                 })?;
                 let initial = meta.initial_timestamp.ok_or_else(|| {
@@ -2275,6 +2529,26 @@ impl Store {
     /// Look up the full metadata record for a key. Errors with `NotFound` if no
     /// association matches. Used by external bindings (e.g. the Julia
     /// `RustTimeSeriesStore`) to reconstruct a typed metadata object on read.
+    /// The metadata of the association filed under `id`, or `None` if the
+    /// catalog holds no such row.
+    ///
+    /// `None` rather than an error: a consumer validating references it
+    /// persisted earlier is asking whether one still resolves, and a stale
+    /// reference is an answer.
+    pub fn get_metadata_by_id(&self, id: i64) -> Result<Option<TimeSeriesMetadata>> {
+        self.metadata.get_by_id(id)
+    }
+
+    /// Whether an association is filed under `id`.
+    ///
+    /// A primary-key probe — one statement, no row fetched — so a consumer can
+    /// check every reference in its model on load rather than discovering a
+    /// dangling one mid-run. Use [`Self::get_metadata_by_id`] when the answer
+    /// is wanted along with the row.
+    pub fn association_exists(&self, id: i64) -> Result<bool> {
+        self.metadata.exists_by_id(id)
+    }
+
     pub fn get_metadata(&self, key: &KeyIdentity) -> Result<TimeSeriesMetadata> {
         self.metadata.get_by_key(key)
     }
@@ -2482,6 +2756,7 @@ impl Store {
                 sources: 0,
                 interval: requested_interval,
                 interval_normalized: false,
+                written: Vec::new(),
             });
         };
         let interval = plan.interval;
@@ -2608,13 +2883,7 @@ impl Store {
                     horizon.to_iso8601(),
                 )));
             }
-            new_metas.push(TimeSeriesMetadata {
-                time_series_type: TimeSeriesType::DeterministicSingleTimeSeries,
-                horizon: Some(horizon),
-                interval: Some(interval),
-                count: Some(count),
-                ..src.clone()
-            });
+            new_metas.push(derived_view_row(src.clone(), horizon, interval, count));
         }
 
         if policy.dry_run {
@@ -2625,6 +2894,7 @@ impl Store {
                 sources: sources.len(),
                 interval,
                 interval_normalized: plan.interval_normalized,
+                written: Vec::new(),
             });
         }
 
@@ -2634,10 +2904,17 @@ impl Store {
         // the feature-set writes collapse to a handful regardless of how many
         // series are transformed.
         let mut feature_sets = SharedSetCache::default();
+        let mut written = Vec::with_capacity(new_metas.len());
         for meta in &new_metas {
-            if let Err(e) = MetadataStore::insert_batched(&tx, meta, &mut feature_sets) {
-                drop(tx);
-                return Err(e);
+            match MetadataStore::insert_batched(&tx, meta, &mut feature_sets) {
+                Ok(id) => written.push(AddedTimeSeries {
+                    key: TimeSeriesKey::from_metadata(meta)?,
+                    id,
+                }),
+                Err(e) => {
+                    drop(tx);
+                    return Err(e);
+                }
             }
         }
         tx.commit()?;
@@ -2646,6 +2923,7 @@ impl Store {
             sources: sources.len(),
             interval,
             interval_normalized: plan.interval_normalized,
+            written,
         })
     }
 
@@ -2670,6 +2948,7 @@ impl Store {
             name_glob: None,
             component_field: None,
             zoneless: None,
+            ids: None,
         })
     }
 
@@ -2785,10 +3064,7 @@ impl Store {
         if updated > 1 {
             // A key names one series, so touching more than one row means the
             // predicate was wider than the caller asked for. Fail *before* the
-            // commit: this used to commit a multi-row update and only then
-            // discover the ambiguity on the follow-up lookup, reporting an error
-            // for a rename that had already taken full effect. The `tx` drop
-            // rolls it back.
+            // commit, so the `tx` drop rolls the update back.
             return Err(TimeSeriesError::IntegrityError(format!(
                 "rename matched {updated} associations for a single key identity"
             )));
@@ -2992,39 +3268,49 @@ impl Store {
     // in both directions — removing a component's series leaves its attachments
     // alone, and vice versa.
 
-    /// Attach a supplemental attribute to a component. Fails with
+    /// Attach a supplemental attribute to a component, returning the catalog id
+    /// the attachment was filed under. Fails with
     /// [`TimeSeriesError::DuplicateAssociation`] if that component already
     /// carries that attribute, whatever type names are supplied.
+    ///
+    /// The catalog assigns the id; `assoc.id` is ignored on the way in, so a row
+    /// read back from one store and attached to another is filed under a fresh
+    /// id there. This table's ids are independent of the other two catalogs'.
     pub fn add_supplemental_attribute_association(
         &mut self,
         assoc: SupplementalAttributeAssociation,
-    ) -> Result<()> {
+    ) -> Result<i64> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
         let tx = self.metadata.savepoint()?;
-        MetadataStore::insert_supplemental_attribute_association(&tx, &assoc)?;
+        let id = MetadataStore::insert_supplemental_attribute_association(&tx, &assoc)?;
         tx.commit()?;
-        Ok(())
+        Ok(id)
     }
 
-    /// Attach many in one all-or-nothing transaction, returning the number
-    /// inserted. A duplicate anywhere in the batch rolls the whole batch back.
-    /// This is the import half of the bulk round trip whose export is
+    /// Attach many in one all-or-nothing transaction, returning the id of each
+    /// in input order. A duplicate anywhere in the batch rolls the whole batch
+    /// back. This is the import half of the bulk round trip whose export is
     /// [`Self::list_supplemental_attribute_associations`] with a default filter.
+    ///
+    /// Returns ids rather than a count, which is `.len()` on the result.
     pub fn add_supplemental_attribute_associations(
         &mut self,
         assocs: Vec<SupplementalAttributeAssociation>,
-    ) -> Result<usize> {
+    ) -> Result<Vec<i64>> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
         let tx = self.metadata.savepoint()?;
+        let mut ids = Vec::with_capacity(assocs.len());
         for assoc in &assocs {
-            MetadataStore::insert_supplemental_attribute_association(&tx, assoc)?;
+            ids.push(MetadataStore::insert_supplemental_attribute_association(
+                &tx, assoc,
+            )?);
         }
         tx.commit()?;
-        Ok(assocs.len())
+        Ok(ids)
     }
 
     /// Whether any attachment matches `filter`.
@@ -3141,31 +3427,35 @@ impl Store {
     /// Record a parent/child edge. Fails with
     /// [`TimeSeriesError::DuplicateAssociation`] if that ordered pair is already
     /// related.
-    pub fn add_parent_child_association(&mut self, assoc: ParentChildAssociation) -> Result<()> {
+    /// Record a directed edge, returning the catalog id it was filed under. As
+    /// on [`Self::add_supplemental_attribute_association`], the catalog assigns
+    /// it and `assoc.id` is ignored, over this table's own id stream.
+    pub fn add_parent_child_association(&mut self, assoc: ParentChildAssociation) -> Result<i64> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
         let tx = self.metadata.savepoint()?;
-        MetadataStore::insert_parent_child_association(&tx, &assoc)?;
+        let id = MetadataStore::insert_parent_child_association(&tx, &assoc)?;
         tx.commit()?;
-        Ok(())
+        Ok(id)
     }
 
-    /// Record many edges in one all-or-nothing transaction, returning the number
-    /// inserted.
+    /// Record many edges in one all-or-nothing transaction, returning the id of
+    /// each in input order. The count is `.len()` on the result.
     pub fn add_parent_child_associations(
         &mut self,
         assocs: Vec<ParentChildAssociation>,
-    ) -> Result<usize> {
+    ) -> Result<Vec<i64>> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
         let tx = self.metadata.savepoint()?;
+        let mut ids = Vec::with_capacity(assocs.len());
         for assoc in &assocs {
-            MetadataStore::insert_parent_child_association(&tx, assoc)?;
+            ids.push(MetadataStore::insert_parent_child_association(&tx, assoc)?);
         }
         tx.commit()?;
-        Ok(assocs.len())
+        Ok(ids)
     }
 
     /// Whether any edge matches `filter`.
@@ -3805,7 +4095,7 @@ impl BulkAdd<'_> {
     /// Flush the buffer: write all arrays as batch-sized blocks and insert every
     /// association in one transaction, returning the keys in push order. On any
     /// error nothing is committed and staged arrays are rolled back.
-    pub fn commit(mut self) -> Result<Vec<TimeSeriesKey>> {
+    pub fn commit(mut self) -> Result<Vec<AddedTimeSeries>> {
         self.committed = true;
         let items = std::mem::take(&mut self.items);
         self.store.flush_bulk_add(items)
@@ -3907,6 +4197,7 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
                     element_type,
                     element_shape: single.data.element_shape().to_vec(),
                     application_data: item.data.application_data().map(str::to_owned),
+                    id: None,
                 },
                 TimeSeriesKey::Single(SingleTimeSeriesKey::new(
                     item.owner_id,
@@ -3953,6 +4244,7 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
                     element_type,
                     element_shape: non_sequential.data.element_shape().to_vec(),
                     application_data: item.data.application_data().map(str::to_owned),
+                    id: None,
                 },
                 TimeSeriesKey::NonSequential(NonSequentialTimeSeriesKey::new(
                     item.owner_id,
@@ -4165,6 +4457,29 @@ fn request_array(item: &AddRequest) -> &TypedArray {
     }
 }
 
+/// The catalog row for a `DeterministicSingleTimeSeries` view of `src`, as
+/// [`Store::transform_single_time_series`] writes it: the source's own
+/// descriptors under the forecast geometry the plan derived.
+///
+/// `id` is cleared rather than inherited: a view is its own row, and `..src`
+/// would otherwise carry the *source's* id — `Some` on anything read back from
+/// the catalog — straight into a primary-key collision.
+fn derived_view_row(
+    src: TimeSeriesMetadata,
+    horizon: Period,
+    interval: Period,
+    count: usize,
+) -> TimeSeriesMetadata {
+    TimeSeriesMetadata {
+        time_series_type: TimeSeriesType::DeterministicSingleTimeSeries,
+        horizon: Some(horizon),
+        interval: Some(interval),
+        count: Some(count),
+        id: None,
+        ..src
+    }
+}
+
 /// Insert one association, enforcing the Deterministic/DeterministicSingleTimeSeries
 /// mutual exclusion: a DST is a synthetic view of a SingleTimeSeries, so a family
 /// may hold one or the other but never both. A DST is only ever created by
@@ -4174,9 +4489,9 @@ fn insert_association(
     tx: &rusqlite::Connection,
     meta: &TimeSeriesMetadata,
     cache: &mut SharedSetCache,
-) -> Result<()> {
+) -> Result<i64> {
     check_forecast_family_free(tx, meta, "add")?;
-    MetadataStore::insert_batched(tx, meta, cache).map(|_| ())
+    MetadataStore::insert_batched(tx, meta, cache)
 }
 
 /// The type that may not share an abstract-deterministic family with `ty`, or
@@ -4415,8 +4730,7 @@ fn require_ms(t: chrono::DateTime<chrono::Utc>, label: &str) -> Result<()> {
 /// catalog — `check_static_consistency`, `transform_single_time_series`,
 /// `build_static_reader` — works off the wrong grid.
 ///
-/// The sibling [`validate_non_sequential`] has always enforced the equivalent
-/// rule; this is the static path catching up.
+/// [`validate_non_sequential`] enforces the equivalent rule.
 fn validate_single(series: &SingleTimeSeries) -> Result<()> {
     require_ms(series.initial_timestamp, "SingleTimeSeries")?;
     if series.length != series.data.length() {
@@ -4562,6 +4876,7 @@ fn forecast_metadata(
         element_type,
         element_shape: data.element_shape().to_vec(),
         application_data: item.data.application_data().map(str::to_owned),
+        id: None,
     }
 }
 
@@ -4711,11 +5026,11 @@ fn persist_temp_path(target: &Path, tag: &str) -> PathBuf {
 /// silently absent on the network filesystems this runs on, so it stages the
 /// same way.
 ///
-/// The cost is that a crashed staging no longer gets swept by the next one:
-/// leftovers accumulate as `<target>.persist-<tag>` / `<store>.h5.repack-<tag>`
-/// siblings. They cannot be swept safely, because a temp belonging to a live
-/// concurrent save is indistinguishable from an abandoned one. Callers may
-/// delete them once no save is in flight.
+/// The cost is that a crashed staging is not swept: leftovers accumulate as
+/// `<target>.persist-<tag>` / `<store>.h5.repack-<tag>` siblings. They cannot
+/// be swept safely, because a temp belonging to a live concurrent save is
+/// indistinguishable from an abandoned one. Callers may delete them once no
+/// save is in flight.
 fn temp_tag() -> String {
     let mut tag = mint_generation();
     tag.truncate(16);

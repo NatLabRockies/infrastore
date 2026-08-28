@@ -42,6 +42,7 @@ fn add_sts(store: &mut Store, owner: i64) -> infrastore_core::TimeSeriesKey {
             Features::new(),
         )
         .unwrap()
+        .key
 }
 
 // --- count_array_references: cases beyond (1, 1) --------------------------------

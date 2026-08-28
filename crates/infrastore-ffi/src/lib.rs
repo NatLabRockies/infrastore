@@ -23,6 +23,46 @@
 //! Two handles onto the *same* on-disk artifact are a different question,
 //! answered by SQLite and HDF5 rather than by this crate: one writer at a time,
 //! and a reader open while a writer is running may observe a partial state.
+//!
+//! # ABI conventions
+//!
+//! These hold for **every** exported function, and the per-function `# Safety`
+//! sections do not repeat them — those cover only what is specific to the call.
+//!
+//! **Handles.** Every `handle` / `batch` / `reader` argument must be a live,
+//! non-null handle created by this library and not yet freed, and must not be
+//! in two calls at once (see Concurrency above). A handle taken by a mutating
+//! call must additionally come from a store opened read-write.
+//!
+//! **Strings in.** Every `*const c_char` must point to a null-terminated UTF-8
+//! string that stays valid for the duration of the call. Arguments documented
+//! as optional may be null; the rest may not, and a null one returns
+//! `INFRASTORE_ERR_NULL_POINTER`.
+//!
+//! **Scalars out.** Every `out_*` pointer to a scalar must be valid for writing
+//! one value.
+//!
+//! **Owned strings out.** An `out_*` naming a string receives either null (the
+//! value is unset) or an owned C string the caller must free exactly once with
+//! [`infrastore_string_free`].
+//!
+//! **Owned buffers out.** An `out_*` naming a buffer is paired with a length
+//! out-param and must be freed exactly once with the deallocator matching its
+//! element type — `infrastore_buffer_free_u8`, `_u64`, `_f64`, and so on —
+//! passing the companion length. A freed pointer must not be used again.
+//!
+//! **Probe-then-fetch.** A call taking `buf` / `cap` / `out_len` writes the
+//! required length to `out_len` and fills `buf` only when `cap` is large
+//! enough. `buf` may be null (a length probe); when non-null it must be valid
+//! for `cap` bytes.
+//!
+//! **Handles out.** A call returning a handle writes it through an `out_*`
+//! pointer valid for one pointer; the caller releases it exactly once with the
+//! matching destructor — [`infrastore_store_free`], [`infrastore_key_free`],
+//! [`infrastore_batch_free`], and so on. Every destructor also accepts null.
+//!
+//! **Owner arguments.** Where a call takes `owner_id` / `owner_category`, the
+//! category is `0` = Component, `1` = SupplementalAttribute.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -68,6 +108,13 @@ pub const INFRASTORE_ERR_STORE_EXISTS: i32 = 11;
 /// The HDF5 file and its catalog do not carry the same generation stamp: they
 /// are halves of two different saves.
 pub const INFRASTORE_ERR_MISMATCHED_ARTIFACT: i32 = 12;
+/// A caller supplied an explicit association id that is already in use.
+///
+/// Distinct from `INFRASTORE_ERR_DUPLICATE_ASSOCIATION`, which is the endpoint
+/// pair colliding, and from `INFRASTORE_ERR_DUPLICATE`, which is a series'
+/// identity colliding. The three mean different things to a caller: a taken id
+/// says the ids being imported do not fit this store.
+pub const INFRASTORE_ERR_DUPLICATE_ASSOCIATION_ID: i32 = 13;
 pub const INFRASTORE_ERR_INTERNAL: i32 = 99;
 
 thread_local! {
@@ -88,6 +135,7 @@ fn map_core_error(e: core_lib::TimeSeriesError) -> i32 {
         E::NotFound => INFRASTORE_ERR_NOT_FOUND,
         E::DuplicateTimeSeries => INFRASTORE_ERR_DUPLICATE,
         E::DuplicateAssociation(_) => INFRASTORE_ERR_DUPLICATE_ASSOCIATION,
+        E::DuplicateAssociationId(_) => INFRASTORE_ERR_DUPLICATE_ASSOCIATION_ID,
         E::InvalidParameter(_) => INFRASTORE_ERR_INVALID_PARAMETER,
         E::IntegrityError(_) => INFRASTORE_ERR_INTEGRITY,
         E::ReadOnlyStore => INFRASTORE_ERR_READ_ONLY,
@@ -431,9 +479,7 @@ unsafe fn write_owned_str_out(s: String, out: *mut *mut c_char, out_len: *mut u6
 ///
 /// # Safety
 ///
-/// `out` must be valid for writing one pointer. When non-null, `path` must point to a valid,
-/// null-terminated UTF-8 string. The returned handle must be released exactly once with
-/// `infrastore_store_free`.
+/// When non-null, `path` must point to a valid, null-terminated UTF-8 string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_create(
     path: *const c_char,
@@ -471,9 +517,7 @@ pub unsafe extern "C" fn infrastore_store_create(
 ///
 /// # Safety
 ///
-/// `out` must be valid for writing one pointer. When non-null, `path` must point to a valid,
-/// null-terminated UTF-8 string. The returned handle must be released exactly once with
-/// `infrastore_store_free`.
+/// When non-null, `path` must point to a valid, null-terminated UTF-8 string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_create_with_compression(
     path: *const c_char,
@@ -513,8 +557,7 @@ pub unsafe extern "C" fn infrastore_store_create_with_compression(
 ///
 /// # Safety
 ///
-/// `path` must point to a valid, null-terminated UTF-8 string, and `out` must be valid for writing
-/// one pointer. The returned handle must be released exactly once with `infrastore_store_free`.
+/// Standard: see the crate-level ABI conventions.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_open(
     path: *const c_char,
@@ -593,9 +636,7 @@ fn catalog_from_code(code: u8) -> std::result::Result<core_lib::CatalogMode, i32
 ///
 /// # Safety
 ///
-/// `path` must be null or point to a valid, null-terminated UTF-8 string, and `out` must be valid
-/// for writing one pointer. The returned handle must be released exactly once with
-/// `infrastore_store_free`.
+/// Standard: see the crate-level ABI conventions.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_create_with_catalog(
     path: *const c_char,
@@ -652,8 +693,7 @@ pub unsafe extern "C" fn infrastore_store_create_with_catalog(
 ///
 /// # Safety
 ///
-/// `path` must point to a valid, null-terminated UTF-8 string, and `out` must be valid for writing
-/// one pointer. The returned handle must be released exactly once with `infrastore_store_free`.
+/// Standard: see the crate-level ABI conventions.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_create_replacing(
     path: *const c_char,
@@ -704,9 +744,7 @@ pub unsafe extern "C" fn infrastore_store_create_replacing(
 ///
 /// # Safety
 ///
-/// `src` and `dest` must point to valid, null-terminated UTF-8 strings, and `out` must be valid for
-/// writing one pointer. The returned handle must be released exactly once with
-/// `infrastore_store_free`.
+/// Standard: see the crate-level ABI conventions.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_open_copy(
     src: *const c_char,
@@ -755,8 +793,7 @@ pub unsafe extern "C" fn infrastore_store_open_copy(
 ///
 /// # Safety
 ///
-/// `path` must point to a valid, null-terminated UTF-8 string, and `out` must be valid for writing
-/// one pointer. The returned handle must be released exactly once with `infrastore_store_free`.
+/// Standard: see the crate-level ABI conventions.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_open_with_catalog(
     path: *const c_char,
@@ -793,8 +830,7 @@ pub unsafe extern "C" fn infrastore_store_open_with_catalog(
 ///
 /// # Safety
 ///
-/// `handle` must be a live handle returned by this library, and `out` must be valid for writing one
-/// `uint8_t`.
+/// Standard: see the crate-level ABI conventions.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_catalog_mode(
     handle: *const InfraStoreHandle,
@@ -988,11 +1024,12 @@ unsafe fn build_single_request(
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle. `owner_id` is a plain integer. Required string
-/// pointers must reference null-terminated UTF-8 strings; optional string pointers may be null.
-/// `dims_ptr` must reference `ndims` elements when `ndims` is nonzero, and `data_ptr` must reference
-/// `data_byte_len` bytes. `out_key` must be valid for writing one pointer. The returned key must be
-/// released with `infrastore_key_free`.
+/// Required string pointers must reference null-terminated UTF-8 strings; optional string
+/// pointers may be null. `dims_ptr` must reference `ndims` elements when `ndims` is nonzero;
+/// `data_ptr` must reference `data_byte_len` bytes. `out_key`, when non-null, must be valid
+/// for writing one pointer.
+/// `out_id`, when non-null, must be valid for writing one `i64`, and receives the catalog
+/// id the row was filed under.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_add_single(
@@ -1016,6 +1053,7 @@ pub unsafe extern "C" fn infrastore_store_add_single(
     time_reference: *const c_char,
     component_field: *const c_char,
     out_key: *mut *mut InfraStoreKeyHandle,
+    out_id: *mut i64,
 ) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_mut() } {
@@ -1055,11 +1093,15 @@ pub unsafe extern "C" fn infrastore_store_add_single(
         Err(c) => return c,
     };
     match store.inner.add_time_series_bulk(vec![req]) {
-        Ok(mut keys) => {
+        Ok(mut added) => {
+            let added = added.remove(0);
             let handle = Box::new(InfraStoreKeyHandle {
-                inner: keys.remove(0).identity().clone(),
+                inner: added.key.identity().clone(),
             });
             unsafe { *out_key = Box::into_raw(handle) };
+            if !out_id.is_null() {
+                unsafe { *out_id = added.id };
+            }
             INFRASTORE_OK
         }
         Err(e) => map_core_error(e),
@@ -1159,11 +1201,13 @@ unsafe fn build_non_sequential_request(
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle. `owner_id` is a plain integer. Required string
-/// pointers must reference null-terminated UTF-8 strings; optional string pointers may be null.
-/// `timestamps_unix_ms` must reference `timestamps_len` elements, `dims_ptr` must reference `ndims`
-/// elements when `ndims` is nonzero, and `data_ptr` must reference `data_byte_len` bytes. `out_key`
-/// must be valid for writing one pointer. The returned key must be released with `infrastore_key_free`.
+/// Required string pointers must reference null-terminated UTF-8 strings; optional string
+/// pointers may be null. `timestamps_unix_ms` must reference `timestamps_len` elements,
+/// `dims_ptr` must reference `ndims` elements when `ndims` is nonzero; `data_ptr` must
+/// reference `data_byte_len` bytes. `out_key`, when non-null, must be valid for writing one
+/// pointer.
+/// `out_id`, when non-null, must be valid for writing one `i64`, and receives the catalog
+/// id the row was filed under.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_add_non_sequential(
@@ -1187,6 +1231,7 @@ pub unsafe extern "C" fn infrastore_store_add_non_sequential(
     time_reference: *const c_char,
     component_field: *const c_char,
     out_key: *mut *mut InfraStoreKeyHandle,
+    out_id: *mut i64,
 ) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_mut() } {
@@ -1226,12 +1271,16 @@ pub unsafe extern "C" fn infrastore_store_add_non_sequential(
         Err(c) => return c,
     };
     match store.inner.add_time_series_bulk(vec![request]) {
-        Ok(mut keys) => {
+        Ok(mut added) => {
+            let added = added.remove(0);
             unsafe {
                 *out_key = Box::into_raw(Box::new(InfraStoreKeyHandle {
-                    inner: keys.remove(0).identity().clone(),
+                    inner: added.key.identity().clone(),
                 }))
             };
+            if !out_id.is_null() {
+                unsafe { *out_id = added.id };
+            }
             INFRASTORE_OK
         }
         Err(error) => map_core_error(error),
@@ -1697,7 +1746,7 @@ pub unsafe extern "C" fn infrastore_store_get_non_sequential(
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle and `key` must be a live key handle created by this
+/// `key` must be a live key handle created by this
 /// library. Neither handle may be used concurrently from another thread for the
 /// duration of the call.
 #[unsafe(no_mangle)]
@@ -1720,10 +1769,8 @@ pub unsafe extern "C" fn infrastore_store_remove(
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle. `keys` must point to `len`
-/// valid, non-null key-handle pointers created by this library. `out_removed`
-/// must be valid for writing one `u64`. No handle may be used concurrently from
-/// another thread for the duration of the call.
+/// `keys` must point to `len` valid, non-null key-handle pointers created by this library. No
+/// handle may be used concurrently from another thread for the duration of the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_remove_bulk(
     handle: *mut InfraStoreHandle,
@@ -1760,8 +1807,7 @@ pub unsafe extern "C" fn infrastore_store_remove_bulk(
 ///
 /// # Safety
 ///
-/// `handle` and `key` must be live handles created by this library, and `out_present` must be valid
-/// for writing one `bool`.
+/// `handle` and `key` must be live handles created by this library.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_has(
     handle: *const InfraStoreHandle,
@@ -1787,7 +1833,7 @@ pub unsafe extern "C" fn infrastore_store_has(
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. All output pointers must be valid for writing one `i64`.
+/// All output pointers must be valid for writing one `i64`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_counts(
     handle: *const InfraStoreHandle,
@@ -1829,12 +1875,10 @@ pub unsafe extern "C" fn infrastore_store_counts(
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle; the filter args are plain scalars.
-/// `out_present` must be valid for writing one `bool`; `out_horizon`,
-/// `out_interval`, and `out_resolution` must each be valid for writing one
-/// `char *`, and each non-null result must be freed exactly once with
-/// `infrastore_string_free`; `out_count` and `out_initial_ms` must each be valid
-/// for writing one `i64`.
+/// The filter args are plain scalars. `out_horizon`, `out_interval`, and `out_resolution` must
+/// each be valid for writing one `char *`, and each non-null result freed exactly once with
+/// `infrastore_string_free`. `out_count` and `out_initial_ms` must each be valid for writing
+/// one `i64`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_get_forecast_parameters(
@@ -1899,9 +1943,7 @@ pub unsafe extern "C" fn infrastore_store_get_forecast_parameters(
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. `filter_resolution` must be null or a
-/// valid NUL-terminated string. `out_len` must be writable; `buf` must be null
-/// or valid for `cap` bytes.
+/// `filter_resolution` must be null or a valid NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_check_static_consistency(
     handle: *const InfraStoreHandle,
@@ -1950,8 +1992,7 @@ pub unsafe extern "C" fn infrastore_store_check_static_consistency(
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle; the type filter args are plain scalars.
-/// `out_len` must be writable; `buf` must be null or valid for `cap` bytes.
+/// The type filter args are plain scalars.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_get_resolutions(
     handle: *const InfraStoreHandle,
@@ -2000,8 +2041,7 @@ pub unsafe extern "C" fn infrastore_store_get_resolutions(
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle; the type filter args are plain scalars.
-/// `out_len` must be writable; `buf` must be null or valid for `cap` bytes.
+/// The type filter args are plain scalars.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_get_intervals(
     handle: *const InfraStoreHandle,
@@ -2098,8 +2138,7 @@ pub unsafe extern "C" fn infrastore_store_is_empty(
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. `out_has_path` and `out_len` must be valid
-/// for writing; `buf` must be null or valid for `cap` bytes.
+/// `out_has_path` and `out_len` must be valid for writing.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_get_path(
     handle: *const InfraStoreHandle,
@@ -2133,8 +2172,7 @@ pub unsafe extern "C" fn infrastore_store_get_path(
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. `out_len` must be writable; `buf` must be
-/// null or valid for `cap` bytes.
+/// Standard: see the crate-level ABI conventions.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_counts_by_type(
     handle: *const InfraStoreHandle,
@@ -2171,8 +2209,7 @@ pub unsafe extern "C" fn infrastore_store_counts_by_type(
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. `out_count` must be valid for writing one
-/// `i64`.
+/// Standard: see the crate-level ABI conventions.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_num_distinct_arrays(
     handle: *const InfraStoreHandle,
@@ -2198,8 +2235,7 @@ pub unsafe extern "C" fn infrastore_store_num_distinct_arrays(
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. Each out pointer must be valid for
-/// writing one `i64`.
+/// Each out pointer must be valid for writing one `i64`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_counts_detailed(
     handle: *const InfraStoreHandle,
@@ -2239,8 +2275,7 @@ pub unsafe extern "C" fn infrastore_store_counts_detailed(
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle; the filter args are plain scalars.
-/// `out_len` must be writable; `buf` must be null or valid for `cap` bytes.
+/// The filter args are plain scalars.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_list_owner_ids(
     handle: *const InfraStoreHandle,
@@ -2298,8 +2333,7 @@ pub unsafe extern "C" fn infrastore_store_list_owner_ids(
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. `out_len` must be writable; `buf` must be
-/// null or valid for `cap` bytes.
+/// Standard: see the crate-level ABI conventions.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_static_summary(
     handle: *const InfraStoreHandle,
@@ -2362,8 +2396,7 @@ pub unsafe extern "C" fn infrastore_store_static_summary(
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. `out_len` must be writable; `buf` must be
-/// null or valid for `cap` bytes.
+/// Standard: see the crate-level ABI conventions.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_forecast_summary(
     handle: *const InfraStoreHandle,
@@ -2430,8 +2463,7 @@ pub unsafe extern "C" fn infrastore_store_forecast_summary(
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. `out_kind` and `out_level` must each be
-/// valid for writing one `u8`; `out_shuffle` must be valid for writing one `bool`.
+/// `out_kind` and `out_level` must each be valid for writing one `u8`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_get_compression(
     handle: *const InfraStoreHandle,
@@ -2504,7 +2536,7 @@ pub unsafe extern "C" fn infrastore_store_verify(
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle and must not be used concurrently for the duration
+/// `handle` must not be used concurrently for the duration
 /// of the call — the underlying file is replaced part-way through. `out_json` and `out_len` must
 /// each be valid for writing one pointer / one `u64`.
 #[unsafe(no_mangle)]
@@ -2550,8 +2582,7 @@ pub unsafe extern "C" fn infrastore_store_compact(
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle and must not be used concurrently for the duration
-/// of the call.
+/// Standard: see the crate-level ABI conventions.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_begin_transaction(handle: *mut InfraStoreHandle) -> i32 {
     clear_error();
@@ -2568,8 +2599,7 @@ pub unsafe extern "C" fn infrastore_store_begin_transaction(handle: *mut InfraSt
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle and must not be used concurrently for the duration
-/// of the call.
+/// Standard: see the crate-level ABI conventions.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_commit_transaction(handle: *mut InfraStoreHandle) -> i32 {
     clear_error();
@@ -2588,8 +2618,7 @@ pub unsafe extern "C" fn infrastore_store_commit_transaction(handle: *mut InfraS
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle and must not be used concurrently for the duration
-/// of the call.
+/// Standard: see the crate-level ABI conventions.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_rollback_transaction(
     handle: *mut InfraStoreHandle,
@@ -2607,7 +2636,7 @@ pub unsafe extern "C" fn infrastore_store_rollback_transaction(
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle; `out` must be a valid, writable `bool` pointer.
+/// `out` must be a valid, writable `bool` pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_in_transaction(
     handle: *mut InfraStoreHandle,
@@ -2627,8 +2656,7 @@ pub unsafe extern "C" fn infrastore_store_in_transaction(
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle and must not be used concurrently for the duration
-/// of the call.
+/// Standard: see the crate-level ABI conventions.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_flush(handle: *mut InfraStoreHandle) -> i32 {
     clear_error();
@@ -2644,8 +2672,7 @@ pub unsafe extern "C" fn infrastore_store_flush(handle: *mut InfraStoreHandle) -
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle; `path` must be a valid NUL-terminated
-/// UTF-8 C string.
+/// `path` must be a valid NUL-terminated UTF-8 C string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_persist(
     handle: *mut InfraStoreHandle,
@@ -2679,7 +2706,7 @@ pub unsafe extern "C" fn infrastore_store_persist(
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle returned by this library.
+/// Standard: see the crate-level ABI conventions.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_persist_catalog(handle: *mut InfraStoreHandle) -> i32 {
     clear_error();
@@ -2750,9 +2777,8 @@ unsafe fn build_key_from_attrs(
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle and `key` a live key handle; neither is
-/// retained past the call. `buf`, when non-null, must be valid for writing `cap`
-/// bytes, and `out_len` must be valid for writing one `u64`.
+/// `handle` must be a live store handle and `key` a live key handle; neither is retained past
+/// the call. `buf`, when non-null, must be valid for writing `cap` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_get_metadata_by_key(
     handle: *const InfraStoreHandle,
@@ -2783,14 +2809,97 @@ pub unsafe extern "C" fn infrastore_store_get_metadata_by_key(
     INFRASTORE_OK
 }
 
+/// Fetch the metadata row filed under `association_id`, as one JSON object.
+///
+/// The read-direction counterpart of the id every `infrastore_store_add_*`
+/// hands back: a caller that recorded ids in its own model resolves them here
+/// without keeping an id-to-key map beside the store. The row shape is exactly
+/// `infrastore_store_get_metadata_by_key`'s, `id` included.
+///
+/// Writes `false` to `*out_present` and nothing to `buf` when the catalog holds
+/// no such row, returning `INFRASTORE_OK` rather than
+/// `INFRASTORE_ERR_NOT_FOUND`: a caller validating references it stored earlier
+/// is asking whether one still resolves, and a stale reference is an answer.
+///
+/// Follows the two-call buffer protocol used throughout: call with `buf` null
+/// (or too small) to learn the required length from `*out_len`, then call again
+/// with a buffer of that size.
+///
+/// # Safety
+///
+/// `buf`, when non-null, must be valid for writing `cap` bytes. `out_len` must be valid for
+/// writing one `u64` and `out_present` for writing one `bool`; both are required.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_store_get_metadata_by_id(
+    handle: *const InfraStoreHandle,
+    association_id: i64,
+    buf: *mut c_char,
+    cap: u64,
+    out_len: *mut u64,
+    out_present: *mut bool,
+) -> i32 {
+    clear_error();
+    let store = deref_handle!(ref handle);
+    if out_len.is_null() || out_present.is_null() {
+        set_error("out_len or out_present is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    match store.inner.get_metadata_by_id(association_id) {
+        Ok(Some(meta)) => {
+            let json = Value::Object(metadata_to_map(&meta)).to_string();
+            unsafe {
+                *out_present = true;
+                write_str_out(&json, buf, cap, out_len);
+            }
+            INFRASTORE_OK
+        }
+        Ok(None) => {
+            unsafe {
+                *out_present = false;
+                *out_len = 0;
+            }
+            INFRASTORE_OK
+        }
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// Whether an association is filed under `association_id`.
+///
+/// A primary-key probe: one statement, no row fetched, no metadata built. Cheap
+/// enough to validate every reference in a model on load, rather than
+/// discovering a dangling one mid-run. Use
+/// `infrastore_store_get_metadata_by_id` when the row is wanted too.
+///
+/// # Safety
+///
+/// Standard: see the crate-level ABI conventions.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_store_association_exists(
+    handle: *const InfraStoreHandle,
+    association_id: i64,
+    out_present: *mut bool,
+) -> i32 {
+    clear_error();
+    let store = deref_handle!(ref handle);
+    if out_present.is_null() {
+        set_error("out_present is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    match store.inner.association_exists(association_id) {
+        Ok(found) => {
+            unsafe { *out_present = found };
+            INFRASTORE_OK
+        }
+        Err(e) => map_core_error(e),
+    }
+}
+
 /// True iff a SingleTimeSeries with the given attributes exists.
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. `owner_id` and `owner_category` (`0` =
-/// Component, `1` = SupplementalAttribute) identify the owner. Required strings must be
-/// null-terminated UTF-8; `features_json` may be null. `out_present` must be valid for writing one
-/// `bool`.
+/// `features_json` may be null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_has_by_attrs(
     handle: *const InfraStoreHandle,
@@ -2827,9 +2936,9 @@ pub unsafe extern "C" fn infrastore_store_has_by_attrs(
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle; `owner_id` is a plain integer and
-/// `owner_category` (`0` = Component, `1` = SupplementalAttribute) identifies the
-/// owner category; `out_present` valid for writing one bool.
+/// `owner_id` is a plain integer and `owner_category` (`0` = Component, `1` =
+/// SupplementalAttribute) identifies the owner category; `out_present` valid for writing one
+/// bool.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_has_for_owner(
     handle: *const InfraStoreHandle,
@@ -2887,10 +2996,8 @@ pub unsafe extern "C" fn infrastore_store_has_for_owner(
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. The scalar filter flags/values are
-/// plain scalars. `name`, `name_glob`, `resolution`, `interval`, and
-/// `features_json` must each be null or a null-terminated UTF-8 string. `out_present` must be valid
-/// for writing one `bool`.
+/// The scalar filter flags/values are plain scalars. `name`, `name_glob`, `resolution`,
+/// `interval`; `features_json` must each be null or a null-terminated UTF-8 string.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_has_any_by_filter(
@@ -2949,9 +3056,7 @@ pub unsafe extern "C" fn infrastore_store_has_any_by_filter(
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle. `owner_id` and `owner_category`
-/// (`0` = Component, `1` = SupplementalAttribute) identify the owner. Required strings
-/// must be null-terminated UTF-8, and `features_json` may be null.
+/// `features_json` may be null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_remove_by_attrs(
     handle: *mut InfraStoreHandle,
@@ -3024,9 +3129,7 @@ pub unsafe extern "C" fn infrastore_store_get_array_by_hash(
 ///
 /// # Safety
 ///
-/// - `handle` must be a live, non-null store handle created by this library, and
-///   must not be used concurrently from another thread for the duration of the
-///   call (see the module's Concurrency section: reads are not an exception).
+/// - `handle` must be a live store handle.
 /// - `data_hash` must be non-null and point to at least 32 readable bytes.
 /// - `out_sts` and `out_dst` must each be valid for writing one `u64`.
 #[unsafe(no_mangle)]
@@ -3127,8 +3230,7 @@ fn time_series_type_to_int(t: core_lib::TimeSeriesType) -> i32 {
 ///
 /// # Safety
 ///
-/// `out_len` must be valid for writing one `u64`. When `buf` is non-null it must
-/// be valid for writing `cap` bytes.
+/// When `buf` is non-null it must be valid for writing `cap` bytes.
 unsafe fn write_str_out(s: &str, buf: *mut c_char, cap: u64, out_len: *mut u64) {
     let bytes = s.as_bytes();
     unsafe {
@@ -3176,10 +3278,10 @@ unsafe fn build_typed_key_from_attrs(
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle. `owner_id` is a plain integer. Required strings
-/// must be null-terminated UTF-8; optional strings may be null. `data_ptr` must reference `data_len`
-/// elements and `out_key` must be valid for writing one pointer. The returned key must be released
-/// with `infrastore_key_free`.
+/// Optional strings may be null. `data_ptr` must reference `data_len` elements and `out_key`
+/// must be valid for writing one pointer.
+/// `out_id`, when non-null, must be valid for writing one `i64`, and receives the catalog
+/// id the row was filed under.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_add_forecast(
@@ -3207,6 +3309,7 @@ pub unsafe extern "C" fn infrastore_store_add_forecast(
     time_reference: *const c_char,
     component_field: *const c_char,
     out_key: *mut *mut InfraStoreKeyHandle,
+    out_id: *mut i64,
 ) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
@@ -3244,11 +3347,15 @@ pub unsafe extern "C" fn infrastore_store_add_forecast(
         Err(c) => return c,
     };
     match store.inner.add_time_series_bulk(vec![req]) {
-        Ok(mut keys) => {
+        Ok(mut added) => {
+            let added = added.remove(0);
             let handle = Box::new(InfraStoreKeyHandle {
-                inner: keys.remove(0).identity().clone(),
+                inner: added.key.identity().clone(),
             });
             unsafe { *out_key = Box::into_raw(handle) };
+            if !out_id.is_null() {
+                unsafe { *out_id = added.id };
+            }
             INFRASTORE_OK
         }
         Err(e) => map_core_error(e),
@@ -3396,10 +3503,11 @@ unsafe fn build_forecast_request(
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle. `owner_id` is a plain integer. Required strings
-/// must be null-terminated UTF-8; optional strings may be null. `percentiles_ptr` and `data_ptr`
-/// must reference their respective element counts, and `out_key` must be valid for writing one
-/// pointer. The returned key must be released with `infrastore_key_free`.
+/// Optional strings may be null. `percentiles_ptr` and `data_ptr` must reference their
+/// respective element counts. `out_key`, when non-null, must be valid for writing one
+/// pointer.
+/// `out_id`, when non-null, must be valid for writing one `i64`, and receives the catalog
+/// id the row was filed under.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_add_probabilistic(
@@ -3428,6 +3536,7 @@ pub unsafe extern "C" fn infrastore_store_add_probabilistic(
     time_reference: *const c_char,
     component_field: *const c_char,
     out_key: *mut *mut InfraStoreKeyHandle,
+    out_id: *mut i64,
 ) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
@@ -3466,11 +3575,15 @@ pub unsafe extern "C" fn infrastore_store_add_probabilistic(
         Err(c) => return c,
     };
     match store.inner.add_time_series_bulk(vec![req]) {
-        Ok(mut keys) => {
+        Ok(mut added) => {
+            let added = added.remove(0);
             let handle = Box::new(InfraStoreKeyHandle {
-                inner: keys.remove(0).identity().clone(),
+                inner: added.key.identity().clone(),
             });
             unsafe { *out_key = Box::into_raw(handle) };
+            if !out_id.is_null() {
+                unsafe { *out_id = added.id };
+            }
             INFRASTORE_OK
         }
         Err(e) => map_core_error(e),
@@ -3614,10 +3727,9 @@ pub unsafe extern "C" fn infrastore_batch_free(batch: *mut InfraStoreBatchHandle
 ///
 /// # Safety
 ///
-/// `batch` must be a live batch handle. `owner_id` is a plain integer. Required
-/// string pointers must reference null-terminated UTF-8 strings; optional string
-/// pointers may be null. `dims_ptr` must reference `ndims` elements when `ndims`
-/// is nonzero, and `data_ptr` must reference `data_byte_len` bytes.
+/// Required string pointers must reference null-terminated UTF-8 strings; optional string
+/// pointers may be null. `dims_ptr` must reference `ndims` elements when `ndims` is nonzero;
+/// `data_ptr` must reference `data_byte_len` bytes.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_batch_add_single(
@@ -3684,11 +3796,10 @@ pub unsafe extern "C" fn infrastore_batch_add_single(
 ///
 /// # Safety
 ///
-/// `batch` must be a live batch handle. `owner_id` is a plain integer. Required
-/// string pointers must reference null-terminated UTF-8 strings; optional string
-/// pointers may be null. `timestamps_unix_ms` must reference `timestamps_len`
-/// elements, `dims_ptr` must reference `ndims` elements when `ndims` is nonzero,
-/// and `data_ptr` must reference `data_byte_len` bytes.
+/// Required string pointers must reference null-terminated UTF-8 strings; optional string
+/// pointers may be null. `timestamps_unix_ms` must reference `timestamps_len` elements,
+/// `dims_ptr` must reference `ndims` elements when `ndims` is nonzero; `data_ptr` must
+/// reference `data_byte_len` bytes.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_batch_add_non_sequential(
@@ -3756,10 +3867,9 @@ pub unsafe extern "C" fn infrastore_batch_add_non_sequential(
 ///
 /// # Safety
 ///
-/// `batch` must be a live batch handle. `owner_id` is a plain integer. Required
-/// string pointers must reference null-terminated UTF-8 strings; optional string
-/// pointers may be null. `dims_ptr` must reference `ndims` elements when `ndims`
-/// is nonzero, and `data_ptr` must reference `data_byte_len` bytes.
+/// Required string pointers must reference null-terminated UTF-8 strings; optional string
+/// pointers may be null. `dims_ptr` must reference `ndims` elements when `ndims` is nonzero;
+/// `data_ptr` must reference `data_byte_len` bytes.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_batch_add_forecast(
@@ -3834,11 +3944,10 @@ pub unsafe extern "C" fn infrastore_batch_add_forecast(
 ///
 /// # Safety
 ///
-/// `batch` must be a live batch handle. `owner_id` is a plain integer. Required
-/// string pointers must reference null-terminated UTF-8 strings; optional string
-/// pointers may be null. `percentiles_ptr` must reference `percentiles_len`
-/// elements, `dims_ptr` must reference `ndims` elements when `ndims` is nonzero,
-/// and `data_ptr` must reference `data_byte_len` bytes.
+/// Required string pointers must reference null-terminated UTF-8 strings; optional string
+/// pointers may be null. `percentiles_ptr` must reference `percentiles_len` elements,
+/// `dims_ptr` must reference `ndims` elements when `ndims` is nonzero; `data_ptr` must
+/// reference `data_byte_len` bytes.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_batch_add_probabilistic(
@@ -3918,7 +4027,7 @@ pub unsafe extern "C" fn infrastore_batch_add_probabilistic(
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle and `batch` a live batch
+/// `handle` must be a live read-write store handle and `batch` a live batch
 /// handle. `out_keys` and `out_len` must each be valid for writing one value.
 /// On success the caller owns the returned array and every key handle in it:
 /// release each key with `infrastore_key_free`, then the array buffer itself with
@@ -3930,6 +4039,7 @@ pub unsafe extern "C" fn infrastore_store_add_batch(
     batch: *mut InfraStoreBatchHandle,
     out_keys: *mut *mut *mut InfraStoreKeyHandle,
     out_len: *mut u64,
+    out_ids: *mut *mut i64,
 ) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_mut() } {
@@ -3952,12 +4062,13 @@ pub unsafe extern "C" fn infrastore_store_add_batch(
     }
     let items = std::mem::take(&mut batch.items);
     match store.inner.add_time_series_bulk(items) {
-        Ok(keys) => {
-            let handles: Vec<*mut InfraStoreKeyHandle> = keys
+        Ok(added) => {
+            let ids: Vec<i64> = added.iter().map(|a| a.id).collect();
+            let handles: Vec<*mut InfraStoreKeyHandle> = added
                 .into_iter()
-                .map(|k| {
+                .map(|a| {
                     Box::into_raw(Box::new(InfraStoreKeyHandle {
-                        inner: k.identity().clone(),
+                        inner: a.key.identity().clone(),
                     }))
                 })
                 .collect();
@@ -3974,6 +4085,17 @@ pub unsafe extern "C" fn infrastore_store_add_batch(
             unsafe {
                 *out_keys = ptr;
                 *out_len = len;
+            }
+            if !out_ids.is_null() {
+                // Same length and ordering as `out_keys`, and released the same
+                // way. An empty batch hands back null, so there is nothing to
+                // free.
+                let id_ptr = if ids.is_empty() {
+                    ptr::null_mut()
+                } else {
+                    vec_into_raw(ids).0
+                };
+                unsafe { *out_ids = id_ptr };
             }
             INFRASTORE_OK
         }
@@ -3998,10 +4120,9 @@ pub unsafe extern "C" fn infrastore_store_add_batch(
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. `keys` must point to `n` live key
-/// handles created by this library (it may be null only when `n` is 0).
-/// `out_result` must be valid for writing one pointer. On `INFRASTORE_OK` the returned
-/// handle must be released exactly once with `infrastore_bulk_result_free`.
+/// `keys` must point to `n` live key handles created by this library (it may be null only when
+/// `n` is 0). On `INFRASTORE_OK` the returned handle must be released exactly once with
+/// `infrastore_bulk_result_free`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_bulk_read_single(
     handle: *const InfraStoreHandle,
@@ -4317,10 +4438,9 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_single(
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. `keys` must point to `n` live key
-/// handles created by this library (it may be null only when `n` is 0).
-/// `out_result` must be valid for writing one pointer. On `INFRASTORE_OK` the returned
-/// handle must be released exactly once with `infrastore_bulk_result_free`.
+/// `keys` must point to `n` live key handles created by this library (it may be null only when
+/// `n` is 0). On `INFRASTORE_OK` the returned handle must be released exactly once with
+/// `infrastore_bulk_result_free`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_bulk_read(
@@ -4380,6 +4500,105 @@ pub unsafe extern "C" fn infrastore_store_bulk_read(
     };
     unsafe { *out_result = Box::into_raw(Box::new(InfraStoreBulkReadHandle { items })) };
     INFRASTORE_OK
+}
+
+/// Read many series named by their catalog association `id`, in the order the
+/// ids are given. The id-addressed counterpart of `infrastore_store_bulk_read`:
+/// results come back in the same `InfraStoreBulkReadHandle`, so a caller reads
+/// them out with the same `infrastore_bulk_result_*` accessors, and repeats in
+/// `ids` are honoured in place.
+///
+/// The read direction of the id every write hands back through its `out_id`: a
+/// caller that recorded ids in its own model resolves them here instead of
+/// keeping an id-to-key map beside the store. Returns
+/// `INFRASTORE_ERR_NOT_FOUND` if any id names no row — unlike
+/// `infrastore_store_association_exists`, which asks the question, this call is
+/// already committed to reading and a stale reference is a failure. The error
+/// does not say *which* id dangled.
+///
+/// # Safety
+///
+/// `ids` must point to `n` readable `i64`s (it may be null only when `n` is 0).
+/// On `INFRASTORE_OK` the returned handle must be released exactly once with
+/// `infrastore_bulk_result_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_store_read_by_ids(
+    handle: *const InfraStoreHandle,
+    ids: *const i64,
+    n: u64,
+    out_result: *mut *mut InfraStoreBulkReadHandle,
+) -> i32 {
+    clear_error();
+    let store = deref_handle!(ref handle);
+    if out_result.is_null() {
+        set_error("out_result pointer is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let count = n as usize;
+    if count != 0 && ids.is_null() {
+        set_error("ids pointer is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let id_slice = if count == 0 {
+        &[][..]
+    } else {
+        unsafe { slice::from_raw_parts(ids, count) }
+    };
+    let items = match store.inner.read_by_ids(id_slice) {
+        Ok(d) => d,
+        Err(e) => return map_core_error(e),
+    };
+    unsafe { *out_result = Box::into_raw(Box::new(InfraStoreBulkReadHandle { items })) };
+    INFRASTORE_OK
+}
+
+/// Write the name of bulk-read item `index` into `out_name` as an owned C
+/// string. The result handle carries each item's name whichever way the read
+/// was addressed, so this is how both `infrastore_store_bulk_read` and
+/// `infrastore_store_read_by_ids` label what they got back — the companion to
+/// `infrastore_bulk_result_item_type` beside it.
+///
+/// # Safety
+///
+/// `result` must be a live bulk-read handle, `index` less than its length, and
+/// `out_name` valid for writing one pointer. `*out_name` is an owned string --
+/// never null on success -- and must be freed exactly once with
+/// `infrastore_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_bulk_result_item_name(
+    result: *const InfraStoreBulkReadHandle,
+    index: u64,
+    out_name: *mut *mut c_char,
+) -> i32 {
+    clear_error();
+    let result = match unsafe { result.as_ref() } {
+        Some(r) => r,
+        None => {
+            set_error("bulk-read result handle is null");
+            return INFRASTORE_ERR_NULL_POINTER;
+        }
+    };
+    if out_name.is_null() {
+        set_error("out_name pointer is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let item = match result.items.get(index as usize) {
+        Some(d) => d,
+        None => {
+            set_error("bulk-read index out of bounds");
+            return INFRASTORE_ERR_INVALID_PARAMETER;
+        }
+    };
+    match std::ffi::CString::new(item.name()) {
+        Ok(c) => {
+            unsafe { *out_name = c.into_raw() };
+            INFRASTORE_OK
+        }
+        Err(e) => {
+            set_error(format!("series name contained an interior NUL: {e}"));
+            INFRASTORE_ERR_INTERNAL
+        }
+    }
 }
 
 /// Write the [`time_series_type_to_int`] discriminant of bulk-read item `index` into
@@ -4702,6 +4921,12 @@ pub const INTERVAL_BUF_LEN: u64 = 64;
 ///   bounded, so the caller passes a fixed buffer of `INTERVAL_BUF_LEN` bytes.
 /// - `out_interval_normalized` — non-zero when the request described a single
 ///   window (see `normalize_single_window`).
+/// - `out_ids` — the catalog id of each view written, in the order they were
+///   written; free with `infrastore_buffer_free_i64(ptr, *out_count)`. Set to
+///   null when nothing was written — a dry run or an idempotent re-run — and a
+///   null pointer must never be indexed, whatever `*out_count` says: on a dry
+///   run `*out_count` is the count a committing run *would* produce, and no
+///   ids exist for it yet. Check the pointer, not the count.
 ///
 /// The two policy flags are `TransformPolicy` (see the core docs); both false
 /// is the permissive default, and InfrastructureSystems.jl passes both true:
@@ -4718,7 +4943,7 @@ pub const INTERVAL_BUF_LEN: u64 = 64;
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle and `out_count` must be valid
+/// `handle` must be a live read-write store handle and `out_count` must be valid
 /// for writing one `u64`. Each non-null optional out-parameter must be valid
 /// for writing its type.
 #[unsafe(no_mangle)]
@@ -4736,6 +4961,7 @@ pub unsafe extern "C" fn infrastore_store_transform_single_time_series(
     out_sources: *mut u64,
     out_interval: *mut c_char,
     out_interval_normalized: *mut bool,
+    out_ids: *mut *mut i64,
 ) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
@@ -4793,6 +5019,19 @@ pub unsafe extern "C" fn infrastore_store_transform_single_time_series(
                         &raw mut written,
                     );
                 }
+                if !out_ids.is_null() {
+                    // `*out_count` elements, in the order they were written,
+                    // or null when nothing was. A dry run is the case to watch:
+                    // it reports the *planned* count in `*out_count` while
+                    // writing nothing, so the pointer, not the count, is the
+                    // caller's signal (documented above).
+                    let ids: Vec<i64> = outcome.written.iter().map(|a| a.id).collect();
+                    *out_ids = if ids.is_empty() {
+                        ptr::null_mut()
+                    } else {
+                        vec_into_raw(ids).0
+                    };
+                }
             }
             INFRASTORE_OK
         }
@@ -4837,47 +5076,11 @@ pub unsafe extern "C" fn infrastore_store_transform_single_time_series(
 ///
 /// # Safety
 ///
-/// - `handle` must be a live, non-null store handle created by this library, and
-///   must not be used concurrently from another thread for the duration of the
-///   call (see the module's Concurrency section: reads are not an exception).
-/// - `owner_id` and `owner_category` (`0` = Component, `1` = SupplementalAttribute)
-///   identify the owner. `name` must point to a valid, null-terminated
-///   UTF-8 string for the duration of the call; `features_json` may be null.
-/// - `resolution` and `interval`, when non-null, must be valid null-terminated
-///   UTF-8 ISO-8601 durations; either may be null to leave that part of the
-///   identity unconstrained (the catalog reports an error if the request is
-///   then ambiguous).
-/// - All `out_*` scalar pointers, including `out_matched_type`, must be valid
-///   for writing one value each.
-/// - `out_dims` must be valid for writing one pointer; the returned pointer
-///   must be freed exactly once with `infrastore_buffer_free_u64` using `*out_ndims`.
-/// - `out_data` must be valid for writing one pointer; the returned pointer
-///   must be freed exactly once with `infrastore_buffer_free_u8` using
-///   `*out_data_byte_len`.
-/// - `out_percentiles` must be valid for writing one pointer; when the result
-///   is not `Probabilistic` the pointer is set to null and `*out_percentiles_len`
-///   to 0, so no free is needed. When non-null it must be freed exactly once
-///   with `infrastore_buffer_free_f64` using `*out_percentiles_len`.
-/// - `out_resolution`, `out_horizon` and `out_interval` are owned strings, not
-///   scalars: each must be valid for writing one pointer, and each non-null
-///   result must be freed exactly once with `infrastore_string_free`. They are
-///   set on success for every forecast type.
-/// - `out_application_data` may be null (the metadata lookup is skipped); when non-null it
-///   must be valid for writing one pointer, and a non-null `*out_application_data` must be
-///   freed exactly once with `infrastore_string_free`.
-/// - `out_element_type` follows the same rules and receives the canonical
-///   `element_type` string, which is how a caller reads the returned bytes as
-///   domain values (`out_dtype` gives only their physical width).
-/// - `out_quantity_kind` follows the same rules and receives the association's
-///   quantity kind, `out_time_reference` how the timestamps were spelled, and
-///   `out_unit_system` its basis as the `natural_units` /
-///   `component_base` spelling (null when unspecified).
-/// - `out_component_field` follows the same rules and receives the component
-///   field the values vary over time (null when unset).
-/// - `out_units` follows the same rules and receives the association's
-///   user-declared units label (null when unset). The store never interprets it.
-/// - All returned heap buffers are invalidated after their matching free call
-///   and must not be used afterwards.
+/// Standard, plus: `resolution` and `interval` may each be null, leaving that
+/// part of the identity unconstrained; `features_json` may be null.
+/// `out_percentiles` is null with `*out_percentiles_len` 0 unless the match is
+/// `Probabilistic`, so only a non-null one needs freeing.
+/// `out_application_data` may be null to skip the metadata lookup entirely.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_get_forecast(
@@ -5190,38 +5393,9 @@ unsafe fn emit_forecast_data(
 ///
 /// # Safety
 ///
-/// - `handle` and `key` must be live handles created by this library, and
-///   neither may be used concurrently from another thread for the duration of
-///   the call (see the module's Concurrency section: reads are not an
-///   exception).
-/// - All `out_*` scalar pointers, including `out_matched_type`, must be valid
-///   for writing one value each.
-/// - `out_dims` must be valid for writing one pointer; the returned pointer must
-///   be freed exactly once with `infrastore_buffer_free_u64` using `*out_ndims`.
-/// - `out_data` must be valid for writing one pointer; the returned pointer must
-///   be freed exactly once with `infrastore_buffer_free_u8` using `*out_data_byte_len`.
-/// - `out_percentiles` must be valid for writing one pointer; when the result is
-///   not `Probabilistic` the pointer is set to null and `*out_percentiles_len`
-///   to 0, so no free is needed. When non-null it must be freed exactly once
-///   with `infrastore_buffer_free_f64` using `*out_percentiles_len`.
-/// - `out_resolution`, `out_horizon` and `out_interval` are owned strings, not
-///   scalars: each must be valid for writing one pointer, and each non-null
-///   result must be freed exactly once with `infrastore_string_free`. They are
-///   set on success for every forecast type.
-/// - `out_application_data` may be null (the metadata lookup is skipped); when non-null it
-///   must be valid for writing one pointer, and a non-null `*out_application_data` must be
-///   freed exactly once with `infrastore_string_free`.
-/// - `out_element_type` follows the same rules and receives the canonical
-///   `element_type` string, which is how a caller reads the returned bytes as
-///   domain values (`out_dtype` gives only their physical width).
-/// - `out_quantity_kind` follows the same rules and receives the association's
-///   quantity kind, `out_time_reference` how the timestamps were spelled, and
-///   `out_unit_system` its basis as the `natural_units` /
-///   `component_base` spelling (null when unspecified).
-/// - `out_component_field` follows the same rules and receives the component
-///   field the values vary over time (null when unset).
-/// - `out_units` follows the same rules and receives the association's
-///   user-declared units label (null when unset). The store never interprets it.
+/// Standard, plus: `out_percentiles` is null with `*out_percentiles_len` 0
+/// unless the match is `Probabilistic`, so only a non-null one needs freeing.
+/// `out_application_data` may be null to skip the metadata lookup entirely.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_get_forecast_by_key(
@@ -5385,11 +5559,7 @@ pub unsafe extern "C" fn infrastore_store_get_forecast_by_key(
 ///
 /// # Safety
 ///
-/// `owner_id` and `owner_category` (`0` = Component, `1` = SupplementalAttribute)
-/// identify the owner. `name` must point to a valid, null-terminated
-/// UTF-8 string. `features_json`, when non-null, must be a null-terminated UTF-8
-/// JSON object. `out_key` must be valid for writing one pointer. The returned key
-/// must be released exactly once with `infrastore_key_free`.
+/// `features_json`, when non-null, must be a null-terminated UTF-8 JSON object.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_make_key_from_attrs(
@@ -5439,10 +5609,7 @@ pub unsafe extern "C" fn infrastore_make_key_from_attrs(
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. `owner_id` and `owner_category` (`0` =
-/// Component, `1` = SupplementalAttribute) identify the owner.
-/// `out_keys` must be valid for writing one pointer and `out_len` for writing one
-/// `u64`.
+/// `out_keys` must be valid for writing one pointer and `out_len` for writing one `u64`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_get_time_series_keys(
     handle: *const InfraStoreHandle,
@@ -5628,6 +5795,9 @@ fn metadata_to_map(m: &core_lib::TimeSeriesMetadata) -> serde_json::Map<String, 
     );
     o.insert("name".into(), Value::from(m.name.clone()));
     o.insert("data_hash".into(), Value::from(hash_to_hex(&m.data_hash)));
+    // Always present on a row read out of the catalog; `null` only if a caller
+    // built the metadata itself without one.
+    o.insert("id".into(), m.id.map(Value::from).unwrap_or(Value::Null));
     o.insert(
         "initial_timestamp_ms".into(),
         m.initial_timestamp
@@ -5743,11 +5913,10 @@ fn metadata_to_map(m: &core_lib::TimeSeriesMetadata) -> serde_json::Map<String, 
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. The scalar filter flags/values are plain
-/// scalars. `name`, `name_glob`, `component_field`, and `features_json` must each
-/// be null or a null-terminated UTF-8 string. `out_json` must be valid for writing one pointer
-/// and `out_len` for writing one `u64`; on success `*out_json` must be released
-/// exactly once with `infrastore_string_free`.
+/// The scalar filter flags/values are plain scalars. `name`, `name_glob`, `component_field`;
+/// `features_json` must each be null or a null-terminated UTF-8 string. `out_json` must be
+/// valid for writing one pointer and `out_len` for writing one `u64`; on success `*out_json`
+/// must be released exactly once with `infrastore_string_free`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_list_keys(
@@ -6002,8 +6171,7 @@ pub unsafe extern "C" fn infrastore_store_list_owner_types(
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle; the filter args match
-/// `infrastore_store_list_keys`. `out_removed` must be valid for writing one `u64`.
+/// The filter args match `infrastore_store_list_keys`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_remove_by_filter(
@@ -6065,9 +6233,8 @@ pub unsafe extern "C" fn infrastore_store_remove_by_filter(
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle and `key` a live key handle.
-/// `new_name` must be null-terminated UTF-8. `out_key` must be valid for writing
-/// one pointer; the returned key must be released with `infrastore_key_free`.
+/// `handle` must be a live read-write store handle and `key` a live key handle. `new_name` must
+/// be null-terminated UTF-8.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_rename(
     handle: *mut InfraStoreHandle,
@@ -6117,15 +6284,13 @@ pub unsafe extern "C" fn infrastore_store_rename(
 /// the catalog, this validates: an ambiguous request returns
 /// `INFRASTORE_ERR_INVALID_PARAMETER` and a miss returns `INFRASTORE_ERR_NOT_FOUND`.
 ///
-/// The name is historical — the underlying `Store::resolve_forecast_key` is not
+/// Despite the name, the underlying `Store::resolve_forecast_key` is not
 /// forecast-specific.
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. `name` must be null-terminated UTF-8;
-/// `resolution`, `interval`, and `features_json` may be null. `out_key` must be
-/// valid for writing one pointer; the returned key must be released with
-/// `infrastore_key_free`.
+/// `name` must be null-terminated UTF-8. `resolution`, `interval`, and `features_json` may be
+/// null.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_resolve_forecast_key(
@@ -6492,10 +6657,7 @@ pub unsafe extern "C" fn infrastore_buffer_free_u64(ptr: *mut u64, len: u64) {
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. `owner_id` and `owner_category` (`0` =
-/// Component, `1` = SupplementalAttribute) identify the owner. Required strings must be
-/// null-terminated UTF-8; `features_json` may be null. `out_present` must be valid for writing one
-/// `bool`.
+/// `features_json` may be null.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_has_typed(
@@ -6541,9 +6703,7 @@ pub unsafe extern "C" fn infrastore_store_has_typed(
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle. `owner_id` and `owner_category`
-/// (`0` = Component, `1` = SupplementalAttribute) identify the owner. Required strings
-/// must be null-terminated UTF-8, and `features_json` may be null.
+/// `features_json` may be null.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_remove_typed(
@@ -6588,12 +6748,10 @@ pub unsafe extern "C" fn infrastore_store_remove_typed(
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle. The `owner_id` / `owner_category`
-/// (`0` = Component, `1` = SupplementalAttribute) / `name` / `ts_type` /
-/// `resolution` / `features_json` arguments identify the SOURCE series, exactly as
-/// for `infrastore_store_remove_typed`. Required strings must be null-terminated UTF-8;
-/// `resolution`, `features_json`, and `new_name` may be null (a null `new_name`
-/// keeps the source name).
+/// The `owner_id` / `owner_category` (`0` = Component, `1` = SupplementalAttribute) / `name` /
+/// `ts_type` / `resolution` / `features_json` arguments identify the SOURCE series, exactly as
+/// for `infrastore_store_remove_typed`. `resolution`, `features_json`, and `new_name` may be null
+/// (a null `new_name` keeps the source name).
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_copy_time_series(
@@ -6651,9 +6809,9 @@ pub unsafe extern "C" fn infrastore_store_copy_time_series(
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle. `has_owner`, `owner_id`, and
-/// `owner_category` are plain scalars; when `has_owner` is true `owner_category`
-/// (`0` = Component, `1` = SupplementalAttribute) scopes the clear to one owner.
+/// `has_owner`, `owner_id`, and `owner_category` are plain scalars; when `has_owner` is true
+/// `owner_category` (`0` = Component, `1` = SupplementalAttribute) scopes the clear to one
+/// owner.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_clear(
     handle: *mut InfraStoreHandle,
@@ -6688,10 +6846,8 @@ pub unsafe extern "C" fn infrastore_store_clear(
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle. `old_owner_id` and
-/// `new_owner_id` are plain integers; `owner_category` (`0` = Component, `1` =
-/// SupplementalAttribute) identifies the owner category. When non-null,
-/// `out_updated` must point to writable `u64` storage.
+/// `old_owner_id` and `new_owner_id` are plain integers; `owner_category` (`0` = Component, `1`
+/// = SupplementalAttribute) identifies the owner category.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_replace_owner(
     handle: *mut InfraStoreHandle,
@@ -6768,6 +6924,32 @@ unsafe fn assoc_rows_from_json<T: serde::de::DeserializeOwned>(
     })
 }
 
+/// Hand a bulk write's assigned ids back through its optional out-parameters.
+///
+/// The same shape `infrastore_store_add_batch` uses: `out_added` takes the
+/// count, `out_ids` an owned buffer of exactly that many ids in input order,
+/// released with `infrastore_buffer_free_i64`. An empty batch writes null,
+/// so there is nothing to free.
+///
+/// # Safety
+///
+/// Each of `out_added` and `out_ids` must be null or valid for writing one
+/// value of its type.
+unsafe fn write_assigned_ids(ids: Vec<i64>, out_added: *mut u64, out_ids: *mut *mut i64) {
+    let len = ids.len() as u64;
+    if !out_added.is_null() {
+        unsafe { *out_added = len };
+    }
+    if !out_ids.is_null() {
+        let ptr = if ids.is_empty() {
+            ptr::null_mut()
+        } else {
+            vec_into_raw(ids).0
+        };
+        unsafe { *out_ids = ptr };
+    }
+}
+
 /// Serialize a result set and write it into the caller's buffer.
 unsafe fn write_json_out<T: serde::Serialize>(
     value: &T,
@@ -6796,9 +6978,10 @@ unsafe fn write_json_out<T: serde::Serialize>(
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle. `component_type` and
-/// `attribute_type` must point to valid, null-terminated UTF-8 strings that stay
-/// valid for the call.
+/// `component_type` and `attribute_type` must point to valid, null-terminated UTF-8 strings
+/// that stay valid for the call.
+/// `out_id`, when non-null, must be valid for writing one `i64`, and receives the catalog
+/// id the row was filed under.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_add_supplemental_attribute_association(
     handle: *mut InfraStoreHandle,
@@ -6806,6 +6989,7 @@ pub unsafe extern "C" fn infrastore_store_add_supplemental_attribute_association
     component_type: *const c_char,
     attribute_id: i64,
     attribute_type: *const c_char,
+    out_id: *mut i64,
 ) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
@@ -6823,9 +7007,16 @@ pub unsafe extern "C" fn infrastore_store_add_supplemental_attribute_association
             component_type,
             attribute_id,
             attribute_type,
+            // The catalog assigns; this table's wire form carries no id.
+            id: None,
         },
     ) {
-        Ok(()) => INFRASTORE_OK,
+        Ok(id) => {
+            if !out_id.is_null() {
+                unsafe { *out_id = id };
+            }
+            INFRASTORE_OK
+        }
         Err(e) => map_core_error(e),
     }
 }
@@ -6833,19 +7024,27 @@ pub unsafe extern "C" fn infrastore_store_add_supplemental_attribute_association
 /// Attach many in one all-or-nothing transaction, from a JSON array of objects
 /// with `component_id`, `component_type`, `attribute_id`, and `attribute_type`.
 /// This is the import half of the bulk round trip whose export is
-/// `infrastore_store_list_supplemental_attribute_associations` with a null filter. When
-/// non-null, `out_added` receives the number inserted.
+/// `infrastore_store_list_supplemental_attribute_associations` with a null filter.
+///
+/// `out_added` receives the number inserted and `out_ids` the catalog id of
+/// each, in input order — the ids are the durable handles this write creates,
+/// so returning only a count would leave a caller re-listing the table to find
+/// what it just wrote. Either may be null to skip it.
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle and `associations_json` a valid,
-/// null-terminated UTF-8 string. When non-null, `out_added` must point to
-/// writable `u64` storage.
+/// `handle` must be a live read-write store handle and `associations_json` a valid, null-
+/// terminated UTF-8 string. `out_added`, when non-null, must be valid for writing one
+/// `uint64_t`. `out_ids`, when non-null, must be valid for writing one pointer; on
+/// `INFRASTORE_OK` it receives an array of `*out_added` ids that the caller owns and must
+/// release with `infrastore_buffer_free_i64(*out_ids, *out_added)`. An empty batch writes
+/// null there, which needs no release.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_add_supplemental_attribute_associations(
     handle: *mut InfraStoreHandle,
     associations_json: *const c_char,
     out_added: *mut u64,
+    out_ids: *mut *mut i64,
 ) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
@@ -6855,10 +7054,8 @@ pub unsafe extern "C" fn infrastore_store_add_supplemental_attribute_association
             Err(c) => return c,
         };
     match store.inner.add_supplemental_attribute_associations(assocs) {
-        Ok(n) => {
-            if !out_added.is_null() {
-                unsafe { *out_added = n as u64 };
-            }
+        Ok(ids) => {
+            unsafe { write_assigned_ids(ids, out_added, out_ids) };
             INFRASTORE_OK
         }
         Err(e) => map_core_error(e),
@@ -6959,9 +7156,7 @@ pub unsafe extern "C" fn infrastore_store_list_supplemental_attribute_associatio
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle and `filter_json` null or valid
-/// null-terminated UTF-8. `out_len` must be writable; `buf` must be null or
-/// valid for `cap` bytes.
+/// `handle` must be a live store handle and `filter_json` null or valid null-terminated UTF-8.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_list_supplemental_attribute_ids(
     handle: *const InfraStoreHandle,
@@ -6993,9 +7188,7 @@ pub unsafe extern "C" fn infrastore_store_list_supplemental_attribute_ids(
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle and `filter_json` null or valid
-/// null-terminated UTF-8. `out_len` must be writable; `buf` must be null or
-/// valid for `cap` bytes.
+/// `handle` must be a live store handle and `filter_json` null or valid null-terminated UTF-8.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_list_components_with_attributes(
     handle: *const InfraStoreHandle,
@@ -7026,9 +7219,8 @@ pub unsafe extern "C" fn infrastore_store_list_components_with_attributes(
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle and `filter_json` null or valid
-/// null-terminated UTF-8. When non-null, `out_removed` must point to writable
-/// `u64` storage.
+/// `handle` must be a live read-write store handle and `filter_json` null or valid null-
+/// terminated UTF-8.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_remove_supplemental_attribute_associations(
     handle: *mut InfraStoreHandle,
@@ -7063,8 +7255,7 @@ pub unsafe extern "C" fn infrastore_store_remove_supplemental_attribute_associat
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle. When non-null, `out_updated`
-/// must point to writable `u64` storage.
+/// Standard: see the crate-level ABI conventions.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_replace_supplemental_attribute_component_id(
     handle: *mut InfraStoreHandle,
@@ -7139,8 +7330,7 @@ pub unsafe extern "C" fn infrastore_store_count_supplemental_attribute_associati
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. `out_len` must be writable; `buf` must
-/// be null or valid for `cap` bytes.
+/// Standard: see the crate-level ABI conventions.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_supplemental_attribute_counts_by_type(
     handle: *const InfraStoreHandle,
@@ -7178,8 +7368,7 @@ pub unsafe extern "C" fn infrastore_store_supplemental_attribute_counts_by_type(
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. `out_len` must be writable; `buf` must
-/// be null or valid for `cap` bytes.
+/// Standard: see the crate-level ABI conventions.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_supplemental_attribute_summary(
     handle: *const InfraStoreHandle,
@@ -7207,9 +7396,10 @@ pub unsafe extern "C" fn infrastore_store_supplemental_attribute_summary(
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle. `parent_type` and `child_type`
-/// must point to valid, null-terminated UTF-8 strings that stay valid for the
-/// call.
+/// `parent_type` and `child_type` must point to valid, null-terminated UTF-8 strings that stay
+/// valid for the call.
+/// `out_id`, when non-null, must be valid for writing one `i64`, and receives the catalog
+/// id the row was filed under.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_add_parent_child_association(
     handle: *mut InfraStoreHandle,
@@ -7217,6 +7407,7 @@ pub unsafe extern "C" fn infrastore_store_add_parent_child_association(
     parent_type: *const c_char,
     child_id: i64,
     child_type: *const c_char,
+    out_id: *mut i64,
 ) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
@@ -7235,26 +7426,40 @@ pub unsafe extern "C" fn infrastore_store_add_parent_child_association(
             parent_type,
             child_id,
             child_type,
+            // The catalog assigns; this table's wire form carries no id.
+            id: None,
         }) {
-        Ok(()) => INFRASTORE_OK,
+        Ok(id) => {
+            if !out_id.is_null() {
+                unsafe { *out_id = id };
+            }
+            INFRASTORE_OK
+        }
         Err(e) => map_core_error(e),
     }
 }
 
 /// Record many edges in one all-or-nothing transaction, from a JSON array of
-/// objects with `parent_id`, `parent_type`, `child_id`, and `child_type`. When
-/// non-null, `out_added` receives the number inserted.
+/// objects with `parent_id`, `parent_type`, `child_id`, and `child_type`.
+///
+/// `out_added` and `out_ids` mean exactly what they mean on
+/// `infrastore_store_add_supplemental_attribute_associations`, over this
+/// table's own id stream.
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle and `associations_json` a valid,
-/// null-terminated UTF-8 string. When non-null, `out_added` must point to
-/// writable `u64` storage.
+/// `handle` must be a live read-write store handle and `associations_json` a valid, null-
+/// terminated UTF-8 string. `out_added`, when non-null, must be valid for writing one
+/// `uint64_t`. `out_ids`, when non-null, must be valid for writing one pointer; on
+/// `INFRASTORE_OK` it receives an array of `*out_added` ids that the caller owns and must
+/// release with `infrastore_buffer_free_i64(*out_ids, *out_added)`. An empty batch writes
+/// null there, which needs no release.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_add_parent_child_associations(
     handle: *mut InfraStoreHandle,
     associations_json: *const c_char,
     out_added: *mut u64,
+    out_ids: *mut *mut i64,
 ) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
@@ -7264,10 +7469,8 @@ pub unsafe extern "C" fn infrastore_store_add_parent_child_associations(
             Err(c) => return c,
         };
     match store.inner.add_parent_child_associations(assocs) {
-        Ok(n) => {
-            if !out_added.is_null() {
-                unsafe { *out_added = n as u64 };
-            }
+        Ok(ids) => {
+            unsafe { write_assigned_ids(ids, out_added, out_ids) };
             INFRASTORE_OK
         }
         Err(e) => map_core_error(e),
@@ -7313,9 +7516,7 @@ pub unsafe extern "C" fn infrastore_store_has_parent_child_association(
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle and `filter_json` null or valid
-/// null-terminated UTF-8. `out_len` must be writable; `buf` must be null or
-/// valid for `cap` bytes.
+/// `handle` must be a live store handle and `filter_json` null or valid null-terminated UTF-8.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_list_parent_child_associations(
     handle: *const InfraStoreHandle,
@@ -7347,9 +7548,7 @@ pub unsafe extern "C" fn infrastore_store_list_parent_child_associations(
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle and `filter_json` null or valid
-/// null-terminated UTF-8. `out_len` must be writable; `buf` must be null or
-/// valid for `cap` bytes.
+/// `handle` must be a live store handle and `filter_json` null or valid null-terminated UTF-8.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_list_parent_child_ids(
     handle: *const InfraStoreHandle,
@@ -7390,9 +7589,8 @@ pub unsafe extern "C" fn infrastore_store_list_parent_child_ids(
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle and `filter_json` null or valid
-/// null-terminated UTF-8. When non-null, `out_removed` must point to writable
-/// `u64` storage.
+/// `handle` must be a live read-write store handle and `filter_json` null or valid null-
+/// terminated UTF-8.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_remove_parent_child_associations(
     handle: *mut InfraStoreHandle,
@@ -7423,8 +7621,7 @@ pub unsafe extern "C" fn infrastore_store_remove_parent_child_associations(
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle. When non-null, `out_updated`
-/// must point to writable `u64` storage.
+/// Standard: see the crate-level ABI conventions.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_replace_parent_child_component_id(
     handle: *mut InfraStoreHandle,
@@ -7496,12 +7693,10 @@ pub unsafe extern "C" fn infrastore_store_count_parent_child_associations(
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. The scalar filter flags/values are
-/// plain scalars; `name`, `resolution`, `interval`, `features_json`, and
-/// `component_field` must each be null or a null-terminated UTF-8 string.
-/// `out_json` must be valid for writing one pointer and `out_len` for writing
-/// one `u64`; on success `*out_json` must be released exactly once with
-/// `infrastore_string_free`.
+/// The scalar filter flags/values are plain scalars; `name`, `resolution`, `interval`,
+/// `features_json`; `component_field` must each be null or a null-terminated UTF-8 string.
+/// `out_json` must be valid for writing one pointer and `out_len` for writing one `u64`; on
+/// success `*out_json` must be released exactly once with `infrastore_string_free`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_export_time_series_associations_openapi(
@@ -7561,9 +7756,8 @@ pub unsafe extern "C" fn infrastore_store_export_time_series_associations_openap
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. `out_json` must be valid for writing
-/// one pointer and `out_len` for writing one `u64`; on success `*out_json`
-/// must be released exactly once with `infrastore_string_free`.
+/// `out_json` must be valid for writing one pointer and `out_len` for writing one `u64`; on
+/// success `*out_json` must be released exactly once with `infrastore_string_free`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_export_supplemental_attribute_associations_openapi(
     handle: *const InfraStoreHandle,
@@ -7586,6 +7780,45 @@ pub unsafe extern "C" fn infrastore_store_export_supplemental_attribute_associat
     unsafe { write_owned_str_out(json, out_json, out_len) }
 }
 
+/// Bulk-ingest a JSON array of time-series association OpenAPI rows in one
+/// all-or-nothing transaction — the import half of the round trip whose export
+/// is `infrastore_store_export_time_series_associations_openapi`. When non-null,
+/// `out_added` receives the number inserted.
+///
+/// Rows only: the document carries locators, never values, so every row must
+/// name an array this store already holds, and each row keeps the
+/// `association_id` it carries. A row whose array is absent, or a
+/// `NonSequentialTimeSeries` row (whose timestamp vector is not on the wire),
+/// is refused with `INFRASTORE_ERR_INVALID_PARAMETER`; an `association_id`
+/// already in use is `INFRASTORE_ERR_DUPLICATE_ASSOCIATION_ID`.
+///
+/// # Safety
+///
+/// `handle` must be a live read-write store handle and `json` a valid, null-terminated UTF-8
+/// string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_store_import_time_series_associations_openapi(
+    handle: *mut InfraStoreHandle,
+    json: *const c_char,
+    out_added: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = deref_handle!(mut handle);
+    let json = match unsafe { cstr_to_str(json) } {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    match store.inner.import_time_series_associations_openapi(json) {
+        Ok(n) => {
+            if !out_added.is_null() {
+                unsafe { *out_added = n as u64 };
+            }
+            INFRASTORE_OK
+        }
+        Err(e) => map_core_error(e),
+    }
+}
+
 /// Bulk-ingest a JSON array of supplemental-attribute association OpenAPI rows
 /// in one all-or-nothing transaction — the import half of the round trip whose
 /// export is `infrastore_store_export_supplemental_attribute_associations_openapi`.
@@ -7593,9 +7826,8 @@ pub unsafe extern "C" fn infrastore_store_export_supplemental_attribute_associat
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle and `json` a valid,
-/// null-terminated UTF-8 string. When non-null, `out_added` must point to
-/// writable `u64` storage.
+/// `handle` must be a live read-write store handle and `json` a valid, null-terminated UTF-8
+/// string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_import_supplemental_attribute_associations_openapi(
     handle: *mut InfraStoreHandle,
@@ -7968,8 +8200,7 @@ unsafe fn reader_filter(
 ///
 /// # Safety
 ///
-/// `out_len` must be valid for writing one `u64`. When `buf` is non-null it must
-/// be valid for writing `cap` `i64` values.
+/// When `buf` is non-null it must be valid for writing `cap` `i64` values.
 unsafe fn write_i64_slice_out(values: &[i64], buf: *mut i64, cap: u64, out_len: *mut u64) {
     unsafe {
         *out_len = values.len() as u64;
@@ -8001,11 +8232,9 @@ unsafe fn write_i64_slice_out(values: &[i64], buf: *mut i64, cap: u64, out_len: 
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. `name` / `name_glob` / `resolution` /
-/// `features_json` / `component_field` -- every string argument -- must be null
-/// or valid null-terminated UTF-8, and must stay readable for the duration of
-/// the call. `out_reader` must be valid for writing one pointer; the returned
-/// handle must be freed exactly once with `infrastore_static_reader_free`.
+/// `name` / `name_glob` / `resolution` / `features_json` / `component_field` -- every string
+/// argument -- must be null or valid null-terminated UTF-8; must stay readable for the duration
+/// of the call.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_build_static_reader(
@@ -8128,8 +8357,7 @@ pub unsafe extern "C" fn infrastore_static_reader_grid(
 ///
 /// # Safety
 ///
-/// `reader` must be a live static-reader handle. `out_time_reference` must be
-/// valid for writing one pointer. On success it is either null or an owned C
+/// `reader` must be a live static-reader handle. On success it is either null or an owned C
 /// string the caller must free exactly once with [`infrastore_string_free`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_static_reader_time_reference(
@@ -8168,9 +8396,8 @@ pub unsafe extern "C" fn infrastore_static_reader_time_reference(
 ///
 /// # Safety
 ///
-/// `reader` must be a live static-reader handle. `out_len` must be valid for
-/// writing one `u64`; when non-null, `buf` must be valid for writing `cap`
-/// `i64` values.
+/// `reader` must be a live static-reader handle. When non-null, `buf` must be valid for writing
+/// `cap` `i64` values.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_static_reader_timestamps(
     reader: *const InfraStoreStaticReaderHandle,
@@ -8199,8 +8426,7 @@ pub unsafe extern "C" fn infrastore_static_reader_timestamps(
 ///
 /// # Safety
 ///
-/// `reader` must be a live static-reader handle. `out_n` must be valid for
-/// writing one `u64`.
+/// `reader` must be a live static-reader handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_static_reader_num_groups(
     reader: *const InfraStoreStaticReaderHandle,
@@ -8276,8 +8502,7 @@ pub unsafe extern "C" fn infrastore_static_reader_group_info(
 ///
 /// # Safety
 ///
-/// `reader` must be a live static-reader handle. `out_key` must be valid for
-/// writing one pointer.
+/// `reader` must be a live static-reader handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_static_reader_group_key(
     reader: *const InfraStoreStaticReaderHandle,
@@ -8426,11 +8651,9 @@ pub unsafe extern "C" fn infrastore_static_reader_free(reader: *mut InfraStoreSt
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. `name` / `name_glob` / `resolution` /
-/// `features_json` / `component_field` -- every string argument -- must be null
-/// or valid null-terminated UTF-8, and must stay readable for the duration of
-/// the call. `out_reader` must be valid for writing one pointer; free the result
-/// with `infrastore_forecast_reader_free`.
+/// `name` / `name_glob` / `resolution` / `features_json` / `component_field` -- every string
+/// argument -- must be null or valid null-terminated UTF-8; must stay readable for the duration
+/// of the call. Free the result with `infrastore_forecast_reader_free`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_build_forecast_reader(
@@ -8501,8 +8724,7 @@ pub unsafe extern "C" fn infrastore_store_build_forecast_reader(
 ///
 /// # Safety
 ///
-/// `reader` must be a live forecast-reader handle. `out_time_reference` must be
-/// valid for writing one pointer. On success it is either null or an owned C
+/// `reader` must be a live forecast-reader handle. On success it is either null or an owned C
 /// string the caller must free exactly once with [`infrastore_string_free`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_forecast_reader_time_reference(
@@ -8578,8 +8800,7 @@ pub unsafe extern "C" fn infrastore_forecast_reader_timeline(
 ///
 /// # Safety
 ///
-/// `reader` must be a live forecast-reader handle. `out_n` must be valid for
-/// writing one `u64`.
+/// `reader` must be a live forecast-reader handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_forecast_reader_num_entries(
     reader: *const InfraStoreForecastReaderHandle,
@@ -8607,8 +8828,7 @@ pub unsafe extern "C" fn infrastore_forecast_reader_num_entries(
 ///
 /// # Safety
 ///
-/// `reader` must be a live forecast-reader handle. `out_n` must be valid for
-/// writing one `u64`.
+/// `reader` must be a live forecast-reader handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_forecast_reader_num_slots(
     reader: *const InfraStoreForecastReaderHandle,
@@ -8636,8 +8856,7 @@ pub unsafe extern "C" fn infrastore_forecast_reader_num_slots(
 ///
 /// # Safety
 ///
-/// `reader` must be a live forecast-reader handle. `out_slot` must be valid for
-/// writing one `u64`.
+/// `reader` must be a live forecast-reader handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_forecast_reader_entry_slot(
     reader: *const InfraStoreForecastReaderHandle,
@@ -8714,8 +8933,7 @@ pub unsafe extern "C" fn infrastore_forecast_reader_entry_info(
 ///
 /// # Safety
 ///
-/// `reader` must be a live forecast-reader handle. `out_key` must be valid for
-/// writing one pointer.
+/// `reader` must be a live forecast-reader handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_forecast_reader_entry_key(
     reader: *const InfraStoreForecastReaderHandle,
@@ -9310,6 +9528,7 @@ mod abi_tests {
                 ptr::null(),
                 ptr::null(),
                 &mut key,
+                ptr::null_mut(),
             )
         };
         (rc, key)
@@ -9366,6 +9585,7 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     &mut key,
+                    ptr::null_mut(),
                 )
             },
             INFRASTORE_OK
@@ -10342,6 +10562,7 @@ mod abi_tests {
                 ptr::null(),
                 ptr::null(),
                 &mut key,
+                ptr::null_mut(),
             )
         };
         assert_eq!(rc, INFRASTORE_ERR_INVALID_UTF8);
@@ -10404,6 +10625,7 @@ mod abi_tests {
                 ptr::null(),
                 ptr::null(),
                 &mut key,
+                ptr::null_mut(),
             )
         };
         assert_eq!(rc, INFRASTORE_ERR_INVALID_PARAMETER);
@@ -10731,6 +10953,7 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     &mut key,
+                    ptr::null_mut(),
                 )
             },
             INFRASTORE_OK
@@ -11301,5 +11524,266 @@ mod abi_tests {
             INFRASTORE_ERR_MISMATCHED_ARTIFACT
         );
         assert!(store.is_null());
+    }
+
+    /// Add one f64 series, returning the association id the catalog assigned.
+    fn abi_add_f64_id(store: *mut InfraStoreHandle, owner: i64, name: &str, vals: &[f64]) -> i64 {
+        let owner_type = CString::new("Generator").unwrap();
+        let name_c = CString::new(name).unwrap();
+        let res = CString::new(HOUR).unwrap();
+        let bytes = to_le(vals);
+        let dims = [vals.len() as u64];
+        let mut key: *mut InfraStoreKeyHandle = ptr::null_mut();
+        let mut out_id = 0i64;
+        let rc = unsafe {
+            infrastore_store_add_single(
+                store,
+                owner,
+                owner_type.as_ptr(),
+                0,
+                name_c.as_ptr(),
+                T0_MS,
+                res.as_ptr(),
+                F64_ET.as_ptr(),
+                1,
+                dims.as_ptr(),
+                bytes.as_ptr(),
+                bytes.len() as u64,
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                &mut key,
+                &mut out_id,
+            )
+        };
+        assert_eq!(rc, INFRASTORE_OK, "add failed: {}", last_error());
+        unsafe { infrastore_key_free(key) };
+        out_id
+    }
+
+    /// Add and drop `n` throwaway rows, so the next id `store` assigns clears
+    /// `n`. Ids are assigned and never chosen, so a document whose ids must sit
+    /// above an importing store's high-water mark is arranged this way.
+    fn abi_advance_ids(store: *mut InfraStoreHandle, n: i64) {
+        let res = CString::new(HOUR).unwrap();
+        for i in 0..n {
+            let name = format!("__spacer{i}");
+            abi_add_f64_id(store, -1, &name, &[i as f64, 0.0, 0.0]);
+            let name_c = CString::new(name).unwrap();
+            assert_eq!(
+                unsafe {
+                    infrastore_store_remove_by_attrs(
+                        store,
+                        -1,
+                        0,
+                        name_c.as_ptr(),
+                        res.as_ptr(),
+                        ptr::null(),
+                    )
+                },
+                INFRASTORE_OK,
+                "spacer remove failed: {}",
+                last_error()
+            );
+        }
+    }
+
+    /// Item `index`'s name, through the getter `read_by_ids` callers rely on.
+    fn abi_bulk_item_name(result: *mut InfraStoreBulkReadHandle, index: u64) -> String {
+        let mut out: *mut c_char = ptr::null_mut();
+        assert_eq!(
+            unsafe { infrastore_bulk_result_item_name(result, index, &mut out) },
+            INFRASTORE_OK,
+            "item_name failed: {}",
+            last_error()
+        );
+        assert!(!out.is_null());
+        let s = unsafe { CStr::from_ptr(out) }.to_str().unwrap().to_string();
+        unsafe { infrastore_string_free(out) };
+        s
+    }
+
+    /// The first f64 value of bulk item `index`.
+    fn abi_bulk_first_value(result: *mut InfraStoreBulkReadHandle, index: u64) -> f64 {
+        let mut initial = 0i64;
+        let mut resolution: *mut c_char = ptr::null_mut();
+        let mut dtype = -1i32;
+        let mut shape: *mut i64 = ptr::null_mut();
+        let mut shape_len = 0u64;
+        let mut data: *mut u8 = ptr::null_mut();
+        let mut data_len = 0u64;
+        assert_eq!(
+            unsafe {
+                infrastore_bulk_result_get_single(
+                    result,
+                    index,
+                    &mut initial,
+                    &mut resolution,
+                    &mut dtype,
+                    &mut shape,
+                    &mut shape_len,
+                    &mut data,
+                    &mut data_len,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                )
+            },
+            INFRASTORE_OK,
+            "get_single failed: {}",
+            last_error()
+        );
+        let bytes = unsafe { slice::from_raw_parts(data, data_len as usize) };
+        let value = f64::from_le_bytes(bytes[..8].try_into().unwrap());
+        unsafe {
+            infrastore_string_free(resolution);
+            infrastore_buffer_free_i64(shape, shape_len);
+            infrastore_buffer_free_u8(data, data_len);
+        }
+        value
+    }
+
+    /// `infrastore_store_read_by_ids` follows the order it was given, repeats
+    /// included, and labels each item with its own name — the id-addressed
+    /// counterpart of the keyed bulk read, which reads names off its keys.
+    #[test]
+    fn abi_read_by_ids_follows_the_order_it_was_given() {
+        let store = abi_create_in_memory();
+        let a = abi_add_f64_id(store, 1, "a", &[1.0, 2.0, 3.0]);
+        let b = abi_add_f64_id(store, 2, "b", &[10.0, 11.0, 12.0]);
+        let c = abi_add_f64_id(store, 3, "c", &[100.0, 101.0, 102.0]);
+
+        let asked = [c, a, c, b];
+        let mut result: *mut InfraStoreBulkReadHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                infrastore_store_read_by_ids(store, asked.as_ptr(), asked.len() as u64, &mut result)
+            },
+            INFRASTORE_OK,
+            "read_by_ids failed: {}",
+            last_error()
+        );
+        assert_eq!(unsafe { infrastore_bulk_result_len(result) }, 4);
+        let names: Vec<String> = (0..4).map(|i| abi_bulk_item_name(result, i)).collect();
+        assert_eq!(names, vec!["c", "a", "c", "b"]);
+        let firsts: Vec<f64> = (0..4).map(|i| abi_bulk_first_value(result, i)).collect();
+        assert_eq!(firsts, vec![100.0, 1.0, 100.0, 10.0]);
+        unsafe { infrastore_bulk_result_free(result) };
+
+        // An id naming no row fails the whole call with the code a caller
+        // switches on, and hands back no handle.
+        let missing = [a, 9_999];
+        let mut bad: *mut InfraStoreBulkReadHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe { infrastore_store_read_by_ids(store, missing.as_ptr(), 2, &mut bad) },
+            INFRASTORE_ERR_NOT_FOUND
+        );
+        assert!(bad.is_null());
+
+        // An empty request is a valid one: an empty handle, not an error.
+        let mut empty: *mut InfraStoreBulkReadHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe { infrastore_store_read_by_ids(store, ptr::null(), 0, &mut empty) },
+            INFRASTORE_OK
+        );
+        assert_eq!(unsafe { infrastore_bulk_result_len(empty) }, 0);
+        unsafe { infrastore_bulk_result_free(empty) };
+
+        assert_eq!(
+            unsafe { infrastore_store_read_by_ids(store, ptr::null(), 1, &mut empty) },
+            INFRASTORE_ERR_NULL_POINTER
+        );
+
+        unsafe { infrastore_store_free(store) };
+    }
+
+    /// Export one store's time-series rows and import them into another that
+    /// already holds the arrays: the ids survive, which is the point of putting
+    /// them on the wire. A store holding no such array refuses the document.
+    #[test]
+    fn abi_time_series_openapi_rows_round_trip_with_their_ids() {
+        let source = abi_create_in_memory();
+        // Above whatever the target will have assigned its own anchor row.
+        abi_advance_ids(source, 699);
+        let id = abi_add_f64_id(source, 1, "load", &[1.0, 2.0, 3.0]);
+        assert_eq!(id, 700);
+
+        let mut json: *mut c_char = ptr::null_mut();
+        let mut json_len = 0u64;
+        assert_eq!(
+            unsafe {
+                infrastore_store_export_time_series_associations_openapi(
+                    source,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    0,
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    -1,
+                    &mut json,
+                    &mut json_len,
+                )
+            },
+            INFRASTORE_OK,
+            "export failed: {}",
+            last_error()
+        );
+
+        // Arrays are content-addressed, so "the artifact brought the values" is
+        // a store already holding the same bytes under an identity of its own.
+        let target = abi_create_in_memory();
+        abi_add_f64_id(target, 9, "anchor", &[1.0, 2.0, 3.0]);
+        let mut added = 0u64;
+        assert_eq!(
+            unsafe {
+                infrastore_store_import_time_series_associations_openapi(target, json, &mut added)
+            },
+            INFRASTORE_OK,
+            "import failed: {}",
+            last_error()
+        );
+        assert_eq!(added, 1);
+        let mut present = false;
+        assert_eq!(
+            unsafe { infrastore_store_association_exists(target, 700, &mut present) },
+            INFRASTORE_OK
+        );
+        assert!(present, "the id did not survive the import");
+
+        // A store holding none of the arrays refuses the rows rather than
+        // writing dangling references.
+        let empty = abi_create_in_memory();
+        assert_eq!(
+            unsafe {
+                infrastore_store_import_time_series_associations_openapi(
+                    empty,
+                    json,
+                    ptr::null_mut(),
+                )
+            },
+            INFRASTORE_ERR_INVALID_PARAMETER
+        );
+        assert!(last_error().contains("does not hold"), "{}", last_error());
+
+        unsafe {
+            infrastore_string_free(json);
+            infrastore_store_free(source);
+            infrastore_store_free(target);
+            infrastore_store_free(empty);
+        }
     }
 }

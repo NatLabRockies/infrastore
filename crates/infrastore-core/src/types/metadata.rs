@@ -271,24 +271,35 @@ pub type Features = BTreeMap<String, FeatureValue>;
 /// reader can scan it.
 pub const RESERVED_FEATURE_NAMES: &[&str] = &[
     "application_data",
+    // Neither names a metadata field: `array_shape` is the wire spelling of the
+    // stored array's native shape, and `association_id` the wire spelling of
+    // `id`. Both are reserved for the same reason as `dtype` below -- they name
+    // a field of the row as a consumer sees it, which is what the shadowing
+    // rule is about, and the OpenAPI schema's own reserved list carries them.
+    "array_shape",
+    "association_id",
     "component_field",
     "count",
     "data",
     "data_hash",
-    // `dtype` no longer names a metadata field -- `element_type` replaced it --
-    // but it stays reserved: it is still the spelling of a `TypedArray`'s
-    // physical type in every binding, so allowing it as a feature name would
-    // reintroduce exactly the shadowing this list exists to prevent.
+    // Reserved though it names no metadata field: it is the spelling of a
+    // `TypedArray`'s physical type in every binding, so allowing it as a
+    // feature name would reintroduce the shadowing this list prevents.
     "dtype",
     "element_shape",
     "element_type",
-    // `ext` no longer names a metadata field -- `application_data` replaced it
-    // -- but it stays reserved for the same reason `dtype` does, and with an
-    // extra one: a consumer still passing the old spelling would otherwise have
-    // it silently accepted as an ordinary feature instead of failing loudly.
+    // Reserved for the same reason as `dtype`, plus one more: a consumer
+    // passing this older spelling of `application_data` fails loudly instead of
+    // having it silently accepted as an ordinary feature.
     "ext",
     "features",
     "horizon",
+    // Reserved for the catalog row's own id, which every binding surfaces
+    // alongside the fields above. Unlike `dtype` and `ext` below it, this one
+    // is reserved *before* anything could have used it: the name is too
+    // generic to be a plausible series discriminator, so the shadowing this
+    // list prevents is the only thing it could cause.
+    "id",
     "initial_timestamp",
     "interval",
     "length",
@@ -305,6 +316,11 @@ pub const RESERVED_FEATURE_NAMES: &[&str] = &[
     "timestamps",
     "unit_system",
     "units",
+    // Names no column and no struct field: it is the wire form's locator for
+    // the dense data. Reserved because the shadowing runs the other way here --
+    // a feature named `uri` is accepted on write, and the exported document
+    // then fails the schema's own propertyNames rule on the features map.
+    "uri",
 ];
 
 /// Whether `name` is one of the [`RESERVED_FEATURE_NAMES`].
@@ -440,6 +456,38 @@ pub struct TimeSeriesMetadata {
     /// it; end users are not expected to set it. Element typing does *not*
     /// belong here — that is [`Self::element_type`].
     pub application_data: Option<String>,
+
+    /// The catalog row's `id`, or `None`.
+    ///
+    /// Unlike every other field here, this describes the *row* rather than the
+    /// data: it is what the catalog filed this association under, and a
+    /// consumer stores it in its own object model as a durable reference back
+    /// (a generator's cost function naming the series that varies it). It is
+    /// never reissued once its row is deleted — see the `id` column in
+    /// `metadata/schema.rs` — but it is meaningful only within the store that
+    /// minted it and only alongside the table it came from.
+    ///
+    /// The direction decides what `None` means:
+    ///
+    /// * **Reading** — always `Some`. Every stored row has an id.
+    /// * **Writing** — the catalog assigns, and every add ignores whatever this
+    ///   field holds; [`crate::AddedTimeSeries`] reports the id it chose. One
+    ///   writer is the exception:
+    ///   [`Store::import_association_rows`](crate::Store::import_association_rows)
+    ///   files each row under the `Some` it carries, so a document that already
+    ///   recorded its ids keeps the references it wrote down. That import wants
+    ///   all-or-none across a batch, and explicit ids only ratchet the catalog's
+    ///   counter *upward*, so one at or below the current high-water mark
+    ///   collides and is refused with
+    ///   [`TimeSeriesError::DuplicateAssociationId`].
+    ///
+    /// Descriptive, so it sits outside [`crate::TimeSeriesKey`] and outside
+    /// both content hashes: two series differing only in it are the same
+    /// series, and it changes nothing about what is stored.
+    ///
+    /// [`TimeSeriesError::DuplicateAssociationId`]: crate::TimeSeriesError::DuplicateAssociationId
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<i64>,
 }
 
 #[cfg(test)]
@@ -535,6 +583,7 @@ mod tests {
             element_type: ElementType::Scalar(single.data.dtype),
             element_shape: vec![],
             application_data: None,
+            id: None,
         };
         let identity = KeyIdentity {
             owner_id: 1,

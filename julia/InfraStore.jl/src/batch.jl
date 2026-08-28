@@ -319,7 +319,7 @@ function add_time_series!(
 end
 
 """
-    add_time_series_bulk!(store, batch::AddBatch) -> Vector{TimeSeriesKey}
+    add_time_series_bulk!(store, batch::AddBatch) -> Vector{AddedTimeSeries}
 
 Submit every request in `batch` through one all-or-nothing bulk add and return
 the new keys in insertion order. The batch is drained in all cases — on error
@@ -328,29 +328,36 @@ nothing was committed and the batch is left empty.
 function add_time_series_bulk!(store::Store, batch::AddBatch)
     out_keys = Ref{Ptr{Ptr{Cvoid}}}(C_NULL)
     out_len = Ref{UInt64}(0)
+    out_ids = Ref{Ptr{Int64}}(C_NULL)
     code = @ccall lib_path().infrastore_store_add_batch(
         store::Ptr{Cvoid},
         batch::Ptr{Cvoid},
         out_keys::Ref{Ptr{Ptr{Cvoid}}},
         out_len::Ref{UInt64},
+        out_ids::Ref{Ptr{Int64}},
     )::Int32
     batch.count = 0
     _check(code)
     n = Int(out_len[])
-    keys = Vector{TimeSeriesKey}(undef, n)
+    added = Vector{AddedTimeSeries}(undef, n)
     if n > 0
-        # Copy each owned handle into a finalized wrapper, then free the array
-        # buffer (the wrappers own the handles and free them via infrastore_key_free).
+        # Copy each owned handle into a finalized wrapper, then free both array
+        # buffers (the wrappers own the handles and free them via
+        # infrastore_key_free). The id buffer is the same length and order.
         try
             raw = unsafe_wrap(Array, out_keys[], n; own=false)
+            ids = unsafe_wrap(Array, out_ids[], n; own=false)
             for i in 1:n
-                keys[i] = TimeSeriesKey(raw[i])
+                added[i] = AddedTimeSeries(TimeSeriesKey(raw[i]), ids[i])
             end
         finally
             @ccall lib_path().infrastore_keys_buffer_free(
                 out_keys[]::Ptr{Ptr{Cvoid}}, out_len[]::UInt64
             )::Cvoid
+            @ccall lib_path().infrastore_buffer_free_i64(
+                out_ids[]::Ptr{Int64}, out_len[]::UInt64
+            )::Cvoid
         end
     end
-    return keys
+    return added
 end

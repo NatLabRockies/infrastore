@@ -22,6 +22,25 @@ pub enum TimeSeriesError {
     #[error("duplicate association: {0}")]
     DuplicateAssociation(String),
 
+    /// A caller supplied an explicit association `id` that the catalog has
+    /// already handed out.
+    ///
+    /// Distinct from [`Self::DuplicateTimeSeries`], which is the *identity*
+    /// tuple colliding. Both surface as a SQLite constraint violation and are
+    /// told apart by the extended result code, because they mean opposite
+    /// things to the caller: a duplicate series is usually a re-add to fix, an
+    /// id collision means the import's ids do not fit this store.
+    ///
+    /// Ids only ratchet upward, so this is what an import into a *non-empty*
+    /// store looks like when its ids sit at or below the current high-water
+    /// mark. Importing into a fresh store is the case that always works.
+    #[error(
+        "association id {0} is already in use; explicit ids can only be supplied \
+         above the catalog's high-water mark, so a document's own ids fit a fresh \
+         store but not one that has already assigned ids of its own"
+    )]
+    DuplicateAssociationId(i64),
+
     #[error("invalid parameter: {0}")]
     InvalidParameter(String),
 

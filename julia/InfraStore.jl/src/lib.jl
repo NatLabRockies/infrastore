@@ -84,6 +84,7 @@ const INFRASTORE_ERR_READ_ONLY = Int32(7)
 const INFRASTORE_ERR_IO = Int32(8)
 const INFRASTORE_ERR_INCOMPATIBLE_FORMAT = Int32(9)
 const INFRASTORE_ERR_DUPLICATE_ASSOCIATION = Int32(10)
+const INFRASTORE_ERR_DUPLICATE_ASSOCIATION_ID = Int32(13)
 const INFRASTORE_ERR_STORE_EXISTS = Int32(11)
 const INFRASTORE_ERR_MISMATCHED_ARTIFACT = Int32(12)
 const INFRASTORE_ERR_INTERNAL = Int32(99)
@@ -436,6 +437,10 @@ struct DuplicateAssociationError <: TimeSeriesException
     msg::String
 end
 
+struct DuplicateAssociationIdError <: TimeSeriesException
+    msg::String
+end
+
 struct InvalidParameterError <: TimeSeriesException
     msg::String
 end
@@ -510,6 +515,8 @@ function _check(code::Int32)
         throw(DuplicateTimeSeriesError(msg))
     elseif code == INFRASTORE_ERR_DUPLICATE_ASSOCIATION
         throw(DuplicateAssociationError(msg))
+    elseif code == INFRASTORE_ERR_DUPLICATE_ASSOCIATION_ID
+        throw(DuplicateAssociationIdError(msg))
     elseif code == INFRASTORE_ERR_INVALID_PARAMETER ||
         code == INFRASTORE_ERR_INVALID_UTF8 ||
         code == INFRASTORE_ERR_NULL_POINTER

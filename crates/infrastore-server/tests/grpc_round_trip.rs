@@ -318,6 +318,14 @@ async fn element_type_preserved_over_grpc() {
 
     let meta = client.get_metadata(keys[0].identity()).await.unwrap();
     assert_eq!(meta.element_type, ElementType::PiecewiseLinear);
+    // The catalog id crosses the wire: a client that stores it as a reference
+    // (a generator's cost function naming the series that varies it) reads it
+    // from a served row, not just a local one.
+    assert_eq!(
+        meta.id,
+        Some(1),
+        "a served metadata row must carry the id the catalog filed it under",
+    );
 
     // And a value read carries it too, so decoding needs no second call.
     let got = client

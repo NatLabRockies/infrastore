@@ -38,6 +38,10 @@ Under development, unstable API, integrating with parent packages
   attribute) and `parent_child_associations` (directed component ↔ component edges) record
   relationships independently of time series, so consumers need not keep a SQLite database of their
   own.
+- **A stable handle for every series** — each catalog row carries an `id` a consumer can store in
+  its own model (a generator's cost function naming the series that varies it). It is never
+  reissued, so a reference can go stale but can never come to mean a different series, and it
+  survives a rename, a reassignment, a compaction, and a save-and-reopen.
 - **Timestamps that round-trip as written** — every series records a `time_reference`: an instant in
   UTC, an instant at a fixed offset, an instant in a named IANA zone, or a wall clock naming no
   instant at all. Each binding infers it from the input type — a naive `datetime` or a bare
@@ -251,7 +255,7 @@ entry in `keys`, and clients must send the chosen key in the `x-api-key` header.
 A persisted store is **two files that travel together**: an HDF5 file and a SQLite catalog at
 `<store-path>.sqlite`. Copying, moving, or deleting one without the other corrupts the store.
 
-The HDF5 file carries the attributes `data_format_version = "0.16.0"` and
+The HDF5 file carries the attributes `data_format_version = "0.18.0"` and
 `storage_backend = "hdf5"`; a file without the latter is not opened. Packed datasets are named
 `sts_{dtype}_{shape}_{length}_{resolution}`, chunked `(1, num_arrays)` so per-timestep reads across
 all components are contiguous; a sibling `u8` dataset `<dataset>_h` holds each column's SHA-256 hex

@@ -74,7 +74,7 @@ class TestDunders:
     def test_round_tripped_series_equal(self):
         store = Store.create(in_memory=True)
         original = sts("load")
-        key = store.add_time_series(1, "Gen", OwnerCategory.Component, original)
+        key = store.add_time_series(1, "Gen", OwnerCategory.Component, original).key
         fetched = store.get_time_series(key)
         assert fetched == original
 
@@ -158,7 +158,7 @@ class TestReservedFeatureNames:
         features = {"Name": "load", "resolution_hours": 1, "model_year": 2030}
         key = store.add_time_series(
             1, "Generator", OwnerCategory.Component, sts("load"), features=features
-        )
+        ).key
         assert key.features == features
 
 

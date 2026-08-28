@@ -37,6 +37,7 @@ fn add(store: &mut Store, owner: i64, data: TimeSeriesData) -> TimeSeriesKey {
             data,
         ))
         .unwrap()
+        .key
 }
 
 fn sts_at(name: &str, initial: DateTime<Utc>, resolution: impl Into<Period>) -> TimeSeriesData {

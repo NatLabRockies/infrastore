@@ -40,7 +40,7 @@ def test_add_application_data_and_get_metadata():
     key = store.add_time_series(
         owner_id=1, owner_type="Generator", owner_category=OwnerCategory.Component,
         time_series=_sts("load", 10.0), units="MW", application_data="Profile",
-    )
+    ).key
     meta = store.get_metadata(key)
     assert meta["units"] == "MW"
     assert meta["application_data"] == "Profile"
@@ -56,7 +56,7 @@ def test_unit_descriptors_round_trip():
         time_series=_sts("load", 10.0), units="MW",
         quantity_kind="ActivePower", unit_system="component_base",
         component_field="max_active_power",
-    )
+    ).key
     meta = store.get_metadata(key)
     assert meta["quantity_kind"] == "ActivePower"
     assert meta["unit_system"] == "component_base"
@@ -113,7 +113,7 @@ def test_unit_system_unset_is_unspecified_not_natural_units():
     key = store.add_time_series(
         owner_id=1, owner_type="Generator", owner_category=OwnerCategory.Component,
         time_series=_sts("load", 10.0), units="MW",
-    )
+    ).key
     meta = store.get_metadata(key)
     assert meta["unit_system"] is None
     assert meta["quantity_kind"] is None
@@ -135,9 +135,9 @@ def test_unknown_unit_system_is_rejected():
 def test_bulk_read_time_range():
     store = Store.create(in_memory=True)
     k1 = store.add_time_series(owner_id=1, owner_type="Generator",
-                              owner_category=OwnerCategory.Component, time_series=_sts("load", 100.0))
+                              owner_category=OwnerCategory.Component, time_series=_sts("load", 100.0)).key
     k2 = store.add_time_series(owner_id=2, owner_type="Generator",
-                              owner_category=OwnerCategory.Component, time_series=_sts("load", 200.0))
+                              owner_category=OwnerCategory.Component, time_series=_sts("load", 200.0)).key
     rng = (_t0() + timedelta(hours=2), _t0() + timedelta(hours=5))
     sliced = store.bulk_read([k1, k2], time_range=rng)
     for i, k in enumerate([k1, k2]):
@@ -152,7 +152,7 @@ def test_discovery_and_removal_and_rename():
     store.add_time_series(owner_id=2, owner_type="Bus",
                           owner_category=OwnerCategory.Component, time_series=_sts("voltage", 2.0))
     kf = store.add_time_series(owner_id=3, owner_type="Generator",
-                               owner_category=OwnerCategory.Component, time_series=_det("fc"))
+                               owner_category=OwnerCategory.Component, time_series=_det("fc")).key
 
     assert store.get_intervals() == ["PT1H"]
     assert store.get_intervals(time_series_type=TimeSeriesType.SingleTimeSeries) == []
@@ -187,9 +187,9 @@ def test_transform_with_params_and_forecast_parameters():
 def test_keys_usable_in_sets():
     store = Store.create(in_memory=True)
     k1 = store.add_time_series(owner_id=1, owner_type="Generator",
-                               owner_category=OwnerCategory.Component, time_series=_sts("load", 1.0))
+                               owner_category=OwnerCategory.Component, time_series=_sts("load", 1.0)).key
     k2 = store.add_time_series(owner_id=2, owner_type="Generator",
-                               owner_category=OwnerCategory.Component, time_series=_sts("load", 2.0))
+                               owner_category=OwnerCategory.Component, time_series=_sts("load", 2.0)).key
     # Same key looked up again is equal + hashes equal.
     (k1_again,) = [k for k in store.list_keys(owner_id=1)]
     assert k1_again == k1

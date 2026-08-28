@@ -84,6 +84,7 @@ pub fn attributes(
         .list_supplemental_attribute_associations(&filter)
         .map_err(|e| e.to_string())?;
     let headers = vec![
+        "ID".to_string(),
         "Component".to_string(),
         "Component Type".to_string(),
         "Attribute".to_string(),
@@ -93,6 +94,7 @@ pub fn attributes(
         .iter()
         .map(|r| {
             vec![
+                crate::fields::opt(r.id),
                 r.component_id.to_string(),
                 r.component_type.clone(),
                 r.attribute_id.to_string(),
@@ -106,6 +108,7 @@ pub fn attributes(
                 .iter()
                 .map(|r| {
                     json!({
+                        "id": r.id,
                         "component_id": r.component_id,
                         "component_type": r.component_type,
                         "attribute_id": r.attribute_id,
@@ -137,6 +140,7 @@ pub fn links(
         .list_parent_child_associations(&filter)
         .map_err(|e| e.to_string())?;
     let headers = vec![
+        "ID".to_string(),
         "Parent".to_string(),
         "Parent Type".to_string(),
         "Child".to_string(),
@@ -146,6 +150,7 @@ pub fn links(
         .iter()
         .map(|r| {
             vec![
+                crate::fields::opt(r.id),
                 r.parent_id.to_string(),
                 r.parent_type.clone(),
                 r.child_id.to_string(),
@@ -159,6 +164,7 @@ pub fn links(
                 .iter()
                 .map(|r| {
                     json!({
+                        "id": r.id,
                         "parent_id": r.parent_id,
                         "parent_type": r.parent_type,
                         "child_id": r.child_id,
@@ -250,6 +256,7 @@ pub fn attach(store_path: &Path, args: &AttachArgs<'_>) -> Result<(), String> {
                 component_type: r.1,
                 attribute_id: r.2,
                 attribute_type: r.3,
+                id: None,
             })
             .collect::<Vec<_>>(),
         None => vec![SupplementalAttributeAssociation {
@@ -257,6 +264,7 @@ pub fn attach(store_path: &Path, args: &AttachArgs<'_>) -> Result<(), String> {
             component_type: require_type(args.component_type, "--component-type")?,
             attribute_id: require_id(args.attribute_id, "--attribute-id")?,
             attribute_type: require_type(args.attribute_type, "--attribute-type")?,
+            id: None,
         }],
     };
     if args.dry_run {
@@ -286,18 +294,22 @@ pub fn attach(store_path: &Path, args: &AttachArgs<'_>) -> Result<(), String> {
         );
     }
     let mut store = store_access::open_writable(store_path)?;
-    let n = store
+    // The ids are what this write creates for the caller to hold, so both
+    // output forms carry them; `attached` stays the count it always was.
+    let ids = store
         .add_supplemental_attribute_associations(rows)
         .map_err(|e| e.to_string())?;
+    let n = ids.len();
     store.flush().map_err(|e| e.to_string())?;
     report(
         args.format,
-        || json!({ "attached": n }),
+        || json!({ "attached": n, "ids": ids }),
         || {
             println!(
                 "{}",
                 color::header(&format!("Attached {n} supplemental attribute(s)."))
             );
+            println!("ids: {}", crate::output::join_ids(&ids));
         },
     )
 }
@@ -391,6 +403,7 @@ pub fn link(store_path: &Path, args: &LinkArgs<'_>) -> Result<(), String> {
                 parent_type: r.1,
                 child_id: r.2,
                 child_type: r.3,
+                id: None,
             })
             .collect::<Vec<_>>(),
         None => vec![ParentChildAssociation {
@@ -398,6 +411,7 @@ pub fn link(store_path: &Path, args: &LinkArgs<'_>) -> Result<(), String> {
             parent_type: require_type(args.parent_type, "--parent-type")?,
             child_id: require_id(args.child_id, "--child-id")?,
             child_type: require_type(args.child_type, "--child-type")?,
+            id: None,
         }],
     };
     if args.dry_run {
@@ -427,15 +441,17 @@ pub fn link(store_path: &Path, args: &LinkArgs<'_>) -> Result<(), String> {
         );
     }
     let mut store = store_access::open_writable(store_path)?;
-    let n = store
+    let ids = store
         .add_parent_child_associations(rows)
         .map_err(|e| e.to_string())?;
+    let n = ids.len();
     store.flush().map_err(|e| e.to_string())?;
     report(
         args.format,
-        || json!({ "linked": n }),
+        || json!({ "linked": n, "ids": ids }),
         || {
             println!("{}", color::header(&format!("Added {n} link(s).")));
+            println!("ids: {}", crate::output::join_ids(&ids));
         },
     )
 }

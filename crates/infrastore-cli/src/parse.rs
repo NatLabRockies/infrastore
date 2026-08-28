@@ -15,16 +15,11 @@ const DURATION_EXAMPLES: &str = "PT1H, PT15M, PT30S, P1D, P1M, P1Y";
 /// Parse a period from an ISO-8601 duration: `PT1H`, `PT15M`, `P1D` for fixed
 /// spans, `P1M` / `P1Y` for calendar ones.
 ///
-/// ISO-8601 is the only accepted spelling. The CLI used to take a human form
-/// as well (`1h`, `15min`, `7d`), but nothing the CLI *printed* was ever spelled
-/// that way — every rendered period goes through [`format_period`], which is
-/// ISO-8601 — so a duration copied out of `list`, `info`, or `export -f json`
-/// could not be pasted back into the descriptor it came from. The human form
-/// also made a bare integer mean *milliseconds*, so `--resolution 24` quietly
-/// meant 24ms rather than the day a reader of a power-systems tool assumes.
-///
-/// The retired grammar survives in [`legacy_suggestion`] as an error hint, so
-/// hitting this is a one-line fix rather than a puzzle.
+/// ISO-8601 is the only accepted spelling, matching what the CLI *prints*
+/// (every rendered period goes through [`format_period`]), so a duration copied
+/// out of `list`, `info`, or `export -f json` pastes back into the descriptor
+/// it came from. A human form (`1h`, `15min`, `7d`) survives in
+/// [`legacy_suggestion`] as an error hint only.
 pub fn parse_period(s: &str) -> Result<Period, String> {
     let s = s.trim();
     Period::from_iso8601(s).map_err(|_| match legacy_suggestion(s) {
@@ -117,13 +112,10 @@ fn assumed_spec() -> Option<TimeSpec> {
 /// Parse the `--assume-timezone` value, three ways: `UTC` (or `Z`), a fixed UTC
 /// offset spelled `+HH:MM` / `-HH:MM` / `+HHMM` / `+HH`, or an IANA zone name.
 ///
-/// A named zone used to be refused here, on the grounds that a zoneless
-/// timestamp in one is not always a single instant — daylight saving skips one
-/// hour and repeats another — so the CLI would have to "either reject rows in
-/// the middle of an ingest or silently pick one". Rejecting loudly, per row,
-/// with both candidates named, is the acceptable half of that pair; silently
-/// picking is still not, and [`parse_timestamp_with_reference`] does the former.
-/// So the rationale is superseded, and this is now a three-way parse.
+/// A zoneless timestamp in a named zone is not always a single instant —
+/// daylight saving skips one hour and repeats another — so
+/// [`parse_timestamp_with_reference`] rejects such a row loudly, naming both
+/// candidates, rather than picking one.
 ///
 /// Preferring a named zone over a fixed offset matters for any series that
 /// crosses a transition: a year of Denver data stamped `-07:00` renders every
@@ -664,8 +656,8 @@ mod tests {
             ("15min", "PT15M"),
             ("500ms", "PT0.5S"),
             ("7d", "P7D"),
-            // A bare integer used to mean milliseconds, which is exactly the
-            // reading a suggestion should make explicit rather than silent.
+            // A bare integer reads as milliseconds, which the suggestion
+            // makes explicit rather than silent.
             ("24", "PT0.024S"),
         ] {
             let err = parse_period(human).expect_err("human form is no longer accepted");
