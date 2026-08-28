@@ -1637,110 +1637,6 @@ impl Store {
         })
     }
 
-    /// Derive a `DeterministicSingleTimeSeries` view of one stored
-    /// `SingleTimeSeries`.
-    ///
-    /// The single-series counterpart of
-    /// [`Self::transform_single_time_series`], which sweeps every eligible
-    /// series in the store. This is for a caller deriving a view over a series
-    /// it just added, without re-examining the rest of the store. Like every
-    /// other add, the catalog assigns the row's id and
-    /// [`AddedTimeSeries::id`] reports it; a document replaying views under
-    /// ids it recorded goes through [`Self::import_association_rows`].
-    ///
-    /// A view carries no array of its own. It shares its source's `data_hash`
-    /// and inherits every descriptive column from it, so this writes one catalog
-    /// row and no HDF5 bytes; an importer never has to re-supply the values to
-    /// recreate one.
-    ///
-    /// The window parameters are validated exactly as the sweep validates them —
-    /// same plan derivation, so `count` is derived rather than trusted, and
-    /// `policy.normalize_single_window` selects the same interval encoding. That
-    /// matters: `interval` is part of the identity, so a view added here under a
-    /// different encoding than the sweep would use is a *different* series.
-    ///
-    /// # Errors
-    ///
-    /// - [`TimeSeriesError::NotFound`] if `source` names no row.
-    /// - [`TimeSeriesError::InvalidParameter`] if `source` is not a
-    ///   `SingleTimeSeries`, if the window parameters do not fit its grid, if a
-    ///   `Deterministic` of the same family already exists (the two are mutually
-    ///   exclusive), or if `policy.dry_run` is set — this entry point writes or
-    ///   fails, and the sweep is where a rehearsal belongs.
-    /// - [`TimeSeriesError::DuplicateTimeSeries`] if the view already exists.
-    ///   `horizon` is not part of the identity, so this fires for a view at this
-    ///   interval whatever horizon it was derived with.
-    #[tracing::instrument(
-        skip(self, source, horizon, interval, policy),
-        fields(owner = source.owner_id, name = %source.name)
-    )]
-    pub fn add_derived_view(
-        &mut self,
-        source: &KeyIdentity,
-        horizon: impl Into<Period>,
-        interval: impl Into<Period>,
-        policy: TransformPolicy,
-    ) -> Result<AddedTimeSeries> {
-        if self.read_only {
-            return Err(TimeSeriesError::ReadOnlyStore);
-        }
-        if policy.dry_run {
-            return Err(TimeSeriesError::InvalidParameter(
-                "add_derived_view writes or fails; use transform_single_time_series with \
-                 dry_run to rehearse"
-                    .to_string(),
-            ));
-        }
-        if source.time_series_type != TimeSeriesType::SingleTimeSeries {
-            return Err(TimeSeriesError::InvalidParameter(format!(
-                "a DeterministicSingleTimeSeries is a view of a SingleTimeSeries, but \
-                 '{}' names a {}",
-                source.name,
-                source.time_series_type.as_str(),
-            )));
-        }
-        let src = self.metadata.get_by_key(source)?;
-        let resolution = required_resolution(&src, "add_derived_view")?;
-        let initial_timestamp = src.initial_timestamp.ok_or_else(|| {
-            TimeSeriesError::IntegrityError("SingleTimeSeries missing initial_timestamp".into())
-        })?;
-        let length = src.length.ok_or_else(|| {
-            TimeSeriesError::IntegrityError("SingleTimeSeries missing length".into())
-        })?;
-
-        // Run the sweep's own plan derivation over this one series' grid, rather
-        // than repeating the window arithmetic here. Anything the sweep would
-        // reject — a horizon that is not a whole number of steps, one longer
-        // than the series — is rejected here with the same message.
-        let grid = StaticConsistency {
-            resolution,
-            initial_timestamp,
-            length,
-        };
-        let plan = TransformPlan::derive(&[grid], horizon.into(), interval.into(), policy)?
-            .ok_or_else(|| {
-                TimeSeriesError::IntegrityError(
-                    "add_derived_view: no plan for a grid that was just supplied".into(),
-                )
-            })?;
-        let GridPlan { interval, count } = plan.for_resolution(resolution)?;
-        if policy.require_uniform_forecast_grid {
-            let existing = self.get_forecast_parameters(Some(resolution), Some(interval))?;
-            plan.check_compatible_with(&existing)?;
-        }
-
-        let meta = derived_view_row(src, plan.horizon, interval, count);
-        let tx = self.metadata.savepoint()?;
-        check_forecast_family_free(&tx, &meta, "derive")?;
-        let assigned = MetadataStore::insert(&tx, &meta)?;
-        tx.commit()?;
-
-        Ok(AddedTimeSeries {
-            key: TimeSeriesKey::from_metadata(&meta)?,
-            id: assigned,
-        })
-    }
-
     /// Insert association rows verbatim, filing each under the `id` it carries.
     ///
     /// The write half of the OpenAPI document round trip (see
@@ -4562,9 +4458,8 @@ fn request_array(item: &AddRequest) -> &TypedArray {
 }
 
 /// The catalog row for a `DeterministicSingleTimeSeries` view of `src`, as
-/// both [`Store::transform_single_time_series`] and [`Store::add_derived_view`]
-/// write it: the source's own descriptors under the forecast geometry the
-/// plan derived.
+/// [`Store::transform_single_time_series`] writes it: the source's own
+/// descriptors under the forecast geometry the plan derived.
 ///
 /// `id` is cleared rather than inherited: a view is its own row, and `..src`
 /// would otherwise carry the *source's* id — `Some` on anything read back from

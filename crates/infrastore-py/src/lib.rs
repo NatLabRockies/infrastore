@@ -2949,43 +2949,6 @@ impl PyStore {
             .collect()
     }
 
-    /// Derive one `DeterministicSingleTimeSeries` view of the stored
-    /// `SingleTimeSeries` named by `source`.
-    ///
-    /// The single-series form of `transform_single_time_series`, which sweeps
-    /// the whole store. A view shares its source's array, so this writes one
-    /// catalog row and no array data. The catalog assigns the row's id and the
-    /// returned `AddedTimeSeries` reports it.
-    ///
-    /// `normalize_single_window` must match what the sweep would use:
-    /// `interval` is part of a series' identity, so the two paths disagreeing
-    /// would produce two different series.
-    #[pyo3(signature = (
-        source, horizon, interval, *,
-        normalize_single_window=false, require_uniform_forecast_grid=false
-    ))]
-    fn add_derived_view(
-        &mut self,
-        source: &PyTimeSeriesKey,
-        horizon: &Bound<'_, PyAny>,
-        interval: &Bound<'_, PyAny>,
-        normalize_single_window: bool,
-        require_uniform_forecast_grid: bool,
-    ) -> PyResult<PyAddedTimeSeries> {
-        let horizon = pyany_to_period(horizon)?;
-        let interval = pyany_to_period(interval)?;
-        let policy = core_lib::TransformPolicy {
-            dry_run: false,
-            normalize_single_window,
-            require_uniform_forecast_grid,
-        };
-        let added = self
-            .store_mut()?
-            .add_derived_view(&source.inner, horizon, interval, policy)
-            .map_err(map_err)?;
-        Ok(PyAddedTimeSeries::from_core(added))
-    }
-
     /// List the `TimeSeriesKey`s matching the filter.
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,

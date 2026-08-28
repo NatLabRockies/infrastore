@@ -287,14 +287,13 @@ Three properties make an id safe to persist:
   uniqueness rule and to both content hashes. It sits outside the key deliberately: a key is also an
   _argument_ — to `get_time_series`, to `remove_time_series!` — where an id would mean nothing.
 
-**The store assigns it; no add accepts one.** Not `add_time_series`, not a bulk add, not
-`add_derived_view`, and not either association catalog's `attach` / `link`. This is what makes
-"never reissued" a guarantee rather than a convention: `AUTOINCREMENT` only ratchets its counter
-upward, so an assigned id is never handed out twice, while a caller free to name one could re-file a
-retired id and make a stale reference in some consumer's model quietly resolve to a different
-series. The association row types carry an `id` field because a listing populates one, but it is an
-output — an add ignores it, so a row read from one store and attached to another is filed under a
-fresh id there.
+**The store assigns it; no add accepts one.** Not `add_time_series`, not a bulk add, and not either
+association catalog's `attach` / `link`. This is what makes "never reissued" a guarantee rather than
+a convention: `AUTOINCREMENT` only ratchets its counter upward, so an assigned id is never handed
+out twice, while a caller free to name one could re-file a retired id and make a stale reference in
+some consumer's model quietly resolve to a different series. The association row types carry an `id`
+field because a listing populates one, but it is an output — an add ignores it, so a row read from
+one store and attached to another is filed under a fresh id there.
 
 What an id does _not_ do is travel between stores. It is the row's number in one catalog, so a
 `merge` assigns fresh ids in the destination, and two stores holding identical content will disagree

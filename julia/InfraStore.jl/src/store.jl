@@ -15,8 +15,8 @@ end
 What a write reports: the [`TimeSeriesKey`](@ref) naming the series, and the
 catalog `id` its row was filed under.
 
-Returned by [`add_time_series!`](@ref), [`add_time_series_bulk!`](@ref) and
-[`add_derived_view!`](@ref). The id is deliberately not part of a
+Returned by [`add_time_series!`](@ref) and [`add_time_series_bulk!`](@ref). The
+id is deliberately not part of a
 `TimeSeriesKey` — a key is also an *argument*, to `get_time_series` and
 `remove_time_series!`, where an id would mean nothing — so a write hands back
 the pair instead. Reach the key with `.key`:

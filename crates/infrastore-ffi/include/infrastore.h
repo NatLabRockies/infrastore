@@ -1029,40 +1029,6 @@ int32_t infrastore_store_association_exists(const struct InfraStore *handle,
                                             bool *out_present);
 
 /**
- * Derive one `DeterministicSingleTimeSeries` view of the stored
- * `SingleTimeSeries` named by `source`.
- *
- * The single-series counterpart of
- * `infrastore_store_transform_single_time_series`, which sweeps the whole
- * store. A view carries no array of its own — it shares its source's data — so
- * this writes one catalog row and no array bytes, and a caller recreating a
- * view never re-supplies the values.
- *
- * `horizon` and `interval` are ISO-8601 durations. The policy flags mean what
- * they mean on the sweep, and `normalize_single_window` must match what the
- * sweep would use: `interval` is part of a series' identity, so the two paths
- * disagreeing would produce two different series. `dry_run` has no counterpart
- * here and is not accepted — this entry point writes or fails.
- *
- * # Safety
- *
- * `handle` must be a live store handle and `source` a live key handle naming a
- * `SingleTimeSeries`; neither is retained past the call. `horizon` and
- * `interval` must be null-terminated UTF-8. `out_key`, when non-null, must be
- * valid for writing one pointer, and on `INFRASTORE_OK` receives a key handle
- * the caller must release exactly once with `infrastore_key_free`. `out_id`,
- * when non-null, must be valid for writing one `i64`.
- */
-int32_t infrastore_store_add_derived_view(struct InfraStore *handle,
-                                          const struct InfraStoreKey *source,
-                                          const char *horizon,
-                                          const char *interval,
-                                          bool normalize_single_window,
-                                          bool require_uniform_forecast_grid,
-                                          struct InfraStoreKey **out_key,
-                                          int64_t *out_id);
-
-/**
  * True iff a SingleTimeSeries with the given attributes exists.
  *
  * # Safety

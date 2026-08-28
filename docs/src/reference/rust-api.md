@@ -1260,9 +1260,9 @@ impl AddRequest {
 }
 ```
 
-A request names no catalog id. Every add — this one, `add_time_series`, `add_derived_view`, and both
-association catalogs' — lets the catalog assign, and reports the id it chose on `AddedTimeSeries`.
-The one writer that files rows under ids a caller supplies is `import_association_rows`, replaying a
+A request names no catalog id. Every add — this one, `add_time_series`, and both association
+catalogs' — lets the catalog assign, and reports the id it chose on `AddedTimeSeries`. The one
+writer that files rows under ids a caller supplies is `import_association_rows`, replaying a
 document that already recorded them; see
 [Association ids](../explanation/data-model.md#association-ids).
 

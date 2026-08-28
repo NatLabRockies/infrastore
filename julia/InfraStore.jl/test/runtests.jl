@@ -4756,7 +4756,7 @@ end
     close!(store)
 end
 
-@testset "association ids: writes report them, and a view gets its own" begin
+@testset "association ids: writes report them" begin
     t0 = DateTime(2024, 1, 1)
     res = Hour(1)
     store = Store(in_memory=true)
@@ -4772,25 +4772,6 @@ end
     added = add_time_series_bulk!(store, batch)
     @test [a.id for a in added] == [1, 2, 3]
     @test all(get_metadata(store, a).id == a.id for a in added)
-
-    # A derived view is a row of its own: its own id, its source's array.
-    long = add_time_series!(
-        store, 10, "Generator", Component,
-        SingleTimeSeries(t0, res, collect(1.0:24.0), "load"),
-    )
-    before = num_distinct_arrays(store)
-    view = add_derived_view!(store, long, Hour(6), Hour(6))
-    @test num_distinct_arrays(store) == before
-    @test view.id != long.id
-    @test get_metadata(store, view).time_series_type === DeterministicSingleTimeSeries
-    @test get_metadata(store, view).data_hash == get_metadata(store, long).data_hash
-
-    # …and a view takes no id either; the catalog assigns it like any other row.
-    other = add_time_series!(
-        store, 11, "Generator", Component,
-        SingleTimeSeries(t0, res, collect(1.0:24.0), "load"),
-    )
-    @test_throws MethodError add_derived_view!(store, other, Hour(6), Hour(6); id=4242)
 
     close!(store)
 end

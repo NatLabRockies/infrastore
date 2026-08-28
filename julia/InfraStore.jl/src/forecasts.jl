@@ -36,57 +36,6 @@ struct TransformOutcome
 end
 
 """
-    add_derived_view!(store, source, horizon, interval; normalize_single_window=false,
-                      require_uniform_forecast_grid=false) -> AddedTimeSeries
-
-Derive one `DeterministicSingleTimeSeries` view of the stored `SingleTimeSeries`
-named by `source`.
-
-The single-series form of [`transform_single_time_series!`](@ref), which sweeps
-every eligible series in the store. This is for a caller deriving a view over a
-series it just added, without re-examining the rest of the store. As on every
-add, the catalog assigns the row's id and the returned `AddedTimeSeries` reports
-it.
-
-A view carries no array of its own — it shares its source's data — so this
-writes one catalog row and no array bytes, and a caller recreating one never
-re-supplies the values.
-
-`normalize_single_window` must match what the sweep would use: `interval` is
-part of a series' identity, so a view derived here under a different encoding
-than the sweep's would be a *different* series.
-
-```julia
-added = add_time_series!(store, 1, "Generator", Component, ts)
-view = add_derived_view!(store, added, Hour(6), Hour(6))
-```
-"""
-function add_derived_view!(
-    store::Store,
-    source::TimeSeriesRef,
-    horizon::Period,
-    interval::Period;
-    normalize_single_window::Bool=false,
-    require_uniform_forecast_grid::Bool=false,
-)
-    out_key = Ref{Ptr{Cvoid}}(C_NULL)
-    out_id = Ref{Int64}(0)
-    _check(
-        @ccall lib_path().infrastore_store_add_derived_view(
-            store::Ptr{Cvoid},
-            _key(source)::Ptr{Cvoid},
-            _period_to_iso(horizon)::Cstring,
-            _period_to_iso(interval)::Cstring,
-            normalize_single_window::Bool,
-            require_uniform_forecast_grid::Bool,
-            out_key::Ref{Ptr{Cvoid}},
-            out_id::Ref{Int64},
-        )::Int32
-    )
-    return AddedTimeSeries(TimeSeriesKey(out_key[]), out_id[])
-end
-
-"""
     transform_single_time_series!(store, horizon, interval; owner_category=nothing,
                                   resolution=nothing, normalize_single_window=false,
                                   require_uniform_forecast_grid=false,

@@ -384,15 +384,6 @@ class Store:
     def get_metadata_by_id(self, id: int) -> dict[str, Any] | None: ...
     def association_exists(self, id: int) -> bool: ...
     def read_by_ids(self, ids: list[int]) -> list[TimeSeriesData]: ...
-    def add_derived_view(
-        self,
-        source: TimeSeriesKey,
-        horizon: Period,
-        interval: Period,
-        *,
-        normalize_single_window: bool = False,
-        require_uniform_forecast_grid: bool = False,
-    ) -> AddedTimeSeries: ...
     def transform_single_time_series(
         self,
         horizon: Period,

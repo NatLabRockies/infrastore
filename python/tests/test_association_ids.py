@@ -145,37 +145,6 @@ class TestReading:
         assert store.read_by_ids([]) == []
 
 
-class TestDerivedViews:
-    def _long(self, store: Store) -> AddedTimeSeries:
-        data = np.arange(24, dtype=np.float64)
-        series = SingleTimeSeries(_t0(), timedelta(hours=1), data, "load")
-        return store.add_time_series(
-            1, "Generator", OwnerCategory.Component, series
-        )
-
-    def test_a_view_adds_a_row_and_no_array(self):
-        store = Store.create(in_memory=True)
-        source = self._long(store)
-        before = store.num_distinct_arrays()
-
-        view = store.add_derived_view(
-            source.key, timedelta(hours=6), timedelta(hours=6)
-        )
-        assert store.num_distinct_arrays() == before
-        assert view.id != source.id
-        meta = store.get_metadata_by_id(view.id)
-        assert meta["time_series_type"] == "DeterministicSingleTimeSeries"
-        assert meta["data_hash"] == store.get_metadata_by_id(source.id)["data_hash"]
-
-    def test_a_view_takes_no_id_either(self):
-        store = Store.create(in_memory=True)
-        source = self._long(store)
-        with pytest.raises(TypeError):
-            store.add_derived_view(
-                source.key, timedelta(hours=6), timedelta(hours=6), id=4242
-            )
-
-
 class TestAssociations:
     def _attach(self, component_id: int, attribute_id: int):
         return SupplementalAttributeAssociation(

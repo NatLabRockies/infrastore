@@ -262,7 +262,7 @@ them raises `InvalidParameterError` rather than being quietly ignored. The eleme
 on the result instead, in its own `{T,N}` and in a reader group's `dtype`.
 
 ```julia
-struct AddedTimeSeries                       # every write: add_time_series!, add_time_series_bulk!, add_derived_view!
+struct AddedTimeSeries                       # every write: add_time_series!, add_time_series_bulk!
     key :: TimeSeriesKey                     # names the series
     id  :: Int64                             # the catalog row's id; assigned, and never reissued
 end                                          # accepted anywhere a TimeSeriesKey is
