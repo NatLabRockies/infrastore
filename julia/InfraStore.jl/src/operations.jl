@@ -1037,12 +1037,12 @@ function bulk_read(
         out_result::Ref{Ptr{Cvoid}},
     )::Int32
     _check(code)
-    return _decode_bulk_result(out_result[], n, i -> _key_name(keys[i]))
+    return _decode_bulk_result(out_result[], n)
 end
 
 # The name of bulk-read item `idx` (0-based), as an owned C string the FFI hands
-# over. The keyed path never needs it -- it has the key it passed in -- but
-# `read_by_ids` addresses rows by number and has nothing else to label them with.
+# over. The result handle carries each item's name whichever way the read was
+# addressed, so both `bulk_read` and `read_by_ids` label their items from here.
 function _bulk_item_name(result::Ptr{Cvoid}, idx::Integer)
     out_name = Ref{Ptr{Cchar}}(C_NULL)
     _check(
@@ -1054,10 +1054,10 @@ function _bulk_item_name(result::Ptr{Cvoid}, idx::Integer)
 end
 
 # Decode every item out of a bulk-read result handle into the proper Julia
-# struct, freeing the handle even when a decode throws. `name_for(i)` supplies
-# item `i`'s series name -- the keyed path reads it off the key it passed in,
-# `read_by_ids` asks the handle.
-function _decode_bulk_result(result::Ptr{Cvoid}, n::Integer, name_for)
+# struct, freeing the handle even when a decode throws. Both the name and the
+# type discriminant come off the handle itself, so the keyed and id-addressed
+# reads decode by exactly the same route.
+function _decode_bulk_result(result::Ptr{Cvoid}, n::Integer)
     out = Vector{Any}(undef, n)
     try
         for i in 1:n
@@ -1067,7 +1067,7 @@ function _decode_bulk_result(result::Ptr{Cvoid}, n::Integer, name_for)
                     result::Ptr{Cvoid}, UInt64(i - 1)::UInt64, out_type::Ref{Int32}
                 )::Int32
             )
-            name = name_for(i)
+            name = _bulk_item_name(result, i - 1)
             t = Int(out_type[])
             out[i] = if t == INFRASTORE_TYPE_SINGLE
                 _bulk_single(result, i - 1, name)
@@ -1112,8 +1112,7 @@ function read_by_ids(store::Store, ids::AbstractVector{<:Integer})
             out_result::Ref{Ptr{Cvoid}},
         )::Int32
     )
-    result = out_result[]
-    return _decode_bulk_result(result, n, i -> _bulk_item_name(result, i - 1))
+    return _decode_bulk_result(out_result[], n)
 end
 
 function get_time_series(

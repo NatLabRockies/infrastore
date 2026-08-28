@@ -4553,9 +4553,10 @@ pub unsafe extern "C" fn infrastore_store_read_by_ids(
 }
 
 /// Write the name of bulk-read item `index` into `out_name` as an owned C
-/// string. The keyed bulk read already knows each name from the key it passed
-/// in; `infrastore_store_read_by_ids` does not, so this is how an id-addressed
-/// caller labels what it got back.
+/// string. The result handle carries each item's name whichever way the read
+/// was addressed, so this is how both `infrastore_store_bulk_read` and
+/// `infrastore_store_read_by_ids` label what they got back — the companion to
+/// `infrastore_bulk_result_item_type` beside it.
 ///
 /// # Safety
 ///

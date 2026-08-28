@@ -747,8 +747,10 @@ every write hands back through its `out_id`, for a consumer that recorded ids in
 instead of an id-to-key map. It fills the same `InfraStoreBulkReadHandle`, so the results come out
 through the same accessors; results follow the order the ids are given (repeats honoured in place),
 and an id naming no row fails the whole call with `INFRASTORE_ERR_NOT_FOUND` rather than being
-skipped. Because there are no keys to read names off, `infrastore_bulk_result_item_name` hands back
-item `index`'s series name as an owned C string, freed with `infrastore_string_free`.
+skipped. The handle carries each item's name whichever way the read was addressed, and
+`infrastore_bulk_result_item_name` hands item `index`'s back as an owned C string, freed with
+`infrastore_string_free` — the companion to `infrastore_bulk_result_item_type`, and how both reads
+label what they decode.
 
 ```c
 int32_t infrastore_store_read_by_ids(const struct InfraStore *handle, const int64_t *ids,
