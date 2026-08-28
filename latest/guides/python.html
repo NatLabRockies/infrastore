@@ -399,8 +399,8 @@ report = store.compact()            # rewrites the .h5 from the live set; keys i
                                    #  "slots_reclaimed", "datasets_dropped",
                                    #  "feature_sets_reclaimed", "timestamp_sets_reclaimed",
                                    #  "bytes_reclaimed"
-integrity = store.verify_integrity()   # {"ok": True, "errors": []} when arrays are intact
-                                   # (arrays only — the SQLite catalog is not checked)
+integrity = store.verify_integrity()   # {"ok": True, "errors": []} when every array and time
+                                   # axis the catalog names matches its recorded hash
 </code></pre>
 <h2 id="associations"><a class="header" href="#associations">Associations</a></h2>
 <p>Two catalog tables record relationships between entities the store does not otherwise model, wholly

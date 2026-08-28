@@ -1051,8 +1051,9 @@ only</strong>: the document carries locators, never values, so every row must na
 already holds — the arrays arrive with the artifact. Each row keeps the <code>association_id</code> it carries,
 which is the point: an import that assigned fresh ids would leave every reference the document
 records pointing at the wrong series. A row whose array is absent, or a <code>NonSequentialTimeSeries</code>
-row (whose timestamp vector is not on the wire), raises <code>InvalidParameterError</code> and rolls the whole
-batch back.</p>
+row (whose <code>timestamps_hash</code> is store-internal and so not on the wire, leaving the document with no
+way to say which stored time axis the row sits on), raises <code>InvalidParameterError</code> and rolls the
+whole batch back.</p>
 <p>Infrastore never modifies the data to make an incoming document agree with what it already holds. A
 geometry disagreement between an added series and its own association row is likewise rejected at
 the add boundary (<code>InvalidParameterError</code>), loudly and without writing anything.</p>

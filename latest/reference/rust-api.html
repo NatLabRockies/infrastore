@@ -563,9 +563,10 @@ key to metadata (including <code>data_hash</code>), then read the array directly
 <li><strong><code>count_array_references</code></strong> — <code>(sts, dst)</code> association counts referencing one <code>data_hash</code>, so a
 caller can tell whether removing a <code>SingleTimeSeries</code> would orphan a
 <code>DeterministicSingleTimeSeries</code> derived from (and sharing) its array.</li>
-<li><strong><code>verify_integrity</code></strong> — Recomputes each stored array's hash and reports mismatches. Covers the
-HDF5 half only: the SQLite catalog is not inspected, so an empty report does not mean the store as
-a whole is sound. See
+<li><strong><code>verify_integrity</code></strong> — Reads back every array and timestamp vector the catalog references,
+recomputes its hash, and reports mismatches and dangling references. It checks the HDF5 half
+against the catalog, never the catalog against itself, so an empty report does not mean the store
+as a whole is sound. See
 <a href="../explanation/content-addressing.html#what-it-does-not-cover">content addressing</a>.</li>
 <li><strong><code>flush</code></strong> — Issues <code>H5Fflush</code> so the files can be copied for persistence without closing.</li>
 <li><strong><code>persist_to</code></strong> — Writes both halves of the artifact to <code>path</code> and <code>&lt;path&gt;.sqlite</code>, overwriting

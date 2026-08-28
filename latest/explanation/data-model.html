@@ -293,6 +293,14 @@ not others, putting the same series on different instants depending on who read 
 <code>NonSequentialTimeSeries</code> whose timestamps are less than a millisecond apart it is worse: two
 distinct timestamps collapse into one, and the vector stops being strictly increasing on the way
 back out.</p>
+<p>A <strong>leap second</strong> is refused by the same rule, for the same reason, though it is not a matter of
+precision. Chrono spells one as a sub-second component at or above one second (<code>23:59:60</code>), which is
+a whole number of milliseconds and would otherwise pass — but a Unix millisecond count cannot
+express a leap second at all, so writing one would store the <em>following</em> second. That is not merely
+lossy: a leap second and the second after it are distinct instants that would become one stored
+instant, so two genuinely different <code>NonSequentialTimeSeries</code> time axes would share a content hash
+and be interned as one, and a single vector holding <code>23:59:60</code> followed by <code>00:00:00</code> would go in
+strictly increasing and come back out with a duplicate. Use the second either side of it.</p>
 <p>A series needing a finer grid should scale its unit and record it in <code>units</code>, exactly as it must for
 a sub-millisecond resolution: a 500 µs series is a 500-unit series.</p>
 <p>Two things are deliberately <em>not</em> constrained. A <strong>query bound</strong> — a <code>time_range</code> end, a reader's

@@ -941,6 +941,14 @@ not others, putting the same series on different instants depending on who read 
 <code>NonSequentialTimeSeries</code> whose timestamps are less than a millisecond apart it is worse: two
 distinct timestamps collapse into one, and the vector stops being strictly increasing on the way
 back out.</p>
+<p>A <strong>leap second</strong> is refused by the same rule, for the same reason, though it is not a matter of
+precision. Chrono spells one as a sub-second component at or above one second (<code>23:59:60</code>), which is
+a whole number of milliseconds and would otherwise pass — but a Unix millisecond count cannot
+express a leap second at all, so writing one would store the <em>following</em> second. That is not merely
+lossy: a leap second and the second after it are distinct instants that would become one stored
+instant, so two genuinely different <code>NonSequentialTimeSeries</code> time axes would share a content hash
+and be interned as one, and a single vector holding <code>23:59:60</code> followed by <code>00:00:00</code> would go in
+strictly increasing and come back out with a duplicate. Use the second either side of it.</p>
 <p>A series needing a finer grid should scale its unit and record it in <code>units</code>, exactly as it must for
 a sub-millisecond resolution: a 500 µs series is a 500-unit series.</p>
 <p>Two things are deliberately <em>not</em> constrained. A <strong>query bound</strong> — a <code>time_range</code> end, a reader's
@@ -1398,8 +1406,9 @@ data-format version is unaffected. In-memory stores ignore the setting.</li>
 <code>DeterministicSingleTimeSeries</code>) pool by resolution into <code>sts_…</code> datasets; <code>NonSequentialTimeSeries</code>
 pool by their <em>timestamp vector</em> into <code>nsts_…</code> datasets, because the chunking is timestamp-major and
 so only means something for arrays on a common time axis. An irregular series carries that axis
-explicitly, and the catalog already content-addresses it, so the interned hash is the cohort key —
-which is what lets a <code>StaticReader</code> sweep irregular series the same way it sweeps regular ones.</p>
+explicitly, and the store content-addresses it — one <code>tsv_{hash}</code> dataset of unix milliseconds per
+distinct axis, in the file's own <code>timestamps</code> group — so the interned hash is the cohort key, which
+is what lets a <code>StaticReader</code> sweep irregular series the same way it sweeps regular ones.</p>
 <p><strong>Standalone mode</strong> holds the dense forecast arrays (<code>Deterministic</code>, <code>Probabilistic</code>, <code>Scenarios</code>)
 and any <code>NonSequentialTimeSeries</code> alone on its time axis — a pool spreads one array over <code>length</code>
 chunks, so a cohort of one is not worth packing. Each is its own typed, multi-dimensional variable
@@ -1612,12 +1621,14 @@ for the cohort actually stored. The report says how much went — <code>slots_re
 <p>Because the file is replaced, compaction assumes the compacting process is its only user. That is
 the store's single-writer model in general; the difference is that here a concurrent reader on Unix
 silently keeps reading the pre-compaction file, and on Windows the rename fails outright.</p>
-<p><strong>On the catalog side, compaction sweeps.</strong> Because feature sets are shared, deleting an association
-cannot cascade into them: removing the last association that referenced a set leaves it unreachable.
-<code>compact()</code> deletes those rows and reports the count as <code>feature_sets_reclaimed</code> (and
-<code>timestamp_sets_reclaimed</code> for timestamp vectors), before the rewrite, so the rewrite's liveness
-scan sees the swept catalog. (Clearing the whole store is the exception that needs no sweep: it
-orphans every set by construction, so it drops them all outright.)</p>
+<p><strong>Compaction also sweeps the shared sets.</strong> Because feature sets and timestamp vectors are shared,
+deleting an association cannot cascade into them: removing the last association that referenced one
+leaves it unreachable. <code>compact()</code> deletes both — the feature set as a catalog row, the timestamp
+vector as an unlinked dataset — and reports the counts as <code>feature_sets_reclaimed</code> and
+<code>timestamp_sets_reclaimed</code>, before the rewrite, so the rewrite's liveness scan sees what survived.
+(Clearing is the exception on both counts: it orphans every feature set and every axis by
+construction, so it reclaims them outright rather than waiting for a compaction a cleared store may
+never get.)</p>
 <p>See <a href="explanation/../reference/rust-api.html#store"><code>compact</code></a>.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="content-addressing"><a class="header" href="#content-addressing">Content Addressing</a></h1>
 <p>Every array is identified by the SHA-256 hash of its contents, not by a name or an ID. Two series
@@ -1679,15 +1690,18 @@ was derived from and has exactly the same features, so <code>transform_single_ti
 source's array.</p>
 <h2 id="the-timestamps-hash"><a class="header" href="#the-timestamps-hash">The Timestamps Hash</a></h2>
 <p>A <code>NonSequentialTimeSeries</code> carries its timestamps explicitly, and those are content-addressed too,
-by <code>timestamps_hash</code>: a domain tag followed by the vector's canonical encoding — the same bytes the
-catalog stores, so the hash addresses the stored form rather than a second serialization of it. Two
-vectors hash equal exactly when they hold the same instants in the same order.</p>
+by <code>timestamps_hash</code>: a domain tag, the count, then each instant as a unix millisecond count — the
+same values the store writes, so the hash addresses the stored form rather than a second
+serialization of it. Two vectors hash equal exactly when they hold the same instants in the same
+order.</p>
 <p>Like the features hash, it does double duty:</p>
 <ul>
-<li><strong>It keys the stored vector.</strong> The <code>timestamp_sets</code> table is keyed by it, so a time axis shared by
-a thousand irregular series is stored <strong>once</strong>. Sharing is again the common case, not the rare
-one: irregular series in this domain sit on a schedule — outage windows, market intervals, event
-times — that many components observe together.</li>
+<li><strong>It names the stored vector.</strong> Each distinct time axis is one <code>tsv_{timestamps_hash}</code> dataset in
+the HDF5 file, so an axis shared by a thousand irregular series is stored <strong>once</strong>. Sharing is
+again the common case, not the rare one: irregular series in this domain sit on a schedule —
+outage windows, market intervals, event times — that many components observe together. Unlike the
+features hash, this one addresses something in the <em>array</em> half of the artifact: a timestamp
+vector is data, and the catalog holds only its hash.</li>
 <li><strong>It is the cohort key of the packed array layout.</strong> Column-packing is only meaningful for arrays
 on a common time axis, since the chunking is timestamp-major; the interned hash is precisely the
 answer to "do these two series share one?", so the arrays of a cohort pool into one
@@ -1781,29 +1795,34 @@ rules can therefore break the format without breaking that test — the reasonin
 is the contract.</p>
 <h2 id="integrity-verification"><a class="header" href="#integrity-verification">Integrity Verification</a></h2>
 <p>Because the stored hash and the stored data are independent on disk, they can be cross-checked.
-<code>verify_integrity</code> walks every indexed column, recomputes <code>array_hash</code> from the stored values, and
-reports any mismatch between the recorded hash and the recomputed one — detecting silent corruption.
-See <a href="explanation/../reference/rust-api.html#store"><code>verify_integrity</code></a>.</p>
+<code>verify_integrity</code> takes the catalog as the statement of what should be there, then checks the HDF5
+half against it: it collects every array and every explicit timestamp vector the catalog references,
+reads each one back, recomputes <code>array_hash</code> / <code>timestamps_hash</code> from the stored values, and reports
+any mismatch between the recorded hash and the recomputed one — detecting silent corruption. A
+reference the file cannot satisfy is reported too, as a dangling one. See
+<a href="explanation/../reference/rust-api.html#store"><code>verify_integrity</code></a>.</p>
 <h3 id="what-it-does-not-cover"><a class="header" href="#what-it-does-not-cover">What it does not cover</a></h3>
-<p>The check is scoped to the <strong>array half</strong> of the store. It reads what the HDF5 side knows about and
-rehashes it; it never opens the SQLite catalog. A clean report is therefore a statement about the
-arrays, not about the store as a whole. Three things fall outside it:</p>
+<p>The check runs from the catalog into the HDF5 file, and only in that direction. It never checks the
+catalog against <em>itself</em>, so a clean report is a statement about the stored content, not about the
+store as a whole. Three things fall outside it:</p>
 <ul>
-<li>a <code>data_hash</code> in the catalog that names no stored array — a truncated or corrupted catalog, or a
-catalog paired with the wrong <code>.h5</code> file. Every read of the affected key fails, and
-<code>verify_integrity</code> reports nothing.</li>
-<li>a catalog row whose <code>dtype</code>, <code>element_shape</code>, or <code>length</code> misdescribes the array it points at.</li>
+<li>a catalog row whose <code>dtype</code>, <code>element_shape</code>, or <code>length</code> misdescribes the array it points at. The
+hash addresses the array's own content, so an array that matches its hash passes the check while
+the row goes on lying about it.</li>
 <li>a missing catalog entirely. The two artifacts are one logical store, but nothing enforces that:
 opening read-write with the <code>.sqlite</code> half deleted silently recreates it empty, and the resulting
-store — zero time series, every array still present and now unreachable — verifies clean.</li>
+store — zero time series, every array still present and now unreachable — verifies clean, because
+a catalog that references nothing is a clean bill of health here.</li>
+<li>anything the catalog does not reference. The sweep never reaches it, whatever state it is in; an
+unreachable array is the expected state after a delete, and <code>compact</code> is what reports it.</li>
 </ul>
-<p>This is a deliberate scope rather than an oversight: the array side is where silent bit-level
-corruption happens, and it is the half no other call examines. The catalog has its own purpose-built
-checks — <code>check_static_consistency</code> for per-resolution grid agreement, and <code>compact</code> for the
-unreachable arrays and feature sets a delete leaves behind, which it reclaims and reports (an
-expected state, documented in the <a href="explanation/../reference/file-format.html">file format</a>, not corruption).
-SQLite also enforces a good deal itself: the <code>NOT NULL</code> and <code>CHECK</code> constraints, and the two unique
-indexes that guarantee identity uniqueness.</p>
+<p>This is a deliberate scope rather than an oversight: content corruption is what happens silently,
+and the catalog has its own purpose-built checks — <code>check_static_consistency</code> for per-resolution
+grid agreement, and <code>compact</code> for the unreachable arrays and feature sets a delete leaves behind,
+which it reclaims and reports (an expected state, documented in the
+<a href="explanation/../reference/file-format.html">file format</a>, not corruption). SQLite also enforces a good deal
+itself: the <code>NOT NULL</code> and <code>CHECK</code> constraints, and the two unique indexes that guarantee identity
+uniqueness.</p>
 <p>If you need end-to-end assurance that a copied or restored store is intact, the operational rule in
 the <a href="explanation/../reference/file-format.html">file format</a> is the one that matters: move, copy, and delete the
 <code>.h5</code> and its <code>.sqlite</code> together.</p>
@@ -2196,7 +2215,8 @@ variants as distinct types (<code>NotFound</code>, <code>DuplicateTimeSeries</co
 <h2 id="testing-an-integration"><a class="header" href="#testing-an-integration">Testing an Integration</a></h2>
 <ul>
 <li>Use <code>in_memory=True</code> stores in unit tests; they exercise the same core.</li>
-<li><code>verify_integrity</code> re-hashes every array; <code>is_empty</code> is the cheap "nothing here" probe.</li>
+<li><code>verify_integrity</code> re-hashes every array and time axis the catalog references; <code>is_empty</code> is the
+cheap "nothing here" probe.</li>
 <li>The <code>infrastore</code> CLI reads any artifact your package writes. <code>infrastore list</code> and
 <code>infrastore info</code> are the fastest way to see what a consumer actually stored, and
 <code>infrastore diff --against</code> compares two artifacts by hash without reading arrays — a usable CI
@@ -2520,7 +2540,7 @@ store.clear_time_series(Some((42, OwnerCategory::Component)))?;  // all series f
 store.clear_time_series(None)?;        // everything
 
 let report = store.compact()?;         // reports reusable slots
-let integrity = store.verify_integrity()?;  // arrays only; catalog not checked
+let integrity = store.verify_integrity()?;  // stored content vs. the hashes the catalog names
 assert!(integrity.errors.is_empty());
 <span class="boring">}</span></code></pre></pre>
 <p>Removal is <a href="guides/../explanation/content-addressing.html#deletion-is-reference-counted">reference-counted</a>:
@@ -2860,8 +2880,8 @@ report = store.compact()            # rewrites the .h5 from the live set; keys i
                                    #  "slots_reclaimed", "datasets_dropped",
                                    #  "feature_sets_reclaimed", "timestamp_sets_reclaimed",
                                    #  "bytes_reclaimed"
-integrity = store.verify_integrity()   # {"ok": True, "errors": []} when arrays are intact
-                                   # (arrays only — the SQLite catalog is not checked)
+integrity = store.verify_integrity()   # {"ok": True, "errors": []} when every array and time
+                                   # axis the catalog names matches its recorded hash
 </code></pre>
 <h2 id="associations-1"><a class="header" href="#associations-1">Associations</a></h2>
 <p>Two catalog tables record relationships between entities the store does not otherwise model, wholly
@@ -3330,7 +3350,7 @@ end
 </code></pre>
 <h2 id="store-wide-operations"><a class="header" href="#store-wide-operations">Store-Wide Operations</a></h2>
 <pre><code class="language-julia">counts = get_counts(store)        # TimeSeriesCounts: components_with_time_series, static_time_series, forecasts
-nerr   = verify_integrity(store)  # 0 == arrays intact (catalog not checked)
+nerr   = verify_integrity(store)  # 0 == every referenced array and time axis matches its hash
 report = compact!(store)          # CompactionReport; rewrites the .h5 from the live set, so a
                                   # delete actually shrinks the file. Nothing else may have the
                                   # store open while it runs.
@@ -4332,7 +4352,7 @@ carries netcdf-c's <code>_NCProperties</code> attribute, and <code>Store::open</
 (see <code>storage_backend</code> below). The <code>.h5</code> extension is a convention — the store never inspects it.</p>
 <h2 id="format-version"><a class="header" href="#format-version">Format Version</a></h2>
 <p>The HDF5 root carries four global attributes:</p>
-<pre><code class="language-text">data_format_version = "0.18.0"
+<pre><code class="language-text">data_format_version = "0.19.0"
 compression         = "deflate:3:shuffle"
 storage_backend     = "hdf5"
 catalog_generation  = "9f2c1ab4e70d5836c41b9e2af0d7c358"
@@ -4362,40 +4382,49 @@ existing value rather than minting a new one, since it rewrites only the HDF5 ha
 <code>IncompatibleFormat</code>, naming both versions. Every bump is backward-incompatible by definition, so
 the check is exact equality and there is no in-place upgrade path: regenerate the store with the
 matching build.</p>
-<p>(<code>0.18.0</code> made the <code>id</code> column of all three catalog tables — <code>time_series_associations</code>,
-<code>supplemental_attribute_associations</code>, and <code>parent_child_associations</code> — an
-<code>INTEGER PRIMARY KEY AUTOINCREMENT</code> rather than a bare rowid alias, so an id is never reissued once
-its row is deleted. It is the one bump that adds no column and changes no value, and it still cannot
-be additive: <code>AUTOINCREMENT</code> is part of a table's declaration and there is no <code>ALTER TABLE</code> for it,
-so applying this DDL to an older catalog would leave all three tables on recycled ids while
-reporting success. Recycled ids matter because the id is an external reference — a consumer stores
-it in its own model — and reuse makes a stale reference resolve to a different, valid row; <code>0.17.0</code>
-added the metadata column <code>time_reference</code>, which records how a series' timestamps were <em>spelled</em> —
-an instant in UTC, an instant at a fixed offset, an instant in a named IANA zone, or a wall clock
-naming no instant. It also changes how stored timestamps are <em>interpreted</em>: a row marked <code>zoneless</code>
-holds wall clocks the store keeps as if UTC, which an older reader would hand back as instants. See
+<p>(<code>0.19.0</code> moved a <code>NonSequentialTimeSeries</code>'s timestamps out of the SQLite catalog and into the HDF5
+file: the <code>timestamp_sets</code> table is gone, and each distinct time axis is now an <code>i64</code> dataset of
+unix milliseconds under <code>time_series/timestamps/</code>, named by the same content hash the association
+row already carried. The hash domain changed with it — <code>timestamps_hash</code> is now the SHA-256 of those
+milliseconds rather than of the delta-varint blob the table held — so the <code>nsts_…</code> pool names change
+too. The timestamps are data, and belong in the half of the artifact built for data: a store may
+hold many distinct axes, each of them long, and a JSON document round trip needs them to travel with
+the artifact rather than be locked inside the catalog; <code>0.18.0</code> made the <code>id</code> column of all three
+catalog tables — <code>time_series_associations</code>, <code>supplemental_attribute_associations</code>, and
+<code>parent_child_associations</code> — an <code>INTEGER PRIMARY KEY AUTOINCREMENT</code> rather than a bare rowid alias,
+so an id is never reissued once its row is deleted. It is the one bump that adds no column and
+changes no value, and it still cannot be additive: <code>AUTOINCREMENT</code> is part of a table's declaration
+and there is no <code>ALTER TABLE</code> for it, so applying this DDL to an older catalog would leave all three
+tables on recycled ids while reporting success. Recycled ids matter because the id is an external
+reference — a consumer stores it in its own model — and reuse makes a stale reference resolve to a
+different, valid row; <code>0.17.0</code> added the metadata column <code>time_reference</code>, which records how a
+series' timestamps were <em>spelled</em> — an instant in UTC, an instant at a fixed offset, an instant in a
+named IANA zone, or a wall clock naming no instant. It also changes how stored timestamps are
+<em>interpreted</em>: a row marked <code>zoneless</code> holds wall clocks the store keeps as if UTC, which an older
+reader would hand back as instants. See
 <a href="reference/../explanation/data-model.html#time-references">Time references</a>; <code>0.16.0</code> added the metadata column
 <code>component_field</code>; <code>0.15.0</code> renamed the metadata column <code>ext</code> to <code>application_data</code> and added the
 <code>quantity_kind</code> and <code>unit_system</code> columns; unlike a new <em>table</em>, new <em>columns</em> are not picked up by
 the idempotent <code>CREATE TABLE IF NOT EXISTS</code> DDL, so a store one version behind is rejected on open;
 <code>0.14.0</code> moved a <code>NonSequentialTimeSeries</code>'s timestamps out of the association row: the
-<code>timestamps_json</code> TEXT column became a <code>timestamps_hash</code> BLOB resolving into the new
-content-addressed <a href="reference/file-format.html#timestamp_sets"><code>timestamp_sets</code></a> table, and irregular arrays that share a time
-axis are now column-packed into <code>nsts_…</code> datasets keyed by that hash instead of one standalone
-<code>arr_…</code> dataset each; <code>0.13.0</code> replaced the <code>dtype</code> column with <code>element_type</code>, which names the
-<em>logical</em> element type and derives the physical dtype from it — see
-<a href="reference/./element-types.html">Element types</a>; <code>0.12.0</code> changed <code>owner_category</code> and <code>time_series_type</code> from
-TEXT names to small INTEGER codes — see <a href="reference/file-format.html#discriminant-encoding">Discriminant encoding</a> below;
-<code>0.11.0</code> renamed the metadata column <code>logical_type</code> to <code>ext</code> — an opaque, package-owned extension
-payload (typically JSON) the store stores verbatim and never interprets; <code>0.10.0</code> replaced the
-per-association <code>features</code> table with the content-addressed <code>feature_sets</code> table below, so a feature
-map is stored once and shared by every association that uses it — dropping the <code>association_id</code>
-foreign key and its <code>ON DELETE CASCADE</code>; <code>0.9.0</code> changed the packed-dataset chunking to
-timestamp-major <code>(1, cols, *element_shape)</code> and made the column count <code>cols</code> per-dataset (sized to
-the writing batch) instead of a fixed 1,000, optimizing reads across series by timestamp and bulk
-writes; <code>0.8.0</code> added the forecast <code>interval</code> to the association uniqueness key — so two forecasts
-of one variable that differ only by interval are now distinct series — widening both unique indexes
-(the <code>NULL</code>-folding index now <code>COALESCE</code>s <code>interval</code> as well as <code>resolution</code>); <code>0.7.0</code> made
+<code>timestamps_json</code> TEXT column became a <code>timestamps_hash</code> BLOB resolving into a then-new
+content-addressed <code>timestamp_sets</code> catalog table (which <code>0.19.0</code> replaced with the HDF5 datasets
+described above), and irregular arrays that share a time axis are now column-packed into <code>nsts_…</code>
+datasets keyed by that hash instead of one standalone <code>arr_…</code> dataset each; <code>0.13.0</code> replaced the
+<code>dtype</code> column with <code>element_type</code>, which names the <em>logical</em> element type and derives the physical
+dtype from it — see <a href="reference/./element-types.html">Element types</a>; <code>0.12.0</code> changed <code>owner_category</code> and
+<code>time_series_type</code> from TEXT names to small INTEGER codes — see
+<a href="reference/file-format.html#discriminant-encoding">Discriminant encoding</a> below; <code>0.11.0</code> renamed the metadata column
+<code>logical_type</code> to <code>ext</code> — an opaque, package-owned extension payload (typically JSON) the store
+stores verbatim and never interprets; <code>0.10.0</code> replaced the per-association <code>features</code> table with
+the content-addressed <code>feature_sets</code> table below, so a feature map is stored once and shared by
+every association that uses it — dropping the <code>association_id</code> foreign key and its
+<code>ON DELETE CASCADE</code>; <code>0.9.0</code> changed the packed-dataset chunking to timestamp-major
+<code>(1, cols, *element_shape)</code> and made the column count <code>cols</code> per-dataset (sized to the writing
+batch) instead of a fixed 1,000, optimizing reads across series by timestamp and bulk writes;
+<code>0.8.0</code> added the forecast <code>interval</code> to the association uniqueness key — so two forecasts of one
+variable that differ only by interval are now distinct series — widening both unique indexes (the
+<code>NULL</code>-folding index now <code>COALESCE</code>s <code>interval</code> as well as <code>resolution</code>); <code>0.7.0</code> made
 <code>resolution</code>/<code>horizon</code>/<code>interval</code> calendar-aware <a href="reference/../explanation/data-model.html">periods</a>: they are
 now encoded as ISO-8601 duration strings (e.g. <code>PT1H</code>, <code>P1M</code>, <code>P1Y</code>) rather than integer
 milliseconds, in both the packed dataset names and the SQLite columns, so irregular periods
@@ -4436,19 +4465,23 @@ so this removes a second, weaker source of truth rather than adding a dependency
 does know a dtype independently (a packed dataset's name encodes it), the catalog's value is checked
 against it and a mismatch is an integrity error.</p>
 <h2 id="hdf5-layout"><a class="header" href="#hdf5-layout">HDF5 Layout</a></h2>
-<p>Arrays live under a two-level group hierarchy, in one of <strong>two storage modes</strong>:</p>
+<p>Arrays live under a two-level group hierarchy, in one of <strong>two storage modes</strong>, with the explicit
+time axes in a sibling group of their own:</p>
 <pre><code class="language-text">&lt;name&gt;.h5
-├── attribute  data_format_version = "0.18.0"
+├── attribute  data_format_version = "0.19.0"
 ├── attribute  compression         = "deflate:3:shuffle"
 ├── attribute  storage_backend     = "hdf5"
 └── group      time_series/
-    └── group  single/
-        ├── dset  sts_{dtype}_{shape}_{length}_{res}      packed  (length, cols, *element_shape)
-        ├── dset  sts_{dtype}_{shape}_{length}_{res}_h    u8  (cols, 64)   # per-column hex hashes
-        ├── dset  sts_{dtype}_{shape}_{length}_{res}__1   packed spill dataset
-        ├── dset  nsts_{dtype}_{shape}_{length}_{tshash}  packed irregular cohort
-        ├── dset  nsts_{dtype}_{shape}_{length}_{tshash}_h  u8  (cols, 64)
-        ├── dset  arr_{hex_hash}                          standalone  [length, *element_shape]
+    ├── group  single/
+    │   ├── dset  sts_{dtype}_{shape}_{length}_{res}      packed  (length, cols, *element_shape)
+    │   ├── dset  sts_{dtype}_{shape}_{length}_{res}_h    u8  (cols, 64)   # per-column hex hashes
+    │   ├── dset  sts_{dtype}_{shape}_{length}_{res}__1   packed spill dataset
+    │   ├── dset  nsts_{dtype}_{shape}_{length}_{tshash}  packed irregular cohort
+    │   ├── dset  nsts_{dtype}_{shape}_{length}_{tshash}_h  u8  (cols, 64)
+    │   ├── dset  arr_{hex_hash}                          standalone  [length, *element_shape]
+    │   └── ...
+    └── group  timestamps/
+        ├── dset  tsv_{hex_hash}                          i64  [n]   # unix milliseconds
         └── ...
 </code></pre>
 <p>Datasets carry <strong>no dimension scales and no dimension names</strong> — shape is read straight off the HDF5
@@ -4476,8 +4509,8 @@ hex characters as raw bytes — not an HDF5 string dataset. <strong>An all-zero 
 <p>The trailing element is what pins the <strong>time axis</strong>, which is what makes packing meaningful at all:
 the chunking is timestamp-major, so row <code>t</code> of a dataset is "every column at the same instant". A
 regular series takes its axis from the resolution; an irregular one carries the axis explicitly, and
-two of them share one exactly when their timestamp vectors are equal — which the catalog already
-answers by content-addressing those vectors (see <a href="reference/file-format.html#timestamp_sets"><code>timestamp_sets</code></a>). The full
+two of them share one exactly when their timestamp vectors are equal — which the store already
+answers by content-addressing those vectors (see <a href="reference/file-format.html#timestamp-vectors">Timestamp vectors</a>). The full
 64-char hash is used, not a prefix: the name is parsed back into the pool key when the index is
 rebuilt at open, so a truncated form could let two distinct time axes collide into one pool.</p>
 <p>The dataset shape is <code>(length, cols, *element_shape)</code> and chunking is <code>(1, cols, *element_shape)</code>,
@@ -4505,11 +4538,12 @@ typed, multi-dimensional variable named <code>arr_{hex_hash}</code> in the <code
 no column packing and no companion hash variable — the variable name carries the hash.</p>
 <ul>
 <li><strong>A lone <code>NonSequentialTimeSeries</code></strong> is shaped <code>[length, *element_shape]</code> and chunked as a single
-whole-array chunk. It stores its explicit, strictly-increasing timestamps in the catalog, not in
-the array. Packing is only a win once a cohort is several columns wide — a packed dataset spreads
-one array over <code>length</code> chunks — so a series alone on its time axis stays standalone. Whether a
-given array is packed or standalone is a write-time choice with no effect on reads (they resolve
-by content hash and handle either), and one cohort can hold columns of both.</li>
+whole-array chunk. Its explicit, strictly-increasing timestamps are not in the array: they are a
+shared time axis, stored once in the <code>timestamps</code> group below. Packing is only a win once a cohort
+is several columns wide — a packed dataset spreads one array over <code>length</code> chunks — so a series
+alone on its time axis stays standalone. Whether a given array is packed or standalone is a
+write-time choice with no effect on reads (they resolve by content hash and handle either), and
+one cohort can hold columns of both.</li>
 <li><strong>Dense forecasts</strong> are shaped <code>[H, count, *element_shape]</code> (<code>Deterministic</code>),
 <code>[num_percentiles, H, count, *element_shape]</code> (<code>Probabilistic</code>), or
 <code>[num_scenarios, H, count, *element_shape]</code> (<code>Scenarios</code>), where <code>count</code> is the number of forecast
@@ -4521,6 +4555,27 @@ block width so sweeping the window timeline decompresses each block exactly once
 is not recorded anywhere: it is a write-time storage choice that reads transparently regardless of
 the width a store was written with, so it does not affect the data-format version.</li>
 </ul>
+<h3 id="timestamp-vectors"><a class="header" href="#timestamp-vectors">Timestamp vectors</a></h3>
+<p>The explicit time axis of a <code>NonSequentialTimeSeries</code> lives in <code>time_series/timestamps/</code>, one
+dataset per <strong>distinct vector</strong>, named <code>tsv_{hex_hash}</code> after the vector's content hash — the same
+hash the association row carries in <code>timestamps_hash</code> and the <code>nsts_…</code> pool name carries as
+<code>{tshash}</code>. Each is a 1-D <code>i64</code> dataset of <strong>unix milliseconds</strong>, one element per timestamp, and
+carries the file's compression policy once it is big enough to be chunked (short vectors go in the
+object header, unfiltered, exactly as small standalone arrays do).</p>
+<p>Milliseconds are the store's precision floor for every instant it records, so this is exact for
+anything a write accepts; a finer timestamp is refused rather than truncated. Ordinary numbers in an
+ordinary dataset: <code>h5py</code> reads a time axis with no help from this library.</p>
+<p>Storing it here rather than in the catalog is what makes the timestamps <strong>data</strong>. Irregular series
+in a power-systems model overwhelmingly share one axis — event times, an outage schedule, a market
+timeline — so a thousand components sampled at the same instants hold one copy between them; but a
+store may hold many distinct axes, each of them long, and a <code>.sqlite</code> file is the wrong place for
+bulk numeric arrays. It also means the vectors travel with the artifact: a document round trip that
+carries locators rather than values still finds the timestamps where it finds the arrays. (Before
+<code>0.19.0</code> they were a delta-varint blob in a <code>timestamp_sets</code> catalog table.)</p>
+<p>Vectors are shared, so removing one series never deletes one; see
+<a href="reference/file-format.html#deletion-and-compaction">Deletion and compaction</a>. <code>verify_integrity</code> reads each referenced vector
+back and rehashes it, exactly as it does an array — the name records the hash, so a dataset
+perturbed behind it is caught rather than silently served.</p>
 <h3 id="compression"><a class="header" href="#compression">Compression</a></h3>
 <p>Compression is chosen at store creation and applies to every data variable, packed and standalone
 alike (the <code>…_h</code> hash variables are strings and are not compressed). The <strong>default</strong> is DEFLATE
@@ -4548,14 +4603,17 @@ compaction (HDF5 cannot reclaim space in place). Re-adding the same content ther
 dataset rather than re-indexing it.</li>
 <li><strong>Feature sets and timestamp vectors:</strong> because both are shared, deleting an association never
 deletes either; removing the last association that referenced one leaves it unreachable.
-<code>compact()</code> deletes unreachable rows and reports the counts as <code>feature_sets_reclaimed</code> and
-<code>timestamp_sets_reclaimed</code>.</li>
+<code>compact()</code> deletes them — the feature set as a catalog row, the timestamp vector as an unlinked
+HDF5 dataset — and reports the counts as <code>feature_sets_reclaimed</code> and <code>timestamp_sets_reclaimed</code>.
+Clearing a store is the exception: it orphans every one of both by construction, so it drops them
+outright rather than leaving a cleared store's worth of them for a compaction.</li>
 </ul>
 <p><code>compact()</code> on an on-disk store <strong>rewrites the <code>.h5</code> file</strong>, because that is the only way HDF5 gives
 the freed space back:</p>
 <ol>
-<li>The catalog is swept of unreachable feature sets and timestamp vectors, then read for the live
-set — the catalog, not the file, is what makes an array live.</li>
+<li>The catalog is swept of unreachable feature sets, and the file of unreachable timestamp vectors;
+the catalog is then read for the live set — the catalog, not the file, is what makes an array or
+a time axis live.</li>
 <li>Every live array is written into a fresh file at <code>&lt;store&gt;.h5.repack</code>, sibling to the original so
 the two share a filesystem. Layouts are planned from scratch: packed pools are created at exactly
 their cohort width rather than the growth-sized width an incremental write reserves.</li>
@@ -4564,10 +4622,10 @@ reopens on the result. A crash before the rename leaves the original untouched p
 <code>.repack</code> file, which the next compaction deletes.</li>
 </ol>
 <p>What the new file therefore lacks: freed packed slots, unreferenced datasets (an interrupted bulk
-add's leftovers, or tombstones left by a store written before deletion unlinked), and the slack in
-over-wide packed pools. The <code>.sqlite</code> half is not touched — arrays are content-addressed, so a
-different physical layout is invisible to it — and <code>data_format_version</code> is unchanged, because the
-rewrite emits the same format.</p>
+add's leftovers, unreferenced timestamp vectors, or tombstones left by a store written before
+deletion unlinked), and the slack in over-wide packed pools. The <code>.sqlite</code> half is not touched —
+arrays are content-addressed, so a different physical layout is invisible to it — and
+<code>data_format_version</code> is unchanged, because the rewrite emits the same format.</p>
 <p>Compaction assumes the process running it is the file's only user. On Unix another process holding
 the file open keeps reading the pre-compaction inode; on Windows its lock makes the rename fail, and
 the error surfaces with the compacting store still open on the original file.</p>
@@ -4589,7 +4647,7 @@ the error surfaces with the compacting store still open on the original file.</p
 <tr><td><code>horizon</code></td><td>TEXT</td><td>ISO-8601 forecast horizon; <code>NULL</code> for non-forecasts</td></tr>
 <tr><td><code>interval</code></td><td>TEXT</td><td>ISO-8601 forecast interval; <code>NULL</code> for non-forecasts</td></tr>
 <tr><td><code>count</code></td><td>INTEGER</td><td>Forecast window count; <code>NULL</code> for non-forecasts</td></tr>
-<tr><td><code>timestamps_hash</code></td><td>BLOB</td><td>32-byte SHA-256 of the timestamp vector (<code>NonSequentialTimeSeries</code>)</td></tr>
+<tr><td><code>timestamps_hash</code></td><td>BLOB</td><td>32-byte hash of the timestamp vector; see below</td></tr>
 <tr><td><code>units</code></td><td>TEXT</td><td>Free-form units label</td></tr>
 <tr><td><code>quantity_kind</code></td><td>TEXT</td><td>What the values measure (QUDT <code>QuantityKind</code> name); <code>NULL</code> if unset</td></tr>
 <tr><td><code>unit_system</code></td><td>TEXT</td><td><code>natural_units</code> or <code>component_base</code>; <code>NULL</code> means <em>unspecified</em></td></tr>
@@ -4605,6 +4663,10 @@ the error surfaces with the compacting store still open on the original file.</p
 </div>
 <p>The two content-address hashes are the last two columns. Column order is not load-bearing — every
 statement names its columns — so the layout is chosen for readability.</p>
+<p><code>timestamps_hash</code> is set only on <code>NonSequentialTimeSeries</code> rows and is <code>NULL</code> on every other type.
+It is a locator, not a value: the vector itself lives in the HDF5 file (see
+<a href="reference/file-format.html#timestamp-vectors">Timestamp vectors</a>), and the same hash is the cohort key the <code>nsts_…</code> pools are
+named by.</p>
 <h4 id="time_reference"><a class="header" href="#time_reference"><code>time_reference</code></a></h4>
 <p>One TEXT column holds all four spellings: <code>utc</code>, <code>zoneless</code>, a fixed offset (<code>-07:00</code>), or an IANA
 zone name (<code>America/Denver</code>). That is unambiguous rather than merely hoped for, because the core
@@ -4651,47 +4713,6 @@ Removing the last association that referenced a set instead leaves it unreachabl
 deletion semantics as the HDF5 side's unreachable standalone variables. <code>Store::compact</code> sweeps
 unreachable sets and reports the count as <code>feature_sets_reclaimed</code>; clearing a store drops them all
 outright.</p>
-<h3 id="timestamp_sets"><a class="header" href="#timestamp_sets"><code>timestamp_sets</code></a></h3>
-<p>The explicit timestamp vector of a <code>NonSequentialTimeSeries</code>, content-addressed exactly as feature
-sets are. The association row carries only the 32-byte <code>timestamps_hash</code>.</p>
-<div class="table-wrapper"><table><thead><tr><th>Column</th><th>Type</th><th>Notes</th></tr></thead><tbody>
-<tr><td><code>timestamps_hash</code></td><td>BLOB</td><td>32-byte SHA-256 of <code>data</code>; <code>PRIMARY KEY</code></td></tr>
-<tr><td><code>data</code></td><td>BLOB</td><td>The vector in the compact encoding below</td></tr>
-</tbody></table>
-</div>
-<p>Three things this buys, in descending order of how much they matter:</p>
-<ul>
-<li><strong>The vector is stored once per distinct time axis.</strong> Irregular series in a power-systems model
-overwhelmingly share one — event times, an outage schedule, a market timeline — so a thousand
-components sampled at the same instants hold one copy between them.</li>
-<li><strong>The association table stays narrow.</strong> The vector used to live inline as an RFC 3339 JSON array
-(24 bytes per timestamp, ~210 KB for a year of hourly data), which pushed those rows into SQLite
-overflow pages and made every scan-shaped catalog query read and parse megabytes it had no use
-for. A listing now decodes each distinct vector once, as it already did for features.</li>
-<li><strong>It is the cohort key the packed HDF5 layout groups irregular arrays by</strong> (see
-<a href="reference/file-format.html#packed-mode">Packed mode</a>).</li>
-</ul>
-<p><code>data</code> is not human-readable, deliberately — the readable projection below covers hand inspection of
-everything else. Its layout is:</p>
-<pre><code class="language-text">[0]      version   u8       currently 1
-[1]      unit      u8       delta unit: 0=ns, 1=µs, 2=ms, 3=s, 4=min, 5=hour, 6=day
-then     count     uvarint  number of timestamps
-if count &gt; 0:
-  base_secs        svarint  seconds since the Unix epoch (zigzag)
-  base_nanos       uvarint  sub-second nanoseconds of the first timestamp
-  delta_1..delta_n svarint  successive differences, in `unit`s (zigzag)
-</code></pre>
-<p>Varints are LEB128; signed values are zigzag-encoded first. The unit is the coarsest one that
-divides every delta, which is what makes the encoding cheap: irregularity in this domain is usually
-coarse (event times on whole seconds or minutes, a regular grid with gaps), so a year of hourly
-timestamps becomes 8,760 single-byte deltas — ~8.8 KB against ~210 KB for the JSON form. A vector
-with genuine microsecond jitter degrades to ~4–5 bytes per timestamp, still well under JSON.
-Precision is nanoseconds over chrono's full range; the base timestamp is stored as its own
-<code>(seconds, nanoseconds)</code> pair and later ones are reconstructed by accumulating deltas in 128-bit
-arithmetic. The one thing not preserved is a leap second after the first position, which normalizes
-into the following second.</p>
-<p>Like <code>feature_sets</code>, there is <strong>no foreign key</strong> and <strong>no cascade</strong>: rows are shared.
-<code>Store::compact</code> sweeps unreachable vectors and reports the count as <code>timestamp_sets_reclaimed</code>.</p>
 <h3 id="supplemental_attribute_associations"><a class="header" href="#supplemental_attribute_associations"><code>supplemental_attribute_associations</code></a></h3>
 <p>Which supplemental attributes are attached to which components. Columns match infrasys' table of the
 same name, whose logic this replaces. See
@@ -4931,6 +4952,9 @@ the relevant <code>sts_…_h</code> dataset; that row index is the column index 
 that a packed pool which fills up spills into <code>{name}__1</code>, <code>{name}__2</code>, so the dataset holding a
 given array is not derivable from its metadata — scan the <code>_h</code> datasets, or let <code>infrastore info</code> /
 <code>infrastore arrays</code> report the resolved <code>dataset</code> and <code>column</code>.</p>
+<p>A <code>NonSequentialTimeSeries</code> row's time axis needs no scan: hex-encode its <code>timestamps_hash</code> and read
+<code>time_series/timestamps/tsv_&lt;hex_hash&gt;</code>, an <code>i64</code> vector of unix milliseconds in the row's own
+order.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="element-types"><a class="header" href="#element-types">Element Types</a></h1>
 <p>Every stored array carries an <strong><code>element_type</code></strong>: what its elements mean, and — for the composite
 kinds — how one timestep's values are laid out across the array's trailing dimensions.</p>
@@ -5398,9 +5422,10 @@ key to metadata (including <code>data_hash</code>), then read the array directly
 <li><strong><code>count_array_references</code></strong> — <code>(sts, dst)</code> association counts referencing one <code>data_hash</code>, so a
 caller can tell whether removing a <code>SingleTimeSeries</code> would orphan a
 <code>DeterministicSingleTimeSeries</code> derived from (and sharing) its array.</li>
-<li><strong><code>verify_integrity</code></strong> — Recomputes each stored array's hash and reports mismatches. Covers the
-HDF5 half only: the SQLite catalog is not inspected, so an empty report does not mean the store as
-a whole is sound. See
+<li><strong><code>verify_integrity</code></strong> — Reads back every array and timestamp vector the catalog references,
+recomputes its hash, and reports mismatches and dangling references. It checks the HDF5 half
+against the catalog, never the catalog against itself, so an empty report does not mean the store
+as a whole is sound. See
 <a href="reference/../explanation/content-addressing.html#what-it-does-not-cover">content addressing</a>.</li>
 <li><strong><code>flush</code></strong> — Issues <code>H5Fflush</code> so the files can be copied for persistence without closing.</li>
 <li><strong><code>persist_to</code></strong> — Writes both halves of the artifact to <code>path</code> and <code>&lt;path&gt;.sqlite</code>, overwriting
@@ -7372,8 +7397,9 @@ only</strong>: the document carries locators, never values, so every row must na
 already holds — the arrays arrive with the artifact. Each row keeps the <code>association_id</code> it carries,
 which is the point: an import that assigned fresh ids would leave every reference the document
 records pointing at the wrong series. A row whose array is absent, or a <code>NonSequentialTimeSeries</code>
-row (whose timestamp vector is not on the wire), raises <code>InvalidParameterError</code> and rolls the whole
-batch back.</p>
+row (whose <code>timestamps_hash</code> is store-internal and so not on the wire, leaving the document with no
+way to say which stored time axis the row sits on), raises <code>InvalidParameterError</code> and rolls the
+whole batch back.</p>
 <p>Infrastore never modifies the data to make an incoming document agree with what it already holds. A
 geometry disagreement between an added series and its own association row is likewise rejected at
 the add boundary (<code>InvalidParameterError</code>), loudly and without writing anything.</p>
@@ -8358,8 +8384,9 @@ only</strong>: the document carries locators, never values, so every row must na
 already holds — the arrays arrive with the artifact. Each row keeps the <code>association_id</code> it carries,
 which is the point: an import that assigned fresh ids would leave every reference the document
 records pointing at the wrong series. A row whose array is absent, or a <code>NonSequentialTimeSeries</code>
-row (whose timestamp vector is not on the wire), throws <code>InvalidParameterError</code> and rolls the whole
-batch back.</p>
+row (whose <code>timestamps_hash</code> is store-internal and so not on the wire, leaving the document with no
+way to say which stored time axis the row sits on), throws <code>InvalidParameterError</code> and rolls the
+whole batch back.</p>
 <p>Infrastore never modifies the data to make an incoming document agree with what it already holds. A
 geometry disagreement between an added series and its own association row is likewise rejected at
 the add boundary (<code>InvalidParameterError</code>), loudly and without writing anything.</p>
@@ -9557,9 +9584,10 @@ fields with that same content hash, hex-encoded, on export. The time-series impo
 only: infrastore never modifies the data to make an incoming document agree with what it already
 holds, so a row naming an array this store does not hold is refused
 (<code>INFRASTORE_ERR_INVALID_PARAMETER</code>) rather than written as a dangling reference, and a
-<code>NonSequentialTimeSeries</code> row is refused outright because its timestamp vector is not on the wire. A
-geometry disagreement between an added series and its own association row is likewise rejected at
-the add boundary, loudly and without writing anything.</p>
+<code>NonSequentialTimeSeries</code> row is refused outright because the wire form carries no
+<code>timestamps_hash</code>, so the document does not say which stored time axis the row sits on. A geometry
+disagreement between an added series and its own association row is likewise rejected at the add
+boundary, loudly and without writing anything.</p>
 <h2 id="error-messages"><a class="header" href="#error-messages">Error Messages</a></h2>
 <pre><code class="language-c">int32_t infrastore_last_error_message(char *buf, uint64_t buf_len, uint64_t *needed);
 </code></pre>

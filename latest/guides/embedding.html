@@ -416,7 +416,8 @@ variants as distinct types (<code>NotFound</code>, <code>DuplicateTimeSeries</co
 <h2 id="testing-an-integration"><a class="header" href="#testing-an-integration">Testing an Integration</a></h2>
 <ul>
 <li>Use <code>in_memory=True</code> stores in unit tests; they exercise the same core.</li>
-<li><code>verify_integrity</code> re-hashes every array; <code>is_empty</code> is the cheap "nothing here" probe.</li>
+<li><code>verify_integrity</code> re-hashes every array and time axis the catalog references; <code>is_empty</code> is the
+cheap "nothing here" probe.</li>
 <li>The <code>infrastore</code> CLI reads any artifact your package writes. <code>infrastore list</code> and
 <code>infrastore info</code> are the fastest way to see what a consumer actually stored, and
 <code>infrastore diff --against</code> compares two artifacts by hash without reading arrays — a usable CI

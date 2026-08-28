@@ -244,15 +244,18 @@ was derived from and has exactly the same features, so <code>transform_single_ti
 source's array.</p>
 <h2 id="the-timestamps-hash"><a class="header" href="#the-timestamps-hash">The Timestamps Hash</a></h2>
 <p>A <code>NonSequentialTimeSeries</code> carries its timestamps explicitly, and those are content-addressed too,
-by <code>timestamps_hash</code>: a domain tag followed by the vector's canonical encoding — the same bytes the
-catalog stores, so the hash addresses the stored form rather than a second serialization of it. Two
-vectors hash equal exactly when they hold the same instants in the same order.</p>
+by <code>timestamps_hash</code>: a domain tag, the count, then each instant as a unix millisecond count — the
+same values the store writes, so the hash addresses the stored form rather than a second
+serialization of it. Two vectors hash equal exactly when they hold the same instants in the same
+order.</p>
 <p>Like the features hash, it does double duty:</p>
 <ul>
-<li><strong>It keys the stored vector.</strong> The <code>timestamp_sets</code> table is keyed by it, so a time axis shared by
-a thousand irregular series is stored <strong>once</strong>. Sharing is again the common case, not the rare
-one: irregular series in this domain sit on a schedule — outage windows, market intervals, event
-times — that many components observe together.</li>
+<li><strong>It names the stored vector.</strong> Each distinct time axis is one <code>tsv_{timestamps_hash}</code> dataset in
+the HDF5 file, so an axis shared by a thousand irregular series is stored <strong>once</strong>. Sharing is
+again the common case, not the rare one: irregular series in this domain sit on a schedule —
+outage windows, market intervals, event times — that many components observe together. Unlike the
+features hash, this one addresses something in the <em>array</em> half of the artifact: a timestamp
+vector is data, and the catalog holds only its hash.</li>
 <li><strong>It is the cohort key of the packed array layout.</strong> Column-packing is only meaningful for arrays
 on a common time axis, since the chunking is timestamp-major; the interned hash is precisely the
 answer to "do these two series share one?", so the arrays of a cohort pool into one
@@ -346,29 +349,34 @@ rules can therefore break the format without breaking that test — the reasonin
 is the contract.</p>
 <h2 id="integrity-verification"><a class="header" href="#integrity-verification">Integrity Verification</a></h2>
 <p>Because the stored hash and the stored data are independent on disk, they can be cross-checked.
-<code>verify_integrity</code> walks every indexed column, recomputes <code>array_hash</code> from the stored values, and
-reports any mismatch between the recorded hash and the recomputed one — detecting silent corruption.
-See <a href="../reference/rust-api.html#store"><code>verify_integrity</code></a>.</p>
+<code>verify_integrity</code> takes the catalog as the statement of what should be there, then checks the HDF5
+half against it: it collects every array and every explicit timestamp vector the catalog references,
+reads each one back, recomputes <code>array_hash</code> / <code>timestamps_hash</code> from the stored values, and reports
+any mismatch between the recorded hash and the recomputed one — detecting silent corruption. A
+reference the file cannot satisfy is reported too, as a dangling one. See
+<a href="../reference/rust-api.html#store"><code>verify_integrity</code></a>.</p>
 <h3 id="what-it-does-not-cover"><a class="header" href="#what-it-does-not-cover">What it does not cover</a></h3>
-<p>The check is scoped to the <strong>array half</strong> of the store. It reads what the HDF5 side knows about and
-rehashes it; it never opens the SQLite catalog. A clean report is therefore a statement about the
-arrays, not about the store as a whole. Three things fall outside it:</p>
+<p>The check runs from the catalog into the HDF5 file, and only in that direction. It never checks the
+catalog against <em>itself</em>, so a clean report is a statement about the stored content, not about the
+store as a whole. Three things fall outside it:</p>
 <ul>
-<li>a <code>data_hash</code> in the catalog that names no stored array — a truncated or corrupted catalog, or a
-catalog paired with the wrong <code>.h5</code> file. Every read of the affected key fails, and
-<code>verify_integrity</code> reports nothing.</li>
-<li>a catalog row whose <code>dtype</code>, <code>element_shape</code>, or <code>length</code> misdescribes the array it points at.</li>
+<li>a catalog row whose <code>dtype</code>, <code>element_shape</code>, or <code>length</code> misdescribes the array it points at. The
+hash addresses the array's own content, so an array that matches its hash passes the check while
+the row goes on lying about it.</li>
 <li>a missing catalog entirely. The two artifacts are one logical store, but nothing enforces that:
 opening read-write with the <code>.sqlite</code> half deleted silently recreates it empty, and the resulting
-store — zero time series, every array still present and now unreachable — verifies clean.</li>
+store — zero time series, every array still present and now unreachable — verifies clean, because
+a catalog that references nothing is a clean bill of health here.</li>
+<li>anything the catalog does not reference. The sweep never reaches it, whatever state it is in; an
+unreachable array is the expected state after a delete, and <code>compact</code> is what reports it.</li>
 </ul>
-<p>This is a deliberate scope rather than an oversight: the array side is where silent bit-level
-corruption happens, and it is the half no other call examines. The catalog has its own purpose-built
-checks — <code>check_static_consistency</code> for per-resolution grid agreement, and <code>compact</code> for the
-unreachable arrays and feature sets a delete leaves behind, which it reclaims and reports (an
-expected state, documented in the <a href="../reference/file-format.html">file format</a>, not corruption).
-SQLite also enforces a good deal itself: the <code>NOT NULL</code> and <code>CHECK</code> constraints, and the two unique
-indexes that guarantee identity uniqueness.</p>
+<p>This is a deliberate scope rather than an oversight: content corruption is what happens silently,
+and the catalog has its own purpose-built checks — <code>check_static_consistency</code> for per-resolution
+grid agreement, and <code>compact</code> for the unreachable arrays and feature sets a delete leaves behind,
+which it reclaims and reports (an expected state, documented in the
+<a href="../reference/file-format.html">file format</a>, not corruption). SQLite also enforces a good deal
+itself: the <code>NOT NULL</code> and <code>CHECK</code> constraints, and the two unique indexes that guarantee identity
+uniqueness.</p>
 <p>If you need end-to-end assurance that a copied or restored store is intact, the operational rule in
 the <a href="../reference/file-format.html">file format</a> is the one that matters: move, copy, and delete the
 <code>.h5</code> and its <code>.sqlite</code> together.</p>
