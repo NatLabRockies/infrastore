@@ -262,6 +262,12 @@ def bulk_read(
 # `time_range` applies the same window to every key (default: each series in full).
 # Results are returned in the same order as `keys`; an empty list of keys returns an empty list.
 
+def read_by_ids(
+    self, ids: list[int]
+) -> list[SingleTimeSeries | NonSequentialTimeSeries | Deterministic | Probabilistic | Scenarios]: ...
+# The same read addressed by catalog association id. Results follow the order the
+# ids are given, repeats included; NotFoundError if any id names no row.
+
 def remove_time_series(self, key: TimeSeriesKey) -> None: ...
 def remove_time_series_bulk(self, keys: list[TimeSeriesKey]) -> int: ...
 # All-or-nothing: a key matching nothing fails the whole batch. Returns the count removed.
@@ -400,6 +406,12 @@ with store.transaction():
   are read in one decompress-once pass per dataset instead of one read per key. Pass the
   keyword-only `time_range=(start, end)` to apply the same window to every key; by default each
   series comes back in full.
+- **`read_by_ids`** is the same read addressed by catalog
+  [association id](../explanation/data-model.md) rather than by key — the read direction of the id
+  every write reports on its `AddedTimeSeries`, for a caller that recorded ids in its own model
+  instead of keeping an id-to-key map beside the store. Results follow the order the ids are given,
+  repeats included; an id naming no row raises `NotFoundError` and fails the whole call, unlike
+  `association_exists`, which asks the question rather than committing to a read.
 - **`list_time_series`** returns a list of dicts (the same shape `get_metadata` returns for one
   key), each with the keys: `owner_id`, `owner_type`, `owner_category`, `time_series_type`, `name`,
   `data_hash` (hex string), `initial_timestamp` (RFC 3339 string, or `None` for non-sequential
@@ -941,9 +953,9 @@ Neither association catalog is exposed over the [gRPC server](grpc-api.md) or th
 Direct JSON serde of the two association catalogs, in the wire spelling
 [SiennaSchemas](https://github.com/Sienna-Platform/SiennaSchemas) defines (`TimeSeries/*.json`,
 `Core/Associations/SupplementalAttributeAssociation.json`). Unlike `list_time_series` /
-`list_supplemental_attribute_associations`, which return Python objects, these three methods
-exchange the wire JSON verbatim — the format a document author (e.g. PowerTableDataParser) reads and
-writes directly.
+`list_supplemental_attribute_associations`, which return Python objects, these four methods exchange
+the wire JSON verbatim — the format a document author (e.g. PowerTableDataParser) reads and writes
+directly.
 
 ```python
 def export_time_series_associations_openapi(
@@ -951,6 +963,7 @@ def export_time_series_associations_openapi(
     time_series_type=None, name=None, name_glob=None, component_field=None,
     resolution=None, interval=None, features=None,
 ) -> str: ...
+def import_time_series_associations_openapi(self, json: str) -> int: ...
 def export_supplemental_attribute_associations_openapi(self) -> str: ...
 def import_supplemental_attribute_associations_openapi(self, json: str) -> int: ...
 ```
@@ -966,10 +979,17 @@ identity.
 insert (a duplicate anywhere in the batch raises `DuplicateAssociationError` and rolls the batch
 back), returning the number of rows inserted.
 
-There is no corresponding time-series _import_ method: infrastore never modifies the associations
-table or the data to make an incoming document agree with what it already holds. A geometry
-disagreement between an added series and its own association row is rejected at the add boundary
-instead (`InvalidParameterError`), loudly and without writing anything.
+`import_time_series_associations_openapi` is the time-series import half, and it writes **rows
+only**: the document carries locators, never values, so every row must name an array this store
+already holds — the arrays arrive with the artifact. Each row keeps the `association_id` it carries,
+which is the point: an import that assigned fresh ids would leave every reference the document
+records pointing at the wrong series. A row whose array is absent, or a `NonSequentialTimeSeries`
+row (whose timestamp vector is not on the wire), raises `InvalidParameterError` and rolls the whole
+batch back.
+
+Infrastore never modifies the data to make an incoming document agree with what it already holds. A
+geometry disagreement between an added series and its own association row is likewise rejected at
+the add boundary (`InvalidParameterError`), loudly and without writing anything.
 
 ```python
 store = Store.create(in_memory=True)

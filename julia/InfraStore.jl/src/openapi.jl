@@ -4,10 +4,10 @@
 # SiennaSchemas defines (`TimeSeries/*.json`,
 # `Core/Associations/SupplementalAttributeAssociation.json`). The Rust core
 # (`infrastore_core::openapi`) owns the mapping between catalog rows and schema
-# rows; this file is a thin wrapper over the three FFI exports it backs.
+# rows; this file is a thin wrapper over the four FFI exports it backs.
 #
 # The two exports use the owned-string convention (`_owned_str`) because their
-# size scales with the catalog; import returns its row count through an
+# size scales with the catalog; the two imports return their row count through an
 # out-param, matching `add_supplemental_attribute_associations!`.
 
 """
@@ -57,6 +57,32 @@ function export_time_series_associations_openapi(
                 out_len::Ref{UInt64},
             )::Int32
     )
+end
+
+"""
+    import_time_series_associations_openapi!(store, json::AbstractString) -> Int
+
+Bulk-ingest a JSON array of time-series association OpenAPI rows in one
+all-or-nothing transaction, returning the number inserted. This is the import
+half of the round trip whose export is
+[`export_time_series_associations_openapi`](@ref).
+
+Rows only: the document carries locators, never values, so every row must name
+an array this store already holds, and each row keeps the `association_id` it
+carries — an import that assigned fresh ids would leave every reference the
+document records pointing at the wrong series. A row whose array is absent, or a
+`NonSequentialTimeSeries` row (whose timestamp vector is not on the wire),
+throws `InvalidParameterError`.
+"""
+function import_time_series_associations_openapi!(store::Store, json::AbstractString)
+    out = Ref{UInt64}(0)
+    json_arg = String(json)
+    _check(
+        @ccall lib_path().infrastore_store_import_time_series_associations_openapi(
+            store::Ptr{Cvoid}, json_arg::Cstring, out::Ref{UInt64}
+        )::Int32
+    )
+    return Int(out[])
 end
 
 """

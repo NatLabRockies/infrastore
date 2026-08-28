@@ -2950,7 +2950,7 @@ impl PyStore {
     /// failure rather than an answer.
     fn read_by_ids(&self, py: Python<'_>, ids: Vec<i64>) -> PyResult<Vec<Py<PyAny>>> {
         self.store()?
-            .bulk_read_by_ids(&ids)
+            .read_by_ids(&ids)
             .map_err(map_err)?
             .into_iter()
             .map(|d| time_series_data_to_py(py, d))
@@ -3845,6 +3845,24 @@ impl PyStore {
         )?;
         self.store()?
             .export_time_series_associations_openapi(&filter)
+            .map_err(map_err)
+    }
+
+    /// Bulk-ingest a JSON array of time-series association OpenAPI rows in one
+    /// all-or-nothing transaction, returning the number inserted. This is the
+    /// import half of the round trip whose export is
+    /// `export_time_series_associations_openapi()`.
+    ///
+    /// Rows only: the document carries locators, never values, so every row
+    /// must name an array this store already holds, and each row keeps the
+    /// `association_id` it carries — an import that assigned fresh ids would
+    /// leave every reference the document records pointing at the wrong
+    /// series. A row whose array is absent, or a `NonSequentialTimeSeries` row
+    /// (whose timestamp vector is not on the wire), raises
+    /// `InvalidParameterError`.
+    fn import_time_series_associations_openapi(&mut self, json: &str) -> PyResult<usize> {
+        self.store_mut()?
+            .import_time_series_associations_openapi(json)
             .map_err(map_err)
     }
 

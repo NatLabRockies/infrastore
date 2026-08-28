@@ -1037,7 +1037,28 @@ function bulk_read(
         out_result::Ref{Ptr{Cvoid}},
     )::Int32
     _check(code)
-    result = out_result[]
+    return _decode_bulk_result(out_result[], n, i -> _key_name(keys[i]))
+end
+
+# The name of bulk-read item `idx` (0-based), as an owned C string the FFI hands
+# over. The keyed path never needs it -- it has the key it passed in -- but
+# `read_by_ids` addresses rows by number and has nothing else to label them with.
+function _bulk_item_name(result::Ptr{Cvoid}, idx::Integer)
+    out_name = Ref{Ptr{Cchar}}(C_NULL)
+    _check(
+        @ccall lib_path().infrastore_bulk_result_item_name(
+            result::Ptr{Cvoid}, UInt64(idx)::UInt64, out_name::Ref{Ptr{Cchar}}
+        )::Int32
+    )
+    return something(_take_cstr(out_name[]), "")
+end
+
+# Decode every item out of a bulk-read result handle into the proper Julia
+# struct, freeing the handle even when a decode throws. `name_for(i)` supplies
+# item `i`'s series name -- the keyed path reads it off the key it passed in,
+# `read_by_ids` asks the handle.
+function _decode_bulk_result(result::Ptr{Cvoid}, n::Integer, name_for)
+    out = Vector{Any}(undef, n)
     try
         for i in 1:n
             out_type = Ref{Int32}(0)
@@ -1046,7 +1067,7 @@ function bulk_read(
                     result::Ptr{Cvoid}, UInt64(i - 1)::UInt64, out_type::Ref{Int32}
                 )::Int32
             )
-            name = _key_name(keys[i])
+            name = name_for(i)
             t = Int(out_type[])
             out[i] = if t == INFRASTORE_TYPE_SINGLE
                 _bulk_single(result, i - 1, name)
@@ -1060,6 +1081,39 @@ function bulk_read(
         @ccall lib_path().infrastore_bulk_result_free(result::Ptr{Cvoid})::Cvoid
     end
     return out
+end
+
+"""
+    read_by_ids(store, ids) -> Vector
+
+Read many full series named by their catalog association `id`, returning one per
+id in the order the ids were given — repeats included, and dispatching on each
+row's stored type to the proper Julia struct exactly as [`bulk_read`](@ref)
+does.
+
+The read direction of the id every write hands back on its `AddedTimeSeries`: a
+caller that recorded ids in its own model resolves them here rather than keeping
+an id-to-key map beside the store. Throws `NotFoundError` if any id names no row
+— unlike [`association_exists`](@ref), which asks the question, this call is
+already committed to reading, so a stale reference is a failure rather than an
+answer. The error does not say *which* id dangled; sift them with
+`association_exists` when that matters.
+"""
+function read_by_ids(store::Store, ids::AbstractVector{<:Integer})
+    n = length(ids)
+    n == 0 && return Vector{Any}(undef, 0)
+    id_vec = Int64[Int64(id) for id in ids]
+    out_result = Ref{Ptr{Cvoid}}(C_NULL)
+    _check(
+        @ccall lib_path().infrastore_store_read_by_ids(
+            store::Ptr{Cvoid},
+            id_vec::Ptr{Int64},
+            UInt64(n)::UInt64,
+            out_result::Ref{Ptr{Cvoid}},
+        )::Int32
+    )
+    result = out_result[]
+    return _decode_bulk_result(result, n, i -> _bulk_item_name(result, i - 1))
 end
 
 function get_time_series(

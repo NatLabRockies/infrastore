@@ -745,6 +745,22 @@ int32_t infrastore_bulk_result_get_single(const struct InfraStoreBulkReadHandle 
 void    infrastore_bulk_result_free(struct InfraStoreBulkReadHandle *result);
 ```
 
+`infrastore_store_read_by_ids` is the same read addressed by catalog
+[association id](../explanation/data-model.md) rather than by key — the read direction of the id
+every write hands back through its `out_id`, for a consumer that recorded ids in its own model
+instead of an id-to-key map. It fills the same `InfraStoreBulkReadHandle`, so the results come out
+through the same accessors; results follow the order the ids are given (repeats honoured in place),
+and an id naming no row fails the whole call with `INFRASTORE_ERR_NOT_FOUND` rather than being
+skipped. Because there are no keys to read names off, `infrastore_bulk_result_item_name` hands back
+item `index`'s series name as an owned C string, freed with `infrastore_string_free`.
+
+```c
+int32_t infrastore_store_read_by_ids(const struct InfraStore *handle, const int64_t *ids,
+                             uint64_t n, struct InfraStoreBulkReadHandle **out_result);
+int32_t infrastore_bulk_result_item_name(const struct InfraStoreBulkReadHandle *result,
+                                 uint64_t index, char **out_name);
+```
+
 ## Store-Wide Operations
 
 ```c
@@ -1092,6 +1108,15 @@ int32_t infrastore_store_export_time_series_associations_openapi(const struct In
                                                           const char *component_field, int32_t zoneless,
                                                           char **out_json, uint64_t *out_len);
 
+/* Bulk-ingest a JSON array of time-series association OpenAPI rows in one
+   all-or-nothing transaction -- the import half of the round trip whose export
+   is infrastore_store_export_time_series_associations_openapi. Rows only: every
+   row must name an array this store already holds, and each keeps the
+   association_id it carries. *out_added (when non-NULL) receives the number
+   inserted. */
+int32_t infrastore_store_import_time_series_associations_openapi(
+    struct InfraStore *handle, const char *json, uint64_t *out_added);
+
 /* Export the whole supplemental_attribute_associations table as an OpenAPI-row
    JSON array, sorted by (component_id, attribute_id). Owned-string return. */
 int32_t infrastore_store_export_supplemental_attribute_associations_openapi(
@@ -1106,11 +1131,13 @@ int32_t infrastore_store_import_supplemental_attribute_associations_openapi(
 ```
 
 A catalog row's `data_hash` is `NOT NULL`, and infrastore fills a row's `uri`/`data_hash` wire
-fields with that same content hash, hex-encoded, on export. There is no corresponding time-series
-_import_ export: infrastore never modifies the associations table or the data to make an incoming
-document agree with what it already holds. A geometry disagreement between an added series and its
-own association row is rejected at the add boundary instead (`INFRASTORE_ERR_INVALID_PARAMETER`),
-loudly and without writing anything.
+fields with that same content hash, hex-encoded, on export. The time-series import writes _rows_
+only: infrastore never modifies the data to make an incoming document agree with what it already
+holds, so a row naming an array this store does not hold is refused
+(`INFRASTORE_ERR_INVALID_PARAMETER`) rather than written as a dangling reference, and a
+`NonSequentialTimeSeries` row is refused outright because its timestamp vector is not on the wire. A
+geometry disagreement between an added series and its own association row is likewise rejected at
+the add boundary, loudly and without writing anything.
 
 ## Error Messages
 

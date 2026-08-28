@@ -2511,7 +2511,7 @@ impl Store {
     /// One catalog query for the whole set, so this costs what the keyed bulk
     /// read costs.
     #[tracing::instrument(skip(self, ids), fields(count = ids.len()))]
-    pub fn bulk_read_by_ids(&self, ids: &[i64]) -> Result<Vec<TimeSeriesData>> {
+    pub fn read_by_ids(&self, ids: &[i64]) -> Result<Vec<TimeSeriesData>> {
         let found = self.metadata.list_by_ids(ids)?;
         // The catalog returns each row once, in its own order; the caller asked
         // for a specific order and may have repeated an id.
@@ -2531,7 +2531,7 @@ impl Store {
         self.bulk_read_metas(&metas)
     }
 
-    /// The shared body of [`Self::bulk_read`] and [`Self::bulk_read_by_ids`],
+    /// The shared body of [`Self::bulk_read`] and [`Self::read_by_ids`],
     /// working from rows both have already resolved.
     fn bulk_read_metas(&self, metas: &[TimeSeriesMetadata]) -> Result<Vec<TimeSeriesData>> {
         // Batch the packed SingleTimeSeries reads; everything else is standalone

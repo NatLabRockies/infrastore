@@ -896,20 +896,20 @@ fn a_bulk_read_by_id_follows_the_order_it_was_given() {
     // Reversed, with a repeat: neither the catalog's order nor uniqueness is
     // assumed.
     let asked = vec![ids[2], ids[0], ids[2], ids[1]];
-    let got = store.bulk_read_by_ids(&asked).unwrap();
+    let got = store.read_by_ids(&asked).unwrap();
     let firsts: Vec<f64> = got
         .iter()
         .map(|d| d.as_single().unwrap().data.to_f64_vec().unwrap()[0])
         .collect();
     assert_eq!(firsts, vec![100.0, 1.0, 100.0, 10.0]);
 
-    let err = store.bulk_read_by_ids(&[ids[0], 9_999]).unwrap_err();
+    let err = store.read_by_ids(&[ids[0], 9_999]).unwrap_err();
     assert!(
         matches!(err, TimeSeriesError::NotFound),
         "an id naming no row must fail the read, got {err:?}",
     );
 
-    assert!(store.bulk_read_by_ids(&[]).unwrap().is_empty());
+    assert!(store.read_by_ids(&[]).unwrap().is_empty());
 }
 
 /// The ids survive the trip to disk and back — the path IS3.jl's system
