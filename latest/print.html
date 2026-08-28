@@ -299,7 +299,7 @@ musl and linked statically, so they run on any distribution regardless of its gl
 including an HPC login node much older than the build machine. The C library is built against glibc
 instead: it gets loaded into a running Julia or Python process, and a musl shared library there
 would put two C libraries in one address space.</p>
-<pre><code class="language-sh">VERSION=v0.9.0    # pick a release from the Releases page
+<pre><code class="language-sh">VERSION=v0.10.0    # pick a release from the Releases page
 BASE=https://github.com/NatLabRockies/infrastore/releases/download/$VERSION
 curl -fsSLO $BASE/infrastore-aarch64-apple-darwin.tar.gz
 tar xzf infrastore-aarch64-apple-darwin.tar.gz
@@ -4021,7 +4021,7 @@ see <a href="how-to/../reference/cli.html">CLI Reference</a>.</p>
 <p>Grab a prebuilt archive from the
 <a href="https://github.com/NatLabRockies/infrastore/releases">Releases page</a> — the executables inside are
 statically linked against HDF5, so there is nothing else to install:</p>
-<pre><code class="language-sh">VERSION=v0.9.0    # pick a release from the Releases page
+<pre><code class="language-sh">VERSION=v0.10.0    # pick a release from the Releases page
 curl -fsSLO https://github.com/NatLabRockies/infrastore/releases/download/$VERSION/infrastore-aarch64-apple-darwin.tar.gz
 tar xzf infrastore-aarch64-apple-darwin.tar.gz
 </code></pre>
@@ -4521,12 +4521,12 @@ default width (<code>DEFAULT_COLS_PER_DATASET = 1000</code>). In both cases <cod
 within a byte budget (<code>MAX_CHUNK_BYTES = 1 MiB</code>); a batch wider than the cap spills across datasets.</p>
 <ul>
 <li><strong>Rows are timesteps, columns are series.</strong> Column <code>i</code> holds one complete series.</li>
-<li><strong>Hash companion variable.</strong> Each packed dataset has a sibling <strong>string</strong> variable <code>{dataset}_h</code>
-of shape <code>(cols,)</code>. Slot <code>i</code> holds the lowercase hex SHA-256 (64 chars) of column <code>i</code>, or an empty
-string if the column is free. This is the on-disk index: on open, the backend scans every <code>…_h</code>,
-decodes the non-empty hashes, and rebuilds its <code>hash → (dataset, column)</code> map. (The backend also
-recovers each dataset's <code>cols</code> from its column dimension length, so per-dataset widths
-round-trip.)</li>
+<li><strong>Hash companion dataset.</strong> Each packed dataset has a sibling <code>{dataset}_h</code> dataset of <code>u8</code>,
+shaped <code>(cols, 64)</code>. Row <code>i</code> holds the lowercase hex SHA-256 (64 characters) of column <code>i</code> as raw
+bytes, or 64 zero bytes if the column is free. This is the on-disk index: on open, the backend
+scans every <code>…_h</code>, decodes the non-zero rows, and rebuilds its <code>hash → (dataset, column)</code> map.
+(The backend also recovers each dataset's <code>cols</code> from its column dimension length, so per-dataset
+widths round-trip.)</li>
 <li><strong>Spill.</strong> When a family's current dataset is full — a batch exceeds the column cap, or
 incremental writes fill a default-width dataset — the next write creates a spill dataset <code>…__1</code>,
 then <code>…__2</code>, and so on.</li>
