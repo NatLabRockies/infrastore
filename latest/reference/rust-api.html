@@ -344,6 +344,18 @@ changes how data is read back — see the <a href="../explanation/storage-model.
         &amp;self,
         filter: ListFilter,
     ) -&gt; Result&lt;Vec&lt;(TimeSeriesKey, [u8; 32])&gt;&gt;;
+    // …and with each key's association id (the id the write handed back; `None`
+    // for a row written before ids were minted), so a consumer holding ids
+    // resolves a listing to them without a metadata read per row.
+    pub fn list_keys_with_id(
+        &amp;self,
+        filter: ListFilter,
+    ) -&gt; Result&lt;Vec&lt;(TimeSeriesKey, Option&lt;i64&gt;)&gt;&gt;;
+    // Both at once: what the bindings' array-group listing serves.
+    pub fn list_array_groups(
+        &amp;self,
+        filter: ListFilter,
+    ) -&gt; Result&lt;Vec&lt;(TimeSeriesKey, [u8; 32], Option&lt;i64&gt;)&gt;&gt;;
     pub fn get_time_series_keys(
         &amp;self,
         owner_id: i64,
@@ -551,9 +563,11 @@ row is written: the array is content-addressed and shared. <code>new_name = None
 name. Errors with <code>DuplicateTimeSeries</code> if the destination identity already exists.</li>
 <li><strong><code>get_time_series_keys</code></strong> — Lists every key for the owner identified by the
 <code>(owner_id, owner_category)</code> pair.</li>
-<li><strong><code>list_keys</code> / <code>list_keys_with_hash</code></strong> — The key-centric listing path (what the bindings use).
-<code>list_keys_with_hash</code> pairs each key with its array's content hash in the same single catalog
-query, so callers can group keys by the data behind them.</li>
+<li><strong><code>list_keys</code> / <code>list_keys_with_hash</code> / <code>list_keys_with_id</code> / <code>list_array_groups</code></strong> — The
+key-centric listing path (what the bindings use). <code>list_keys_with_hash</code> pairs each key with its
+array's content hash in the same single catalog query, so callers can group keys by the data
+behind them; <code>list_keys_with_id</code> pairs it with the association id the write handed back (<code>None</code>
+for a row written before ids were minted); <code>list_array_groups</code> carries both.</li>
 <li><strong><code>resolve_forecast_key</code></strong> — Resolves a forecast addressed by attributes plus a
 <a href="#requested-types">requested type</a> to the single matching key, whose <code>time_series_type</code> is the
 concrete type that matched. <code>resolution</code> and <code>interval</code> are optional filters; leave them <code>None</code> to

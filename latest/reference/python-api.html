@@ -582,8 +582,10 @@ match — rows must contain at least the given pairs — whereas a <code>TimeSer
 map exactly.</li>
 <li><strong><code>list_array_groups</code></strong> accepts the same filters as <code>list_time_series</code> and groups the matching
 series by their underlying stored array. It returns a list of dicts, each with <code>data_hash</code> (hex
-string) and <code>keys</code> (a list of <code>TimeSeriesKey</code>s that resolve to that array). Keys sharing one dict
-share one deduplicated array.</li>
+string), <code>keys</code> (a list of <code>TimeSeriesKey</code>s that resolve to that array), and <code>ids</code> (each of those
+keys' association id, positionally aligned with <code>keys</code> — a <code>TimeSeriesKey</code> is opaque and carries
+no id itself; <code>None</code> for a row written before ids were minted). Keys sharing one dict share one
+deduplicated array.</li>
 <li><strong><code>get_time_series_counts</code></strong> returns
 <code>{"components_with_time_series": int, "static_time_series": int, "forecasts": int}</code>;
 <strong><code>time_series_counts_detailed</code></strong> adds <code>supplemental_attributes_with_time_series</code> and spells the

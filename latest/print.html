@@ -5203,6 +5203,18 @@ changes how data is read back — see the <a href="reference/../explanation/stor
         &amp;self,
         filter: ListFilter,
     ) -&gt; Result&lt;Vec&lt;(TimeSeriesKey, [u8; 32])&gt;&gt;;
+    // …and with each key's association id (the id the write handed back; `None`
+    // for a row written before ids were minted), so a consumer holding ids
+    // resolves a listing to them without a metadata read per row.
+    pub fn list_keys_with_id(
+        &amp;self,
+        filter: ListFilter,
+    ) -&gt; Result&lt;Vec&lt;(TimeSeriesKey, Option&lt;i64&gt;)&gt;&gt;;
+    // Both at once: what the bindings' array-group listing serves.
+    pub fn list_array_groups(
+        &amp;self,
+        filter: ListFilter,
+    ) -&gt; Result&lt;Vec&lt;(TimeSeriesKey, [u8; 32], Option&lt;i64&gt;)&gt;&gt;;
     pub fn get_time_series_keys(
         &amp;self,
         owner_id: i64,
@@ -5410,9 +5422,11 @@ row is written: the array is content-addressed and shared. <code>new_name = None
 name. Errors with <code>DuplicateTimeSeries</code> if the destination identity already exists.</li>
 <li><strong><code>get_time_series_keys</code></strong> — Lists every key for the owner identified by the
 <code>(owner_id, owner_category)</code> pair.</li>
-<li><strong><code>list_keys</code> / <code>list_keys_with_hash</code></strong> — The key-centric listing path (what the bindings use).
-<code>list_keys_with_hash</code> pairs each key with its array's content hash in the same single catalog
-query, so callers can group keys by the data behind them.</li>
+<li><strong><code>list_keys</code> / <code>list_keys_with_hash</code> / <code>list_keys_with_id</code> / <code>list_array_groups</code></strong> — The
+key-centric listing path (what the bindings use). <code>list_keys_with_hash</code> pairs each key with its
+array's content hash in the same single catalog query, so callers can group keys by the data
+behind them; <code>list_keys_with_id</code> pairs it with the association id the write handed back (<code>None</code>
+for a row written before ids were minted); <code>list_array_groups</code> carries both.</li>
 <li><strong><code>resolve_forecast_key</code></strong> — Resolves a forecast addressed by attributes plus a
 <a href="reference/rust-api.html#requested-types">requested type</a> to the single matching key, whose <code>time_series_type</code> is the
 concrete type that matched. <code>resolution</code> and <code>interval</code> are optional filters; leave them <code>None</code> to
@@ -6928,8 +6942,10 @@ match — rows must contain at least the given pairs — whereas a <code>TimeSer
 map exactly.</li>
 <li><strong><code>list_array_groups</code></strong> accepts the same filters as <code>list_time_series</code> and groups the matching
 series by their underlying stored array. It returns a list of dicts, each with <code>data_hash</code> (hex
-string) and <code>keys</code> (a list of <code>TimeSeriesKey</code>s that resolve to that array). Keys sharing one dict
-share one deduplicated array.</li>
+string), <code>keys</code> (a list of <code>TimeSeriesKey</code>s that resolve to that array), and <code>ids</code> (each of those
+keys' association id, positionally aligned with <code>keys</code> — a <code>TimeSeriesKey</code> is opaque and carries
+no id itself; <code>None</code> for a row written before ids were minted). Keys sharing one dict share one
+deduplicated array.</li>
 <li><strong><code>get_time_series_counts</code></strong> returns
 <code>{"components_with_time_series": int, "static_time_series": int, "forecasts": int}</code>;
 <strong><code>time_series_counts_detailed</code></strong> adds <code>supplemental_attributes_with_time_series</code> and spells the
@@ -7719,6 +7735,7 @@ struct TimeSeriesMetadata                    # get_metadata / list_time_series
     time_reference    :: Union{Nothing,TimeReference}   # how the timestamps were spelled
     component_field   :: Union{Nothing,String}       # e.g. "max_active_power"
     application_data  :: Union{Nothing,String}
+    id                :: Union{Nothing,Int64}    # the catalog row's id; nothing off-catalog
 end
 </code></pre>
 <p><code>TimeSeriesMetadata</code> is the Julia mirror of the Rust core's type of the same name, and the package's
@@ -7728,7 +7745,7 @@ end
 than absent, so no field is silently dropped by the addressing path taken.</p>
 <div class="table-wrapper"><table><thead><tr><th>Struct</th><th>Returned by</th><th>Fields</th></tr></thead><tbody>
 <tr><td><code>KeyInfo</code></td><td><code>key_info</code></td><td><code>owner_id</code>, <code>owner_category</code>, <code>name</code>, <code>time_series_type</code>, <code>resolution</code>, <code>features</code></td></tr>
-<tr><td><code>KeyRow</code></td><td><code>list_keys</code></td><td><code>owner_id</code>, <code>owner_category</code>, <code>time_series_type</code>, <code>name</code>, <code>initial_timestamp</code>, <code>resolution</code>, <code>length</code>, <code>horizon</code>, <code>interval</code>, <code>count</code>, <code>features</code>, <code>time_reference</code></td></tr>
+<tr><td><code>KeyRow</code></td><td><code>list_keys</code></td><td><code>owner_id</code>, <code>owner_category</code>, <code>time_series_type</code>, <code>name</code>, <code>initial_timestamp</code>, <code>resolution</code>, <code>length</code>, <code>horizon</code>, <code>interval</code>, <code>count</code>, <code>features</code>, <code>time_reference</code>, <code>id</code></td></tr>
 <tr><td><code>ArrayGroupRow</code></td><td><code>list_array_groups</code></td><td>every <code>KeyRow</code> field, plus <code>data_hash</code> (the 32 bytes)</td></tr>
 <tr><td><code>TimeSeriesCounts</code></td><td><code>get_counts</code></td><td><code>components_with_time_series</code>, <code>static_time_series</code>, <code>forecasts</code></td></tr>
 <tr><td><code>TimeSeriesCountsDetailed</code></td><td><code>time_series_counts</code></td><td><code>components_with_time_series</code>, <code>supplemental_attributes_with_time_series</code>, <code>static_time_series_count</code>, <code>forecast_count</code></td></tr>
@@ -7745,6 +7762,12 @@ than absent, so no field is silently dropped by the addressing path taken.</p>
 <tr><td><code>CompactionReport</code></td><td><code>compact!</code></td><td><code>slots_reclaimed</code>, <code>datasets_dropped</code>, <code>feature_sets_reclaimed</code>, <code>timestamp_sets_reclaimed</code>, <code>bytes_reclaimed</code></td></tr>
 </tbody></table>
 </div>
+<p>Every struct in the table compares and hashes by value over <strong>all</strong> of its fields, <code>id</code> included: a
+<code>KeyRow</code> (or a <code>TimeSeriesMetadata</code>) describing the same series in two different stores is not equal
+to its counterpart, because the id is the catalog's record of that row rather than a property of the
+data. The association row types are the exception — <code>SupplementalAttributeAssociation</code> and
+<code>ParentChildAssociation</code> compare on their endpoints alone, since a caller constructs those as plain
+values and a row read back has to equal the one that wrote it.</p>
 <p><code>StaticGrid</code> is shared by <code>static_grid</code> (a reader's timeline) and <code>check_static_consistency</code> (one
 per resolution present) — the same concept, so the same type. Its <code>resolution</code> is <code>nothing</code> only for
 a <code>NonSequentialTimeSeries</code> reader, whose timeline is an explicit list of instants rather than a
@@ -9320,8 +9343,9 @@ int32_t infrastore_store_clear(struct InfraStore *handle, bool has_owner, int64_
 int32_t infrastore_store_replace_owner(struct InfraStore *handle,
                                int64_t old_owner_id, int64_t new_owner_id,
                                int32_t owner_category, uint64_t *out_updated);
-/* List keys as a JSON array (identity + per-type descriptive snapshot, no physical
-   storage detail). The filters are independent; with none set the whole store is
+/* List keys as a JSON array (identity + per-type descriptive snapshot + the
+   association `id` the write handed back, no physical storage detail). The
+   filters are independent; with none set the whole store is
    listed. `interval` (ISO-8601; NULL = unset) matches forecasts only — static
    rows carry no interval. `name_glob` (NULL = unset) is a SQLite GLOB pattern
    over the name (`*`/`?`, case-sensitive) and is ANDed with `name` rather than
@@ -9340,7 +9364,7 @@ int32_t infrastore_store_list_keys(const struct InfraStore *handle,
                            const char *features_json, const char *component_field, int32_t zoneless,
                            char **out_json, uint64_t *out_len);
 /* Like infrastore_store_list_keys, but each row is annotated with the hex content hash of
-   the array it resolves to (keys_to_json's shape plus a `data_hash` field); rows
+   the array it resolves to (an infrastore_store_list_keys row plus a `data_hash` field); rows
    that share a stored array share their `data_hash`, so a caller can group time
    series by their underlying data in one query. Same filters, and the same
    owned-string return, as infrastore_store_list_keys. */

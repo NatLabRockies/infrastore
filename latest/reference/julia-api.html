@@ -454,6 +454,7 @@ struct TimeSeriesMetadata                    # get_metadata / list_time_series
     time_reference    :: Union{Nothing,TimeReference}   # how the timestamps were spelled
     component_field   :: Union{Nothing,String}       # e.g. "max_active_power"
     application_data  :: Union{Nothing,String}
+    id                :: Union{Nothing,Int64}    # the catalog row's id; nothing off-catalog
 end
 </code></pre>
 <p><code>TimeSeriesMetadata</code> is the Julia mirror of the Rust core's type of the same name, and the package's
@@ -463,7 +464,7 @@ end
 than absent, so no field is silently dropped by the addressing path taken.</p>
 <div class="table-wrapper"><table><thead><tr><th>Struct</th><th>Returned by</th><th>Fields</th></tr></thead><tbody>
 <tr><td><code>KeyInfo</code></td><td><code>key_info</code></td><td><code>owner_id</code>, <code>owner_category</code>, <code>name</code>, <code>time_series_type</code>, <code>resolution</code>, <code>features</code></td></tr>
-<tr><td><code>KeyRow</code></td><td><code>list_keys</code></td><td><code>owner_id</code>, <code>owner_category</code>, <code>time_series_type</code>, <code>name</code>, <code>initial_timestamp</code>, <code>resolution</code>, <code>length</code>, <code>horizon</code>, <code>interval</code>, <code>count</code>, <code>features</code>, <code>time_reference</code></td></tr>
+<tr><td><code>KeyRow</code></td><td><code>list_keys</code></td><td><code>owner_id</code>, <code>owner_category</code>, <code>time_series_type</code>, <code>name</code>, <code>initial_timestamp</code>, <code>resolution</code>, <code>length</code>, <code>horizon</code>, <code>interval</code>, <code>count</code>, <code>features</code>, <code>time_reference</code>, <code>id</code></td></tr>
 <tr><td><code>ArrayGroupRow</code></td><td><code>list_array_groups</code></td><td>every <code>KeyRow</code> field, plus <code>data_hash</code> (the 32 bytes)</td></tr>
 <tr><td><code>TimeSeriesCounts</code></td><td><code>get_counts</code></td><td><code>components_with_time_series</code>, <code>static_time_series</code>, <code>forecasts</code></td></tr>
 <tr><td><code>TimeSeriesCountsDetailed</code></td><td><code>time_series_counts</code></td><td><code>components_with_time_series</code>, <code>supplemental_attributes_with_time_series</code>, <code>static_time_series_count</code>, <code>forecast_count</code></td></tr>
@@ -480,6 +481,12 @@ than absent, so no field is silently dropped by the addressing path taken.</p>
 <tr><td><code>CompactionReport</code></td><td><code>compact!</code></td><td><code>slots_reclaimed</code>, <code>datasets_dropped</code>, <code>feature_sets_reclaimed</code>, <code>timestamp_sets_reclaimed</code>, <code>bytes_reclaimed</code></td></tr>
 </tbody></table>
 </div>
+<p>Every struct in the table compares and hashes by value over <strong>all</strong> of its fields, <code>id</code> included: a
+<code>KeyRow</code> (or a <code>TimeSeriesMetadata</code>) describing the same series in two different stores is not equal
+to its counterpart, because the id is the catalog's record of that row rather than a property of the
+data. The association row types are the exception — <code>SupplementalAttributeAssociation</code> and
+<code>ParentChildAssociation</code> compare on their endpoints alone, since a caller constructs those as plain
+values and a row read back has to equal the one that wrote it.</p>
 <p><code>StaticGrid</code> is shared by <code>static_grid</code> (a reader's timeline) and <code>check_static_consistency</code> (one
 per resolution present) — the same concept, so the same type. Its <code>resolution</code> is <code>nothing</code> only for
 a <code>NonSequentialTimeSeries</code> reader, whose timeline is an explicit list of instants rather than a

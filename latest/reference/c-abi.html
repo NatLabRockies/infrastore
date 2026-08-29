@@ -962,8 +962,9 @@ int32_t infrastore_store_clear(struct InfraStore *handle, bool has_owner, int64_
 int32_t infrastore_store_replace_owner(struct InfraStore *handle,
                                int64_t old_owner_id, int64_t new_owner_id,
                                int32_t owner_category, uint64_t *out_updated);
-/* List keys as a JSON array (identity + per-type descriptive snapshot, no physical
-   storage detail). The filters are independent; with none set the whole store is
+/* List keys as a JSON array (identity + per-type descriptive snapshot + the
+   association `id` the write handed back, no physical storage detail). The
+   filters are independent; with none set the whole store is
    listed. `interval` (ISO-8601; NULL = unset) matches forecasts only — static
    rows carry no interval. `name_glob` (NULL = unset) is a SQLite GLOB pattern
    over the name (`*`/`?`, case-sensitive) and is ANDed with `name` rather than
@@ -982,7 +983,7 @@ int32_t infrastore_store_list_keys(const struct InfraStore *handle,
                            const char *features_json, const char *component_field, int32_t zoneless,
                            char **out_json, uint64_t *out_len);
 /* Like infrastore_store_list_keys, but each row is annotated with the hex content hash of
-   the array it resolves to (keys_to_json's shape plus a `data_hash` field); rows
+   the array it resolves to (an infrastore_store_list_keys row plus a `data_hash` field); rows
    that share a stored array share their `data_hash`, so a caller can group time
    series by their underlying data in one query. Same filters, and the same
    owned-string return, as infrastore_store_list_keys. */
