@@ -10852,12 +10852,30 @@ git tag v0.9.0
 git push origin v0.9.0
 </code></pre>
 <p>Pushing the tag triggers three workflows: <code>crates-release</code>, <code>python-wheels</code>, and <code>release</code>.</p>
+<p>Tag the merge commit once its own CI is green. <code>crates-release</code> now enforces this itself (see
+<a href="releasing.html#2-rust--cratesio">step 2</a>), so a tag on a red or untested commit fails the gate instead of
+publishing — but it enforces it by <em>waiting</em>, so tagging ahead of CI just means the release job sits
+there. Nothing is lost either way; the tag does not need to be re-pushed once Test finishes.</p>
 <p>When a version string moves to a new file, add a <code>[[pre-release-replacements]]</code> entry for it in
 <code>crates/infrastore-core/release.toml</code> — not in the root <code>release.toml</code>, where cargo-release would
 resolve it relative to each of the seven crate directories in turn. Every entry requires at least
 one match, so a file that gets renamed fails the release instead of quietly going stale.</p>
 <h3 id="2-rust--cratesio"><a class="header" href="#2-rust--cratesio">2. Rust → crates.io</a></h3>
 <p>Handled by <code>.github/workflows/crates-release.yml</code> on the tag.</p>
+<p>Its <code>verify-ci</code> job runs first and refuses to publish a commit that has not passed <code>Test</code> on all
+three platforms. The check is worth understanding, because the two workflows are joined by commit
+rather than by ref: <code>crates-release</code> fires on the tag, but <code>test.yml</code> fires on pushes to <code>main</code> and
+<code>dev</code> and never on tags, so there is no Test run attached to the tag itself. <code>verify-ci</code> looks up
+the run for the <strong>commit</strong> the tag names — which exists because the release commit reaches <code>main</code>
+before it is tagged — and requires <code>conclusion == "success"</code>.</p>
+<p>It fails closed. A tag on a commit that never reached <code>main</code> has no Test run at all, and that is an
+error rather than a pass; so is a run that is still going after 70 minutes. A tag pushed in the same
+breath as the branch gets a 15-minute grace period for its run to appear before the job gives up.</p>
+<p>This exists because an upload is irreversible in a way the rest of the pipeline is not: crates.io
+never lets a version number be reused, so publishing from a broken commit burns that version
+permanently, and the recovery is to abandon it and release the next one — which is what happened to
+v0.5.0 on the PyPI side. Waiting for CI by hand worked only as long as whoever pushed the tag
+remembered to; local checks are not a substitute either, since a maintainer runs them on one OS.</p>
 <p><code>cargo publish --workspace</code> resolves the intra-workspace order itself (<code>infrastore-core</code> →
 <code>infrastore-proto</code> → <code>infrastore-ffi</code> / <code>infrastore-server</code> / <code>infrastore-cli</code>) and waits for each
 crate to land in the index before publishing its dependents, so the crates must not be published
@@ -10890,7 +10908,22 @@ publishing (environment <code>pypi</code>).</p>
 attaches one archive per platform — each with a <code>.sha256</code> sidecar — to a <strong>draft</strong> GitHub Release
 with generated release notes. Review the notes and publish the draft by hand.</p>
 <p>Because the workflow creates the draft itself, cut releases by pushing the tag rather than by
-authoring a release in the GitHub UI first.</p>
+authoring a release in the GitHub UI first. A hand-made release is not a shortcut that saves the
+wait — it is an <strong>empty</strong> release until <code>create-release</code> runs, and that job is gated on the whole
+build matrix, so the assets do not exist until the slowest target (Windows) finishes. Two things
+follow from that, both of which have bitten a release:</p>
+<ul>
+<li><strong>Step 5 below cannot start early.</strong> <code>generate_artifacts.jl</code> downloads every
+<code>libinfrastore_ffi.&lt;triplet&gt;.tar.gz</code> to hash it, so against an assetless release it fails, and
+against a partially uploaded one it would hash whatever happens to be there.</li>
+<li><strong>Publishing it early does not stick reliably.</strong> <code>softprops/action-gh-release</code> updates the
+existing release for the tag rather than erroring, and it sends <code>draft: true</code> in that update. It
+has left an already-published release published, but do not count on that: check the release's
+state after the workflow finishes, and publish it (again, if need be) once the assets are
+attached.</li>
+</ul>
+<p>The supported sequence is: push the tag, wait for <code>release</code> to go green, then review and publish the
+draft it left.</p>
 <div class="table-wrapper"><table><thead><tr><th>Target</th><th>Runner</th><th>Archive contents</th></tr></thead><tbody>
 <tr><td><code>aarch64-apple-darwin</code></td><td><code>macos-14</code></td><td>executables and C library</td></tr>
 <tr><td><code>x86_64-unknown-linux-musl</code></td><td><code>ubuntu-latest</code></td><td>executables only</td></tr>
