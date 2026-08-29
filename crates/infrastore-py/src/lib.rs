@@ -2957,6 +2957,45 @@ impl PyStore {
             .collect()
     }
 
+    /// Read one series by catalog id, or the window of it these arguments name,
+    /// in a single call.
+    ///
+    /// The id is a primary-key lookup and its row carries the grid, so the store
+    /// resolves the window itself: a caller holding an id needs no metadata read
+    /// to ask for the second day of a series. With no keywords this is
+    /// `read_by_ids` for one id.
+    ///
+    /// `start_time` is the first timestamp to read — a window boundary
+    /// (`initial_timestamp + k * interval`) for a forecast — and must be spelled
+    /// the way the series is, naive for a zoneless one and aware otherwise.
+    /// `len` counts timesteps and applies to the static types; `count` counts
+    /// windows and applies to the forecasts. Passing the one that does not apply
+    /// raises `InvalidParameterError`.
+    ///
+    /// A window is checked, not clamped: a `start_time` off the series' grid, or
+    /// a `len`/`count` running past its end, raises `InvalidParameterError` —
+    /// where the `time_range` on `get_time_series` and `bulk_read` hands back
+    /// the smaller answer that fits. Raises `NotFoundError` if the id names no
+    /// row.
+    #[pyo3(signature = (id, *, start_time=None, len=None, count=None))]
+    fn read_by_id(
+        &self,
+        py: Python<'_>,
+        id: i64,
+        start_time: Option<PyInstant>,
+        len: Option<usize>,
+        count: Option<usize>,
+    ) -> PyResult<Py<PyAny>> {
+        let window = core_lib::ReadWindow {
+            start: start_time.as_ref().map(|s| s.instant),
+            zoneless: start_time.as_ref().is_some_and(|s| s.is_zoneless()),
+            len,
+            count,
+        };
+        let data = self.store()?.read_by_id(id, window).map_err(map_err)?;
+        time_series_data_to_py(py, data)
+    }
+
     /// Remove many series by catalog id, in one all-or-nothing transaction.
     /// Returns the number removed.
     ///

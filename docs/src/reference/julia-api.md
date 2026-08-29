@@ -22,8 +22,8 @@ Exported names (types first, then functions):
 `TransformOutcome`, `UnitSystem` (`NaturalUnits`, `ComponentBase`), `add_parent_child_association!`,
 `add_parent_child_associations!`, `add_supplemental_attribute_association!`,
 `add_supplemental_attribute_associations!`, `add_time_series!`, `add_time_series_bulk!`,
-`build_forecast_reader`, `build_static_reader`, `bulk_read`, `read_by_ids`, `catalog_mode`,
-`check_static_consistency`, `clear!`, `close!`, `compact!`, `copy_time_series!`,
+`build_forecast_reader`, `build_static_reader`, `bulk_read`, `read_by_ids`, `read_by_id`,
+`catalog_mode`, `check_static_consistency`, `clear!`, `close!`, `compact!`, `copy_time_series!`,
 `count_array_references`, `count_components_with_attributes`,
 `export_supplemental_attribute_associations_openapi`, `export_time_series_associations_openapi`,
 `import_supplemental_attribute_associations_openapi!`, `import_time_series_associations_openapi!`,
@@ -418,6 +418,27 @@ returns an empty vector without touching the store.
 
 ```julia
 series = read_by_ids(store, [added.id, other.id])
+```
+
+```julia
+read_by_id(store::Store, id::Integer; start_time=nothing, len=nothing, count=nothing)
+```
+
+The single-id read, which also takes the slice. Both halves happen in one call: the id is a
+primary-key lookup and the row it lands on carries the grid the window resolves against, so a caller
+holding an id spends nothing to learn a series' `resolution` or `count` before asking for the second
+day of it. With no keywords this is `read_by_ids` for one id.
+
+`start_time` is the first timestamp to read — a window boundary (`initial_timestamp + k·interval`)
+for a forecast — and may be a `DateTime` or, with TimeZones loaded, a `ZonedDateTime`. `len` counts
+timesteps and applies to `SingleTimeSeries` / `NonSequentialTimeSeries`; `count` counts windows and
+applies to the forecasts; passing the one that does not apply throws `InvalidParameterError`. So
+does a `start_time` off the series' own grid, or a `len`/`count` running past its end — a window is
+checked where the `time_range` on `get_time_series` and `bulk_read` is clamped. `NotFoundError` if
+the id names no row.
+
+```julia
+day_two = read_by_id(store, added.id; start_time = t0 + Day(1), len = 24)
 ```
 
 ## Bulk Adds

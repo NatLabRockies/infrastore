@@ -18,9 +18,9 @@
 use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{
     AddRequest, AddedTimeSeries, FeatureValue, Features, KeyIdentity, ListFilter, OwnerCategory,
-    ParentChildAssociation, Period, SingleTimeSeries, SupplementalAttributeAssociation,
-    SupplementalAttributeFilter, TimeSeriesData, TimeSeriesError, TimeSeriesType, TransformPolicy,
-    TypedArray, create_store, open_store,
+    ParentChildAssociation, Period, ReadWindow, SingleTimeSeries, SupplementalAttributeAssociation,
+    SupplementalAttributeFilter, TimeRange, TimeSeriesData, TimeSeriesError, TimeSeriesType,
+    TransformPolicy, TypedArray, create_store, open_store,
 };
 
 /// One hourly `SingleTimeSeries` named `name`, three points long.
@@ -1673,4 +1673,283 @@ fn an_import_refuses_an_irregular_row() {
         }
         other => panic!("expected InvalidParameter, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Windowed reads by id (`Store::read_by_id`).
+//
+// The id is a primary-key lookup and the row it returns carries the grid, so
+// one call covers both halves of a sliced read — the arithmetic a caller
+// otherwise does for itself off a row it had to fetch first. What these pin is
+// that the window is *checked* where a raw `TimeRange` is clamped: the point of
+// taking a window rather than a range is that asking for more than is stored is
+// an error, not a smaller answer.
+// ---------------------------------------------------------------------------
+
+/// Twenty-four hourly points from 2024-01-01, values 0.0..24.0.
+fn day_series(name: &str) -> SingleTimeSeries {
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let vals: Vec<f64> = (0..24).map(|i| i as f64).collect();
+    let data = TypedArray::from_f64(vec![24], &vals);
+    SingleTimeSeries::new(initial, Duration::hours(1), data, name)
+}
+
+fn add_day_series(store: &mut infrastore_core::Store, name: &str) -> i64 {
+    store
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(day_series(name)),
+        ))
+        .unwrap()
+        .id
+}
+
+/// A window names exactly the steps asked for, and moves the returned series'
+/// `initial_timestamp` to the one it starts at.
+#[test]
+fn a_windowed_read_by_id_slices_a_single_time_series() {
+    let mut store = create_store(None, true).unwrap();
+    let id = add_day_series(&mut store, "load");
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+
+    let whole = store.read_by_id(id, ReadWindow::full()).unwrap();
+    assert_eq!(whole.as_single().unwrap().length, 24);
+
+    let window = ReadWindow::from(initial + Duration::hours(4)).with_len(3);
+    let got = store.read_by_id(id, window).unwrap();
+    let sts = got.as_single().unwrap();
+    assert_eq!(sts.data.to_f64_vec().unwrap(), vec![4.0, 5.0, 6.0]);
+    assert_eq!(sts.initial_timestamp, initial + Duration::hours(4));
+    assert_eq!(sts.length, 3);
+
+    // `len` alone runs to the end; `start` alone runs from there.
+    assert_eq!(
+        store
+            .read_by_id(id, ReadWindow::full().with_len(2))
+            .unwrap()
+            .as_single()
+            .unwrap()
+            .data
+            .to_f64_vec()
+            .unwrap(),
+        vec![0.0, 1.0],
+    );
+    assert_eq!(
+        store
+            .read_by_id(id, ReadWindow::from(initial + Duration::hours(22)))
+            .unwrap()
+            .as_single()
+            .unwrap()
+            .length,
+        2,
+    );
+}
+
+/// The contrast that justifies the type: the same over-long request is clamped
+/// by a raw range and refused by a window.
+#[test]
+fn a_windowed_read_by_id_refuses_what_a_range_would_clamp() {
+    let mut store = create_store(None, true).unwrap();
+    let id = add_day_series(&mut store, "load");
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+
+    // A range asking for 30 hours from hour 22 quietly yields the 2 that exist.
+    let clamped = store
+        .get_time_series(
+            &key("load"),
+            Some(TimeRange::new(
+                initial + Duration::hours(22),
+                initial + Duration::hours(52),
+            )),
+        )
+        .unwrap();
+    assert_eq!(clamped.as_single().unwrap().length, 2);
+
+    // The same request as a window is a mistake the store can see.
+    let err = store
+        .read_by_id(
+            id,
+            ReadWindow::from(initial + Duration::hours(22)).with_len(30),
+        )
+        .unwrap_err();
+    match err {
+        TimeSeriesError::InvalidParameter(msg) => {
+            assert!(msg.contains("30 timesteps"), "{msg}");
+            assert!(msg.contains("24"), "{msg}");
+        }
+        other => panic!("expected InvalidParameter, got {other:?}"),
+    }
+
+    // A start past the end, and a zero extent, are refused the same way.
+    assert!(matches!(
+        store
+            .read_by_id(id, ReadWindow::from(initial + Duration::hours(24)))
+            .unwrap_err(),
+        TimeSeriesError::InvalidParameter(_),
+    ));
+    assert!(matches!(
+        store
+            .read_by_id(id, ReadWindow::full().with_len(0))
+            .unwrap_err(),
+        TimeSeriesError::InvalidParameter(_),
+    ));
+}
+
+/// A start between two steps is off the grid, not rounded down onto it.
+#[test]
+fn a_windowed_read_by_id_refuses_an_off_grid_start() {
+    let mut store = create_store(None, true).unwrap();
+    let id = add_day_series(&mut store, "load");
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+
+    let err = store
+        .read_by_id(id, ReadWindow::from(initial + Duration::minutes(30)))
+        .unwrap_err();
+    assert!(
+        matches!(err, TimeSeriesError::InvalidParameter(_)),
+        "got {err:?}",
+    );
+}
+
+/// A forecast slices on its window axis by `count`, from a window boundary.
+#[test]
+fn a_windowed_read_by_id_slices_a_forecast_by_count() {
+    let mut store = create_store(None, true).unwrap();
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let resolution = Duration::hours(1);
+    let horizon = Duration::hours(2);
+    let interval = Duration::hours(1);
+    // Stored [horizon=2, count=4] in row-major order, so window k holds
+    // [10k, 10k+1] down the horizon axis.
+    let mut arr = vec![0.0; 8];
+    for k in 0..4 {
+        arr[k] = 10.0 * k as f64;
+        arr[4 + k] = 10.0 * k as f64 + 1.0;
+    }
+    let det = infrastore_core::Deterministic::new(
+        initial,
+        Period::fixed(resolution),
+        Period::fixed(horizon),
+        Period::fixed(interval),
+        4,
+        TypedArray::from_f64(vec![2, 4], &arr),
+        "fx",
+    )
+    .unwrap();
+    let id = store
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::Deterministic(det),
+        ))
+        .unwrap()
+        .id;
+
+    let got = store
+        .read_by_id(
+            id,
+            ReadWindow::from(initial + Duration::hours(1)).with_count(2),
+        )
+        .unwrap();
+    let d = got.as_deterministic().unwrap();
+    assert_eq!(d.count, 2);
+    assert_eq!(d.initial_timestamp, initial + Duration::hours(1));
+
+    // Past the last window, and more windows than are stored, are both refused.
+    assert!(matches!(
+        store
+            .read_by_id(id, ReadWindow::from(initial + Duration::hours(4)))
+            .unwrap_err(),
+        TimeSeriesError::InvalidParameter(_),
+    ));
+    assert!(matches!(
+        store
+            .read_by_id(id, ReadWindow::full().with_count(5))
+            .unwrap_err(),
+        TimeSeriesError::InvalidParameter(_),
+    ));
+}
+
+/// The extent argument belonging to the other family is refused, not ignored.
+#[test]
+fn a_windowed_read_by_id_refuses_the_wrong_extent_argument() {
+    let mut store = create_store(None, true).unwrap();
+    let id = add_day_series(&mut store, "load");
+
+    let err = store
+        .read_by_id(id, ReadWindow::full().with_count(2))
+        .unwrap_err();
+    match err {
+        TimeSeriesError::InvalidParameter(msg) => assert!(msg.contains("use len"), "{msg}"),
+        other => panic!("expected InvalidParameter, got {other:?}"),
+    }
+}
+
+/// An irregular series counts points, and its start has to be one of its own
+/// timestamps — there is no grid to round onto.
+#[test]
+fn a_windowed_read_by_id_slices_a_non_sequential_series() {
+    let mut store = create_store(None, true).unwrap();
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let timestamps = vec![
+        initial,
+        initial + Duration::hours(3),
+        initial + Duration::hours(4),
+        initial + Duration::days(2),
+    ];
+    let series = infrastore_core::NonSequentialTimeSeries::new(
+        timestamps.clone(),
+        TypedArray::from_f64(vec![4], &[10.0, 20.0, 30.0, 40.0]),
+        "outage",
+    )
+    .unwrap();
+    let id = store
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::NonSequentialTimeSeries(series),
+        ))
+        .unwrap()
+        .id;
+
+    let got = store
+        .read_by_id(id, ReadWindow::from(timestamps[1]).with_len(2))
+        .unwrap();
+    let ns = got.as_non_sequential().unwrap();
+    assert_eq!(ns.data.to_f64_vec().unwrap(), vec![20.0, 30.0]);
+    assert_eq!(ns.timestamps, timestamps[1..3].to_vec());
+
+    // A window running to the final timestamp keeps it: the exclusive bound is
+    // past the end, not on it.
+    let tail = store
+        .read_by_id(id, ReadWindow::from(timestamps[3]))
+        .unwrap();
+    assert_eq!(
+        tail.as_non_sequential().unwrap().data.to_f64_vec().unwrap(),
+        vec![40.0]
+    );
+
+    // A start between two of its timestamps names no point of this series.
+    let err = store
+        .read_by_id(id, ReadWindow::from(initial + Duration::hours(1)))
+        .unwrap_err();
+    match err {
+        TimeSeriesError::InvalidParameter(msg) => assert!(msg.contains("not one of"), "{msg}"),
+        other => panic!("expected InvalidParameter, got {other:?}"),
+    }
+}
+
+/// A read is already committed to acting on the reference, so a dangling id
+/// fails it — matching `read_by_ids` and `remove_by_ids`.
+#[test]
+fn a_windowed_read_by_id_fails_on_a_dangling_id() {
+    let store = create_store(None, true).unwrap();
+    assert!(matches!(
+        store.read_by_id(9_999, ReadWindow::full()).unwrap_err(),
+        TimeSeriesError::NotFound,
+    ));
 }

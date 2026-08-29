@@ -267,6 +267,21 @@ def read_by_ids(
 # The same read addressed by catalog association id. Results follow the order the
 # ids are given, repeats included; NotFoundError if any id names no row.
 
+def read_by_id(
+    self,
+    id: int,
+    *,
+    start_time: datetime | None = None,
+    len: int | None = None,
+    count: int | None = None,
+) -> SingleTimeSeries | NonSequentialTimeSeries | Deterministic | Probabilistic | Scenarios: ...
+# The single-id read, which also takes the slice -- in one call, because the
+# primary-key lookup already returns the row the window resolves against. `len`
+# counts timesteps (static types) and `count` counts windows (forecasts);
+# passing the one that does not apply raises InvalidParameterError, as does a
+# `start_time` off the series' grid or an extent past its end. A window is
+# checked where `time_range` is clamped. No keywords reads the whole series.
+
 def remove_time_series(self, key: TimeSeriesKey) -> None: ...
 def remove_time_series_bulk(self, keys: list[TimeSeriesKey]) -> int: ...
 # All-or-nothing: a key matching nothing fails the whole batch. Returns the count removed.

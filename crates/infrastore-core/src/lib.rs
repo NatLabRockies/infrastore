@@ -40,7 +40,7 @@ pub use reader::{ForecastEntry, ForecastReader, StaticGroup, StaticReader, Windo
 pub use storage::{ArrayLocation, CompactionReport, Compression, IntegrityReport};
 pub use store::{
     AddRequest, AddedTimeSeries, ArrayGroupEntry, BulkAdd, CatalogMode, ForecastParameters,
-    ListFilter, StaticConsistency, Store, TimeSeriesCounts, TimeSeriesCountsDetailed,
+    ListFilter, ReadWindow, StaticConsistency, Store, TimeSeriesCounts, TimeSeriesCountsDetailed,
     TransformOutcome, TransformPolicy, catalog_sqlite_path,
 };
 pub use types::{

@@ -4604,6 +4604,77 @@ pub unsafe extern "C" fn infrastore_store_read_by_ids(
     INFRASTORE_OK
 }
 
+/// Read the series filed under `id`, or the window of it the arguments name, in
+/// one call. The result comes back in the same `InfraStoreBulkReadHandle` as the
+/// bulk reads, holding exactly one item, so a caller decodes it with the same
+/// `infrastore_bulk_result_*` accessors.
+///
+/// The id is a primary-key lookup and its row carries the grid, so both halves
+/// of a sliced read happen here: a caller holding an id needs no metadata call
+/// to ask for the second day of a series. Each optional argument is a
+/// `*_present` flag beside its value; with none present this reads the whole
+/// series, exactly as `infrastore_store_read_by_ids` would for one id.
+///
+/// `start_ms` is Unix milliseconds, spelled zoned or zoneless by
+/// `start_zoneless` like every other bound. `len` counts timesteps and applies
+/// to the static types; `count` counts windows and applies to the forecasts.
+/// Supplying the one that does not apply is `INFRASTORE_ERR_INVALID_PARAMETER`,
+/// not an argument the store drops -- as is a start off the series' grid or an
+/// extent running past its end, which a raw time range would instead clamp.
+/// `INFRASTORE_ERR_NOT_FOUND` if the id names no row.
+///
+/// # Safety
+///
+/// `out_result` must be valid for writing one pointer. On `INFRASTORE_OK` the
+/// returned handle must be released exactly once with
+/// `infrastore_bulk_result_free`.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn infrastore_store_read_by_id(
+    handle: *const InfraStoreHandle,
+    id: i64,
+    start_present: bool,
+    start_zoneless: bool,
+    start_ms: i64,
+    len_present: bool,
+    len: u64,
+    count_present: bool,
+    count: u64,
+    out_result: *mut *mut InfraStoreBulkReadHandle,
+) -> i32 {
+    clear_error();
+    let store = deref_handle!(ref handle);
+    if out_result.is_null() {
+        set_error("out_result pointer is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let start = if start_present {
+        match unix_ms_to_datetime(start_ms) {
+            Some(dt) => Some(dt),
+            None => {
+                set_error(format!("invalid start_ms: {start_ms}"));
+                return INFRASTORE_ERR_INVALID_PARAMETER;
+            }
+        }
+    } else {
+        None
+    };
+    let window = core_lib::ReadWindow {
+        start,
+        zoneless: start_zoneless,
+        len: len_present.then_some(len as usize),
+        count: count_present.then_some(count as usize),
+    };
+    let item = match store.inner.read_by_id(id, window) {
+        Ok(d) => d,
+        Err(e) => return map_core_error(e),
+    };
+    unsafe {
+        *out_result = Box::into_raw(Box::new(InfraStoreBulkReadHandle { items: vec![item] }))
+    };
+    INFRASTORE_OK
+}
+
 /// Write the name of bulk-read item `index` into `out_name` as an owned C
 /// string. The result handle carries each item's name whichever way the read
 /// was addressed, so this is how both `infrastore_store_bulk_read` and

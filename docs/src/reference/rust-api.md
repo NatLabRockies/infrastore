@@ -133,6 +133,14 @@ impl Store {
     // `NotFound` if any id names no row.
     pub fn read_by_ids(&self, ids: &[i64]) -> Result<Vec<TimeSeriesData>>;
 
+    // One series by id, whole or windowed, in a single call: the id is a
+    // primary-key lookup and its row carries the grid the window resolves
+    // against. `len` counts timesteps (static types), `count` counts windows
+    // (forecasts); supplying the other is `InvalidParameter`, as is a start off
+    // the grid or an extent past the end -- a window is checked where a
+    // `TimeRange` is clamped. `ReadWindow::full()` reads everything.
+    pub fn read_by_id(&self, id: i64, window: ReadWindow) -> Result<TimeSeriesData>;
+
     pub fn transform_single_time_series(
         &mut self,
         horizon: impl Into<Period>,

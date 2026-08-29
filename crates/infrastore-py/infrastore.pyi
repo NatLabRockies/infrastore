@@ -384,6 +384,14 @@ class Store:
     def get_metadata_by_id(self, id: int) -> dict[str, Any] | None: ...
     def association_exists(self, id: int) -> bool: ...
     def read_by_ids(self, ids: list[int]) -> list[TimeSeriesData]: ...
+    def read_by_id(
+        self,
+        id: int,
+        *,
+        start_time: datetime | None = None,
+        len: int | None = None,
+        count: int | None = None,
+    ) -> TimeSeriesData: ...
     def transform_single_time_series(
         self,
         horizon: Period,
