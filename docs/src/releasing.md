@@ -132,6 +132,11 @@ git push origin v0.9.0
 
 Pushing the tag triggers three workflows: `crates-release`, `python-wheels`, and `release`.
 
+Tag the merge commit once its own CI is green. `crates-release` now enforces this itself (see
+[step 2](#2-rust--cratesio)), so a tag on a red or untested commit fails the gate instead of
+publishing — but it enforces it by _waiting_, so tagging ahead of CI just means the release job sits
+there. Nothing is lost either way; the tag does not need to be re-pushed once Test finishes.
+
 When a version string moves to a new file, add a `[[pre-release-replacements]]` entry for it in
 `crates/infrastore-core/release.toml` — not in the root `release.toml`, where cargo-release would
 resolve it relative to each of the seven crate directories in turn. Every entry requires at least
@@ -140,6 +145,23 @@ one match, so a file that gets renamed fails the release instead of quietly goin
 ### 2. Rust → crates.io
 
 Handled by `.github/workflows/crates-release.yml` on the tag.
+
+Its `verify-ci` job runs first and refuses to publish a commit that has not passed `Test` on all
+three platforms. The check is worth understanding, because the two workflows are joined by commit
+rather than by ref: `crates-release` fires on the tag, but `test.yml` fires on pushes to `main` and
+`dev` and never on tags, so there is no Test run attached to the tag itself. `verify-ci` looks up
+the run for the **commit** the tag names — which exists because the release commit reaches `main`
+before it is tagged — and requires `conclusion == "success"`.
+
+It fails closed. A tag on a commit that never reached `main` has no Test run at all, and that is an
+error rather than a pass; so is a run that is still going after 70 minutes. A tag pushed in the same
+breath as the branch gets a 15-minute grace period for its run to appear before the job gives up.
+
+This exists because an upload is irreversible in a way the rest of the pipeline is not: crates.io
+never lets a version number be reused, so publishing from a broken commit burns that version
+permanently, and the recovery is to abandon it and release the next one — which is what happened to
+v0.5.0 on the PyPI side. Waiting for CI by hand worked only as long as whoever pushed the tag
+remembered to; local checks are not a substitute either, since a maintainer runs them on one OS.
 
 `cargo publish --workspace` resolves the intra-workspace order itself (`infrastore-core` →
 `infrastore-proto` → `infrastore-ffi` / `infrastore-server` / `infrastore-cli`) and waits for each
@@ -181,7 +203,22 @@ attaches one archive per platform — each with a `.sha256` sidecar — to a **d
 with generated release notes. Review the notes and publish the draft by hand.
 
 Because the workflow creates the draft itself, cut releases by pushing the tag rather than by
-authoring a release in the GitHub UI first.
+authoring a release in the GitHub UI first. A hand-made release is not a shortcut that saves the
+wait — it is an **empty** release until `create-release` runs, and that job is gated on the whole
+build matrix, so the assets do not exist until the slowest target (Windows) finishes. Two things
+follow from that, both of which have bitten a release:
+
+- **Step 5 below cannot start early.** `generate_artifacts.jl` downloads every
+  `libinfrastore_ffi.<triplet>.tar.gz` to hash it, so against an assetless release it fails, and
+  against a partially uploaded one it would hash whatever happens to be there.
+- **Publishing it early does not stick reliably.** `softprops/action-gh-release` updates the
+  existing release for the tag rather than erroring, and it sends `draft: true` in that update. It
+  has left an already-published release published, but do not count on that: check the release's
+  state after the workflow finishes, and publish it (again, if need be) once the assets are
+  attached.
+
+The supported sequence is: push the tag, wait for `release` to go green, then review and publish the
+draft it left.
 
 | Target                      | Runner           | Archive contents          |
 | --------------------------- | ---------------- | ------------------------- |

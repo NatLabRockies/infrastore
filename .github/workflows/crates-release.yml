@@ -6,6 +6,12 @@
 # be listed individually here. `infrastore-py` and `infrastore-bench` set
 # `publish = false` in their manifests and are skipped automatically: the former
 # ships as the `infrastore` wheel on PyPI, the latter is an internal tool.
+#
+# An upload here is irreversible: crates.io never lets a version number be
+# reused, so a crate published from a broken commit burns that version for
+# good. `verify-ci` below is the guard -- publishing waits on the Test
+# workflow's verdict for the tagged commit rather than trusting that whoever
+# pushed the tag checked first.
 name: crates-release
 
 on:
@@ -19,10 +25,99 @@ on:
         default: true
 
 jobs:
+  # Refuse to publish a commit that has not passed Test on all three platforms.
+  #
+  # This workflow fires on the tag, but test.yml fires on pushes to main/dev --
+  # never on tags -- so there is no Test run attached to the tag ref. The run to
+  # consult is the one for the *commit* the tag names, which exists because the
+  # release commit reached main before being tagged. A tag on a commit that
+  # never reached main therefore has no run at all, and this fails closed rather
+  # than publishing something CI never saw.
+  #
+  # Local checks are not a substitute: a maintainer runs them on one OS, and the
+  # matrix here covers Linux, macOS, and Windows.
+  verify-ci:
+    name: verify the tagged commit passed CI
+    runs-on: ubuntu-latest
+    # Skipped only for a dry run, which uploads nothing and so needs no gate.
+    if: ${{ github.event_name == 'push' || !inputs.dry_run }}
+    timeout-minutes: 75
+    permissions:
+      contents: read
+      actions: read  # read other workflows' runs
+    steps:
+      - name: Require a successful Test run on this commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          # A tag pushed in the same breath as the branch can arrive before the
+          # Test run is created, so allow a grace period for one to appear
+          # before concluding there is none. Once a run exists, wait out the
+          # full matrix (the vendored HDF5 build makes it slow on a cold cache).
+          appear_deadline=$(( SECONDS + 900 ))    # 15 min for a run to show up
+          finish_deadline=$(( SECONDS + 4200 ))   # 70 min for it to finish
+
+          while :; do
+            # A transient API failure must not abort the release under `set -e`;
+            # retry it like any other not-yet-answered state.
+            if ! runs="$(gh api \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/test.yml/runs?head_sha=$SHA&per_page=100" \
+              --jq '[.workflow_runs[]] | sort_by(.run_started_at) | last' 2>&1)"; then
+              if [ "$SECONDS" -ge "$finish_deadline" ]; then
+                echo "::error::could not query the Test workflow for $SHA: $runs"
+                exit 1
+              fi
+              echo "query failed, retrying: $runs"
+              sleep 30
+              continue
+            fi
+
+            if [ -z "$runs" ] || [ "$runs" = "null" ]; then
+              if [ "$SECONDS" -ge "$appear_deadline" ]; then
+                echo "::error::no Test run for $SHA. Tag a commit that has been pushed to main," \
+                     "so test.yml has run on it."
+                exit 1
+              fi
+              echo "no Test run for $SHA yet; waiting..."
+              sleep 30
+              continue
+            fi
+
+            status="$(jq -r '.status' <<<"$runs")"
+            conclusion="$(jq -r '.conclusion // "-"' <<<"$runs")"
+            url="$(jq -r '.html_url' <<<"$runs")"
+
+            if [ "$status" != "completed" ]; then
+              if [ "$SECONDS" -ge "$finish_deadline" ]; then
+                echo "::error::Test run for $SHA still $status after 70 minutes: $url"
+                exit 1
+              fi
+              echo "Test run is $status; waiting... ($url)"
+              sleep 30
+              continue
+            fi
+
+            if [ "$conclusion" != "success" ]; then
+              echo "::error::Test run for $SHA concluded '$conclusion', refusing to publish: $url"
+              exit 1
+            fi
+
+            echo "::notice::Test passed for $SHA ($url)"
+            break
+          done
+
   publish:
     name: publish to crates.io
     runs-on: ubuntu-latest
     environment: crates-io
+    needs: verify-ci
+    # `needs` alone would skip this job whenever verify-ci is skipped, which is
+    # exactly the dry-run path that should still run. Accept success or skipped,
+    # but never a failed gate, and never a cancelled workflow.
+    if: ${{ !cancelled() && (needs.verify-ci.result == 'success' || needs.verify-ci.result == 'skipped') }}
     permissions:
       id-token: write  # trusted publishing
     steps:
