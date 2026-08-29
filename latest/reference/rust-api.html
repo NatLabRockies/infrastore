@@ -323,6 +323,11 @@ changes how data is read back — see the <a href="../explanation/storage-model.
     ) -&gt; Result&lt;usize&gt;;
 
     pub fn remove_time_series(&amp;mut self, key: &amp;KeyIdentity) -&gt; Result&lt;()&gt;;
+    // The same removal, addressed by catalog association id: one all-or-nothing
+    // transaction, `NotFound` if any id names no row (and nothing removed).
+    // A repeated id is removed, and counted, once. Precise where a key is not —
+    // a key with no interval matches any interval.
+    pub fn remove_by_ids(&amp;mut self, ids: &amp;[i64]) -&gt; Result&lt;usize&gt;;
     pub fn clear_time_series(
         &amp;mut self,
         owner: Option&lt;(i64, OwnerCategory)&gt;,

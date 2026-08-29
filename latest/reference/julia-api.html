@@ -220,7 +220,7 @@ or else from the <code>libinfrastore_ffi</code> artifact that <code>Pkg</code> d
 <code>list_parents</code>, <code>list_supplemental_attribute_associations</code>, <code>list_supplemental_attribute_ids</code>,
 <code>list_time_series</code>, <code>num_distinct_arrays</code>, <code>open_copy</code>, <code>open_store</code>, <code>persist!</code>,
 <code>persist_catalog!</code>, <code>read_only</code>, <code>rollback_transaction!</code>, <code>transaction</code>, <code>begin_transaction!</code>,
-<code>commit_transaction!</code>, <code>remove_by_filter!</code>, <code>remove_parent_child_associations!</code>,
+<code>commit_transaction!</code>, <code>remove_by_filter!</code>, <code>remove_by_ids!</code>, <code>remove_parent_child_associations!</code>,
 <code>remove_supplemental_attribute_associations!</code>, <code>remove_time_series!</code>, <code>rename_time_series!</code>,
 <code>replace_owner!</code>, <code>replace_parent_child_component_id!</code>,
 <code>replace_supplemental_attribute_component_id!</code>, <code>static_grid</code>, <code>static_groups</code>, <code>static_read!</code>,
@@ -613,9 +613,18 @@ feeds it directly; <code>bytes2hex</code> gives the display form.</p>
 <pre><code class="language-julia">has_time_series(store, key::TimeSeriesKey) -&gt; Bool
 remove_time_series!(store, key::TimeSeriesKey) -&gt; Nothing
 remove_time_series!(store, keys::Vector{TimeSeriesKey}) -&gt; Int
+remove_by_ids!(store, ids::AbstractVector{&lt;:Integer}) -&gt; Int
 </code></pre>
 <p>The vector form removes every key in one all-or-nothing transaction and returns the count; a single
 missing key aborts the whole batch.</p>
+<p><code>remove_by_ids!</code> is the same removal addressed by catalog
+<a href="../explanation/data-model.html">association id</a> rather than by key — the removal direction of the id
+every write reports on its <code>AddedTimeSeries</code>, and the counterpart of <code>read_by_ids</code>. It is
+all-or-nothing too: an id naming no row throws <code>NotFoundError</code> and nothing is removed (sift the set
+with <code>association_exists</code> first when some references are expected to have gone), and a repeated id
+is removed, and counted, once. An empty id vector returns <code>0</code> without touching the store. It is also
+the precise removal — a key identity with no interval matches any interval, where an id names
+exactly one row — and it runs the same orphaned-view guard <code>remove_time_series!</code> does.</p>
 <h3 id="enumerating-keys"><a class="header" href="#enumerating-keys">Enumerating keys</a></h3>
 <pre><code class="language-julia">get_time_series_keys(store, owner_id, owner_category::OwnerCategory) -&gt; Vector{TimeSeriesKey}
 get_time_series_key(T::Type, store, owner_id, owner_category::OwnerCategory, name;

@@ -430,6 +430,10 @@ def read_by_ids(
 def remove_time_series(self, key: TimeSeriesKey) -&gt; None: ...
 def remove_time_series_bulk(self, keys: list[TimeSeriesKey]) -&gt; int: ...
 # All-or-nothing: a key matching nothing fails the whole batch. Returns the count removed.
+def remove_by_ids(self, ids: list[int]) -&gt; int: ...
+# The same removal addressed by catalog association id: one all-or-nothing
+# transaction, NotFoundError if any id names no row (and nothing removed).
+# A repeated id is removed, and counted, once.
 def remove_by_filter(self, *, ...) -&gt; int: ...
 # Same keyword-only filter arguments as list_time_series; one all-or-nothing
 # transaction; returns the count removed (0 when nothing matched).
@@ -569,6 +573,11 @@ every write reports on its <code>AddedTimeSeries</code>, for a caller that recor
 instead of keeping an id-to-key map beside the store. Results follow the order the ids are given,
 repeats included; an id naming no row raises <code>NotFoundError</code> and fails the whole call, unlike
 <code>association_exists</code>, which asks the question rather than committing to a read.</li>
+<li><strong><code>remove_by_ids</code></strong> is the removal direction of the same reference: one all-or-nothing
+transaction, the count removed, and <code>NotFoundError</code> if any id names no row — in which case nothing
+is removed. A repeated id is removed, and counted, once. It is also the precise removal: a key
+identity with no interval matches any interval, so <code>remove_time_series</code> can take a whole forecast
+family, where an id is a primary key and takes exactly the row it names.</li>
 <li><strong><code>list_time_series</code></strong> returns a list of dicts (the same shape <code>get_metadata</code> returns for one
 key), each with the keys: <code>owner_id</code>, <code>owner_type</code>, <code>owner_category</code>, <code>time_series_type</code>, <code>name</code>,
 <code>data_hash</code> (hex string), <code>initial_timestamp</code> (RFC 3339 string, or <code>None</code> for non-sequential

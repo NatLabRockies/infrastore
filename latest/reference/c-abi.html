@@ -335,6 +335,11 @@ int32_t infrastore_store_remove(struct InfraStore *handle, const struct InfraSto
 int32_t infrastore_store_remove_bulk(struct InfraStore *handle,
                              const struct InfraStoreKey *const *keys, uint64_t len,
                              uint64_t *out_removed);
+/* The same removal addressed by catalog association id. All-or-nothing: an id
+   naming no row returns INFRASTORE_ERR_NOT_FOUND and removes nothing. A repeated
+   id is removed, and counted, once. `ids` may be null only when `n` is 0. */
+int32_t infrastore_store_remove_by_ids(struct InfraStore *handle, const int64_t *ids,
+                             uint64_t n, uint64_t *out_removed);
 int32_t infrastore_store_has(const struct InfraStore *handle, const struct InfraStoreKey *key, bool *out_present);
 
 /* Key identity comparison and hashing (consistent with each other; the hash is
@@ -871,6 +876,9 @@ skipped. The handle carries each item's name whichever way the read was addresse
 <code>infrastore_bulk_result_item_name</code> hands item <code>index</code>'s back as an owned C string, freed with
 <code>infrastore_string_free</code> — the companion to <code>infrastore_bulk_result_item_type</code>, and how both reads
 label what they decode.</p>
+<p><code>infrastore_store_remove_by_ids</code> is the removal direction of the same reference, listed with the
+other removals above: one all-or-nothing transaction, the count through <code>out_removed</code>, and
+<code>INFRASTORE_ERR_NOT_FOUND</code> if any id names no row.</p>
 <pre><code class="language-c">int32_t infrastore_store_read_by_ids(const struct InfraStore *handle, const int64_t *ids,
                              uint64_t n, struct InfraStoreBulkReadHandle **out_result);
 int32_t infrastore_bulk_result_item_name(const struct InfraStoreBulkReadHandle *result,

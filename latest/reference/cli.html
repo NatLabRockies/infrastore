@@ -598,9 +598,12 @@ one row, by the catalog id that <code>add</code>, <code>list</code>, and <code>i
 <code>list --id 3</code> is refused rather than quietly returning one row. Use it where a caller has stored an
 id in its own model and wants that series back:</p>
 <pre><code class="language-sh">infrastore --store system.h5 -f json info --id 214
+infrastore --store system.h5 --yes remove --id 214
 </code></pre>
 <p>An id that names no row is an error saying so, and saying that it will stay that way: ids are never
 reissued, so a reference that stops resolving cannot later come to mean a different series.</p>
+<p><code>remove</code> deletes the row the selector resolved by its id, so it takes exactly that row; its JSON
+document reports the id it removed alongside the name and owner.</p>
 <p><code>--spelling</code> is the constructive half of the time-reference coherence rule. <code>zoneless</code> keeps the
 wall-clock series; <code>zoned</code> keeps the ones that record instants, including those that declare no
 reference at all. <code>grid</code> and the bulk reads span one timestamp axis, so they refuse a selection
