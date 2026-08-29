@@ -210,6 +210,7 @@ function _decode_key_row(r::AbstractDict)
         _row_int(r["count"]),
         Dict{String, Any}(r["features"]),
         _row_time_reference(r),
+        _row_int(get(r, "id", nothing)),
     )
 end
 

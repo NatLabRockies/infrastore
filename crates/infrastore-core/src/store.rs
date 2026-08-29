@@ -2373,6 +2373,23 @@ impl Store {
             .collect()
     }
 
+    /// Like [`Self::list_keys`], but pairs each key with the association id
+    /// the catalog filed it under -- the same id [`AddedTimeSeries::id`] handed
+    /// back at the write. A consumer that keeps ids in its own model resolves a
+    /// listing to them here in the one catalog query the listing already costs,
+    /// rather than re-reading each row through [`Self::get_metadata`]. `None`
+    /// only for a row written before the catalog minted ids.
+    pub fn list_keys_with_id(
+        &self,
+        filter: ListFilter,
+    ) -> Result<Vec<(TimeSeriesKey, Option<i64>)>> {
+        self.metadata
+            .list_without_timestamps(&filter.into())?
+            .iter()
+            .map(|m| Ok((TimeSeriesKey::from_metadata(m)?, m.id)))
+            .collect()
+    }
+
     /// Build a [`StaticReader`] over the static series matching `filter`.
     ///
     /// Every column in a reader must share one timeline, so which type the
