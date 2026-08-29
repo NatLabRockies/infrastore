@@ -1830,8 +1830,15 @@ pub unsafe extern "C" fn infrastore_store_remove_by_ids(
     clear_error();
     let store = deref_handle!(mut handle);
     let count = n as usize;
-    if out_removed.is_null() || (ids.is_null() && count != 0) {
-        set_error("an out pointer is null");
+    // Named separately, as the id-addressed read does: one of these is the
+    // caller's output buffer and the other is its input, and a C caller can
+    // only act on the diagnostic if it says which.
+    if out_removed.is_null() {
+        set_error("out_removed pointer is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    if ids.is_null() && count != 0 {
+        set_error("ids pointer is null");
         return INFRASTORE_ERR_NULL_POINTER;
     }
     let id_slice = if count == 0 {
@@ -11822,9 +11829,19 @@ mod abi_tests {
             unsafe { infrastore_store_remove_by_ids(store, ptr::null(), 1, &mut removed) },
             INFRASTORE_ERR_NULL_POINTER
         );
+        assert!(
+            last_error().contains("ids"),
+            "the diagnostic must name the null input, got: {}",
+            last_error()
+        );
         assert_eq!(
             unsafe { infrastore_store_remove_by_ids(store, asked.as_ptr(), 1, ptr::null_mut()) },
             INFRASTORE_ERR_NULL_POINTER
+        );
+        assert!(
+            last_error().contains("out_removed"),
+            "the diagnostic must name the null output, got: {}",
+            last_error()
         );
 
         unsafe { infrastore_store_free(store) };
