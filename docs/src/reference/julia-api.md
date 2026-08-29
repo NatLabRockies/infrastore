@@ -290,6 +290,7 @@ struct TimeSeriesMetadata                    # get_metadata / list_time_series
     time_reference    :: Union{Nothing,TimeReference}   # how the timestamps were spelled
     component_field   :: Union{Nothing,String}       # e.g. "max_active_power"
     application_data  :: Union{Nothing,String}
+    id                :: Union{Nothing,Int64}    # the catalog row's id; nothing off-catalog
 end
 ```
 
@@ -299,24 +300,31 @@ end
 [`list_time_series`](#store-wide-operations). The fields a type does not use are `nothing` rather
 than absent, so no field is silently dropped by the addressing path taken.
 
-| Struct                            | Returned by                               | Fields                                                                                                                                                              |
-| --------------------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `KeyInfo`                         | `key_info`                                | `owner_id`, `owner_category`, `name`, `time_series_type`, `resolution`, `features`                                                                                  |
-| `KeyRow`                          | `list_keys`                               | `owner_id`, `owner_category`, `time_series_type`, `name`, `initial_timestamp`, `resolution`, `length`, `horizon`, `interval`, `count`, `features`, `time_reference` |
-| `ArrayGroupRow`                   | `list_array_groups`                       | every `KeyRow` field, plus `data_hash` (the 32 bytes)                                                                                                               |
-| `TimeSeriesCounts`                | `get_counts`                              | `components_with_time_series`, `static_time_series`, `forecasts`                                                                                                    |
-| `TimeSeriesCountsDetailed`        | `time_series_counts`                      | `components_with_time_series`, `supplemental_attributes_with_time_series`, `static_time_series_count`, `forecast_count`                                             |
-| `TimeSeriesTypeCount`             | `counts_by_type`                          | `time_series_type`, `count`                                                                                                                                         |
-| `ArrayReferenceCounts`            | `count_array_references`                  | `sts`, `dst`                                                                                                                                                        |
-| `StaticSummaryRow`                | `static_summary`                          | `owner_type`, `owner_category`, `time_series_type`, `name`, `initial_timestamp`, `resolution`, `time_step_count`, `count`                                           |
-| `ForecastSummaryRow`              | `forecast_summary`                        | `owner_type`, `owner_category`, `time_series_type`, `name`, `initial_timestamp`, `resolution`, `horizon`, `interval`, `window_count`, `count`                       |
-| `SupplementalAttributeTypeCount`  | `supplemental_attribute_counts_by_type`   | `attribute_type`, `count`                                                                                                                                           |
-| `SupplementalAttributeSummaryRow` | `supplemental_attribute_summary`          | `component_type`, `attribute_type`, `count`                                                                                                                         |
-| `ForecastParameters`              | `get_forecast_parameters`                 | `horizon`, `interval`, `count`, `resolution`, `initial_timestamp` (all `nothing` when nothing matches)                                                              |
-| `StaticGrid`                      | `static_grid`, `check_static_consistency` | `initial_timestamp`, `resolution` (`nothing` for an irregular reader), `length`, `time_reference`                                                                   |
-| `ForecastTimeline`                | `forecast_timeline`                       | `initial_timestamp`, `resolution`, `interval`, `count`, `time_reference`                                                                                            |
-| `CompressionSettings`             | `get_compression`                         | `compression` (`:deflate` / `:none`), `level`, `shuffle`                                                                                                            |
-| `CompactionReport`                | `compact!`                                | `slots_reclaimed`, `datasets_dropped`, `feature_sets_reclaimed`, `timestamp_sets_reclaimed`, `bytes_reclaimed`                                                      |
+| Struct                            | Returned by                               | Fields                                                                                                                                                                    |
+| --------------------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `KeyInfo`                         | `key_info`                                | `owner_id`, `owner_category`, `name`, `time_series_type`, `resolution`, `features`                                                                                        |
+| `KeyRow`                          | `list_keys`                               | `owner_id`, `owner_category`, `time_series_type`, `name`, `initial_timestamp`, `resolution`, `length`, `horizon`, `interval`, `count`, `features`, `time_reference`, `id` |
+| `ArrayGroupRow`                   | `list_array_groups`                       | every `KeyRow` field, plus `data_hash` (the 32 bytes)                                                                                                                     |
+| `TimeSeriesCounts`                | `get_counts`                              | `components_with_time_series`, `static_time_series`, `forecasts`                                                                                                          |
+| `TimeSeriesCountsDetailed`        | `time_series_counts`                      | `components_with_time_series`, `supplemental_attributes_with_time_series`, `static_time_series_count`, `forecast_count`                                                   |
+| `TimeSeriesTypeCount`             | `counts_by_type`                          | `time_series_type`, `count`                                                                                                                                               |
+| `ArrayReferenceCounts`            | `count_array_references`                  | `sts`, `dst`                                                                                                                                                              |
+| `StaticSummaryRow`                | `static_summary`                          | `owner_type`, `owner_category`, `time_series_type`, `name`, `initial_timestamp`, `resolution`, `time_step_count`, `count`                                                 |
+| `ForecastSummaryRow`              | `forecast_summary`                        | `owner_type`, `owner_category`, `time_series_type`, `name`, `initial_timestamp`, `resolution`, `horizon`, `interval`, `window_count`, `count`                             |
+| `SupplementalAttributeTypeCount`  | `supplemental_attribute_counts_by_type`   | `attribute_type`, `count`                                                                                                                                                 |
+| `SupplementalAttributeSummaryRow` | `supplemental_attribute_summary`          | `component_type`, `attribute_type`, `count`                                                                                                                               |
+| `ForecastParameters`              | `get_forecast_parameters`                 | `horizon`, `interval`, `count`, `resolution`, `initial_timestamp` (all `nothing` when nothing matches)                                                                    |
+| `StaticGrid`                      | `static_grid`, `check_static_consistency` | `initial_timestamp`, `resolution` (`nothing` for an irregular reader), `length`, `time_reference`                                                                         |
+| `ForecastTimeline`                | `forecast_timeline`                       | `initial_timestamp`, `resolution`, `interval`, `count`, `time_reference`                                                                                                  |
+| `CompressionSettings`             | `get_compression`                         | `compression` (`:deflate` / `:none`), `level`, `shuffle`                                                                                                                  |
+| `CompactionReport`                | `compact!`                                | `slots_reclaimed`, `datasets_dropped`, `feature_sets_reclaimed`, `timestamp_sets_reclaimed`, `bytes_reclaimed`                                                            |
+
+Every struct in the table compares and hashes by value over **all** of its fields, `id` included: a
+`KeyRow` (or a `TimeSeriesMetadata`) describing the same series in two different stores is not equal
+to its counterpart, because the id is the catalog's record of that row rather than a property of the
+data. The association row types are the exception — `SupplementalAttributeAssociation` and
+`ParentChildAssociation` compare on their endpoints alone, since a caller constructs those as plain
+values and a row read back has to equal the one that wrote it.
 
 `StaticGrid` is shared by `static_grid` (a reader's timeline) and `check_static_consistency` (one
 per resolution present) — the same concept, so the same type. Its `resolution` is `nothing` only for

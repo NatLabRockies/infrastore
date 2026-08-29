@@ -100,6 +100,13 @@ recorded for it. `length` applies to static series, `horizon` / `interval` /
 `time_series_type` are `nothing`. `time_reference` records how the row's
 timestamps were spelled, and `id` is the association id the write handed back.
 
+`id` counts toward `==` and `hash` for these rows, as it does for
+[`TimeSeriesMetadata`](@ref): a listing row is the catalog's record of a series,
+so two rows describing the same series in two different stores are not equal.
+The association row types take the opposite rule and compare on their endpoints
+alone, because a caller constructs those as plain values and a row read back has
+to equal the one that wrote it; a `KeyRow` only ever comes from a listing.
+
 Physical storage detail (`data_hash`, `element_type`, `application_data`, `percentiles`) is not part
 of a key — read it with [`list_time_series`](@ref), [`list_array_groups`](@ref),
 or the `get_*_metadata` functions.

@@ -424,8 +424,10 @@ with store.transaction():
   map exactly.
 - **`list_array_groups`** accepts the same filters as `list_time_series` and groups the matching
   series by their underlying stored array. It returns a list of dicts, each with `data_hash` (hex
-  string) and `keys` (a list of `TimeSeriesKey`s that resolve to that array). Keys sharing one dict
-  share one deduplicated array.
+  string), `keys` (a list of `TimeSeriesKey`s that resolve to that array), and `ids` (each of those
+  keys' association id, positionally aligned with `keys` — a `TimeSeriesKey` is opaque and carries
+  no id itself; `None` for a row written before ids were minted). Keys sharing one dict share one
+  deduplicated array.
 - **`get_time_series_counts`** returns
   `{"components_with_time_series": int, "static_time_series": int, "forecasts": int}`;
   **`time_series_counts_detailed`** adds `supplemental_attributes_with_time_series` and spells the

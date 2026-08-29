@@ -2476,10 +2476,12 @@ impl PyStore {
     }
 
     /// Group time series by their underlying stored array. Returns one dict per
-    /// unique content hash, each with `data_hash` (hex str) and `keys` (the list
-    /// of `TimeSeriesKey`s that resolve to that array). Keys sharing one dict
-    /// share one deduplicated array. Accepts the same filters as
-    /// `list_time_series`. Wraps the core `list_keys_with_hash`.
+    /// unique content hash, each with `data_hash` (hex str), `keys` (the list of
+    /// `TimeSeriesKey`s that resolve to that array), and `ids` (the association
+    /// id of each of those keys, positionally aligned with `keys`, `None` for a
+    /// row written before ids were minted). Keys sharing one dict share one
+    /// deduplicated array. Accepts the same filters as `list_time_series`.
+    /// Wraps the core `list_array_groups`.
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
         name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
@@ -2514,22 +2516,28 @@ impl PyStore {
             interval,
             features,
         )?;
-        let rows = self.store()?.list_keys_with_hash(filter).map_err(map_err)?;
-        let mut groups: BTreeMap<[u8; 32], Vec<Py<PyTimeSeriesKey>>> = BTreeMap::new();
-        for (key, hash) in rows {
+        let rows = self.store()?.list_array_groups(filter).map_err(map_err)?;
+        // `keys` and `ids` are built side by side so a group's nth id belongs to
+        // its nth key: a `TimeSeriesKey` is opaque and carries no id of its own.
+        type Group = (Vec<Py<PyTimeSeriesKey>>, Vec<Option<i64>>);
+        let mut groups: BTreeMap<[u8; 32], Group> = BTreeMap::new();
+        for (key, hash, id) in rows {
             let pk = Py::new(
                 py,
                 PyTimeSeriesKey {
                     inner: key.identity().clone(),
                 },
             )?;
-            groups.entry(hash).or_default().push(pk);
+            let entry = groups.entry(hash).or_default();
+            entry.0.push(pk);
+            entry.1.push(id);
         }
         let mut out = Vec::with_capacity(groups.len());
-        for (hash, keys) in groups {
+        for (hash, (keys, ids)) in groups {
             let d = PyDict::new(py);
             d.set_item("data_hash", core_lib::hash_hex(&hash))?;
             d.set_item("keys", keys)?;
+            d.set_item("ids", ids)?;
             out.push(d);
         }
         Ok(out)

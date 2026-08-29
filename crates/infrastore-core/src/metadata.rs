@@ -2524,9 +2524,13 @@ impl MetadataStore {
     ///
     /// Neither association catalog takes a caller-supplied id — no wire form
     /// carries one, so there is nothing to preserve — so the id column is left
-    /// out of the insert entirely and `AUTOINCREMENT` assigns. `RETURNING`
-    /// reads back what landed rather than relying on `last_insert_rowid()`
-    /// being untouched by whatever runs next.
+    /// out of the insert entirely and `AUTOINCREMENT` assigns. The id comes
+    /// back from `last_insert_rowid()`, which is per-connection and reports
+    /// the most recent rowid insert, so the read must stay immediately after
+    /// the `execute`: any statement slipped between the two — a denormalized
+    /// write, a lookup that itself inserts — makes this hand back that row's
+    /// id instead. `RETURNING` would lift the ordering constraint, at the
+    /// price the comment in the body describes.
     fn assoc_insert(
         tx: &Connection,
         table: AssocTable,

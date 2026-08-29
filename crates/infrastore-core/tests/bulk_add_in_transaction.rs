@@ -7,10 +7,11 @@
 //! sub-journal on close, and the in-memory sub-journal (`memjrnl`) is a chunk
 //! list walked from the front — so the cost of each insert grows with every
 //! page the transaction has touched so far, and a load that flushes in batches
-//! goes quadratic. `INSERT ... RETURNING` is one such statement; it took a
-//! 10-batch load of 100k rows from ~1 s to ~22 s, with the last batch fifty
-//! times slower than the first. `last_insert_rowid()` after a plain `INSERT`
-//! is the same id without the journal.
+//! goes quadratic. `INSERT ... RETURNING` is one such statement; measured, it
+//! took a 100k-row load flushed in ten batches from ~1 s to ~22 s, the tenth
+//! batch fifty times slower than the first. `last_insert_rowid()` after a plain
+//! `INSERT` is the same id without the journal. The batch counts below are
+//! smaller than that measurement: the growth shows up long before the tenth.
 
 use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{
@@ -50,16 +51,28 @@ fn scratch_store(dir: &tempfile::TempDir) -> infrastore_core::Store {
     .unwrap()
 }
 
-/// The last batch must stay within a loose multiple of the first: a healthy
-/// run is ~1.1x, and the regression this guards was an order of magnitude past
-/// the bound by the last batch.
+/// The load must stay flat: the median of the second half of the batches within
+/// a loose multiple of the median of the first half. A healthy run is ~1.1x and
+/// the guarded regression grows with every batch — an order of magnitude past
+/// the bound by the last one — so comparing halves separates the two by a wide
+/// margin while a single stalled batch, which a shared CI runner will hand out
+/// sooner or later, moves neither median. Comparing the last batch against the
+/// first would turn that stall into a failure: each batch here is a few tens of
+/// milliseconds, so one scheduling hiccup is 4x on its own.
 fn assert_flat(elapsed: &[std::time::Duration]) {
-    let first = elapsed[0].as_secs_f64();
-    let last = elapsed[elapsed.len() - 1].as_secs_f64();
+    fn median(batches: &[std::time::Duration]) -> f64 {
+        let mut secs: Vec<f64> = batches.iter().map(|d| d.as_secs_f64()).collect();
+        secs.sort_by(f64::total_cmp);
+        secs[secs.len() / 2]
+    }
+
+    let (head, tail) = elapsed.split_at(elapsed.len() / 2);
+    let (first, last) = (median(head), median(tail));
     assert!(
         last < 4.0 * first,
-        "batch {} took {last:.3}s against {first:.3}s for batch 1 ({elapsed:?})",
-        elapsed.len()
+        "the last {} batches took a median {last:.3}s against {first:.3}s for the first {} ({elapsed:?})",
+        tail.len(),
+        head.len()
     );
 }
 
