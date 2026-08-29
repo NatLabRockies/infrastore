@@ -142,6 +142,11 @@ impl Store {
     ) -> Result<usize>;
 
     pub fn remove_time_series(&mut self, key: &KeyIdentity) -> Result<()>;
+    // The same removal, addressed by catalog association id: one all-or-nothing
+    // transaction, `NotFound` if any id names no row (and nothing removed).
+    // A repeated id is removed, and counted, once. Precise where a key is not —
+    // a key with no interval matches any interval.
+    pub fn remove_by_ids(&mut self, ids: &[i64]) -> Result<usize>;
     pub fn clear_time_series(
         &mut self,
         owner: Option<(i64, OwnerCategory)>,

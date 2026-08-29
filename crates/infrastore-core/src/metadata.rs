@@ -1316,6 +1316,37 @@ impl MetadataStore {
         Ok(out)
     }
 
+    /// Delete the one association filed under `id`. Returns its data_hash and
+    /// stored type, or `None` if the catalog holds no such row — the caller
+    /// decides whether a stale reference is an error.
+    ///
+    /// The id is the primary key, so this names exactly one row: unlike
+    /// [`Self::delete_by_key`], whose NULL-interval wildcard can sweep a whole
+    /// forecast family, a removal by reference removes only what the reference
+    /// points at.
+    pub fn delete_by_id(tx: &Connection, id: i64) -> Result<Option<([u8; 32], TimeSeriesType)>> {
+        let row: Option<(Vec<u8>, i64)> = tx
+            .prepare_cached(
+                "SELECT data_hash, time_series_type FROM time_series_associations WHERE id = ?1",
+            )?
+            .query_row(params![id], |r| {
+                Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?))
+            })
+            .optional()?;
+        let Some((hash_bytes, type_code)) = row else {
+            return Ok(None);
+        };
+        tx.prepare_cached("DELETE FROM time_series_associations WHERE id = ?1")?
+            .execute(params![id])?;
+        let hash = bytes_to_hash32(&hash_bytes).ok_or_else(|| {
+            TimeSeriesError::IntegrityError(format!(
+                "malformed catalog row: data_hash is {} bytes, expected 32",
+                hash_bytes.len()
+            ))
+        })?;
+        Ok(Some((hash, decode_type(type_code)?)))
+    }
+
     /// Delete all associations for the owner `(owner_id, owner_category)`.
     /// Returns the data_hashes of removed rows.
     pub fn delete_by_owner(

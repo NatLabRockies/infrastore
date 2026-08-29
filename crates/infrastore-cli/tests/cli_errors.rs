@@ -3191,6 +3191,32 @@ fn an_unknown_id_is_refused_with_the_reason_it_stays_stale() {
     assert!(err.contains("never reissued"), "{err}");
 }
 
+/// `remove --id` deletes the row that id names, and says which id it removed.
+///
+/// The id is the reference a caller persisted elsewhere, so retiring a series
+/// by it — rather than by rebuilding the key it was filed under — is the
+/// removal that matches how the reference was stored.
+#[test]
+fn a_series_can_be_removed_by_its_catalog_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("system.h5");
+    seeded_store(dir.path(), &store, "load");
+
+    let out = run(&store, &["-f", "json", "remove", "--id", "1", "--force"]);
+    let report: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(report["removed"], 1);
+    assert_eq!(report["id"], 1);
+    assert_eq!(report["name"], "load");
+
+    let listed = run(&store, &["-f", "json", "list"]);
+    let rows: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    assert_eq!(rows["items"].as_array().unwrap().len(), 0);
+
+    // The id stays stale, and the removal says so rather than resolving it.
+    let err = run_err(&store, &["remove", "--id", "1", "--force"]);
+    assert!(err.contains("no association has id 1"), "{err}");
+}
+
 /// `--id` is a point lookup, not a predicate: it refuses to be combined with
 /// the narrowing flags, and refuses to stand in for them where a command works
 /// over a set.

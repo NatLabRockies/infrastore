@@ -2957,6 +2957,20 @@ impl PyStore {
             .collect()
     }
 
+    /// Remove many series by catalog id, in one all-or-nothing transaction.
+    /// Returns the number removed.
+    ///
+    /// The removal direction of the id every write hands back: a caller that
+    /// recorded ids in its own model retires one without rebuilding the key it
+    /// was filed under, and an id names exactly one row where a key can match a
+    /// whole forecast family. Raises `NotFoundError` if any id names no row,
+    /// rolling the batch back — sift the set with `association_exists` first
+    /// when some references are expected to have gone. A repeated id is removed
+    /// once.
+    fn remove_by_ids(&mut self, ids: Vec<i64>) -> PyResult<usize> {
+        self.store_mut()?.remove_by_ids(&ids).map_err(map_err)
+    }
+
     /// List the `TimeSeriesKey`s matching the filter.
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,

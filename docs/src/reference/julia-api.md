@@ -39,7 +39,7 @@ Exported names (types first, then functions):
 `list_parents`, `list_supplemental_attribute_associations`, `list_supplemental_attribute_ids`,
 `list_time_series`, `num_distinct_arrays`, `open_copy`, `open_store`, `persist!`,
 `persist_catalog!`, `read_only`, `rollback_transaction!`, `transaction`, `begin_transaction!`,
-`commit_transaction!`, `remove_by_filter!`, `remove_parent_child_associations!`,
+`commit_transaction!`, `remove_by_filter!`, `remove_by_ids!`, `remove_parent_child_associations!`,
 `remove_supplemental_attribute_associations!`, `remove_time_series!`, `rename_time_series!`,
 `replace_owner!`, `replace_parent_child_component_id!`,
 `replace_supplemental_attribute_component_id!`, `static_grid`, `static_groups`, `static_read!`,
@@ -489,10 +489,20 @@ feeds it directly; `bytes2hex` gives the display form.
 has_time_series(store, key::TimeSeriesKey) -> Bool
 remove_time_series!(store, key::TimeSeriesKey) -> Nothing
 remove_time_series!(store, keys::Vector{TimeSeriesKey}) -> Int
+remove_by_ids!(store, ids::AbstractVector{<:Integer}) -> Int
 ```
 
 The vector form removes every key in one all-or-nothing transaction and returns the count; a single
 missing key aborts the whole batch.
+
+`remove_by_ids!` is the same removal addressed by catalog
+[association id](../explanation/data-model.md) rather than by key — the removal direction of the id
+every write reports on its `AddedTimeSeries`, and the counterpart of `read_by_ids`. It is
+all-or-nothing too: an id naming no row throws `NotFoundError` and nothing is removed (sift the set
+with `association_exists` first when some references are expected to have gone), and a repeated id
+is removed, and counted, once. An empty id vector returns `0` without touching the store. It is also
+the precise removal — a key identity with no interval matches any interval, where an id names
+exactly one row — and it runs the same orphaned-view guard `remove_time_series!` does.
 
 ### Enumerating keys
 

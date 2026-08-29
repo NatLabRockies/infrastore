@@ -1610,6 +1610,24 @@ impl Store {
         Ok(())
     }
 
+    /// The arrays a removal left unreferenced, decided inside the removal
+    /// transaction after *all* the deletes so a hash referenced only by other
+    /// rows removed in the same batch is reclaimed too. Deduplicated, so a hash
+    /// removed via several rows is checked (and dropped) once.
+    fn unreferenced_after_removal(
+        tx: &rusqlite::Connection,
+        removed_hashes: &[[u8; 32]],
+    ) -> Result<Vec<[u8; 32]>> {
+        let mut to_drop = Vec::new();
+        let mut seen = HashSet::new();
+        for h in removed_hashes {
+            if seen.insert(*h) && references_to_in_tx(tx, h)? == 0 {
+                to_drop.push(*h);
+            }
+        }
+        Ok(to_drop)
+    }
+
     /// Remove several time series in one all-or-nothing transaction, dropping
     /// each underlying array that no surviving association references (exactly
     /// like [`Self::remove_time_series`], and sharing its removal helper).
@@ -1620,6 +1638,58 @@ impl Store {
     /// every requested series or none.
     pub fn remove_time_series_bulk(&mut self, keys: &[&KeyIdentity]) -> Result<usize> {
         self.remove_identities(keys, true)
+    }
+
+    /// Remove every association named by its catalog `id`, in one
+    /// all-or-nothing transaction, dropping each underlying array that no
+    /// surviving association references (exactly like
+    /// [`Self::remove_time_series`]). Returns the number of associations
+    /// removed.
+    ///
+    /// The removal-direction counterpart of [`Self::read_by_ids`]: a consumer
+    /// that recorded ids in its own model retires one without reconstructing
+    /// the key it was filed under. An id names exactly one row, so this is also
+    /// the precise removal — [`Self::remove_time_series`] takes a key, whose
+    /// NULL interval matches any interval and can therefore sweep a whole
+    /// forecast family.
+    ///
+    /// [`TimeSeriesError::NotFound`] if any id names no row, rolling the whole
+    /// batch back — a stale reference means the caller's model disagrees with
+    /// the store, and ids are never reissued, so it cannot come to name a
+    /// different series later. Sift the set with [`Self::association_exists`]
+    /// first when some references are expected to have gone. A repeated id is
+    /// removed (and counted) once.
+    #[tracing::instrument(skip(self, ids), fields(count = ids.len()))]
+    pub fn remove_by_ids(&mut self, ids: &[i64]) -> Result<usize> {
+        if self.read_only {
+            return Err(TimeSeriesError::ReadOnlyStore);
+        }
+        let tx = self.metadata.savepoint()?;
+        let mut removed_hashes: Vec<[u8; 32]> = Vec::with_capacity(ids.len());
+        let mut removed_sts_hashes: Vec<[u8; 32]> = Vec::new();
+        let mut seen_ids = HashSet::new();
+        for &id in ids {
+            if !seen_ids.insert(id) {
+                continue;
+            }
+            // Dropping the tx rolls the batch back.
+            let Some((hash, ts_type)) = MetadataStore::delete_by_id(&tx, id)? else {
+                return Err(TimeSeriesError::NotFound);
+            };
+            if ts_type == TimeSeriesType::SingleTimeSeries {
+                removed_sts_hashes.push(hash);
+            }
+            removed_hashes.push(hash);
+        }
+        // Checked after all deletes, so a batch removing a DST together with
+        // its backing series passes regardless of order.
+        Self::check_no_orphaned_dst(&tx, removed_sts_hashes)?;
+        let to_drop = Self::unreferenced_after_removal(&tx, &removed_hashes)?;
+        tx.commit()?;
+        for h in to_drop {
+            self.free_or_defer(h)?;
+        }
+        Ok(removed_hashes.len())
     }
 
     /// Remove every time series matching `filter` in one all-or-nothing
@@ -1667,16 +1737,7 @@ impl Store {
         // Checked after all deletes, so a batch removing a DST together with
         // its backing series passes regardless of order.
         Self::check_no_orphaned_dst(&tx, removed_sts_hashes)?;
-        // Decide array drops after *all* deletes so a hash referenced only by
-        // other rows removed in this same batch is reclaimed too. Dedup so a
-        // hash removed via several keys is checked (and dropped) once.
-        let mut to_drop = Vec::new();
-        let mut seen = HashSet::new();
-        for h in &removed_hashes {
-            if seen.insert(*h) && references_to_in_tx(&tx, h)? == 0 {
-                to_drop.push(*h);
-            }
-        }
+        let to_drop = Self::unreferenced_after_removal(&tx, &removed_hashes)?;
         tx.commit()?;
         for h in to_drop {
             self.free_or_defer(h)?;

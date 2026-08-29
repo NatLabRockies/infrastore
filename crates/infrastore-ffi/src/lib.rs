@@ -1803,6 +1803,58 @@ pub unsafe extern "C" fn infrastore_store_remove_bulk(
     }
 }
 
+/// Remove many associations named by their catalog `id`, in one all-or-nothing
+/// transaction. On success `*out_removed` receives the number removed.
+///
+/// The removal direction of the id every write hands back through its `out_id`:
+/// a caller that recorded ids in its own model retires one without rebuilding
+/// the key it was filed under, and an id names exactly one row where a key can
+/// match a whole forecast family. Returns `INFRASTORE_ERR_NOT_FOUND` if any id
+/// names no row, in which case nothing is removed — sift the set with
+/// `infrastore_store_association_exists` first when some references are
+/// expected to have gone. A repeated id is removed, and counted, once.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle created by this library and must not be
+/// used concurrently from another thread for the duration of the call. `ids`
+/// must point to `n` readable `i64`s (it may be null only when `n` is 0), and
+/// `out_removed` must be valid for writing one `u64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_store_remove_by_ids(
+    handle: *mut InfraStoreHandle,
+    ids: *const i64,
+    n: u64,
+    out_removed: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = deref_handle!(mut handle);
+    let count = n as usize;
+    // Named separately, as the id-addressed read does: one of these is the
+    // caller's output buffer and the other is its input, and a C caller can
+    // only act on the diagnostic if it says which.
+    if out_removed.is_null() {
+        set_error("out_removed pointer is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    if ids.is_null() && count != 0 {
+        set_error("ids pointer is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let id_slice = if count == 0 {
+        &[][..]
+    } else {
+        unsafe { slice::from_raw_parts(ids, count) }
+    };
+    match store.inner.remove_by_ids(id_slice) {
+        Ok(removed) => {
+            unsafe { *out_removed = removed as u64 };
+            INFRASTORE_OK
+        }
+        Err(e) => map_core_error(e),
+    }
+}
+
 /// Report whether the store contains the time series identified by `key`.
 ///
 /// # Safety
@@ -11718,6 +11770,78 @@ mod abi_tests {
         assert_eq!(
             unsafe { infrastore_store_read_by_ids(store, ptr::null(), 1, &mut empty) },
             INFRASTORE_ERR_NULL_POINTER
+        );
+
+        unsafe { infrastore_store_free(store) };
+    }
+
+    /// `infrastore_store_remove_by_ids` removes exactly the rows its ids name,
+    /// is all-or-nothing when one of them dangles, and reports the count.
+    #[test]
+    fn abi_remove_by_ids_is_all_or_nothing() {
+        let store = abi_create_in_memory();
+        let a = abi_add_f64_id(store, 1, "a", &[1.0, 2.0, 3.0]);
+        let b = abi_add_f64_id(store, 2, "b", &[10.0, 11.0, 12.0]);
+        let c = abi_add_f64_id(store, 3, "c", &[100.0, 101.0, 102.0]);
+
+        // One dangling id fails the batch, and leaves every row in place.
+        let doomed = [a, 9_999, b];
+        let mut removed = 0u64;
+        assert_eq!(
+            unsafe { infrastore_store_remove_by_ids(store, doomed.as_ptr(), 3, &mut removed) },
+            INFRASTORE_ERR_NOT_FOUND
+        );
+        for id in [a, b, c] {
+            let mut present = false;
+            assert_eq!(
+                unsafe { infrastore_store_association_exists(store, id, &mut present) },
+                INFRASTORE_OK
+            );
+            assert!(present, "id {id} must survive the rolled-back batch");
+        }
+
+        // The good pair goes together; a repeated id counts once.
+        let asked = [a, b, a];
+        assert_eq!(
+            unsafe { infrastore_store_remove_by_ids(store, asked.as_ptr(), 3, &mut removed) },
+            INFRASTORE_OK,
+            "remove_by_ids failed: {}",
+            last_error()
+        );
+        assert_eq!(removed, 2);
+        for (id, expected) in [(a, false), (b, false), (c, true)] {
+            let mut present = false;
+            assert_eq!(
+                unsafe { infrastore_store_association_exists(store, id, &mut present) },
+                INFRASTORE_OK
+            );
+            assert_eq!(present, expected, "id {id}");
+        }
+
+        // An empty request is valid; a null `ids` with a non-zero length is not,
+        // and neither is a null out pointer.
+        assert_eq!(
+            unsafe { infrastore_store_remove_by_ids(store, ptr::null(), 0, &mut removed) },
+            INFRASTORE_OK
+        );
+        assert_eq!(removed, 0);
+        assert_eq!(
+            unsafe { infrastore_store_remove_by_ids(store, ptr::null(), 1, &mut removed) },
+            INFRASTORE_ERR_NULL_POINTER
+        );
+        assert!(
+            last_error().contains("ids"),
+            "the diagnostic must name the null input, got: {}",
+            last_error()
+        );
+        assert_eq!(
+            unsafe { infrastore_store_remove_by_ids(store, asked.as_ptr(), 1, ptr::null_mut()) },
+            INFRASTORE_ERR_NULL_POINTER
+        );
+        assert!(
+            last_error().contains("out_removed"),
+            "the diagnostic must name the null output, got: {}",
+            last_error()
         );
 
         unsafe { infrastore_store_free(store) };

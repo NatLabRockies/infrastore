@@ -337,9 +337,20 @@ Writes report the id they used, and reads take one:
 | Resolve   | `get_metadata_by_id`                  | `get_metadata_by_id` | `get_metadata_by_id` |
 | Validate  | `association_exists`                  | `association_exists` | `association_exists` |
 | Read      | `read_by_ids`                         | `read_by_ids`        | `read_by_ids`        |
+| Remove    | `remove_by_ids`                       | `remove_by_ids`      | `remove_by_ids!`     |
 
 `association_exists` fetches no row, so a consumer can check every reference in its model on load
 rather than discovering a dangling one mid-simulation.
+
+`read_by_ids` and `remove_by_ids` both refuse a set containing an id that names no row — the read
+returns nothing, the removal removes nothing. That is deliberate: a caller working from references
+it recorded earlier has a model that disagrees with the store, and since an id is never reissued the
+disagreement will not resolve itself. Sift the set with `association_exists` first when some
+references are expected to have gone.
+
+A removal by id is also the precise one. A key identity with no interval matches any interval, so
+`remove_time_series` can take a whole forecast family; an id is a primary key and takes exactly the
+row it names.
 
 ## Optional Descriptors
 

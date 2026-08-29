@@ -57,11 +57,19 @@ pub fn remove(
     }
 
     let mut store = store_access::open_writable(store_path)?;
-    store.remove_time_series(&key).map_err(|e| e.to_string())?;
+    // The selector resolved one row, so remove that row by its catalog id when
+    // it has one: an id is a primary key, where a key identity can in principle
+    // match siblings. Only a row predating the id column falls back to the key.
+    match meta.id {
+        Some(id) => {
+            store.remove_by_ids(&[id]).map_err(|e| e.to_string())?;
+        }
+        None => store.remove_time_series(&key).map_err(|e| e.to_string())?,
+    }
     store.flush().map_err(|e| e.to_string())?;
     report(
         format,
-        || json!({ "removed": 1, "name": meta.name, "owner_id": meta.owner_id }),
+        || json!({ "removed": 1, "id": meta.id, "name": meta.name, "owner_id": meta.owner_id }),
         || {
             println!(
                 "{}",
