@@ -1073,19 +1073,23 @@ impl MetadataStore {
         // `prepare_cached` so bulk adds parse each INSERT's SQL once per
         // connection instead of once per row.
         //
-        // `id` is bound rather than omitted, and `RETURNING id` reads back what
-        // landed. Both choices are deliberate:
+        // `id` is bound rather than omitted: binding `NULL` into an `INTEGER
+        // PRIMARY KEY` is how SQLite is asked to assign one, so a
+        // caller-supplied id and an assigned one are the same statement -- no
+        // second prepared statement, and no branch that could drift between
+        // the two.
         //
-        //   * Binding `NULL` into an `INTEGER PRIMARY KEY` is how SQLite is
-        //     asked to assign one, so a caller-supplied id and an assigned one
-        //     are the same statement -- no second prepared statement, and no
-        //     branch that could drift between the two.
-        //   * `RETURNING` instead of `last_insert_rowid()`. That function is
-        //     per-connection and reports the most recent insert on it, so
-        //     reading it here was only correct because the feature-set insert
-        //     below happens *after* it: it writes to a rowid table and would
-        //     clobber it. Nothing should have to preserve that ordering to keep
-        //     this function correct.
+        // The id is read back with `last_insert_rowid()`, *not* `RETURNING`.
+        // `RETURNING` makes the statement need a statement journal, and with
+        // an enclosing savepoint open (a caller's transaction) every such
+        // statement truncates the sub-journal on close -- a front-to-back walk
+        // of a chunk list when the catalog is in memory, over a journal that
+        // grows with every page the transaction has touched. A batched load
+        // under one transaction went quadratic on it: the tenth batch of 10k
+        // rows was fifty times slower than the first. `last_insert_rowid()` is
+        // per-connection and reports the most recent rowid insert, so it must
+        // be read before the feature-set insert below, which would clobber it;
+        // `tests/bulk_add_in_transaction.rs` pins the cost.
         let mut insert_stmt = tx.prepare_cached(
             "INSERT INTO time_series_associations
              (id, owner_id, owner_type, owner_category, time_series_type, name, data_hash,
@@ -1094,11 +1098,10 @@ impl MetadataStore {
               component_field, percentiles_json, element_type, element_shape,
               application_data, features_hash)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                     ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
-             RETURNING id",
+                     ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
         )?;
-        let result = insert_stmt.query_row(
-            params![
+        let result = insert_stmt
+            .execute(params![
                 meta.id,
                 meta.owner_id,
                 meta.owner_type,
@@ -1125,9 +1128,8 @@ impl MetadataStore {
                 element_shape_json,
                 meta.application_data,
                 f_hash.as_slice(),
-            ],
-            |row| row.get::<_, i64>(0),
-        );
+            ])
+            .map(|_| tx.last_insert_rowid());
 
         let id = match result {
             Ok(id) => id,
@@ -2522,9 +2524,13 @@ impl MetadataStore {
     ///
     /// Neither association catalog takes a caller-supplied id — no wire form
     /// carries one, so there is nothing to preserve — so the id column is left
-    /// out of the insert entirely and `AUTOINCREMENT` assigns. `RETURNING`
-    /// reads back what landed rather than relying on `last_insert_rowid()`
-    /// being untouched by whatever runs next.
+    /// out of the insert entirely and `AUTOINCREMENT` assigns. The id comes
+    /// back from `last_insert_rowid()`, which is per-connection and reports
+    /// the most recent rowid insert, so the read must stay immediately after
+    /// the `execute`: any statement slipped between the two — a denormalized
+    /// write, a lookup that itself inserts — makes this hand back that row's
+    /// id instead. `RETURNING` would lift the ordering constraint, at the
+    /// price the comment in the body describes.
     fn assoc_insert(
         tx: &Connection,
         table: AssocTable,
@@ -2534,15 +2540,19 @@ impl MetadataStore {
         right_type: &str,
         detail: &str,
     ) -> Result<i64> {
+        // A plain INSERT read back with `last_insert_rowid()`, not `RETURNING`,
+        // for the reason given at the time series insert: `RETURNING` needs a
+        // statement journal, and under a caller's transaction on an in-memory
+        // catalog closing one costs a walk of everything the transaction has
+        // touched, so the bulk paths that call this per row would go quadratic.
         let sql = format!(
-            "INSERT INTO {} ({}, {}, {}, {}) VALUES (?1, ?2, ?3, ?4) RETURNING id",
+            "INSERT INTO {} ({}, {}, {}, {}) VALUES (?1, ?2, ?3, ?4)",
             table.name, table.left_id, table.left_type, table.right_id, table.right_type
         );
         let mut stmt = tx.prepare_cached(&sql)?;
-        stmt.query_row(params![left_id, left_type, right_id, right_type], |row| {
-            row.get::<_, i64>(0)
-        })
-        .map_err(|e| map_association_violation(e, detail))
+        stmt.execute(params![left_id, left_type, right_id, right_type])
+            .map_err(|e| map_association_violation(e, detail))?;
+        Ok(tx.last_insert_rowid())
     }
 
     fn assoc_delete(tx: &Connection, table: AssocTable, filter: &EndpointFilter) -> Result<usize> {

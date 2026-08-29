@@ -5678,7 +5678,7 @@ pub unsafe extern "C" fn infrastore_store_get_time_series_keys(
 // (`data_hash`, `element_type`, `application_data`, `percentiles`) is deliberately absent —
 // it is read on demand via the metadata read descriptors.
 /// Build the JSON object for one key (the per-row shape shared by
-/// `keys_to_json` and `keys_with_hash_to_json`).
+/// `keys_with_id_to_json` and `keys_with_hash_to_json`).
 fn key_to_map(k: &core_lib::TimeSeriesKey) -> serde_json::Map<String, Value> {
     let dur_ms = |d: Option<core_lib::Period>| -> Value {
         d.map(|x| Value::from(x.to_iso8601()))
@@ -5744,8 +5744,19 @@ fn key_to_map(k: &core_lib::TimeSeriesKey) -> serde_json::Map<String, Value> {
     o
 }
 
-fn keys_to_json(keys: &[core_lib::TimeSeriesKey]) -> String {
-    let arr: Vec<Value> = keys.iter().map(|k| Value::Object(key_to_map(k))).collect();
+/// One `key_to_map` object per row, each carrying the association `id` the catalog
+/// filed it under (`null` for a row written before ids were minted) -- the same
+/// id a write hands back, so a listing resolves straight to a consumer's stored
+/// references without a per-row metadata read.
+fn keys_with_id_to_json(rows: &[(core_lib::TimeSeriesKey, Option<i64>)]) -> String {
+    let arr: Vec<Value> = rows
+        .iter()
+        .map(|(k, id)| {
+            let mut o = key_to_map(k);
+            o.insert("id".into(), id.map(Value::from).unwrap_or(Value::Null));
+            Value::Object(o)
+        })
+        .collect();
     Value::Array(arr).to_string()
 }
 
@@ -5759,13 +5770,15 @@ fn hash_to_hex(hash: &[u8; 32]) -> String {
     s
 }
 
-/// Like `keys_to_json`, but each row carries an extra `data_hash` field (the
-/// lowercase hex content hash). Rows that share a stored array share the hash.
-fn keys_with_hash_to_json(rows: &[(core_lib::TimeSeriesKey, [u8; 32])]) -> String {
+/// One `key_to_map` object per row, each with the association `id` (as in
+/// `keys_with_id_to_json`) and an extra `data_hash` field (the lowercase hex
+/// content hash). Rows that share a stored array share the hash.
+fn keys_with_hash_to_json(rows: &[core_lib::ArrayGroupEntry]) -> String {
     let arr: Vec<Value> = rows
         .iter()
-        .map(|(k, h)| {
+        .map(|(k, h, id)| {
             let mut o = key_to_map(k);
+            o.insert("id".into(), id.map(Value::from).unwrap_or(Value::Null));
             o.insert("data_hash".into(), Value::from(hash_to_hex(h)));
             Value::Object(o)
         })
@@ -5886,7 +5899,7 @@ fn metadata_to_map(m: &core_lib::TimeSeriesMetadata) -> serde_json::Map<String, 
     o
 }
 
-/// List time series keys as a JSON array string (see `keys_to_json` for the
+/// List time series keys as a JSON array string (see `key_to_map` for the
 /// per-key shape). Every filter is optional and independent; with none set the
 /// whole store is listed. A `has_*` flag of `false` (or a null string pointer)
 /// disables that filter:
@@ -5904,6 +5917,10 @@ fn metadata_to_map(m: &core_lib::TimeSeriesMetadata) -> serde_json::Map<String, 
 /// - `component_field` (null = no filter; exact, case-sensitive match on the
 ///   owning component's field. A row that declares none matches no value, so
 ///   this cannot select the rows that left it unset.)
+///
+/// Each row also carries `id`, the association id the catalog filed it under
+/// (the same id `infrastore_store_add_batch` returns; `null` for a row written
+/// before ids were minted).
 ///
 /// Returns the JSON through `out_json` as an **owned** allocation the caller
 /// releases with `infrastore_string_free`; `out_len` is its byte length. A
@@ -5963,11 +5980,11 @@ pub unsafe extern "C" fn infrastore_store_list_keys(
         Ok(f) => f,
         Err(c) => return c,
     };
-    let keys = match store.inner.list_keys(filter) {
-        Ok(k) => k,
+    let rows = match store.inner.list_keys_with_id(filter) {
+        Ok(r) => r,
         Err(e) => return map_core_error(e),
     };
-    let json = keys_to_json(&keys);
+    let json = keys_with_id_to_json(&rows);
     unsafe { write_owned_str_out(json, out_json, out_len) }
 }
 
@@ -6454,7 +6471,8 @@ unsafe fn build_list_filter(
 
 /// List time series keys, each annotated with the hex content hash of the array
 /// it resolves to, as a JSON array string (see `keys_with_hash_to_json` for the
-/// per-row shape — `keys_to_json`'s shape plus a `data_hash` field). Rows that
+/// per-row shape — an `infrastore_store_list_keys` row, `id` included, plus a
+/// `data_hash` field). Rows that
 /// share a stored array share their `data_hash`, so a caller can group time
 /// series by their underlying data in one query (no per-row metadata fetch).
 ///
@@ -6514,7 +6532,7 @@ pub unsafe extern "C" fn infrastore_store_list_array_groups(
         Ok(f) => f,
         Err(c) => return c,
     };
-    let rows = match store.inner.list_keys_with_hash(filter) {
+    let rows = match store.inner.list_array_groups(filter) {
         Ok(r) => r,
         Err(e) => return map_core_error(e),
     };

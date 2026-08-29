@@ -741,6 +741,7 @@ end
     # Rows carry every list_keys field plus the 32-byte content hash.
     @test all(r -> r.data_hash isa Vector{UInt8} && length(r.data_hash) == 32, rows)
     @test all(r -> r.name == "load", rows)
+    @test sort([r.id for r in rows]) == [1, 2, 3]
 
     # A Vector{UInt8} hashes by content, so it groups directly as a Dict key.
     groups = Dict{Vector{UInt8}, Vector{Int}}()
@@ -4714,6 +4715,10 @@ end
     @test association_exists(store, added.id)
     @test get_metadata_by_id(store, 9999) === nothing
     @test !association_exists(store, 9999)
+
+    # A listing carries the same ids, so a caller holding a stored reference
+    # matches rows to it without a metadata read per row.
+    @test [r.id for r in list_keys(store)] == [1, 2]
 
     # A removed row's id stops resolving and is never handed out again, so a
     # stale reference can never come to mean a different series.

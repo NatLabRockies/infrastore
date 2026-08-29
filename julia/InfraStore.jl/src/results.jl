@@ -98,7 +98,14 @@ One row of [`list_keys`](@ref): a key's identity plus the descriptive snapshot
 recorded for it. `length` applies to static series, `horizon` / `interval` /
 `count` to forecasts; the fields that do not apply to a row's
 `time_series_type` are `nothing`. `time_reference` records how the row's
-timestamps were spelled.
+timestamps were spelled, and `id` is the association id the write handed back.
+
+`id` counts toward `==` and `hash` for these rows, as it does for
+[`TimeSeriesMetadata`](@ref): a listing row is the catalog's record of a series,
+so two rows describing the same series in two different stores are not equal.
+The association row types take the opposite rule and compare on their endpoints
+alone, because a caller constructs those as plain values and a row read back has
+to equal the one that wrote it; a `KeyRow` only ever comes from a listing.
 
 Physical storage detail (`data_hash`, `element_type`, `application_data`, `percentiles`) is not part
 of a key — read it with [`list_time_series`](@ref), [`list_array_groups`](@ref),
@@ -118,12 +125,14 @@ struct KeyRow
     features::Dict{String, Any}
     "How the row's timestamps were spelled (a [`TimeReference`](@ref)), or `nothing` for unspecified. Descriptive, so it is part of the snapshot and never of key equality."
     time_reference::Union{Nothing, TimeReference}
+    "The association id the catalog filed the row under — the same id [`add_time_series!`](@ref) and [`add_time_series_bulk!`](@ref) hand back — or `nothing` for a row written before ids were minted."
+    id::Union{Nothing, Int64}
 end
 
 """
     ArrayGroupRow
 
-One row of [`list_array_groups`](@ref): every [`KeyRow`] field plus `data_hash`,
+One row of [`list_array_groups`](@ref): every [`KeyRow`] field (`id` included) plus `data_hash`,
 the 32-byte content hash of the array the row resolves to. Rows that share a
 stored array share their `data_hash`, so grouping by it (a `Vector{UInt8}` hashes
 and compares by content, so it works directly as a `Dict` key) finds the series
@@ -143,6 +152,7 @@ struct ArrayGroupRow
     features::Dict{String, Any}
     "How the row's timestamps were spelled (a [`TimeReference`](@ref)), or `nothing` for unspecified."
     time_reference::Union{Nothing, TimeReference}
+    id::Union{Nothing, Int64}
     data_hash::Vector{UInt8}
 end
 

@@ -1872,7 +1872,7 @@ int32_t infrastore_store_get_time_series_keys(const struct InfraStore *handle,
                                               uint64_t *out_len);
 
 /**
- * List time series keys as a JSON array string (see `keys_to_json` for the
+ * List time series keys as a JSON array string (see `key_to_map` for the
  * per-key shape). Every filter is optional and independent; with none set the
  * whole store is listed. A `has_*` flag of `false` (or a null string pointer)
  * disables that filter:
@@ -1890,6 +1890,10 @@ int32_t infrastore_store_get_time_series_keys(const struct InfraStore *handle,
  * - `component_field` (null = no filter; exact, case-sensitive match on the
  *   owning component's field. A row that declares none matches no value, so
  *   this cannot select the rows that left it unset.)
+ *
+ * Each row also carries `id`, the association id the catalog filed it under
+ * (the same id `infrastore_store_add_batch` returns; `null` for a row written
+ * before ids were minted).
  *
  * Returns the JSON through `out_json` as an **owned** allocation the caller
  * releases with `infrastore_string_free`; `out_len` is its byte length. A
@@ -2081,7 +2085,8 @@ int32_t infrastore_store_resolve_forecast_key(const struct InfraStore *handle,
 /**
  * List time series keys, each annotated with the hex content hash of the array
  * it resolves to, as a JSON array string (see `keys_with_hash_to_json` for the
- * per-row shape — `keys_to_json`'s shape plus a `data_hash` field). Rows that
+ * per-row shape — an `infrastore_store_list_keys` row, `id` included, plus a
+ * `data_hash` field). Rows that
  * share a stored array share their `data_hash`, so a caller can group time
  * series by their underlying data in one query (no per-row metadata fetch).
  *

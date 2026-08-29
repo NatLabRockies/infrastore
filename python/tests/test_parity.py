@@ -856,10 +856,19 @@ def test_list_array_groups():
     assert by_size[0]["keys"][0].owner_id == 3
     assert by_size[0]["data_hash"] == store.get_metadata(k3)["data_hash"]
 
+    # Each group's ids line up positionally with its keys, and are the ids the
+    # writes handed back.
+    for group in groups:
+        assert len(group["ids"]) == len(group["keys"])
+        for key, id_ in zip(group["keys"], group["ids"]):
+            assert id_ == store.get_metadata(key)["id"]
+    assert sorted(i for g in groups for i in g["ids"]) == [1, 2, 3]
+
     # Filters apply.
     filtered = store.list_array_groups(owner_id=3)
     assert len(filtered) == 1
     assert filtered[0]["data_hash"] == store.get_metadata(k3)["data_hash"]
+    assert filtered[0]["ids"] == [store.get_metadata(k3)["id"]]
     assert store.list_array_groups(name="absent") == []
 
 

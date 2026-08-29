@@ -163,6 +163,18 @@ impl Store {
         &self,
         filter: ListFilter,
     ) -> Result<Vec<(TimeSeriesKey, [u8; 32])>>;
+    // …and with each key's association id (the id the write handed back; `None`
+    // for a row written before ids were minted), so a consumer holding ids
+    // resolves a listing to them without a metadata read per row.
+    pub fn list_keys_with_id(
+        &self,
+        filter: ListFilter,
+    ) -> Result<Vec<(TimeSeriesKey, Option<i64>)>>;
+    // Both at once: what the bindings' array-group listing serves.
+    pub fn list_array_groups(
+        &self,
+        filter: ListFilter,
+    ) -> Result<Vec<(TimeSeriesKey, [u8; 32], Option<i64>)>>;
     pub fn get_time_series_keys(
         &self,
         owner_id: i64,
@@ -372,9 +384,11 @@ can be moved between threads, but sharing one requires external synchronization 
   name. Errors with `DuplicateTimeSeries` if the destination identity already exists.
 - **`get_time_series_keys`** — Lists every key for the owner identified by the
   `(owner_id, owner_category)` pair.
-- **`list_keys` / `list_keys_with_hash`** — The key-centric listing path (what the bindings use).
-  `list_keys_with_hash` pairs each key with its array's content hash in the same single catalog
-  query, so callers can group keys by the data behind them.
+- **`list_keys` / `list_keys_with_hash` / `list_keys_with_id` / `list_array_groups`** — The
+  key-centric listing path (what the bindings use). `list_keys_with_hash` pairs each key with its
+  array's content hash in the same single catalog query, so callers can group keys by the data
+  behind them; `list_keys_with_id` pairs it with the association id the write handed back (`None`
+  for a row written before ids were minted); `list_array_groups` carries both.
 - **`resolve_forecast_key`** — Resolves a forecast addressed by attributes plus a
   [requested type](#requested-types) to the single matching key, whose `time_series_type` is the
   concrete type that matched. `resolution` and `interval` are optional filters; leave them `None` to
