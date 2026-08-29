@@ -270,6 +270,10 @@ def read_by_ids(
 def remove_time_series(self, key: TimeSeriesKey) -> None: ...
 def remove_time_series_bulk(self, keys: list[TimeSeriesKey]) -> int: ...
 # All-or-nothing: a key matching nothing fails the whole batch. Returns the count removed.
+def remove_by_ids(self, ids: list[int]) -> int: ...
+# The same removal addressed by catalog association id: one all-or-nothing
+# transaction, NotFoundError if any id names no row (and nothing removed).
+# A repeated id is removed, and counted, once.
 def remove_by_filter(self, *, ...) -> int: ...
 # Same keyword-only filter arguments as list_time_series; one all-or-nothing
 # transaction; returns the count removed (0 when nothing matched).
@@ -411,6 +415,11 @@ with store.transaction():
   instead of keeping an id-to-key map beside the store. Results follow the order the ids are given,
   repeats included; an id naming no row raises `NotFoundError` and fails the whole call, unlike
   `association_exists`, which asks the question rather than committing to a read.
+- **`remove_by_ids`** is the removal direction of the same reference: one all-or-nothing
+  transaction, the count removed, and `NotFoundError` if any id names no row — in which case nothing
+  is removed. A repeated id is removed, and counted, once. It is also the precise removal: a key
+  identity with no interval matches any interval, so `remove_time_series` can take a whole forecast
+  family, where an id is a primary key and takes exactly the row it names.
 - **`list_time_series`** returns a list of dicts (the same shape `get_metadata` returns for one
   key), each with the keys: `owner_id`, `owner_type`, `owner_category`, `time_series_type`, `name`,
   `data_hash` (hex string), `initial_timestamp` (RFC 3339 string, or `None` for non-sequential

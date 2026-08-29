@@ -507,10 +507,14 @@ id in its own model and wants that series back:
 
 ```sh
 infrastore --store system.h5 -f json info --id 214
+infrastore --store system.h5 --yes remove --id 214
 ```
 
 An id that names no row is an error saying so, and saying that it will stay that way: ids are never
 reissued, so a reference that stops resolving cannot later come to mean a different series.
+
+`remove` deletes the row the selector resolved by its id, so it takes exactly that row; its JSON
+document reports the id it removed alongside the name and owner.
 
 `--spelling` is the constructive half of the time-reference coherence rule. `zoneless` keeps the
 wall-clock series; `zoned` keeps the ones that record instants, including those that declare no

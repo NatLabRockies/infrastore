@@ -918,6 +918,186 @@ fn a_bulk_read_by_id_follows_the_order_it_was_given() {
     assert!(store.read_by_ids(&[]).unwrap().is_empty());
 }
 
+/// A removal by id takes exactly the row the reference names, reclaims its
+/// array, and leaves every other row alone.
+#[test]
+fn a_removal_by_id_takes_only_the_row_it_names() {
+    let mut store = create_store(None, true).unwrap();
+    let mut ids = Vec::new();
+    for name in ["a", "b", "c"] {
+        ids.push(
+            store
+                .add(AddRequest::new(
+                    1,
+                    "Generator",
+                    OwnerCategory::Component,
+                    TimeSeriesData::SingleTimeSeries(series(name)),
+                ))
+                .unwrap()
+                .id,
+        );
+    }
+
+    assert_eq!(store.remove_by_ids(&[ids[1]]).unwrap(), 1);
+    assert!(!store.association_exists(ids[1]).unwrap());
+    let left: Vec<String> = store
+        .list_time_series(ListFilter::new())
+        .unwrap()
+        .into_iter()
+        .map(|m| m.name)
+        .collect();
+    assert_eq!(left, vec!["a".to_string(), "c".to_string()]);
+    assert!(store.verify_integrity().unwrap().ok());
+
+    // The rest go together, and the store is empty afterwards.
+    assert_eq!(store.remove_by_ids(&[ids[2], ids[0]]).unwrap(), 2);
+    assert!(store.list_keys(ListFilter::new()).unwrap().is_empty());
+    assert_eq!(store.num_distinct_arrays().unwrap(), 0);
+}
+
+/// A stale id fails the whole batch and rolls it back: the rows named beside it
+/// are still there afterwards.
+///
+/// The all-or-nothing rule is the same one `remove_time_series_bulk`
+/// follows, and it matters more by reference than by key — a caller removing by
+/// id is working from its own recorded references, so one that no longer
+/// resolves says the model disagrees with the store, not that this particular
+/// removal is a no-op.
+#[test]
+fn a_removal_by_id_is_all_or_nothing() {
+    let mut store = create_store(None, true).unwrap();
+    let a = store
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series("a")),
+        ))
+        .unwrap()
+        .id;
+    let b = store
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series("b")),
+        ))
+        .unwrap()
+        .id;
+
+    let err = store.remove_by_ids(&[a, 9_999, b]).unwrap_err();
+    assert!(
+        matches!(err, TimeSeriesError::NotFound),
+        "an id naming no row must fail the batch, got {err:?}",
+    );
+    assert!(store.association_exists(a).unwrap(), "rolled back");
+    assert!(store.association_exists(b).unwrap(), "rolled back");
+    assert_eq!(store.list_keys(ListFilter::new()).unwrap().len(), 2);
+
+    // An empty set is a no-op, not an error.
+    assert_eq!(store.remove_by_ids(&[]).unwrap(), 0);
+
+    // A repeated id names one row, so it is removed — and counted — once.
+    assert_eq!(store.remove_by_ids(&[a, a]).unwrap(), 1);
+    assert!(!store.association_exists(a).unwrap());
+}
+
+/// Removing by id honors the array refcount: a shared array survives while any
+/// other association still references it.
+#[test]
+fn a_removal_by_id_reclaims_only_the_last_reference() {
+    let mut store = create_store(None, true).unwrap();
+    // Same values under two owners: one array, two associations.
+    let first = store
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series("load")),
+        ))
+        .unwrap()
+        .id;
+    let second = store
+        .add(AddRequest::new(
+            2,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series("load")),
+        ))
+        .unwrap()
+        .id;
+    assert_eq!(store.num_distinct_arrays().unwrap(), 1);
+
+    store.remove_by_ids(&[first]).unwrap();
+    assert_eq!(
+        store.num_distinct_arrays().unwrap(),
+        1,
+        "the array must survive while the second association references it",
+    );
+    store.remove_by_ids(&[second]).unwrap();
+    assert_eq!(store.num_distinct_arrays().unwrap(), 0);
+}
+
+/// The removal-by-reference path runs the same orphaned-view guard the keyed
+/// removals do: a `SingleTimeSeries` backing a `DeterministicSingleTimeSeries`
+/// cannot go on its own, but the pair can go together in one batch.
+#[test]
+fn a_removal_by_id_refuses_to_orphan_a_derived_view() {
+    let mut store = create_store(None, true).unwrap();
+    let source = add_long(&mut store, "load").id;
+    let view = store
+        .transform_single_time_series(
+            Duration::hours(6),
+            Duration::hours(6),
+            None,
+            None,
+            TransformPolicy::default(),
+        )
+        .unwrap()
+        .written
+        .remove(0)
+        .id;
+
+    let err = store.remove_by_ids(&[source]).unwrap_err();
+    assert!(
+        matches!(err, TimeSeriesError::InvalidParameter(_)),
+        "removing the backing series alone must be refused, got {err:?}",
+    );
+    assert!(store.association_exists(source).unwrap(), "rolled back");
+
+    // Together, in either order.
+    assert_eq!(store.remove_by_ids(&[source, view]).unwrap(), 2);
+    assert!(store.list_keys(ListFilter::new()).unwrap().is_empty());
+}
+
+/// A read-only store refuses the removal before touching the catalog.
+#[test]
+fn a_read_only_store_refuses_a_removal_by_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.h5");
+    let id = {
+        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let added = store
+            .add(AddRequest::new(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(series("load")),
+            ))
+            .unwrap();
+        store.flush().unwrap();
+        added.id
+    };
+
+    let mut store = open_store(path.as_path(), true).unwrap();
+    let err = store.remove_by_ids(&[id]).unwrap_err();
+    assert!(
+        matches!(err, TimeSeriesError::ReadOnlyStore),
+        "expected ReadOnlyStore, got {err:?}",
+    );
+    assert!(store.association_exists(id).unwrap());
+}
+
 /// The ids survive the trip to disk and back — the path IS3.jl's system
 /// serialization actually takes, where the catalog is copied rather than
 /// rewritten.

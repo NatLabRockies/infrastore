@@ -642,6 +642,36 @@ function remove_time_series!(store::Store, keys::AbstractVector{<:TimeSeriesRef}
     return Int(out_removed[])
 end
 
+"""
+    remove_by_ids!(store, ids) -> Int
+
+Remove many associations named by their catalog `id`, in one all-or-nothing
+transaction, returning the number removed.
+
+The removal direction of the id every write hands back on its
+`AddedTimeSeries`: a caller that recorded ids in its own model retires one
+without rebuilding the key it was filed under, and an id names exactly one row
+where a key can match a whole forecast family. Throws `NotFoundError` if any id
+names no row, leaving the store untouched — sift the set with
+[`association_exists`](@ref) first when some references are expected to have
+gone. A repeated id is removed, and counted, once.
+
+See also [`read_by_ids`](@ref), the read direction of the same reference.
+"""
+function remove_by_ids!(store::Store, ids::AbstractVector{<:Integer})
+    isempty(ids) && return 0
+    id_vec = Int64[Int64(id) for id in ids]
+    out_removed = Ref{UInt64}(0)
+    code = GC.@preserve id_vec @ccall lib_path().infrastore_store_remove_by_ids(
+        store::Ptr{Cvoid},
+        id_vec::Ptr{Int64},
+        UInt64(length(id_vec))::UInt64,
+        out_removed::Ref{UInt64},
+    )::Int32
+    _check(code)
+    return Int(out_removed[])
+end
+
 function has_time_series(store::Store, key::TimeSeriesRef)
     out = Ref{Bool}(false)
     code = @ccall lib_path().infrastore_store_has(

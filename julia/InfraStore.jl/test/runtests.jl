@@ -4761,6 +4761,37 @@ end
     close!(store)
 end
 
+@testset "association ids: remove_by_ids! is all-or-nothing" begin
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+    store = Store(in_memory=true)
+
+    ids = Int[]
+    for name in ["a", "b", "c"]
+        added = add_time_series!(
+            store, 1, "Generator", Component,
+            SingleTimeSeries(t0, res, collect(1.0:3.0), name),
+        )
+        push!(ids, added.id)
+    end
+
+    # One dangling id fails the batch and leaves every row in place: a stale
+    # reference says the caller's model disagrees with the store.
+    @test_throws InfraStore.NotFoundError remove_by_ids!(store, [ids[1], 9999])
+    @test all(association_exists(store, id) for id in ids)
+
+    # The rest go together; a repeated id is removed, and counted, once.
+    @test remove_by_ids!(store, [ids[1], ids[2], ids[1]]) == 2
+    @test !association_exists(store, ids[1])
+    @test !association_exists(store, ids[2])
+    @test association_exists(store, ids[3])
+    @test [r.name for r in list_keys(store)] == ["c"]
+
+    @test remove_by_ids!(store, Int[]) == 0
+
+    close!(store)
+end
+
 @testset "association ids: writes report them" begin
     t0 = DateTime(2024, 1, 1)
     res = Hour(1)

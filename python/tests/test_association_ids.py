@@ -144,6 +144,43 @@ class TestReading:
             store.read_by_ids([ids[0], 9999])
         assert store.read_by_ids([]) == []
 
+    def test_remove_by_ids_is_all_or_nothing(self):
+        store = Store.create(in_memory=True)
+        ids = [_add(store, name).id for name in ("a", "b", "c")]
+
+        # One dangling id fails the batch and leaves every row in place: a
+        # stale reference says the caller's model disagrees with the store.
+        with pytest.raises(NotFoundError):
+            store.remove_by_ids([ids[0], 9999])
+        assert all(store.association_exists(i) for i in ids)
+
+        # The rest go together, and a repeated id is removed — and counted —
+        # once.
+        assert store.remove_by_ids([ids[0], ids[1], ids[0]]) == 2
+        assert not store.association_exists(ids[0])
+        assert not store.association_exists(ids[1])
+        assert store.association_exists(ids[2])
+        assert [k.name for k in store.list_keys()] == ["c"]
+
+        assert store.remove_by_ids([]) == 0
+
+    def test_remove_by_ids_reclaims_only_the_last_reference(self):
+        """The array behind a removed row survives while anything else uses it.
+
+        Removing by reference goes through the same refcount as removing by
+        key; the two owners here share one content-addressed array.
+        """
+        store = Store.create(in_memory=True)
+        first = _add(store, "load", owner=1).id
+        second = _add(store, "load", owner=2).id
+        assert store.num_distinct_arrays() == 1
+
+        store.remove_by_ids([first])
+        assert store.num_distinct_arrays() == 1
+        store.remove_by_ids([second])
+        assert store.num_distinct_arrays() == 0
+
+
 
 class TestAssociations:
     def _attach(self, component_id: int, attribute_id: int):
