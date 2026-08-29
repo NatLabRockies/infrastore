@@ -2536,15 +2536,19 @@ impl MetadataStore {
         right_type: &str,
         detail: &str,
     ) -> Result<i64> {
+        // A plain INSERT read back with `last_insert_rowid()`, not `RETURNING`,
+        // for the reason given at the time series insert: `RETURNING` needs a
+        // statement journal, and under a caller's transaction on an in-memory
+        // catalog closing one costs a walk of everything the transaction has
+        // touched, so the bulk paths that call this per row would go quadratic.
         let sql = format!(
-            "INSERT INTO {} ({}, {}, {}, {}) VALUES (?1, ?2, ?3, ?4) RETURNING id",
+            "INSERT INTO {} ({}, {}, {}, {}) VALUES (?1, ?2, ?3, ?4)",
             table.name, table.left_id, table.left_type, table.right_id, table.right_type
         );
         let mut stmt = tx.prepare_cached(&sql)?;
-        stmt.query_row(params![left_id, left_type, right_id, right_type], |row| {
-            row.get::<_, i64>(0)
-        })
-        .map_err(|e| map_association_violation(e, detail))
+        stmt.execute(params![left_id, left_type, right_id, right_type])
+            .map_err(|e| map_association_violation(e, detail))?;
+        Ok(tx.last_insert_rowid())
     }
 
     fn assoc_delete(tx: &Connection, table: AssocTable, filter: &EndpointFilter) -> Result<usize> {

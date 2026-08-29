@@ -15,7 +15,7 @@
 use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{
     AddRequest, CatalogMode, Compression, Features, ListFilter, OwnerCategory, SingleTimeSeries,
-    TimeSeriesData, TypedArray, create_store_with_catalog,
+    SupplementalAttributeAssociation, TimeSeriesData, TypedArray, create_store_with_catalog,
 };
 use std::time::Instant;
 
@@ -40,16 +40,33 @@ fn requests(batch: usize) -> Vec<AddRequest> {
         .collect()
 }
 
-#[test]
-fn successive_bulk_adds_in_one_transaction_do_not_slow_down() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut store = create_store_with_catalog(
+fn scratch_store(dir: &tempfile::TempDir) -> infrastore_core::Store {
+    create_store_with_catalog(
         Some(&dir.path().join("scratch.h5")),
         false,
         Compression::None,
         CatalogMode::InMemory,
     )
-    .unwrap();
+    .unwrap()
+}
+
+/// The last batch must stay within a loose multiple of the first: a healthy
+/// run is ~1.1x, and the regression this guards was an order of magnitude past
+/// the bound by the last batch.
+fn assert_flat(elapsed: &[std::time::Duration]) {
+    let first = elapsed[0].as_secs_f64();
+    let last = elapsed[elapsed.len() - 1].as_secs_f64();
+    assert!(
+        last < 4.0 * first,
+        "batch {} took {last:.3}s against {first:.3}s for batch 1 ({elapsed:?})",
+        elapsed.len()
+    );
+}
+
+#[test]
+fn successive_bulk_adds_in_one_transaction_do_not_slow_down() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = scratch_store(&dir);
 
     store.begin_transaction().unwrap();
     let mut elapsed = Vec::with_capacity(BATCHES);
@@ -66,28 +83,51 @@ fn successive_bulk_adds_in_one_transaction_do_not_slow_down() {
     assert_eq!(ids, (1..=(BATCHES * BATCH_SIZE) as i64).collect::<Vec<_>>());
     assert!(store.association_exists(*ids.last().unwrap()).unwrap());
 
-    // Per-batch cost is flat in the size of the store. The bound is loose
-    // enough for a noisy CI box (a healthy run is ~1.1x); the regression this
-    // guards was an order of magnitude past it by the last batch.
-    let first = elapsed[0].as_secs_f64();
-    let last = elapsed[BATCHES - 1].as_secs_f64();
-    assert!(
-        last < 4.0 * first,
-        "batch {BATCHES} took {last:.3}s against {first:.3}s for batch 1 ({:?})",
-        elapsed
+    assert_flat(&elapsed);
+}
+
+/// The association tables' insert goes through the same helper per row, so a
+/// bulk attachment under a transaction has the same journal to avoid.
+#[test]
+fn successive_bulk_attachments_in_one_transaction_do_not_slow_down() {
+    const ATTACH_BATCH: usize = 20_000;
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = scratch_store(&dir);
+
+    store.begin_transaction().unwrap();
+    let mut elapsed = Vec::with_capacity(BATCHES);
+    let mut ids = Vec::with_capacity(BATCHES * ATTACH_BATCH);
+    for b in 0..BATCHES {
+        let assocs = (0..ATTACH_BATCH)
+            .map(|i| SupplementalAttributeAssociation {
+                component_id: (b * ATTACH_BATCH + i) as i64 + 1,
+                component_type: "Generator".into(),
+                attribute_id: 7,
+                attribute_type: "GeographicInfo".into(),
+                id: None,
+            })
+            .collect();
+        let t = Instant::now();
+        ids.extend(
+            store
+                .add_supplemental_attribute_associations(assocs)
+                .unwrap(),
+        );
+        elapsed.push(t.elapsed());
+    }
+    store.commit_transaction().unwrap();
+
+    assert_eq!(
+        ids,
+        (1..=(BATCHES * ATTACH_BATCH) as i64).collect::<Vec<_>>()
     );
+    assert_flat(&elapsed);
 }
 
 #[test]
 fn list_keys_with_id_reports_the_ids_the_writes_handed_back() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = create_store_with_catalog(
-        Some(&dir.path().join("scratch.h5")),
-        false,
-        Compression::None,
-        CatalogMode::InMemory,
-    )
-    .unwrap();
+    let mut store = scratch_store(&dir);
     let added = store.add_time_series_bulk(requests(0)).unwrap();
 
     let listed = store
@@ -97,6 +137,18 @@ fn list_keys_with_id_reports_the_ids_the_writes_handed_back() {
     let mut by_owner: std::collections::HashMap<i64, i64> = listed
         .into_iter()
         .map(|(key, id)| (key.identity().owner_id, id.expect("a minted id")))
+        .collect();
+    for a in &added {
+        assert_eq!(by_owner.remove(&a.key.identity().owner_id), Some(a.id));
+    }
+    assert!(by_owner.is_empty());
+
+    // The array-group listing carries the same id beside the hash.
+    let groups = store.list_array_groups(ListFilter::new()).unwrap();
+    assert_eq!(groups.len(), added.len());
+    let mut by_owner: std::collections::HashMap<i64, i64> = groups
+        .into_iter()
+        .map(|(key, _hash, id)| (key.identity().owner_id, id.expect("a minted id")))
         .collect();
     for a in &added {
         assert_eq!(by_owner.remove(&a.key.identity().owner_id), Some(a.id));

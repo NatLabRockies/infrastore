@@ -2085,7 +2085,8 @@ int32_t infrastore_store_resolve_forecast_key(const struct InfraStore *handle,
 /**
  * List time series keys, each annotated with the hex content hash of the array
  * it resolves to, as a JSON array string (see `keys_with_hash_to_json` for the
- * per-row shape — `key_to_map`'s shape plus a `data_hash` field). Rows that
+ * per-row shape — an `infrastore_store_list_keys` row, `id` included, plus a
+ * `data_hash` field). Rows that
  * share a stored array share their `data_hash`, so a caller can group time
  * series by their underlying data in one query (no per-row metadata fetch).
  *

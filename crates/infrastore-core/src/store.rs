@@ -150,6 +150,11 @@ impl From<ListFilter> for MetadataFilter {
     }
 }
 
+/// One row of [`Store::list_array_groups`]: a key, the 32-byte content hash of
+/// the array it resolves to, and its association id (`None` for a row written
+/// before ids were minted).
+pub type ArrayGroupEntry = (TimeSeriesKey, [u8; 32], Option<i64>);
+
 /// Single item in a bulk add.
 ///
 /// A request names no catalog id. Every add — this one, the wide positional
@@ -2387,6 +2392,18 @@ impl Store {
             .list_without_timestamps(&filter.into())?
             .iter()
             .map(|m| Ok((TimeSeriesKey::from_metadata(m)?, m.id)))
+            .collect()
+    }
+
+    /// [`Self::list_keys_with_hash`] and [`Self::list_keys_with_id`] in one row:
+    /// each key with its array's content hash and its association id. What the
+    /// bindings' array-group listing serves, so an array-group row carries
+    /// everything a key row does.
+    pub fn list_array_groups(&self, filter: ListFilter) -> Result<Vec<ArrayGroupEntry>> {
+        self.metadata
+            .list_without_timestamps(&filter.into())?
+            .iter()
+            .map(|m| Ok((TimeSeriesKey::from_metadata(m)?, m.data_hash, m.id)))
             .collect()
     }
 

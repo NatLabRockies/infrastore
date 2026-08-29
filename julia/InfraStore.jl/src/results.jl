@@ -125,7 +125,7 @@ end
 """
     ArrayGroupRow
 
-One row of [`list_array_groups`](@ref): every [`KeyRow`] field plus `data_hash`,
+One row of [`list_array_groups`](@ref): every [`KeyRow`] field (`id` included) plus `data_hash`,
 the 32-byte content hash of the array the row resolves to. Rows that share a
 stored array share their `data_hash`, so grouping by it (a `Vector{UInt8}` hashes
 and compares by content, so it works directly as a `Dict` key) finds the series
@@ -145,6 +145,7 @@ struct ArrayGroupRow
     features::Dict{String, Any}
     "How the row's timestamps were spelled (a [`TimeReference`](@ref)), or `nothing` for unspecified."
     time_reference::Union{Nothing, TimeReference}
+    id::Union{Nothing, Int64}
     data_hash::Vector{UInt8}
 end
 

@@ -232,6 +232,7 @@ function _decode_array_group_row(r::AbstractDict)
         k.count,
         k.features,
         k.time_reference,
+        k.id,
         hex2bytes(String(r["data_hash"])),
     )
 end
