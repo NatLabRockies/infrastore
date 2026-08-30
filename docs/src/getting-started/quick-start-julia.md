@@ -58,12 +58,14 @@ of a cost curve.
 
 ## Look It Up Without the Key
 
-A series can also be addressed by its attributes, which is convenient when a caller keeps its own
-identifiers:
+A series known by its attributes is resolved to its catalog id first, and read by that — the store
+identifies in one call and acts in another, so a caller that keeps its own identifiers stores the id
+and skips the first half from then on:
 
 ```julia
-got = get_time_series(SingleTimeSeries, store, 42, Component, "load";
-                      resolution = Hour(1), features = Dict("model_year" => 2030))
+id = resolve_id(SingleTimeSeries, store, 42, Component, "load";
+                resolution = Hour(1), features = Dict("model_year" => 2030))
+got = read_by_id(store, id)
 
 for m in list_time_series(store; owner_id = 42)   # Vector{TimeSeriesMetadata}
     println(m.name, " ", m.resolution, " ", m.units)

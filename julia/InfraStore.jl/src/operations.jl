@@ -629,35 +629,6 @@ function has_for_owner(
     return out[]
 end
 
-"""
-    remove_time_series!(store, owner_id, owner_category, name; resolution, features=nothing)
-
-`owner_category` is the owner's `OwnerCategory` (`Component` or
-`SupplementalAttribute`).
-"""
-function remove_time_series!(
-    store::Store,
-    owner_id::Integer,
-    owner_category::OwnerCategory,
-    name::AbstractString;
-    resolution::Union{Nothing, Period}=nothing,
-    features::Union{Nothing, AbstractDict}=nothing,
-)
-    resolution_iso = _period_to_cstr(resolution)
-    features_json =
-        (features === nothing || isempty(features)) ? C_NULL : JSON.json(features)
-    code = @ccall lib_path().infrastore_store_remove_by_attrs(
-        store::Ptr{Cvoid},
-        Int64(owner_id)::Int64,
-        _category_int(owner_category)::Int32,
-        name::Cstring,
-        resolution_iso::Cstring,
-        features_json::Cstring,
-    )::Int32
-    _check(code)
-    return nothing
-end
-
 function get_time_series(
     store::Store,
     key::TimeSeriesRef;

@@ -1119,21 +1119,6 @@ int32_t infrastore_store_has_any_by_filter(const struct InfraStore *handle,
                                            bool *out_present);
 
 /**
- * Remove a SingleTimeSeries by attributes. Drops the underlying array iff no
- * other association still references its content hash.
- *
- * # Safety
- *
- * `features_json` may be null.
- */
-int32_t infrastore_store_remove_by_attrs(struct InfraStore *handle,
-                                         int64_t owner_id,
-                                         int32_t owner_category,
-                                         const char *name,
-                                         const char *resolution,
-                                         const char *features_json);
-
-/**
  * Fetch a stored array by its 32-byte content hash. On success the caller owns
  * `*out_data` and must free it with `infrastore_buffer_free_u8`.
  *
@@ -1766,84 +1751,6 @@ int32_t infrastore_store_transform_single_time_series(struct InfraStore *handle,
                                                       int64_t **out_ids);
 
 /**
- * Fetch a forecast by attributes and return the full data array plus metadata.
- *
- * `ts_type` is a read request naming a forecast type (`2`=Deterministic,
- * `3`=DeterministicSingleTimeSeries, `4`=Probabilistic, `5`=Scenarios).
- * Requesting `2`=Deterministic also matches a stored
- * `DeterministicSingleTimeSeries` — a transformed view reads back as a
- * `Deterministic`, so callers need not know which form the store holds — while
- * `3` narrows to the transformed form alone. The catalog resolves this
- * authoritatively (no client-side guess-and-retry) and writes the concrete
- * stored type that matched to `*out_matched_type`. An ambiguous request returns
- * `INFRASTORE_ERR_INVALID_PARAMETER`; a genuine miss returns the unmasked
- * not-found error.
- *
- * Reads a `Deterministic`, `Probabilistic`, or `Scenarios` forecast (DST is
- * synthesized into `Deterministic`). On success, the caller owns two heap
- * buffers and must free them with the matching deallocators:
- *
- * - `*out_data` (byte buffer, `*out_data_byte_len` bytes) —
- *   free with `infrastore_buffer_free_u8(*out_data, *out_data_byte_len)`.
- * - `*out_dims` (array of `u64`, `*out_ndims` elements) —
- *   free with `infrastore_buffer_free_u64(*out_dims, *out_ndims)`.
- * - `*out_percentiles` (`f64` array, `*out_percentiles_len` elements) —
- *   non-NULL only for `Probabilistic`; free with
- *   `infrastore_buffer_free_f64(*out_percentiles, *out_percentiles_len)`.
- *
- * `out_application_data`, when non-null, receives the association's opaque `application_data` payload
- * from the metadata row: null when unset, otherwise an owned C string the
- * caller must free with `infrastore_string_free`. Pass a null `out_application_data` to
- * skip the metadata lookup entirely.
- *
- * **Optional time-range / window selection:** when `time_range_present` is
- * `true`, only the windows whose start timestamp falls in
- * `[time_range_start_ms, time_range_end_ms)` are returned. Pass
- * `time_range_present = false` to retrieve all windows.
- *
- * # Safety
- *
- * Standard, plus: `resolution` and `interval` may each be null, leaving that
- * part of the identity unconstrained; `features_json` may be null.
- * `out_percentiles` is null with `*out_percentiles_len` 0 unless the match is
- * `Probabilistic`, so only a non-null one needs freeing.
- * `out_application_data` may be null to skip the metadata lookup entirely.
- */
-int32_t infrastore_store_get_forecast(const struct InfraStore *handle,
-                                      int64_t owner_id,
-                                      int32_t owner_category,
-                                      const char *name,
-                                      int32_t ts_type,
-                                      const char *resolution,
-                                      const char *interval,
-                                      const char *features_json,
-                                      bool time_range_present,
-                                      bool time_range_zoneless,
-                                      int64_t time_range_start_ms,
-                                      int64_t time_range_end_ms,
-                                      int64_t *out_initial_ts_unix_ms,
-                                      char **out_resolution,
-                                      char **out_horizon,
-                                      char **out_interval,
-                                      uint64_t *out_count,
-                                      uint64_t *out_scenario_count,
-                                      uint64_t *out_ndims,
-                                      uint64_t **out_dims,
-                                      int32_t *out_dtype,
-                                      uint8_t **out_data,
-                                      uint64_t *out_data_byte_len,
-                                      double **out_percentiles,
-                                      uint64_t *out_percentiles_len,
-                                      int32_t *out_matched_type,
-                                      char **out_application_data,
-                                      char **out_element_type,
-                                      char **out_units,
-                                      char **out_quantity_kind,
-                                      char **out_unit_system,
-                                      char **out_time_reference,
-                                      char **out_component_field);
-
-/**
  * Fetch a forecast (`Deterministic` / `Probabilistic` / `Scenarios`, or a
  * `DeterministicSingleTimeSeries` synthesized into a `Deterministic`) by key.
  *
@@ -2274,22 +2181,6 @@ int32_t infrastore_store_has_typed(const struct InfraStore *handle,
                                    const char *interval,
                                    const char *features_json,
                                    bool *out_present);
-
-/**
- * Remove a time series of `ts_type` by attributes.
- *
- * # Safety
- *
- * `features_json` may be null.
- */
-int32_t infrastore_store_remove_typed(struct InfraStore *handle,
-                                      int64_t owner_id,
-                                      int32_t owner_category,
-                                      const char *name,
-                                      int32_t ts_type,
-                                      const char *resolution,
-                                      const char *interval,
-                                      const char *features_json);
 
 /**
  * Copy the time series identified by the source attributes onto another owner,

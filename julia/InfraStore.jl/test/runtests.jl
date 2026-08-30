@@ -29,8 +29,16 @@ using InfraStore
     @test length(got.data) == 24
 
     # The same series is reachable attribute-addressed (both conventions unified).
-    got_attr = get_time_series(
-        SingleTimeSeries, store, 42, Component, "load"; features=Dict("model_year" => 2030)
+    got_attr = read_by_id(
+        store,
+        resolve_id(
+            SingleTimeSeries,
+            store,
+            42,
+            Component,
+            "load";
+            features=Dict("model_year" => 2030),
+        ),
     )
     @test got_attr.data == values
     @test got_attr.name == "load"
@@ -89,8 +97,11 @@ end
     @test get_counts(store).static_time_series == 1
 
     # Attribute-addressed read returns the same series.
-    got_attr = get_time_series(
-        NonSequentialTimeSeries, store, 7, Component, "events"; features=nothing
+    got_attr = read_by_id(
+        store,
+        resolve_id(
+            NonSequentialTimeSeries, store, 7, Component, "events"; features=nothing
+        ),
     )
     @test got_attr.timestamps == timestamps
     @test got_attr.data == Int64[10, 20, 30]
@@ -124,7 +135,9 @@ end
     @test got.application_data == "LinearFunctionData"
     @test got.name == "curves"
 
-    got_attr = get_time_series(NonSequentialTimeSeries, store, 9, Component, "curves")
+    got_attr = read_by_id(
+        store, resolve_id(NonSequentialTimeSeries, store, 9, Component, "curves")
+    )
     @test got_attr.data == data
     @test got_attr.application_data == "LinearFunctionData"
 end
@@ -183,8 +196,14 @@ end
     fetched = get_array_by_hash(store, meta.data_hash)
     @test fetched == values
 
-    remove_time_series!(
-        store, owner, Component, "load"; resolution=resolution, features=feats
+    remove_by_ids!(
+        store,
+        [
+            resolve_id(
+                SingleTimeSeries, store, owner, Component, "load";
+                resolution=resolution, features=feats,
+            ),
+        ],
     )
     @test !has_time_series(
         store, owner, Component, "load"; resolution=resolution, features=feats
@@ -251,8 +270,8 @@ end
     @test mq.element_type == "quadratic_function"
     # A value read carries the element type back too, so a caller can decode the
     # rows without a second metadata lookup.
-    @test get_time_series(
-        SingleTimeSeries, store, 1002, Component, "cost"; resolution=res
+    @test read_by_id(
+        store, resolve_id(SingleTimeSeries, store, 1002, Component, "cost"; resolution=res)
     ).element_type == "quadratic_function"
     flat = get_array_by_hash(store, mq.data_hash, Float64)
     @test permutedims(reshape(flat, (3, 4)), (2, 1)) == A
@@ -281,7 +300,7 @@ end
         Deterministic(t0, res, hor, ivl, count, data, "pf"),
     )
 
-    fc = get_time_series(Deterministic, store, 100, Component, "pf")
+    fc = read_by_id(store, resolve_id(Deterministic, store, 100, Component, "pf"))
     @test fc.initial_timestamp == t0
     @test fc.resolution == Millisecond(res)
     @test fc.horizon == Millisecond(hor)
@@ -321,10 +340,12 @@ end
     # Select windows 1 and 2 (0-indexed: window 1 = t0+6h, window 2 = t0+12h).
     # Julia 1-indexed: columns 2 and 3.
     win_start = t0 + Hour(6)
-    win_end = t0 + Hour(18)   # exclusive; covers windows at +6h and +12h
 
-    fc = get_time_series(
-        Deterministic, store, 110, Component, "pf2"; time_range=(win_start, win_end)
+    fc = read_by_id(
+        store,
+        resolve_id(Deterministic, store, 110, Component, "pf2");
+        start_time=win_start,
+        count=2,
     )
     @test fc.initial_timestamp == win_start
     @test fc.count == 2
@@ -355,7 +376,7 @@ end
         Deterministic(t0, res, hor, ivl, count, data, "pf_md"),
     )
 
-    fc = get_time_series(Deterministic, store, 120, Component, "pf_md")
+    fc = read_by_id(store, resolve_id(Deterministic, store, 120, Component, "pf_md"))
     @test size(fc.data) == (H, count, E)
     @test fc.data == data
 end
@@ -381,7 +402,7 @@ end
         Probabilistic(t0, res, hor, ivl, count, percentiles, data, "pf_prob"),
     )
 
-    fc = get_time_series(Probabilistic, store, 200, Component, "pf_prob")
+    fc = read_by_id(store, resolve_id(Probabilistic, store, 200, Component, "pf_prob"))
     @test fc.initial_timestamp == t0
     @test fc.resolution == Millisecond(res)
     @test fc.horizon == Millisecond(hor)
@@ -420,12 +441,14 @@ end
         Probabilistic(t0, res, hor, ivl, count, percentiles, data, "pf_prob_win"),
     )
 
-    # Select windows 2 and 3 (Julia columns 2 and 3): start at t0+4h, end at t0+12h.
+    # Select windows 2 and 3 (Julia columns 2 and 3), starting at t0+4h.
     win_start = t0 + Hour(4)
-    win_end = t0 + Hour(12)
 
-    fc = get_time_series(
-        Probabilistic, store, 210, Component, "pf_prob_win"; time_range=(win_start, win_end)
+    fc = read_by_id(
+        store,
+        resolve_id(Probabilistic, store, 210, Component, "pf_prob_win");
+        start_time=win_start,
+        count=2,
     )
     @test fc.initial_timestamp == win_start
     @test fc.count == 2
@@ -454,7 +477,7 @@ end
         Scenarios(t0, res, hor, ivl, count, data, "pf_scen"),
     )
 
-    fc = get_time_series(Scenarios, store, 300, Component, "pf_scen")
+    fc = read_by_id(store, resolve_id(Scenarios, store, 300, Component, "pf_scen"))
     @test fc.initial_timestamp == t0
     @test fc.resolution == Millisecond(res)
     @test fc.horizon == Millisecond(hor)
@@ -492,12 +515,14 @@ end
         Scenarios(t0, res, hor, ivl, count, data, "pf_scen_win"),
     )
 
-    # Select windows 2 and 3 (Julia columns 2 and 3): start at t0+8h, end at t0+24h.
+    # Select windows 2 and 3 (Julia columns 2 and 3), starting at t0+8h.
     win_start = t0 + Hour(8)
-    win_end = t0 + Hour(24)
 
-    fc = get_time_series(
-        Scenarios, store, 310, Component, "pf_scen_win"; time_range=(win_start, win_end)
+    fc = read_by_id(
+        store,
+        resolve_id(Scenarios, store, 310, Component, "pf_scen_win");
+        start_time=win_start,
+        count=2,
     )
     @test fc.initial_timestamp == win_start
     @test fc.count == 2
@@ -525,7 +550,7 @@ end
         Deterministic(t0, res, hor, ivl, count, data, "pf_i64"),
     )
 
-    fc = get_time_series(Deterministic, store, 130, Component, "pf_i64")
+    fc = read_by_id(store, resolve_id(Deterministic, store, 130, Component, "pf_i64"))
     @test eltype(fc.data) == Int64
     @test fc.data == data
 end
@@ -549,7 +574,7 @@ end
 
     # Asking for `Deterministic` resolves the stored DST: the transform is a
     # storage detail, not something the caller has to name.
-    fc = get_time_series(Deterministic, store, 400, Component, "dst")
+    fc = read_by_id(store, resolve_id(Deterministic, store, 400, Component, "dst"))
     @test fc.count == 3
     @test size(fc.data) == (4, 3)
     @test fc.name == "dst"
@@ -559,8 +584,8 @@ end
 
     # Naming the derived type explicitly reads the same values — it narrows the
     # query, it does not change the result struct.
-    @test get_time_series(
-        DeterministicSingleTimeSeries, store, 400, Component, "dst"
+    @test read_by_id(
+        store, resolve_id(DeterministicSingleTimeSeries, store, 400, Component, "dst")
     ).data == expected
 
     # The detail stays inspectable: the resolved row reports the stored type.
@@ -931,8 +956,8 @@ end
     # Resolution happens in the core; a real miss is not masked by a
     # guess-and-retry fallback.
     store = Store(in_memory=true)
-    @test_throws InfraStore.NotFoundError get_time_series(
-        Deterministic, store, 999, Component, "nope"
+    @test_throws InfraStore.NotFoundError read_by_id(
+        store, resolve_id(Deterministic, store, 999, Component, "nope")
     )
 
     # Two Deterministic forecasts of one variable at the same resolution but
@@ -958,11 +983,13 @@ end
             t0, res, hor, Hour(6), 2, reshape(Float64[10, 11, 12, 13], 2, 2), "dup"
         ),
     )
-    @test_throws InfraStore.InvalidParameterError get_time_series(
-        Deterministic, store, 401, Component, "dup"
+    @test_throws InfraStore.InvalidParameterError read_by_id(
+        store, resolve_id(Deterministic, store, 401, Component, "dup")
     )
     # Pinning the interval disambiguates.
-    cd = get_time_series(Deterministic, store, 401, Component, "dup"; interval=Hour(6))
+    cd = read_by_id(
+        store, resolve_id(Deterministic, store, 401, Component, "dup"; interval=Hour(6))
+    )
     @test cd isa Deterministic
     @test cd.interval == Hour(6)
 end
@@ -1046,14 +1073,17 @@ end
     # The key's type resolves the series, and an attribute read using the
     # recovered features matches — confirming features round-trip faithfully.
     @test get_time_series(info.time_series_type, store, keys[1]).data == collect(1.0:6.0)
-    @test get_time_series(
-        info.time_series_type,
+    @test read_by_id(
         store,
-        info.owner_id,
-        info.owner_category,
-        info.name;
-        resolution=info.resolution,
-        features=info.features,
+        resolve_id(
+            info.time_series_type,
+            store,
+            info.owner_id,
+            info.owner_category,
+            info.name;
+            resolution=info.resolution,
+            features=info.features,
+        ),
     ).data == collect(1.0:6.0)
 end
 
@@ -1288,16 +1318,22 @@ end
     @test get_time_series(store, supp_key).data == supp_vals
 
     # ...and attribute-addressed, keyed on the category.
-    @test get_time_series(
-        SingleTimeSeries, store, owner_id, Component, "load"; resolution=resolution
-    ).data == comp_vals
-    @test get_time_series(
-        SingleTimeSeries,
+    @test read_by_id(
         store,
-        owner_id,
-        SupplementalAttribute,
-        "load";
-        resolution=resolution,
+        resolve_id(
+            SingleTimeSeries, store, owner_id, Component, "load"; resolution=resolution
+        ),
+    ).data == comp_vals
+    @test read_by_id(
+        store,
+        resolve_id(
+            SingleTimeSeries,
+            store,
+            owner_id,
+            SupplementalAttribute,
+            "load";
+            resolution=resolution,
+        ),
     ).data == supp_vals
 
     # has_time_series / get_metadata are independent per category.
@@ -1315,7 +1351,14 @@ end
     @test key_info(supp_keys[1]).owner_category == SupplementalAttribute
 
     # Removing the component series leaves the supplemental one intact.
-    remove_time_series!(store, owner_id, Component, "load"; resolution=resolution)
+    remove_by_ids!(
+        store,
+        [
+            resolve_id(
+                SingleTimeSeries, store, owner_id, Component, "load"; resolution=resolution
+            ),
+        ],
+    )
     @test !has_time_series(store, owner_id, Component, "load"; resolution=resolution)
     @test has_time_series(
         store, owner_id, SupplementalAttribute, "load"; resolution=resolution
@@ -1577,7 +1620,7 @@ end
         Component,
         Probabilistic(t0, res, Hour(H), Hour(1), count, [0.1, 0.5, 0.9], pdata, "pf"),
     )
-    full_p = get_time_series(Probabilistic, pstore, 2, Component, "pf")
+    full_p = read_by_id(pstore, resolve_id(Probabilistic, pstore, 2, Component, "pf"))
     @test full_p.data == pdata
     fr = build_forecast_reader(pstore, Probabilistic; resolution=res)
     @test forecast_entries(fr)[1].window_shape == [P, H]
@@ -1993,19 +2036,16 @@ end
     sts = SingleTimeSeries(t0, res, collect(1.0:8.0), "load")
     k = add_time_series!(store, 1, "Generator", Component, sts).key
 
-    # time_range on the typed key alias and the attribute-addressed forms.
+    # A window, addressed by key and by a resolved id.
     sliced = get_time_series(
         SingleTimeSeries, store, k; time_range=(t0 + Hour(2), t0 + Hour(5))
     )
     @test sliced.data == collect(3.0:5.0)
-    sliced = get_time_series(
-        SingleTimeSeries,
+    sliced = read_by_id(
         store,
-        1,
-        Component,
-        "load";
-        resolution=res,
-        time_range=(t0 + Hour(2), t0 + Hour(5)),
+        resolve_id(SingleTimeSeries, store, 1, Component, "load"; resolution=res);
+        start_time=t0 + Hour(2),
+        len=3,
     )
     @test sliced.data == collect(3.0:5.0)
 
@@ -2013,13 +2053,11 @@ end
         [t0, t0 + Hour(3), t0 + Hour(7)], [10.0, 20.0, 30.0], "events"
     )
     add_time_series!(store, 2, "Bus", Component, nsts)
-    ns_sliced = get_time_series(
-        NonSequentialTimeSeries,
+    ns_sliced = read_by_id(
         store,
-        2,
-        Component,
-        "events";
-        time_range=(t0 + Hour(1), t0 + Hour(5)),
+        resolve_id(NonSequentialTimeSeries, store, 2, Component, "events");
+        start_time=t0 + Hour(3),
+        len=1,
     )
     @test ns_sliced.data == [20.0]
 
@@ -2055,8 +2093,8 @@ end
     persist!(store, dest)
     @test isfile(dest)
     reopened = open_store(dest; read_only=true)
-    @test get_time_series(SingleTimeSeries, store, 1, Component, "load").data ==
-        get_time_series(SingleTimeSeries, reopened, 1, Component, "load").data
+    @test read_by_id(store, resolve_id(SingleTimeSeries, store, 1, Component, "load")).data ==
+        read_by_id(reopened, resolve_id(SingleTimeSeries, reopened, 1, Component, "load")).data
     close!(reopened)
 
     # Typed IOError is part of the exception hierarchy.
@@ -2560,7 +2598,8 @@ end
     mu = resolve_metadata(SingleTimeSeries, store, 2001, Component, "u64"; resolution=res)
     @test mu.element_type == "u64"
     @test get_array_by_hash(store, mu.data_hash, UInt64) == u
-    @test get_time_series(SingleTimeSeries, store, 2001, Component, "u64").data == u
+    @test read_by_id(store, resolve_id(SingleTimeSeries, store, 2001, Component, "u64")).data ==
+        u
 
     i = Int32[typemin(Int32), -1, 0, typemax(Int32)]
     add_time_series!(
@@ -2569,7 +2608,7 @@ end
     mi = resolve_metadata(SingleTimeSeries, store, 2002, Component, "i32"; resolution=res)
     @test mi.element_type == "i32"
     @test get_array_by_hash(store, mi.data_hash, Int32) == i
-    got = get_time_series(SingleTimeSeries, store, 2002, Component, "i32")
+    got = read_by_id(store, resolve_id(SingleTimeSeries, store, 2002, Component, "i32"))
     @test eltype(got.data) == Int32
     @test got.data == i
 
@@ -2609,8 +2648,12 @@ end
         close!(store)
 
         reopened = open_store(path; read_only=true)
-        @test get_time_series(SingleTimeSeries, reopened, 1, Component, "u64").data == u
-        got = get_time_series(SingleTimeSeries, reopened, 2, Component, "i32")
+        @test read_by_id(
+            reopened, resolve_id(SingleTimeSeries, reopened, 1, Component, "u64")
+        ).data == u
+        got = read_by_id(
+            reopened, resolve_id(SingleTimeSeries, reopened, 2, Component, "i32")
+        )
         @test eltype(got.data) == Int32
         @test got.data == i
         @test verify_integrity(reopened) == 0
@@ -2635,18 +2678,16 @@ end
         Component,
         Deterministic(t0, res, hor, ivl, count, data, "pf_f32"),
     )
-    fc = get_time_series(Deterministic, store, 2100, Component, "pf_f32")
+    fc = read_by_id(store, resolve_id(Deterministic, store, 2100, Component, "pf_f32"))
     @test eltype(fc.data) == Float32
     @test fc.data == data
 
     # And a window-selected read keeps the dtype.
-    win = get_time_series(
-        Deterministic,
+    win = read_by_id(
         store,
-        2100,
-        Component,
-        "pf_f32";
-        time_range=(t0 + Hour(2), t0 + Hour(4)),
+        resolve_id(Deterministic, store, 2100, Component, "pf_f32");
+        start_time=t0 + Hour(2),
+        count=1,
     )
     @test eltype(win.data) == Float32
     @test win.count == 1
@@ -2670,7 +2711,7 @@ end
         Component,
         Probabilistic(t0, res, hor, ivl, count, [0.1, 0.9], prob, "prob_f32"),
     )
-    got = get_time_series(Probabilistic, store, 2110, Component, "prob_f32")
+    got = read_by_id(store, resolve_id(Probabilistic, store, 2110, Component, "prob_f32"))
     @test eltype(got.data) == Float32
     @test got.data == prob
     @test got.percentiles == [0.1, 0.9]
@@ -2684,7 +2725,7 @@ end
         # `scenario_count` is inferred from the leading dimension.
         Scenarios(t0, res, hor, ivl, count, scen, "scen_f32"),
     )
-    got = get_time_series(Scenarios, store, 2111, Component, "scen_f32")
+    got = read_by_id(store, resolve_id(Scenarios, store, 2111, Component, "scen_f32"))
     @test eltype(got.data) == Float32
     @test got.data == scen
     @test got.scenario_count == 3
@@ -2699,7 +2740,8 @@ end
     add_time_series!(
         store, 2200, "Generator", Component, SingleTimeSeries(t0, res, values, "nonfinite")
     )
-    got = get_time_series(SingleTimeSeries, store, 2200, Component, "nonfinite").data
+    got =
+        read_by_id(store, resolve_id(SingleTimeSeries, store, 2200, Component, "nonfinite")).data
 
     # `==` is useless here: NaN != NaN and -0.0 == 0.0. Compare the bits.
     @test reinterpret(UInt64, got) == reinterpret(UInt64, values)
@@ -2786,33 +2828,23 @@ end
         Deterministic(t0, res, hor, ivl, count, data, "det_errs"),
     )
 
+    id = resolve_id(Deterministic, store, 2400, Component, "det_errs")
+
     # 1. A start that is not a window boundary (windows are every 12h).
-    @test_throws InfraStore.InvalidParameterError get_time_series(
-        Deterministic,
-        store,
-        2400,
-        Component,
-        "det_errs";
-        time_range=(t0 + Hour(1), t0 + Hour(24)),
+    @test_throws InfraStore.InvalidParameterError read_by_id(
+        store, id; start_time=t0 + Hour(1)
     )
 
-    # 2. end < start.
-    @test_throws InfraStore.InvalidParameterError get_time_series(
-        Deterministic, store, 2400, Component, "det_errs"; time_range=(t0 + Hour(24), t0)
-    )
-
-    # 3. A grid-aligned start past the last window (windows are 0..3).
+    # 2. A grid-aligned start past the last window (windows are 0..3).
     past = t0 + count * ivl
-    @test_throws InfraStore.InvalidParameterError get_time_series(
-        Deterministic, store, 2400, Component, "det_errs"; time_range=(past, past + ivl)
-    )
+    @test_throws InfraStore.InvalidParameterError read_by_id(store, id; start_time=past)
 
-    # A zero-width range over an in-range start legitimately selects nothing.
-    win = t0 + ivl
-    empty = get_time_series(
-        Deterministic, store, 2400, Component, "det_errs"; time_range=(win, win)
-    )
-    @test empty.count == 0
+    # 3. More windows than are stored.
+    @test_throws InfraStore.InvalidParameterError read_by_id(store, id; count=count + 1)
+
+    # A window is checked, not clamped: asking for none is a caller error, where
+    # the range form this replaced would hand back an empty selection.
+    @test_throws InfraStore.InvalidParameterError read_by_id(store, id; count=0)
 end
 
 @testset "replace_owner! moves every series of one owner" begin
@@ -2838,7 +2870,7 @@ end
     @test moved_names == ["load", "voltage"]
 
     # The untouched owner still reads its own values.
-    other = get_time_series(SingleTimeSeries, store, 2501, Component, "load")
+    other = read_by_id(store, resolve_id(SingleTimeSeries, store, 2501, Component, "load"))
     @test other.data == Float64[3, 4, 5]
 
     # Arrays are shared by hash, so nothing was copied.
@@ -2919,7 +2951,7 @@ end
         @test_throws InfraStore.ReadOnlyStoreError replace_owner!(ro, 1, 2, Component)
         @test_throws InfraStore.ReadOnlyStoreError compact!(ro)
         # Reads still work.
-        @test get_time_series(SingleTimeSeries, ro, 1, Component, "load").data ==
+        @test read_by_id(ro, resolve_id(SingleTimeSeries, ro, 1, Component, "load")).data ==
             Float64[1, 2, 3]
         close!(ro)
     end
@@ -2977,7 +3009,9 @@ end
         @test occursin("bytes_reclaimed=", sprint(show, report))
 
         # The survivor is intact and the store is still usable across the swap.
-        @test get_time_series(SingleTimeSeries, store, 1, Component, "keep").data ==
+        @test read_by_id(
+            store, resolve_id(SingleTimeSeries, store, 1, Component, "keep")
+        ).data ==
             Float64[1, 2, 3, 4]
         @test verify_integrity(store) == 0
         close!(store)
@@ -3013,8 +3047,8 @@ end
     # Nothing was added.
     @test isempty(list_keys(store))
 
-    # The same guard applies on the read path and to the owner type.
-    @test_throws ArgumentError get_time_series(
+    # The same guard applies on the resolution path and to the owner type.
+    @test_throws ArgumentError resolve_id(
         SingleTimeSeries, store, 2800, Component, bad
     )
     @test_throws ArgumentError add_time_series!(
@@ -3069,7 +3103,9 @@ end
         Component,
         SingleTimeSeries(t, Hour(1), Float64[1, 2, 3, 4], "load"),
     )
-    got = get_time_series(SingleTimeSeries, store, 1, Component, "load"; resolution=Hour(1))
+    got = read_by_id(
+        store, resolve_id(SingleTimeSeries, store, 1, Component, "load"; resolution=Hour(1))
+    )
     @test got.initial_timestamp == t
     @test Dates.millisecond(got.initial_timestamp) == 123
 
@@ -3084,21 +3120,12 @@ end
             Component,
             SingleTimeSeries(t, res, Float64[1, 2, 3, 4], name),
         )
-        g = get_time_series(
-            SingleTimeSeries, store, 100 + i, Component, name; resolution=res
-        )
+        id = resolve_id(SingleTimeSeries, store, 100 + i, Component, name; resolution=res)
+        g = read_by_id(store, id)
         @test g.resolution == Millisecond(res)
 
         # And the grid slices correctly at that resolution.
-        sliced = get_time_series(
-            SingleTimeSeries,
-            store,
-            100 + i,
-            Component,
-            name;
-            resolution=res,
-            time_range=(t + res, t + 3 * res),
-        )
+        sliced = read_by_id(store, id; start_time=t + res, len=2)
         @test sliced.data == Float64[2, 3]
         @test sliced.initial_timestamp == t + Millisecond(res)
     end
@@ -3138,8 +3165,11 @@ end
     keys = list_keys(store; owner_id=1)
     @test length(keys) == 1
     @test keys[1].resolution == Millisecond(1)
-    got = get_time_series(
-        SingleTimeSeries, store, 1, Component, "milli"; resolution=Millisecond(1)
+    got = read_by_id(
+        store,
+        resolve_id(
+            SingleTimeSeries, store, 1, Component, "milli"; resolution=Millisecond(1)
+        ),
     )
     @test length(got.data) == 4
 end
@@ -3169,20 +3199,13 @@ end
 
         reopened = open_store(path; read_only=true)
         for (i, (name, ts)) in enumerate(cases)
-            got = get_time_series(
+            id = resolve_id(
                 SingleTimeSeries, reopened, i, Component, name; resolution=Hour(1)
             )
+            got = read_by_id(reopened, id)
             @test got.initial_timestamp == ts
-            # A slice resolves against a negative epoch too.
-            sliced = get_time_series(
-                SingleTimeSeries,
-                reopened,
-                i,
-                Component,
-                name;
-                resolution=Hour(1),
-                time_range=(ts + Hour(1), ts + Hour(3)),
-            )
+            # A window resolves against a negative epoch too.
+            sliced = read_by_id(reopened, id; start_time=ts + Hour(1), len=2)
             @test sliced.data == Float64[2, 3]
         end
         close!(reopened)
@@ -3213,7 +3236,9 @@ end
         close!(store)
 
         reopened = open_store(path; read_only=true)
-        got = get_time_series(NonSequentialTimeSeries, reopened, 1, Component, "century")
+        got = read_by_id(
+            reopened, resolve_id(NonSequentialTimeSeries, reopened, 1, Component, "century")
+        )
         @test got.timestamps == timestamps
         @test got.data == values
         close!(reopened)
@@ -3231,7 +3256,9 @@ end
         Component,
         NonSequentialTimeSeries(timestamps, Float64[1, 2, 3, 4], "precise"),
     )
-    got = get_time_series(NonSequentialTimeSeries, store, 1, Component, "precise")
+    got = read_by_id(
+        store, resolve_id(NonSequentialTimeSeries, store, 1, Component, "precise")
+    )
     @test got.timestamps == timestamps
 end
 
@@ -3264,8 +3291,10 @@ end
     static_read!(reader, t0)
     @test sort(vec(static_values(reader, 1))) == Float64[1, 100]
 
-    # `list_keys` returns metadata rows, not keys, so remove by attributes.
-    remove_time_series!(store, 1, Component, "a"; resolution=Hour(1))
+    # `list_keys` returns metadata rows, not keys, so resolve the id to remove by.
+    remove_by_ids!(
+        store, [resolve_id(SingleTimeSeries, store, 1, Component, "a"; resolution=Hour(1))]
+    )
     @test num_distinct_arrays(store) == 1
 
     # PIN: the read fails rather than returning whatever now occupies the
@@ -3297,7 +3326,9 @@ end
     before = copy(vec(static_values(reader, 1)))
     @test length(before) == 2
 
-    remove_time_series!(store, 1, Component, "a"; resolution=Hour(1))
+    remove_by_ids!(
+        store, [resolve_id(SingleTimeSeries, store, 1, Component, "a"; resolution=Hour(1))]
+    )
     @test num_distinct_arrays(store) == 1
 
     # The array is still alive for the survivor, so the stale read succeeds and
@@ -3694,7 +3725,7 @@ end
     @test only(list_array_groups(store; time_series_type=Scenarios, owner_id=1)).name == "b"
 
     # Typed removal, then the filter form.
-    remove_time_series!(Scenarios, store, 2, Component, "b"; resolution=res)
+    remove_by_ids!(store, [resolve_id(Scenarios, store, 2, Component, "b"; resolution=res)])
     @test !has_time_series(Scenarios, store, 2, Component, "b"; resolution=res)
     @test remove_by_filter!(store; time_series_type=Scenarios) == 1
     @test isempty(list_keys(store; time_series_type=Scenarios))
@@ -3739,20 +3770,22 @@ end
     @test_throws InfraStore.InvalidParameterError get_time_series(
         SingleTimeSeries{Float64}, store, sts
     )
-    @test_throws InfraStore.InvalidParameterError get_time_series(
-        SingleTimeSeries{Float64, 1}, store, 1, Component, "a"; resolution=res
+    @test_throws InfraStore.InvalidParameterError read_by_id(
+        store,
+        resolve_id(SingleTimeSeries{Float64, 1}, store, 1, Component, "a"; resolution=res),
     )
     @test_throws InfraStore.InvalidParameterError get_time_series(
         NonSequentialTimeSeries{Float64, 1}, store, nsts
     )
-    @test_throws InfraStore.InvalidParameterError get_time_series(
-        NonSequentialTimeSeries{Float64}, store, 1, Component, "b"
+    @test_throws InfraStore.InvalidParameterError read_by_id(
+        store, resolve_id(NonSequentialTimeSeries{Float64}, store, 1, Component, "b")
     )
     @test_throws InfraStore.InvalidParameterError get_time_series(
         Deterministic{Float64, 2}, store, det
     )
-    @test_throws InfraStore.InvalidParameterError get_time_series(
-        Deterministic{Float64, 2}, store, 1, Component, "d"; resolution=res
+    @test_throws InfraStore.InvalidParameterError read_by_id(
+        store,
+        resolve_id(Deterministic{Float64, 2}, store, 1, Component, "d"; resolution=res),
     )
     # The rest of the type-taking surface.
     @test_throws InfraStore.InvalidParameterError has_time_series(
@@ -3761,8 +3794,8 @@ end
     @test_throws InfraStore.InvalidParameterError resolve_metadata(
         Deterministic{Float64, 2}, store, 1, Component, "d"; resolution=res
     )
-    @test_throws InfraStore.InvalidParameterError remove_time_series!(
-        Scenarios{Float64, 3}, store, 1, Component, "d"; resolution=res
+    @test_throws InfraStore.InvalidParameterError remove_by_ids!(
+        store, [resolve_id(Scenarios{Float64, 3}, store, 1, Component, "d"; resolution=res)]
     )
     @test_throws InfraStore.InvalidParameterError resolve_id(
         SingleTimeSeries{Float64}, store, 1, Component, "a"; resolution=res
@@ -4806,14 +4839,8 @@ end
     @test read_by_id(store, id; len=2).data == [0.0, 1.0]
     @test read_by_id(store, id; start_time=t0 + Hour(22)).data == [22.0, 23.0]
 
-    # A window is checked where a time range is clamped: the same over-long
-    # request yields the two steps that exist through `get_time_series`, and is
-    # a mistake through `read_by_id`.
-    clamped = get_time_series(
-        SingleTimeSeries, store, 1, Component, "load";
-        resolution=res, time_range=(t0 + Hour(22), t0 + Hour(52)),
-    )
-    @test length(clamped.data) == 2
+    # A window is checked, not clamped: asking for 30 steps from hour 22 is a
+    # mistake, where a raw time range would have handed back the 2 that exist.
     @test_throws InfraStore.InvalidParameterError read_by_id(
         store, id; start_time=t0 + Hour(22), len=30
     )

@@ -151,41 +151,6 @@ function has_time_series(
 end
 
 """
-    remove_time_series!(T, store, owner_id, owner_category, name; resolution, interval, features=nothing)
-
-Remove the time series of type `T` with the given attributes. `T` is any stored
-time series type; the type-less form is the `SingleTimeSeries` shorthand.
-`owner_category` is the owner's `OwnerCategory` (`Component` or
-`SupplementalAttribute`).
-"""
-function remove_time_series!(
-    ::Type{T},
-    store::Store,
-    owner_id::Integer,
-    owner_category::OwnerCategory,
-    name::AbstractString;
-    resolution::Union{Nothing, Period}=nothing,
-    interval::Union{Nothing, Period}=nothing,
-    features::Union{Nothing, AbstractDict}=nothing,
-) where {T}
-    resolution_iso = _period_to_cstr(resolution)
-    interval_iso = _period_to_cstr(interval)
-    features_json = _features_arg(features)
-    code = @ccall lib_path().infrastore_store_remove_typed(
-        store::Ptr{Cvoid},
-        Int64(owner_id)::Int64,
-        _category_int(owner_category)::Int32,
-        name::Cstring,
-        Int32(_type_code(T))::Int32,
-        resolution_iso::Cstring,
-        interval_iso::Cstring,
-        features_json::Cstring,
-    )::Int32
-    _check(code)
-    return nothing
-end
-
-"""
     copy_time_series!(T, store, owner_id, owner_category, name,
                       dst_owner_id, dst_owner_type; new_name=nothing,
                       resolution=nothing, interval=nothing, features=nothing)
@@ -251,114 +216,8 @@ end
 # reverse the dim order when reinterpreting and then permute axes back:
 # the same transform used in `get_array_nd`.
 
-# Internal helper: issue the ccall and return raw out-param values.
-function _get_forecast_raw(
-    store::Store,
-    owner_id::Integer,
-    owner_category::OwnerCategory,
-    name::AbstractString,
-    ts_type::Integer;
-    resolution::Union{Nothing, Period}=nothing,
-    interval::Union{Nothing, Period}=nothing,
-    features::Union{Nothing, AbstractDict}=nothing,
-    time_range::TimeRangeArg=nothing,
-)
-    resolution_iso = _period_to_cstr(resolution)
-    interval_iso = _period_to_cstr(interval)
-    features_json = _features_arg(features)
-
-    time_range_present, time_range_zoneless, range_start_ms, range_end_ms = _time_range_args(
-        time_range
-    )
-
-    out_initial = Ref{Int64}(0)
-    out_res = Ref{Ptr{Cchar}}(C_NULL)
-    out_horizon = Ref{Ptr{Cchar}}(C_NULL)
-    out_interval = Ref{Ptr{Cchar}}(C_NULL)
-    out_count = Ref{UInt64}(0)
-    out_scen = Ref{UInt64}(0)
-    out_ndims = Ref{UInt64}(0)
-    out_dims = Ref{Ptr{UInt64}}(C_NULL)
-    out_dtype = Ref{Int32}(0)
-    out_data = Ref{Ptr{UInt8}}(C_NULL)
-    out_byte_len = Ref{UInt64}(0)
-    out_pct = Ref{Ptr{Float64}}(C_NULL)
-    out_pct_len = Ref{UInt64}(0)
-    out_matched = Ref{Int32}(0)
-    out_application_data = Ref{Ptr{Cchar}}(C_NULL)
-    out_element_type = Ref{Ptr{Cchar}}(C_NULL)
-    out_units = Ref{Ptr{Cchar}}(C_NULL)
-    out_quantity_kind = Ref{Ptr{Cchar}}(C_NULL)
-    out_unit_system = Ref{Ptr{Cchar}}(C_NULL)
-    out_time_reference = Ref{Ptr{Cchar}}(C_NULL)
-    out_component_field = Ref{Ptr{Cchar}}(C_NULL)
-
-    _check(
-        @ccall lib_path().infrastore_store_get_forecast(
-            store::Ptr{Cvoid},
-            Int64(owner_id)::Int64,
-            _category_int(owner_category)::Int32,
-            name::Cstring,
-            Int32(ts_type)::Int32,
-            resolution_iso::Cstring,
-            interval_iso::Cstring,
-            features_json::Cstring,
-            time_range_present::Bool,
-            time_range_zoneless::Bool,
-            range_start_ms::Int64,
-            range_end_ms::Int64,
-            out_initial::Ref{Int64},
-            out_res::Ref{Ptr{Cchar}},
-            out_horizon::Ref{Ptr{Cchar}},
-            out_interval::Ref{Ptr{Cchar}},
-            out_count::Ref{UInt64},
-            out_scen::Ref{UInt64},
-            out_ndims::Ref{UInt64},
-            out_dims::Ref{Ptr{UInt64}},
-            out_dtype::Ref{Int32},
-            out_data::Ref{Ptr{UInt8}},
-            out_byte_len::Ref{UInt64},
-            out_pct::Ref{Ptr{Float64}},
-            out_pct_len::Ref{UInt64},
-            out_matched::Ref{Int32},
-            out_application_data::Ref{Ptr{Cchar}},
-            out_element_type::Ref{Ptr{Cchar}},
-            out_units::Ref{Ptr{Cchar}},
-            out_quantity_kind::Ref{Ptr{Cchar}},
-            out_unit_system::Ref{Ptr{Cchar}},
-            out_time_reference::Ref{Ptr{Cchar}},
-            out_component_field::Ref{Ptr{Cchar}},
-        )::Int32
-    )
-
-    return _decode_forecast_outputs(
-        out_initial,
-        out_res,
-        out_horizon,
-        out_interval,
-        out_count,
-        out_scen,
-        out_ndims,
-        out_dims,
-        out_dtype,
-        out_data,
-        out_byte_len,
-        out_pct,
-        out_pct_len,
-        out_matched,
-        out_application_data,
-        out_element_type,
-        out_units,
-        out_quantity_kind,
-        out_unit_system,
-        out_time_reference,
-        out_component_field,
-    )
-end
-
-# Decode the out-params populated by `infrastore_store_get_forecast` /
-# `infrastore_store_get_forecast_by_key` into the common named tuple, copying then
-# freeing every FFI-owned buffer.
+# Decode the out-params populated by `infrastore_store_get_forecast_by_key` into
+# the common named tuple, copying then freeing every FFI-owned buffer.
 function _decode_forecast_outputs(
     out_initial,
     out_res,
@@ -431,7 +290,7 @@ function _decode_forecast_outputs(
     end
 end
 
-# Key-based counterpart of `_get_forecast_raw`: reads via the key handle
+# Issue the forecast ccall and return raw out-param values.
 # (`infrastore_store_get_forecast_by_key`), so the time series type comes from the key.
 function _get_forecast_raw(
     store::Store,
@@ -588,57 +447,6 @@ function _forecast_from_raw(::Type{Scenarios}, r, name::AbstractString)
         time_reference=r.time_reference,
         component_field=r.component_field,
     )
-end
-
-"""
-    get_time_series(T, store, owner_id, owner_category, name;
-                    resolution, interval, features=nothing, time_range)
-
-Fetch a stored forecast of type `T`: `Deterministic`, `Probabilistic`, or
-`Scenarios`. `owner_category` is the owner's `OwnerCategory` (`Component` or
-`SupplementalAttribute`).
-
-Ask for `Deterministic` whether the forecast was added densely or derived by
-`transform_single_time_series!` — it matches both, so how the store holds it
-stays an internal detail. (`DeterministicSingleTimeSeries` is also accepted, and
-narrows to the derived form; you need it only when auditing which forecasts are
-synthetic.)
-
-The Rust core resolves the identity in a single call — no guess-and-retry. A
-genuine miss raises `NotFoundError`; an ambiguous request raises an error naming
-the candidates (narrow it with `resolution` and/or `interval`).
-
-A stored `DeterministicSingleTimeSeries` has no materialized form and is
-returned as a [`Deterministic`]. `data` has the canonical shape
-`(H, count, element_dims...)` for the deterministic family,
-`(num_percentiles, H, count, element_dims...)` for `Probabilistic`, and
-`(scenario_count, H, count, element_dims...)` for `Scenarios`, where
-`H = horizon / resolution`. Pass `time_range = (start, end)` (exclusive end) to
-select a window sub-range per the InfrastructureSystems.jl convention.
-"""
-function get_time_series(
-    ::Type{T},
-    store::Store,
-    owner_id::Integer,
-    owner_category::OwnerCategory,
-    name::AbstractString;
-    resolution::Union{Nothing, Period}=nothing,
-    interval::Union{Nothing, Period}=nothing,
-    features::Union{Nothing, AbstractDict}=nothing,
-    time_range::TimeRangeArg=nothing,
-) where {T <: _ForecastRequest}
-    r = _get_forecast_raw(
-        store,
-        owner_id,
-        owner_category,
-        name,
-        _type_code(T);
-        resolution=resolution,
-        interval=interval,
-        features=features,
-        time_range=time_range,
-    )
-    return _forecast_from_raw(_forecast_result_type(T), r, String(name))
 end
 
 # Whether a `T`-shaped read may decode a forecast the store matched as

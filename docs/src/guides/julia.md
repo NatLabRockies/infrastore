@@ -203,14 +203,16 @@ scen = get_metadata(Scenarios, store, 42, Component, "wind"; resolution = Hour(1
 
 values = get_array_by_hash(store, meta.data_hash)     # Vector{Float64}; pass ::Type{T} for other dtypes
 
-# get_time_series itself resolves by attributes too (pass the type as the first argument):
-got = get_time_series(SingleTimeSeries, store, 42, Component, "load";
-                      resolution = Hour(1), features = Dict("model_year" => 2030))
+# Reads and removals take an id, which `resolve_id` gets from the attributes:
+id = resolve_id(SingleTimeSeries, store, 42, Component, "load";
+                resolution = Hour(1), features = Dict("model_year" => 2030))
+got = read_by_id(store, id)
+remove_by_ids!(store, [id])
 
+# `has_time_series` stays attribute-addressed: it is an index probe that reads no
+# row, so routing it through a resolution would cost more than it answers.
 present = has_time_series(store, 42, Component, "load";
                           resolution = Hour(1), features = Dict("model_year" => 2030))
-remove_time_series!(store, 42, Component, "load";
-                    resolution = Hour(1), features = Dict("model_year" => 2030))
 ```
 
 These attribute forms match the feature map **exactly** — the series above was added with

@@ -247,10 +247,6 @@ int32_t infrastore_store_has_any_by_filter(const struct InfraStore *handle,
                                    const char *features_json, const char *component_field, int32_t zoneless,
                                    bool *out_present);
 
-int32_t infrastore_store_remove_by_attrs(struct InfraStore *handle,
-                                 int64_t owner_id, int32_t owner_category, const char *name,
-                                 const char *resolution, const char *features_json);
-
 int32_t infrastore_store_get_array_by_hash(const struct InfraStore *handle, const uint8_t *data_hash,
                                    int32_t *out_dtype,
                                    uint8_t **out_data, uint64_t *out_byte_len); /* infrastore_buffer_free_u8 */
@@ -471,24 +467,7 @@ with `infrastore_buffer_free_u64`, `*out_percentiles` (non-NULL only for `Probab
 ISO-8601 strings with `infrastore_string_free`.
 
 ```c
-int32_t infrastore_store_get_forecast(const struct InfraStore *handle,
-                              int64_t owner_id, int32_t owner_category,
-                              const char *name,
-                              int32_t ts_type,  /* 2..5; 2 also matches a stored DST */
-                              const char *resolution, const char *interval,  /* ISO-8601 filters; NULL = none */
-                              const char *features_json,
-                              bool time_range_present,
-                              bool time_range_zoneless,         /* how the caller spelled the bounds */
-                              int64_t time_range_start_ms, int64_t time_range_end_ms,
-                              int64_t *out_initial_ts_unix_ms,
-                              char **out_resolution, char **out_horizon, char **out_interval,  /* ISO-8601; infrastore_string_free */
-                              uint64_t *out_count, uint64_t *out_scenario_count,
-                              uint64_t *out_ndims, uint64_t **out_dims,  /* dims: infrastore_buffer_free_u64 */
-                              int32_t *out_dtype,
-                              uint8_t **out_data, uint64_t *out_data_byte_len, /* infrastore_buffer_free_u8 */
-                              double **out_percentiles, uint64_t *out_percentiles_len, /* infrastore_buffer_free_f64 */
-                              int32_t *out_matched_type,  /* concrete matched TimeSeriesType */
-                              char **out_application_data,   /* optional (NULL skips); owned, infrastore_string_free */
+owned, infrastore_string_free */
                               char **out_element_type,   /* optional (NULL skips); owned, same free */
                               char **out_units,          /* optional (NULL skips); owned, same free */
                               char **out_quantity_kind,  /* optional (NULL skips); owned, same free */
@@ -541,11 +520,6 @@ int32_t infrastore_store_has_typed(const struct InfraStore *handle,
                            const char *resolution, const char *interval,  /* ISO-8601; NULL = unset */
                            const char *features_json,
                            bool *out_present);
-int32_t infrastore_store_remove_typed(struct InfraStore *handle,
-                              int64_t owner_id, int32_t owner_category, const char *name,
-                              int32_t ts_type,
-                              const char *resolution, const char *interval,  /* ISO-8601; NULL = unset */
-                              const char *features_json);
 ```
 
 `infrastore_store_copy_time_series` copies one association onto another owner (optionally under a
@@ -553,8 +527,7 @@ new name). Arrays are content-addressed, so only a new association row is writte
 duplicated, and the stored type is preserved (a `DeterministicSingleTimeSeries` stays one rather
 than being materialized into a dense `Deterministic`). The copy keeps the source's owner category.
 The leading `owner_id` / `owner_category` / `name` / `ts_type` / `resolution` / `interval` /
-`features_json` arguments identify the **source** series, exactly as for
-`infrastore_store_remove_typed`; a `NULL` `new_name` keeps the source name.
+`features_json` arguments identify the **source** series; a `NULL` `new_name` keeps the source name.
 
 ```c
 int32_t infrastore_store_copy_time_series(struct InfraStore *handle,

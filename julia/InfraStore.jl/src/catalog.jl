@@ -555,65 +555,6 @@ function get_time_series(
     return get_time_series(store, key; time_range=time_range)
 end
 
-"""
-    get_time_series(SingleTimeSeries, store, owner_id, owner_category, name; resolution, features, time_range)
-
-Attribute-addressed counterpart to `get_time_series(store, key)`. `owner_category`
-is the owner's `OwnerCategory` (`Component` or `SupplementalAttribute`). The
-optional `time_range` `(start, stop)` slices like the key-based form.
-"""
-function get_time_series(
-    ::Type{T},
-    store::Store,
-    owner_id::Integer,
-    owner_category::OwnerCategory,
-    name::AbstractString;
-    resolution::Union{Nothing, Period}=nothing,
-    features::Union{Nothing, AbstractDict}=nothing,
-    time_range::TimeRangeArg=nothing,
-) where {T <: SingleTimeSeries}
-    _check_request_type(T)
-    key = _make_key(
-        owner_id,
-        owner_category,
-        name,
-        INFRASTORE_TYPE_SINGLE;
-        resolution=resolution,
-        features=features,
-    )
-    return get_time_series(store, key; time_range=time_range)
-end
-
-"""
-    get_time_series(NonSequentialTimeSeries, store, owner_id, owner_category, name; resolution, features, time_range)
-
-Attribute-addressed counterpart to `get_time_series(NonSequentialTimeSeries, store, key)`.
-`owner_category` is the owner's `OwnerCategory` (`Component` or
-`SupplementalAttribute`). The optional `time_range` `(start, stop)` slices like
-the key-based form.
-"""
-function get_time_series(
-    ::Type{T},
-    store::Store,
-    owner_id::Integer,
-    owner_category::OwnerCategory,
-    name::AbstractString;
-    resolution::Union{Nothing, Period}=nothing,
-    features::Union{Nothing, AbstractDict}=nothing,
-    time_range::TimeRangeArg=nothing,
-) where {T <: NonSequentialTimeSeries}
-    _check_request_type(T)
-    key = _make_key(
-        owner_id,
-        owner_category,
-        name,
-        INFRASTORE_TYPE_NON_SEQUENTIAL;
-        resolution=resolution,
-        features=features,
-    )
-    return get_time_series(NonSequentialTimeSeries, store, key; time_range=time_range)
-end
-
 function remove_time_series!(store::Store, key::TimeSeriesRef)
     code = @ccall lib_path().infrastore_store_remove(
         store::Ptr{Cvoid}, key::Ptr{Cvoid}
