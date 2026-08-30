@@ -112,7 +112,7 @@ void    infrastore_buffer_free_u64(uint64_t *ptr, uint64_t len);
 **There is no key on this ABI.** A series is addressed by its catalog association `id`, an `int64_t`
 that every write reports through `out_id` and that `infrastore_store_list_metadata` carries on every
 row. Reads take that id and come back through the shared bulk-result handle, so one decoding path
-serves the single and bulk reads alike; see [Reading](#reading).
+serves the single and bulk reads alike; see [Bulk Reads](#bulk-reads).
 
 ```c
 int32_t infrastore_store_add_single(struct InfraStore *handle,
@@ -256,10 +256,10 @@ a caller that wants exactly one row poses the filter and checks that it got one.
 
 The forecast types are created and read through the C ABI. `ts_type` is the `TimeSeriesType`
 discriminant — `0 = SingleTimeSeries`, `1 = NonSequentialTimeSeries`, `2 = Deterministic`,
-`3 = DeterministicSingleTimeSeries`, `4 = Probabilistic`, `5 = Scenarios`. As a _request_ it is read
-per [the matching rule](#requested-forecast-types) below. Forecast values are dtype-generic raw
-little-endian byte buffers with explicit dimensions — the same `element_type`, `ndims`, `dims_ptr`,
-`data_ptr`, `data_byte_len` convention as the static add functions (see the
+`3 = DeterministicSingleTimeSeries`, `4 = Probabilistic`, `5 = Scenarios`. As a filter it is read
+per [Type filters](#type-filters) below. Forecast values are dtype-generic raw little-endian byte
+buffers with explicit dimensions — the same `element_type`, `ndims`, `dims_ptr`, `data_ptr`,
+`data_byte_len` convention as the static add functions (see the
 [data model](../explanation/data-model.md#forecasts) for the conventional shapes); the store records
 the windowing parameters in metadata and does not interpret the layout. A
 `DeterministicSingleTimeSeries` (`3`) is read like any other forecast but cannot be written through
@@ -359,9 +359,11 @@ returns the decoded data buffer, its out-dimensions, the window parameters, and 
 into `Deterministic` _values_ (its dense windows are materialized from the backing
 `SingleTimeSeries`), but it remains a distinct stored type in the catalog.
 
+### Type filters
+
 A read names only an id, so there is no requested type to disagree with what is stored — the
 family-resolution rules that a `ts_type` argument used to carry now live entirely in the identify
-half. `infrastore_store_list_metadata`'s type filter reads a request the same way:
+half. `infrastore_store_list_metadata`'s type filter reads one the same way:
 
 - `2 = Deterministic` matches a stored `Deterministic` **or** a stored
   `DeterministicSingleTimeSeries`. A DST is a synthetic view that reads back as a `Deterministic`,
