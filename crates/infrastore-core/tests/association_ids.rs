@@ -1795,6 +1795,18 @@ fn a_windowed_read_by_id_refuses_what_a_range_would_clamp() {
             .unwrap_err(),
         TimeSeriesError::InvalidParameter(_),
     ));
+
+    // An extent large enough to overflow the index arithmetic is refused like
+    // any other extent past the end, not wrapped into one that fits.
+    assert!(matches!(
+        store
+            .read_by_id(
+                id,
+                ReadWindow::from(initial + Duration::hours(4)).with_len(usize::MAX),
+            )
+            .unwrap_err(),
+        TimeSeriesError::InvalidParameter(_),
+    ));
 }
 
 /// A start between two steps is off the grid, not rounded down onto it.

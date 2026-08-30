@@ -4659,11 +4659,30 @@ pub unsafe extern "C" fn infrastore_store_read_by_id(
     } else {
         None
     };
+    // The ABI carries both extents as `u64` because that is what the wrapper
+    // languages spell; on a target where `usize` is narrower, an `as` cast
+    // would quietly hand the core a different window than the caller asked
+    // for.
+    let extent = |present: bool, value: u64, name: &str| match present {
+        false => Ok(None),
+        true => usize::try_from(value).map(Some).map_err(|_| {
+            set_error(format!("{name} {value} is too large for this platform"));
+            INFRASTORE_ERR_INVALID_PARAMETER
+        }),
+    };
+    let len = match extent(len_present, len, "len") {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let count = match extent(count_present, count, "count") {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
     let window = core_lib::ReadWindow {
         start,
         zoneless: start_zoneless,
-        len: len_present.then_some(len as usize),
-        count: count_present.then_some(count as usize),
+        len,
+        count,
     };
     let item = match store.inner.read_by_id(id, window) {
         Ok(d) => d,

@@ -275,13 +275,18 @@ impl ReadWindow {
         total: usize,
         unit: &str,
     ) -> Result<usize> {
-        let n = requested.unwrap_or(total - start_idx);
+        // Every caller resolves `start_idx` against `total` before asking, so
+        // the remainder cannot underflow -- and comparing against it, rather
+        // than adding `n` to `start_idx`, keeps the check itself from
+        // overflowing on an extent a caller is free to make arbitrarily large.
+        let remaining = total - start_idx;
+        let n = requested.unwrap_or(remaining);
         if n == 0 {
             return Err(TimeSeriesError::InvalidParameter(format!(
                 "requested 0 {unit}; a read selects at least one"
             )));
         }
-        if start_idx + n > total {
+        if n > remaining {
             return Err(TimeSeriesError::InvalidParameter(format!(
                 "requested {n} {unit} from index {start_idx}, past the end of the {total} \
                  stored"
