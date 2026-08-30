@@ -83,8 +83,8 @@ simulation startup conditions. The OS page cache may still be warm.
 
 Reports per-step **min / median / p95 / max** and total **component-reads/s**.
 
-> **Deterministic note.** The current `get_time_series` implementation reads the full `[H × count]`
-> array from storage and then slices to the requested window in memory. For large `count` (e.g. 168
+> **Deterministic note.** The current `read_by_id` implementation reads the full `[H × count]` array
+> from storage and then slices to the requested window in memory. For large `count` (e.g. 168
 > windows) each single-step read transfers `H × count × 8` bytes, which is `24 × 168 × 8 = 32 KB`
 > per component. The benchmark output flags this explicitly so the overhead is visible.
 
@@ -123,10 +123,11 @@ The key spans emitted by `infrastore-core`:
 | Span                      | Layer        | Key fields                                       |
 | ------------------------- | ------------ | ------------------------------------------------ |
 | `add_time_series_bulk`    | `Store`      | `count` — number of items in the bulk request    |
-| `get_time_series`         | `Store`      | `owner`, `name`, `has_time_range`                |
-| `copy_time_series`        | `Store`      | `owner`, `name` — of the source series           |
-| `remove_by_ids`           | `Store`      | `ids`                                            |
-| `read_by_ids`             | `Store`      | `count` — number of keys read in one pass        |
+| `read_by_id`              | `Store`      | `id`, `window`                                   |
+| `copy_time_series`        | `Store`      | `src_id` — the source association                |
+| `remove_by_ids`           | `Store`      | `count` — number of ids in the request           |
+| `read_by_ids`             | `Store`      | `count` — number of ids read in one pass         |
+| `list_metadata_by_ids`    | `Store`      | `count` — number of ids requested                |
 | `put_array`               | HDF5 backend | `bytes`, `packed`                                |
 | `put_packed`              | HDF5 backend | `bytes`                                          |
 | `put_packed_block`        | HDF5 backend | `n` — series written in one batch-sized block    |

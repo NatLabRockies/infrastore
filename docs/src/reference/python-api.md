@@ -441,7 +441,8 @@ with store.transaction():
   list is empty. It checks stored arrays against their recorded hashes and does not inspect the
   SQLite catalog, so `ok` is not a statement about the store as a whole — see
   [content addressing](../explanation/content-addressing.md#what-it-does-not-cover).
-- **`get_time_series`** with `time_range=(start, end)` slices on the time axis; `end` is exclusive.
+- **`read_by_ids_range`** with `time_range=(start, end)` slices on the time axis; `end` is
+  exclusive.
 
 ## `SingleTimeSeries`
 
@@ -460,8 +461,8 @@ Read-only properties: `initial_timestamp -> datetime`, `resolution -> str` (ISO 
 [Time references](#time-references). The constructor accepts either a `timedelta` or an ISO 8601
 duration string for `resolution`; the getter always returns the ISO string. `name` is a required
 association attribute (the same array may be stored under different names). It is read off the
-object by `add_time_series` and populated on `get_time_series`. The array's `element_type` and
-per-step element shape are preserved through a round-trip.
+object by `add_time_series` and populated on `read_by_id`. The array's `element_type` and per-step
+element shape are preserved through a round-trip.
 
 ## `NonSequentialTimeSeries`
 
@@ -509,15 +510,15 @@ string raises `InvalidParameterError` naming the valid ones, and a value that is
 ## Forecasts
 
 Dense forecasts are constructed as `Deterministic`, `Probabilistic`, or `Scenarios` objects and then
-passed to [`add_time_series`](#methods). They are read back through `get_time_series`, which returns
-the matching object depending on the stored type (a `DeterministicSingleTimeSeries` is synthesized
-into a `Deterministic` on read). A `DeterministicSingleTimeSeries` is not added directly — derive
-one from stored `SingleTimeSeries` with [`transform_single_time_series`](#methods).
+passed to [`add_time_series`](#methods). They are read back through `read_by_id`, which returns the
+matching object for the row's stored type (a `DeterministicSingleTimeSeries` is synthesized into a
+`Deterministic` on read). A `DeterministicSingleTimeSeries` is not added directly — derive one from
+stored `SingleTimeSeries` with [`transform_single_time_series`](#methods).
 [`get_time_series_counts`](#methods) reports the forecast total under `forecasts`.
 
 ```python
 ts = Deterministic(initial_timestamp, resolution, horizon, interval, count, data, "load_fc")
-key = store.add_time_series(42, "Generator", OwnerCategory.Component, ts, units="MW")
+series_id = store.add_time_series(42, "Generator", OwnerCategory.Component, ts, units="MW")
 ```
 
 `data` is a NumPy array in the canonical shape for the forecast type, where `H` is
@@ -601,8 +602,8 @@ forecast.scenario_count -> int
 
 ## Readers
 
-`get_time_series` returns one whole series or forecast. For the simulation access pattern — _walk
-every timestamp and, at each, read the value of every matching series_ — use a **reader** instead. A
+`read_by_id` returns one whole series or forecast. For the simulation access pattern — _walk every
+timestamp and, at each, read the value of every matching series_ — use a **reader** instead. A
 reader is built once over a filter, pins one timeline, and reuses its output buffers so a tight loop
 allocates almost nothing. There are two: `StaticReader` for the static types, and `ForecastReader`
 for forecasts. Both share the lifecycle: build → inspect the layout once → `*_read(when)` in a loop

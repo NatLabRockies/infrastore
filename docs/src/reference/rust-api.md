@@ -499,7 +499,7 @@ Conventional array shapes:
 | `Probabilistic`                 | `[percentile_count, H, count, *E]`            | `percentiles`  |
 | `Scenarios`                     | `[scenario_count, H, count, *E]`              | —              |
 
-**Reading forecasts:** `get_time_series` reconstructs all forecast types, returning the matching
+**Reading forecasts:** `read_by_id` reconstructs all forecast types, returning the matching
 [`TimeSeriesData`](#timeseriesdata) variant — `Deterministic`, `Probabilistic`, or `Scenarios`. A
 `DeterministicSingleTimeSeries` is synthesized into a `Deterministic` by gathering its windows from
 the underlying packed array. The low-level pair still works for direct array access: fetch a
@@ -1165,10 +1165,9 @@ impl TimeRange {
 impl From<(DateTime<Utc>, DateTime<Utc>)> for TimeRange;   // zoned
 ```
 
-The `time_range` argument of `get_time_series` / `get_time_series_with_metadata` /
-`read_by_ids_range`. The `zoneless` flag is what lets the core refuse a bound whose spelling the
-series cannot answer rather than coercing it; a `DateTime<Utc>` is zoned by construction, so
-`(start, end).into()` is the native spelling.
+The `time_range` argument of `read_by_ids_range`. The `zoneless` flag is what lets the core refuse a
+bound whose spelling the series cannot answer rather than coercing it; a `DateTime<Utc>` is zoned by
+construction, so `(start, end).into()` is the native spelling.
 
 ### `Descriptors`
 

@@ -236,8 +236,8 @@ access: build a `StaticReader` or `ForecastReader` once, then step it. A `Foreca
 distinct backing array once per step and fans it out to every component referencing it, so a
 forecast shared by a hundred components costs one decompression; `entry_slot` lets your own
 per-component work dedup the same way. The inverse access — one component's full history — is the
-slow direction, and `read_by_ids` over many keys is the right call when you need it, not a loop of
-`get_time_series`. See the per-language sections:
+slow direction, and `read_by_ids` over many ids is the right call when you need it, not a loop of
+`read_by_id`. See the per-language sections:
 [Python](./python.md#per-timestamp-reads-simulation-loop),
 [Julia](./julia.md#per-timestamp-reads-simulation-loop), [Rust](./rust.md).
 

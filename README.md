@@ -103,7 +103,8 @@ See [Building from source](#building-from-source) below for the toolchain prereq
 ```rust
 use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{
-    Features, OwnerCategory, SingleTimeSeries, TimeSeriesData, TypedArray, create_store,
+    Features, OwnerCategory, ReadWindow, SingleTimeSeries, TimeSeriesData, TypedArray,
+    create_store,
 };
 
 let mut store = create_store(None, true)?;

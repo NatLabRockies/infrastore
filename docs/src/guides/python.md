@@ -64,7 +64,7 @@ carried on the object — the same array can be added under different names. Use
 ## Add a Series
 
 ```python
-added = store.add_time_series(
+series_id = store.add_time_series(
     owner_id=42,
     owner_type="Generator",
     owner_category=OwnerCategory.Component,
@@ -78,9 +78,10 @@ added = store.add_time_series(
 
 `features` is a plain dict whose values are `int`, `float`, `bool`, or `str`. Adding a series whose
 [identity](../explanation/data-model.md#identity) already exists raises `DuplicateTimeSeriesError`.
-The returned `key` exposes `owner_id`, `owner_category`, `time_series_type`, `name`, `resolution`,
-`interval`, and `features` as read-only properties (`resolution` and `interval` are ISO 8601
-duration strings or `None`).
+The add returns the id and nothing else. To see the rest of the row — `owner_id`, `owner_category`,
+`time_series_type`, `name`, `resolution`, `interval`, `features`, and the descriptors below — ask
+`store.get_metadata_by_id(series_id)`, or `store.list_metadata(...)` for a set of them (`resolution`
+and `interval` come back as ISO 8601 duration strings or `None`).
 
 ### Descriptors
 
@@ -120,7 +121,7 @@ load a system: an order of magnitude faster than a loop of single adds, and same
 in the same packed dataset.
 
 ```python
-added = store.add_time_series_bulk([
+ids = store.add_time_series_bulk([
     {"owner_id": i, "owner_type": "Generator", "owner_category": OwnerCategory.Component,
      "time_series": series[i], "units": "MW"}
     for i in range(len(series))
@@ -191,11 +192,11 @@ See [Datetimes](../reference/python-api.md#datetimes).
 
 ## Per-Timestamp Reads (Simulation Loop)
 
-`get_time_series` hands back a whole series or forecast. Simulations instead walk the timeline and,
-at each timestamp, want the value of _every_ series at that instant. For that, build a **reader**
-once and drive it in a loop — it pins one resolution and reuses its output buffers, so the loop
-allocates almost nothing. `StaticReader` serves `SingleTimeSeries`; `ForecastReader` serves
-forecasts. (Full signatures: [Python API reference](../reference/python-api.md#readers).)
+`read_by_id` hands back a whole series or forecast. Simulations instead walk the timeline and, at
+each timestamp, want the value of _every_ series at that instant. For that, build a **reader** once
+and drive it in a loop — it pins one resolution and reuses its output buffers, so the loop allocates
+almost nothing. `StaticReader` serves `SingleTimeSeries`; `ForecastReader` serves forecasts. (Full
+signatures: [Python API reference](../reference/python-api.md#readers).)
 
 ### Static series
 

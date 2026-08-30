@@ -67,7 +67,7 @@ ts = SingleTimeSeries(
     np.arange(24, dtype=np.float64) + 100,
     "load",
 )
-key = store.add_time_series(
+series_id = store.add_time_series(
     owner_id=42, owner_type="Generator",
     owner_category=OwnerCategory.Component,
     time_series=ts,

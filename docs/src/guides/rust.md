@@ -261,7 +261,7 @@ let n = store.transform_single_time_series(
 )?;
 ```
 
-`get_time_series` reconstructs forecasts too, returning a `TimeSeriesData::Deterministic`,
+`read_by_id` reconstructs forecasts too, returning a `TimeSeriesData::Deterministic`,
 `Probabilistic`, or `Scenarios` variant (a `DeterministicSingleTimeSeries` is synthesized into a
 `Deterministic`). Match on the variant or use the `as_deterministic` / `as_probabilistic` /
 `as_scenarios` accessors:

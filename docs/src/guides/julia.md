@@ -24,8 +24,8 @@ export INFRASTORE_LIB=$PWD/target/release/libinfrastore_ffi.dylib  # .so on Linu
 
 Exported names include `Store`, `SingleTimeSeries`, `NonSequentialTimeSeries`, the forecast structs
 (`Deterministic`, `Probabilistic`, `Scenarios`), `OwnerCategory` (`Component`,
-`SupplementalAttribute`), the `add_time_series!` / `get_time_series` / `get_metadata_by_id` family,
-and `transform_single_time_series!`. The store type is named **`Store`**.
+`SupplementalAttribute`), the `add_time_series!` / `read_by_id` / `list_metadata` family, and
+`transform_single_time_series!`. The store type is named **`Store`**.
 
 ## Open or Create a Store
 
@@ -65,7 +65,7 @@ Reads return a `DateTime` in UTC either way; see
 [Time and resolution conversions](../reference/julia-api.md#time-and-resolution-conversions).
 
 ```julia
-added = add_time_series!(
+id = add_time_series!(
     store,
     42,
     "Generator",
@@ -111,7 +111,7 @@ ts = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(100.0:123.0), "load
                       units = "MW", quantity_kind = "ActivePower",
                       unit_system = NaturalUnits, component_field = "max_active_power",
                       application_data = "{\"source\": \"weather_year_2012\"}")
-key = add_time_series!(store, 42, "Generator", Component, ts)   # keeps all five
+id = add_time_series!(store, 42, "Generator", Component, ts)   # keeps all five
 ```
 
 A series also records a `time_reference` — how its timestamps were spelled — inferred from the
@@ -120,8 +120,8 @@ timestamp it was built with. A bare `DateTime` is a wall clock (`ZonelessReferen
 transition. Reads still return a `DateTime` holding the instant, with the reference beside it;
 `using TimeZones` adds `zoned_timestamp` to fuse them back together losslessly.
 
-None of them is part of the key or of either content hash, so two adds that differ only in a
-descriptor are a duplicate. See
+None of them is part of a series' identity or of either content hash, so two adds that differ only
+in a descriptor are a duplicate. See
 [Optional Descriptors](../explanation/data-model.md#optional-descriptors) and
 [Time references](../explanation/data-model.md#time-references).
 
@@ -228,7 +228,7 @@ the buffer row-major). Construct one and add it through the generic `add_time_se
 ```julia
 data = zeros(Float64, 24, 7)   # (horizon_count, count)
 fc = Deterministic(DateTime(2024, 1, 1), Hour(1), Hour(24), Hour(24), 7, data, "load_fc")
-key = add_time_series!(
+id = add_time_series!(
     store,
     42,
     "Generator",
@@ -311,12 +311,11 @@ the [Julia API reference](../reference/julia-api.md#forecasts).
 
 ## Per-Timestamp Reads (Simulation Loop)
 
-`get_time_series` hands back a whole series or forecast. Simulations instead walk the timeline and,
-at each timestamp, want the value of _every_ series at that instant. For that, build a **reader**
-once and drive it in a loop — it pins one resolution and reuses its output buffers, so the loop
-allocates almost nothing. `StaticReader` serves `SingleTimeSeries`; `ForecastReader` serves
-forecasts. (Full signatures:
-[Julia API reference](../reference/julia-api.md#readers-per-timestamp-iteration).)
+`read_by_id` hands back a whole series or forecast. Simulations instead walk the timeline and, at
+each timestamp, want the value of _every_ series at that instant. For that, build a **reader** once
+and drive it in a loop — it pins one resolution and reuses its output buffers, so the loop allocates
+almost nothing. `StaticReader` serves `SingleTimeSeries`; `ForecastReader` serves forecasts. (Full
+signatures: [Julia API reference](../reference/julia-api.md#readers-per-timestamp-iteration).)
 
 ### Static series
 
