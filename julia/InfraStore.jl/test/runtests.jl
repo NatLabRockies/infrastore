@@ -1,5 +1,6 @@
 using Test
 using Dates
+using JSON
 using InfraStore
 
 # ---- Identify, then act ----------------------------------------------------
@@ -5073,3 +5074,5 @@ end
 
     close!(store)
 end
+
+include("element_type_conformance.jl")

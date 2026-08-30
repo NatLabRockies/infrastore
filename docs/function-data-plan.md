@@ -236,28 +236,34 @@ not new behavior.
 _Touched:_ `infrastore-core` and the corpus only. No ABI, proto, or header regeneration; no binding
 changes.
 
-### Phase 2 — lift IS.jl's codec into InfraStore.jl (no store involvement)
-
-Re-scoped by D3: this is a **move**, not a write. The code exists in `IS/src/infrastore.jl`, is
-byte-compatible with the Rust codec, and is already conformance-tested.
+### Phase 2 — lift IS.jl's codec into InfraStore.jl ✅ **done**
 
 - `julia/InfraStore.jl/src/function_data.jl`: `LinearFunction`, `QuadraticFunction`,
-  `PiecewiseLinear`, `PiecewiseStep` — permissive, matching what the store accepts, with `==` /
-  `hash` / `show` per the package's `Base` convention. Wire-vocabulary names, so they cannot clash
-  with IS.jl's exports.
-- `encode_element_values` / `decode_element_values` as pure functions over an `Array{Float64}` plus
-  an element-type string and `leading_dims` — no `Store` in the signature — lifted from IS.jl's
-  `_storage_array` / `_decode_static_values` / `_decode_forecast_window`, with the element
-  constructors as a plug point rather than hardcoded.
-- Tests read `conformance/element_type_vectors.json` directly, mirroring
-  `python/tests/test_element_type_codec.py` and `typescript/codec/test/conformance.test.ts` — and
-  covering the **forecast** layouts, which IS.jl's own conformance test skips (`leading_dims == 1`
-  only), so the three forecast vectors added in Phase 1 finally get a Julia consumer.
-- A package extension carrying `IS.LinearFunctionData` ↔ `InfraStore.LinearFunction` and friends, so
-  IS.jl decodes straight to its own types.
+  `PiecewiseLinear`, `PiecewiseStep`, plus `XYCoords` — a `@NamedTuple{x, y}` rather than a struct,
+  so a consumer's own point type is already the same value. Permissive, matching what the store
+  accepts; wire-vocabulary names, so they cannot clash with IS.jl's exports.
+- `encode_element_values` / `decode_element_values`, pure functions with no `Store` in the
+  signature. Decode returns the array's shape **without** its trailing element axis, so a forecast
+  comes back windowed rather than flattened — the same rank rule `_parameterized_type` follows.
+- Tests read `conformance/element_type_vectors.json` directly and check **all 15 vectors in both
+  directions**, including the three forecast layouts IS.jl's own conformance test skips
+  (`leading_dims == 1` only). The Phase 1 vectors finally have a Julia consumer.
 
-_Size:_ medium, and mostly transcription — call it ~350 lines of source plus ~200 of tests, against
-the ~400–500 originally budgeted. _Risk:_ low; nothing depends on it until Phase 3.
+**Correction to the plan: the extension cannot live on the InfraStore side.** A package extension
+needs a weak dependency on InfrastructureSystems.jl, and IS.jl already depends on InfraStore — that
+is a cycle Pkg will not resolve. It is also unnecessary. Two extension points do the same job
+without one:
+
+- **Decode** takes a `types` keyword (`DEFAULT_ELEMENT_TYPES` by default), because it starts from an
+  `element_type` string and the type has to be chosen by name. The entries' call signatures are
+  exactly IS.jl's `FunctionData` constructors, which is what makes the substitution free.
+- **Encode** is open dispatch: `element_type_tag`, `element_row_width` and `write_element_row!`,
+  three small generic functions a consumer adds methods to for its own types.
+
+IS.jl adds all of that on its own side, where it already has the dependency.
+
+_Size:_ ~400 lines of source, ~150 of tests. _Verified:_ the full InfraStore.jl suite, `Pkg.test()`,
+and the Julia formatter.
 
 ### Phase 3 — Julia write path
 
@@ -340,7 +346,7 @@ all bindings before considering it done" convention argues for doing it in the s
 | ----------------------------- | ------- | --------------- |
 | 0 — decisions                 | —       | yes, everything |
 | 1 — Rust ergonomics + vectors | ✅ done | —               |
-| 2 — Julia codec + types       | large   | yes, Phases 3–4 |
+| 2 — Lift IS.jl's codec        | ✅ done | —               |
 | 3 — Julia write               | small   | —               |
 | 4 — Julia read + metadata     | small   | —               |
 | 5 — Python parity             | medium  | no (deferrable) |

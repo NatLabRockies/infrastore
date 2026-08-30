@@ -241,6 +241,62 @@ not plain numbers (`"tuple(3,f64)"`, `"piecewise_linear"`, … — see
 [Element types](./element-types.md)); it defaults to the object's own `element_type`, which is
 `nothing` for plain scalars.
 
+## Element values
+
+A composite `element_type` describes a layout, not a number: `"piecewise_linear"` is a curve per
+timestep, packed across the array's trailing axis. Two functions convert between that packing and
+the values it holds, and neither takes a `Store` — they work on any array you already have.
+
+```julia
+curves = [PiecewiseLinear([(x = 0.0, y = 1.0), (x = 1.0, y = 3.0)]),
+          PiecewiseLinear([(x = 0.0, y = 2.0)])]
+
+array, element_type = encode_element_values(curves)      # (2, 5), "piecewise_linear"
+add_time_series!(store, 1, "Generator", Component,
+    SingleTimeSeries(t0, Hour(1), array, "cost"; element_type = element_type))
+
+md = get_metadata_by_id(store, id)
+values = decode_element_values(read_by_id(store, id).data, md.element_type)
+```
+
+`decode_element_values` returns the array's shape **without** its trailing element axis — a vector
+for a static series, an `(H, count)` matrix for a `Deterministic`, an `(P, H, count)` array for a
+`Probabilistic` or `Scenarios` — so a forecast comes back windowed rather than flattened. A scalar
+`element_type` is returned unchanged, because there the stored numbers already are the values;
+`is_composite_element_type` tells the cases apart, and an unrecognized spelling reads back as raw
+numbers rather than throwing.
+
+| Value type          | `element_type`       | Constructor                           |
+| ------------------- | -------------------- | ------------------------------------- |
+| `LinearFunction`    | `linear_function`    | `(proportional, constant)`            |
+| `QuadraticFunction` | `quadratic_function` | `(quadratic, proportional, constant)` |
+| `PiecewiseLinear`   | `piecewise_linear`   | `(points)`, a vector of `XYCoords`    |
+| `PiecewiseStep`     | `piecewise_step`     | `(x_coords, y_values)`                |
+| `NTuple{N,Float64}` | `tuple(N,f64)`       | —                                     |
+
+These types are **permissive on purpose**: they accept everything the store accepts, including the
+zero- and one-point piecewise curves that a domain type such as InfrastructureSystems.jl's
+`PiecewiseLinearData` rejects. A codec that could not represent a stored row could not read a store
+back. They are named for the wire vocabulary for a second reason: so that
+`using InfraStore, InfrastructureSystems` is not an ambiguity error.
+
+A consumer with its own domain types never materializes them. Decode takes a `types` keyword whose
+entries have exactly the constructor signatures in the table above:
+
+```julia
+decode_element_values(array, "piecewise_linear";
+    types = merge(DEFAULT_ELEMENT_TYPES, (piecewise_linear = MyCurve,)))
+```
+
+and encode is open dispatch — add methods to `element_type_tag`, `element_row_width` and
+`write_element_row!` for your own type and it encodes without a conversion step.
+
+The encodings themselves are the store's, specified in [Element types](./element-types.md) and
+pinned across every binding by `conformance/element_type_vectors.json`, which this package's tests
+read. One consequence worth knowing: the ragged kinds are padded to the widest entry **in the series
+being written**, so equal curves in differently-shaped series encode to different bytes and do not
+share a stored array.
+
 ## Result Types
 
 The catalog, metadata, and summary queries return **structs**, not `NamedTuple`s or `Dict`s. Each is

@@ -101,8 +101,14 @@ Each binding ships a reference codec between the stored bytes and per-timestep v
   write still encodes by hand and declares `element_type=`.
 - **TypeScript** — `@infrastore/codec`, which decodes a gRPC response's `value_bytes` + `shape` +
   `element_type` directly into plottable values.
-- **Julia** — no codec yet. A read hands back the raw array with its `element_type` beside it, and
-  InfrastructureSystems.jl decodes to its own `FunctionData` types.
+- **Julia** — `InfraStore.encode_element_values` / `decode_element_values`, over the value types
+  `LinearFunction`, `QuadraticFunction`, `PiecewiseLinear` and `PiecewiseStep`. Decode takes a
+  `types` keyword, so a consumer with its own domain types — InfrastructureSystems.jl's
+  `FunctionData` — decodes straight into them and pays no conversion; encode is three small generic
+  functions it extends instead. The names follow the wire vocabulary (`PiecewiseLinear`, not
+  `PiecewiseLinearData`) so that `using InfraStore,
+  InfrastructureSystems` is not an ambiguity
+  error.
 
 The CLI is deliberately not on that list: it renders function-data rows as their raw padded numbers
 rather than decoding them.
@@ -117,7 +123,11 @@ UPDATE_CONFORMANCE_VECTORS=1 cargo test -p infrastore-core conformance
 ```
 
 A binding may reject what it cannot represent — the grammar allows `tuple(4,i32)`, which the Julia
-binding does not map — but the store accepts the full grammar.
+binding does not map — but the store accepts the full grammar. A binding's _codec_ is the other way
+round: it has to represent everything the store accepts, which is why the Julia value types take the
+zero- and one-point piecewise curves that a domain type like InfrastructureSystems.jl's
+`PiecewiseLinearData` rejects. A curve too short to interpolate is still a row a read has to hand
+back.
 
 Because consumers go through the codecs, a future storage optimization (a true ragged layout with an
 offsets array instead of zero padding) can land behind this boundary without touching them.
