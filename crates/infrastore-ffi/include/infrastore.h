@@ -1549,6 +1549,43 @@ int32_t infrastore_store_read_by_ids(const struct InfraStore *handle,
                                      struct InfraStoreBulkReadHandle **out_result);
 
 /**
+ * Read the series filed under `id`, or the window of it the arguments name, in
+ * one call. The result comes back in the same `InfraStoreBulkReadHandle` as the
+ * bulk reads, holding exactly one item, so a caller decodes it with the same
+ * `infrastore_bulk_result_*` accessors.
+ *
+ * The id is a primary-key lookup and its row carries the grid, so both halves
+ * of a sliced read happen here: a caller holding an id needs no metadata call
+ * to ask for the second day of a series. Each optional argument is a
+ * `*_present` flag beside its value; with none present this reads the whole
+ * series, exactly as `infrastore_store_read_by_ids` would for one id.
+ *
+ * `start_ms` is Unix milliseconds, spelled zoned or zoneless by
+ * `start_zoneless` like every other bound. `len` counts timesteps and applies
+ * to the static types; `count` counts windows and applies to the forecasts.
+ * Supplying the one that does not apply is `INFRASTORE_ERR_INVALID_PARAMETER`,
+ * not an argument the store drops -- as is a start off the series' grid or an
+ * extent running past its end, which a raw time range would instead clamp.
+ * `INFRASTORE_ERR_NOT_FOUND` if the id names no row.
+ *
+ * # Safety
+ *
+ * `out_result` must be valid for writing one pointer. On `INFRASTORE_OK` the
+ * returned handle must be released exactly once with
+ * `infrastore_bulk_result_free`.
+ */
+int32_t infrastore_store_read_by_id(const struct InfraStore *handle,
+                                    int64_t id,
+                                    bool start_present,
+                                    bool start_zoneless,
+                                    int64_t start_ms,
+                                    bool len_present,
+                                    uint64_t len,
+                                    bool count_present,
+                                    uint64_t count,
+                                    struct InfraStoreBulkReadHandle **out_result);
+
+/**
  * Write the name of bulk-read item `index` into `out_name` as an owned C
  * string. The result handle carries each item's name whichever way the read
  * was addressed, so this is how both `infrastore_store_bulk_read` and

@@ -4761,6 +4761,81 @@ end
     close!(store)
 end
 
+@testset "association ids: read_by_id resolves a window in one call" begin
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+    store = Store(in_memory=true)
+    vals = collect(0.0:23.0)
+    id = add_time_series!(
+        store, 1, "Generator", Component,
+        SingleTimeSeries(t0, res, vals, "load"),
+    ).id
+
+    # No keywords is the whole series, the same answer `read_by_ids` gives.
+    @test read_by_id(store, id).data == vals
+    @test read_by_id(store, id).data == only(read_by_ids(store, [id])).data
+
+    # A window names exactly the steps asked for and moves the returned series'
+    # initial timestamp onto the one it starts at -- no metadata read first.
+    sliced = read_by_id(store, id; start_time=t0 + Hour(4), len=3)
+    @test sliced.data == [4.0, 5.0, 6.0]
+    @test sliced.initial_timestamp == t0 + Hour(4)
+    @test read_by_id(store, id; len=2).data == [0.0, 1.0]
+    @test read_by_id(store, id; start_time=t0 + Hour(22)).data == [22.0, 23.0]
+
+    # A window is checked where a time range is clamped: the same over-long
+    # request yields the two steps that exist through `get_time_series`, and is
+    # a mistake through `read_by_id`.
+    clamped = get_time_series(
+        SingleTimeSeries, store, 1, Component, "load";
+        resolution=res, time_range=(t0 + Hour(22), t0 + Hour(52)),
+    )
+    @test length(clamped.data) == 2
+    @test_throws InfraStore.InvalidParameterError read_by_id(
+        store, id; start_time=t0 + Hour(22), len=30
+    )
+    # A start off the grid is not rounded down onto it.
+    @test_throws InfraStore.InvalidParameterError read_by_id(
+        store, id; start_time=t0 + Minute(30)
+    )
+    # `count` selects forecast windows; on a static series it is refused, not
+    # silently dropped.
+    @test_throws InfraStore.InvalidParameterError read_by_id(store, id; count=2)
+    # A read is committed to acting on the reference.
+    @test_throws InfraStore.NotFoundError read_by_id(store, 9999)
+
+    close!(store)
+end
+
+@testset "association ids: read_by_id slices a forecast by count" begin
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+    store = Store(in_memory=true)
+    # [horizon=2, count=4]; window k holds [10k, 10k+1].
+    data = zeros(2, 4)
+    for k in 0:3
+        data[1, k + 1] = 10.0 * k
+        data[2, k + 1] = 10.0 * k + 1
+    end
+    id = add_time_series!(
+        store, 1, "Generator", Component,
+        Deterministic(t0, res, Hour(2), Hour(1), 4, data, "fx"),
+    ).id
+
+    whole = read_by_id(store, id)
+    @test whole.count == 4
+
+    sliced = read_by_id(store, id; start_time=t0 + Hour(1), count=2)
+    @test sliced.count == 2
+    @test sliced.initial_timestamp == t0 + Hour(1)
+
+    # More windows than are stored, and `len` on a forecast, are both refused.
+    @test_throws InfraStore.InvalidParameterError read_by_id(store, id; count=5)
+    @test_throws InfraStore.InvalidParameterError read_by_id(store, id; len=2)
+
+    close!(store)
+end
+
 @testset "association ids: remove_by_ids! is all-or-nothing" begin
     t0 = DateTime(2024, 1, 1)
     res = Hour(1)

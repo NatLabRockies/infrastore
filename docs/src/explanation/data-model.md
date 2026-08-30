@@ -337,6 +337,7 @@ Writes report the id they used, and reads take one:
 | Resolve   | `get_metadata_by_id`                  | `get_metadata_by_id` | `get_metadata_by_id` |
 | Validate  | `association_exists`                  | `association_exists` | `association_exists` |
 | Read      | `read_by_ids`                         | `read_by_ids`        | `read_by_ids`        |
+| Read one  | `read_by_id`                          | `read_by_id`         | `read_by_id`         |
 | Remove    | `remove_by_ids`                       | `remove_by_ids`      | `remove_by_ids!`     |
 
 `association_exists` fetches no row, so a consumer can check every reference in its model on load
@@ -347,6 +348,15 @@ returns nothing, the removal removes nothing. That is deliberate: a caller worki
 it recorded earlier has a model that disagrees with the store, and since an id is never reissued the
 disagreement will not resolve itself. Sift the set with `association_exists` first when some
 references are expected to have gone.
+
+`read_by_id` is the single-id read, and it also takes the slice: a `start_time` plus a `len` of
+timesteps or a `count` of windows. Both halves happen in one call because the primary-key lookup
+already returns the row the window resolves against — a consumer holding an id spends nothing to
+learn a series' `resolution` or `count` before asking for the second day of it. Unlike the
+`time_range` on the keyed reads, a window is _checked_: a start off the series' own grid, or an
+extent running past its end, is an error rather than the smaller answer a range clamps to. A range
+says "whatever lies between these bounds"; a window says "these exact steps", and a caller that
+asked for 24 and silently received 3 has a bug the store can see and it cannot.
 
 A removal by id is also the precise one. A key identity with no interval matches any interval, so
 `remove_time_series` can take a whole forecast family; an id is a primary key and takes exactly the

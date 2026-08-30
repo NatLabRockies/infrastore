@@ -155,6 +155,276 @@ impl From<ListFilter> for MetadataFilter {
 /// before ids were minted).
 pub type ArrayGroupEntry = (TimeSeriesKey, [u8; 32], Option<i64>);
 
+/// The slice of one association a read asks for, in the terms its caller thinks
+/// in: where to start, and how much to take from there.
+/// [`Store::read_by_id`] resolves it against the row's own grid.
+///
+/// `len` counts timesteps and belongs to the static types; `count` counts
+/// windows and belongs to the forecasts. Neither means anything for the other
+/// family, so supplying the wrong one is an error rather than an argument the
+/// store quietly drops. Every field unset reads the whole series.
+///
+/// A window is *checked* where a [`TimeRange`] is clamped, and that is the
+/// reason it exists. A range says "whatever lies between these bounds", so a
+/// bound past the end of the series is a smaller answer; a window says "these
+/// exact steps", so it is a mistake. A caller that asked for 24 steps and
+/// silently got 3 has a bug the store can see and the caller cannot — which is
+/// why every binding that reads by name has grown its own copy of this
+/// arithmetic, off the row it had to fetch first.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReadWindow {
+    /// First timestamp to read; the series' own start when unset. For a
+    /// forecast this is a window boundary, `initial_timestamp + k·interval`.
+    pub start: Option<chrono::DateTime<chrono::Utc>>,
+    /// Whether `start` was written without a zone, exactly as on
+    /// [`TimeRange`]: the bound has to be spelled the way the series is.
+    pub zoneless: bool,
+    /// Timesteps to read from `start` (static types); to the end when unset.
+    pub len: Option<usize>,
+    /// Forecast windows to read from `start`; to the end when unset.
+    pub count: Option<usize>,
+}
+
+impl ReadWindow {
+    /// The whole series — what a read with no slicing asks for.
+    pub fn full() -> Self {
+        Self::default()
+    }
+
+    /// A zoned start, the native Rust spelling. Chain [`Self::with_len`] or
+    /// [`Self::with_count`].
+    pub fn from(start: chrono::DateTime<chrono::Utc>) -> Self {
+        Self {
+            start: Some(start),
+            ..Self::default()
+        }
+    }
+
+    /// A start written as a wall clock, for a [`TimeReference::Zoneless`] series.
+    pub fn from_zoneless(start: chrono::DateTime<chrono::Utc>) -> Self {
+        Self {
+            start: Some(start),
+            zoneless: true,
+            ..Self::default()
+        }
+    }
+
+    /// Take `len` timesteps (a static series).
+    pub fn with_len(mut self, len: usize) -> Self {
+        self.len = Some(len);
+        self
+    }
+
+    /// Take `count` windows (a forecast).
+    pub fn with_count(mut self, count: usize) -> Self {
+        self.count = Some(count);
+        self
+    }
+
+    /// Whether this asks for the whole series, in which case the read skips the
+    /// grid arithmetic entirely and hands the array back whole.
+    fn is_full(&self) -> bool {
+        self.start.is_none() && self.len.is_none() && self.count.is_none()
+    }
+
+    /// The [`TimeRange`] this window names on `meta`'s grid, or `None` for a
+    /// whole-series read. Errors — rather than clamping — when the start is off
+    /// the grid or the requested extent runs past the end.
+    fn resolve(&self, meta: &TimeSeriesMetadata) -> Result<Option<TimeRange>> {
+        if self.is_full() {
+            return Ok(None);
+        }
+        let range = match meta.time_series_type {
+            TimeSeriesType::SingleTimeSeries => self.resolve_single(meta)?,
+            TimeSeriesType::NonSequentialTimeSeries => self.resolve_non_sequential(meta)?,
+            TimeSeriesType::Deterministic
+            | TimeSeriesType::DeterministicSingleTimeSeries
+            | TimeSeriesType::Probabilistic
+            | TimeSeriesType::Scenarios => self.resolve_forecast(meta)?,
+        };
+        Ok(Some(range))
+    }
+
+    /// Reject the extent argument belonging to the other family, naming the one
+    /// that applies. A silently ignored argument is a wrong answer the caller
+    /// cannot see.
+    fn reject_count(&self, label: &str) -> Result<()> {
+        match self.count {
+            None => Ok(()),
+            Some(_) => Err(TimeSeriesError::InvalidParameter(format!(
+                "count selects forecast windows and does not apply to {label}; use len"
+            ))),
+        }
+    }
+
+    fn reject_len(&self, label: &str) -> Result<()> {
+        match self.len {
+            None => Ok(()),
+            Some(_) => Err(TimeSeriesError::InvalidParameter(format!(
+                "len selects timesteps and does not apply to {label}, whose windows are \
+                 selected by count"
+            ))),
+        }
+    }
+
+    /// The extent to take from `start_idx`, defaulting to the rest of `total`.
+    /// Zero is refused: an empty read is a caller error, not a smaller answer.
+    fn extent(
+        requested: Option<usize>,
+        start_idx: usize,
+        total: usize,
+        unit: &str,
+    ) -> Result<usize> {
+        // Every caller resolves `start_idx` against `total` before asking, so
+        // the remainder cannot underflow -- and comparing against it, rather
+        // than adding `n` to `start_idx`, keeps the check itself from
+        // overflowing on an extent a caller is free to make arbitrarily large.
+        let remaining = total - start_idx;
+        let n = requested.unwrap_or(remaining);
+        if n == 0 {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "requested 0 {unit}; a read selects at least one"
+            )));
+        }
+        if n > remaining {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "requested {n} {unit} from index {start_idx}, past the end of the {total} \
+                 stored"
+            )));
+        }
+        Ok(n)
+    }
+
+    /// The resolved bounds, spelled the way the read has to be for `meta` to
+    /// answer it.
+    ///
+    /// A caller who named a start is held to their own spelling — that bound is
+    /// theirs, and a mismatch with the series is the category error
+    /// [`TimeRange::check_against`] refuses. A caller who named none did not
+    /// choose a spelling: the bound is the series' own first timestamp, so it is
+    /// spelled the way the series is. Otherwise `read_by_id(id,
+    /// ReadWindow::full().with_len(2))` — a request with no timestamp anywhere in
+    /// it — would fail against a zoneless series for a bound the caller never
+    /// wrote.
+    fn range(
+        &self,
+        meta: &TimeSeriesMetadata,
+        start: chrono::DateTime<chrono::Utc>,
+        end: chrono::DateTime<chrono::Utc>,
+    ) -> TimeRange {
+        let zoneless = match self.start {
+            Some(_) => self.zoneless,
+            None => !TimeReference::accepts_zoned_bound(meta.time_reference.as_ref()),
+        };
+        TimeRange::spelled(start, end, zoneless)
+    }
+
+    fn resolve_single(&self, meta: &TimeSeriesMetadata) -> Result<TimeRange> {
+        self.reject_count("a SingleTimeSeries")?;
+        let initial = required_initial(meta, "SingleTimeSeries")?;
+        let resolution = required_resolution(meta, "SingleTimeSeries")?;
+        let length = required_length(meta, "SingleTimeSeries")?;
+        let start = self.start.unwrap_or(initial);
+        // `steps_between` is the strict counterpart of the `floor_steps` a raw
+        // range would use: a start between two steps is off the grid, not the
+        // step below it.
+        let start_idx = resolution.steps_between(initial, start)?;
+        if start_idx >= length {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "start_time is past the last timestep (resolves to index {start_idx}, but \
+                 only {length} step(s) are stored)"
+            )));
+        }
+        let n = Self::extent(self.len, start_idx, length, "timesteps")?;
+        let end = resolution.add_to(start, n as i64).ok_or_else(|| {
+            TimeSeriesError::IntegrityError("window end timestamp overflow".into())
+        })?;
+        Ok(self.range(meta, start, end))
+    }
+
+    fn resolve_non_sequential(&self, meta: &TimeSeriesMetadata) -> Result<TimeRange> {
+        self.reject_count("a NonSequentialTimeSeries")?;
+        let timestamps = meta.timestamps.as_ref().ok_or_else(|| {
+            TimeSeriesError::IntegrityError("NonSequentialTimeSeries missing timestamps".into())
+        })?;
+        let total = timestamps.len();
+        if total == 0 {
+            return Err(TimeSeriesError::InvalidParameter(
+                "cannot select a window of an empty NonSequentialTimeSeries".into(),
+            ));
+        }
+        let start = self.start.unwrap_or(timestamps[0]);
+        // An irregular series has no grid to round onto, so the start has to be
+        // one of its own timestamps. Answering with the next one along would be
+        // a different series than the caller named.
+        let start_idx = timestamps.partition_point(|t| *t < start);
+        if start_idx >= total || timestamps[start_idx] != start {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "start_time {start} is not one of this NonSequentialTimeSeries' timestamps"
+            )));
+        }
+        let n = Self::extent(self.len, start_idx, total, "timestamps")?;
+        // The bound is exclusive, so it is the timestamp after the last one
+        // selected — or just past the final timestamp when the window runs to
+        // the end. One millisecond is the catalog's own timestamp resolution.
+        let end = if start_idx + n < total {
+            timestamps[start_idx + n]
+        } else {
+            timestamps[total - 1]
+                .checked_add_signed(chrono::Duration::milliseconds(1))
+                .ok_or_else(|| {
+                    TimeSeriesError::IntegrityError("window end timestamp overflow".into())
+                })?
+        };
+        Ok(self.range(meta, start, end))
+    }
+
+    fn resolve_forecast(&self, meta: &TimeSeriesMetadata) -> Result<TimeRange> {
+        let label = format!("a {:?}", meta.time_series_type);
+        self.reject_len(&label)?;
+        let initial = required_initial(meta, &label)?;
+        let interval = required_interval(meta, &label)?;
+        let stored = required_count(meta, &label)?;
+        let start = self.start.unwrap_or(initial);
+        // A single-window forecast carries a zero interval — there is no second
+        // window to step to — so its only valid start is `initial`.
+        let start_idx = if interval.is_zero() {
+            if start != initial {
+                return Err(TimeSeriesError::InvalidParameter(
+                    "forecast start_time must align to a window boundary \
+                     (initial_timestamp + k·interval)"
+                        .into(),
+                ));
+            }
+            0
+        } else {
+            interval.steps_between(initial, start)?
+        };
+        if start_idx >= stored {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "start_time is past the last window (resolves to window index {start_idx}, \
+                 but only {stored} window(s) are stored)"
+            )));
+        }
+        let n = Self::extent(self.count, start_idx, stored, "windows")?;
+        // With a zero interval the arithmetic below would put `end` on `start`,
+        // selecting nothing; the one window starts at `start`, so any bound past
+        // it selects exactly that window.
+        let end = if interval.is_zero() {
+            start
+                .checked_add_signed(chrono::Duration::milliseconds(1))
+                .ok_or_else(|| {
+                    TimeSeriesError::IntegrityError("window end timestamp overflow".into())
+                })?
+        } else {
+            interval.add_to(start, n as i64).ok_or_else(|| {
+                TimeSeriesError::IntegrityError("window end timestamp overflow".into())
+            })?
+        };
+        Ok(self.range(meta, start, end))
+    }
+}
+
 /// Single item in a bulk add.
 ///
 /// A request names no catalog id. Every add — this one, the wide positional
@@ -2702,6 +2972,35 @@ impl Store {
             })
             .collect::<Result<_>>()?;
         self.bulk_read_metas(&metas)
+    }
+
+    /// Read the series filed under `id`, or the slice of it that `window` names.
+    ///
+    /// The whole read, for any stored type, in one call: the id is a primary-key
+    /// lookup, and the row it returns carries the grid the window resolves
+    /// against — the same row the read then materializes from. A caller holding
+    /// an id spends nothing to learn a series' `resolution` or `count` before
+    /// asking for the second day of it.
+    ///
+    /// [`ReadWindow::full()`] reads everything, which is
+    /// [`Self::read_by_ids`] for a single id. Otherwise the window is resolved
+    /// strictly: a start off the series' grid, or an extent running past its
+    /// end, is [`TimeSeriesError::InvalidParameter`] rather than the smaller
+    /// answer a raw [`TimeRange`] would clamp to. That is the whole reason to
+    /// take a window rather than a range — see [`ReadWindow`].
+    ///
+    /// [`TimeSeriesError::NotFound`] if the id names no row, following
+    /// [`Self::read_by_ids`]: a call already committed to reading treats a
+    /// stale reference as a failure, where [`Self::association_exists`] treats
+    /// it as an answer.
+    #[tracing::instrument(skip(self))]
+    pub fn read_by_id(&self, id: i64, window: ReadWindow) -> Result<TimeSeriesData> {
+        let meta = self
+            .metadata
+            .get_by_id(id, &*self.backend)?
+            .ok_or(TimeSeriesError::NotFound)?;
+        let time_range = window.resolve(&meta)?;
+        self.materialize_time_series(&meta, time_range)
     }
 
     /// The shared body of [`Self::bulk_read`] and [`Self::read_by_ids`],
@@ -5750,6 +6049,14 @@ fn required_interval(
 fn required_count(meta: &crate::types::metadata::TimeSeriesMetadata, label: &str) -> Result<usize> {
     meta.count
         .ok_or_else(|| TimeSeriesError::IntegrityError(format!("{label} missing count")))
+}
+
+fn required_length(
+    meta: &crate::types::metadata::TimeSeriesMetadata,
+    label: &str,
+) -> Result<usize> {
+    meta.length
+        .ok_or_else(|| TimeSeriesError::IntegrityError(format!("{label} missing length")))
 }
 
 /// Validate that the leading shape dims of `arr` match `expected_prefix`,

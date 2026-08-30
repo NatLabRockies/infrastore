@@ -1115,6 +1115,63 @@ function read_by_ids(store::Store, ids::AbstractVector{<:Integer})
     return _decode_bulk_result(out_result[], n)
 end
 
+"""
+    read_by_id(store, id; start_time=nothing, len=nothing, count=nothing)
+
+Read the series filed under catalog association `id`, or the window of it these
+arguments name, in **one** call — dispatching on the row's stored type to the
+proper Julia struct exactly as [`read_by_ids`](@ref) does.
+
+The id is a primary-key lookup and the row it lands on carries the grid, so the
+store resolves the window itself: a caller holding an id spends nothing to learn
+a series' `resolution` or `count` before asking for the second day of it. With
+no keywords this is [`read_by_ids`](@ref) for a single id.
+
+`start_time` is the first timestamp to read — a window boundary
+(`initial_timestamp + k·interval`) for a forecast — and may be a `DateTime` or,
+with TimeZones loaded, a `ZonedDateTime`; the store refuses a bound spelled
+differently from the series rather than coercing it. `len` counts timesteps and
+applies to `SingleTimeSeries` / `NonSequentialTimeSeries`; `count` counts windows
+and applies to the forecasts. Passing the one that does not apply throws
+`InvalidParameterError`.
+
+A window is *checked*, not clamped: a `start_time` off the series' own grid, or a
+`len` / `count` running past its end, throws `InvalidParameterError` — where the
+`time_range` on [`get_time_series`](@ref) and [`bulk_read`](@ref) would quietly
+hand back the smaller answer that fits. Throws `NotFoundError` if `id` names no
+row, following [`read_by_ids`](@ref).
+
+See also [`read_by_ids`](@ref), [`remove_by_ids!`](@ref), and
+[`get_metadata_by_id`](@ref).
+"""
+function read_by_id(
+    store::Store,
+    id::Integer;
+    start_time=nothing,
+    len::Union{Nothing, Integer}=nothing,
+    count::Union{Nothing, Integer}=nothing,
+)
+    start_present = start_time !== nothing
+    start_zoneless = start_present && is_zoneless(_time_reference_of(start_time))
+    start_ms = start_present ? _to_unix_ms(start_time) : Int64(0)
+    out_result = Ref{Ptr{Cvoid}}(C_NULL)
+    _check(
+        @ccall lib_path().infrastore_store_read_by_id(
+            store::Ptr{Cvoid},
+            Int64(id)::Int64,
+            start_present::Bool,
+            start_zoneless::Bool,
+            start_ms::Int64,
+            (len !== nothing)::Bool,
+            UInt64(len === nothing ? 0 : len)::UInt64,
+            (count !== nothing)::Bool,
+            UInt64(count === nothing ? 0 : count)::UInt64,
+            out_result::Ref{Ptr{Cvoid}},
+        )::Int32
+    )
+    return only(_decode_bulk_result(out_result[], 1))
+end
+
 function get_time_series(
     ::Type{T},
     store::Store,

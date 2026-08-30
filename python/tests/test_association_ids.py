@@ -144,6 +144,57 @@ class TestReading:
             store.read_by_ids([ids[0], 9999])
         assert store.read_by_ids([]) == []
 
+    def test_read_by_id_resolves_a_window_in_one_call(self):
+        store = Store.create(in_memory=True)
+        # 24 hourly points, values 0.0..23.0.
+        data = np.arange(24, dtype=np.float64)
+        added = store.add_time_series(
+            1,
+            "Generator",
+            OwnerCategory.Component,
+            SingleTimeSeries(_t0(), timedelta(hours=1), data, "load"),
+        )
+
+        # No keywords is the whole series, the answer read_by_ids gives.
+        assert np.asarray(store.read_by_id(added.id).data).tolist() == data.tolist()
+
+        # A window names exactly the steps asked for and moves the returned
+        # series' initial timestamp onto the one it starts at -- and it does so
+        # without a metadata read first.
+        sliced = store.read_by_id(
+            added.id, start_time=_t0() + timedelta(hours=4), len=3
+        )
+        assert np.asarray(sliced.data).tolist() == [4.0, 5.0, 6.0]
+        assert sliced.initial_timestamp == _t0() + timedelta(hours=4)
+        assert np.asarray(store.read_by_id(added.id, len=2).data).tolist() == [0.0, 1.0]
+
+        # A window is checked where a time range is clamped: the same over-long
+        # request yields the two steps that exist through get_time_series, and
+        # is a mistake through read_by_id.
+        clamped = store.get_time_series(
+            added.key,
+            time_range=(
+                _t0() + timedelta(hours=22),
+                _t0() + timedelta(hours=52),
+            ),
+        )
+        assert len(np.asarray(clamped.data)) == 2
+        with pytest.raises(InvalidParameterError):
+            store.read_by_id(added.id, start_time=_t0() + timedelta(hours=22), len=30)
+
+        # A start between two steps is off the grid, not rounded onto it.
+        with pytest.raises(InvalidParameterError):
+            store.read_by_id(added.id, start_time=_t0() + timedelta(minutes=30))
+
+        # count selects forecast windows; on a static series it is refused
+        # rather than silently dropped.
+        with pytest.raises(InvalidParameterError):
+            store.read_by_id(added.id, count=2)
+
+        # A read is already committed to acting on the reference.
+        with pytest.raises(NotFoundError):
+            store.read_by_id(9999)
+
     def test_remove_by_ids_is_all_or_nothing(self):
         store = Store.create(in_memory=True)
         ids = [_add(store, name).id for name in ("a", "b", "c")]

@@ -761,9 +761,23 @@ label what they decode.
 other removals above: one all-or-nothing transaction, the count through `out_removed`, and
 `INFRASTORE_ERR_NOT_FOUND` if any id names no row.
 
+`infrastore_store_read_by_id` is the single-id read, and it also takes the slice. Each optional
+argument is a `*_present` flag beside its value; with none present it reads the whole series, as
+`infrastore_store_read_by_ids` would for one id. `start_ms` is Unix milliseconds, spelled zoned or
+zoneless by `start_zoneless` like every other bound; `len` counts timesteps (the static types) and
+`count` counts windows (the forecasts), and supplying the one that does not apply is
+`INFRASTORE_ERR_INVALID_PARAMETER` rather than an argument the store drops. So is a start off the
+series' own grid or an extent running past its end — a window is checked where a time range is
+clamped. The result arrives in the same `InfraStoreBulkReadHandle`, holding one item.
+
 ```c
 int32_t infrastore_store_read_by_ids(const struct InfraStore *handle, const int64_t *ids,
                              uint64_t n, struct InfraStoreBulkReadHandle **out_result);
+int32_t infrastore_store_read_by_id(const struct InfraStore *handle, int64_t id,
+                             bool start_present, bool start_zoneless, int64_t start_ms,
+                             bool len_present, uint64_t len,
+                             bool count_present, uint64_t count,
+                             struct InfraStoreBulkReadHandle **out_result);
 int32_t infrastore_bulk_result_item_name(const struct InfraStoreBulkReadHandle *result,
                                  uint64_t index, char **out_name);
 ```
