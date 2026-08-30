@@ -8,6 +8,7 @@ use super::element_type::ElementType;
 use super::metadata::UnitSystem;
 use super::period::Period;
 use super::time_reference::TimeReference;
+use crate::codec::{self, DecodedValues};
 
 /// Discriminator for the six time series types defined in the spec.
 ///
@@ -252,6 +253,49 @@ impl SingleTimeSeries {
 }
 
 impl SingleTimeSeries {
+    /// Construct from per-timestep logical values, encoding them into the flat
+    /// array the store holds and declaring the element type they imply.
+    ///
+    /// The pairing is the point. An `element_type` and the array it describes
+    /// are two independent things a caller can get out of step;
+    /// [`Store::add`](crate::Store::add) rejects the mismatch, but only after
+    /// the fact. Deriving both from one set of values means there is no
+    /// mismatch to reject.
+    ///
+    /// Returns `Err(String)` if the values cannot be encoded: a
+    /// [`DecodedValues::Raw`], which carries no values of its own (build the
+    /// [`TypedArray`] and call [`Self::new`] instead), tuple rows of differing
+    /// arity, or a step function whose `x` and `y` lengths disagree.
+    ///
+    /// One entry per timestep, so `length` is `values.len()`.
+    ///
+    /// ```
+    /// # use infrastore_core::{DecodedValues, XyPoint, SingleTimeSeries, Period};
+    /// # use chrono::{TimeZone, Utc, Duration};
+    /// let curves = DecodedValues::PiecewiseLinear(vec![
+    ///     vec![XyPoint { x: 0.0, y: 1.0 }, XyPoint { x: 1.0, y: 3.0 }],
+    ///     vec![XyPoint { x: 0.0, y: 2.0 }],
+    /// ]);
+    /// let series = SingleTimeSeries::from_values(
+    ///     Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
+    ///     Period::Fixed(Duration::hours(1)),
+    ///     &curves,
+    ///     "variable_cost",
+    /// )?;
+    /// assert_eq!(series.element_type.to_string(), "piecewise_linear");
+    /// assert_eq!(series.length, 2);
+    /// # Ok::<(), String>(())
+    /// ```
+    pub fn from_values(
+        initial_timestamp: DateTime<Utc>,
+        resolution: impl Into<Period>,
+        values: &DecodedValues,
+        name: impl Into<String>,
+    ) -> Result<Self, String> {
+        let (data, element_type) = encode_with_type(values, &[values.len()])?;
+        Ok(Self::new(initial_timestamp, resolution, data, name).with_element_type(element_type))
+    }
+
     /// Declare the logical element type of the array. Validated on commit
     /// against the array's dtype and per-step shape.
     pub fn with_element_type(mut self, element_type: ElementType) -> Self {
@@ -380,6 +424,31 @@ impl NonSequentialTimeSeries {
 }
 
 impl NonSequentialTimeSeries {
+    /// Construct from per-timestep logical values, encoding them into the flat
+    /// array the store holds and declaring the element type they imply.
+    ///
+    /// The pairing is the point. An `element_type` and the array it describes
+    /// are two independent things a caller can get out of step;
+    /// [`Store::add`](crate::Store::add) rejects the mismatch, but only after
+    /// the fact. Deriving both from one set of values means there is no
+    /// mismatch to reject.
+    ///
+    /// Returns `Err(String)` if the values cannot be encoded: a
+    /// [`DecodedValues::Raw`], which carries no values of its own (build the
+    /// [`TypedArray`] and call [`Self::new`] instead), tuple rows of differing
+    /// arity, or a step function whose `x` and `y` lengths disagree.
+    /// It also returns `Err` when the timestamp count does not match the number
+    /// of timesteps, or the timestamps are not strictly increasing — the same
+    /// checks [`Self::new`] makes.
+    pub fn from_values(
+        timestamps: Vec<DateTime<Utc>>,
+        values: &DecodedValues,
+        name: impl Into<String>,
+    ) -> Result<Self, String> {
+        let (data, element_type) = encode_with_type(values, &[values.len()])?;
+        Ok(Self::new(timestamps, data, name)?.with_element_type(element_type))
+    }
+
     /// Declare the logical element type of the array. Validated on commit
     /// against the array's dtype and per-step shape.
     pub fn with_element_type(mut self, element_type: ElementType) -> Self {
@@ -601,6 +670,48 @@ pub struct Probabilistic {
 }
 
 impl Deterministic {
+    /// Construct from per-window logical values, encoding them into the flat
+    /// array the store holds and declaring the element type they imply.
+    ///
+    /// The pairing is the point. An `element_type` and the array it describes
+    /// are two independent things a caller can get out of step;
+    /// [`Store::add`](crate::Store::add) rejects the mismatch, but only after
+    /// the fact. Deriving both from one set of values means there is no
+    /// mismatch to reject.
+    ///
+    /// Returns `Err(String)` if the values cannot be encoded: a
+    /// [`DecodedValues::Raw`], which carries no values of its own (build the
+    /// [`TypedArray`] and call [`Self::new`] instead), tuple rows of differing
+    /// arity, or a step function whose `x` and `y` lengths disagree.
+    ///
+    /// One entry per timestep in row-major order over the leading axes, so
+    /// entry `i * count + j` is window `j`'s step `i`, and there must be
+    /// exactly `H * count` of them.
+    pub fn from_values(
+        initial_timestamp: DateTime<Utc>,
+        resolution: impl Into<Period>,
+        horizon: impl Into<Period>,
+        interval: impl Into<Period>,
+        count: usize,
+        values: &DecodedValues,
+        name: impl Into<String>,
+    ) -> Result<Self, String> {
+        let resolution = resolution.into();
+        let horizon = horizon.into();
+        let h = compute_h(horizon, resolution)?;
+        let (data, element_type) = encode_with_type(values, &[h, count])?;
+        Ok(Self::new(
+            initial_timestamp,
+            resolution,
+            horizon,
+            interval,
+            count,
+            data,
+            name,
+        )?
+        .with_element_type(element_type))
+    }
+
     /// Declare the logical element type of the array. Validated on commit
     /// against the array's dtype and per-step shape.
     pub fn with_element_type(mut self, element_type: ElementType) -> Self {
@@ -774,6 +885,51 @@ pub struct Scenarios {
 }
 
 impl Probabilistic {
+    /// Construct from per-window logical values, encoding them into the flat
+    /// array the store holds and declaring the element type they imply.
+    ///
+    /// The pairing is the point. An `element_type` and the array it describes
+    /// are two independent things a caller can get out of step;
+    /// [`Store::add`](crate::Store::add) rejects the mismatch, but only after
+    /// the fact. Deriving both from one set of values means there is no
+    /// mismatch to reject.
+    ///
+    /// Returns `Err(String)` if the values cannot be encoded: a
+    /// [`DecodedValues::Raw`], which carries no values of its own (build the
+    /// [`TypedArray`] and call [`Self::new`] instead), tuple rows of differing
+    /// arity, or a step function whose `x` and `y` lengths disagree.
+    ///
+    /// One entry per timestep in row-major order over `[num_percentiles, H,
+    /// count]`, so there must be exactly `percentiles.len() * H * count` of
+    /// them.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_values(
+        initial_timestamp: DateTime<Utc>,
+        resolution: impl Into<Period>,
+        horizon: impl Into<Period>,
+        interval: impl Into<Period>,
+        count: usize,
+        percentiles: Vec<f64>,
+        values: &DecodedValues,
+        name: impl Into<String>,
+    ) -> Result<Self, String> {
+        let resolution = resolution.into();
+        let horizon = horizon.into();
+        let h = compute_h(horizon, resolution)?;
+        let (data, element_type) = encode_with_type(values, &[percentiles.len(), h, count])?;
+        Ok(Self::new(
+            initial_timestamp,
+            resolution,
+            horizon,
+            interval,
+            count,
+            percentiles,
+            data,
+            name,
+        )?
+        .with_element_type(element_type))
+    }
+
     /// Declare the logical element type of the array. Validated on commit
     /// against the array's dtype and per-step shape.
     pub fn with_element_type(mut self, element_type: ElementType) -> Self {
@@ -891,6 +1047,25 @@ pub(crate) fn compute_h(horizon: Period, resolution: Period) -> Result<usize, St
     resolution.divide_into(&horizon).map_err(|e| e.to_string())
 }
 
+/// Encode `values` over `leading_dims` and name the element type they produce.
+///
+/// The two halves that have to agree, derived from one input. Every
+/// `from_values` constructor goes through here, which is what makes the
+/// agreement structural rather than something the caller maintains.
+fn encode_with_type(
+    values: &DecodedValues,
+    leading_dims: &[usize],
+) -> Result<(TypedArray, ElementType), String> {
+    // Encode first: it is the call that rejects `Raw`, and its message names the
+    // remedy. `element_type_of` only returns `None` for the same case, so the
+    // fallback below is unreachable in practice and exists to avoid a panic if
+    // that ever stops being true.
+    let data = codec::encode(values, leading_dims).map_err(|e| e.to_string())?;
+    let element_type = codec::element_type_of(values)
+        .ok_or_else(|| "these values have no element type of their own".to_string())?;
+    Ok((data, element_type))
+}
+
 /// Validate a forecast's periods: resolution and horizon must be strictly
 /// positive; interval must be strictly positive unless the forecast has a
 /// single window (`count == 1`), where a zero interval is meaningful — there
@@ -931,6 +1106,50 @@ fn validate_forecast_periods(
 }
 
 impl Scenarios {
+    /// Construct from per-window logical values, encoding them into the flat
+    /// array the store holds and declaring the element type they imply.
+    ///
+    /// The pairing is the point. An `element_type` and the array it describes
+    /// are two independent things a caller can get out of step;
+    /// [`Store::add`](crate::Store::add) rejects the mismatch, but only after
+    /// the fact. Deriving both from one set of values means there is no
+    /// mismatch to reject.
+    ///
+    /// Returns `Err(String)` if the values cannot be encoded: a
+    /// [`DecodedValues::Raw`], which carries no values of its own (build the
+    /// [`TypedArray`] and call [`Self::new`] instead), tuple rows of differing
+    /// arity, or a step function whose `x` and `y` lengths disagree.
+    ///
+    /// One entry per timestep in row-major order over `[scenario_count, H,
+    /// count]`, so there must be exactly `scenario_count * H * count` of them.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_values(
+        initial_timestamp: DateTime<Utc>,
+        resolution: impl Into<Period>,
+        horizon: impl Into<Period>,
+        interval: impl Into<Period>,
+        count: usize,
+        scenario_count: usize,
+        values: &DecodedValues,
+        name: impl Into<String>,
+    ) -> Result<Self, String> {
+        let resolution = resolution.into();
+        let horizon = horizon.into();
+        let h = compute_h(horizon, resolution)?;
+        let (data, element_type) = encode_with_type(values, &[scenario_count, h, count])?;
+        Ok(Self::new(
+            initial_timestamp,
+            resolution,
+            horizon,
+            interval,
+            count,
+            scenario_count,
+            data,
+            name,
+        )?
+        .with_element_type(element_type))
+    }
+
     /// Declare the logical element type of the array. Validated on commit
     /// against the array's dtype and per-step shape.
     pub fn with_element_type(mut self, element_type: ElementType) -> Self {
@@ -1047,6 +1266,53 @@ impl TimeSeriesData {
             TimeSeriesData::Probabilistic(p) => &p.name,
             TimeSeriesData::Scenarios(s) => &s.name,
         }
+    }
+
+    /// The stored array of the wrapped series.
+    fn array(&self) -> &TypedArray {
+        match self {
+            TimeSeriesData::SingleTimeSeries(s) => &s.data,
+            TimeSeriesData::NonSequentialTimeSeries(s) => &s.data,
+            TimeSeriesData::Deterministic(d) => &d.data,
+            TimeSeriesData::Probabilistic(p) => &p.data,
+            TimeSeriesData::Scenarios(s) => &s.data,
+        }
+    }
+
+    /// Decode the wrapped array into the per-timestep values its element type
+    /// describes — the read-side counterpart of the `from_values` constructors,
+    /// and the reason a caller never has to know the row layouts.
+    ///
+    /// Entries are in row-major order over the leading axes, so for a
+    /// `Deterministic` entry `i * count + j` is window `j`'s step `i`.
+    ///
+    /// [`DecodedValues::Raw`] for every scalar element type and for any array
+    /// whose physical dtype is not `f64`: there the stored elements already are
+    /// the values, and the array itself is the answer.
+    ///
+    /// ```
+    /// # use infrastore_core::{DecodedValues, TimeSeriesData, XyPoint, SingleTimeSeries, Period};
+    /// # use chrono::{TimeZone, Utc, Duration};
+    /// # let curves = DecodedValues::PiecewiseLinear(vec![
+    /// #     vec![XyPoint { x: 0.0, y: 1.0 }, XyPoint { x: 1.0, y: 3.0 }],
+    /// #     vec![XyPoint { x: 0.0, y: 2.0 }],
+    /// # ]);
+    /// let series = SingleTimeSeries::from_values(
+    ///     Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
+    ///     Period::Fixed(Duration::hours(1)),
+    ///     &curves,
+    ///     "variable_cost",
+    /// )?;
+    /// let data = TimeSeriesData::SingleTimeSeries(series);
+    /// assert_eq!(data.decoded_values().unwrap(), curves);
+    /// # Ok::<(), String>(())
+    /// ```
+    pub fn decoded_values(&self) -> crate::Result<DecodedValues> {
+        codec::decode(
+            self.array(),
+            self.element_type(),
+            self.time_series_type().leading_dims(),
+        )
     }
 
     /// The element type of the wrapped series — always concrete, defaulting to
@@ -1918,5 +2184,136 @@ mod tests {
         assert_eq!(det.name(), "d");
         assert!(det.as_deterministic().is_some());
         assert!(det.as_single().is_none());
+    }
+
+    // ---- from_values / decoded_values -------------------------------------
+
+    fn curves() -> DecodedValues {
+        DecodedValues::PiecewiseLinear(vec![
+            vec![
+                crate::codec::XyPoint { x: 0.0, y: 1.0 },
+                crate::codec::XyPoint { x: 1.0, y: 3.0 },
+            ],
+            vec![crate::codec::XyPoint { x: 0.0, y: 2.0 }],
+            vec![],
+            vec![crate::codec::XyPoint { x: 2.0, y: 9.5 }],
+        ])
+    }
+
+    fn hour() -> Period {
+        Period::Fixed(Duration::hours(1))
+    }
+
+    /// The invariant the constructors exist for: whatever leading dims a type
+    /// stacks in front of the element shape, the values come back out of
+    /// `decoded_values` exactly as they went in, with an element type nobody
+    /// had to declare.
+    #[test]
+    fn from_values_round_trips_through_decoded_values_for_every_type() {
+        let ts = [
+            TimeSeriesData::SingleTimeSeries(
+                SingleTimeSeries::from_values(t0(), hour(), &curves(), "s").unwrap(),
+            ),
+            TimeSeriesData::NonSequentialTimeSeries(
+                NonSequentialTimeSeries::from_values(
+                    (0..4).map(|i| t0() + Duration::hours(i * 3)).collect(),
+                    &curves(),
+                    "n",
+                )
+                .unwrap(),
+            ),
+            // [H = 2, count = 2]
+            TimeSeriesData::Deterministic(
+                Deterministic::from_values(
+                    t0(),
+                    hour(),
+                    Period::Fixed(Duration::hours(2)),
+                    hour(),
+                    2,
+                    &curves(),
+                    "d",
+                )
+                .unwrap(),
+            ),
+            // [P = 2, H = 2, count = 1]
+            TimeSeriesData::Probabilistic(
+                Probabilistic::from_values(
+                    t0(),
+                    hour(),
+                    Period::Fixed(Duration::hours(2)),
+                    hour(),
+                    1,
+                    vec![0.1, 0.9],
+                    &curves(),
+                    "p",
+                )
+                .unwrap(),
+            ),
+            // [S = 2, H = 2, count = 1]
+            TimeSeriesData::Scenarios(
+                Scenarios::from_values(
+                    t0(),
+                    hour(),
+                    Period::Fixed(Duration::hours(2)),
+                    hour(),
+                    1,
+                    2,
+                    &curves(),
+                    "sc",
+                )
+                .unwrap(),
+            ),
+        ];
+        for data in ts {
+            let what = data.time_series_type().as_str();
+            assert_eq!(
+                data.element_type(),
+                ElementType::PiecewiseLinear,
+                "{what} did not derive its element type"
+            );
+            assert_eq!(
+                data.decoded_values().unwrap(),
+                curves(),
+                "{what} did not round-trip"
+            );
+        }
+    }
+
+    #[test]
+    fn from_values_rejects_values_that_do_not_fill_the_leading_dims() {
+        // 4 curves cannot fill [H = 2, count = 3].
+        let err = Deterministic::from_values(
+            t0(),
+            hour(),
+            Period::Fixed(Duration::hours(2)),
+            hour(),
+            3,
+            &curves(),
+            "d",
+        )
+        .unwrap_err();
+        assert!(err.contains("4 decoded timesteps"), "{err}");
+
+        // The timestamp count is still checked against the values.
+        let err = NonSequentialTimeSeries::from_values(vec![t0()], &curves(), "n").unwrap_err();
+        assert!(err.contains("does not match data length"), "{err}");
+    }
+
+    #[test]
+    fn from_values_refuses_raw_and_names_the_alternative() {
+        let err =
+            SingleTimeSeries::from_values(t0(), hour(), &DecodedValues::Raw, "s").unwrap_err();
+        assert!(err.contains("carries no values"), "{err}");
+        assert!(err.contains("TypedArray"), "{err}");
+    }
+
+    /// A scalar series has no logical structure to decode, so the array itself
+    /// stays the answer — the case a caller must not mistake for "no values".
+    #[test]
+    fn decoded_values_is_raw_for_a_plain_numeric_series() {
+        let single = SingleTimeSeries::new(t0(), hour(), arr(vec![4]), "s");
+        assert_eq!(single.element_type, ElementType::Scalar(Dtype::F64));
+        let data = TimeSeriesData::SingleTimeSeries(single);
+        assert_eq!(data.decoded_values().unwrap(), DecodedValues::Raw);
     }
 }

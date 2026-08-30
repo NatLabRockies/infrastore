@@ -91,12 +91,21 @@ records what its bytes mean.
 
 Each binding ships a reference codec between the stored bytes and per-timestep values:
 
-- **Rust** — `infrastore_core::{decode, encode}` over `TypedArray` + `ElementType`, used by the CLI
-  for human-readable dumps.
-- **Python** — `infrastore.decode_element_values(array, element_type, leading_dims)`.
+- **Rust** — `infrastore_core::{decode, encode}` over `TypedArray` + `ElementType`. Prefer the
+  paired forms: every value type has a `from_values` constructor that encodes the values _and_
+  declares the element type they imply, and `TimeSeriesData::decoded_values` reads them back. An
+  `element_type` and the array it describes are two things a caller can get out of step — the store
+  rejects the mismatch on write, but deriving both from one set of values means there is none to
+  reject.
+- **Python** — `infrastore.decode_element_values(array, element_type, leading_dims)`. Decode only; a
+  write still encodes by hand and declares `element_type=`.
 - **TypeScript** — `@infrastore/codec`, which decodes a gRPC response's `value_bytes` + `shape` +
   `element_type` directly into plottable values.
-- **Julia** — InfrastructureSystems.jl decodes straight to its own `FunctionData` types.
+- **Julia** — no codec yet. A read hands back the raw array with its `element_type` beside it, and
+  InfrastructureSystems.jl decodes to its own `FunctionData` types.
+
+The CLI is deliberately not on that list: it renders function-data rows as their raw padded numbers
+rather than decoding them.
 
 `conformance/element_type_vectors.json` at the repo root pins encoded bytes against expected decoded
 values for every element type, static and forecast. It is generated from `infrastore-core`'s

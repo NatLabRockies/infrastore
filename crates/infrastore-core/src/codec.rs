@@ -72,6 +72,28 @@ pub enum DecodedValues {
     PiecewiseStep(Vec<StepFunction>),
 }
 
+impl DecodedValues {
+    /// How many timesteps these values describe.
+    ///
+    /// `0` for [`Self::Raw`], which carries no values of its own — the stored
+    /// array is the answer there, and its `length` is on the array.
+    pub fn len(&self) -> usize {
+        match self {
+            DecodedValues::Raw => 0,
+            DecodedValues::Tuple(rows) => rows.len(),
+            DecodedValues::LinearFunction(rows) => rows.len(),
+            DecodedValues::QuadraticFunction(rows) => rows.len(),
+            DecodedValues::PiecewiseLinear(rows) => rows.len(),
+            DecodedValues::PiecewiseStep(rows) => rows.len(),
+        }
+    }
+
+    /// Whether there are no timesteps. Always true for [`Self::Raw`].
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 /// Decode `array` according to `element_type`.
 ///
 /// `leading_dims` is how many leading axes precede the per-step element shape —
