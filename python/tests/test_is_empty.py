@@ -37,10 +37,10 @@ def test_fresh_store_is_empty():
 
 def test_time_series_alone_is_not_empty():
     store = _store()
-    key = store.add_time_series(1, "Generator", OwnerCategory.Component, _sts()).key
+    key = store.add_time_series(1, "Generator", OwnerCategory.Component, _sts())
     assert not store.is_empty()
 
-    store.remove_time_series(key)
+    store.remove_by_ids([key])
     assert store.is_empty()
 
 
@@ -67,13 +67,13 @@ def test_parent_child_associations_alone_are_not_empty():
 
 def test_no_single_table_short_circuits_the_answer():
     store = _store()
-    key = store.add_time_series(1, "Generator", OwnerCategory.Component, _sts()).key
+    key = store.add_time_series(1, "Generator", OwnerCategory.Component, _sts())
     store.add_supplemental_attribute_association(
         SupplementalAttributeAssociation(1, "Generator", 10, "GeographicInfo")
     )
     store.add_parent_child_association(ParentChildAssociation(1, "Generator", 20, "Bus"))
 
-    store.remove_time_series(key)
+    store.remove_by_ids([key])
     assert not store.is_empty()
     store.remove_supplemental_attribute_associations()
     assert not store.is_empty()

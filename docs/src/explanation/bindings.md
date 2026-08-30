@@ -70,12 +70,12 @@ The conventions that shape the Julia API:
 - **Features cross as JSON.** Julia serializes the feature dict to a JSON string, which the FFI
   layer parses into a `Features` map.
 - **Forecasts are wrapped.** `InfraStore.jl` exposes `Deterministic` / `Probabilistic` / `Scenarios`
-  structs passed to the generic `add_time_series!`, type-dispatched `get_time_series(Type, …)`
-  getters, and `transform_single_time_series!`, so all four forecast types are usable from Julia.
-- **Bulk reads use a result handle.** `bulk_read` reads many full `SingleTimeSeries` at once: the
+  structs passed to the generic `add_time_series!`, id-addressed `read_by_id` getters, and
+  `transform_single_time_series!`, so all four forecast types are usable from Julia.
+- **Bulk reads use a result handle.** `read_by_ids` reads many full `SingleTimeSeries` at once: the
   FFI fetches them in one decompress-once pass per dataset into a `InfraStoreBulkReadHandle`
   (`infrastore_store_bulk_read_single`), and Julia reads each element out, then frees the handle.
-  Python's `store.bulk_read` exposes the same operation directly. `read_by_ids` addresses the same
+  Python's `store.read_by_ids` exposes the same operation directly. `read_by_ids` addresses the same
   read by catalog association id and fills the same handle, so both reads decode by the same route:
   `infrastore_bulk_result_item_name` hands each item's name back beside its values, as
   `infrastore_bulk_result_item_type` does its type. Managed bulk _writes_ already take the fast
@@ -95,7 +95,7 @@ features accept string values so InfrastructureSystems.jl's feature dictionaries
 unchanged. The FFI exposes attribute-based accessors (`infrastore_store_has_by_attrs`,
 `infrastore_store_remove_by_ids`), a whole-record metadata read
 (`infrastore_store_get_metadata_by_key`, reachable from attributes through
-`infrastore_make_key_from_attrs`), and a hash-based array fetch
+`infrastore_store_list_metadata`), and a hash-based array fetch
 (`infrastore_store_get_array_by_hash`) so an InfrastructureSystems.jl-side store can keep its own
 key objects and reach the array layer directly.
 
@@ -132,7 +132,7 @@ See the [Use the `infrastore` CLI how-to](../how-to/use-cli.md) and the
 
 | Concern            | Single source of truth                                           |
 | ------------------ | ---------------------------------------------------------------- |
-| Types & validation | `infrastore-core` (`Store`, `TimeSeriesKey`, `Features`)         |
+| Types & validation | `infrastore-core` (`Store`, `TimeSeriesId`, `Features`)          |
 | On-disk format     | `Hdf5Backend` + `MetadataStore` — identical regardless of caller |
 | Hashing            | `array_hash` / `features_hash` — the cross-language contract     |
 | Error taxonomy     | `TimeSeriesError`, re-projected into each language's idiom       |

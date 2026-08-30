@@ -206,44 +206,6 @@ class Scenarios:
     def __eq__(self, value: object) -> bool: ...
     def __len__(self) -> int: ...
 
-# ---- Keys ------------------------------------------------------------------
-
-@final
-class AddedTimeSeries:
-    """What a write reports: the key naming the series, and the catalog id it
-    was filed under.
-
-    The id is never reissued once its row is deleted, so it is safe to persist
-    as a reference. It is not a field on ``TimeSeriesKey`` because a key is also
-    an argument to ``get``/``remove``, where an id means nothing.
-    """
-
-    @property
-    def key(self) -> TimeSeriesKey: ...
-    @property
-    def id(self) -> int: ...
-    def __eq__(self, value: object) -> bool: ...
-    def __hash__(self) -> int: ...
-    def __repr__(self) -> str: ...
-
-class TimeSeriesKey:
-    @property
-    def owner_id(self) -> int: ...
-    @property
-    def owner_category(self) -> OwnerCategory: ...
-    @property
-    def time_series_type(self) -> TimeSeriesType: ...
-    @property
-    def name(self) -> str: ...
-    @property
-    def resolution(self) -> str | None: ...
-    @property
-    def interval(self) -> str | None: ...
-    @property
-    def features(self) -> dict[str, int | float | bool | str]: ...
-    def __eq__(self, value: object) -> bool: ...
-    def __hash__(self) -> int: ...
-
 # ---- Associations ----------------------------------------------------------
 
 @final
@@ -302,7 +264,7 @@ class StaticReader:
 @final
 class ForecastReader:
     def timeline(self) -> dict[str, Any]: ...
-    def entries(self) -> list[TimeSeriesKey]: ...
+    def entries(self) -> list[int]: ...
     def timestamps(self) -> list[datetime]: ...
     def entry_values(self, index: int) -> NDArray[Any]: ...
     def num_slots(self) -> int: ...
@@ -377,13 +339,15 @@ class Store:
         unit_system: str | None = None,
         time_reference: str | None = None,
         component_field: str | None = None,
-    ) -> AddedTimeSeries: ...
-    def add_time_series_bulk(
-        self, items: list[dict[str, Any]]
-    ) -> list[AddedTimeSeries]: ...
+    ) -> int: ...
+    def add_time_series_bulk(self, items: list[dict[str, Any]]) -> list[int]: ...
     def get_metadata_by_id(self, id: int) -> dict[str, Any] | None: ...
+    def list_metadata_by_ids(self, ids: list[int]) -> list[dict[str, Any]]: ...
     def association_exists(self, id: int) -> bool: ...
     def read_by_ids(self, ids: list[int]) -> list[TimeSeriesData]: ...
+    def read_by_ids_range(
+        self, ids: list[int], time_range: tuple[datetime, datetime]
+    ) -> list[TimeSeriesData]: ...
     def read_by_id(
         self,
         id: int,
@@ -400,8 +364,6 @@ class Store:
         owner_category: OwnerCategory | None = None,
         resolution: Period | None = None,
     ) -> int: ...
-    def remove_time_series(self, key: TimeSeriesKey) -> None: ...
-    def remove_time_series_bulk(self, keys: list[TimeSeriesKey]) -> int: ...
     def remove_by_ids(self, ids: list[int]) -> int: ...
     def remove_by_filter(
         self,
@@ -432,13 +394,13 @@ class Store:
     ) -> int: ...
     def copy_time_series(
         self,
-        src: TimeSeriesKey,
+        src: int,
         dst_owner_id: int,
         dst_owner_type: str,
         *,
         new_name: str | None = None,
-    ) -> TimeSeriesKey: ...
-    def rename_time_series(self, key: TimeSeriesKey, new_name: str) -> TimeSeriesKey: ...
+    ) -> int: ...
+    def rename_time_series(self, id: int, new_name: str) -> None: ...
     def persist_to(self, path: str) -> None: ...
     def persist_catalog(self) -> None: ...
     def compact(self) -> dict[str, Any]: ...
@@ -453,43 +415,11 @@ class Store:
     def transaction(self) -> Transaction: ...
 
     # -- reads --
-    def get_time_series(
-        self,
-        key: TimeSeriesKey,
-        *,
-        time_range: tuple[datetime, datetime] | None = None,
-    ) -> TimeSeriesData: ...
-    def bulk_read(
-        self,
-        keys: list[TimeSeriesKey],
-        *,
-        time_range: tuple[datetime, datetime] | None = None,
-    ) -> list[TimeSeriesData]: ...
-    def get_metadata(self, key: TimeSeriesKey) -> dict[str, Any]: ...
+    #
+    # A series is addressed by its catalog association id. `list_metadata` is
+    # the identify half, and its rows carry the `id` these take.
     def get_array_by_hash(self, data_hash: str) -> NDArray[Any]: ...
     def count_array_references(self, data_hash: str) -> dict[str, Any]: ...
-    def resolve_metadata(
-        self,
-        owner_id: int,
-        owner_category: OwnerCategory,
-        name: str,
-        requested_type: TimeSeriesType,
-        *,
-        resolution: Period | None = None,
-        interval: Period | None = None,
-        features: dict[str, int | float | bool | str] | None = None,
-    ) -> dict[str, Any]: ...
-    def resolve_id(
-        self,
-        owner_id: int,
-        owner_category: OwnerCategory,
-        name: str,
-        requested_type: TimeSeriesType,
-        *,
-        resolution: Period | None = None,
-        interval: Period | None = None,
-        features: dict[str, int | float | bool | str] | None = None,
-    ) -> int: ...
 
     # -- readers --
     def build_static_reader(
@@ -524,7 +454,12 @@ class Store:
     def forecast_read(self, reader: ForecastReader, when: datetime) -> None: ...
 
     # -- listing / discovery --
-    def list_time_series(
+    #
+    # `list_metadata` is the identify half of the surface: each row says
+    # which series it is and carries the `id` that addresses it. It
+    # replaced the three key-shaped listings, which were this one query
+    # projected differently.
+    def list_metadata(
         self,
         *,
         owner_id: int | None = None,
@@ -539,36 +474,6 @@ class Store:
         interval: Period | None = None,
         features: dict[str, int | float | bool | str] | None = None,
     ) -> list[dict[str, Any]]: ...
-    def list_array_groups(
-        self,
-        *,
-        owner_id: int | None = None,
-        owner_category: OwnerCategory | None = None,
-        owner_type: str | None = None,
-        time_series_type: TimeSeriesType | None = None,
-        name: str | None = None,
-        name_glob: str | None = None,
-        component_field: str | None = None,
-        zoneless: bool | None = None,
-        resolution: Period | None = None,
-        interval: Period | None = None,
-        features: dict[str, int | float | bool | str] | None = None,
-    ) -> list[dict[str, Any]]: ...
-    def list_keys(
-        self,
-        *,
-        owner_id: int | None = None,
-        owner_category: OwnerCategory | None = None,
-        owner_type: str | None = None,
-        time_series_type: TimeSeriesType | None = None,
-        name: str | None = None,
-        name_glob: str | None = None,
-        component_field: str | None = None,
-        zoneless: bool | None = None,
-        resolution: Period | None = None,
-        interval: Period | None = None,
-        features: dict[str, int | float | bool | str] | None = None,
-    ) -> list[TimeSeriesKey]: ...
     def list_names(
         self,
         *,
@@ -599,12 +504,6 @@ class Store:
         interval: Period | None = None,
         features: dict[str, int | float | bool | str] | None = None,
     ) -> list[str]: ...
-    def get_time_series_keys(
-        self,
-        owner_id: int,
-        owner_category: OwnerCategory,
-    ) -> list[TimeSeriesKey]: ...
-    def has_time_series(self, key: TimeSeriesKey) -> bool: ...
     def has_any_time_series(
         self,
         *,

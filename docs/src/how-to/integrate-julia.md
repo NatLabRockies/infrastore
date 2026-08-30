@@ -90,7 +90,7 @@ key = add_time_series!(
     features=Dict("model_year" => 2030),
     units="MW",
 )
-got = get_time_series(store, key)
+got = read_by_id(store, id)
 @assert got.data == ts.data
 @assert got.name == "load"
 println("ok")

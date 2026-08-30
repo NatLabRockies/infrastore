@@ -392,7 +392,7 @@ fn flush(
         .map_err(|e| e.to_string())?;
     for (id, (ts_type, name, owner_id)) in keys.iter().zip(&echo) {
         added.push(AddedRow {
-            id: *id,
+            id: id.get(),
             time_series_type: ts_type,
             name: name.clone(),
             owner_id: *owner_id,

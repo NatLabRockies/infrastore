@@ -40,7 +40,7 @@ def add(store: Store, owner_id: int, base: float):
         owner_type="Generator",
         owner_category=OwnerCategory.Component,
         time_series=series(base),
-    ).key
+    )
 
 
 def test_rollback_undoes_a_mixed_add_and_remove_span():
@@ -50,17 +50,17 @@ def test_rollback_undoes_a_mixed_add_and_remove_span():
     with pytest.raises(RuntimeError, match="boom"):
         with store.transaction():
             add(store, 2, 100.0)
-            store.remove_time_series(k1)
+            store.remove_by_ids([k1])
             # Uncommitted work is visible inside the transaction, because reads
             # go through the same connection. No client-side overlay needed.
-            assert len(store.list_keys()) == 1
+            assert len(store.list_metadata()) == 1
             assert store.in_transaction
             raise RuntimeError("boom")
 
     assert not store.in_transaction
-    assert len(store.list_keys()) == 1
+    assert len(store.list_metadata()) == 1
     # Not just the catalog row: the array behind the removal survived.
-    restored = store.get_time_series(k1)
+    restored = store.read_by_id(k1)
     assert restored.data[0] == 0.0
 
 
@@ -69,7 +69,7 @@ def test_commit_makes_the_span_durable():
     with store.transaction():
         add(store, 1, 0.0)
         add(store, 2, 100.0)
-    assert len(store.list_keys()) == 2
+    assert len(store.list_metadata()) == 2
     assert not store.in_transaction
 
 
@@ -79,9 +79,9 @@ def test_commit_applies_deferred_frees():
     add(store, 2, 100.0)
 
     with store.transaction():
-        store.remove_time_series(k1)
+        store.remove_by_ids([k1])
 
-    assert len(store.list_keys()) == 1
+    assert len(store.list_metadata()) == 1
     # A committed removal reclaims its array exactly as an untransacted one would.
     assert store.num_distinct_arrays() == 1
 
@@ -90,7 +90,7 @@ def test_enter_binds_the_store():
     store = Store.create(in_memory=True)
     with store.transaction() as bound:
         add(bound, 1, 0.0)
-    assert len(store.list_keys()) == 1
+    assert len(store.list_metadata()) == 1
 
 
 def test_nesting_inner_rollback_leaves_outer_open():
@@ -102,8 +102,8 @@ def test_nesting_inner_rollback_leaves_outer_open():
                 add(store, 2, 100.0)
                 raise RuntimeError("inner")
         assert store.in_transaction
-        assert len(store.list_keys()) == 1
-    assert len(store.list_keys()) == 1
+        assert len(store.list_metadata()) == 1
+    assert len(store.list_metadata()) == 1
 
 
 def test_outer_rollback_discards_committed_inner_transactions():
@@ -113,7 +113,7 @@ def test_outer_rollback_discards_committed_inner_transactions():
             with store.transaction():
                 add(store, 1, 0.0)
             raise RuntimeError("outer")
-    assert len(store.list_keys()) == 0
+    assert len(store.list_metadata()) == 0
     assert store.num_distinct_arrays() == 0
 
 
@@ -147,12 +147,12 @@ def test_rollback_survives_a_reopen(tmp_path):
     with pytest.raises(RuntimeError):
         with store.transaction():
             add(store, 2, 100.0)
-            store.remove_time_series(k1)
+            store.remove_by_ids([k1])
             raise RuntimeError("boom")
     store.flush()
     del store
 
     reopened = Store.open(path=str(path), read_only=True)
-    keys = reopened.list_keys()
+    keys = reopened.list_metadata()
     assert len(keys) == 1
-    assert reopened.get_time_series(keys[0]).data[0] == 0.0
+    assert reopened.read_by_id(keys[0]["id"]).data[0] == 0.0

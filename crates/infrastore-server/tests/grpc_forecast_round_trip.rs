@@ -104,6 +104,31 @@ fn add_scen_forecast(store: &mut Store) {
 
 // ---- Deterministic ----
 
+/// The catalog ids of every series an owner holds, in catalog order.
+///
+/// The wire has no key: `list_metadata` is the identify half and every row
+/// carries the id the read half takes.
+async fn owner_ids(client: &RemoteClient, owner: i64) -> Vec<infrastore_core::TimeSeriesId> {
+    client
+        .list_metadata(
+            Some(owner),
+            Some(OwnerCategory::Component),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|m| m.id.expect("a served row carries its id"))
+        .collect()
+}
+
 #[tokio::test]
 async fn deterministic_full_round_trip_over_grpc() {
     let mut store = create_store(None, true).unwrap();
@@ -112,16 +137,10 @@ async fn deterministic_full_round_trip_over_grpc() {
     let addr = spawn_server(store).await;
     let client = RemoteClient::connect(addr).await.unwrap();
 
-    let keys = client
-        .get_time_series_keys(1, OwnerCategory::Component)
-        .await
-        .unwrap();
-    assert_eq!(keys.len(), 1);
+    let ids = owner_ids(&client, 1).await;
+    assert_eq!(ids.len(), 1);
 
-    let data = client
-        .get_time_series(keys[0].identity(), None)
-        .await
-        .unwrap();
+    let data = client.read_by_id(ids[0], None).await.unwrap();
     let det = data.as_deterministic().expect("expected Deterministic");
     assert_eq!(det.count, 6);
     assert_eq!(det.data.shape, vec![4, 6]);
@@ -144,10 +163,7 @@ async fn deterministic_time_range_over_grpc() {
     let addr = spawn_server(store).await;
     let client = RemoteClient::connect(addr).await.unwrap();
 
-    let keys = client
-        .get_time_series_keys(1, OwnerCategory::Component)
-        .await
-        .unwrap();
+    let ids = owner_ids(&client, 1).await;
 
     // Windows start at t0 + k*2h. Select windows 2,3,4 (start=t0+4h, end=t0+10h).
     let t0 = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
@@ -155,7 +171,7 @@ async fn deterministic_time_range_over_grpc() {
     let end = t0 + Duration::hours(10); // window index 5 (exclusive)
 
     let data = client
-        .get_time_series(keys[0].identity(), Some((start, end).into()))
+        .read_by_id(ids[0], Some((start, end).into()))
         .await
         .unwrap();
     let det = data.as_deterministic().expect("expected Deterministic");
@@ -178,16 +194,10 @@ async fn probabilistic_full_round_trip_over_grpc() {
     let addr = spawn_server(store).await;
     let client = RemoteClient::connect(addr).await.unwrap();
 
-    let keys = client
-        .get_time_series_keys(2, OwnerCategory::Component)
-        .await
-        .unwrap();
-    assert_eq!(keys.len(), 1);
+    let ids = owner_ids(&client, 2).await;
+    assert_eq!(ids.len(), 1);
 
-    let data = client
-        .get_time_series(keys[0].identity(), None)
-        .await
-        .unwrap();
+    let data = client.read_by_id(ids[0], None).await.unwrap();
     let prob = data.as_probabilistic().expect("expected Probabilistic");
     assert_eq!(prob.count, 5);
     assert_eq!(prob.data.shape, vec![3, 4, 5]);
@@ -206,10 +216,7 @@ async fn probabilistic_time_range_over_grpc() {
     let addr = spawn_server(store).await;
     let client = RemoteClient::connect(addr).await.unwrap();
 
-    let keys = client
-        .get_time_series_keys(2, OwnerCategory::Component)
-        .await
-        .unwrap();
+    let ids = owner_ids(&client, 2).await;
 
     // Windows start at t0 + k*2h. Select windows 1,2 (start=t0+2h, end=t0+6h).
     let t0 = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
@@ -217,7 +224,7 @@ async fn probabilistic_time_range_over_grpc() {
     let end = t0 + Duration::hours(6);
 
     let data = client
-        .get_time_series(keys[0].identity(), Some((start, end).into()))
+        .read_by_id(ids[0], Some((start, end).into()))
         .await
         .unwrap();
     let prob = data.as_probabilistic().expect("expected Probabilistic");
@@ -240,16 +247,10 @@ async fn scenarios_full_round_trip_over_grpc() {
     let addr = spawn_server(store).await;
     let client = RemoteClient::connect(addr).await.unwrap();
 
-    let keys = client
-        .get_time_series_keys(3, OwnerCategory::Component)
-        .await
-        .unwrap();
-    assert_eq!(keys.len(), 1);
+    let ids = owner_ids(&client, 3).await;
+    assert_eq!(ids.len(), 1);
 
-    let data = client
-        .get_time_series(keys[0].identity(), None)
-        .await
-        .unwrap();
+    let data = client.read_by_id(ids[0], None).await.unwrap();
     let scen = data.as_scenarios().expect("expected Scenarios");
     assert_eq!(scen.count, 5);
     assert_eq!(scen.scenario_count, 4);
@@ -268,10 +269,7 @@ async fn scenarios_time_range_over_grpc() {
     let addr = spawn_server(store).await;
     let client = RemoteClient::connect(addr).await.unwrap();
 
-    let keys = client
-        .get_time_series_keys(3, OwnerCategory::Component)
-        .await
-        .unwrap();
+    let ids = owner_ids(&client, 3).await;
 
     // Windows start at t0 + k*2h. Select windows 0,1 (start=t0, end=t0+4h).
     let t0 = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
@@ -279,7 +277,7 @@ async fn scenarios_time_range_over_grpc() {
     let end = t0 + Duration::hours(4);
 
     let data = client
-        .get_time_series(keys[0].identity(), Some((start, end).into()))
+        .read_by_id(ids[0], Some((start, end).into()))
         .await
         .unwrap();
     let scen = data.as_scenarios().expect("expected Scenarios");
@@ -324,43 +322,47 @@ async fn forecast_parameters_empty_store_over_grpc() {
 }
 
 #[tokio::test]
-async fn resolve_forecast_key_and_bulk_over_grpc() {
+async fn the_deterministic_family_resolves_to_its_concrete_row_over_grpc() {
     let mut store = infrastore_core::create_store(None, true).unwrap();
     add_det_forecast(&mut store); // owner 1, "price", Deterministic
     let addr = spawn_server(store).await;
     let client = RemoteClient::connect(addr).await.unwrap();
 
-    // Resolve the abstract-deterministic family to the concrete key.
-    let key = client
-        .resolve_forecast_key(
-            1,
-            OwnerCategory::Component,
-            "price",
+    // Asking for the abstract-deterministic family selects the concrete stored
+    // row: the filter's type is read through `TimeSeriesType::accepts`, so
+    // `Deterministic` spans a stored `DeterministicSingleTimeSeries` too, and
+    // the row that comes back reports which form actually matched. There is no
+    // resolver RPC — a caller wanting exactly one poses the filter and checks.
+    let rows = client
+        .list_metadata(
+            Some(1),
+            Some(OwnerCategory::Component),
+            None,
+            Some(infrastore_core::TimeSeriesType::Deterministic),
+            Some("price".to_string()),
             None,
             None,
-            Features::new(),
-            infrastore_core::TimeSeriesType::Deterministic,
+            None,
+            None,
+            None,
         )
         .await
         .unwrap();
+    assert_eq!(rows.len(), 1, "the family resolves to exactly one row");
+    let row = &rows[0];
     assert_eq!(
-        key.time_series_type(),
+        row.time_series_type,
         infrastore_core::TimeSeriesType::Deterministic
     );
 
-    // Full-key snapshot carries horizon + count for a forecast key.
-    match &key {
-        infrastore_core::TimeSeriesKey::Forecast(f) => {
-            assert_eq!(f.count, 6);
-            assert_eq!(f.horizon, Period::Fixed(Duration::hours(4)));
-        }
-        other => panic!("expected Forecast key, got {other:?}"),
-    }
+    // The row carries the forecast snapshot a key used to, so nothing needs a
+    // second call to learn the windowing.
+    assert_eq!(row.count, Some(6));
+    assert_eq!(row.horizon, Some(Period::Fixed(Duration::hours(4))));
 
-    // BulkRead the resolved forecast.
-    let ids = [key.identity().clone()];
-    let refs: Vec<_> = ids.iter().collect();
-    let datas = client.bulk_read(&refs, None).await.unwrap();
+    // Read it back through the id the row handed over.
+    let id = row.id.expect("a served row carries its id");
+    let datas = client.read_by_ids(&[id], None).await.unwrap();
     assert_eq!(datas.len(), 1);
     assert!(datas[0].as_deterministic().is_some());
 

@@ -24,8 +24,8 @@ export INFRASTORE_LIB=$PWD/target/release/libinfrastore_ffi.dylib  # .so on Linu
 
 Exported names include `Store`, `SingleTimeSeries`, `NonSequentialTimeSeries`, the forecast structs
 (`Deterministic`, `Probabilistic`, `Scenarios`), `OwnerCategory` (`Component`,
-`SupplementalAttribute`), the `add_time_series!` / `get_time_series` / `get_metadata` family, and
-`transform_single_time_series!`. The store type is named **`Store`**.
+`SupplementalAttribute`), the `add_time_series!` / `get_time_series` / `get_metadata_by_id` family,
+and `transform_single_time_series!`. The store type is named **`Store`**.
 
 ## Open or Create a Store
 
@@ -74,8 +74,8 @@ added = add_time_series!(
     features = Dict("model_year" => 2030),
     units = "MW",
 )
-key = added.key   # TimeSeriesKey
-added.id          # the catalog row's id: one integer to keep in your own model
+# `id` is the catalog row's id: how every read, removal and rename addresses
+# the series, and one integer to keep in your own model.
 ```
 
 Notes:
@@ -84,13 +84,12 @@ Notes:
 - **`resolution` is a `Period`** such as `Hour(1)` or `Minute(5)`.
 - **`features`** is a `Dict` serialized to JSON, so values must be JSON scalars (`Int`, `Float64`,
   `Bool`, `String`). String features are supported and round-trip unchanged.
-- Adding a duplicate [key](../explanation/data-model.md#keys) throws `DuplicateTimeSeriesError`.
+- Adding a duplicate [identity](../explanation/data-model.md#identity) throws
+  `DuplicateTimeSeriesError`.
 
-`add_time_series!` returns an `AddedTimeSeries`: its `key` is a `TimeSeriesKey` holding an opaque
-handle into the store, and its `id` is the catalog row's id (see
-[Association ids](../explanation/data-model.md#association-ids)). Every function taking a
-`TimeSeriesKey` also accepts the `AddedTimeSeries` directly, so `get_time_series(store, added)`
-works without unwrapping.
+`add_time_series!` returns the catalog row's `id` as an `Int64` (see
+[Association ids](../explanation/data-model.md#association-ids)). Every read, removal, rename and
+copy takes that id; `list_metadata` is how you recover one for a series you did not just write.
 
 Two more rules worth knowing up front. **Stored instants and periods are millisecond-precision**: a
 `Microsecond(1)` resolution, a `Millisecond(0)` one, or a negative period is refused with
@@ -138,8 +137,7 @@ batch = AddBatch()
 for (id, ts) in series
     add_time_series!(batch, id, "Generator", Component, ts; units = "MW")
 end
-added = add_time_series_bulk!(store, batch)   # Vector{AddedTimeSeries}, in input order; all-or-nothing
-keys = [a.key for a in added]
+ids = add_time_series_bulk!(store, batch)   # Vector{Int64}, in input order; all-or-nothing
 ```
 
 ### Transactions
@@ -150,8 +148,8 @@ immediately.
 
 ```julia
 transaction(store) do
-    new_key = add_time_series!(store, 42, "Generator", Component, updated)
-    remove_time_series!(store, old_key)
+    new_id = add_time_series!(store, 42, "Generator", Component, updated)
+    remove_by_ids!(store, [old_id])
 end   # committed if the block returns, rolled back if it throws
 ```
 
@@ -163,19 +161,22 @@ explicit form.
 ## Read a Series
 
 ```julia
-got = get_time_series(store, key)
+got = read_by_id(store, id)
 @assert got.data == ts.data
 println(got.initial_timestamp, " ", got.resolution)   # resolution comes back as Millisecond
 ```
 
-To read **many whole series at once** — e.g. loading everything for a plot — `bulk_read` takes a
-vector of keys and returns one struct per key in the same order (each of its stored type, so the
+`read_by_id` also takes a window — `start_time` plus a `len` of timesteps or a `count` of windows —
+which is **checked**: an over-long request throws rather than quietly returning less.
+
+To read **many whole series at once** — e.g. loading everything for a plot — `read_by_ids` takes a
+vector of ids and returns one struct per id in the same order (each of its stored type, so the
 result is a `Vector{Any}`), reading each packed dataset's column span once instead of re-reading
-every chunk per series:
+every chunk per series. Its `time_range` keyword is the other kind of slice, which **clips**:
 
 ```julia
-series = bulk_read(store, keys)   # keys :: Vector{TimeSeriesKey}
-window = bulk_read(store, keys; time_range = (t0, t1))   # the same slice of every key
+series = read_by_ids(store, ids)
+window = read_by_ids(store, ids; time_range = (t0, t1))   # the same clip on every series
 ```
 
 ## Attribute-Based Lookups
@@ -184,7 +185,7 @@ Beyond key handles, `InfraStore.jl` can resolve a series directly from its attri
 when a caller keeps its own identifiers (as an InfrastructureSystems.jl-side store does):
 
 ```julia
-meta = get_metadata(
+meta = get_metadata_by_id(
     store,
     42,
     Component,        # owner_category; the owner is the (owner_id, owner_category) pair
@@ -197,17 +198,15 @@ meta = get_metadata(
 #          horizon/interval/count, percentiles, element_type, element_shape, features,
 #          units, quantity_kind, unit_system, component_field, application_data
 
-# Any other stored type: pass it first, exactly as get_time_series does. Omitting
-# the type reads a SingleTimeSeries.
-scen = get_metadata(Scenarios, store, 42, Component, "wind"; resolution = Hour(1))
-
 values = get_array_by_hash(store, meta.data_hash)     # Vector{Float64}; pass ::Type{T} for other dtypes
 
-# Reads and removals take an id, which `resolve_id` gets from the attributes:
-id = resolve_id(SingleTimeSeries, store, 42, Component, "load";
-                resolution = Hour(1), features = Dict("model_year" => 2030))
-got = read_by_id(store, id)
-remove_by_ids!(store, [id])
+# Identify, then act. `list_metadata` answers which series exist and hands back
+# the id; every read and removal takes that id.
+row = only(list_metadata(store, owner_id = 42, name = "load",
+                         resolution = Hour(1),
+                         exact_features = Dict("model_year" => 2030)))
+got = read_by_id(store, row.id)
+remove_by_ids!(store, [row.id])
 
 # `has_time_series` stays attribute-addressed: it is an index probe that reads no
 # row, so routing it through a resolution would cost more than it answers.
@@ -215,15 +214,10 @@ present = has_time_series(store, 42, Component, "load";
                           resolution = Hour(1), features = Dict("model_year" => 2030))
 ```
 
-These attribute forms match the feature map **exactly** — the series above was added with
-`model_year = 2030`, so omitting `features` here is a `NotFoundError`, not a wildcard. The
-list/filter forms (`list_keys`, `has_any_time_series`, `remove_by_filter!`) match features as a
-subset instead and may return several rows; a package that resolves partial user queries lists, then
-decides what more than one match means.
-
-`get_time_series`, `has_time_series`, and `remove_time_series!` all accept either a `TimeSeriesKey`
-or `(owner_id, owner_category, name; resolution, features)` attributes — the conventions are
-interchangeable for every time series type, static or forecast.
+`exact_features` matches the feature map **exactly** — the series above was added with
+`model_year = 2030`, so `features` (a subset match) would also select a sibling carrying more. The
+plain `features` keyword is the right one for "every series tagged `scenario = high`"; a package
+that resolves partial user queries lists, then decides what more than one match means.
 
 ## Forecasts
 
@@ -243,28 +237,23 @@ key = add_time_series!(
     units = "MW",
 )
 
-got = get_time_series(Deterministic, store, 42, Component, "load_fc"; resolution = Hour(1))
-values = got.data   # Float64 matrix, shape (24, 7)
-
-# Same forecast, read by the key returned from add_time_series! — forecasts and
-# static series both support the key-based and attribute-based conventions.
-got_by_key = get_time_series(Deterministic, store, key)
+got = read_by_id(store, id)   # the id add_time_series! returned
+values = got.data             # Float64 matrix, shape (24, 7)
 ```
 
 `Probabilistic(initial_timestamp, resolution, horizon, interval, count, percentiles, data, name)`
 carries the percentile vector, and
 `Scenarios(initial_timestamp, resolution, horizon, interval, count, data, name)` takes
 `scenario_count` from `data`'s leading axis. Every forecast constructor also accepts a
-`application_data=` keyword. Read the corresponding type back with
-`get_time_series(Probabilistic, …)` / `get_time_series(Scenarios, …)`.
+`application_data=` keyword. A read names only an id, so the row's own type decides what comes back
+— there is no requested type to disagree with it.
 
 If two forecasts of one owner/name/type differ only by `interval` (say day-ahead and intra-day),
-pass `interval=` to pin the one you want; without it the read is ambiguous and throws
-`InvalidParameterError`:
+pass `interval=` to the listing to pin the one you want; without it it returns both:
 
 ```julia
-got = get_time_series(Deterministic, store, 42, Component, "load_fc";
-                      resolution = Hour(1), interval = Hour(6))
+row = only(list_metadata(store; owner_id = 42, name = "load_fc",
+                         resolution = Hour(1), interval = Hour(6)))
 ```
 
 A `DeterministicSingleTimeSeries` is not added directly — derive one from the stored
@@ -283,66 +272,42 @@ outcome = transform_single_time_series!(store, Hour(24), Hour(24);
 The two policy flags reproduce InfrastructureSystems.jl's rules (it passes both as `true`); see the
 [reference](../reference/julia-api.md#forecasts) for what each enforces.
 
-Requesting `Deterministic` also matches a transformed `DeterministicSingleTimeSeries`, so you read a
-forecast the same way whether it was added densely or derived (either returns a `Deterministic`,
-since a DST has no materialized struct):
+Filtering for `Deterministic` also matches a transformed `DeterministicSingleTimeSeries`, so you
+find a forecast the same way whether it was added densely or derived — and either reads back as a
+`Deterministic`, since a DST has no materialized struct. Each row still reports the concrete form it
+is, so `transform_single_time_series!` needs no separate enumeration path:
 
 ```julia
-fc = get_time_series(Deterministic, store, 42, Component, "load")
-```
-
-A genuine miss throws `NotFoundError`. To check which form you actually have, inspect the
-`time_series_type` on the key or metadata — or pass `DeterministicSingleTimeSeries` to select only
-the derived ones.
-
-`transform_single_time_series!` returns no keys, so to read a derived forecast by key, enumerate the
-owner's keys with `get_time_series_keys(store, owner_id, owner_category)` (the owner is the
-`(owner_id, owner_category)` pair) and use `key_info`, whose `time_series_type` is the actual Julia
-type — pass it straight to `get_time_series` (a `DeterministicSingleTimeSeries` reads back as a
-`Deterministic`):
-
-```julia
-for k in get_time_series_keys(store, 42, Component)
-    info = key_info(k)
-    series = get_time_series(info.time_series_type, store, k)
+for row in list_metadata(store; owner_id = 42, time_series_type = Deterministic)
+    row.time_series_type   # Deterministic or DeterministicSingleTimeSeries
+    series = read_by_id(store, row.id)   # a Deterministic either way
 end
 ```
 
-To address one series rather than enumerate an owner, `resolve_id` resolves attributes to its
-catalog association id — for any stored type, and validated against the catalog (a miss or an
-ambiguous match throws). The id is then what reads and removals take:
+`transform_single_time_series!` also reports the ids it wrote on its `TransformOutcome.written`, so
+a caller can reference a view it just derived without listing the store to find it again.
 
-```julia
-id = resolve_id(Scenarios, store, 42, Component, "wind"; resolution = Hour(1))
-window = read_by_id(store, id)
-```
-
-`resolve_metadata` is the same call returning the whole row, for when the concrete stored type, the
-grid, or the content hash is wanted alongside the id.
-
-(`list_keys` returns `KeyRow` description structs, not handles; use these two when you need a key to
-pass to a reader or `bulk_read`.)
-
-`has_time_series`, `remove_time_series!`, and `copy_time_series!` take the time series type as their
-first argument to address anything other than a `SingleTimeSeries` (and take the same `resolution` /
-`interval` / `features` keywords). `copy_time_series!` re-points a stored series at another owner
-without duplicating data — it writes one association row against the same content-addressed array,
-preserving the stored type (a DST stays a DST):
+`has_time_series` takes the time series type as its first argument to address anything other than a
+`SingleTimeSeries` (and takes the same `resolution` / `interval` / `features` keywords).
+`copy_time_series!` takes the source id and re-points that series at another owner without
+duplicating data — it writes one association row against the same content-addressed array,
+preserving the stored type (a DST stays a DST) — and returns the copy's own id:
 
 ```julia
 has_time_series(Scenarios, store, 42, Component, "wind"; resolution = Hour(1))
-copy_time_series!(SingleTimeSeries, store, 42, Component, "load", 43, "Generator")
+src = only(list_metadata(store; owner_id = 42, name = "load")).id
+copy_time_series!(store, src, 43, "Generator")
 ```
 
 Every `time_series_type` filter keyword takes the Julia type as well:
 
 ```julia
-list_keys(store; time_series_type = Deterministic)
+list_metadata(store; time_series_type = Deterministic)
 get_resolutions(store; time_series_type = SingleTimeSeries)
 ```
 
-The low-level `get_metadata` + `get_array_by_hash` path is still available for raw access. See the
-[Julia API reference](../reference/julia-api.md#forecasts).
+The low-level `get_metadata_by_id` + `get_array_by_hash` path is still available for raw access. See
+the [Julia API reference](../reference/julia-api.md#forecasts).
 
 ## Per-Timestamp Reads (Simulation Loop)
 
@@ -570,9 +535,9 @@ honor. The Julia-specific points:
   identity: the owner is the `(owner_id, owner_category)` pair, so a component and a supplemental
   attribute may share a numeric id and stay distinct. Owner-scoped calls take the category alongside
   the id.
-- The attribute-based accessors (`get_metadata`, `has_time_series`, `remove_time_series!`) plus
-  `get_array_by_hash` let an InfrastructureSystems.jl-side store keep its own key objects and reach
-  the array layer without holding a `TimeSeriesKey`.
+- The attribute-based existence probes (`has_time_series`, `has_any_time_series`) plus
+  `get_metadata_by_id` and `get_array_by_hash` let an InfrastructureSystems.jl-side store keep its
+  own object model — holding only the catalog id — and reach the array layer directly.
 - For the simulation read pattern — iterate every component's value at each timestamp, reading a
   forecast shared across components only once — use the readers
   ([Per-Timestamp Reads](#per-timestamp-reads-simulation-loop)). The `ForecastEntry.slot` /

@@ -7,25 +7,29 @@ package infrastore.v1;
 // All write operations (add, remove, clear, compact) require local filesystem
 // access and are NOT exposed through this service.
 service CatalogStore {
-  rpc ListTimeSeries     (ListReq)        returns (ListResp);
-  rpc GetTimeSeries      (GetReq)         returns (GetResp);
-  rpc GetResolutions     (ResolutionsReq) returns (ResolutionsResp);
-  rpc GetCounts          (CountsReq)      returns (CountsResp);
-  rpc GetForecastParameters (ForecastParamsReq) returns (ForecastParamsResp);
-  rpc HasTimeSeries      (HasReq)         returns (HasResp);
-  rpc VerifyIntegrity    (VerifyReq)      returns (VerifyResp);
+  // Identify: which series exist, and the id that addresses each.
+  rpc ListMetadata           (ListMetadataReq)           returns (ListMetadataResp);
+  rpc ListMetadataByIds      (ListMetadataByIdsReq)      returns (ListMetadataByIdsResp);
+  rpc GetMetadataById        (GetMetadataByIdReq)        returns (TimeSeriesMetadata);
+  rpc AssociationExists      (AssociationExistsReq)      returns (AssociationExistsResp);
+  rpc HasAnyTimeSeries       (HasAnyTimeSeriesReq)       returns (HasAnyTimeSeriesResp);
 
-  // Additive read surface (Phase 4.4).
-  rpc GetMetadata            (IdReq)                 returns (TimeSeriesMetadata);
-  rpc BulkRead               (BulkReadReq)           returns (BulkReadResp);
-  rpc GetDetailedCounts      (EmptyReq)              returns (DetailedCountsResp);
-  rpc GetCountsByType        (EmptyReq)              returns (CountsByTypeResp);
-  rpc ListOwnerIds           (ListOwnerIdsReq)       returns (ListOwnerIdsResp);
-  rpc GetIntervals           (IntervalsReq)          returns (IntervalsResp);
-  rpc GetStaticSummary       (EmptyReq)              returns (StaticSummaryResp);
-  rpc GetForecastSummary     (EmptyReq)              returns (ForecastSummaryResp);
-  rpc CheckStaticConsistency (ConsistencyReq)        returns (ConsistencyResp);
-  rpc ResolveMetadata        (ResolveMetadataReq)    returns (TimeSeriesMetadata);
+  // Act: every read takes the id an identify call handed back.
+  rpc ReadById               (ReadByIdReq)               returns (ReadByIdResp);
+  rpc ReadByIds              (ReadByIdsReq)              returns (ReadByIdsResp);
+
+  // Aggregates and maintenance.
+  rpc GetResolutions         (GetResolutionsReq)         returns (GetResolutionsResp);
+  rpc GetIntervals           (GetIntervalsReq)           returns (GetIntervalsResp);
+  rpc GetCounts              (GetCountsReq)              returns (GetCountsResp);
+  rpc GetDetailedCounts      (GetDetailedCountsReq)      returns (GetDetailedCountsResp);
+  rpc GetCountsByType        (GetCountsByTypeReq)        returns (GetCountsByTypeResp);
+  rpc GetForecastParameters  (GetForecastParametersReq)  returns (GetForecastParametersResp);
+  rpc ListOwnerIds           (ListOwnerIdsReq)           returns (ListOwnerIdsResp);
+  rpc GetStaticSummary       (GetStaticSummaryReq)       returns (GetStaticSummaryResp);
+  rpc GetForecastSummary     (GetForecastSummaryReq)     returns (GetForecastSummaryResp);
+  rpc CheckStaticConsistency (CheckStaticConsistencyReq) returns (CheckStaticConsistencyResp);
+  rpc VerifyIntegrity        (VerifyIntegrityReq)        returns (VerifyIntegrityResp);
 }
 
 // ---- Common types ----
@@ -100,7 +104,8 @@ message TimeSeriesMetadata {
   // Free-form and never interpreted by the store.
   optional string component_field                = 24;
   // `TimeReference::as_storage_string`: how this series' timestamps were
-  // spelled. See TimeSeriesKey.time_reference.
+  // spelled. Descriptive, so it sits outside the identity the catalog files
+  // this row under; absent means unspecified, NOT a claim of UTC.
   optional string time_reference                 = 25;
   // The catalog row's own id -- the handle a consumer stores in its own model
   // to reference this series later. Transmitted rather than derived: nothing
@@ -110,9 +115,9 @@ message TimeSeriesMetadata {
   optional int64  id                             = 26;
 }
 
-// ---- ListTimeSeries ----
+// ---- ListMetadata / ListMetadataByIds ----
 
-message ListReq {
+message ListMetadataReq {
   optional int64           owner_id          = 1;
   optional string          owner_type        = 2;
   optional TimeSeriesType  time_series_type  = 3;
@@ -132,14 +137,28 @@ message ListReq {
   // that second group.
   optional bool            zoneless          = 10;
 }
-message ListResp {
+message ListMetadataResp {
   repeated TimeSeriesMetadata metadata = 1;
 }
 
-// ---- GetTimeSeries ----
+// ListMetadata addressed by id instead of by attributes -- the bulk companion
+// to GetMetadataById, and what a consumer hydrating a model full of recorded
+// ids wants: one catalog query for the whole set rather than one call per
+// reference. Rows come back in the order the ids are given, repeats once each
+// in place. NOT_FOUND if any id names no row: a caller naming ids is asserting
+// they exist, and a silently short result would let a stale reference pass as
+// an absent match.
+message ListMetadataByIdsReq {
+  repeated int64 ids = 1;
+}
+message ListMetadataByIdsResp {
+  repeated TimeSeriesMetadata metadata = 1;
+}
 
-message GetReq {
-  // The catalog association id, from ResolveMetadata or a listing row.
+// ---- ReadById / ReadByIds ----
+
+message ReadByIdReq {
+  // The catalog association id, from a ListMetadata row.
   int64          id                        = 1;
   // Optional time-range slicing on the time axis.
   optional string start_rfc3339            = 2;
@@ -150,7 +169,7 @@ message GetReq {
   // rather than coerced. Absent means zoned, which is what an RFC3339 bound is.
   optional bool   bounds_zoneless          = 4;
 }
-message GetResp {
+message ReadByIdResp {
   string             initial_timestamp_rfc3339  = 1;
   string             resolution                 = 2;        // ISO-8601 duration
   uint64             length                     = 3;
@@ -191,21 +210,30 @@ message GetResp {
   optional string    unit_system                 = 19;
   optional string    component_field             = 20;
   optional string    time_reference              = 21;
+  // The series' name.
+  //
+  // Like the unit descriptors above this is a property of the time-series data
+  // types, which the core populates on every local read. It used to be
+  // reconstructible on the client because a read named a key, which carried the
+  // name; a read now names only an id, so without this field every series read
+  // over gRPC came back with an empty name where the identical local call
+  // returned it.
+  string             name                        = 22;
 }
 
 // ---- GetResolutions ----
 
-message ResolutionsReq {
+message GetResolutionsReq {
   optional TimeSeriesType time_series_type = 1;
 }
-message ResolutionsResp {
+message GetResolutionsResp {
   repeated string resolution = 1;       // ISO-8601 durations
 }
 
 // ---- GetCounts ----
 
-message CountsReq {}
-message CountsResp {
+message GetCountsReq {}
+message GetCountsResp {
   int64 components_with_time_series = 1;
   int64 static_time_series          = 2;
   int64 forecasts                   = 3;
@@ -213,13 +241,13 @@ message CountsResp {
 
 // ---- GetForecastParameters ----
 
-message ForecastParamsReq {
+message GetForecastParametersReq {
   optional string resolution = 1;       // ISO-8601 duration filter
   optional string interval   = 2;       // ISO-8601 duration filter
 }
 // All fields optional: absent when the store holds no forecasts (or that
 // particular field is not populated for the forecast type found).
-message ForecastParamsResp {
+message GetForecastParametersResp {
   optional string horizon                   = 1;   // ISO-8601 duration
   optional string interval                  = 2;   // ISO-8601 duration
   optional uint64 count                     = 3;
@@ -227,12 +255,12 @@ message ForecastParamsResp {
   optional string initial_timestamp_rfc3339 = 5;
 }
 
-// ---- HasTimeSeries ----
+// ---- HasAnyTimeSeries ----
 
 // An existence probe stays attribute-addressed: it is answered off the catalog
 // indexes without hydrating a row, so posing it through a resolution would cost
 // more than the question. `features` matches the whole set, not a subset.
-message HasReq {
+message HasAnyTimeSeriesReq {
   int64          owner_id       = 1;
   OwnerCategory  owner_category = 2;
   string         name           = 3;
@@ -241,43 +269,61 @@ message HasReq {
   optional string interval      = 6;   // ISO-8601 duration
   map<string, FeatureValue> features = 7;
 }
-message HasResp {
+message HasAnyTimeSeriesResp {
   bool present = 1;
 }
 
 // ---- VerifyIntegrity ----
 
-message VerifyReq {}
-message VerifyResp {
+message VerifyIntegrityReq {}
+message VerifyIntegrityResp {
   repeated string errors = 1;
 }
 
-// ---- Additive read RPCs (Phase 4.4) ----
+// ---- Aggregates, summaries and maintenance ----
 
-// Shared no-argument request for the aggregate read RPCs.
-message EmptyReq {}
+// One request message per RPC even where it carries no field today, so a later
+// filter lands as an added field rather than a new message and a second RPC.
+message GetDetailedCountsReq {}
+message GetCountsByTypeReq {}
+message GetStaticSummaryReq {}
+message GetForecastSummaryReq {}
 
-// Single-association request, by catalog id.
-message IdReq {
+// The metadata of one association, by catalog id. NOT_FOUND if the id names no
+// row -- a call already committed to fetching treats a stale reference as a
+// failure, where AssociationExists treats it as an answer.
+message GetMetadataByIdReq {
   int64 id = 1;
 }
 
-// BulkRead: fetch several series (any variant) at once, optionally time-sliced.
-message BulkReadReq {
+// Whether an association is filed under a catalog id. A primary-key probe that
+// fetches no row, so a consumer can validate every reference in its own model
+// on load rather than discovering a dangling one mid-run. An id is never
+// reissued once its row is deleted, so a reference that stops resolving stays
+// stale -- it can never come to name a different series.
+message AssociationExistsReq {
+  int64 id = 1;
+}
+message AssociationExistsResp {
+  bool present = 1;
+}
+
+// ReadByIds: fetch several series (any variant) at once, optionally time-sliced.
+message ReadByIdsReq {
   repeated int64         ids           = 1;
   optional string        start_rfc3339 = 2;
   optional string        end_rfc3339   = 3;
-  // See GetReq.bounds_zoneless. A ranged bulk read is additionally refused when
+  // See ReadByIdReq.bounds_zoneless. A ranged bulk read is additionally refused when
   // the selection mixes zoneless series with series that record instants: one
   // bound cannot be valid for both.
   optional bool          bounds_zoneless = 4;
 }
-message BulkReadResp {
-  repeated GetResp items = 1;   // aligned with the request keys
+message ReadByIdsResp {
+  repeated ReadByIdResp items = 1;   // aligned with the request ids
 }
 
 // GetDetailedCounts.
-message DetailedCountsResp {
+message GetDetailedCountsResp {
   int64 components_with_time_series                = 1;
   int64 supplemental_attributes_with_time_series   = 2;
   int64 static_time_series_count                   = 3;
@@ -285,7 +331,7 @@ message DetailedCountsResp {
 }
 
 // GetCountsByType.
-message CountsByTypeResp {
+message GetCountsByTypeResp {
   message Entry {
     TimeSeriesType time_series_type = 1;
     int64          count            = 2;
@@ -304,10 +350,10 @@ message ListOwnerIdsResp {
 }
 
 // GetIntervals.
-message IntervalsReq {
+message GetIntervalsReq {
   optional TimeSeriesType time_series_type = 1;
 }
-message IntervalsResp {
+message GetIntervalsResp {
   repeated string interval = 1;   // ISO-8601 durations
 }
 
@@ -322,7 +368,7 @@ message StaticSummaryRow {
   optional int64  time_step_count               = 7;
   int64           count                         = 8;
 }
-message StaticSummaryResp {
+message GetStaticSummaryResp {
   repeated StaticSummaryRow rows = 1;
 }
 message ForecastSummaryRow {
@@ -337,15 +383,15 @@ message ForecastSummaryRow {
   optional int64  window_count                  = 9;
   int64           count                         = 10;
 }
-message ForecastSummaryResp {
+message GetForecastSummaryResp {
   repeated ForecastSummaryRow rows = 1;
 }
 
 // CheckStaticConsistency.
-message ConsistencyReq {
+message CheckStaticConsistencyReq {
   optional string resolution = 1;   // ISO-8601 duration scope
 }
-message ConsistencyResp {
+message CheckStaticConsistencyResp {
   message Row {
     string resolution                = 1;   // ISO-8601 duration
     string initial_timestamp_rfc3339 = 2;
@@ -354,20 +400,3 @@ message ConsistencyResp {
   repeated Row rows = 1;
 }
 
-// ResolveMetadata: the identify half of every by-name operation. `requested`
-// names a stored type; DETERMINISTIC also matches a
-// DETERMINISTIC_SINGLE_TIME_SERIES (a transformed view reads back as a
-// Deterministic), every other type matches only itself, and the response row
-// carries the concrete stored type that matched. Its `id` is what GetTimeSeries,
-// BulkRead and GetMetadata take.
-message ResolveMetadataReq {
-  int64          owner_id       = 1;
-  OwnerCategory  owner_category = 2;
-  string         name           = 3;
-  optional string resolution    = 4;   // ISO-8601 duration
-  optional string interval      = 5;   // ISO-8601 duration
-  Features       features       = 6;
-  // `optional` so an omitted type stays distinguishable from the zero enum
-  // value (SINGLE_TIME_SERIES) and is rejected rather than silently honored.
-  optional TimeSeriesType requested = 7;
-}

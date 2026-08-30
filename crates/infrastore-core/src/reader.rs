@@ -41,6 +41,7 @@ use crate::error::{Result, TimeSeriesError};
 use crate::storage::common::window_block_cols;
 use crate::types::array::{Dtype, Element};
 use crate::types::element_type::ElementType;
+use crate::types::id::TimeSeriesId;
 use crate::types::metadata::{Features, TimeSeriesMetadata};
 use crate::types::period::Period;
 use crate::types::time_reference::TimeReference;
@@ -112,7 +113,7 @@ pub struct StaticGroup {
     /// Catalog id of each column, in buffer order. Returned once; stable for
     /// the reader's lifetime — read a column's row with `get_metadata_by_id`
     /// when its name or grid is wanted.
-    ids: Vec<i64>,
+    ids: Vec<TimeSeriesId>,
     /// Content hash of each column's array, parallel to `ids`. Drives the read.
     hashes: Vec<[u8; 32]>,
     /// Reused output buffer: `num_columns * element_count * dtype.size()` bytes.
@@ -140,7 +141,7 @@ impl StaticGroup {
     }
 
     /// Column association ids, in buffer order.
-    pub fn ids(&self) -> &[i64] {
+    pub fn ids(&self) -> &[TimeSeriesId] {
         &self.ids
     }
 
@@ -540,9 +541,9 @@ pub(crate) fn build_groups(
             });
         }
         let g = groups.last_mut().expect("group present");
-        g.ids.push(r.id.ok_or_else(|| TimeSeriesError::IntegrityError(
-            "a reader column carries no catalog id".into(),
-        ))?);
+        g.ids.push(r.id.ok_or_else(|| {
+            TimeSeriesError::IntegrityError("a reader column carries no catalog id".into())
+        })?);
         g.hashes.push(r.data_hash);
     }
 
@@ -793,14 +794,14 @@ fn gather_window(
 /// read plan; reach the window bytes via [`ForecastReader::entry_slot`].
 #[derive(Debug)]
 pub struct ForecastEntry {
-    id: i64,
+    id: TimeSeriesId,
     /// Index into [`ForecastReader::slots`].
     slot: usize,
 }
 
 impl ForecastEntry {
     /// The association id of the forecast this entry reads.
-    pub fn id(&self) -> i64 {
+    pub fn id(&self) -> TimeSeriesId {
         self.id
     }
 
@@ -1123,9 +1124,9 @@ pub(crate) fn build_forecast_entries(
                 slots.len() - 1
             });
         entries.push(ForecastEntry {
-            id: m.id.ok_or_else(|| TimeSeriesError::IntegrityError(
-                "a reader entry carries no catalog id".into(),
-            ))?,
+            id: m.id.ok_or_else(|| {
+                TimeSeriesError::IntegrityError("a reader entry carries no catalog id".into())
+            })?,
             slot,
         });
     }
@@ -1208,6 +1209,27 @@ mod tests {
         Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap()
     }
 
+    /// The `owner_id` of the column a reader placed at `col`.
+    ///
+    /// A group carries ids, not keys, so a column maps back to its series
+    /// through the catalog. That is the point of the change: the id resolves to
+    /// the row as it is *now*, where a key snapshot froze it at build time.
+    fn col_owner(store: &Store, g: &StaticGroup, col: usize) -> i64 {
+        store
+            .get_metadata_by_id(g.ids()[col])
+            .unwrap()
+            .unwrap()
+            .owner_id
+    }
+
+    /// The catalog row a forecast reader placed at `entry`.
+    fn entry_row(store: &Store, r: &ForecastReader, entry: usize) -> TimeSeriesMetadata {
+        store
+            .get_metadata_by_id(r.entries()[entry].id())
+            .unwrap()
+            .unwrap()
+    }
+
     fn add(store: &mut Store, owner_id: i64, name: &str, data: TypedArray) {
         let ts = SingleTimeSeries::new(t0(), Duration::hours(1), data, name);
         store
@@ -1277,8 +1299,8 @@ mod tests {
         assert_eq!(g0.dtype(), Dtype::F64);
         assert_eq!(g0.num_columns(), 2);
         assert_eq!(f64_cols(g0), vec![12.0, 22.0]);
-        assert_eq!(g0.keys()[0].owner_id(), 1);
-        assert_eq!(g0.keys()[1].owner_id(), 2);
+        assert_eq!(col_owner(&store, g0, 0), 1);
+        assert_eq!(col_owner(&store, g0, 1), 2);
 
         // Group 1: i64, single column.
         let g1 = &reader.groups()[1];
@@ -1378,7 +1400,9 @@ mod tests {
             for (gd, gm) in r_disk.groups().iter().zip(r_mem.groups()) {
                 assert_eq!(gd.dtype(), gm.dtype());
                 assert_eq!(gd.element_shape(), gm.element_shape());
-                assert_eq!(gd.keys(), gm.keys());
+                // Ids are per-store, so two stores holding the same series do
+                // not agree on them; what has to match is the column *layout*.
+                assert_eq!(gd.ids().len(), gm.ids().len());
                 assert_eq!(gd.values(), gm.values(), "mismatch at index {idx}");
             }
         }
@@ -1414,12 +1438,14 @@ mod tests {
         add_f64(&mut store, 4, "load", &[40.0, 41.0, 42.0, 43.0]); // col 3
 
         // Remove owners 2 and 3 -> survivors keep columns 0 and 3 (gap + high col).
-        let keys = store.list_keys(ListFilter::new()).unwrap();
-        for k in &keys {
-            if k.owner_id() == 2 || k.owner_id() == 3 {
-                store.remove_time_series(k.identity()).unwrap();
-            }
-        }
+        let doomed: Vec<_> = store
+            .list_metadata(ListFilter::new())
+            .unwrap()
+            .iter()
+            .filter(|m| m.owner_id == 2 || m.owner_id == 3)
+            .map(|m| m.id.unwrap())
+            .collect();
+        store.remove_by_ids(&doomed).unwrap();
 
         let mut reader = store
             .build_static_reader(ListFilter::new().resolution(Duration::hours(1)))
@@ -1431,8 +1457,8 @@ mod tests {
             .static_read(&mut reader, t0() + Duration::hours(2))
             .unwrap();
         let g = &reader.groups()[0];
-        assert_eq!(g.keys()[0].owner_id(), 1);
-        assert_eq!(g.keys()[1].owner_id(), 4);
+        assert_eq!(col_owner(&store, g, 0), 1);
+        assert_eq!(col_owner(&store, g, 1), 4);
         // col 0 @ idx 2 -> 12.0; col 3 @ idx 2 -> 42.0.
         assert_eq!(f64_cols(g), vec![12.0, 42.0]);
     }
@@ -1516,7 +1542,7 @@ mod tests {
             assert_eq!(r_disk.index_at(*at).unwrap(), index);
             let g = &r_disk.groups()[0];
             assert_eq!(g.num_columns(), 2);
-            assert_eq!(g.keys()[0].owner_id(), 1, "columns order by identity");
+            assert_eq!(col_owner(&disk, g, 0), 1, "columns order by identity");
             assert_eq!(
                 f64_cols(g),
                 vec![10.0 + index as f64, 20.0 + index as f64],
@@ -1697,7 +1723,17 @@ mod tests {
             disk.forecast_read(&mut rd, at).unwrap();
             mem.forecast_read(&mut rm, at).unwrap();
             for i in 0..rd.entries().len() {
-                assert_eq!(rd.entries()[i].key(), rm.entries()[i].key());
+                // Ids are per-store; the entry *order* is what has to agree.
+                assert_eq!(
+                    disk.get_metadata_by_id(rd.entries()[i].id())
+                        .unwrap()
+                        .unwrap()
+                        .owner_id,
+                    mem.get_metadata_by_id(rm.entries()[i].id())
+                        .unwrap()
+                        .unwrap()
+                        .owner_id
+                );
                 assert_eq!(
                     rd.entry_slot(i).window_shape(),
                     rm.entry_slot(i).window_shape()
@@ -1715,12 +1751,12 @@ mod tests {
             .unwrap();
         // Entry 0: scalar, owner 1 -> window k=1 = [value(1,0), value(1,1)] = [10, 11].
         let s0 = rd.entry_slot(0);
-        assert_eq!(rd.entries()[0].key().owner_id(), 1);
+        assert_eq!(entry_row(&disk, &rd, 0).owner_id, 1);
         assert_eq!(s0.window_shape(), &[2]); // [H]
         assert_eq!(f64_window(s0), vec![10.0, 11.0]);
         // Entry 1: shaped, owner 2 -> window k=1, shape [H, E] = [2, 2].
         let s1 = rd.entry_slot(1);
-        assert_eq!(rd.entries()[1].key().owner_id(), 2);
+        assert_eq!(entry_row(&disk, &rd, 1).owner_id, 2);
         assert_eq!(s1.window_shape(), &[2, 2]);
         assert_eq!(f64_window(s1), vec![110.0, 111.0, 210.0, 211.0]);
     }
@@ -1929,11 +1965,11 @@ mod tests {
         assert_eq!(rd.entries().len(), 2);
         assert_eq!(rd.count(), 5);
         assert_eq!(
-            rd.entries()[0].key().time_series_type(),
+            entry_row(&disk, &rd, 0).time_series_type,
             TimeSeriesType::DeterministicSingleTimeSeries
         );
         assert_eq!(
-            rd.entries()[1].key().time_series_type(),
+            entry_row(&disk, &rd, 1).time_series_type,
             TimeSeriesType::Deterministic
         );
 
@@ -2034,13 +2070,15 @@ mod tests {
         let mut reader = store
             .build_static_reader(ListFilter::new().resolution(res))
             .unwrap();
-        // Oracle: full series bytes per owner, via get_time_series.
+        // Oracle: full series bytes per owner, read by the same ids the reader
+        // laid its columns out with.
         let mut full: HashMap<i64, Vec<u8>> = HashMap::new();
         for g in reader.groups() {
-            for k in g.keys() {
-                match store.get_time_series(k.identity(), None).unwrap() {
+            for id in g.ids() {
+                let owner = store.get_metadata_by_id(*id).unwrap().unwrap().owner_id;
+                match store.read_by_id(*id, crate::ReadWindow::full()).unwrap() {
                     TimeSeriesData::SingleTimeSeries(s) => {
-                        full.insert(k.owner_id(), s.data.bytes);
+                        full.insert(owner, s.data.bytes);
                     }
                     other => panic!("expected SingleTimeSeries, got {other:?}"),
                 }
@@ -2063,14 +2101,14 @@ mod tests {
             for g in reader.groups() {
                 let eb = g.element_shape().iter().product::<usize>().max(1) * g.dtype().size();
                 let vals = g.values();
-                for (j, k) in g.keys().iter().enumerate() {
+                for (j, id) in g.ids().iter().enumerate() {
+                    let owner = store.get_metadata_by_id(*id).unwrap().unwrap().owner_id;
                     let col = &vals[j * eb..(j + 1) * eb];
-                    let oracle = &full[&k.owner_id()];
+                    let oracle = &full[&owner];
                     assert_eq!(
                         col,
                         &oracle[i * eb..(i + 1) * eb],
-                        "owner {} dtype {:?} shape {:?} index {i}",
-                        k.owner_id(),
+                        "owner {owner} dtype {:?} shape {:?} index {i}",
                         g.dtype(),
                         g.element_shape()
                     );
@@ -2255,15 +2293,16 @@ mod tests {
                 let t_w = t0() + ivl * (w as i32);
                 store.forecast_read(&mut reader, t_w).unwrap();
                 for i in 0..reader.entries().len() {
-                    let key = reader.entries()[i].key();
+                    let id = reader.entries()[i].id();
+                    let owner = store.get_metadata_by_id(id).unwrap().unwrap().owner_id;
                     let window = store
-                        .get_time_series(key.identity(), Some((t_w, t_w + ivl).into()))
+                        .read_by_ids_range(&[id], (t_w, t_w + ivl).into())
+                        .map(|mut v| v.remove(0))
                         .unwrap();
                     assert_eq!(
                         reader.entry_slot(i).window(),
                         forecast_bytes(&window).as_slice(),
-                        "type {ts_type:?} owner {} window {w}",
-                        key.owner_id()
+                        "type {ts_type:?} owner {owner} window {w}"
                     );
                 }
             }
@@ -2310,9 +2349,9 @@ mod tests {
                 .unwrap();
             let g = &reader.groups()[0];
             let vals = g.values();
-            for (j, k) in g.keys().iter().enumerate() {
+            for j in 0..g.num_columns() {
                 let got = f64::from_le_bytes(vals[j * 8..j * 8 + 8].try_into().unwrap());
-                assert_eq!(got, k.owner_id() as f64 * 10.0 + i as f64);
+                assert_eq!(got, col_owner(&store, g, j) as f64 * 10.0 + i as f64);
             }
         }
     }
@@ -2444,7 +2483,7 @@ mod tests {
         let owners: Vec<i64> = reader
             .groups()
             .iter()
-            .flat_map(|g| g.keys().iter().map(|k| k.owner_id()))
+            .flat_map(|g| (0..g.num_columns()).map(|j| col_owner(&store, g, j)))
             .collect();
         assert_eq!(owners, vec![1, 2], "the 2h series must be excluded");
     }

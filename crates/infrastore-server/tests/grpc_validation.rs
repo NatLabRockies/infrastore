@@ -20,8 +20,8 @@ use infrastore_core::{
     TimeSeriesError, TimeSeriesType, TypedArray, create_store,
 };
 use infrastore_proto::pb::{
-    self, BulkReadReq, GetReq, HasReq, IntervalsReq, KeyReq, KeysReq, ListOwnerIdsReq, ListReq,
-    ResolutionsReq, catalog_store_client::CatalogStoreClient,
+    self, GetIntervalsReq, GetResolutionsReq, HasAnyTimeSeriesReq, ListMetadataReq,
+    ListOwnerIdsReq, ReadByIdReq, ReadByIdsReq, catalog_store_client::CatalogStoreClient,
 };
 use infrastore_server::client::RemoteClient;
 use infrastore_server::service::CatalogStoreService;
@@ -53,7 +53,7 @@ async fn spawn_with_bulk_limit(store: Store, max_keys: usize) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let local_addr = listener.local_addr().unwrap();
     let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
-    let service = CatalogStoreService::new(store).with_max_bulk_read_keys(max_keys);
+    let service = CatalogStoreService::new(store).with_max_read_ids(max_keys);
     tokio::spawn(async move {
         tonic::transport::Server::builder()
             .add_service(service.into_server())
@@ -115,53 +115,99 @@ fn empty_store() -> Store {
     create_store(None, true).unwrap()
 }
 
-/// A well-formed key message for the series in `populated_store`.
-fn good_key() -> pb::TimeSeriesKey {
-    pb::TimeSeriesKey {
-        owner_id: 42,
-        owner_category: pb::OwnerCategory::Component as i32,
-        time_series_type: pb::TimeSeriesType::SingleTimeSeries as i32,
-        name: "load".into(),
-        resolution: "PT1H".into(),
-        interval: String::new(),
-        features: Some(pb::Features::default()),
-        initial_timestamp_rfc3339: None,
-        length: None,
-        horizon: None,
-        count: None,
-        time_reference: None,
-    }
-}
+/// The catalog id of the one series in `populated_store`.
+///
+/// The catalog assigns from 1 and never reuses, and the fixture adds exactly one
+/// association, so this is deterministic; `the_fixtures_id_is_what_the_catalog_filed`
+/// pins it against an actual listing so a fixture change cannot make every
+/// id-taking test here silently probe a stale reference instead.
+const GOOD_ID: i64 = 1;
+
+/// An id the catalog has never issued. Ids are never reused, so this stays stale.
+const STALE_ID: i64 = 9_999;
 
 // ---------------------------------------------------------------------------
 // 3.3a Request validation
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn a_missing_key_is_invalid_argument_on_every_key_taking_rpc() {
+async fn a_stale_id_is_not_found_on_every_id_taking_rpc() {
     let addr = spawn(populated_store()).await;
     let mut client = raw_client(&addr).await;
 
+    // There is nothing malformed an id request can carry -- an `int64` either
+    // names a row or it does not -- so what this has to get right is the stale
+    // reference, not the bad message.
     let err = client
-        .get_time_series(GetReq {
-            key: None,
+        .read_by_id(ReadByIdReq {
+            id: STALE_ID,
             start_rfc3339: None,
             end_rfc3339: None,
             bounds_zoneless: None,
         })
         .await
         .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::InvalidArgument, "{err:?}");
+    assert_eq!(err.code(), tonic::Code::NotFound, "{err:?}");
     assert!(!err.message().is_empty());
 
     let err = client
-        .has_time_series(HasReq { key: None })
+        .get_metadata_by_id(pb::GetMetadataByIdReq { id: STALE_ID })
         .await
         .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::InvalidArgument, "{err:?}");
+    assert_eq!(err.code(), tonic::Code::NotFound, "{err:?}");
 
-    let err = client.get_metadata(KeyReq { key: None }).await.unwrap_err();
-    assert_eq!(err.code(), tonic::Code::InvalidArgument, "{err:?}");
+    // One stale id among live ones fails the whole call rather than returning a
+    // short list the caller would silently mis-index.
+    let err = client
+        .list_metadata_by_ids(pb::ListMetadataByIdsReq {
+            ids: vec![GOOD_ID, STALE_ID],
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::NotFound, "{err:?}");
+
+    let err = client
+        .read_by_ids(ReadByIdsReq {
+            ids: vec![STALE_ID],
+            start_rfc3339: None,
+            end_rfc3339: None,
+            bounds_zoneless: None,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::NotFound, "{err:?}");
+
+    // `AssociationExists` is the one that answers instead of failing.
+    assert!(
+        !client
+            .association_exists(pb::AssociationExistsReq { id: STALE_ID })
+            .await
+            .unwrap()
+            .into_inner()
+            .present
+    );
+    assert!(
+        client
+            .association_exists(pb::AssociationExistsReq { id: GOOD_ID })
+            .await
+            .unwrap()
+            .into_inner()
+            .present
+    );
+}
+
+/// Pins `GOOD_ID` against what the catalog actually filed, so a change to the
+/// fixture cannot quietly turn every id-taking test here into a stale probe.
+#[tokio::test]
+async fn the_fixtures_id_is_what_the_catalog_filed() {
+    let addr = spawn(populated_store()).await;
+    let client = RemoteClient::connect(addr).await.unwrap();
+    let rows = client
+        .list_metadata(None, None, None, None, None, None, None, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, Some(infrastore_core::TimeSeriesId(GOOD_ID)));
 }
 
 #[tokio::test]
@@ -171,8 +217,8 @@ async fn a_one_sided_time_range_is_invalid_argument() {
 
     // start without end.
     let err = client
-        .get_time_series(GetReq {
-            key: Some(good_key()),
+        .read_by_id(ReadByIdReq {
+            id: GOOD_ID,
             start_rfc3339: Some(t0().to_rfc3339()),
             end_rfc3339: None,
             bounds_zoneless: None,
@@ -183,8 +229,8 @@ async fn a_one_sided_time_range_is_invalid_argument() {
 
     // end without start.
     let err = client
-        .get_time_series(GetReq {
-            key: Some(good_key()),
+        .read_by_id(ReadByIdReq {
+            id: GOOD_ID,
             start_rfc3339: None,
             end_rfc3339: Some(t0().to_rfc3339()),
             bounds_zoneless: None,
@@ -196,8 +242,8 @@ async fn a_one_sided_time_range_is_invalid_argument() {
     // Both absent is the full read, and both present is a slice.
     assert!(
         client
-            .get_time_series(GetReq {
-                key: Some(good_key()),
+            .read_by_id(ReadByIdReq {
+                id: GOOD_ID,
                 start_rfc3339: None,
                 end_rfc3339: None,
                 bounds_zoneless: None,
@@ -207,8 +253,8 @@ async fn a_one_sided_time_range_is_invalid_argument() {
     );
     assert!(
         client
-            .get_time_series(GetReq {
-                key: Some(good_key()),
+            .read_by_id(ReadByIdReq {
+                id: GOOD_ID,
                 start_rfc3339: Some(t0().to_rfc3339()),
                 end_rfc3339: Some((t0() + Duration::hours(2)).to_rfc3339()),
                 bounds_zoneless: None,
@@ -235,8 +281,8 @@ async fn a_malformed_rfc3339_timestamp_is_invalid_argument() {
         ),
     ] {
         let err = client
-            .get_time_series(GetReq {
-                key: Some(good_key()),
+            .read_by_id(ReadByIdReq {
+                id: GOOD_ID,
                 start_rfc3339: start.clone(),
                 end_rfc3339: end.clone(),
                 bounds_zoneless: None,
@@ -256,23 +302,10 @@ async fn an_unparseable_iso_period_is_invalid_argument() {
     let addr = spawn(populated_store()).await;
     let mut client = raw_client(&addr).await;
 
-    // In a key.
-    let mut key = good_key();
-    key.resolution = "not-a-period".into();
+    // In a filter. A read carries an id, which cannot be malformed, so a period
+    // only reaches the server through a filter now.
     let err = client
-        .get_time_series(GetReq {
-            key: Some(key),
-            start_rfc3339: None,
-            end_rfc3339: None,
-            bounds_zoneless: None,
-        })
-        .await
-        .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::InvalidArgument, "{err:?}");
-
-    // In a filter.
-    let err = client
-        .list_time_series(ListReq {
+        .list_metadata(ListMetadataReq {
             resolution: Some("PT?H".into()),
             ..Default::default()
         })
@@ -297,28 +330,6 @@ async fn an_unknown_owner_category_enum_int_is_invalid_argument() {
     let addr = spawn(populated_store()).await;
     let mut client = raw_client(&addr).await;
 
-    let mut key = good_key();
-    key.owner_category = 999;
-    let err = client
-        .get_time_series(GetReq {
-            key: Some(key),
-            start_rfc3339: None,
-            end_rfc3339: None,
-            bounds_zoneless: None,
-        })
-        .await
-        .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::InvalidArgument, "{err:?}");
-
-    let err = client
-        .get_time_series_keys(KeysReq {
-            owner_id: 42,
-            owner_category: 999,
-        })
-        .await
-        .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::InvalidArgument, "{err:?}");
-
     let err = client
         .list_owner_ids(ListOwnerIdsReq {
             owner_category: 999,
@@ -330,7 +341,7 @@ async fn an_unknown_owner_category_enum_int_is_invalid_argument() {
     assert_eq!(err.code(), tonic::Code::InvalidArgument, "{err:?}");
 
     let err = client
-        .list_time_series(ListReq {
+        .list_metadata(ListMetadataReq {
             owner_category: Some(999),
             ..Default::default()
         })
@@ -344,21 +355,8 @@ async fn an_unknown_time_series_type_enum_int_is_invalid_argument() {
     let addr = spawn(populated_store()).await;
     let mut client = raw_client(&addr).await;
 
-    let mut key = good_key();
-    key.time_series_type = 999;
     let err = client
-        .get_time_series(GetReq {
-            key: Some(key),
-            start_rfc3339: None,
-            end_rfc3339: None,
-            bounds_zoneless: None,
-        })
-        .await
-        .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::InvalidArgument, "{err:?}");
-
-    let err = client
-        .list_time_series(ListReq {
+        .list_metadata(ListMetadataReq {
             time_series_type: Some(999),
             ..Default::default()
         })
@@ -367,7 +365,7 @@ async fn an_unknown_time_series_type_enum_int_is_invalid_argument() {
     assert_eq!(err.code(), tonic::Code::InvalidArgument, "{err:?}");
 
     let err = client
-        .get_resolutions(ResolutionsReq {
+        .get_resolutions(GetResolutionsReq {
             time_series_type: Some(999),
         })
         .await
@@ -375,28 +373,8 @@ async fn an_unknown_time_series_type_enum_int_is_invalid_argument() {
     assert_eq!(err.code(), tonic::Code::InvalidArgument, "{err:?}");
 
     let err = client
-        .get_intervals(IntervalsReq {
+        .get_intervals(GetIntervalsReq {
             time_series_type: Some(999),
-        })
-        .await
-        .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::InvalidArgument, "{err:?}");
-}
-
-#[tokio::test]
-async fn a_resolve_forecast_key_request_with_no_requested_type_is_invalid_argument() {
-    let addr = spawn(populated_store()).await;
-    let mut client = raw_client(&addr).await;
-
-    let err = client
-        .resolve_forecast_key(pb::ResolveForecastKeyReq {
-            owner_id: 42,
-            owner_category: pb::OwnerCategory::Component as i32,
-            name: "load".into(),
-            requested: None,
-            resolution: None,
-            interval: None,
-            features: None,
         })
         .await
         .unwrap_err();
@@ -414,20 +392,12 @@ async fn listing_an_empty_store_returns_empty_messages_not_errors() {
 
     assert!(
         client
-            .list_time_series(None, None, None, None, None, None, None, None, None, None)
+            .list_metadata(None, None, None, None, None, None, None, None, None, None)
             .await
             .unwrap()
             .is_empty()
     );
-    assert!(
-        client
-            .list_keys(
-                None, None, None, None, None, None, None, None, None, None, false
-            )
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(client.list_metadata_by_ids(&[]).await.unwrap().is_empty());
     assert!(client.get_resolutions(None).await.unwrap().is_empty());
     assert!(client.get_intervals(None).await.unwrap().is_empty());
     assert!(client.static_summary().await.unwrap().is_empty());
@@ -470,7 +440,7 @@ async fn a_filter_matching_nothing_returns_an_empty_list() {
 
     assert!(
         client
-            .list_time_series(
+            .list_metadata(
                 Some(999),
                 None,
                 None,
@@ -488,7 +458,7 @@ async fn a_filter_matching_nothing_returns_an_empty_list() {
     );
     assert!(
         client
-            .list_time_series(
+            .list_metadata(
                 None,
                 None,
                 None,
@@ -504,10 +474,21 @@ async fn a_filter_matching_nothing_returns_an_empty_list() {
             .unwrap()
             .is_empty()
     );
-    // Keys for an owner that has none.
+    // Rows for an owner that has none.
     assert!(
         client
-            .get_time_series_keys(999, OwnerCategory::Component)
+            .list_metadata(
+                Some(999),
+                Some(OwnerCategory::Component),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .await
             .unwrap()
             .is_empty()
@@ -515,7 +496,18 @@ async fn a_filter_matching_nothing_returns_an_empty_list() {
     // The right owner id under the wrong category.
     assert!(
         client
-            .get_time_series_keys(42, OwnerCategory::SupplementalAttribute)
+            .list_metadata(
+                Some(42),
+                Some(OwnerCategory::SupplementalAttribute),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .await
             .unwrap()
             .is_empty()
@@ -531,25 +523,34 @@ async fn a_filter_matching_nothing_returns_an_empty_list() {
 }
 
 #[tokio::test]
-async fn has_time_series_returns_false_rather_than_not_found() {
+async fn has_any_time_series_returns_false_rather_than_not_found() {
     let addr = spawn(populated_store()).await;
     let mut client = raw_client(&addr).await;
 
+    // The probe stays attribute-addressed: it is answered off the catalog
+    // indexes without hydrating a row, which is the whole reason it did not
+    // move to an id along with the reads.
+    let probe = |name: &str| HasAnyTimeSeriesReq {
+        owner_id: 42,
+        owner_category: pb::OwnerCategory::Component as i32,
+        name: name.to_string(),
+        time_series_type: Some(pb::TimeSeriesType::SingleTimeSeries as i32),
+        resolution: Some("PT1H".into()),
+        interval: None,
+        features: Default::default(),
+    };
+
     // Present.
     let resp = client
-        .has_time_series(HasReq {
-            key: Some(good_key()),
-        })
+        .has_any_time_series(probe("load"))
         .await
         .unwrap()
         .into_inner();
     assert!(resp.present);
 
     // Absent: `false`, not a NotFound status.
-    let mut absent = good_key();
-    absent.name = "no_such_name".into();
     let resp = client
-        .has_time_series(HasReq { key: Some(absent) })
+        .has_any_time_series(probe("no_such_name"))
         .await
         .unwrap()
         .into_inner();
@@ -557,34 +558,20 @@ async fn has_time_series_returns_false_rather_than_not_found() {
 
     // The same through the typed client.
     let client = RemoteClient::connect(addr).await.unwrap();
-    let mut absent = infrastore_proto::convert::key_from_pb(good_key()).unwrap();
-    absent.name = "no_such_name".into();
-    assert!(!client.has_time_series(&absent).await.unwrap());
-}
-
-#[tokio::test]
-async fn getting_a_missing_key_is_not_found() {
-    let addr = spawn(populated_store()).await;
-    let mut raw = raw_client(&addr).await;
-
-    let mut absent = good_key();
-    absent.name = "no_such_name".into();
-    let err = raw
-        .get_time_series(GetReq {
-            key: Some(absent.clone()),
-            start_rfc3339: None,
-            end_rfc3339: None,
-            bounds_zoneless: None,
-        })
-        .await
-        .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::NotFound, "{err:?}");
-
-    let err = raw
-        .get_metadata(KeyReq { key: Some(absent) })
-        .await
-        .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::NotFound, "{err:?}");
+    assert!(
+        !client
+            .has_any_time_series(
+                42,
+                OwnerCategory::Component,
+                "no_such_name",
+                Some(TimeSeriesType::SingleTimeSeries),
+                Some(Period::fixed(Duration::hours(1))),
+                None,
+                Features::new(),
+            )
+            .await
+            .unwrap()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -592,12 +579,12 @@ async fn getting_a_missing_key_is_not_found() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn bulk_read_with_an_empty_key_list_returns_no_items() {
+async fn read_by_ids_with_an_empty_id_list_returns_no_items() {
     let addr = spawn(populated_store()).await;
     let mut raw = raw_client(&addr).await;
     let resp = raw
-        .bulk_read(BulkReadReq {
-            keys: Vec::new(),
+        .read_by_ids(ReadByIdsReq {
+            ids: Vec::new(),
             start_rfc3339: None,
             end_rfc3339: None,
             bounds_zoneless: None,
@@ -609,11 +596,11 @@ async fn bulk_read_with_an_empty_key_list_returns_no_items() {
 
     // And through the typed client.
     let client = RemoteClient::connect(addr).await.unwrap();
-    assert!(client.bulk_read(&[], None).await.unwrap().is_empty());
+    assert!(client.read_by_ids(&[], None).await.unwrap().is_empty());
 }
 
 #[tokio::test]
-async fn bulk_read_fails_the_whole_batch_on_one_missing_key() {
+async fn read_by_ids_fails_the_whole_batch_on_one_stale_id() {
     let mut store = create_store(None, true).unwrap();
     add(
         &mut store,
@@ -628,17 +615,14 @@ async fn bulk_read_fails_the_whole_batch_on_one_missing_key() {
     let addr = spawn(store).await;
     let mut raw = raw_client(&addr).await;
 
-    let present = |owner: i64| pb::TimeSeriesKey {
-        owner_id: owner,
-        ..good_key()
-    };
-    let mut absent = present(1);
-    absent.name = "no_such_name".into();
+    // The two adds above take ids 1 and 2, in order.
+    let (a, b) = (1i64, 2i64);
+    let absent = STALE_ID;
 
     // All present: two items back, in request order.
     let resp = raw
-        .bulk_read(BulkReadReq {
-            keys: vec![present(1), present(2)],
+        .read_by_ids(ReadByIdsReq {
+            ids: vec![a, b],
             start_rfc3339: None,
             end_rfc3339: None,
             bounds_zoneless: None,
@@ -650,14 +634,10 @@ async fn bulk_read_fails_the_whole_batch_on_one_missing_key() {
 
     // One missing among N fails the whole call rather than returning a short
     // list the caller would silently mis-index.
-    for keys in [
-        vec![absent.clone(), present(1)],
-        vec![present(1), absent.clone()],
-        vec![present(1), absent.clone(), present(2)],
-    ] {
+    for ids in [vec![absent, a], vec![a, absent], vec![a, absent, b]] {
         let err = raw
-            .bulk_read(BulkReadReq {
-                keys,
+            .read_by_ids(ReadByIdsReq {
+                ids,
                 start_rfc3339: None,
                 end_rfc3339: None,
                 bounds_zoneless: None,
@@ -669,13 +649,13 @@ async fn bulk_read_fails_the_whole_batch_on_one_missing_key() {
 }
 
 #[tokio::test]
-async fn bulk_read_returns_duplicate_keys_once_each() {
+async fn read_by_ids_returns_a_repeated_id_once_each_in_place() {
     let addr = spawn(populated_store()).await;
     let mut raw = raw_client(&addr).await;
 
     let resp = raw
-        .bulk_read(BulkReadReq {
-            keys: vec![good_key(), good_key(), good_key()],
+        .read_by_ids(ReadByIdsReq {
+            ids: vec![GOOD_ID, GOOD_ID, GOOD_ID],
             start_rfc3339: None,
             end_rfc3339: None,
             bounds_zoneless: None,
@@ -683,7 +663,7 @@ async fn bulk_read_returns_duplicate_keys_once_each() {
         .await
         .unwrap()
         .into_inner();
-    // One item per requested key, positionally: duplicates are not collapsed.
+    // One item per requested id, positionally: duplicates are not collapsed.
     assert_eq!(resp.items.len(), 3);
     assert_eq!(resp.items[0].value_bytes, resp.items[1].value_bytes);
     assert_eq!(resp.items[1].value_bytes, resp.items[2].value_bytes);
@@ -705,21 +685,15 @@ async fn a_time_range_applies_to_every_key_in_a_bulk_read() {
     let addr = spawn(store).await;
     let client = RemoteClient::connect(addr).await.unwrap();
 
-    let key = |owner: i64| infrastore_core::KeyIdentity {
-        owner_id: owner,
-        owner_category: OwnerCategory::Component,
-        time_series_type: TimeSeriesType::SingleTimeSeries,
-        name: "load".into(),
-        resolution: Some(Period::fixed(Duration::hours(1))),
-        interval: None,
-        features: Features::new(),
-    };
-    let k1 = key(1);
-    let k2 = key(2);
+    // The two adds above take ids 1 and 2, in order.
+    let (id1, id2) = (
+        infrastore_core::TimeSeriesId(1),
+        infrastore_core::TimeSeriesId(2),
+    );
     let range = (t0() + Duration::hours(2), t0() + Duration::hours(5));
 
     let items = client
-        .bulk_read(&[&k1, &k2], Some(range.into()))
+        .read_by_ids(&[id1, id2], Some(range.into()))
         .await
         .unwrap();
     assert_eq!(items.len(), 2);
@@ -734,27 +708,25 @@ async fn a_time_range_applies_to_every_key_in_a_bulk_read() {
         );
     }
 
-    // FINDING F9: `BulkReadResp` items carry no name, so
-    // `RemoteClient::bulk_read` fills in the empty string — unlike
-    // `get_time_series`, which knows the name from the key it was given. Pinned,
-    // not fixed: the caller already holds the keys positionally, but the
-    // asymmetry with `get_time_series` is a trap.
+    // The name comes off the wire on every item. It used to be reconstructed
+    // client-side from the key a read named; a read names only an id now, so
+    // without `ReadByIdResp.name` every series came back unnamed -- which is
+    // what FINDING F9 pinned as an asymmetry between the bulk and single reads
+    // and is now closed for both.
     for (i, item) in items.iter().enumerate() {
-        assert_eq!(item.as_single().unwrap().name, "", "item {i}");
+        assert_eq!(item.as_single().unwrap().name, "load", "item {i}");
     }
 
-    // Apart from the name, the slice matches the per-key read.
-    for (i, k) in [&k1, &k2].iter().enumerate() {
-        let per_key = client.get_time_series(k, Some(range.into())).await.unwrap();
+    // The slice matches the per-id read, name included.
+    for (i, id) in [id1, id2].iter().enumerate() {
+        let per_key = client.read_by_id(*id, Some(range.into())).await.unwrap();
         let (bulk, single) = (items[i].as_single().unwrap(), per_key.as_single().unwrap());
         assert_eq!(bulk.data, single.data, "item {i}");
         assert_eq!(bulk.initial_timestamp, single.initial_timestamp, "item {i}");
         assert_eq!(bulk.resolution, single.resolution, "item {i}");
         assert_eq!(bulk.length, single.length, "item {i}");
-        assert_eq!(
-            single.name, "load",
-            "item {i}: get_time_series keeps the name"
-        );
+        assert_eq!(bulk.name, single.name, "item {i}");
+        assert_eq!(single.name, "load", "item {i}");
     }
 }
 
@@ -813,7 +785,7 @@ async fn a_monthly_series_survives_the_wire_as_a_calendar_period() {
 
     // Metadata rows carry it.
     let metas = client
-        .list_time_series(
+        .list_metadata(
             Some(7),
             None,
             None,
@@ -830,20 +802,29 @@ async fn a_monthly_series_survives_the_wire_as_a_calendar_period() {
     assert_eq!(metas.len(), 1);
     assert_eq!(metas[0].resolution, Some(Period::Months(1)));
 
-    // Keys carry it, and the full key decodes.
-    let keys = client
-        .get_time_series_keys(8, OwnerCategory::Component)
+    // The catalog row carries the calendar periods, and the id that reads it.
+    let rows = client
+        .list_metadata(
+            Some(8),
+            Some(OwnerCategory::Component),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
-    assert_eq!(keys.len(), 1);
-    assert_eq!(keys[0].resolution(), Some(Period::Months(1)));
-    assert_eq!(keys[0].interval(), Some(Period::Months(1)));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].resolution, Some(Period::Months(1)));
+    assert_eq!(rows[0].interval, Some(Period::Months(1)));
 
-    // A get returns the calendar periods and the right values.
-    let data = client
-        .get_time_series(keys[0].identity(), None)
-        .await
-        .unwrap();
+    // A read returns the calendar periods and the right values.
+    let id = rows[0].id.expect("a served row carries its id");
+    let data = client.read_by_id(id, None).await.unwrap();
     let det = data.as_deterministic().unwrap();
     assert_eq!(det.resolution, Period::Months(1));
     assert_eq!(det.horizon, Period::Months(3));
@@ -856,7 +837,7 @@ async fn a_monthly_series_survives_the_wire_as_a_calendar_period() {
     let feb = Utc.with_ymd_and_hms(2024, 2, 15, 0, 0, 0).unwrap();
     let mar = Utc.with_ymd_and_hms(2024, 3, 15, 0, 0, 0).unwrap();
     let sliced = client
-        .get_time_series(keys[0].identity(), Some((feb, mar).into()))
+        .read_by_id(id, Some((feb, mar).into()))
         .await
         .unwrap();
     let det = sliced.as_deterministic().unwrap();
@@ -866,7 +847,7 @@ async fn a_monthly_series_survives_the_wire_as_a_calendar_period() {
     // Filtering by the calendar resolution matches; a fixed span does not.
     assert_eq!(
         client
-            .list_time_series(
+            .list_metadata(
                 None,
                 None,
                 None,
@@ -885,7 +866,7 @@ async fn a_monthly_series_survives_the_wire_as_a_calendar_period() {
     );
     assert!(
         client
-            .list_time_series(
+            .list_metadata(
                 None,
                 None,
                 None,
@@ -921,16 +902,19 @@ async fn map_status_translates_not_found_and_invalid_argument() {
     let client = RemoteClient::connect(addr).await.unwrap();
 
     // NotFound -> TimeSeriesError::NotFound (payload-free).
-    let mut absent = infrastore_proto::convert::key_from_pb(good_key()).unwrap();
-    absent.name = "no_such_name".into();
-    let err = client.get_time_series(&absent, None).await.unwrap_err();
+    let err = client
+        .read_by_id(infrastore_core::TimeSeriesId(STALE_ID), None)
+        .await
+        .unwrap_err();
     assert!(matches!(err, TimeSeriesError::NotFound), "{err:?}");
 
     // InvalidArgument -> InvalidParameter, carrying the server's message.
-    let key = infrastore_proto::convert::key_from_pb(good_key()).unwrap();
     let backwards = (t0() + Duration::hours(5), t0());
     let err = client
-        .get_time_series(&key, Some(backwards.into()))
+        .read_by_id(
+            infrastore_core::TimeSeriesId(GOOD_ID),
+            Some(backwards.into()),
+        )
         .await
         .unwrap_err();
     match err {
@@ -1053,30 +1037,35 @@ async fn every_read_rpc_answers_on_a_populated_store() {
     // complement of the empty-store matrix above.
     let addr = spawn(populated_store()).await;
     let client = RemoteClient::connect(addr).await.unwrap();
-    let key = infrastore_proto::convert::key_from_pb(good_key()).unwrap();
+    let id = infrastore_core::TimeSeriesId(GOOD_ID);
 
     assert_eq!(
         client
-            .list_time_series(None, None, None, None, None, None, None, None, None, None)
+            .list_metadata(None, None, None, None, None, None, None, None, None, None)
             .await
             .unwrap()
             .len(),
         1
     );
-    assert_eq!(
+    assert_eq!(client.list_metadata_by_ids(&[id]).await.unwrap().len(), 1);
+    assert!(client.association_exists(id).await.unwrap());
+    assert!(client.read_by_id(id, None).await.is_ok());
+    assert!(client.get_metadata_by_id(id).await.is_ok());
+    assert!(
         client
-            .list_keys(
-                None, None, None, None, None, None, None, None, None, None, true
+            .has_any_time_series(
+                42,
+                OwnerCategory::Component,
+                "load",
+                Some(TimeSeriesType::SingleTimeSeries),
+                Some(Period::fixed(Duration::hours(1))),
+                None,
+                Features::new(),
             )
             .await
             .unwrap()
-            .len(),
-        1
     );
-    assert!(client.get_time_series(&key, None).await.is_ok());
-    assert!(client.get_metadata(&key).await.is_ok());
-    assert!(client.has_time_series(&key).await.unwrap());
-    assert_eq!(client.bulk_read(&[&key], None).await.unwrap().len(), 1);
+    assert_eq!(client.read_by_ids(&[id], None).await.unwrap().len(), 1);
     assert_eq!(
         client.get_resolutions(None).await.unwrap(),
         vec![Period::fixed(Duration::hours(1))]
@@ -1129,14 +1118,14 @@ async fn every_read_rpc_answers_on_a_populated_store() {
 /// measured an 822 MB response off a 16 KB store, unauthenticated under the
 /// default `auth = "none"`.
 #[tokio::test]
-async fn bulk_read_refuses_more_keys_than_the_server_allows() {
+async fn read_by_ids_refuses_more_ids_than_the_server_allows() {
     let addr = spawn_with_bulk_limit(populated_store(), 3).await;
     let mut raw = raw_client(&addr).await;
 
     // At the limit: still served.
     let resp = raw
-        .bulk_read(BulkReadReq {
-            keys: vec![good_key(), good_key(), good_key()],
+        .read_by_ids(ReadByIdsReq {
+            ids: vec![GOOD_ID; 3],
             start_rfc3339: None,
             end_rfc3339: None,
             bounds_zoneless: None,
@@ -1147,10 +1136,10 @@ async fn bulk_read_refuses_more_keys_than_the_server_allows() {
     assert_eq!(resp.items.len(), 3);
 
     // One over: refused, and refused as a resource limit rather than as bad
-    // input, so a client can tell "split the request" from "this key is wrong".
+    // input, so a client can tell "split the request" from "this id is wrong".
     let err = raw
-        .bulk_read(BulkReadReq {
-            keys: vec![good_key(), good_key(), good_key(), good_key()],
+        .read_by_ids(ReadByIdsReq {
+            ids: vec![GOOD_ID; 4],
             start_rfc3339: None,
             end_rfc3339: None,
             bounds_zoneless: None,
@@ -1164,20 +1153,15 @@ async fn bulk_read_refuses_more_keys_than_the_server_allows() {
     // string literal, which is exactly what it used to carry.
     assert_eq!(
         err.message(),
-        "bulk_read requested 4 keys, more than this server's limit of 3; split the request",
+        "ReadByIds requested 4 ids, more than this server's limit of 3; split the request",
         "{err:?}"
     );
 
-    // The keys are never even decoded, so a request that is both oversized and
-    // malformed reports the size -- the cheap check runs first.
+    // No id is looked up, so a request that is both oversized and full of stale
+    // references reports the size -- the cheap check runs first.
     let err = raw
-        .bulk_read(BulkReadReq {
-            keys: vec![
-                good_key(),
-                good_key(),
-                good_key(),
-                pb::TimeSeriesKey::default(),
-            ],
+        .read_by_ids(ReadByIdsReq {
+            ids: vec![GOOD_ID, GOOD_ID, GOOD_ID, STALE_ID],
             start_rfc3339: None,
             end_rfc3339: None,
             bounds_zoneless: None,
@@ -1189,13 +1173,12 @@ async fn bulk_read_refuses_more_keys_than_the_server_allows() {
 
 /// The shipped default is high enough not to get in the way of real batching.
 #[tokio::test]
-async fn the_default_bulk_read_limit_admits_an_ordinary_batch() {
+async fn the_default_read_by_ids_limit_admits_an_ordinary_batch() {
     let addr = spawn(populated_store()).await;
     let mut raw = raw_client(&addr).await;
-    let keys = vec![good_key(); 512];
     let resp = raw
-        .bulk_read(BulkReadReq {
-            keys,
+        .read_by_ids(ReadByIdsReq {
+            ids: vec![GOOD_ID; 512],
             start_rfc3339: None,
             end_rfc3339: None,
             bounds_zoneless: None,

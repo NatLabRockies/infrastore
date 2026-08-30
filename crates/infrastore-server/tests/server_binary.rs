@@ -22,7 +22,7 @@ use infrastore_core::{
     Features, OwnerCategory, SingleTimeSeries, TimeSeriesData, TypedArray, catalog_sqlite_path,
     create_store,
 };
-use infrastore_proto::pb::{CountsReq, catalog_store_client::CatalogStoreClient};
+use infrastore_proto::pb::{GetCountsReq, catalog_store_client::CatalogStoreClient};
 use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
 
@@ -300,7 +300,11 @@ async fn auth_none_serves_without_a_header() {
     let (_proc, port) = spawn_server(dir.path(), &store, "none", &[]);
 
     let mut client = CatalogStoreClient::new(channel(port).await);
-    let resp = client.get_counts(CountsReq {}).await.unwrap().into_inner();
+    let resp = client
+        .get_counts(GetCountsReq {})
+        .await
+        .unwrap()
+        .into_inner();
     assert_eq!(resp.static_time_series, 1);
     assert_eq!(resp.components_with_time_series, 1);
 }
@@ -321,7 +325,11 @@ async fn auth_none_ignores_a_supplied_api_key_header() {
             Ok(req)
         },
     );
-    let resp = client.get_counts(CountsReq {}).await.unwrap().into_inner();
+    let resp = client
+        .get_counts(GetCountsReq {})
+        .await
+        .unwrap()
+        .into_inner();
     assert_eq!(resp.static_time_series, 1);
 }
 
@@ -333,7 +341,7 @@ async fn api_key_auth_through_the_binary_accepts_and_rejects() {
 
     // No header at all.
     let mut anon = CatalogStoreClient::new(channel(port).await);
-    let err = anon.get_counts(CountsReq {}).await.unwrap_err();
+    let err = anon.get_counts(GetCountsReq {}).await.unwrap_err();
     assert_eq!(err.code(), tonic::Code::Unauthenticated, "{err:?}");
 
     // A wrong key.
@@ -345,7 +353,7 @@ async fn api_key_auth_through_the_binary_accepts_and_rejects() {
             Ok(req)
         },
     );
-    let err = wrong.get_counts(CountsReq {}).await.unwrap_err();
+    let err = wrong.get_counts(GetCountsReq {}).await.unwrap_err();
     assert_eq!(err.code(), tonic::Code::Unauthenticated, "{err:?}");
 
     // Either configured key works, and the data comes back.
@@ -358,7 +366,11 @@ async fn api_key_auth_through_the_binary_accepts_and_rejects() {
                 Ok(req)
             },
         );
-        let resp = client.get_counts(CountsReq {}).await.unwrap().into_inner();
+        let resp = client
+            .get_counts(GetCountsReq {})
+            .await
+            .unwrap()
+            .into_inner();
         assert_eq!(resp.static_time_series, 1, "key {key_text}");
     }
 }

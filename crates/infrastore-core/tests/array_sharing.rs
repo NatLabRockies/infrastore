@@ -32,7 +32,7 @@ fn sts_series() -> SingleTimeSeries {
     )
 }
 
-fn add_sts(store: &mut Store, owner: i64) -> infrastore_core::TimeSeriesKey {
+fn add_sts(store: &mut Store, owner: i64) -> infrastore_core::TimeSeriesId {
     store
         .add_time_series(
             owner,
@@ -42,7 +42,6 @@ fn add_sts(store: &mut Store, owner: i64) -> infrastore_core::TimeSeriesKey {
             Features::new(),
         )
         .unwrap()
-        .key
 }
 
 // --- count_array_references: cases beyond (1, 1) --------------------------------
@@ -53,18 +52,18 @@ fn count_array_references_multiple_sts_then_decrements() {
     // Two SingleTimeSeries with identical data share one array; no DST exists.
     let k1 = add_sts(&mut store, 1);
     let k2 = add_sts(&mut store, 2);
-    let hash = store.get_metadata(k1.identity()).unwrap().data_hash;
+    let hash = store.get_metadata_by_id(k1).unwrap().unwrap().data_hash;
 
     assert_eq!(store.count_array_references(&hash).unwrap(), (2, 0));
     assert_eq!(store.num_distinct_arrays().unwrap(), 1);
 
     // Removing one sharer drops the count to (1, 0); the array survives.
-    store.remove_time_series(k1.identity()).unwrap();
+    store.remove_by_ids(&[k1]).unwrap();
     assert_eq!(store.count_array_references(&hash).unwrap(), (1, 0));
     assert_eq!(store.num_distinct_arrays().unwrap(), 1);
 
     // Removing the last reference clears the count and reclaims the array.
-    store.remove_time_series(k2.identity()).unwrap();
+    store.remove_by_ids(&[k2]).unwrap();
     assert_eq!(store.count_array_references(&hash).unwrap(), (0, 0));
     assert_eq!(store.num_distinct_arrays().unwrap(), 0);
 }
@@ -87,13 +86,17 @@ fn removing_the_last_sts_backing_a_dst_is_refused() {
         .transformed;
     assert_eq!(derived, 1);
 
-    let hash = store.get_metadata(sts_key.identity()).unwrap().data_hash;
+    let hash = store
+        .get_metadata_by_id(sts_key)
+        .unwrap()
+        .unwrap()
+        .data_hash;
     assert_eq!(store.count_array_references(&hash).unwrap(), (1, 1));
 
     // A DST is a view over the STS's array: removing its last backing
     // SingleTimeSeries would orphan it, so the remove is refused and rolled
     // back.
-    let err = store.remove_time_series(sts_key.identity()).unwrap_err();
+    let err = store.remove_by_ids(&[sts_key]).unwrap_err();
     assert!(matches!(
         err,
         infrastore_core::TimeSeriesError::InvalidParameter(_)
@@ -102,13 +105,13 @@ fn removing_the_last_sts_backing_a_dst_is_refused() {
 
     // Removing the derived DST first unblocks the STS removal.
     let dst_key = store
-        .list_keys(infrastore_core::ListFilter::new())
+        .list_metadata(infrastore_core::ListFilter::new())
         .unwrap()
         .into_iter()
-        .find(|k| k.time_series_type() == TimeSeriesType::DeterministicSingleTimeSeries)
+        .find(|m| m.time_series_type == TimeSeriesType::DeterministicSingleTimeSeries)
         .expect("the derived DST key must be listed");
-    store.remove_time_series(dst_key.identity()).unwrap();
-    store.remove_time_series(sts_key.identity()).unwrap();
+    store.remove_by_ids(&[dst_key.id.unwrap()]).unwrap();
+    store.remove_by_ids(&[sts_key]).unwrap();
     assert_eq!(store.count_array_references(&hash).unwrap(), (0, 0));
     assert_eq!(store.num_distinct_arrays().unwrap(), 0);
 }
@@ -126,18 +129,20 @@ fn bulk_remove_of_dst_and_backing_sts_is_order_independent() {
             Default::default(),
         )
         .unwrap();
-    let hash = store.get_metadata(sts_key.identity()).unwrap().data_hash;
+    let hash = store
+        .get_metadata_by_id(sts_key)
+        .unwrap()
+        .unwrap()
+        .data_hash;
     let dst_key = store
-        .list_keys(infrastore_core::ListFilter::new())
+        .list_metadata(infrastore_core::ListFilter::new())
         .unwrap()
         .into_iter()
-        .find(|k| k.time_series_type() == TimeSeriesType::DeterministicSingleTimeSeries)
+        .find(|m| m.time_series_type == TimeSeriesType::DeterministicSingleTimeSeries)
         .expect("the derived DST key must be listed");
 
     // An STS-only bulk remove would orphan the DST and is refused atomically.
-    let err = store
-        .remove_time_series_bulk(&[sts_key.identity()])
-        .unwrap_err();
+    let err = store.remove_by_ids(&[sts_key]).unwrap_err();
     assert!(matches!(
         err,
         infrastore_core::TimeSeriesError::InvalidParameter(_)
@@ -147,7 +152,7 @@ fn bulk_remove_of_dst_and_backing_sts_is_order_independent() {
     // Removing both in one batch passes: the orphan check runs on the
     // post-removal state, so the STS-before-DST order does not matter.
     let removed = store
-        .remove_time_series_bulk(&[sts_key.identity(), dst_key.identity()])
+        .remove_by_ids(&[sts_key, dst_key.id.unwrap()])
         .unwrap();
     assert_eq!(removed, 2);
     assert_eq!(store.count_array_references(&hash).unwrap(), (0, 0));
@@ -205,8 +210,8 @@ fn shared_hash_across_packed_and_standalone_persists_as_standalone() {
 
         // Despite differing layouts, they share one array.
         assert_eq!(store.num_distinct_arrays().unwrap(), 1);
-        sts_id = sts_key.identity().clone();
-        ns_id = ns_key.identity().clone();
+        sts_id = sts_key;
+        ns_id = ns_key;
 
         // Persisting an in-memory store re-plans each array's layout. The shared
         // hash must be promoted to standalone (the packed layout is invalid for
@@ -217,9 +222,13 @@ fn shared_hash_across_packed_and_standalone_persists_as_standalone() {
     let store = open_store(path.as_path(), true).unwrap();
     assert_eq!(store.num_distinct_arrays().unwrap(), 1);
 
-    let sts_got = store.get_time_series(&sts_id, None).unwrap();
+    let sts_got = store
+        .read_by_id(sts_id, infrastore_core::ReadWindow::full())
+        .unwrap();
     assert_eq!(sts_got.as_single().unwrap().data, sts_data);
-    let ns_got = store.get_time_series(&ns_id, None).unwrap();
+    let ns_got = store
+        .read_by_id(ns_id, infrastore_core::ReadWindow::full())
+        .unwrap();
     assert_eq!(ns_got.as_non_sequential().unwrap().data, ns_data);
 
     let report = store.verify_integrity().unwrap();
@@ -234,16 +243,20 @@ fn rename_preserves_the_shared_array_and_refcount() {
     // Two owners share one array (identical data).
     let k1 = add_sts(&mut store, 1);
     let k2 = add_sts(&mut store, 2);
-    let hash = store.get_metadata(k1.identity()).unwrap().data_hash;
+    let hash = store.get_metadata_by_id(k1).unwrap().unwrap().data_hash;
     assert_eq!(store.num_distinct_arrays().unwrap(), 1);
     assert_eq!(store.count_array_references(&hash).unwrap(), (2, 0));
 
     // Rename one sharer.
-    let renamed = store.rename_time_series(k1.identity(), "renamed").unwrap();
+    let renamed = store.rename_time_series(k1, "renamed").unwrap();
 
     // Rename touches only the name: same hash, same shared array, same refcount.
     assert_eq!(
-        store.get_metadata(renamed.identity()).unwrap().data_hash,
+        store
+            .get_metadata_by_id(renamed.id.unwrap())
+            .unwrap()
+            .unwrap()
+            .data_hash,
         hash
     );
     assert_eq!(store.num_distinct_arrays().unwrap(), 1);
@@ -252,7 +265,7 @@ fn rename_preserves_the_shared_array_and_refcount() {
     // Both the renamed series and the untouched sharer still read the data.
     assert_eq!(
         store
-            .get_time_series(renamed.identity(), None)
+            .read_by_id(renamed.id.unwrap(), infrastore_core::ReadWindow::full())
             .unwrap()
             .as_single()
             .unwrap()
@@ -261,7 +274,7 @@ fn rename_preserves_the_shared_array_and_refcount() {
     );
     assert_eq!(
         store
-            .get_time_series(k2.identity(), None)
+            .read_by_id(k2, infrastore_core::ReadWindow::full())
             .unwrap()
             .as_single()
             .unwrap()
@@ -306,7 +319,7 @@ fn locate_array_names_the_dataset_and_column_of_a_packed_array() {
                     Features::new(),
                 )
                 .unwrap();
-            hashes.push(store.get_metadata(key.identity()).unwrap().data_hash);
+            hashes.push(store.get_metadata_by_id(key).unwrap().unwrap().data_hash);
         }
         store.flush().unwrap();
         hashes
@@ -363,7 +376,7 @@ fn locate_array_names_the_standalone_dataset_of_a_lone_irregular_series() {
                 Features::new(),
             )
             .unwrap();
-        let hash = store.get_metadata(key.identity()).unwrap().data_hash;
+        let hash = store.get_metadata_by_id(key).unwrap().unwrap().data_hash;
         store.flush().unwrap();
         hash
     };
@@ -425,7 +438,7 @@ fn irregular_series_sharing_a_time_axis_are_packed_into_one_cohort_dataset() {
 
     let hashes: Vec<[u8; 32]> = keys
         .iter()
-        .map(|k| store.get_metadata(k.identity()).unwrap().data_hash)
+        .map(|k| store.get_metadata_by_id(*k).unwrap().unwrap().data_hash)
         .collect();
     let mut cohort_datasets = Vec::new();
     for hash in &hashes[..3] {
@@ -455,7 +468,10 @@ fn irregular_series_sharing_a_time_axis_are_packed_into_one_cohort_dataset() {
     drop(store);
     let store = open_store(path.as_path(), true).unwrap();
     for (owner, key) in keys.iter().enumerate().take(3) {
-        match store.get_time_series(key.identity(), None).unwrap() {
+        match store
+            .read_by_id(*key, infrastore_core::ReadWindow::full())
+            .unwrap()
+        {
             TimeSeriesData::NonSequentialTimeSeries(ns) => {
                 assert_eq!(ns.timestamps, stamps);
                 assert_eq!(
@@ -483,7 +499,7 @@ fn locate_array_reports_no_on_disk_location_for_an_in_memory_store() {
             Features::new(),
         )
         .unwrap();
-    let hash = store.get_metadata(key.identity()).unwrap().data_hash;
+    let hash = store.get_metadata_by_id(key).unwrap().unwrap().data_hash;
     assert_eq!(store.locate_array(&hash).unwrap(), ArrayLocation::InMemory);
     assert!(store.locate_array(&[0u8; 32]).is_err());
 }

@@ -18,10 +18,10 @@ use hdf5_metno as h5;
 use sha2::{Digest, Sha256};
 
 use infrastore_core::{
-    CatalogMode, Compression, Deterministic, Dtype, ElementType, Features, OwnerCategory,
-    ParentChildAssociation, ParentChildFilter, SingleTimeSeries, TimeSeriesData, TimeSeriesType,
-    TypedArray, array_hash, catalog_sqlite_path, create_store, create_store_with_catalog, hash_hex,
-    open_store,
+    CatalogMode, Compression, Deterministic, Dtype, ElementType, Features, ListFilter,
+    OwnerCategory, ParentChildAssociation, ParentChildFilter, SingleTimeSeries, TimeSeriesData,
+    TimeSeriesType, TypedArray, array_hash, catalog_sqlite_path, create_store,
+    create_store_with_catalog, hash_hex, open_store,
 };
 
 /// SHA-256 of an empty `Features` map, reproducing the domain documented for
@@ -231,28 +231,40 @@ fn sidecar_reads_back_through_the_public_api() {
     assert!(report.ok(), "integrity errors: {:?}", report.errors);
 
     let keys = store
-        .get_time_series_keys(1, OwnerCategory::Component)
+        .list_metadata(
+            ListFilter::new()
+                .owner_id(1)
+                .owner_category(OwnerCategory::Component),
+        )
         .unwrap();
     assert_eq!(keys.len(), 2, "{keys:?}");
 
     let single_key = keys
         .iter()
-        .find(|k| k.identity().name == "load")
+        .find(|k| k.name == "load")
         .expect("the static series");
-    let single_data = store.get_time_series(single_key.identity(), None).unwrap();
+    let single_data = store
+        .read_by_id(single_key.id.unwrap(), infrastore_core::ReadWindow::full())
+        .unwrap();
     let single = single_data.as_single().expect("SingleTimeSeries");
     assert_eq!(single.data.to_f64_vec().unwrap(), static_values);
     assert_eq!(single.initial_timestamp, initial_timestamp);
-    let single_meta = store.get_metadata(single_key.identity()).unwrap();
+    let single_meta = store
+        .get_metadata_by_id(single_key.id.unwrap())
+        .unwrap()
+        .unwrap();
     assert_eq!(single_meta.units, Some("MW".to_string()));
     assert_eq!(single_meta.data_hash, static_hash);
 
     let forecast_key = keys
         .iter()
-        .find(|k| k.identity().name == "forecast")
+        .find(|k| k.name == "forecast")
         .expect("the forecast");
     let forecast_data = store
-        .get_time_series(forecast_key.identity(), None)
+        .read_by_id(
+            forecast_key.id.unwrap(),
+            infrastore_core::ReadWindow::full(),
+        )
         .unwrap();
     let det = forecast_data.as_deterministic().expect("Deterministic");
     assert_eq!(det.data.to_f64_vec().unwrap(), forecast_values);

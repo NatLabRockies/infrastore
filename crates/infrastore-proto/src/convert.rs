@@ -6,8 +6,8 @@ use chrono::{DateTime, Utc};
 use infrastore_core::{
     Deterministic, ElementType, FeatureValue, Features, ForecastSummaryRow,
     NonSequentialTimeSeries, OwnerCategory, Period, Probabilistic, Scenarios, SingleTimeSeries,
-    StaticSummaryRow, TimeReference, TimeSeriesData, TimeSeriesMetadata, TimeSeriesType, TypedArray,
-    UnitSystem,
+    StaticSummaryRow, TimeReference, TimeSeriesData, TimeSeriesId, TimeSeriesMetadata,
+    TimeSeriesType, TypedArray, UnitSystem,
 };
 
 use crate::pb;
@@ -122,10 +122,6 @@ pub fn features_from_pb(f: pb::Features) -> Result<Features, ConvertError> {
 
 // ---- Key + metadata ----
 
-
-
-
-
 pub fn metadata_to_pb(m: &TimeSeriesMetadata) -> pb::TimeSeriesMetadata {
     pb::TimeSeriesMetadata {
         owner_id: m.owner_id,
@@ -157,7 +153,7 @@ pub fn metadata_to_pb(m: &TimeSeriesMetadata) -> pb::TimeSeriesMetadata {
         element_type: m.element_type.to_string(),
         element_shape: m.element_shape.iter().map(|d| *d as u64).collect(),
         application_data: m.application_data.clone(),
-        id: m.id,
+        id: m.id.map(|id| id.get()),
         percentiles: m.percentiles.clone().unwrap_or_default(),
     }
 }
@@ -243,24 +239,24 @@ pub fn metadata_from_pb(m: pb::TimeSeriesMetadata) -> Result<TimeSeriesMetadata,
         })?,
         element_shape: m.element_shape.iter().map(|d| *d as usize).collect(),
         application_data: m.application_data,
-        id: m.id,
+        id: m.id.map(TimeSeriesId),
     })
 }
 
-// ---- TimeSeriesData (for GetResp body construction) ----
+// ---- TimeSeriesData (for ReadByIdResp body construction) ----
 
-/// Encode a [`TimeSeriesData`] into the wire-shape used by `GetResp`.
+/// Encode a [`TimeSeriesData`] into the wire-shape used by `ReadByIdResp`.
 ///
 /// The `element_type` comes off the data itself: a read fills it in from the
 /// association row, so the caller needs no second catalog lookup to describe
 /// what the bytes mean.
 ///
-/// `GetResp.application_data` is left empty on every variant, and that is not an omission:
+/// `ReadByIdResp.application_data` is left empty on every variant, and that is not an omission:
 /// `application_data` belongs to the association row ([`TimeSeriesMetadata::application_data`], which
 /// [`metadata_to_pb`] does carry), so a gRPC caller reads it from `GetMetadata`
 /// or `ListTimeSeries` rather than from the values. Pinned by
-/// `application_data_is_always_empty_in_get_resp`; see the proto comment on field 10.
-pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
+/// `application_data_is_always_empty_in_read_resp`; see the proto comment on field 10.
+pub fn time_series_data_to_read_resp(data: &TimeSeriesData) -> pb::ReadByIdResp {
     let element_type = data.element_type();
     // Uniform across every variant, so read once. These describe the values and
     // travel with them, which is exactly why the read path has to carry them:
@@ -273,8 +269,9 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
     let unit_system = data.unit_system().map(|u| u.as_str().to_owned());
     let time_reference = data.time_reference().map(TimeReference::as_storage_string);
     let component_field = data.component_field().map(str::to_owned);
+    let name = data.name().to_owned();
     match data {
-        TimeSeriesData::SingleTimeSeries(s) => pb::GetResp {
+        TimeSeriesData::SingleTimeSeries(s) => pb::ReadByIdResp {
             initial_timestamp_rfc3339: s.initial_timestamp.to_rfc3339(),
             resolution: s.resolution.to_iso8601(),
             length: s.length as u64,
@@ -294,8 +291,9 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             count: 0,
             percentiles: Vec::new(),
             scenario_count: 0,
+            name: name.clone(),
         },
-        TimeSeriesData::NonSequentialTimeSeries(s) => pb::GetResp {
+        TimeSeriesData::NonSequentialTimeSeries(s) => pb::ReadByIdResp {
             initial_timestamp_rfc3339: String::new(),
             resolution: String::new(),
             length: s.length as u64,
@@ -315,8 +313,9 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             count: 0,
             percentiles: Vec::new(),
             scenario_count: 0,
+            name: name.clone(),
         },
-        TimeSeriesData::Deterministic(d) => pb::GetResp {
+        TimeSeriesData::Deterministic(d) => pb::ReadByIdResp {
             initial_timestamp_rfc3339: d.initial_timestamp.to_rfc3339(),
             resolution: d.resolution.to_iso8601(),
             length: d.data.shape[0] as u64,
@@ -336,8 +335,9 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             count: d.count as u64,
             percentiles: Vec::new(),
             scenario_count: 0,
+            name: name.clone(),
         },
-        TimeSeriesData::Probabilistic(p) => pb::GetResp {
+        TimeSeriesData::Probabilistic(p) => pb::ReadByIdResp {
             initial_timestamp_rfc3339: p.initial_timestamp.to_rfc3339(),
             resolution: p.resolution.to_iso8601(),
             length: p.data.shape[0] as u64,
@@ -357,8 +357,9 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             count: p.count as u64,
             percentiles: p.percentiles.clone(),
             scenario_count: 0,
+            name: name.clone(),
         },
-        TimeSeriesData::Scenarios(s) => pb::GetResp {
+        TimeSeriesData::Scenarios(s) => pb::ReadByIdResp {
             initial_timestamp_rfc3339: s.initial_timestamp.to_rfc3339(),
             resolution: s.resolution.to_iso8601(),
             length: s.data.shape[0] as u64,
@@ -378,14 +379,19 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             count: s.count as u64,
             percentiles: Vec::new(),
             scenario_count: s.scenario_count as u64,
+            name: name.clone(),
         },
     }
 }
 
-pub fn get_resp_to_time_series_data(
-    mut resp: pb::GetResp,
-    name: String,
+/// Rebuild a [`TimeSeriesData`] from the wire form.
+///
+/// The name comes off the message rather than from the caller: a read names an
+/// id, and an id carries no name, so a client has nothing to supply.
+pub fn read_resp_to_time_series_data(
+    mut resp: pb::ReadByIdResp,
 ) -> Result<TimeSeriesData, ConvertError> {
+    let name = std::mem::take(&mut resp.name);
     let ts_type = pb::TimeSeriesType::try_from(resp.time_series_type).map_err(|_| {
         ConvertError::InvalidValue {
             field: "time_series_type",
@@ -546,26 +552,6 @@ fn parse_time_reference(s: Option<&str>) -> Result<Option<TimeReference>, Conver
         })
     })
     .transpose()
-}
-
-/// Encode an optional period as its ISO-8601 string; `None` -> empty string.
-fn period_to_iso(p: Option<Period>) -> String {
-    p.map(|p| p.to_iso8601()).unwrap_or_default()
-}
-
-/// Decode an ISO-8601 period string; empty -> `None`. Used by the key message,
-/// whose resolution/interval remain empty-string-sentinel `string` fields.
-fn optional_period(s: &str) -> Result<Option<Period>, ConvertError> {
-    if s.is_empty() {
-        Ok(None)
-    } else {
-        Period::from_iso8601(s)
-            .map(Some)
-            .map_err(|e| ConvertError::InvalidValue {
-                field: "period",
-                message: e.to_string(),
-            })
-    }
 }
 
 /// Decode an optional ISO-8601 period from a proto3 `optional string` field.
@@ -792,7 +778,7 @@ mod tests {
         )
         .unwrap();
         let original = TimeSeriesData::Deterministic(det);
-        let resp = time_series_data_to_get_resp(&original);
+        let resp = time_series_data_to_read_resp(&original);
         assert_eq!(
             resp.time_series_type,
             pb::TimeSeriesType::Deterministic as i32
@@ -804,7 +790,7 @@ mod tests {
         assert!(resp.percentiles.is_empty());
         assert_eq!(resp.scenario_count, 0);
 
-        let roundtripped = get_resp_to_time_series_data(resp, "test".to_string()).unwrap();
+        let roundtripped = read_resp_to_time_series_data(resp).unwrap();
         assert_eq!(roundtripped, original);
     }
 
@@ -824,11 +810,11 @@ mod tests {
         )
         .unwrap();
         let original = TimeSeriesData::Deterministic(det);
-        let resp = time_series_data_to_get_resp(&original);
+        let resp = time_series_data_to_read_resp(&original);
         assert_eq!(resp.shape, vec![2u64, 3, 2]);
         assert_eq!(resp.count, 3);
 
-        let roundtripped = get_resp_to_time_series_data(resp, "test".to_string()).unwrap();
+        let roundtripped = read_resp_to_time_series_data(resp).unwrap();
         assert_eq!(roundtripped, original);
         let d = roundtripped.as_deterministic().unwrap();
         assert_eq!(d.data.shape, vec![2, 3, 2]);
@@ -855,7 +841,7 @@ mod tests {
         )
         .unwrap();
         let original = TimeSeriesData::Probabilistic(prob);
-        let resp = time_series_data_to_get_resp(&original);
+        let resp = time_series_data_to_read_resp(&original);
         assert_eq!(
             resp.time_series_type,
             pb::TimeSeriesType::Probabilistic as i32
@@ -865,7 +851,7 @@ mod tests {
         assert_eq!(resp.scenario_count, 0);
         assert_eq!(resp.length, 3); // shape[0] = num_percentiles
 
-        let roundtripped = get_resp_to_time_series_data(resp, "test".to_string()).unwrap();
+        let roundtripped = read_resp_to_time_series_data(resp).unwrap();
         assert_eq!(roundtripped, original);
         let p = roundtripped.as_probabilistic().unwrap();
         assert_eq!(p.percentiles, vec![10.0, 50.0, 90.0]);
@@ -889,11 +875,11 @@ mod tests {
         )
         .unwrap();
         let original = TimeSeriesData::Probabilistic(prob);
-        let resp = time_series_data_to_get_resp(&original);
+        let resp = time_series_data_to_read_resp(&original);
         assert_eq!(resp.shape, vec![2u64, 3, 4, 5]);
         assert_eq!(resp.percentiles, percentiles);
 
-        let roundtripped = get_resp_to_time_series_data(resp, "test".to_string()).unwrap();
+        let roundtripped = read_resp_to_time_series_data(resp).unwrap();
         assert_eq!(roundtripped, original);
     }
 
@@ -916,14 +902,14 @@ mod tests {
         )
         .unwrap();
         let original = TimeSeriesData::Scenarios(scen);
-        let resp = time_series_data_to_get_resp(&original);
+        let resp = time_series_data_to_read_resp(&original);
         assert_eq!(resp.time_series_type, pb::TimeSeriesType::Scenarios as i32);
         assert_eq!(resp.scenario_count, 4);
         assert_eq!(resp.count, 3);
         assert!(resp.percentiles.is_empty());
         assert_eq!(resp.length, 4); // shape[0] = scenario_count
 
-        let roundtripped = get_resp_to_time_series_data(resp, "test".to_string()).unwrap();
+        let roundtripped = read_resp_to_time_series_data(resp).unwrap();
         assert_eq!(roundtripped, original);
         let s = roundtripped.as_scenarios().unwrap();
         assert_eq!(s.scenario_count, 4);
@@ -946,11 +932,11 @@ mod tests {
         )
         .unwrap();
         let original = TimeSeriesData::Scenarios(scen);
-        let resp = time_series_data_to_get_resp(&original);
+        let resp = time_series_data_to_read_resp(&original);
         assert_eq!(resp.shape, vec![2u64, 4, 3, 2]);
         assert_eq!(resp.scenario_count, 2);
 
-        let roundtripped = get_resp_to_time_series_data(resp, "test".to_string()).unwrap();
+        let roundtripped = read_resp_to_time_series_data(resp).unwrap();
         assert_eq!(roundtripped, original);
     }
 
@@ -973,10 +959,10 @@ mod tests {
         )
         .unwrap();
         let original = TimeSeriesData::Scenarios(scen);
-        let resp = time_series_data_to_get_resp(&original);
+        let resp = time_series_data_to_read_resp(&original);
         assert_eq!(resp.element_type, "i64");
 
-        let roundtripped = get_resp_to_time_series_data(resp, "test".to_string()).unwrap();
+        let roundtripped = read_resp_to_time_series_data(resp).unwrap();
         assert_eq!(roundtripped, original);
         let s = roundtripped.as_scenarios().unwrap();
         assert_eq!(s.data.dtype, Dtype::I64);
@@ -1031,7 +1017,7 @@ mod convert_coverage_tests {
     // ---- Dtype matrix ------------------------------------------------------
 
     #[test]
-    fn every_dtype_round_trips_through_get_resp() {
+    fn every_dtype_round_trips_through_read_resp() {
         for &dtype in ALL_DTYPES {
             let data = typed(dtype, vec![3]);
             let original = TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
@@ -1040,7 +1026,7 @@ mod convert_coverage_tests {
                 data.clone(),
                 "load",
             ));
-            let resp = time_series_data_to_get_resp(&original);
+            let resp = time_series_data_to_read_resp(&original);
             assert_eq!(
                 resp.element_type,
                 dtype.as_str(),
@@ -1048,7 +1034,7 @@ mod convert_coverage_tests {
             );
             assert_eq!(resp.value_bytes, data.bytes, "{dtype:?}: bytes");
 
-            let back = get_resp_to_time_series_data(resp, "load".to_string()).unwrap();
+            let back = read_resp_to_time_series_data(resp).unwrap();
             assert_eq!(back, original, "{dtype:?}");
         }
     }
@@ -1104,9 +1090,9 @@ mod convert_coverage_tests {
             )
             .unwrap();
             let original = TimeSeriesData::Deterministic(det);
-            let resp = time_series_data_to_get_resp(&original);
+            let resp = time_series_data_to_read_resp(&original);
             assert_eq!(resp.element_type, dtype.as_str(), "{dtype:?}");
-            let back = get_resp_to_time_series_data(resp, "det".to_string()).unwrap();
+            let back = read_resp_to_time_series_data(resp).unwrap();
             assert_eq!(back, original, "{dtype:?}");
         }
     }
@@ -1120,10 +1106,10 @@ mod convert_coverage_tests {
             data,
             "load",
         ));
-        let mut resp = time_series_data_to_get_resp(&original);
+        let mut resp = time_series_data_to_read_resp(&original);
         resp.element_type = "float64".into();
         assert!(matches!(
-            get_resp_to_time_series_data(resp, "load".to_string()),
+            read_resp_to_time_series_data(resp),
             Err(ConvertError::InvalidValue {
                 field: "element_type",
                 ..
@@ -1285,90 +1271,6 @@ mod convert_coverage_tests {
     }
 
     #[test]
-    fn months_periods_round_trip_in_a_key() {
-        let identity = KeyIdentity {
-            owner_id: 9,
-            owner_category: OwnerCategory::Component,
-            time_series_type: TimeSeriesType::Deterministic,
-            name: "monthly".into(),
-            resolution: Some(Period::Months(1)),
-            interval: Some(Period::Months(1)),
-            features: Features::new(),
-        };
-        let key = TimeSeriesKey::Forecast(ForecastTimeSeriesKey {
-            identity: identity.clone(),
-            initial_timestamp: t0(),
-            horizon: Period::Months(3),
-            count: 4,
-            time_reference: None,
-        });
-
-        let pb = full_key_to_pb(&key);
-        assert_eq!(pb.resolution, "P1M");
-        assert_eq!(pb.interval, "P1M");
-        assert_eq!(pb.horizon.as_deref(), Some("P3M"));
-
-        let back = full_key_from_pb(pb).unwrap();
-        assert_eq!(back, key);
-        assert_eq!(back.identity().resolution, Some(Period::Months(1)));
-
-        // The identity-only encoding too.
-        let pb = key_to_pb(&identity);
-        assert_eq!(pb.resolution, "P1M");
-        assert_eq!(key_from_pb(pb).unwrap(), identity);
-    }
-
-    #[test]
-    fn the_empty_string_sentinel_decodes_an_absent_period_in_a_key() {
-        // A key message keeps `resolution`/`interval` as plain `string` fields
-        // with the empty string standing in for "absent". A NonSequential key
-        // has neither, so both must come back `None` — and a non-empty value
-        // must never decode to `None`.
-        let key = TimeSeriesKey::NonSequential(NonSequentialTimeSeriesKey {
-            identity: KeyIdentity {
-                owner_id: 1,
-                owner_category: OwnerCategory::Component,
-                time_series_type: TimeSeriesType::NonSequentialTimeSeries,
-                name: "events".into(),
-                resolution: None,
-                interval: None,
-                features: Features::new(),
-            },
-            length: 3,
-            time_reference: None,
-        });
-
-        let pb = full_key_to_pb(&key);
-        assert_eq!(pb.resolution, "", "absent period is the empty string");
-        assert_eq!(pb.interval, "");
-        let back = full_key_from_pb(pb).unwrap();
-        assert_eq!(back, key);
-        assert_eq!(back.identity().resolution, None);
-        assert_eq!(back.identity().interval, None);
-    }
-
-    #[test]
-    fn a_malformed_period_string_in_a_key_errors() {
-        let mut pb = key_to_pb(&KeyIdentity {
-            owner_id: 1,
-            owner_category: OwnerCategory::Component,
-            time_series_type: TimeSeriesType::SingleTimeSeries,
-            name: "load".into(),
-            resolution: Some(Period::fixed(Duration::hours(1))),
-            interval: None,
-            features: Features::new(),
-        });
-        pb.resolution = "not-a-period".into();
-        assert!(matches!(
-            key_from_pb(pb),
-            Err(ConvertError::InvalidValue {
-                field: "period",
-                ..
-            })
-        ));
-    }
-
-    #[test]
     fn months_periods_round_trip_through_get_resp() {
         let data = typed(Dtype::F64, vec![3, 4]);
         let det = Deterministic::new(
@@ -1383,12 +1285,12 @@ mod convert_coverage_tests {
         .unwrap();
         let original = TimeSeriesData::Deterministic(det);
 
-        let resp = time_series_data_to_get_resp(&original);
+        let resp = time_series_data_to_read_resp(&original);
         assert_eq!(resp.resolution, "P1M");
         assert_eq!(resp.horizon, "P3M");
         assert_eq!(resp.interval, "P1M");
 
-        let back = get_resp_to_time_series_data(resp, "monthly".to_string()).unwrap();
+        let back = read_resp_to_time_series_data(resp).unwrap();
         assert_eq!(back, original);
         let det = back.as_deterministic().unwrap();
         assert!(det.resolution.is_irregular());
@@ -1431,30 +1333,79 @@ mod convert_coverage_tests {
         assert_eq!(forecast_summary_row_from_pb(pb).unwrap(), forecast_row);
     }
 
-    // ---- full_key_from_pb failure modes -----------------------------------
-
-    fn single_key_pb() -> pb::TimeSeriesKey {
-        full_key_to_pb(&TimeSeriesKey::Single(SingleTimeSeriesKey {
-            identity: KeyIdentity {
-                owner_id: 1,
-                owner_category: OwnerCategory::Component,
-                time_series_type: TimeSeriesType::SingleTimeSeries,
-                name: "load".into(),
-                resolution: Some(Period::fixed(Duration::hours(1))),
-                interval: None,
-                features: Features::new(),
-            },
-            initial_timestamp: t0(),
-            length: 24,
-            time_reference: None,
-        }))
+    /// A read names an id, and an id carries no name, so the name has to come
+    /// off the wire. Before it did, every series read over gRPC came back with
+    /// an empty name where the identical local call returned it.
+    #[test]
+    fn the_name_survives_the_read_round_trip_for_every_variant() {
+        let ts = t0();
+        let arr = |shape: Vec<usize>| {
+            let n: usize = shape.iter().product();
+            let vals: Vec<f64> = (0..n).map(|i| i as f64).collect();
+            TypedArray::from_f64(shape, &vals)
+        };
+        let variants = vec![
+            TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+                ts,
+                Duration::hours(1),
+                arr(vec![4]),
+                "sts_name",
+            )),
+            TimeSeriesData::NonSequentialTimeSeries(
+                NonSequentialTimeSeries::new(
+                    vec![ts, ts + Duration::hours(3)],
+                    arr(vec![2]),
+                    "nsts_name",
+                )
+                .unwrap(),
+            ),
+            TimeSeriesData::Deterministic(
+                Deterministic::new(
+                    ts,
+                    Duration::hours(1),
+                    Duration::hours(4),
+                    Duration::hours(6),
+                    3,
+                    arr(vec![4, 3]),
+                    "det_name",
+                )
+                .unwrap(),
+            ),
+            TimeSeriesData::Probabilistic(
+                Probabilistic::new(
+                    ts,
+                    Duration::hours(1),
+                    Duration::hours(3),
+                    Duration::hours(3),
+                    2,
+                    vec![0.1, 0.9],
+                    arr(vec![2, 3, 2]),
+                    "prob_name",
+                )
+                .unwrap(),
+            ),
+            TimeSeriesData::Scenarios(
+                Scenarios::new(
+                    ts,
+                    Duration::hours(1),
+                    Duration::hours(3),
+                    Duration::hours(3),
+                    2,
+                    2,
+                    arr(vec![2, 3, 2]),
+                    "scen_name",
+                )
+                .unwrap(),
+            ),
+        ];
+        for original in variants {
+            let expected = original.name().to_string();
+            let resp = time_series_data_to_read_resp(&original);
+            assert_eq!(resp.name, expected, "{expected}: encode");
+            let back = read_resp_to_time_series_data(resp).unwrap();
+            assert_eq!(back.name(), expected, "{expected}: decode");
+        }
     }
-
-
-
-
-
-
 
     // ---- DeterministicSingleTimeSeries on the wire ------------------------
 
@@ -1462,7 +1413,7 @@ mod convert_coverage_tests {
     fn a_deterministic_single_time_series_metadata_row_round_trips() {
         // A DST is never returned as a distinct *data* variant (it reads back as
         // a Deterministic), but the tag remains visible in catalog surfaces, so
-        // the metadata and key encodings must carry it exactly.
+        // the metadata encoding must carry it exactly.
         let meta = TimeSeriesMetadata {
             owner_id: 4,
             owner_type: "Generator".into(),
@@ -1496,7 +1447,7 @@ mod convert_coverage_tests {
             pb::TimeSeriesType::DeterministicSingleTimeSeries as i32
         );
         // The metadata path *does* carry `application_data` (unlike GetResp — see
-        // `application_data_is_always_empty_in_get_resp`).
+        // `application_data_is_always_empty_in_read_resp`).
         assert_eq!(
             pb.application_data.as_deref(),
             Some("QuadraticFunctionData")
@@ -1505,31 +1456,6 @@ mod convert_coverage_tests {
         // Struct equality, so every descriptor -- `component_field` included --
         // has to survive both directions, not just the ones named above.
         assert_eq!(metadata_from_pb(pb).unwrap(), meta);
-    }
-
-    #[test]
-    fn a_deterministic_single_time_series_key_round_trips() {
-        let key = TimeSeriesKey::Forecast(ForecastTimeSeriesKey {
-            identity: KeyIdentity {
-                owner_id: 4,
-                owner_category: OwnerCategory::Component,
-                time_series_type: TimeSeriesType::DeterministicSingleTimeSeries,
-                name: "load".into(),
-                resolution: Some(Period::fixed(Duration::hours(1))),
-                interval: Some(Period::fixed(Duration::hours(2))),
-                features: Features::new(),
-            },
-            initial_timestamp: t0(),
-            horizon: Period::fixed(Duration::hours(4)),
-            count: 3,
-            time_reference: None,
-        });
-        let pb = full_key_to_pb(&key);
-        assert_eq!(
-            pb.time_series_type,
-            pb::TimeSeriesType::DeterministicSingleTimeSeries as i32
-        );
-        assert_eq!(full_key_from_pb(pb).unwrap(), key);
     }
 
     #[test]
@@ -1563,7 +1489,7 @@ mod convert_coverage_tests {
     // ---- 3.2: `application_data` on the GetResp path ----------------------------------
 
     #[test]
-    fn application_data_is_always_empty_in_get_resp() {
+    fn application_data_is_always_empty_in_read_resp() {
         // FINDING F1 (TEST_COVERAGE_PLAN.md §9), resolved as documented
         // behavior: `GetResp.application_data` is always the empty string, and this test is
         // the tripwire that keeps it that way.
@@ -1634,7 +1560,7 @@ mod convert_coverage_tests {
                 .unwrap(),
             ),
         ] {
-            let resp = time_series_data_to_get_resp(&original);
+            let resp = time_series_data_to_read_resp(&original);
             assert_eq!(
                 resp.application_data,
                 "",
@@ -1656,9 +1582,9 @@ mod convert_coverage_tests {
             data.clone(),
             "load",
         ));
-        let resp = time_series_data_to_get_resp(&original);
+        let resp = time_series_data_to_read_resp(&original);
         assert_eq!(resp.value_bytes, data.bytes);
-        let back = get_resp_to_time_series_data(resp, "load".to_string()).unwrap();
+        let back = read_resp_to_time_series_data(resp).unwrap();
         // `TypedArray`'s PartialEq compares raw bytes, so this is a bitwise
         // comparison even for NaN.
         assert_eq!(back, original);

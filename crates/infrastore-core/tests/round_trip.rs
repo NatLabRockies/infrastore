@@ -5,9 +5,9 @@ use std::collections::BTreeMap;
 
 use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{
-    FeatureValue, Features, KeyIdentity, ListFilter, NonSequentialTimeSeries, OwnerCategory,
-    Period, SingleTimeSeries, TimeSeriesData, TimeSeriesError, TimeSeriesType, TypedArray,
-    create_store, open_store,
+    FeatureValue, Features, ListFilter, NonSequentialTimeSeries, OwnerCategory, Period,
+    SingleTimeSeries, TimeSeriesData, TimeSeriesError, TimeSeriesType, TypedArray, create_store,
+    open_store,
 };
 
 fn series(initial_year: i32, length: usize, base: f64) -> SingleTimeSeries {
@@ -57,9 +57,9 @@ fn monthly_calendar_resolution_round_trips_on_disk_and_reader() {
     // Reopen read-only: the resolution survives the ISO round trip as a calendar
     // period (not a fixed ms span).
     let store = open_store(path.as_path(), true).unwrap();
-    let keys = store.list_keys(ListFilter::new()).unwrap();
+    let keys = store.list_metadata(ListFilter::new()).unwrap();
     assert_eq!(keys.len(), 1);
-    assert_eq!(keys[0].resolution(), Some(Period::Months(1)));
+    assert_eq!(keys[0].resolution, Some(Period::Months(1)));
 
     // StaticReader over the monthly grid: month index 3 is 2024-04-15.
     let mut reader = store
@@ -102,7 +102,9 @@ fn add_and_get_round_trip() {
         )
         .unwrap();
 
-    let got = store.get_time_series(key.identity(), None).unwrap();
+    let got = store
+        .read_by_id(key, infrastore_core::ReadWindow::full())
+        .unwrap();
     let single = got.as_single().unwrap();
     assert_eq!(single.data, s.data);
     assert_eq!(single.length, 24);
@@ -133,7 +135,9 @@ fn a_series_reads_back_equal_to_the_one_written() {
             Features::new(),
         )
         .unwrap();
-    let got = store.get_time_series(key.identity(), None).unwrap();
+    let got = store
+        .read_by_id(key, infrastore_core::ReadWindow::full())
+        .unwrap();
     assert_eq!(got.element_type(), plain.element_type);
     assert_eq!(got.as_single().unwrap(), &plain);
 
@@ -151,7 +155,9 @@ fn a_series_reads_back_equal_to_the_one_written() {
         )
         .unwrap();
     assert_eq!(
-        store.get_time_series(key.identity(), None).unwrap(),
+        store
+            .read_by_id(key, infrastore_core::ReadWindow::full())
+            .unwrap(),
         described
     );
 
@@ -172,7 +178,9 @@ fn a_series_reads_back_equal_to_the_one_written() {
             Features::new(),
         )
         .unwrap();
-    let got = store.get_time_series(key.identity(), None).unwrap();
+    let got = store
+        .read_by_id(key, infrastore_core::ReadWindow::full())
+        .unwrap();
     assert_eq!(got.as_non_sequential().unwrap(), &irregular);
 }
 
@@ -228,14 +236,12 @@ fn features_disambiguate_keys() {
         )
         .unwrap();
 
-    let all = store
-        .list_time_series(ListFilter::new().owner_id(1))
-        .unwrap();
+    let all = store.list_metadata(ListFilter::new().owner_id(1)).unwrap();
     assert_eq!(all.len(), 2);
 
     // Subset filter — only the 2035 row.
     let only_2035 = store
-        .list_time_series(
+        .list_metadata(
             ListFilter::new()
                 .owner_id(1)
                 .features(features_with_year(2035)),
@@ -331,13 +337,15 @@ fn remove_keeps_array_when_other_refs_exist() {
         .unwrap();
 
     // Remove first association — array still referenced by k2, so k2 must work.
-    store.remove_time_series(k1.identity()).unwrap();
-    let still_there = store.get_time_series(k2.identity(), None).unwrap();
+    store.remove_by_ids(&[k1]).unwrap();
+    let still_there = store
+        .read_by_id(k2, infrastore_core::ReadWindow::full())
+        .unwrap();
     assert_eq!(still_there.as_single().unwrap().data, s.data);
 
     // Remove second — array is now unreferenced. The store doesn't expose
     // the dropped-array fact directly, but verify_integrity should still pass.
-    store.remove_time_series(k2.identity()).unwrap();
+    store.remove_by_ids(&[k2]).unwrap();
     let report = store.verify_integrity().unwrap();
     assert!(report.ok());
 }
@@ -381,9 +389,7 @@ fn bulk_add_atomic_rollback() {
     assert!(matches!(err, TimeSeriesError::DuplicateTimeSeries));
 
     // The first item must have been rolled back: owner 2 has nothing.
-    let rows = store
-        .list_time_series(ListFilter::new().owner_id(2))
-        .unwrap();
+    let rows = store.list_metadata(ListFilter::new().owner_id(2)).unwrap();
     assert!(rows.is_empty(), "rollback failed: {:?}", rows);
 }
 
@@ -409,7 +415,8 @@ fn time_range_slicing() {
     let start = initial + Duration::hours(2);
     let end = initial + Duration::hours(5);
     let got = store
-        .get_time_series(key.identity(), Some((start, end).into()))
+        .read_by_ids_range(&[key], (start, end).into())
+        .map(|mut v| v.remove(0))
         .unwrap();
     let single = got.as_single().unwrap();
     assert_eq!(single.length, 3);
@@ -442,7 +449,7 @@ fn clear_by_owner() {
         .unwrap();
     assert_eq!(removed, 1);
     let remaining = store
-        .list_time_series(ListFilter::new().time_series_type(TimeSeriesType::SingleTimeSeries))
+        .list_metadata(ListFilter::new().time_series_type(TimeSeriesType::SingleTimeSeries))
         .unwrap();
     assert_eq!(remaining.len(), 2);
 }
@@ -542,20 +549,21 @@ fn non_sequential_round_trip_and_time_slice() {
         )
         .unwrap();
 
+    let metadata = store.get_metadata_by_id(key).unwrap().unwrap();
     assert_eq!(
-        key.key.time_series_type(),
+        metadata.time_series_type,
         TimeSeriesType::NonSequentialTimeSeries
     );
-    assert_eq!(key.key.resolution(), None);
-    let metadata = store.get_metadata(key.identity()).unwrap();
+    assert_eq!(metadata.resolution, None);
     assert_eq!(metadata.timestamps, Some(timestamps.clone()));
     assert_eq!(metadata.resolution, None);
 
     let got = store
-        .get_time_series(
-            key.identity(),
-            Some((initial + Duration::hours(2), initial + Duration::days(1)).into()),
+        .read_by_ids_range(
+            &[key],
+            (initial + Duration::hours(2), initial + Duration::days(1)).into(),
         )
+        .map(|mut v| v.remove(0))
         .unwrap();
     let irregular = got.as_non_sequential().unwrap();
     assert_eq!(irregular.timestamps, timestamps[1..3]);
@@ -636,19 +644,20 @@ fn list_keys_with_hash_groups_shared_arrays() {
         )
         .unwrap();
 
-    let rows = store.list_keys_with_hash(ListFilter::new()).unwrap();
+    let rows = store.list_metadata(ListFilter::new()).unwrap();
     assert_eq!(rows.len(), 3);
 
-    // Each row's hash agrees with the per-key get_metadata hash.
-    for (key, hash) in &rows {
-        let meta = store.get_metadata(key.identity()).unwrap();
-        assert_eq!(&meta.data_hash, hash);
+    // Each listed row's hash agrees with the one a by-id fetch reports.
+    for row in &rows {
+        let meta = store.get_metadata_by_id(row.id.unwrap()).unwrap().unwrap();
+        assert_eq!(meta.data_hash, row.data_hash);
     }
 
-    // Group by hash: owners 1 and 2 share one array, owner 3 is alone.
+    // Group by hash: owners 1 and 2 share one array, owner 3 is alone. The
+    // listing carries the hash beside the id, so this is one query.
     let mut groups: HashMap<[u8; 32], Vec<i64>> = HashMap::new();
-    for (key, hash) in &rows {
-        groups.entry(*hash).or_default().push(key.owner_id());
+    for row in &rows {
+        groups.entry(row.data_hash).or_default().push(row.owner_id);
     }
     assert_eq!(groups.len(), 2);
     let mut shared: Vec<Vec<i64>> = groups.values().filter(|v| v.len() > 1).cloned().collect();
@@ -659,13 +668,17 @@ fn list_keys_with_hash_groups_shared_arrays() {
 
 // ---- copy_time_series -------------------------------------------------------
 
-/// The identity of the single association owned by `owner`.
-fn only_key(store: &infrastore_core::Store, owner: i64) -> KeyIdentity {
+/// The catalog id of the single association owned by `owner`.
+fn only_key(store: &infrastore_core::Store, owner: i64) -> infrastore_core::TimeSeriesId {
     let keys = store
-        .get_time_series_keys(owner, OwnerCategory::Component)
+        .list_metadata(
+            ListFilter::new()
+                .owner_id(owner)
+                .owner_category(OwnerCategory::Component),
+        )
         .unwrap();
     assert_eq!(keys.len(), 1);
-    keys[0].identity().clone()
+    keys[0].id.expect("a stored row carries its id")
 }
 
 #[test]
@@ -683,18 +696,19 @@ fn copy_time_series_shares_the_array_and_renames() {
 
     let src = only_key(&store, 1);
     let copied = store
-        .copy_time_series(&src, 2, "HybridSystem", Some("Generator__load"))
+        .copy_time_series(src, 2, "HybridSystem", Some("Generator__load"))
         .unwrap();
 
     // The copy is a new association on the new owner under the new name...
-    assert_eq!(copied.identity().owner_id, 2);
-    assert_eq!(copied.identity().name, "Generator__load");
+    assert_ne!(copied, src, "a copy is its own row, with its own id");
+    let dst_meta = store.get_metadata_by_id(copied).unwrap().unwrap();
+    assert_eq!(dst_meta.owner_id, 2);
+    assert_eq!(dst_meta.name, "Generator__load");
     // ...and the source is untouched (a copy, not a move).
-    assert!(store.has_time_series(&src).unwrap());
+    assert!(store.association_exists(src).unwrap());
 
     // No array duplication: both associations point at the same content hash.
-    let src_meta = store.get_metadata(&src).unwrap();
-    let dst_meta = store.get_metadata(copied.identity()).unwrap();
+    let src_meta = store.get_metadata_by_id(src).unwrap().unwrap();
     assert_eq!(src_meta.data_hash, dst_meta.data_hash);
     assert_eq!(store.num_distinct_arrays().unwrap(), 1);
     assert_eq!(dst_meta.owner_type, "HybridSystem");
@@ -724,15 +738,19 @@ fn copy_time_series_preserves_deterministic_single_type() {
         .unwrap();
 
     let dst_src = store
-        .get_time_series_keys(1, OwnerCategory::Component)
+        .list_metadata(
+            ListFilter::new()
+                .owner_id(1)
+                .owner_category(OwnerCategory::Component),
+        )
         .unwrap()
         .into_iter()
-        .find(|k| k.identity().time_series_type == TimeSeriesType::DeterministicSingleTimeSeries)
+        .find(|k| k.time_series_type == TimeSeriesType::DeterministicSingleTimeSeries)
         .expect("transform should have produced a DeterministicSingleTimeSeries");
 
     let copied = store
         .copy_time_series(
-            dst_src.identity(),
+            dst_src.id.unwrap(),
             2,
             "HybridSystem",
             Some("Generator__load"),
@@ -741,14 +759,18 @@ fn copy_time_series_preserves_deterministic_single_type() {
 
     // The whole point: the copy stays a DeterministicSingleTimeSeries rather than
     // being materialized into a dense Deterministic, and still shares the array.
-    let meta = store.get_metadata(copied.identity()).unwrap();
+    let meta = store.get_metadata_by_id(copied).unwrap().unwrap();
     assert_eq!(
         meta.time_series_type,
         TimeSeriesType::DeterministicSingleTimeSeries
     );
     assert_eq!(
         meta.data_hash,
-        store.get_metadata(dst_src.identity()).unwrap().data_hash
+        store
+            .get_metadata_by_id(dst_src.id.unwrap())
+            .unwrap()
+            .unwrap()
+            .data_hash
     );
     assert_eq!(store.num_distinct_arrays().unwrap(), 1);
 }
@@ -767,10 +789,10 @@ fn copy_time_series_rejects_a_duplicate_destination() {
         .unwrap();
     let src = only_key(&store, 1);
 
-    store.copy_time_series(&src, 2, "Generator", None).unwrap();
+    store.copy_time_series(src, 2, "Generator", None).unwrap();
     // Copying again onto the same owner+name collides with the first copy.
     let err = store
-        .copy_time_series(&src, 2, "Generator", None)
+        .copy_time_series(src, 2, "Generator", None)
         .unwrap_err();
     assert!(matches!(err, TimeSeriesError::DuplicateTimeSeries));
 }
@@ -807,26 +829,19 @@ fn deleting_one_sharer_leaves_the_others_features_intact() {
             .unwrap();
     }
 
-    store
-        .remove_time_series(&KeyIdentity {
-            owner_id: 2,
-            owner_category: OwnerCategory::Component,
-            time_series_type: TimeSeriesType::SingleTimeSeries,
-            name: "load".to_string(),
-            resolution: Some(Period::from(Duration::hours(1))),
-            interval: None,
-            features: features.clone(),
-        })
-        .unwrap();
+    store.remove_by_ids(&[only_key(&store, 2)]).unwrap();
 
     for owner in [1i64, 3] {
         let keys = store
-            .get_time_series_keys(owner, OwnerCategory::Component)
+            .list_metadata(
+                ListFilter::new()
+                    .owner_id(owner)
+                    .owner_category(OwnerCategory::Component),
+            )
             .unwrap();
         assert_eq!(keys.len(), 1, "owner {owner} should still have its series");
         assert_eq!(
-            keys[0].features(),
-            &features,
+            keys[0].features, features,
             "owner {owner} lost its features when a co-sharer was deleted"
         );
     }
@@ -838,17 +853,7 @@ fn deleting_one_sharer_leaves_the_others_features_intact() {
 fn compact_reclaims_feature_sets_left_unreachable_by_deletion() {
     let mut store = create_store(None, true).unwrap();
     let features = features_with_year(2031);
-    let key = KeyIdentity {
-        owner_id: 1,
-        owner_category: OwnerCategory::Component,
-        time_series_type: TimeSeriesType::SingleTimeSeries,
-        name: "load".to_string(),
-        resolution: Some(Period::from(Duration::hours(1))),
-        interval: None,
-        features: features.clone(),
-    };
-
-    store
+    let key = store
         .add_time_series(
             1,
             "Generator",
@@ -861,7 +866,7 @@ fn compact_reclaims_feature_sets_left_unreachable_by_deletion() {
     // Nothing to reclaim while the set is still referenced.
     assert_eq!(store.compact().unwrap().feature_sets_reclaimed, 0);
 
-    store.remove_time_series(&key).unwrap();
+    store.remove_by_ids(&[key]).unwrap();
 
     // The set is now unreachable: one key/value row is swept.
     let report = store.compact().unwrap();
@@ -910,11 +915,15 @@ fn transform_reuses_the_sources_feature_set() {
     assert_eq!(store.compact().unwrap().feature_sets_reclaimed, 0);
     for owner in 1..=5i64 {
         let keys = store
-            .get_time_series_keys(owner, OwnerCategory::Component)
+            .list_metadata(
+                ListFilter::new()
+                    .owner_id(owner)
+                    .owner_category(OwnerCategory::Component),
+            )
             .unwrap();
         assert_eq!(keys.len(), 2, "owner {owner}: an STS and its derived DST");
         assert!(
-            keys.iter().all(|k| k.features() == &features),
+            keys.iter().all(|k| k.features == features),
             "owner {owner}: a derived DST lost the source's features"
         );
     }
@@ -1025,7 +1034,10 @@ fn a_shared_timestamp_vector_is_stored_once_and_swept_when_orphaned() {
 
     // Every series reads back its own copy of the shared axis.
     for key in &keys {
-        match store.get_time_series(key.identity(), None).unwrap() {
+        match store
+            .read_by_id(*key, infrastore_core::ReadWindow::full())
+            .unwrap()
+        {
             TimeSeriesData::NonSequentialTimeSeries(ns) => assert_eq!(ns.timestamps, stamps),
             other => panic!("expected a NonSequentialTimeSeries, got {other:?}"),
         }
@@ -1035,17 +1047,20 @@ fn a_shared_timestamp_vector_is_stored_once_and_swept_when_orphaned() {
     // seven of them leaves the axis alive for the eighth.
     assert_eq!(store.compact().unwrap().timestamp_sets_reclaimed, 0);
     for key in &keys[..7] {
-        store.remove_time_series(key.identity()).unwrap();
+        store.remove_by_ids(&[*key]).unwrap();
     }
     assert_eq!(store.compact().unwrap().timestamp_sets_reclaimed, 0);
-    match store.get_time_series(keys[7].identity(), None).unwrap() {
+    match store
+        .read_by_id(keys[7], infrastore_core::ReadWindow::full())
+        .unwrap()
+    {
         TimeSeriesData::NonSequentialTimeSeries(ns) => assert_eq!(ns.timestamps, stamps),
         other => panic!("expected a NonSequentialTimeSeries, got {other:?}"),
     }
 
     // The last reference goes: now the vector is unreachable and one row is
     // swept. Idempotent afterwards, like the feature-set sweep.
-    store.remove_time_series(keys[7].identity()).unwrap();
+    store.remove_by_ids(&[keys[7]]).unwrap();
     assert_eq!(store.compact().unwrap().timestamp_sets_reclaimed, 1);
     assert_eq!(store.compact().unwrap().timestamp_sets_reclaimed, 0);
 }
@@ -1096,9 +1111,12 @@ fn the_catalog_does_not_scale_with_rows_times_timestamps() {
 
     // And it still reads back intact.
     let store = open_store(path.as_path(), true).unwrap();
-    let keys = store.list_keys(ListFilter::new()).unwrap();
+    let keys = store.list_metadata(ListFilter::new()).unwrap();
     assert_eq!(keys.len(), 50);
-    match store.get_time_series(keys[0].identity(), None).unwrap() {
+    match store
+        .read_by_id(keys[0].id.unwrap(), infrastore_core::ReadWindow::full())
+        .unwrap()
+    {
         TimeSeriesData::NonSequentialTimeSeries(ns) => assert_eq!(ns.timestamps, stamps),
         other => panic!("expected a NonSequentialTimeSeries, got {other:?}"),
     }
@@ -1151,38 +1169,44 @@ fn many_distinct_time_axes_survive_the_decode_memo() {
         }
     }
 
-    let check =
-        |store: &infrastore_core::Store, i: usize, owner: i64, key: &KeyIdentity| match store
-            .get_time_series(key, None)
-            .unwrap()
-        {
-            TimeSeriesData::NonSequentialTimeSeries(ns) => {
-                assert_eq!(ns.timestamps, axes[i], "axis {i}");
-                assert_eq!(
-                    ns.data.to_f64_vec().unwrap()[0],
-                    (i * 100) as f64 + owner as f64
-                );
-            }
-            other => panic!("expected a NonSequentialTimeSeries, got {other:?}"),
-        };
+    let check = |store: &infrastore_core::Store,
+                 i: usize,
+                 owner: i64,
+                 key: infrastore_core::TimeSeriesId| match store
+        .read_by_id(key, infrastore_core::ReadWindow::full())
+        .unwrap()
+    {
+        TimeSeriesData::NonSequentialTimeSeries(ns) => {
+            assert_eq!(ns.timestamps, axes[i], "axis {i}");
+            assert_eq!(
+                ns.data.to_f64_vec().unwrap()[0],
+                (i * 100) as f64 + owner as f64
+            );
+        }
+        other => panic!("expected a NonSequentialTimeSeries, got {other:?}"),
+    };
 
     // Forwards, then backwards (worst case for a recency-ordered memo), then
     // interleaved with a repeatedly-read hot axis.
     for (i, owner, key) in &keys {
-        check(&store, *i, *owner, key.identity());
+        check(&store, *i, *owner, *key);
     }
     for (i, owner, key) in keys.iter().rev() {
-        check(&store, *i, *owner, key.identity());
+        check(&store, *i, *owner, *key);
     }
     for (i, owner, key) in &keys {
-        check(&store, 0, 0, keys[0].2.identity());
-        check(&store, *i, *owner, key.identity());
+        check(&store, 0, 0, keys[0].2);
+        check(&store, *i, *owner, *key);
     }
 
     // And through the bulk path, which resolves them all in one call.
-    let identities: Vec<KeyIdentity> = keys.iter().map(|(_, _, k)| k.identity().clone()).collect();
-    let refs: Vec<&KeyIdentity> = identities.iter().collect();
-    for (series, (i, owner, _)) in store.bulk_read(&refs).unwrap().iter().zip(&keys) {
+    let ids: Vec<_> = keys.iter().map(|(_, _, k)| *k).collect();
+    for (series, (i, owner, _)) in store
+        .read_by_ids(&ids, infrastore_core::ReadWindow::full())
+        .unwrap()
+        .iter()
+        .zip(&keys)
+    {
         match series {
             TimeSeriesData::NonSequentialTimeSeries(ns) => {
                 assert_eq!(ns.timestamps, axes[*i], "axis {i} via bulk_read");

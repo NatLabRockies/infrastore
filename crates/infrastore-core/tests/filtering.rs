@@ -66,11 +66,11 @@ fn glob_star_and_question_wildcards() {
 
         // GLOB is case-sensitive: capital-W series is not matched.
         let keys = store
-            .list_keys(ListFilter::new().name_glob("wind*"))
+            .list_metadata(ListFilter::new().name_glob("wind*"))
             .unwrap();
         assert_eq!(keys.len(), 2, "{backend}");
         let keys = store
-            .list_keys(ListFilter::new().name_glob("Wind*"))
+            .list_metadata(ListFilter::new().name_glob("Wind*"))
             .unwrap();
         assert_eq!(keys.len(), 1, "{backend}");
     });
@@ -81,25 +81,25 @@ fn glob_composes_with_other_filters_as_and() {
     for_each_backend(populate, |store, (), backend| {
         // Glob + owner filter.
         let keys = store
-            .list_keys(ListFilter::new().owner_id(2).name_glob("*ind*"))
+            .list_metadata(ListFilter::new().owner_id(2).name_glob("*ind*"))
             .unwrap();
         assert_eq!(keys.len(), 1, "{backend}");
-        assert_eq!(keys[0].identity().name, "Wind_gust", "{backend}");
+        assert_eq!(keys[0].name, "Wind_gust", "{backend}");
 
         // Exact name + glob both apply (AND): consistent pair matches...
         let keys = store
-            .list_keys(ListFilter::new().name("wind_speed").name_glob("wind_*"))
+            .list_metadata(ListFilter::new().name("wind_speed").name_glob("wind_*"))
             .unwrap();
         assert_eq!(keys.len(), 1, "{backend}");
         // ...contradictory pair matches nothing.
         let keys = store
-            .list_keys(ListFilter::new().name("wind_speed").name_glob("solar_*"))
+            .list_metadata(ListFilter::new().name("wind_speed").name_glob("solar_*"))
             .unwrap();
         assert!(keys.is_empty(), "{backend}");
 
         // list_time_series and list_owner_types honor it too.
         let rows = store
-            .list_time_series(ListFilter::new().name_glob("solar_*"))
+            .list_metadata(ListFilter::new().name_glob("solar_*"))
             .unwrap();
         assert_eq!(rows.len(), 1, "{backend}");
         assert_eq!(rows[0].name, "solar_irradiance", "{backend}");
@@ -115,7 +115,7 @@ fn glob_no_match_is_empty_not_error() {
     for_each_backend(populate, |store, (), backend| {
         assert!(
             store
-                .list_keys(ListFilter::new().name_glob("xyz*"))
+                .list_metadata(ListFilter::new().name_glob("xyz*"))
                 .unwrap()
                 .is_empty(),
             "{backend}"
@@ -140,10 +140,13 @@ fn glob_selects_the_same_series_for_a_static_reader() {
                     .resolution(Duration::hours(1)),
             )
             .unwrap();
-        let mut names: Vec<&str> = reader
+        // The reader carries ids, so a column maps back to its series through
+        // the catalog rather than through a name snapshot taken at build time.
+        let mut names: Vec<String> = reader
             .groups()
             .iter()
-            .flat_map(|g| g.keys().iter().map(|k| k.name()))
+            .flat_map(|g| g.ids())
+            .map(|id| store.get_metadata_by_id(*id).unwrap().unwrap().name)
             .collect();
         names.sort();
         assert_eq!(names, vec!["wind_dir", "wind_speed"], "{backend}");
@@ -174,7 +177,7 @@ fn remove_by_filter_with_a_no_match_glob_removes_nothing() {
             .unwrap();
         assert_eq!(removed, 0, "{backend}");
         assert_eq!(
-            store.list_keys(ListFilter::new()).unwrap().len(),
+            store.list_metadata(ListFilter::new()).unwrap().len(),
             4,
             "{backend}"
         );
@@ -214,23 +217,23 @@ fn component_field_selects_across_owners() {
     for_each_backend(populate_fields, |store, (), backend| {
         // The point of the filter: one field, every component that varies it.
         let keys = store
-            .list_keys(ListFilter::new().component_field("max_active_power"))
+            .list_metadata(ListFilter::new().component_field("max_active_power"))
             .unwrap();
-        let mut owners: Vec<i64> = keys.iter().map(|k| k.owner_id()).collect();
+        let mut owners: Vec<i64> = keys.iter().map(|m| m.owner_id).collect();
         owners.sort();
         assert_eq!(owners, vec![1, 2], "{backend}");
 
         // ...and it composes with the owner scope, which is the other half of
         // "the series for this field on this component".
         let scoped = store
-            .list_keys(
+            .list_metadata(
                 ListFilter::new()
                     .owner_id(1)
                     .component_field("max_active_power"),
             )
             .unwrap();
         assert_eq!(scoped.len(), 1, "{backend}");
-        assert_eq!(scoped[0].name(), "max_active_power", "{backend}");
+        assert_eq!(scoped[0].name, "max_active_power", "{backend}");
     });
 }
 
@@ -242,7 +245,7 @@ fn component_field_matching_is_exact_and_case_sensitive() {
         for pattern in ["max_active", "max_active_power*", "Max_Active_Power"] {
             assert!(
                 store
-                    .list_keys(ListFilter::new().component_field(pattern))
+                    .list_metadata(ListFilter::new().component_field(pattern))
                     .unwrap()
                     .is_empty(),
                 "{pattern} should not match ({backend})"
@@ -285,7 +288,8 @@ fn component_field_selects_the_same_series_for_a_static_reader() {
         let mut owners: Vec<i64> = reader
             .groups()
             .iter()
-            .flat_map(|g| g.keys().iter().map(|k| k.owner_id()))
+            .flat_map(|g| g.ids())
+            .map(|id| store.get_metadata_by_id(*id).unwrap().unwrap().owner_id)
             .collect();
         owners.sort();
         assert_eq!(owners, vec![1, 2], "{backend}");

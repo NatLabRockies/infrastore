@@ -40,8 +40,8 @@ def test_add_application_data_and_get_metadata():
     key = store.add_time_series(
         owner_id=1, owner_type="Generator", owner_category=OwnerCategory.Component,
         time_series=_sts("load", 10.0), units="MW", application_data="Profile",
-    ).key
-    meta = store.get_metadata(key)
+    )
+    meta = store.get_metadata_by_id(key)
     assert meta["units"] == "MW"
     assert meta["application_data"] == "Profile"
     assert meta["element_type"] == "f64"
@@ -56,13 +56,13 @@ def test_unit_descriptors_round_trip():
         time_series=_sts("load", 10.0), units="MW",
         quantity_kind="ActivePower", unit_system="component_base",
         component_field="max_active_power",
-    ).key
-    meta = store.get_metadata(key)
+    )
+    meta = store.get_metadata_by_id(key)
     assert meta["quantity_kind"] == "ActivePower"
     assert meta["unit_system"] == "component_base"
     assert meta["component_field"] == "max_active_power"
     # The list row is the same record, so it must agree with the point lookup.
-    row = store.list_time_series()[0]
+    row = store.list_metadata()[0]
     assert row["unit_system"] == "component_base"
     assert row["component_field"] == "max_active_power"
 
@@ -84,25 +84,25 @@ def test_component_field_filter():
         )
 
     # One field, every component that varies it.
-    keys = store.list_keys(component_field="max_active_power")
-    assert sorted(k.owner_id for k in keys) == [1, 2]
+    keys = store.list_metadata(component_field="max_active_power")
+    assert sorted(k['owner_id'] for k in keys) == [1, 2]
 
     # Composes with the owner scope.
-    scoped = store.list_keys(owner_id=1, component_field="max_active_power")
+    scoped = store.list_metadata(owner_id=1, component_field="max_active_power")
     assert len(scoped) == 1
 
     # Exact and case-sensitive; no glob semantics.
-    assert store.list_keys(component_field="max_active") == []
-    assert store.list_keys(component_field="Max_Active_Power") == []
+    assert store.list_metadata(component_field="max_active") == []
+    assert store.list_metadata(component_field="Max_Active_Power") == []
 
     # A row that declares none is unreachable through this filter.
-    assert store.list_keys(component_field="legacy") == []
+    assert store.list_metadata(component_field="legacy") == []
 
     # It reaches the reader filter too, which is the columnar sweep case.
     reader = store.build_static_reader(
         timedelta(hours=1), component_field="max_active_power"
     )
-    assert sum(len(g["keys"]) for g in reader.groups()) == 2
+    assert sum(len(g["ids"]) for g in reader.groups()) == 2
 
 
 def test_unit_system_unset_is_unspecified_not_natural_units():
@@ -113,8 +113,8 @@ def test_unit_system_unset_is_unspecified_not_natural_units():
     key = store.add_time_series(
         owner_id=1, owner_type="Generator", owner_category=OwnerCategory.Component,
         time_series=_sts("load", 10.0), units="MW",
-    ).key
-    meta = store.get_metadata(key)
+    )
+    meta = store.get_metadata_by_id(key)
     assert meta["unit_system"] is None
     assert meta["quantity_kind"] is None
     assert meta["component_field"] is None
@@ -135,13 +135,13 @@ def test_unknown_unit_system_is_rejected():
 def test_bulk_read_time_range():
     store = Store.create(in_memory=True)
     k1 = store.add_time_series(owner_id=1, owner_type="Generator",
-                              owner_category=OwnerCategory.Component, time_series=_sts("load", 100.0)).key
+                              owner_category=OwnerCategory.Component, time_series=_sts("load", 100.0))
     k2 = store.add_time_series(owner_id=2, owner_type="Generator",
-                              owner_category=OwnerCategory.Component, time_series=_sts("load", 200.0)).key
+                              owner_category=OwnerCategory.Component, time_series=_sts("load", 200.0))
     rng = (_t0() + timedelta(hours=2), _t0() + timedelta(hours=5))
-    sliced = store.bulk_read([k1, k2], time_range=rng)
+    sliced = store.read_by_ids_range([k1, k2], rng)
     for i, k in enumerate([k1, k2]):
-        expected = store.get_time_series(k, time_range=rng)
+        expected = store.read_by_ids_range([k], rng)[0]
         np.testing.assert_array_equal(sliced[i].data, expected.data)
 
 
@@ -152,7 +152,7 @@ def test_discovery_and_removal_and_rename():
     store.add_time_series(owner_id=2, owner_type="Bus",
                           owner_category=OwnerCategory.Component, time_series=_sts("voltage", 2.0))
     kf = store.add_time_series(owner_id=3, owner_type="Generator",
-                               owner_category=OwnerCategory.Component, time_series=_det("fc")).key
+                               owner_category=OwnerCategory.Component, time_series=_det("fc"))
 
     assert store.get_intervals() == ["PT1H"]
     assert store.get_intervals(time_series_type=TimeSeriesType.SingleTimeSeries) == []
@@ -161,9 +161,9 @@ def test_discovery_and_removal_and_rename():
     assert sorted(store.list_owner_types()) == ["Bus", "Generator"]
 
     # rename
-    nk = store.rename_time_series(kf, "fc2")
-    assert nk.name == "fc2"
-    assert store.get_metadata(nk)["name"] == "fc2"
+    # A rename moves the name, not the reference: the id still resolves.
+    store.rename_time_series(kf, "fc2")
+    assert store.get_metadata_by_id(kf)["name"] == "fc2"
 
     # remove_by_filter
     removed = store.remove_by_filter(owner_id=2)
@@ -187,14 +187,15 @@ def test_transform_with_params_and_forecast_parameters():
 def test_keys_usable_in_sets():
     store = Store.create(in_memory=True)
     k1 = store.add_time_series(owner_id=1, owner_type="Generator",
-                               owner_category=OwnerCategory.Component, time_series=_sts("load", 1.0)).key
+                               owner_category=OwnerCategory.Component, time_series=_sts("load", 1.0))
     k2 = store.add_time_series(owner_id=2, owner_type="Generator",
-                               owner_category=OwnerCategory.Component, time_series=_sts("load", 2.0)).key
-    # Same key looked up again is equal + hashes equal.
-    (k1_again,) = [k for k in store.list_keys(owner_id=1)]
+                               owner_category=OwnerCategory.Component, time_series=_sts("load", 2.0))
+    # An id is a plain value: the same series listed again gives the same id,
+    # and ids work in a set with no equality of their own to keep consistent.
+    (row,) = store.list_metadata(owner_id=1)
+    k1_again = row["id"]
     assert k1_again == k1
-    s = {k1, k2, k1_again}
-    assert len(s) == 2
+    assert len({k1, k2, k1_again}) == 2
 
 
 def test_static_reader():
@@ -330,7 +331,7 @@ def test_list_time_series_new_fields_and_interval_filter():
     store = Store.create(in_memory=True)
     store.add_time_series(owner_id=1, owner_type="Generator",
                           owner_category=OwnerCategory.Component, time_series=_det("fc"))
-    rows = store.list_time_series(interval=timedelta(hours=1))
+    rows = store.list_metadata(interval=timedelta(hours=1))
     assert len(rows) == 1
     row = rows[0]
     for field in ("initial_timestamp", "horizon", "interval", "count",
@@ -339,7 +340,7 @@ def test_list_time_series_new_fields_and_interval_filter():
         assert field in row
     assert row["interval"] == "PT1H"
     # No forecast at a different interval.
-    assert store.list_time_series(interval=timedelta(hours=2)) == []
+    assert store.list_metadata(interval=timedelta(hours=2)) == []
 
 
 def test_close_and_repr():

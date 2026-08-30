@@ -58,7 +58,7 @@
 //!
 //! **Handles out.** A call returning a handle writes it through an `out_*`
 //! pointer valid for one pointer; the caller releases it exactly once with the
-//! matching destructor — [`infrastore_store_free`], [`infrastore_key_free`],
+//! matching destructor — [`infrastore_store_free`],
 //! [`infrastore_batch_free`], and so on. Every destructor also accepts null.
 //!
 //! **Owner arguments.** Where a call takes `owner_id` / `owner_category`, the
@@ -215,20 +215,13 @@ pub struct InfraStoreHandle {
     inner: core_lib::Store,
 }
 
-pub struct InfraStoreKeyHandle {
-    // A key handle is a lookup handle: it carries the identity tuple the catalog
-    // resolves. Descriptive window fields (only known for a fully-described key
-    // from add/list) are not carried here.
-    inner: core_lib::KeyIdentity,
-}
-
 /// Accumulates pending add requests for a single all-or-nothing
 /// `infrastore_store_add_batch` call. Building the batch performs no store I/O.
 pub struct InfraStoreBatchHandle {
     items: Vec<core_lib::AddRequest>,
 }
 
-/// Owns the results of a bulk-read call (`infrastore_store_bulk_read_single` or the
+/// Owns the results of a read call (`infrastore_store_read_by_ids` or the
 /// variant-general `infrastore_store_bulk_read`): the time series fetched for a batch of
 /// keys, in input order. Each element's variant is discovered with
 /// `infrastore_bulk_result_item_type` and read out with the matching
@@ -391,7 +384,7 @@ fn into_raw_or_null(c: Option<std::ffi::CString>) -> *mut c_char {
 /// Hand a `Vec`'s contents to the caller as a heap buffer whose allocation is
 /// exactly `len` elements, returning `(ptr, len)`.
 ///
-/// The matching `infrastore_buffer_free_*` / `infrastore_keys_buffer_free`
+/// The matching `infrastore_buffer_free_*`
 /// reconstructs a `Box<[T]>` from `(ptr, len)`, so the handed-out allocation
 /// must have capacity == length. `into_boxed_slice` guarantees that
 /// (reallocating if the vector carried excess capacity), which makes the
@@ -1091,7 +1084,7 @@ pub unsafe extern "C" fn infrastore_store_add_single(
         Ok(mut added) => {
             let id = added.remove(0);
             if !out_id.is_null() {
-                unsafe { *out_id = id };
+                unsafe { *out_id = id.get() };
             }
             INFRASTORE_OK
         }
@@ -1260,7 +1253,7 @@ pub unsafe extern "C" fn infrastore_store_add_non_sequential(
         Ok(mut added) => {
             let id = added.remove(0);
             if !out_id.is_null() {
-                unsafe { *out_id = id };
+                unsafe { *out_id = id.get() };
             }
             INFRASTORE_OK
         }
@@ -1270,11 +1263,7 @@ pub unsafe extern "C" fn infrastore_store_add_non_sequential(
 
 // ---- get_single -----------------------------------------------------------
 
-
-
 // ---- remove / has / counts / verify ---------------------------------------
-
-
 
 /// Remove many associations named by their catalog `id`, in one all-or-nothing
 /// transaction. On success `*out_removed` receives the number removed.
@@ -1319,7 +1308,12 @@ pub unsafe extern "C" fn infrastore_store_remove_by_ids(
     } else {
         unsafe { slice::from_raw_parts(ids, count) }
     };
-    match store.inner.remove_by_ids(id_slice) {
+    let id_slice: Vec<core_lib::TimeSeriesId> = id_slice
+        .iter()
+        .copied()
+        .map(core_lib::TimeSeriesId)
+        .collect();
+    match store.inner.remove_by_ids(&id_slice) {
         Ok(removed) => {
             unsafe { *out_removed = removed as u64 };
             INFRASTORE_OK
@@ -1327,7 +1321,6 @@ pub unsafe extern "C" fn infrastore_store_remove_by_ids(
         Err(e) => map_core_error(e),
     }
 }
-
 
 /// Return aggregate time-series counts.
 ///
@@ -1439,7 +1432,7 @@ pub unsafe extern "C" fn infrastore_store_get_forecast_parameters(
 /// objects, ordered by resolution (empty array = no `SingleTimeSeries`).
 /// `filter_resolution` (nullable ISO-8601 duration) scopes the check to one
 /// resolution. Errors when any single resolution holds more than one distinct
-/// pair. Probe-then-fetch (see `infrastore_store_list_keys`).
+/// pair. Probe-then-fetch (see `infrastore_store_list_metadata`).
 ///
 /// # Safety
 ///
@@ -1668,7 +1661,7 @@ pub unsafe extern "C" fn infrastore_store_get_path(
 
 /// Association count grouped by time series type, as a JSON array of
 /// `{"time_series_type": <name>, "count": <n>}` objects. Probe-then-fetch (see
-/// `infrastore_store_list_keys`).
+/// `infrastore_store_list_metadata`).
 ///
 /// # Safety
 ///
@@ -1771,7 +1764,7 @@ pub unsafe extern "C" fn infrastore_store_counts_detailed(
 /// SupplementalAttribute) that have a time series, as a JSON array of integers.
 /// Optionally restricted to one `time_series_type` (`INFRASTORE_TYPE_*` code, gated by
 /// `has_time_series_type`) and/or `resolution` (empty/null = no filter).
-/// Probe-then-fetch (see `infrastore_store_list_keys`).
+/// Probe-then-fetch (see `infrastore_store_list_metadata`).
 ///
 /// # Safety
 ///
@@ -2261,13 +2254,12 @@ unsafe fn exact_identity_filter(
     })
 }
 
-
 /// Fetch the metadata row filed under `association_id`, as one JSON object.
 ///
 /// The read-direction counterpart of the id every `infrastore_store_add_*`
 /// hands back: a caller that recorded ids in its own model resolves them here
 /// without keeping an id-to-key map beside the store. The row shape is exactly
-/// `infrastore_store_get_metadata_by_key`'s, `id` included.
+/// `infrastore_store_get_metadata_by_id`'s, `id` included.
 ///
 /// Writes `false` to `*out_present` and nothing to `buf` when the catalog holds
 /// no such row, returning `INFRASTORE_OK` rather than
@@ -2297,7 +2289,10 @@ pub unsafe extern "C" fn infrastore_store_get_metadata_by_id(
         set_error("out_len or out_present is null");
         return INFRASTORE_ERR_NULL_POINTER;
     }
-    match store.inner.get_metadata_by_id(association_id) {
+    match store
+        .inner
+        .get_metadata_by_id(core_lib::TimeSeriesId(association_id))
+    {
         Ok(Some(meta)) => {
             let json = Value::Object(metadata_to_map(&meta)).to_string();
             unsafe {
@@ -2339,7 +2334,10 @@ pub unsafe extern "C" fn infrastore_store_association_exists(
         set_error("out_present is null");
         return INFRASTORE_ERR_NULL_POINTER;
     }
-    match store.inner.association_exists(association_id) {
+    match store
+        .inner
+        .association_exists(core_lib::TimeSeriesId(association_id))
+    {
         Ok(found) => {
             unsafe { *out_present = found };
             INFRASTORE_OK
@@ -2369,7 +2367,14 @@ pub unsafe extern "C" fn infrastore_store_has_by_attrs(
         return INFRASTORE_ERR_NULL_POINTER;
     }
     let filter = match unsafe {
-        exact_identity_filter(owner_id, owner_category, name, resolution, None, features_json)
+        exact_identity_filter(
+            owner_id,
+            owner_category,
+            name,
+            resolution,
+            None,
+            features_json,
+        )
     } {
         Ok(f) => f,
         Err(code) => return code,
@@ -2437,7 +2442,7 @@ pub unsafe extern "C" fn infrastore_store_has_for_owner(
 }
 
 /// True iff at least one association matches the filter — the existence probe
-/// over the full `infrastore_store_list_keys` filter surface (all-optional,
+/// over the full `infrastore_store_list_metadata` filter surface (all-optional,
 /// independent predicates; `features_json` is a subset match). Unlike
 /// `infrastore_store_has_typed`, which matches one exact key identity (its
 /// feature set compared by content hash), this answers "is there any series
@@ -2689,7 +2694,14 @@ unsafe fn build_typed_key_from_attrs(
     };
     let interval = unsafe { cstr_to_optional_period(interval)? };
     let mut filter = unsafe {
-        exact_identity_filter(owner_id, owner_category, name, resolution, interval, features_json)
+        exact_identity_filter(
+            owner_id,
+            owner_category,
+            name,
+            resolution,
+            interval,
+            features_json,
+        )
     }?;
     filter.time_series_type = Some(time_series_type);
     Ok(filter)
@@ -2770,7 +2782,7 @@ pub unsafe extern "C" fn infrastore_store_add_forecast(
         Ok(mut added) => {
             let id = added.remove(0);
             if !out_id.is_null() {
-                unsafe { *out_id = id };
+                unsafe { *out_id = id.get() };
             }
             INFRASTORE_OK
         }
@@ -2989,7 +3001,7 @@ pub unsafe extern "C" fn infrastore_store_add_probabilistic(
         Ok(mut added) => {
             let id = added.remove(0);
             if !out_id.is_null() {
-                unsafe { *out_id = id };
+                unsafe { *out_id = id.get() };
             }
             INFRASTORE_OK
         }
@@ -3437,9 +3449,7 @@ pub unsafe extern "C" fn infrastore_batch_add_probabilistic(
 /// `handle` must be a live read-write store handle and `batch` a live batch
 /// handle. `out_keys` and `out_len` must each be valid for writing one value.
 /// On success the caller owns the returned array and every key handle in it:
-/// release each key with `infrastore_key_free`, then the array buffer itself with
-/// `infrastore_keys_buffer_free(*out_keys, *out_len)` (the same contract as
-/// `infrastore_store_get_time_series_keys`).
+/// release the id buffer with `infrastore_buffer_free_i64(*out_ids, *out_len)`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_add_batch(
     handle: *mut InfraStoreHandle,
@@ -3469,7 +3479,7 @@ pub unsafe extern "C" fn infrastore_store_add_batch(
     let items = std::mem::take(&mut batch.items);
     match store.inner.add_time_series_bulk(items) {
         Ok(added) => {
-            let ids: Vec<i64> = added.clone();
+            let ids: Vec<i64> = added.iter().map(|i| i.get()).collect();
             let len = added.len() as u64;
             // An empty batch is reported as null (no free needed); otherwise
             // the handed-out allocation is exactly `len` elements (see
@@ -3492,8 +3502,7 @@ pub unsafe extern "C" fn infrastore_store_add_batch(
 // A bulk read fetches many full SingleTimeSeries in one call, reading each
 // packed dataset's column span once (`Store::bulk_read`) instead of re-reading
 // every chunk per series. Results are held in a `InfraStoreBulkReadHandle` and read out
-// element-by-element with the same out-parameter shape as `infrastore_store_get_single`.
-
+// element-by-element through the `infrastore_bulk_result_*` accessors.
 
 /// Write a series' descriptive attributes (`application_data`, `element_type`,
 /// `units`, `quantity_kind`, `unit_system`, `time_reference`, `component_field`)
@@ -3613,7 +3622,7 @@ unsafe fn emit_descriptors(
 ///
 /// # Safety
 ///
-/// `result` must be null or a live handle from `infrastore_store_bulk_read_single`.
+/// `result` must be null or a live handle from a read call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_bulk_result_len(
     result: *const InfraStoreBulkReadHandle,
@@ -3625,7 +3634,7 @@ pub unsafe extern "C" fn infrastore_bulk_result_len(
 }
 
 /// Read element `index` out of a bulk-read result handle. The out parameters
-/// match `infrastore_store_get_single`: the caller owns the `out_resolution` string and
+/// follow the usual convention: the caller owns the `out_resolution` string and
 /// the `out_shape` / `out_data` buffers and must release them with
 /// `infrastore_string_free`, `infrastore_buffer_free_i64`, and `infrastore_buffer_free_u8`. The handle
 /// is not consumed, so an element may be read more than once.
@@ -3638,7 +3647,7 @@ pub unsafe extern "C" fn infrastore_bulk_result_len(
 ///
 /// # Safety
 ///
-/// `result` must be a live handle from `infrastore_store_bulk_read_single` and `index`
+/// `result` must be a live handle from a read call and `index`
 /// must be less than its length. Every output pointer except `out_application_data`,
 /// `out_element_type`, `out_units`, `out_quantity_kind`, `out_unit_system`, and
 /// `out_component_field` must be valid for writing its indicated value; those
@@ -3741,7 +3750,6 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_single(
     INFRASTORE_OK
 }
 
-
 /// Read many series named by their catalog association `id`, in the order the
 /// ids are given. The id-addressed counterpart of `infrastore_store_bulk_read`:
 /// results come back in the same `InfraStoreBulkReadHandle`, so a caller reads
@@ -3784,7 +3792,77 @@ pub unsafe extern "C" fn infrastore_store_read_by_ids(
     } else {
         unsafe { slice::from_raw_parts(ids, count) }
     };
-    let items = match store.inner.read_by_ids(id_slice, core_lib::ReadWindow::full()) {
+    let id_slice: Vec<core_lib::TimeSeriesId> = id_slice
+        .iter()
+        .copied()
+        .map(core_lib::TimeSeriesId)
+        .collect();
+    let items = match store
+        .inner
+        .read_by_ids(&id_slice, core_lib::ReadWindow::full())
+    {
+        Ok(d) => d,
+        Err(e) => return map_core_error(e),
+    };
+    unsafe { *out_result = Box::into_raw(Box::new(InfraStoreBulkReadHandle { items })) };
+    INFRASTORE_OK
+}
+
+/// Read many series named by their catalog association `id`, each clipped to
+/// whatever lies within the given time range.
+///
+/// The *bounds* read beside `infrastore_store_read_by_ids`' *window* read. A
+/// window says "these exact steps" and is checked; a range says "whatever falls
+/// between these instants" and clips to what is there. A caller exporting a
+/// month of a store it did not write knows the bounds it wants and not how many
+/// steps each series has in them.
+///
+/// `start_ms` / `end_ms` are Unix milliseconds, spelled zoned or zoneless by
+/// `zoneless` like every other bound. A set mixing zoneless and instant-bearing
+/// series has no single valid spelling and is
+/// `INFRASTORE_ERR_INVALID_PARAMETER` rather than resolved per series.
+/// Results come back in the same `InfraStoreBulkReadHandle` as every other bulk
+/// read, in the order the ids are given.
+///
+/// # Safety
+///
+/// `ids` must point to `n` readable `i64`s (it may be null only when `n` is 0).
+/// On `INFRASTORE_OK` the returned handle must be released exactly once with
+/// `infrastore_bulk_result_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_store_read_by_ids_range(
+    handle: *const InfraStoreHandle,
+    ids: *const i64,
+    n: u64,
+    zoneless: bool,
+    start_ms: i64,
+    end_ms: i64,
+    out_result: *mut *mut InfraStoreBulkReadHandle,
+) -> i32 {
+    clear_error();
+    let store = deref_handle!(ref handle);
+    if out_result.is_null() {
+        set_error("out_result pointer is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let count = n as usize;
+    if count != 0 && ids.is_null() {
+        set_error("ids pointer is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let range = match build_time_range(true, zoneless, start_ms, end_ms) {
+        Ok(Some(r)) => r,
+        Ok(None) => unreachable!("build_time_range with present=true always yields a range"),
+        Err(c) => return c,
+    };
+    let raw = if count == 0 {
+        &[][..]
+    } else {
+        unsafe { slice::from_raw_parts(ids, count) }
+    };
+    let id_slice: Vec<core_lib::TimeSeriesId> =
+        raw.iter().copied().map(core_lib::TimeSeriesId).collect();
+    let items = match store.inner.read_by_ids_range(&id_slice, range) {
         Ok(d) => d,
         Err(e) => return map_core_error(e),
     };
@@ -3872,7 +3950,7 @@ pub unsafe extern "C" fn infrastore_store_read_by_id(
         len,
         count,
     };
-    let item = match store.inner.read_by_id(id, window) {
+    let item = match store.inner.read_by_id(core_lib::TimeSeriesId(id), window) {
         Ok(d) => d,
         Err(e) => return map_core_error(e),
     };
@@ -3971,7 +4049,7 @@ pub unsafe extern "C" fn infrastore_bulk_result_item_type(
 }
 
 /// Read a `NonSequentialTimeSeries` element out of a bulk-read result. The
-/// out-params mirror `infrastore_store_get_non_sequential` except there is no
+/// out-params mirror `infrastore_bulk_result_get_single` except there is no
 /// `application_data` (a bulk read carries the array data, not the metadata row;
 /// fetch it per-key with `infrastore_store_get_metadata` if needed). The caller owns the
 /// `out_timestamps`, `out_shape`, and `out_data` buffers.
@@ -4085,7 +4163,7 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_non_sequential(
 }
 
 /// Read a forecast element (`Deterministic`, `Probabilistic`, or `Scenarios`)
-/// out of a bulk-read result. The out-params mirror `infrastore_store_get_forecast`
+/// out of a read result. The out-params carry the forecast window parameters
 /// (`out_scenario_count` is nonzero only for `Scenarios`; `out_percentiles` is
 /// non-null only for `Probabilistic`). The caller owns the `out_dims`,
 /// `out_data`, and `out_percentiles` buffers.
@@ -4217,7 +4295,7 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_forecast(
     }
 }
 
-/// Free a bulk-read result handle created by `infrastore_store_bulk_read_single` or
+/// Free a read result handle created by `infrastore_store_read_by_ids` or
 /// `infrastore_store_bulk_read`.
 ///
 /// # Safety
@@ -4355,7 +4433,7 @@ pub unsafe extern "C" fn infrastore_store_transform_single_time_series(
                     // it reports the *planned* count in `*out_count` while
                     // writing nothing, so the pointer, not the count, is the
                     // caller's signal (documented above).
-                    let ids: Vec<i64> = outcome.written.clone();
+                    let ids: Vec<i64> = outcome.written.iter().map(|i| i.get()).collect();
                     *out_ids = if ids.is_empty() {
                         ptr::null_mut()
                     } else {
@@ -4370,7 +4448,7 @@ pub unsafe extern "C" fn infrastore_store_transform_single_time_series(
 }
 
 /// Shared emitter: write a forecast `TimeSeriesData` value into the C out-params
-/// used by [`infrastore_store_get_forecast`] and [`infrastore_store_get_forecast_by_key`].
+/// used by [`infrastore_bulk_result_get_forecast`].
 ///
 /// # Safety
 ///
@@ -4484,11 +4562,6 @@ unsafe fn emit_forecast_data(
     }
 }
 
-
-
-
-
-
 /// Lowercase hex of a 32-byte content hash (64 chars).
 fn hash_to_hex(hash: &[u8; 32]) -> String {
     use std::fmt::Write;
@@ -4499,7 +4572,6 @@ fn hash_to_hex(hash: &[u8; 32]) -> String {
     s
 }
 
-
 /// Full-metadata JSON object for one association row: the identity/descriptive
 /// key fields plus the storage columns a key row omits (`data_hash` hex,
 /// `element_type`, `element_shape`, `percentiles`, `units`, `application_data`).
@@ -4507,7 +4579,12 @@ fn hash_to_hex(hash: &[u8; 32]) -> String {
 /// One `metadata_to_map` object per row, as a JSON array — what every listing
 /// serves now that a listing is rows rather than keys.
 fn metadata_rows_to_json(rows: &[core_lib::TimeSeriesMetadata]) -> String {
-    Value::Array(rows.iter().map(|m| Value::Object(metadata_to_map(m))).collect()).to_string()
+    Value::Array(
+        rows.iter()
+            .map(|m| Value::Object(metadata_to_map(m)))
+            .collect(),
+    )
+    .to_string()
 }
 
 fn metadata_to_map(m: &core_lib::TimeSeriesMetadata) -> serde_json::Map<String, Value> {
@@ -4530,7 +4607,10 @@ fn metadata_to_map(m: &core_lib::TimeSeriesMetadata) -> serde_json::Map<String, 
     o.insert("data_hash".into(), Value::from(hash_to_hex(&m.data_hash)));
     // Always present on a row read out of the catalog; `null` only if a caller
     // built the metadata itself without one.
-    o.insert("id".into(), m.id.map(Value::from).unwrap_or(Value::Null));
+    o.insert(
+        "id".into(),
+        m.id.map(|i| Value::from(i.get())).unwrap_or(Value::Null),
+    );
     o.insert(
         "initial_timestamp_ms".into(),
         m.initial_timestamp
@@ -4619,9 +4699,67 @@ fn metadata_to_map(m: &core_lib::TimeSeriesMetadata) -> serde_json::Map<String, 
     o
 }
 
-/// List time series keys as a JSON array string (see `key_to_map` for the
-/// per-key shape). Every filter is optional and independent; with none set the
-/// whole store is listed. A `has_*` flag of `false` (or a null string pointer)
+/// List the catalog metadata rows named by `ids`, in the order the ids are
+/// given, as a JSON array string (the per-row shape of
+/// `infrastore_store_list_metadata`).
+///
+/// `infrastore_store_list_metadata` addressed by id instead of by attributes —
+/// the bulk companion to `infrastore_store_get_metadata_by_id`, and what a
+/// consumer hydrating a model full of recorded ids wants: one catalog query for
+/// the whole set rather than one call per reference.
+///
+/// `INFRASTORE_ERR_NOT_FOUND` if any id names no row: a caller naming ids is
+/// asserting they exist, and a silently short array would let a stale reference
+/// pass as an absent match. Sift the set with
+/// `infrastore_store_association_exists` first when some are expected to have
+/// gone. Repeats are returned once each, in place.
+///
+/// Returns the JSON through `out_json` as an **owned** allocation the caller
+/// releases with `infrastore_string_free`; `out_len` is its byte length.
+///
+/// # Safety
+///
+/// `ids` must point to `n` readable `i64`s (it may be null only when `n` is 0).
+/// `out_json` must be valid for writing one pointer and `out_len` for writing
+/// one `u64`; on success `*out_json` must be released exactly once with
+/// `infrastore_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_store_list_metadata_by_ids(
+    handle: *const InfraStoreHandle,
+    ids: *const i64,
+    n: u64,
+    out_json: *mut *mut c_char,
+    out_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = deref_handle!(ref handle);
+    if out_json.is_null() || out_len.is_null() {
+        set_error("a required pointer is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let count = n as usize;
+    if count != 0 && ids.is_null() {
+        set_error("ids pointer is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let raw = if count == 0 {
+        &[][..]
+    } else {
+        unsafe { slice::from_raw_parts(ids, count) }
+    };
+    let id_slice: Vec<core_lib::TimeSeriesId> =
+        raw.iter().copied().map(core_lib::TimeSeriesId).collect();
+    let rows = match store.inner.list_metadata_by_ids(&id_slice) {
+        Ok(r) => r,
+        Err(e) => return map_core_error(e),
+    };
+    let json = metadata_rows_to_json(&rows);
+    unsafe { write_owned_str_out(json, out_json, out_len) }
+}
+
+/// List catalog metadata rows as a JSON array string (see `metadata_to_map` for
+/// the per-row shape). Every filter is optional and independent; with none set
+/// the whole store is listed. A `has_*` flag of `false` (or a null string pointer)
 /// disables that filter:
 /// - `owner_id` / `owner_category` (`0` = Component, `1` = SupplementalAttribute)
 /// - `time_series_type` (the `INFRASTORE_TYPE_*` code)
@@ -4633,14 +4771,16 @@ fn metadata_to_map(m: &core_lib::TimeSeriesMetadata) -> serde_json::Map<String, 
 /// - `interval` (empty/null = no interval filter; forecasts only — static rows
 ///   have no interval and never match an interval filter)
 /// - `features_json` (a JSON object; null or empty = no feature filter; matches as
-///   a subset, i.e. a key whose features include all the given ones)
+///   a subset, i.e. a row whose features include all the given ones)
 /// - `component_field` (null = no filter; exact, case-sensitive match on the
 ///   owning component's field. A row that declares none matches no value, so
 ///   this cannot select the rows that left it unset.)
 ///
-/// Each row also carries `id`, the association id the catalog filed it under
-/// (the same id `infrastore_store_add_batch` returns; `null` for a row written
-/// before ids were minted).
+/// Each row carries `id`, the association id the catalog filed it under (the
+/// same id `infrastore_store_add_batch` returns) — the address every read,
+/// removal and rename takes. A row carries no timestamp vector: an irregular
+/// series' time axis is the one part of a row that costs a read per row, so a
+/// listing omits it and a caller that needs it reads the series.
 ///
 /// Returns the JSON through `out_json` as an **owned** allocation the caller
 /// releases with `infrastore_string_free`; `out_len` is its byte length. A
@@ -4656,7 +4796,7 @@ fn metadata_to_map(m: &core_lib::TimeSeriesMetadata) -> serde_json::Map<String, 
 /// must be released exactly once with `infrastore_string_free`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn infrastore_store_list_keys(
+pub unsafe extern "C" fn infrastore_store_list_metadata(
     handle: *const InfraStoreHandle,
     has_owner: bool,
     owner_id: i64,
@@ -4708,85 +4848,13 @@ pub unsafe extern "C" fn infrastore_store_list_keys(
     unsafe { write_owned_str_out(json, out_json, out_len) }
 }
 
-/// List full time-series metadata rows as a JSON array (see `metadata_to_map`
-/// for the per-row shape: the key fields plus `data_hash`,
-/// `initial_timestamp_ms`, `horizon`, `interval`, `count`, `length`,
-/// `percentiles`, `element_type`, `element_shape`, `units`, `quantity_kind`,
-/// `unit_system`, `component_field`, and `application_data`). There is no
-/// `dtype` field -- an earlier version of this line named one, and no row has
-/// ever carried it; `element_type` is what says how to read the values, and a
-/// value read reports the physical dtype through its own `out_dtype`. Filters
-/// and the owned-string return (freed with `infrastore_string_free`) match
-/// `infrastore_store_list_keys`.
-///
-/// # Safety
-///
-/// Identical to `infrastore_store_list_keys`.
-#[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn infrastore_store_list_time_series(
-    handle: *const InfraStoreHandle,
-    has_owner: bool,
-    owner_id: i64,
-    has_owner_category: bool,
-    owner_category: i32,
-    has_time_series_type: bool,
-    time_series_type: i32,
-    name: *const c_char,
-    name_glob: *const c_char,
-    resolution: *const c_char,
-    interval: *const c_char,
-    features_json: *const c_char,
-    component_field: *const c_char,
-    zoneless: i32,
-    out_json: *mut *mut c_char,
-    out_len: *mut u64,
-) -> i32 {
-    clear_error();
-    let store = deref_handle!(ref handle);
-    if out_json.is_null() || out_len.is_null() {
-        set_error("a required pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let filter = match unsafe {
-        build_list_filter(
-            has_owner,
-            owner_id,
-            has_owner_category,
-            owner_category,
-            has_time_series_type,
-            time_series_type,
-            name,
-            name_glob,
-            resolution,
-            interval,
-            features_json,
-            component_field,
-            zoneless,
-        )
-    } {
-        Ok(f) => f,
-        Err(c) => return c,
-    };
-    let rows = match store.inner.list_time_series(filter) {
-        Ok(r) => r,
-        Err(e) => return map_core_error(e),
-    };
-    let arr: Vec<Value> = rows
-        .iter()
-        .map(|m| Value::Object(metadata_to_map(m)))
-        .collect();
-    let json = Value::Array(arr).to_string();
-    unsafe { write_owned_str_out(json, out_json, out_len) }
-}
-
 /// List the distinct series names matching the filter as a JSON array of strings
 /// (sorted). Filters and the owned-string return match
-/// `infrastore_store_list_keys`.
+/// `infrastore_store_list_metadata`.
 ///
 /// # Safety
 ///
-/// Identical to `infrastore_store_list_keys`.
+/// Identical to `infrastore_store_list_metadata`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_list_names(
@@ -4843,11 +4911,11 @@ pub unsafe extern "C" fn infrastore_store_list_names(
 
 /// List the distinct owner types matching the filter as a JSON array of strings
 /// (sorted). Filters and the owned-string return match
-/// `infrastore_store_list_keys`.
+/// `infrastore_store_list_metadata`.
 ///
 /// # Safety
 ///
-/// Identical to `infrastore_store_list_keys`.
+/// Identical to `infrastore_store_list_metadata`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_list_owner_types(
@@ -4904,11 +4972,11 @@ pub unsafe extern "C" fn infrastore_store_list_owner_types(
 
 /// Remove every time series matching the filter in one all-or-nothing
 /// transaction, writing the number removed into `*out_removed`. Filters match
-/// `infrastore_store_list_keys`; an empty match removes nothing (`0`).
+/// `infrastore_store_list_metadata`; an empty match removes nothing (`0`).
 ///
 /// # Safety
 ///
-/// The filter args match `infrastore_store_list_keys`.
+/// The filter args match `infrastore_store_list_metadata`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_remove_by_filter(
@@ -4984,108 +5052,17 @@ pub unsafe extern "C" fn infrastore_store_rename(
         Ok(s) => s,
         Err(c) => return c,
     };
-    match store.inner.rename_time_series(id, new_name) {
+    match store
+        .inner
+        .rename_time_series(core_lib::TimeSeriesId(id), new_name)
+    {
         Ok(_) => INFRASTORE_OK,
         Err(e) => map_core_error(e),
     }
 }
 
-/// Resolve a time series addressed by attributes plus a requested type to its
-/// catalog row, written into `buf` as JSON (probe-then-fetch, like every other
-/// metadata getter).
-///
-/// The *identify* half of every by-name operation, and the entry point to the
-/// id-addressed halves: resolve once here, take `id` off the row, then
-/// `infrastore_store_read_by_id` or `infrastore_store_remove_by_ids`.
-///
-/// The row rather than the bare id, because the resolution builds one either
-/// way: a binding wanting the id alone reads one field, and a binding wanting
-/// the concrete stored type, the grid, or the content hash gets them without a
-/// second lookup. That is what lets this be the *only* attribute-addressed
-/// entry point the C ABI needs. `requested_type` is any stored type code
-/// (`0`=SingleTimeSeries, `1`=NonSequentialTimeSeries, `2`=Deterministic,
-/// `3`=DeterministicSingleTimeSeries, `4`=Probabilistic, `5`=Scenarios);
-/// requesting `2`=Deterministic also matches a stored
-/// `DeterministicSingleTimeSeries`. `resolution` / `interval`, when non-null,
-/// narrow the identity.
-///
-/// This validates against the catalog, unlike `infrastore_make_key_from_attrs`,
-/// which builds an identity without consulting it: an ambiguous request returns
-/// `INFRASTORE_ERR_INVALID_PARAMETER` naming the candidates, and a miss returns
-/// `INFRASTORE_ERR_NOT_FOUND`.
-///
-/// # Safety
-///
-/// `name` must be null-terminated UTF-8. `resolution`, `interval`, and `features_json` may be
-/// null. `out_len` must be valid for writing one `uint64_t`.
-#[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn infrastore_store_resolve_metadata(
-    handle: *const InfraStoreHandle,
-    owner_id: i64,
-    owner_category: i32,
-    name: *const c_char,
-    resolution: *const c_char,
-    interval: *const c_char,
-    features_json: *const c_char,
-    requested_type: i32,
-    buf: *mut c_char,
-    cap: u64,
-    out_len: *mut u64,
-) -> i32 {
-    clear_error();
-    let store = deref_handle!(ref handle);
-    if out_len.is_null() {
-        set_error("out_len pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let category = match owner_category {
-        0 => core_lib::OwnerCategory::Component,
-        1 => core_lib::OwnerCategory::SupplementalAttribute,
-        other => {
-            set_error(format!("invalid owner_category {other}"));
-            return INFRASTORE_ERR_INVALID_PARAMETER;
-        }
-    };
-    let name = match unsafe { cstr_to_str(name) } {
-        Ok(s) => s,
-        Err(c) => return c,
-    };
-    let resolution = match unsafe { cstr_to_optional_period(resolution) } {
-        Ok(r) => r,
-        Err(c) => return c,
-    };
-    let interval = match unsafe { cstr_to_optional_period(interval) } {
-        Ok(i) => i,
-        Err(c) => return c,
-    };
-    let features = match unsafe { parse_features_json(features_json) } {
-        Ok(f) => f,
-        Err(c) => return c,
-    };
-    let requested = match resolve_requested_type_from_int(requested_type) {
-        Some(r) => r,
-        None => {
-            set_error(format!(
-                "invalid requested time series type {requested_type}"
-            ));
-            return INFRASTORE_ERR_INVALID_PARAMETER;
-        }
-    };
-    match store.inner.resolve_metadata(
-        owner_id, category, name, resolution, interval, features, requested,
-    ) {
-        Ok(meta) => {
-            let json = Value::Object(metadata_to_map(&meta)).to_string();
-            unsafe { write_str_out(&json, buf, cap, out_len) };
-            INFRASTORE_OK
-        }
-        Err(e) => map_core_error(e),
-    }
-}
-
 /// Build a [`core_lib::ListFilter`] from the optional scalar/string filter args
-/// shared by `infrastore_store_list_keys` and `infrastore_store_list_array_groups`. On a bad
+/// shared by `infrastore_store_list_metadata` and `infrastore_store_list_array_groups`. On a bad
 /// argument it sets the thread-local error (where appropriate) and returns the
 /// error code to propagate.
 ///
@@ -5178,8 +5155,6 @@ unsafe fn build_list_filter(
     Ok(filter)
 }
 
-
-
 /// Serialize a key's `Features` map to a JSON object string of plain scalar
 /// values (the same shape `parse_features_json` accepts), so it round-trips back
 /// through the attribute-addressed entry points. An empty map serializes to
@@ -5198,8 +5173,7 @@ fn features_to_json(features: &core_lib::Features) -> String {
     Value::Object(map).to_string()
 }
 
-
-/// Release a `u64` dims buffer returned by `infrastore_store_get_forecast`.
+/// Release a `u64` dims buffer returned by `infrastore_bulk_result_get_forecast`.
 ///
 /// # Safety
 ///
@@ -5256,28 +5230,33 @@ pub unsafe extern "C" fn infrastore_store_has_typed(
     }
 }
 
-/// Copy the time series identified by the source attributes onto another owner,
-/// optionally under a new name.
+/// Copy the association filed under `src_id` onto another owner, optionally
+/// under a new name, and report the id of the new row through `out_id`.
 ///
 /// Arrays are content-addressed, so only a new association row is written — no
 /// array data is duplicated and the stored time series type is preserved (a
 /// `DeterministicSingleTimeSeries` stays one rather than being materialized into
 /// a dense `Deterministic`). The copy keeps the source's owner category.
 ///
+/// A copy is its own row with its own id; `src_id` is untouched and still
+/// resolves afterwards. The new id is reported rather than left for the caller
+/// to find, because a listing is the only other way to recover it and the caller
+/// usually wants to reference the copy straight away.
+///
 /// # Safety
 ///
-/// The `owner_id` / `owner_category` (`0` = Component, `1` = SupplementalAttribute) / `name` /
-/// `ts_type` / `resolution` / `features_json` arguments identify the SOURCE series, exactly as
-/// for `infrastore_store_remove_typed`. `resolution`, `features_json`, and `new_name` may be null
-/// (a null `new_name` keeps the source name).
+/// `src_id` names the SOURCE association. `dst_owner_type` must be a
+/// null-terminated UTF-8 string; `new_name` may be null (which keeps the source
+/// name). `out_id` may be null to discard the new id, and is otherwise valid for
+/// writing one `int64_t`.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_copy_time_series(
     handle: *mut InfraStoreHandle,
     src_id: i64,
     dst_owner_id: i64,
     dst_owner_type: *const c_char,
     new_name: *const c_char,
+    out_id: *mut i64,
 ) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
@@ -5293,11 +5272,18 @@ pub unsafe extern "C" fn infrastore_store_copy_time_series(
             Err(c) => return c,
         }
     };
-    match store
-        .inner
-        .copy_time_series(src_id, dst_owner_id, dst_type, renamed)
-    {
-        Ok(_) => INFRASTORE_OK,
+    match store.inner.copy_time_series(
+        core_lib::TimeSeriesId(src_id),
+        dst_owner_id,
+        dst_type,
+        renamed,
+    ) {
+        Ok(id) => {
+            if !out_id.is_null() {
+                unsafe { *out_id = id.get() };
+            }
+            INFRASTORE_OK
+        }
         Err(e) => map_core_error(e),
     }
 }
@@ -5392,7 +5378,7 @@ pub unsafe extern "C" fn infrastore_store_replace_owner(
 // the probe-then-fetch JSON convention. These association listings are bounded
 // by one owner's edges rather than by the whole catalog, so the convention's
 // double execution is not the cost here that it is for the time-series listings
-// (`infrastore_store_list_keys` and friends), which return owned strings.
+// (`infrastore_store_list_metadata` and friends), which return owned strings.
 
 /// Parse a filter from a JSON object, or the default (match-everything) filter
 /// from a null or empty string. Unknown fields are rejected so a typo in a
@@ -5604,7 +5590,7 @@ pub unsafe extern "C" fn infrastore_store_has_supplemental_attribute_association
 /// This listing is catalog-scaled (a no-filter call exports the whole table),
 /// so — unlike the other `list_supplemental_attribute_*` exports in this
 /// section, which stay probe-then-fetch because they are bounded by one
-/// owner's edges — it follows the owned-string convention `infrastore_store_list_keys`
+/// owner's edges — it follows the owned-string convention `infrastore_store_list_metadata`
 /// and friends use, to avoid running the query and serializing every row twice.
 ///
 /// # Safety
@@ -6185,7 +6171,7 @@ pub unsafe extern "C" fn infrastore_store_count_parent_child_associations(
 /// Export `time_series_associations` matching the filter as a sorted
 /// OpenAPI-row JSON array. Each row's `uri` and `data_hash` are the
 /// hex-encoded content hash the store already has for that row — never a
-/// caller-supplied locator. Filters match `infrastore_store_list_keys`.
+/// caller-supplied locator. Filters match `infrastore_store_list_metadata`.
 /// Returns the JSON through `out_json` as an **owned** allocation the caller
 /// releases with `infrastore_string_free`; `out_len` is its byte length.
 ///
@@ -6354,9 +6340,6 @@ pub unsafe extern "C" fn infrastore_store_import_supplemental_attribute_associat
 
 // ---- Free helpers ---------------------------------------------------------
 
-
-
-
 /// Release an `f64` buffer returned by this library.
 ///
 /// # Safety
@@ -6379,7 +6362,7 @@ pub unsafe extern "C" fn infrastore_buffer_free_u8(ptr: *mut u8, len: u64) {
     unsafe { free_raw_buffer(ptr, len) };
 }
 
-/// Free an `i64` buffer returned by `infrastore_store_get_non_sequential`.
+/// Free an `i64` buffer returned by `infrastore_bulk_result_get_non_sequential`.
 ///
 /// # Safety
 ///
@@ -6650,7 +6633,7 @@ unsafe fn write_i64_slice_out(values: &[i64], buf: *mut i64, cap: u64, out_len: 
 // ---- StaticReader ---------------------------------------------------------
 
 /// Build a [`InfraStoreStaticReaderHandle`] over the static series matching the
-/// filter. The filter arguments are `infrastore_store_list_keys`', minus the
+/// filter. The filter arguments are `infrastore_store_list_metadata`'s, minus the
 /// interval (a static series has none) -- `name_glob` included.
 ///
 /// `time_series_type` is a `TimeSeriesType` discriminant and selects the two
@@ -6933,17 +6916,24 @@ pub unsafe extern "C" fn infrastore_static_reader_group_info(
     INFRASTORE_OK
 }
 
-/// Return an owned key handle for column `col_idx` of group `group_idx`. The
-/// handle carries the column's identity and must be freed with `infrastore_key_free`.
+/// Write the association id of column `col_idx` of group `group_idx` to
+/// `out_id`.
+///
+/// The reader's columns are in buffer order, so this is how a caller maps a
+/// column of values back to the series it came from: take the id, then
+/// `infrastore_store_get_metadata_by_id` for its owner, name, or descriptors.
+/// Nothing is allocated and nothing needs freeing.
 ///
 /// # Safety
 ///
-/// `reader` must be a live static-reader handle.
+/// `reader` must be a live static-reader handle. `out_id` must be valid for
+/// writing one `int64_t`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn infrastore_static_reader_group_key(
+pub unsafe extern "C" fn infrastore_static_reader_group_id(
     reader: *const InfraStoreStaticReaderHandle,
     group_idx: u64,
     col_idx: u64,
+    out_id: *mut i64,
 ) -> i32 {
     clear_error();
     let reader = match unsafe { reader.as_ref() } {
@@ -6960,13 +6950,18 @@ pub unsafe extern "C" fn infrastore_static_reader_group_key(
             return INFRASTORE_ERR_INVALID_PARAMETER;
         }
     };
+    if out_id.is_null() {
+        set_error("out_id pointer is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
     let id = match group.ids().get(col_idx as usize) {
-        Some(k) => *k,
+        Some(id) => *id,
         None => {
             set_error(format!("column index {col_idx} out of bounds"));
             return INFRASTORE_ERR_INVALID_PARAMETER;
         }
     };
+    unsafe { *out_id = id.get() };
     INFRASTORE_OK
 }
 
@@ -7069,7 +7064,7 @@ pub unsafe extern "C" fn infrastore_static_reader_free(reader: *mut InfraStoreSt
 // ---- ForecastReader -------------------------------------------------------
 
 /// Build a [`InfraStoreForecastReaderHandle`] over the forecasts matching the filter.
-/// The filter arguments are `infrastore_store_list_keys`', minus the interval --
+/// The filter arguments are `infrastore_store_list_metadata`'s, minus the interval --
 /// `name_glob` included.
 /// `time_series_type` must be a forecast type; a `Deterministic` reader also
 /// includes `DeterministicSingleTimeSeries`, matching the read request rule.
@@ -7356,15 +7351,21 @@ pub unsafe extern "C" fn infrastore_forecast_reader_entry_info(
     INFRASTORE_OK
 }
 
-/// Return an owned key handle for entry `entry_idx`, freed with `infrastore_key_free`.
+/// Write the association id of entry `entry_idx` to `out_id`.
+///
+/// The forecast counterpart of `infrastore_static_reader_group_id`: entries are
+/// in reader order, and the id maps one back to its series through
+/// `infrastore_store_get_metadata_by_id`. Nothing is allocated.
 ///
 /// # Safety
 ///
-/// `reader` must be a live forecast-reader handle.
+/// `reader` must be a live forecast-reader handle. `out_id` must be valid for
+/// writing one `int64_t`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn infrastore_forecast_reader_entry_key(
+pub unsafe extern "C" fn infrastore_forecast_reader_entry_id(
     reader: *const InfraStoreForecastReaderHandle,
     entry_idx: u64,
+    out_id: *mut i64,
 ) -> i32 {
     clear_error();
     let reader = match unsafe { reader.as_ref() } {
@@ -7374,6 +7375,10 @@ pub unsafe extern "C" fn infrastore_forecast_reader_entry_key(
             return INFRASTORE_ERR_NULL_POINTER;
         }
     };
+    if out_id.is_null() {
+        set_error("out_id pointer is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
     let entry = match reader.inner.entries().get(entry_idx as usize) {
         Some(e) => e,
         None => {
@@ -7381,6 +7386,7 @@ pub unsafe extern "C" fn infrastore_forecast_reader_entry_key(
             return INFRASTORE_ERR_INVALID_PARAMETER;
         }
     };
+    unsafe { *out_id = entry.id().get() };
     INFRASTORE_OK
 }
 
@@ -7572,15 +7578,21 @@ mod reader_ffi_tests {
         );
         assert_eq!((dtype, ncols, shape_len), (0, 2, 0)); // F64 code 0
 
-        // Column keys (owners 1 then 2).
+        // Column ids, in buffer order (owners 1 then 2). A group carries ids,
+        // not keys, so a column maps back to its series through the catalog --
+        // and nothing has to be freed.
         for (col, owner) in [(0u64, 1i64), (1, 2)] {
-            let mut key: *mut InfraStoreKeyHandle = ptr::null_mut();
+            let mut id = 0i64;
             assert_eq!(
-                unsafe { infrastore_static_reader_group_key(reader, 0, col, &mut key) },
+                unsafe { infrastore_static_reader_group_id(reader, 0, col, &mut id) },
                 INFRASTORE_OK
             );
-            assert_eq!(unsafe { (*key).inner.owner_id }, owner);
-            unsafe { infrastore_key_free(key) };
+            let row = handle
+                .inner
+                .get_metadata_by_id(core_lib::TimeSeriesId(id))
+                .unwrap()
+                .expect("a reader column resolves to a live row");
+            assert_eq!(row.owner_id, owner);
         }
 
         // Read at t0 + 2h -> [12, 22].
@@ -7743,7 +7755,6 @@ mod reader_ffi_tests {
     #[test]
     fn get_single_returns_native_dtype_and_shape() {
         use core_lib::Dtype;
-        use std::ffi::CString;
 
         let mut store = Store::create(None, true).unwrap();
         // Int64 with a 2-element shape: stored array shape [3, 2].
@@ -7764,20 +7775,29 @@ mod reader_ffi_tests {
             .unwrap();
         let handle = InfraStoreHandle { inner: store };
 
-        let name = CString::new("im").unwrap();
-        let hour = CString::new("PT1H").unwrap();
-        let mut key: *mut InfraStoreKeyHandle = ptr::null_mut();
+        // The wire carries no key: list for the series, then read the id the
+        // row hands back.
+        let id = handle
+            .inner
+            .list_metadata(core_lib::ListFilter::new().owner_id(5).name("im"))
+            .unwrap()[0]
+            .id
+            .expect("a stored row carries its id");
+
+        let mut result: *mut InfraStoreBulkReadHandle = ptr::null_mut();
         assert_eq!(
             unsafe {
-                infrastore_make_key_from_attrs(
-                    5,
+                infrastore_store_read_by_id(
+                    &handle,
+                    id.get(),
+                    false,
+                    false,
                     0,
-                    name.as_ptr(),
+                    false,
                     0,
-                    hour.as_ptr(),
-                    ptr::null(),
-                    ptr::null(),
-                    &mut key,
+                    false,
+                    0,
+                    &mut result,
                 )
             },
             INFRASTORE_OK
@@ -7791,12 +7811,8 @@ mod reader_ffi_tests {
         let mut data_len = 0u64;
         assert_eq!(
             unsafe {
-                infrastore_store_get_single(
-                    &handle,
-                    key,
-                    false,
-                    false,
-                    0,
+                infrastore_bulk_result_get_single(
+                    result,
                     0,
                     &mut initial,
                     &mut res,
@@ -7833,7 +7849,7 @@ mod reader_ffi_tests {
             infrastore_string_free(res);
             infrastore_buffer_free_i64(shape_ptr, shape_len);
             infrastore_buffer_free_u8(data_ptr, data_len);
-            infrastore_key_free(key);
+            infrastore_bulk_result_free(result);
         }
     }
 }
@@ -7886,15 +7902,10 @@ mod abi_tests {
         String::from_utf8_lossy(&buf[..nul]).into_owned()
     }
 
-    /// Add one f64 SingleTimeSeries through the ABI; returns the key handle.
+    /// Add one f64 SingleTimeSeries through the ABI; returns its catalog id.
     #[allow(clippy::too_many_arguments)]
-    fn abi_add_f64(
-        store: *mut InfraStoreHandle,
-        owner: i64,
-        name: &str,
-        vals: &[f64],
-    ) -> *mut InfraStoreKeyHandle {
-        let (rc, key) = abi_try_add(
+    fn abi_add_f64(store: *mut InfraStoreHandle, owner: i64, name: &str, vals: &[f64]) -> i64 {
+        let (rc, id) = abi_try_add(
             store,
             owner,
             name,
@@ -7903,14 +7914,15 @@ mod abi_tests {
             vals.len(),
         );
         assert_eq!(rc, INFRASTORE_OK, "add failed: {}", last_error());
-        key
+        id
     }
 
     fn to_le(vals: &[f64]) -> Vec<u8> {
         vals.iter().flat_map(|v| v.to_le_bytes()).collect()
     }
 
-    /// Add through the ABI without asserting success.
+    /// Add through the ABI without asserting success. Returns the catalog id
+    /// the write was filed under, which is how every read addresses it.
     fn abi_try_add(
         store: *mut InfraStoreHandle,
         owner: i64,
@@ -7918,12 +7930,12 @@ mod abi_tests {
         element_type: *const c_char,
         bytes: &[u8],
         length: usize,
-    ) -> (i32, *mut InfraStoreKeyHandle) {
+    ) -> (i32, i64) {
         let owner_type = CString::new("Generator").unwrap();
         let name_c = CString::new(name).unwrap();
         let res = CString::new(HOUR).unwrap();
         let dims = [length as u64];
-        let mut key: *mut InfraStoreKeyHandle = ptr::null_mut();
+        let mut id = 0i64;
         let rc = unsafe {
             infrastore_store_add_single(
                 store,
@@ -7945,11 +7957,53 @@ mod abi_tests {
                 ptr::null(),
                 ptr::null(),
                 ptr::null(),
-                &mut key,
-                ptr::null_mut(),
+                &mut id,
             )
         };
-        (rc, key)
+        (rc, id)
+    }
+
+    /// The catalog id of the single series `name` on `owner`, through the ABI.
+    ///
+    /// The identify half: the wire carries no key, so a test that knows a series
+    /// by its attributes lists for it and takes the `id` off the row. Asserts
+    /// exactly one match, so a fixture that grows a sibling fails here rather
+    /// than silently addressing whichever row came back first.
+    fn abi_resolve_id(store: *mut InfraStoreHandle, owner: i64, name: &str) -> i64 {
+        let name_c = CString::new(name).unwrap();
+        let mut out: *mut c_char = ptr::null_mut();
+        let mut len = 0u64;
+        assert_eq!(
+            unsafe {
+                infrastore_store_list_metadata(
+                    store,
+                    true,
+                    owner,
+                    true,
+                    0,
+                    false,
+                    0,
+                    name_c.as_ptr(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    -1,
+                    &mut out,
+                    &mut len,
+                )
+            },
+            INFRASTORE_OK,
+            "list failed: {}",
+            last_error()
+        );
+        let json = unsafe { CStr::from_ptr(out) }.to_str().unwrap().to_string();
+        unsafe { infrastore_string_free(out) };
+        let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let rows = rows.as_array().expect("a JSON array of rows");
+        assert_eq!(rows.len(), 1, "expected one row named {name}: {json}");
+        rows[0]["id"].as_i64().expect("a served row carries its id")
     }
 
     fn abi_create_in_memory() -> *mut InfraStoreHandle {
@@ -7963,7 +8017,7 @@ mod abi_tests {
     }
 
     /// A NonSequentialTimeSeries `application_data` far larger than any fixed buffer
-    /// round-trips exactly through `infrastore_store_get_non_sequential`, which
+    /// round-trips exactly through `infrastore_bulk_result_get_non_sequential`, which
     /// returns it as an owned string (the earlier caller-sized-buffer form
     /// invited silent truncation).
     #[test]
@@ -7979,7 +8033,7 @@ mod abi_tests {
         let timestamps: Vec<i64> = vec![0, 3_600_000, 10_800_000];
         let bytes = to_le(&[1.0, 2.0, 3.0]);
         let dims = [3u64];
-        let mut key: *mut InfraStoreKeyHandle = ptr::null_mut();
+        let mut id = 0i64;
         assert_eq!(
             unsafe {
                 infrastore_store_add_non_sequential(
@@ -8002,8 +8056,7 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     ptr::null(),
-                    &mut key,
-                    ptr::null_mut(),
+                    &mut id,
                 )
             },
             INFRASTORE_OK
@@ -8018,14 +8071,30 @@ mod abi_tests {
         let mut data_len = 0u64;
         let mut application_data_out: *mut c_char = ptr::null_mut();
         let mut units_out: *mut c_char = ptr::null_mut();
+        // Read by the id the add handed back; the result decodes through the
+        // same accessors every bulk read uses.
+        let mut result: *mut InfraStoreBulkReadHandle = ptr::null_mut();
         assert_eq!(
             unsafe {
-                infrastore_store_get_non_sequential(
+                infrastore_store_read_by_id(
                     store,
-                    key,
+                    id,
                     false,
                     false,
                     0,
+                    false,
+                    0,
+                    false,
+                    0,
+                    &mut result,
+                )
+            },
+            INFRASTORE_OK
+        );
+        assert_eq!(
+            unsafe {
+                infrastore_bulk_result_get_non_sequential(
+                    result,
                     0,
                     &mut ts_ptr,
                     &mut ts_len,
@@ -8062,7 +8131,7 @@ mod abi_tests {
             infrastore_buffer_free_i64(shape_ptr, shape_len);
             infrastore_buffer_free_u8(data_ptr, data_len);
             infrastore_string_free(application_data_out);
-            infrastore_key_free(key);
+            infrastore_bulk_result_free(result);
             infrastore_store_free(store);
         }
     }
@@ -8120,18 +8189,15 @@ mod abi_tests {
         );
 
         // add, then flush and free
-        let key = abi_add_f64(store, 1, "load", &[10.0, 11.0, 12.0, 13.0]);
+        let id = abi_add_f64(store, 1, "load", &[10.0, 11.0, 12.0, 13.0]);
         let mut present = false;
         assert_eq!(
-            unsafe { infrastore_store_has(store, key, &mut present) },
+            unsafe { infrastore_store_association_exists(store, id, &mut present) },
             INFRASTORE_OK
         );
         assert!(present);
         assert_eq!(unsafe { infrastore_store_flush(store) }, INFRASTORE_OK);
-        unsafe {
-            infrastore_key_free(key);
-            infrastore_store_free(store);
-        }
+        unsafe { infrastore_store_free(store) };
 
         // reopen read-only through the ABI and read the values back
         let mut ro: *mut InfraStoreHandle = ptr::null_mut();
@@ -8172,31 +8238,29 @@ mod abi_tests {
             .collect()
     }
 
-    /// `infrastore_store_get_single` through the ABI, returning
+    /// a read through the ABI, returning
     /// `(dtype_code, shape, raw bytes)` with every out-buffer freed.
+    /// Read owner's series `name` whole, as `(dtype, shape, bytes)`.
+    ///
+    /// Identify, then act: resolve the attributes to an id, then read it. A
+    /// single read comes back in the same result handle as a bulk one, holding
+    /// exactly one item, so it decodes through the same accessors.
     fn abi_get_single(
         store: *mut InfraStoreHandle,
         owner: i64,
         name: &str,
     ) -> (i32, Vec<i64>, Vec<u8>) {
-        let name_c = CString::new(name).unwrap();
-        let res = CString::new(HOUR).unwrap();
-        let mut key: *mut InfraStoreKeyHandle = ptr::null_mut();
-        assert_eq!(
-            unsafe {
-                infrastore_make_key_from_attrs(
-                    owner,
-                    0,
-                    name_c.as_ptr(),
-                    0,
-                    res.as_ptr(),
-                    ptr::null(),
-                    ptr::null(),
-                    &mut key,
-                )
-            },
-            INFRASTORE_OK
-        );
+        let id = abi_resolve_id(store, owner, name);
+        abi_read_by_id(store, id)
+    }
+
+    /// [`abi_get_single`] for a caller that already holds the id.
+    fn abi_read_by_id(store: *mut InfraStoreHandle, id: i64) -> (i32, Vec<i64>, Vec<u8>) {
+        let mut result: *mut InfraStoreBulkReadHandle = ptr::null_mut();
+        let rc = unsafe {
+            infrastore_store_read_by_id(store, id, false, false, 0, false, 0, false, 0, &mut result)
+        };
+        assert_eq!(rc, INFRASTORE_OK, "read_by_id failed: {}", last_error());
 
         let (mut initial, mut dtype) = (0i64, -1i32);
         let mut res_out: *mut c_char = ptr::null_mut();
@@ -8204,31 +8268,31 @@ mod abi_tests {
         let mut shape_len = 0u64;
         let mut data_ptr: *mut u8 = ptr::null_mut();
         let mut data_len = 0u64;
-        let rc = unsafe {
-            infrastore_store_get_single(
-                store,
-                key,
-                false,
-                false,
-                0,
-                0,
-                &mut initial,
-                &mut res_out,
-                &mut dtype,
-                &mut shape_ptr,
-                &mut shape_len,
-                &mut data_ptr,
-                &mut data_len,
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            )
-        };
-        assert_eq!(rc, INFRASTORE_OK, "get_single failed: {}", last_error());
+        assert_eq!(
+            unsafe {
+                infrastore_bulk_result_get_single(
+                    result,
+                    0,
+                    &mut initial,
+                    &mut res_out,
+                    &mut dtype,
+                    &mut shape_ptr,
+                    &mut shape_len,
+                    &mut data_ptr,
+                    &mut data_len,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                )
+            },
+            INFRASTORE_OK,
+            "decode failed: {}",
+            last_error()
+        );
         assert_eq!(initial, T0_MS);
 
         let shape = unsafe { slice::from_raw_parts(shape_ptr, shape_len as usize) }.to_vec();
@@ -8237,7 +8301,7 @@ mod abi_tests {
             infrastore_string_free(res_out);
             infrastore_buffer_free_i64(shape_ptr, shape_len);
             infrastore_buffer_free_u8(data_ptr, data_len);
-            infrastore_key_free(key);
+            infrastore_bulk_result_free(result);
         }
         (dtype, shape, bytes)
     }
@@ -8245,7 +8309,7 @@ mod abi_tests {
     #[test]
     fn persist_materializes_an_in_memory_store_and_reopens() {
         let store = abi_create_in_memory();
-        let key = abi_add_f64(store, 3, "load", &[1.5, 2.5, 3.5]);
+        let _key = abi_add_f64(store, 3, "load", &[1.5, 2.5, 3.5]);
 
         // An in-memory store reports no path.
         let (mut has_path, mut len) = (true, 99u64);
@@ -8265,10 +8329,7 @@ mod abi_tests {
             unsafe { infrastore_store_persist(store, path_c.as_ptr()) },
             INFRASTORE_OK
         );
-        unsafe {
-            infrastore_key_free(key);
-            infrastore_store_free(store);
-        }
+        unsafe { infrastore_store_free(store) };
 
         let mut reopened: *mut InfraStoreHandle = ptr::null_mut();
         assert_eq!(
@@ -8300,7 +8361,6 @@ mod abi_tests {
         // does, so bindings need no null guard of their own.
         unsafe {
             infrastore_store_free(ptr::null_mut());
-            infrastore_key_free(ptr::null_mut());
             infrastore_string_free(ptr::null_mut());
             infrastore_buffer_free_u8(ptr::null_mut(), 0);
             infrastore_buffer_free_i64(ptr::null_mut(), 0);
@@ -8325,21 +8385,17 @@ mod abi_tests {
         );
 
         let store = abi_create_in_memory();
-        let key = abi_add_f64(store, 1, "load", &[1.0, 2.0]);
+        let id = abi_add_f64(store, 1, "load", &[1.0, 2.0]);
 
-        // -- store op: null handle, then null out-param
+        // -- store op: null handle, then null out-param. There is no third case
+        // any more: the request carries an id, and an `int64` cannot be null.
         let mut present = false;
         assert_eq!(
-            unsafe { infrastore_store_has(ptr::null(), key, &mut present) },
+            unsafe { infrastore_store_association_exists(ptr::null(), id, &mut present) },
             INFRASTORE_ERR_NULL_POINTER
         );
         assert_eq!(
-            unsafe { infrastore_store_has(store, key, ptr::null_mut()) },
-            INFRASTORE_ERR_NULL_POINTER
-        );
-        // null key handle
-        assert_eq!(
-            unsafe { infrastore_store_has(store, ptr::null(), &mut present) },
+            unsafe { infrastore_store_association_exists(store, id, ptr::null_mut()) },
             INFRASTORE_ERR_NULL_POINTER
         );
         // create with a null out pointer
@@ -8432,55 +8488,65 @@ mod abi_tests {
         );
         unsafe { infrastore_static_reader_free(reader) };
 
-        // -- key op
-        let name = CString::new("load").unwrap();
+        // -- id ops
+        //
+        // An id-addressed call carries a bare `int64`, so there is no key
+        // message to be null. What still has to be checked is every out-param.
+        let mut out_result: *mut InfraStoreBulkReadHandle = ptr::null_mut();
         assert_eq!(
             unsafe {
-                infrastore_make_key_from_attrs(
+                infrastore_store_read_by_id(
+                    ptr::null(),
                     1,
+                    false,
+                    false,
                     0,
-                    name.as_ptr(),
+                    false,
                     0,
-                    res.as_ptr(),
-                    ptr::null(),
-                    ptr::null(),
+                    false,
+                    0,
+                    &mut out_result,
+                )
+            },
+            INFRASTORE_ERR_NULL_POINTER
+        );
+        assert_eq!(
+            unsafe {
+                infrastore_store_read_by_id(
+                    store,
+                    1,
+                    false,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    0,
                     ptr::null_mut(),
                 )
             },
             INFRASTORE_ERR_NULL_POINTER
         );
-        // a null name string is a null pointer, not invalid UTF-8
-        let mut out_key: *mut InfraStoreKeyHandle = ptr::null_mut();
+        let mut present = false;
         assert_eq!(
-            unsafe {
-                infrastore_make_key_from_attrs(
-                    1,
-                    0,
-                    ptr::null(),
-                    0,
-                    res.as_ptr(),
-                    ptr::null(),
-                    ptr::null(),
-                    &mut out_key,
-                )
-            },
+            unsafe { infrastore_store_association_exists(ptr::null(), 1, &mut present) },
             INFRASTORE_ERR_NULL_POINTER
         );
-        let mut eq = false;
         assert_eq!(
-            unsafe { infrastore_key_eq(ptr::null(), key, &mut eq) },
+            unsafe { infrastore_store_association_exists(store, 1, ptr::null_mut()) },
             INFRASTORE_ERR_NULL_POINTER
         );
-        let mut hash = 0u64;
+        // A non-null `ids` is only required when the count is non-zero.
+        let mut removed = 0u64;
         assert_eq!(
-            unsafe { infrastore_key_identity_hash(ptr::null(), &mut hash) },
+            unsafe { infrastore_store_remove_by_ids(store, ptr::null(), 1, &mut removed) },
             INFRASTORE_ERR_NULL_POINTER
         );
 
         // -- listing op (owned-string return with a null out_len)
         assert_eq!(
             unsafe {
-                infrastore_store_list_keys(
+                infrastore_store_list_metadata(
                     store,
                     false,
                     0,
@@ -8503,16 +8569,13 @@ mod abi_tests {
             INFRASTORE_ERR_NULL_POINTER
         );
 
-        unsafe {
-            infrastore_key_free(key);
-            infrastore_store_free(store);
-        }
+        unsafe { infrastore_store_free(store) };
     }
 
     #[test]
     fn compact_returns_a_report_and_leaves_the_store_usable() {
         let store = abi_create_in_memory();
-        let (rc, key) = abi_try_add(store, 1, "load", F64_ET.as_ptr(), &to_le(&[1.0, 2.0]), 2);
+        let (rc, _id) = abi_try_add(store, 1, "load", F64_ET.as_ptr(), &to_le(&[1.0, 2.0]), 2);
         assert_eq!(rc, INFRASTORE_OK);
 
         let mut out: *mut c_char = ptr::null_mut();
@@ -8549,10 +8612,7 @@ mod abi_tests {
             INFRASTORE_OK
         );
         assert_eq!(n, 1);
-        unsafe {
-            infrastore_key_free(key);
-            infrastore_store_free(store);
-        }
+        unsafe { infrastore_store_free(store) };
     }
 
     // ---- Invalid UTF-8 -----------------------------------------------------
@@ -8621,12 +8681,12 @@ mod abi_tests {
             json
         };
 
-        // The four that carry the matched names.
-        let by_name: [(&str, ListFn); 4] = [
-            ("list_keys", infrastore_store_list_keys),
-            ("list_time_series", infrastore_store_list_time_series),
+        // The two that carry the matched names. The three key-shaped listings
+        // that used to sit beside `list_metadata` were the same query projected
+        // differently; one listing carries what all of them projected.
+        let by_name: [(&str, ListFn); 2] = [
+            ("list_metadata", infrastore_store_list_metadata),
             ("list_names", infrastore_store_list_names),
-            ("list_array_groups", infrastore_store_list_array_groups),
         ];
         for (label, f) in by_name {
             let json = listed(f, &glob);
@@ -8765,73 +8825,78 @@ mod abi_tests {
         unsafe { infrastore_store_free(store) };
     }
 
-    /// `infrastore_key_attributes` allocates its resolution string on every call
-    /// that asks for it, so the probe call may pass null to skip it.
+    /// The metadata getter is probe-then-fetch: a call with a null buffer
+    /// allocates nothing and reports the length the caller must supply.
+    ///
+    /// This is what replaced `infrastore_key_attributes`. The attributes used to
+    /// come off a key handle the caller was holding; a caller holds an id now,
+    /// and the row it names carries every attribute plus the descriptors a key
+    /// never did.
     #[test]
-    fn key_attributes_resolution_is_optional() {
+    fn get_metadata_by_id_probes_before_it_fetches() {
         let store = abi_create_in_memory();
-        let key = abi_add_f64(store, 1, "load", &[1.0, 2.0]);
+        let id = abi_add_f64(store, 1, "load", &[1.0, 2.0]);
 
-        let (mut ty, mut owner, mut category) = (-1i32, 0i64, -1i32);
-        let (mut name_len, mut feat_len) = (0u64, 0u64);
-
-        // The probe: null resolution, null buffers, lengths only. Nothing is
-        // allocated, so there is nothing to free.
+        // The probe: null buffer, zero cap. `out_len` reports what is needed and
+        // nothing is written.
+        let (mut needed, mut present) = (0u64, false);
         assert_eq!(
             unsafe {
-                infrastore_key_attributes(
-                    key,
-                    &mut ty,
-                    ptr::null_mut(),
-                    &mut owner,
-                    &mut category,
+                infrastore_store_get_metadata_by_id(
+                    store,
+                    id,
                     ptr::null_mut(),
                     0,
-                    &mut name_len,
-                    ptr::null_mut(),
-                    0,
-                    &mut feat_len,
+                    &mut needed,
+                    &mut present,
                 )
             },
             INFRASTORE_OK
         );
-        assert_eq!((owner, category), (1, 0));
-        assert_eq!(name_len, "load".len() as u64);
-        assert_eq!(feat_len, "{}".len() as u64);
+        assert!(present);
+        assert!(needed > 0);
 
-        // The fetch: the resolution comes back owned.
-        let mut res: *mut c_char = ptr::null_mut();
-        let mut name_buf = vec![0i8; name_len as usize + 1];
-        let mut feat_buf = vec![0i8; feat_len as usize + 1];
+        // The fetch: the same call with a buffer the probe sized.
+        let mut buf = vec![0i8; needed as usize + 1];
+        let mut got = 0u64;
         assert_eq!(
             unsafe {
-                infrastore_key_attributes(
-                    key,
-                    &mut ty,
-                    &mut res,
-                    &mut owner,
-                    &mut category,
-                    name_buf.as_mut_ptr(),
-                    name_buf.len() as u64,
-                    &mut name_len,
-                    feat_buf.as_mut_ptr(),
-                    feat_buf.len() as u64,
-                    &mut feat_len,
+                infrastore_store_get_metadata_by_id(
+                    store,
+                    id,
+                    buf.as_mut_ptr(),
+                    buf.len() as u64,
+                    &mut got,
+                    &mut present,
                 )
             },
             INFRASTORE_OK
         );
-        assert!(!res.is_null());
-        assert_eq!(unsafe { CStr::from_ptr(res) }.to_str().unwrap(), HOUR);
-        unsafe { infrastore_string_free(res) };
-        assert_eq!(
-            unsafe { CStr::from_ptr(name_buf.as_ptr()) }
-                .to_str()
-                .unwrap(),
-            "load"
-        );
+        assert_eq!(got, needed);
+        let json = unsafe { CStr::from_ptr(buf.as_ptr()) }.to_str().unwrap();
+        let row: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(row["owner_id"].as_i64(), Some(1));
+        assert_eq!(row["name"].as_str(), Some("load"));
+        assert_eq!(row["resolution"].as_str(), Some(HOUR));
+        assert_eq!(row["id"].as_i64(), Some(id));
 
-        unsafe { infrastore_key_free(key) };
+        // A stale id is an answer, not an error: `present` says no and the row
+        // is not built.
+        assert_eq!(
+            unsafe {
+                infrastore_store_get_metadata_by_id(
+                    store,
+                    9_999,
+                    ptr::null_mut(),
+                    0,
+                    &mut needed,
+                    &mut present,
+                )
+            },
+            INFRASTORE_OK
+        );
+        assert!(!present);
+
         unsafe { infrastore_store_free(store) };
     }
 
@@ -8856,7 +8921,7 @@ mod abi_tests {
         let mut out: *mut c_char = ptr::null_mut();
         let mut len = 0u64;
         let rc = unsafe {
-            infrastore_store_list_keys(
+            infrastore_store_list_metadata(
                 store,
                 false,
                 0,
@@ -8914,7 +8979,7 @@ mod abi_tests {
         // A valid glob still works, so the guard is the only thing rejecting.
         let good = CString::new("lo*").unwrap();
         let rc = unsafe {
-            infrastore_store_list_keys(
+            infrastore_store_list_metadata(
                 store,
                 false,
                 0,
@@ -8957,7 +9022,7 @@ mod abi_tests {
         let vals = [1.0f64, 2.0];
         let bytes = to_le(&vals);
         let dims = [2u64];
-        let mut key: *mut InfraStoreKeyHandle = ptr::null_mut();
+        let mut id = 0i64;
         let rc = unsafe {
             infrastore_store_add_single(
                 store,
@@ -8979,12 +9044,11 @@ mod abi_tests {
                 ptr::null(),
                 ptr::null(),
                 ptr::null(),
-                &mut key,
-                ptr::null_mut(),
+                &mut id,
             )
         };
         assert_eq!(rc, INFRASTORE_ERR_INVALID_UTF8);
-        assert!(key.is_null());
+        assert_eq!(id, 0, "a refused add mints no id");
         let msg = last_error();
         assert!(
             !msg.is_empty(),
@@ -9000,15 +9064,12 @@ mod abi_tests {
         assert_eq!(total, 0);
 
         // A successful call clears the message.
-        let key = abi_add_f64(store, 1, "load", &[1.0, 2.0]);
+        let _key = abi_add_f64(store, 1, "load", &[1.0, 2.0]);
         assert!(
             last_error().is_empty(),
             "a successful call must clear the thread-local error"
         );
-        unsafe {
-            infrastore_key_free(key);
-            infrastore_store_free(store);
-        }
+        unsafe { infrastore_store_free(store) };
     }
 
     #[test]
@@ -9020,7 +9081,7 @@ mod abi_tests {
         let bad_res = CString::new("not-a-period").unwrap();
         let bytes = to_le(&[1.0f64, 2.0]);
         let dims = [2u64];
-        let mut key: *mut InfraStoreKeyHandle = ptr::null_mut();
+        let mut id = 0i64;
         let rc = unsafe {
             infrastore_store_add_single(
                 store,
@@ -9042,8 +9103,7 @@ mod abi_tests {
                 ptr::null(),
                 ptr::null(),
                 ptr::null(),
-                &mut key,
-                ptr::null_mut(),
+                &mut id,
             )
         };
         assert_eq!(rc, INFRASTORE_ERR_INVALID_PARAMETER);
@@ -9054,7 +9114,7 @@ mod abi_tests {
     #[test]
     fn an_unknown_element_type_is_an_invalid_parameter() {
         let store = abi_create_in_memory();
-        let (rc, key) = abi_try_add(
+        let (rc, id) = abi_try_add(
             store,
             1,
             "load",
@@ -9063,7 +9123,7 @@ mod abi_tests {
             2,
         );
         assert_eq!(rc, INFRASTORE_ERR_INVALID_PARAMETER);
-        assert!(key.is_null());
+        assert_eq!(id, 0, "a refused add mints no id");
         assert!(!last_error().is_empty());
         unsafe { infrastore_store_free(store) };
     }
@@ -9072,9 +9132,9 @@ mod abi_tests {
     fn a_byte_length_that_contradicts_the_shape_is_an_invalid_parameter() {
         let store = abi_create_in_memory();
         // Shape says 4 elements, only 2 f64s of bytes are supplied.
-        let (rc, key) = abi_try_add(store, 1, "load", F64_ET.as_ptr(), &to_le(&[1.0, 2.0]), 4);
+        let (rc, id) = abi_try_add(store, 1, "load", F64_ET.as_ptr(), &to_le(&[1.0, 2.0]), 4);
         assert_eq!(rc, INFRASTORE_ERR_INVALID_PARAMETER);
-        assert!(key.is_null());
+        assert_eq!(id, 0, "a refused add mints no id");
         unsafe { infrastore_store_free(store) };
     }
 
@@ -9101,29 +9161,14 @@ mod abi_tests {
             unsafe { infrastore_store_create(path_c.as_ptr(), false, &mut store) },
             INFRASTORE_OK
         );
-        let key = abi_add_f64(store, 1, "load", &[1.0, 2.0]);
+        let _key = abi_add_f64(store, 1, "load", &[1.0, 2.0]);
 
-        // NOT_FOUND: remove a key that names a series that does not exist.
-        let absent = CString::new("absent").unwrap();
-        let res = CString::new(HOUR).unwrap();
-        let mut missing: *mut InfraStoreKeyHandle = ptr::null_mut();
+        // NOT_FOUND: remove an id the catalog never minted. Ids are never
+        // reissued, so a stale one stays stale.
+        let missing = 9_999i64;
+        let mut removed = 0u64;
         assert_eq!(
-            unsafe {
-                infrastore_make_key_from_attrs(
-                    1,
-                    0,
-                    absent.as_ptr(),
-                    0,
-                    res.as_ptr(),
-                    ptr::null(),
-                    ptr::null(),
-                    &mut missing,
-                )
-            },
-            INFRASTORE_OK
-        );
-        assert_eq!(
-            unsafe { infrastore_store_remove(store, missing) },
+            unsafe { infrastore_store_remove_by_ids(store, &missing, 1, &mut removed) },
             INFRASTORE_ERR_NOT_FOUND
         );
         assert!(!last_error().is_empty());
@@ -9131,13 +9176,10 @@ mod abi_tests {
         // DUPLICATE: add the same identity twice.
         let (rc, dup) = abi_try_add(store, 1, "load", F64_ET.as_ptr(), &to_le(&[1.0, 2.0]), 2);
         assert_eq!(rc, INFRASTORE_ERR_DUPLICATE);
-        assert!(dup.is_null());
+        assert_eq!(dup, 0, "a refused add mints no id");
 
         assert_eq!(unsafe { infrastore_store_flush(store) }, INFRASTORE_OK);
-        unsafe {
-            infrastore_key_free(key);
-            infrastore_store_free(store);
-        }
+        unsafe { infrastore_store_free(store) };
 
         // READ_ONLY: every write through a read-only handle.
         let mut ro: *mut InfraStoreHandle = ptr::null_mut();
@@ -9147,9 +9189,10 @@ mod abi_tests {
         );
         let (rc, k) = abi_try_add(ro, 2, "new", F64_ET.as_ptr(), &to_le(&[1.0, 2.0]), 2);
         assert_eq!(rc, INFRASTORE_ERR_READ_ONLY);
-        assert!(k.is_null());
+        assert_eq!(k, 0, "a refused add mints no id");
+        let mut removed = 0u64;
         assert_eq!(
-            unsafe { infrastore_store_remove(ro, missing) },
+            unsafe { infrastore_store_remove_by_ids(ro, &missing, 1, &mut removed) },
             INFRASTORE_ERR_READ_ONLY
         );
         let mut report: *mut c_char = ptr::null_mut();
@@ -9160,72 +9203,43 @@ mod abi_tests {
         );
         assert!(report.is_null());
 
-        unsafe {
-            infrastore_key_free(missing);
-            infrastore_store_free(ro);
-        }
+        unsafe { infrastore_store_free(ro) };
     }
 
     #[test]
-    fn get_single_on_a_missing_key_is_not_found() {
+    fn reading_a_stale_id_is_not_found() {
         let store = abi_create_in_memory();
-        let name = CString::new("absent").unwrap();
-        let res = CString::new(HOUR).unwrap();
-        let mut key: *mut InfraStoreKeyHandle = ptr::null_mut();
-        assert_eq!(
-            unsafe {
-                infrastore_make_key_from_attrs(
-                    1,
-                    0,
-                    name.as_ptr(),
-                    0,
-                    res.as_ptr(),
-                    ptr::null(),
-                    ptr::null(),
-                    &mut key,
-                )
-            },
-            INFRASTORE_OK
-        );
-
-        let (mut initial, mut dtype) = (0i64, -1i32);
-        let mut res_out: *mut c_char = ptr::null_mut();
-        let mut shape_ptr: *mut i64 = ptr::null_mut();
-        let mut shape_len = 0u64;
-        let mut data_ptr: *mut u8 = ptr::null_mut();
-        let mut data_len = 0u64;
+        // An id the catalog never minted. Nothing else can be malformed about an
+        // id request, so this is the whole failure surface a read has.
+        let mut result: *mut InfraStoreBulkReadHandle = ptr::null_mut();
         let rc = unsafe {
-            infrastore_store_get_single(
+            infrastore_store_read_by_id(
                 store,
-                key,
+                9_999,
                 false,
                 false,
                 0,
+                false,
                 0,
-                &mut initial,
-                &mut res_out,
-                &mut dtype,
-                &mut shape_ptr,
-                &mut shape_len,
-                &mut data_ptr,
-                &mut data_len,
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
+                false,
+                0,
+                &mut result,
             )
         };
         assert_eq!(rc, INFRASTORE_ERR_NOT_FOUND);
-        // No buffers were handed out, so there is nothing to free.
-        assert!(res_out.is_null() && shape_ptr.is_null() && data_ptr.is_null());
+        // No handle was produced, so there is nothing to free.
+        assert!(result.is_null());
+        assert!(!last_error().is_empty());
 
-        unsafe {
-            infrastore_key_free(key);
-            infrastore_store_free(store);
-        }
+        // The probe that asks instead of failing answers `false`.
+        let mut present = true;
+        assert_eq!(
+            unsafe { infrastore_store_association_exists(store, 9_999, &mut present) },
+            INFRASTORE_OK
+        );
+        assert!(!present);
+
+        unsafe { infrastore_store_free(store) };
     }
 
     #[test]
@@ -9273,7 +9287,7 @@ mod abi_tests {
         // prefix. A binding that trusted `cap` instead of `out_len` would
         // silently read a truncated JSON document.
         let store = abi_create_in_memory();
-        let key = abi_add_f64(store, 1, "load", &[1.0, 2.0]);
+        let _key = abi_add_f64(store, 1, "load", &[1.0, 2.0]);
 
         let mut needed = 0u64;
         assert_eq!(
@@ -9331,10 +9345,7 @@ mod abi_tests {
         assert_eq!(reported, needed);
         assert_eq!(one[0], 0);
 
-        unsafe {
-            infrastore_key_free(key);
-            infrastore_store_free(store);
-        }
+        unsafe { infrastore_store_free(store) };
     }
 
     #[test]
@@ -9347,7 +9358,7 @@ mod abi_tests {
         let vals: Vec<f64> = (0..12).map(|i| i as f64).collect();
         let bytes = to_le(&vals);
         let dims = [2u64, 2, 3];
-        let mut key: *mut InfraStoreKeyHandle = ptr::null_mut();
+        let mut id = 0i64;
         assert_eq!(
             unsafe {
                 infrastore_store_add_single(
@@ -9370,8 +9381,7 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     ptr::null(),
-                    &mut key,
-                    ptr::null_mut(),
+                    &mut id,
                 )
             },
             INFRASTORE_OK
@@ -9441,7 +9451,6 @@ mod abi_tests {
 
         unsafe {
             infrastore_static_reader_free(reader);
-            infrastore_key_free(key);
             infrastore_store_free(store);
         }
     }
@@ -9449,7 +9458,7 @@ mod abi_tests {
     #[test]
     fn an_out_of_range_group_or_entry_index_is_an_invalid_parameter() {
         let store = abi_create_in_memory();
-        let key = abi_add_f64(store, 1, "load", &[1.0, 2.0]);
+        let _key = abi_add_f64(store, 1, "load", &[1.0, 2.0]);
         let res = CString::new(HOUR).unwrap();
 
         let mut reader: *mut InfraStoreStaticReaderHandle = ptr::null_mut();
@@ -9501,14 +9510,14 @@ mod abi_tests {
         assert!(!last_error().is_empty());
 
         // A column index past the group's width, and the group index again.
-        let mut out_key: *mut InfraStoreKeyHandle = ptr::null_mut();
+        let mut out_id = -1i64;
         assert_eq!(
-            unsafe { infrastore_static_reader_group_key(reader, 0, 99, &mut out_key) },
+            unsafe { infrastore_static_reader_group_id(reader, 0, 99, &mut out_id) },
             INFRASTORE_ERR_INVALID_PARAMETER
         );
-        assert!(out_key.is_null());
+        assert_eq!(out_id, -1, "a refused lookup writes nothing");
         assert_eq!(
-            unsafe { infrastore_static_reader_group_key(reader, 99, 0, &mut out_key) },
+            unsafe { infrastore_static_reader_group_id(reader, 99, 0, &mut out_id) },
             INFRASTORE_ERR_INVALID_PARAMETER
         );
 
@@ -9574,7 +9583,6 @@ mod abi_tests {
         unsafe {
             infrastore_forecast_reader_free(freader);
             infrastore_store_free(det_store);
-            infrastore_key_free(key);
             infrastore_store_free(store);
         }
     }
@@ -9663,9 +9671,8 @@ mod abi_tests {
 
         for (i, (element_type, code, bytes)) in cases.iter().enumerate() {
             let name = element_type.to_str().unwrap();
-            let (rc, key) = abi_try_add(store, i as i64 + 1, name, element_type.as_ptr(), bytes, 3);
+            let (rc, _id) = abi_try_add(store, i as i64 + 1, name, element_type.as_ptr(), bytes, 3);
             assert_eq!(rc, INFRASTORE_OK, "adding {name}: {}", last_error());
-            unsafe { infrastore_key_free(key) };
 
             let (got_dtype, shape, got_bytes) = abi_get_single(store, i as i64 + 1, name);
             assert_eq!(got_dtype, *code, "{name}: dtype code");
@@ -9695,9 +9702,8 @@ mod abi_tests {
             "create failed: {}",
             last_error()
         );
-        let key = abi_add_f64(store, 1, "load", &[1.0, 2.0, 3.0]);
+        let _key = abi_add_f64(store, 1, "load", &[1.0, 2.0, 3.0]);
         unsafe {
-            infrastore_key_free(key);
             assert_eq!(infrastore_store_flush(store), INFRASTORE_OK);
             infrastore_store_free(store);
         }
@@ -9710,7 +9716,7 @@ mod abi_tests {
         let mut len = 0u64;
         assert_eq!(
             unsafe {
-                infrastore_store_list_keys(
+                infrastore_store_list_metadata(
                     store,
                     false,
                     0,
@@ -9897,8 +9903,7 @@ mod abi_tests {
             "create failed: {}",
             last_error()
         );
-        let key = abi_add_f64(store, 1, "load", &[1.0, 2.0, 3.0]);
-        unsafe { infrastore_key_free(key) };
+        let _key = abi_add_f64(store, 1, "load", &[1.0, 2.0, 3.0]);
         assert!(!sqlite.exists(), "an in-memory catalog writes nothing yet");
 
         assert_eq!(
@@ -9944,52 +9949,13 @@ mod abi_tests {
         assert!(store.is_null());
     }
 
-    /// Add one f64 series, returning the association id the catalog assigned.
-    fn abi_add_f64_id(store: *mut InfraStoreHandle, owner: i64, name: &str, vals: &[f64]) -> i64 {
-        let owner_type = CString::new("Generator").unwrap();
-        let name_c = CString::new(name).unwrap();
-        let res = CString::new(HOUR).unwrap();
-        let bytes = to_le(vals);
-        let dims = [vals.len() as u64];
-        let mut key: *mut InfraStoreKeyHandle = ptr::null_mut();
-        let mut out_id = 0i64;
-        let rc = unsafe {
-            infrastore_store_add_single(
-                store,
-                owner,
-                owner_type.as_ptr(),
-                0,
-                name_c.as_ptr(),
-                T0_MS,
-                res.as_ptr(),
-                F64_ET.as_ptr(),
-                1,
-                dims.as_ptr(),
-                bytes.as_ptr(),
-                bytes.len() as u64,
-                ptr::null(),
-                ptr::null(),
-                ptr::null(),
-                ptr::null(),
-                ptr::null(),
-                ptr::null(),
-                ptr::null(),
-                &mut key,
-                &mut out_id,
-            )
-        };
-        assert_eq!(rc, INFRASTORE_OK, "add failed: {}", last_error());
-        unsafe { infrastore_key_free(key) };
-        out_id
-    }
-
     /// Add and drop `n` throwaway rows, so the next id `store` assigns clears
     /// `n`. Ids are assigned and never chosen, so a document whose ids must sit
     /// above an importing store's high-water mark is arranged this way.
     fn abi_advance_ids(store: *mut InfraStoreHandle, n: i64) {
         for i in 0..n {
             let name = format!("__spacer{i}");
-            let id = abi_add_f64_id(store, -1, &name, &[i as f64, 0.0, 0.0]);
+            let id = abi_add_f64(store, -1, &name, &[i as f64, 0.0, 0.0]);
             let mut removed: u64 = 0;
             assert_eq!(
                 unsafe { infrastore_store_remove_by_ids(store, &id, 1, &mut removed) },
@@ -10065,9 +10031,9 @@ mod abi_tests {
     #[test]
     fn abi_read_by_ids_follows_the_order_it_was_given() {
         let store = abi_create_in_memory();
-        let a = abi_add_f64_id(store, 1, "a", &[1.0, 2.0, 3.0]);
-        let b = abi_add_f64_id(store, 2, "b", &[10.0, 11.0, 12.0]);
-        let c = abi_add_f64_id(store, 3, "c", &[100.0, 101.0, 102.0]);
+        let a = abi_add_f64(store, 1, "a", &[1.0, 2.0, 3.0]);
+        let b = abi_add_f64(store, 2, "b", &[10.0, 11.0, 12.0]);
+        let c = abi_add_f64(store, 3, "c", &[100.0, 101.0, 102.0]);
 
         let asked = [c, a, c, b];
         let mut result: *mut InfraStoreBulkReadHandle = ptr::null_mut();
@@ -10118,9 +10084,9 @@ mod abi_tests {
     #[test]
     fn abi_remove_by_ids_is_all_or_nothing() {
         let store = abi_create_in_memory();
-        let a = abi_add_f64_id(store, 1, "a", &[1.0, 2.0, 3.0]);
-        let b = abi_add_f64_id(store, 2, "b", &[10.0, 11.0, 12.0]);
-        let c = abi_add_f64_id(store, 3, "c", &[100.0, 101.0, 102.0]);
+        let a = abi_add_f64(store, 1, "a", &[1.0, 2.0, 3.0]);
+        let b = abi_add_f64(store, 2, "b", &[10.0, 11.0, 12.0]);
+        let c = abi_add_f64(store, 3, "c", &[100.0, 101.0, 102.0]);
 
         // One dangling id fails the batch, and leaves every row in place.
         let doomed = [a, 9_999, b];
@@ -10193,7 +10159,7 @@ mod abi_tests {
         let source = abi_create_in_memory();
         // Above whatever the target will have assigned its own anchor row.
         abi_advance_ids(source, 699);
-        let id = abi_add_f64_id(source, 1, "load", &[1.0, 2.0, 3.0]);
+        let id = abi_add_f64(source, 1, "load", &[1.0, 2.0, 3.0]);
         assert_eq!(id, 700);
 
         let mut json: *mut c_char = ptr::null_mut();
@@ -10226,7 +10192,7 @@ mod abi_tests {
         // Arrays are content-addressed, so "the artifact brought the values" is
         // a store already holding the same bytes under an identity of its own.
         let target = abi_create_in_memory();
-        abi_add_f64_id(target, 9, "anchor", &[1.0, 2.0, 3.0]);
+        abi_add_f64(target, 9, "anchor", &[1.0, 2.0, 3.0]);
         let mut added = 0u64;
         assert_eq!(
             unsafe {

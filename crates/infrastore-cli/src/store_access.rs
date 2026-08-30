@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use infrastore_core::{CatalogMode, Compression, KeyIdentity, Store, create_store, open_store};
+use infrastore_core::{CatalogMode, Compression, Store, create_store, open_store};
 
 /// Where the SQLite catalog lives *while a command runs*.
 ///
@@ -121,7 +121,7 @@ pub fn remove_existing(
     // Each filter names one identity exactly (`features_exact`), so this
     // resolves the ids the store actually holds and removes those. Identities
     // it does not hold contribute nothing, which is what `--replace` wants.
-    let mut present: Vec<i64> = Vec::new();
+    let mut present: Vec<infrastore_core::TimeSeriesId> = Vec::new();
     for filter in filters {
         present.extend(
             store

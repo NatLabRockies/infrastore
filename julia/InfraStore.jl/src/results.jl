@@ -6,7 +6,8 @@
 # are `nothing` (e.g. `horizon` on a `SingleTimeSeries` row).
 #
 # `time_series_type` fields hold the Julia type (`SingleTimeSeries`,
-# `Deterministic`, ...), so they can be passed straight to `get_time_series`;
+# `Deterministic`, ...), so they can be passed straight to a `time_series_type`
+# filter;
 # Reader `dtype` fields hold the Julia element type (`Float64`, `Bool`, ...);
 # metadata carries the logical `element_type` string instead.
 
@@ -15,7 +16,7 @@
 
 The complete stored description of one time series association — the Julia
 mirror of the Rust core's `TimeSeriesMetadata`, and the single metadata type of
-this package. It is returned both by [`list_time_series`](@ref) (one per matching
+this package. It is returned both by [`list_metadata`](@ref) (one per matching
 association) and by the [`get_metadata`](@ref) family (one, addressed by key or
 by attributes).
 
@@ -75,87 +76,6 @@ struct TimeSeriesMetadata
     application_data::Union{Nothing, String}
     id::Union{Nothing, Int64}
 end
-"""
-    KeyInfo
-
-The attributes an opaque [`TimeSeriesKey`] carries, as returned by
-[`key_info`](@ref): the identity a series is addressed by. `resolution` is
-`nothing` for types that have none (a `NonSequentialTimeSeries`).
-"""
-struct KeyInfo
-    owner_id::Int64
-    owner_category::OwnerCategory
-    name::String
-    time_series_type::Type
-    resolution::Union{Nothing, Period}
-    features::Dict{String, Any}
-end
-
-"""
-    KeyRow
-
-One row of [`list_keys`](@ref): a key's identity plus the descriptive snapshot
-recorded for it. `length` applies to static series, `horizon` / `interval` /
-`count` to forecasts; the fields that do not apply to a row's
-`time_series_type` are `nothing`. `time_reference` records how the row's
-timestamps were spelled, and `id` is the association id the write handed back.
-
-`id` counts toward `==` and `hash` for these rows, as it does for
-[`TimeSeriesMetadata`](@ref): a listing row is the catalog's record of a series,
-so two rows describing the same series in two different stores are not equal.
-The association row types take the opposite rule and compare on their endpoints
-alone, because a caller constructs those as plain values and a row read back has
-to equal the one that wrote it; a `KeyRow` only ever comes from a listing.
-
-Physical storage detail (`data_hash`, `element_type`, `application_data`, `percentiles`) is not part
-of a key — read it with [`list_time_series`](@ref), [`list_array_groups`](@ref),
-or the `get_*_metadata` functions.
-"""
-struct KeyRow
-    owner_id::Int64
-    owner_category::OwnerCategory
-    time_series_type::Type
-    name::String
-    initial_timestamp::Union{Nothing, DateTime}
-    resolution::Union{Nothing, Period}
-    length::Union{Nothing, Int}
-    horizon::Union{Nothing, Period}
-    interval::Union{Nothing, Period}
-    count::Union{Nothing, Int}
-    features::Dict{String, Any}
-    "How the row's timestamps were spelled (a [`TimeReference`](@ref)), or `nothing` for unspecified. Descriptive, so it is part of the snapshot and never of key equality."
-    time_reference::Union{Nothing, TimeReference}
-    "The association id the catalog filed the row under — the same id [`add_time_series!`](@ref) and [`add_time_series_bulk!`](@ref) hand back — or `nothing` for a row written before ids were minted."
-    id::Union{Nothing, Int64}
-end
-
-"""
-    ArrayGroupRow
-
-One row of [`list_array_groups`](@ref): every [`KeyRow`] field (`id` included) plus `data_hash`,
-the 32-byte content hash of the array the row resolves to. Rows that share a
-stored array share their `data_hash`, so grouping by it (a `Vector{UInt8}` hashes
-and compares by content, so it works directly as a `Dict` key) finds the series
-that share their underlying data.
-"""
-struct ArrayGroupRow
-    owner_id::Int64
-    owner_category::OwnerCategory
-    time_series_type::Type
-    name::String
-    initial_timestamp::Union{Nothing, DateTime}
-    resolution::Union{Nothing, Period}
-    length::Union{Nothing, Int}
-    horizon::Union{Nothing, Period}
-    interval::Union{Nothing, Period}
-    count::Union{Nothing, Int}
-    features::Dict{String, Any}
-    "How the row's timestamps were spelled (a [`TimeReference`](@ref)), or `nothing` for unspecified."
-    time_reference::Union{Nothing, TimeReference}
-    id::Union{Nothing, Int64}
-    data_hash::Vector{UInt8}
-end
-
 """
     TimeSeriesCounts
 
@@ -376,9 +296,6 @@ end
 # `show` are generated for each of them here.
 const _RESULT_TYPES = (
     :TimeSeriesMetadata,
-    :KeyInfo,
-    :KeyRow,
-    :ArrayGroupRow,
     :TimeSeriesCounts,
     :TimeSeriesCountsDetailed,
     :TimeSeriesTypeCount,

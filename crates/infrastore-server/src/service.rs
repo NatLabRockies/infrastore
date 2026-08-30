@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use infrastore_core::{
-    KeyIdentity, ListFilter, OwnerCategory, Period, Store, TimeRange, TimeSeriesError,
+    ListFilter, OwnerCategory, Period, Store, TimeRange, TimeSeriesError, TimeSeriesId,
     TimeSeriesType,
 };
 
@@ -15,9 +15,9 @@ fn parse_period(s: &str) -> Result<Period, Status> {
     Period::from_iso8601(s).map_err(|e| Status::invalid_argument(e.to_string()))
 }
 
-/// Build a [`ListFilter`] from a `ListReq`, mapping bad enums / periods to
+/// Build a [`ListFilter`] from a `ListMetadataReq`, mapping bad enums / periods to
 /// `invalid_argument`. Shared by `ListTimeSeries` and `ListKeys`.
-fn filter_from_list_req(req: ListReq) -> Result<ListFilter, Status> {
+fn filter_from_list_req(req: ListMetadataReq) -> Result<ListFilter, Status> {
     let mut filter = ListFilter::new();
     if let Some(id) = req.owner_id {
         filter = filter.owner_id(id);
@@ -91,14 +91,18 @@ fn parse_time_range(
 }
 use infrastore_proto::convert::{
     features_from_pb, forecast_summary_row_to_pb, metadata_to_pb, requested_type_from_pb,
-    static_summary_row_to_pb, time_series_data_to_get_resp,
+    static_summary_row_to_pb, time_series_data_to_read_resp,
 };
 use infrastore_proto::pb::{
-    self, BulkReadReq, BulkReadResp, ConsistencyReq, ConsistencyResp, CountsByTypeResp, CountsReq,
-    CountsResp, DetailedCountsResp, EmptyReq, ForecastParamsReq, ForecastParamsResp,
-    ForecastSummaryResp, GetReq, GetResp, HasReq, HasResp, IntervalsReq, IntervalsResp,
-    ListOwnerIdsReq, ListOwnerIdsResp, ListReq, ListResp, ResolutionsReq, ResolutionsResp,
-    StaticSummaryResp, TimeSeriesMetadata, VerifyReq, VerifyResp,
+    self, AssociationExistsReq, AssociationExistsResp, CheckStaticConsistencyReq,
+    CheckStaticConsistencyResp, GetCountsByTypeReq, GetCountsByTypeResp, GetCountsReq,
+    GetCountsResp, GetDetailedCountsReq, GetDetailedCountsResp, GetForecastParametersReq,
+    GetForecastParametersResp, GetForecastSummaryReq, GetForecastSummaryResp, GetIntervalsReq,
+    GetIntervalsResp, GetResolutionsReq, GetResolutionsResp, GetStaticSummaryReq,
+    GetStaticSummaryResp, HasAnyTimeSeriesReq, HasAnyTimeSeriesResp, ListMetadataByIdsReq,
+    ListMetadataByIdsResp, ListMetadataReq, ListMetadataResp, ListOwnerIdsReq, ListOwnerIdsResp,
+    ReadByIdReq, ReadByIdResp, ReadByIdsReq, ReadByIdsResp, TimeSeriesMetadata, VerifyIntegrityReq,
+    VerifyIntegrityResp,
     catalog_store_server::{CatalogStore as CatalogStoreSvc, CatalogStoreServer},
 };
 use tokio::sync::Mutex;
@@ -107,29 +111,28 @@ use tonic::{Request, Response, Status};
 /// Trait service backed by a `Store`. Read-only RPCs only.
 pub struct CatalogStoreService {
     store: Arc<Mutex<Store>>,
-    /// See [`DEFAULT_MAX_BULK_READ_KEYS`].
-    max_bulk_read_keys: usize,
+    /// See [`DEFAULT_MAX_READ_IDS`].
+    max_read_ids: usize,
 }
 
-/// Default ceiling on the number of keys one `BulkRead` may name.
+/// Default ceiling on the number of ids one `ReadByIds` may name.
 ///
-/// `BulkRead` is the one RPC whose response size the *caller* chooses: it
-/// returns a full copy of a series per key and does not collapse duplicates
-/// (items correspond positionally to the keys asked for, pinned by
-/// `bulk_read_returns_duplicate_keys_once_each`). Unbounded, a request inside
-/// tonic's 4 MiB decode limit can name a couple of hundred thousand keys and
-/// amplify a 900 KB request into an 822 MB response off a 16 KB store —
+/// `ReadByIds` is the one RPC whose response size the *caller* chooses: it
+/// returns a full copy of a series per id and does not collapse duplicates
+/// (items correspond positionally to the ids asked for). Unbounded, a request
+/// inside tonic's 4 MiB decode limit can name a couple of hundred thousand ids
+/// and amplify a 900 KB request into an 822 MB response off a 16 KB store —
 /// unauthenticated under the default `auth = "none"`.
 ///
 /// Operators serving very large stores can raise it; see
-/// `[server] max_bulk_read_keys`.
-pub const DEFAULT_MAX_BULK_READ_KEYS: usize = 4096;
+/// `[server] max_read_ids`.
+pub const DEFAULT_MAX_READ_IDS: usize = 4096;
 
 impl CatalogStoreService {
     pub fn new(store: Store) -> Self {
         Self {
             store: Arc::new(Mutex::new(store)),
-            max_bulk_read_keys: DEFAULT_MAX_BULK_READ_KEYS,
+            max_read_ids: DEFAULT_MAX_READ_IDS,
         }
     }
 
@@ -138,9 +141,9 @@ impl CatalogStoreService {
         Ok(Self::new(store))
     }
 
-    /// Override the `BulkRead` key ceiling. See [`DEFAULT_MAX_BULK_READ_KEYS`].
-    pub fn with_max_bulk_read_keys(mut self, max: usize) -> Self {
-        self.max_bulk_read_keys = max;
+    /// Override the `ReadByIds` id ceiling. See [`DEFAULT_MAX_READ_IDS`].
+    pub fn with_max_read_ids(mut self, max: usize) -> Self {
+        self.max_read_ids = max;
         self
     }
 
@@ -179,39 +182,83 @@ fn map_convert_err(e: infrastore_proto::convert::ConvertError) -> Status {
 
 #[tonic::async_trait]
 impl CatalogStoreSvc for CatalogStoreService {
-    async fn list_time_series(
+    async fn list_metadata(
         &self,
-        request: Request<ListReq>,
-    ) -> Result<Response<ListResp>, Status> {
+        request: Request<ListMetadataReq>,
+    ) -> Result<Response<ListMetadataResp>, Status> {
         let filter = filter_from_list_req(request.into_inner())?;
         let store = self.store.lock().await;
-        let metas = store.list_time_series(filter).map_err(map_err)?;
-        Ok(Response::new(ListResp {
+        let metas = store.list_metadata(filter).map_err(map_err)?;
+        Ok(Response::new(ListMetadataResp {
             metadata: metas.iter().map(metadata_to_pb).collect(),
         }))
     }
 
-    async fn get_time_series(&self, request: Request<GetReq>) -> Result<Response<GetResp>, Status> {
+    /// The catalog rows `ids` names, in the order the ids are given.
+    ///
+    /// `list_metadata` addressed by id — one query for a whole model's worth of
+    /// recorded references rather than one call per reference. `NOT_FOUND` if
+    /// any id names no row, because a caller naming ids is asserting they
+    /// exist; `association_exists` is the call that treats a stale reference as
+    /// an answer instead.
+    async fn list_metadata_by_ids(
+        &self,
+        request: Request<ListMetadataByIdsReq>,
+    ) -> Result<Response<ListMetadataByIdsResp>, Status> {
+        let ids: Vec<TimeSeriesId> = request
+            .into_inner()
+            .ids
+            .into_iter()
+            .map(TimeSeriesId)
+            .collect();
+        let store = self.store.lock().await;
+        let metas = store.list_metadata_by_ids(&ids).map_err(map_err)?;
+        Ok(Response::new(ListMetadataByIdsResp {
+            metadata: metas.iter().map(metadata_to_pb).collect(),
+        }))
+    }
+
+    /// Whether an association is filed under `id`, without fetching its row.
+    ///
+    /// The remote form of the load-time reference check: a consumer holding ids
+    /// in its own model sifts them here rather than calling `GetMetadataById`
+    /// and catching `NOT_FOUND`, which hydrates a row to answer a yes/no.
+    async fn association_exists(
+        &self,
+        request: Request<AssociationExistsReq>,
+    ) -> Result<Response<AssociationExistsResp>, Status> {
+        let id = request.into_inner().id;
+        let store = self.store.lock().await;
+        let present = store
+            .association_exists(TimeSeriesId(id))
+            .map_err(map_err)?;
+        Ok(Response::new(AssociationExistsResp { present }))
+    }
+
+    async fn read_by_id(
+        &self,
+        request: Request<ReadByIdReq>,
+    ) -> Result<Response<ReadByIdResp>, Status> {
         let req = request.into_inner();
         let time_range = parse_time_range(req.start_rfc3339, req.end_rfc3339, req.bounds_zoneless)?;
         let store = self.store.lock().await;
+        let id = TimeSeriesId(req.id);
         let data = match time_range {
             Some(range) => store
-                .read_by_ids_range(&[req.id], range)
+                .read_by_ids_range(&[id], range)
                 .map(|mut v| v.remove(0)),
-            None => store.read_by_id(req.id, infrastore_core::ReadWindow::full()),
+            None => store.read_by_id(id, infrastore_core::ReadWindow::full()),
         }
         .map_err(map_err)?;
         // The read already stamped the row's element type onto `data`, so the
         // response describes what its bytes mean without a second catalog trip.
-        Ok(Response::new(time_series_data_to_get_resp(&data)))
+        Ok(Response::new(time_series_data_to_read_resp(&data)))
     }
-
 
     async fn get_resolutions(
         &self,
-        request: Request<ResolutionsReq>,
-    ) -> Result<Response<ResolutionsResp>, Status> {
+        request: Request<GetResolutionsReq>,
+    ) -> Result<Response<GetResolutionsResp>, Status> {
         let req = request.into_inner();
         let ts_type = match req.time_series_type {
             Some(t) => Some(TimeSeriesType::from(
@@ -223,18 +270,18 @@ impl CatalogStoreSvc for CatalogStoreService {
         };
         let store = self.store.lock().await;
         let durations = store.get_resolutions(ts_type).map_err(map_err)?;
-        Ok(Response::new(ResolutionsResp {
+        Ok(Response::new(GetResolutionsResp {
             resolution: durations.iter().map(|p| p.to_iso8601()).collect(),
         }))
     }
 
     async fn get_counts(
         &self,
-        _request: Request<CountsReq>,
-    ) -> Result<Response<CountsResp>, Status> {
+        _request: Request<GetCountsReq>,
+    ) -> Result<Response<GetCountsResp>, Status> {
         let store = self.store.lock().await;
         let counts = store.get_time_series_counts().map_err(map_err)?;
-        Ok(Response::new(CountsResp {
+        Ok(Response::new(GetCountsResp {
             components_with_time_series: counts.components_with_time_series,
             static_time_series: counts.static_time_series,
             forecasts: counts.forecasts,
@@ -243,8 +290,8 @@ impl CatalogStoreSvc for CatalogStoreService {
 
     async fn get_forecast_parameters(
         &self,
-        request: Request<ForecastParamsReq>,
-    ) -> Result<Response<ForecastParamsResp>, Status> {
+        request: Request<GetForecastParametersReq>,
+    ) -> Result<Response<GetForecastParametersResp>, Status> {
         let req = request.into_inner();
         let resolution = req.resolution.as_deref().map(parse_period).transpose()?;
         let interval = req.interval.as_deref().map(parse_period).transpose()?;
@@ -252,7 +299,7 @@ impl CatalogStoreSvc for CatalogStoreService {
         let params = store
             .get_forecast_parameters(resolution, interval)
             .map_err(map_err)?;
-        Ok(Response::new(ForecastParamsResp {
+        Ok(Response::new(GetForecastParametersResp {
             horizon: params.horizon.map(|p| p.to_iso8601()),
             interval: params.interval.map(|p| p.to_iso8601()),
             count: params.count.map(|c| c as u64),
@@ -261,7 +308,10 @@ impl CatalogStoreSvc for CatalogStoreService {
         }))
     }
 
-    async fn has_time_series(&self, request: Request<HasReq>) -> Result<Response<HasResp>, Status> {
+    async fn has_any_time_series(
+        &self,
+        request: Request<HasAnyTimeSeriesReq>,
+    ) -> Result<Response<HasAnyTimeSeriesResp>, Status> {
         let req = request.into_inner();
         let owner_category = pb::OwnerCategory::try_from(req.owner_category)
             .map_err(|_| {
@@ -278,79 +328,82 @@ impl CatalogStoreSvc for CatalogStoreService {
                 .transpose()?,
             resolution: req.resolution.as_deref().map(parse_period).transpose()?,
             interval: req.interval.as_deref().map(parse_period).transpose()?,
-            features: Some(features_from_pb(pb::Features { entries: req.features }).map_err(map_convert_err)?),
+            features: Some(
+                features_from_pb(pb::Features {
+                    entries: req.features,
+                })
+                .map_err(map_convert_err)?,
+            ),
             features_exact: true,
             ..Default::default()
         };
         let store = self.store.lock().await;
         let present = store.has_any_time_series(filter).map_err(map_err)?;
-        Ok(Response::new(HasResp { present }))
+        Ok(Response::new(HasAnyTimeSeriesResp { present }))
     }
 
     async fn verify_integrity(
         &self,
-        _request: Request<VerifyReq>,
-    ) -> Result<Response<VerifyResp>, Status> {
+        _request: Request<VerifyIntegrityReq>,
+    ) -> Result<Response<VerifyIntegrityResp>, Status> {
         let store = self.store.lock().await;
         let report = store.verify_integrity().map_err(map_err)?;
-        Ok(Response::new(VerifyResp {
+        Ok(Response::new(VerifyIntegrityResp {
             errors: report.errors,
         }))
     }
 
-    // ---- Additive read RPCs (Phase 4.4) ----
-
-
-    async fn get_metadata(
+    async fn get_metadata_by_id(
         &self,
-        request: Request<pb::IdReq>,
+        request: Request<pb::GetMetadataByIdReq>,
     ) -> Result<Response<TimeSeriesMetadata>, Status> {
         let id = request.into_inner().id;
         let store = self.store.lock().await;
         let meta = store
-            .get_metadata_by_id(id)
+            .get_metadata_by_id(TimeSeriesId(id))
             .map_err(map_err)?
             .ok_or_else(|| Status::not_found(format!("no association has id {id}")))?;
         Ok(Response::new(metadata_to_pb(&meta)))
     }
 
-    async fn bulk_read(
+    async fn read_by_ids(
         &self,
-        request: Request<BulkReadReq>,
-    ) -> Result<Response<BulkReadResp>, Status> {
+        request: Request<ReadByIdsReq>,
+    ) -> Result<Response<ReadByIdsResp>, Status> {
         let req = request.into_inner();
         // The transport has already decoded the request by the time this runs —
         // tonic's own limit bounds that — but nothing past it has happened yet:
-        // no key is converted or validated, and the store is not touched. The
-        // cost of this call is the caller's to choose, so the ceiling applies
-        // before that work starts rather than after it.
-        if req.ids.len() > self.max_bulk_read_keys {
+        // no id is looked up and the store is not touched. The cost of this call
+        // is the caller's to choose, so the ceiling applies before that work
+        // starts rather than after it.
+        if req.ids.len() > self.max_read_ids {
             return Err(Status::resource_exhausted(format!(
-                "bulk_read requested {} ids, more than this server's limit of {}; \
+                "ReadByIds requested {} ids, more than this server's limit of {}; \
                  split the request",
                 req.ids.len(),
-                self.max_bulk_read_keys
+                self.max_read_ids
             )));
         }
         let time_range = parse_time_range(req.start_rfc3339, req.end_rfc3339, req.bounds_zoneless)?;
         let store = self.store.lock().await;
+        let ids: Vec<TimeSeriesId> = req.ids.iter().copied().map(TimeSeriesId).collect();
         let datas = match time_range {
-            Some(range) => store.read_by_ids_range(&req.ids, range),
-            None => store.read_by_ids(&req.ids, infrastore_core::ReadWindow::full()),
+            Some(range) => store.read_by_ids_range(&ids, range),
+            None => store.read_by_ids(&ids, infrastore_core::ReadWindow::full()),
         }
         .map_err(map_err)?;
-        Ok(Response::new(BulkReadResp {
-            items: datas.iter().map(time_series_data_to_get_resp).collect(),
+        Ok(Response::new(ReadByIdsResp {
+            items: datas.iter().map(time_series_data_to_read_resp).collect(),
         }))
     }
 
     async fn get_detailed_counts(
         &self,
-        _request: Request<EmptyReq>,
-    ) -> Result<Response<DetailedCountsResp>, Status> {
+        _request: Request<GetDetailedCountsReq>,
+    ) -> Result<Response<GetDetailedCountsResp>, Status> {
         let store = self.store.lock().await;
         let c = store.time_series_counts_detailed().map_err(map_err)?;
-        Ok(Response::new(DetailedCountsResp {
+        Ok(Response::new(GetDetailedCountsResp {
             components_with_time_series: c.components_with_time_series,
             supplemental_attributes_with_time_series: c.supplemental_attributes_with_time_series,
             static_time_series_count: c.static_time_series_count,
@@ -360,19 +413,19 @@ impl CatalogStoreSvc for CatalogStoreService {
 
     async fn get_counts_by_type(
         &self,
-        _request: Request<EmptyReq>,
-    ) -> Result<Response<CountsByTypeResp>, Status> {
+        _request: Request<GetCountsByTypeReq>,
+    ) -> Result<Response<GetCountsByTypeResp>, Status> {
         let store = self.store.lock().await;
         let entries = store
             .counts_by_type()
             .map_err(map_err)?
             .into_iter()
-            .map(|(t, n)| pb::counts_by_type_resp::Entry {
+            .map(|(t, n)| pb::get_counts_by_type_resp::Entry {
                 time_series_type: pb::TimeSeriesType::from(t) as i32,
                 count: n,
             })
             .collect();
-        Ok(Response::new(CountsByTypeResp { entries }))
+        Ok(Response::new(GetCountsByTypeResp { entries }))
     }
 
     async fn list_owner_ids(
@@ -403,8 +456,8 @@ impl CatalogStoreSvc for CatalogStoreService {
 
     async fn get_intervals(
         &self,
-        request: Request<IntervalsReq>,
-    ) -> Result<Response<IntervalsResp>, Status> {
+        request: Request<GetIntervalsReq>,
+    ) -> Result<Response<GetIntervalsResp>, Status> {
         let req = request.into_inner();
         let ts_type = match req.time_series_type {
             Some(t) => Some(TimeSeriesType::from(
@@ -416,37 +469,37 @@ impl CatalogStoreSvc for CatalogStoreService {
         };
         let store = self.store.lock().await;
         let intervals = store.get_intervals(ts_type).map_err(map_err)?;
-        Ok(Response::new(IntervalsResp {
+        Ok(Response::new(GetIntervalsResp {
             interval: intervals.iter().map(|p| p.to_iso8601()).collect(),
         }))
     }
 
     async fn get_static_summary(
         &self,
-        _request: Request<EmptyReq>,
-    ) -> Result<Response<StaticSummaryResp>, Status> {
+        _request: Request<GetStaticSummaryReq>,
+    ) -> Result<Response<GetStaticSummaryResp>, Status> {
         let store = self.store.lock().await;
         let rows = store.static_summary().map_err(map_err)?;
-        Ok(Response::new(StaticSummaryResp {
+        Ok(Response::new(GetStaticSummaryResp {
             rows: rows.iter().map(static_summary_row_to_pb).collect(),
         }))
     }
 
     async fn get_forecast_summary(
         &self,
-        _request: Request<EmptyReq>,
-    ) -> Result<Response<ForecastSummaryResp>, Status> {
+        _request: Request<GetForecastSummaryReq>,
+    ) -> Result<Response<GetForecastSummaryResp>, Status> {
         let store = self.store.lock().await;
         let rows = store.forecast_summary().map_err(map_err)?;
-        Ok(Response::new(ForecastSummaryResp {
+        Ok(Response::new(GetForecastSummaryResp {
             rows: rows.iter().map(forecast_summary_row_to_pb).collect(),
         }))
     }
 
     async fn check_static_consistency(
         &self,
-        request: Request<ConsistencyReq>,
-    ) -> Result<Response<ConsistencyResp>, Status> {
+        request: Request<CheckStaticConsistencyReq>,
+    ) -> Result<Response<CheckStaticConsistencyResp>, Status> {
         let resolution = request
             .into_inner()
             .resolution
@@ -458,48 +511,12 @@ impl CatalogStoreSvc for CatalogStoreService {
             .check_static_consistency(resolution)
             .map_err(map_err)?
             .into_iter()
-            .map(|c| pb::consistency_resp::Row {
+            .map(|c| pb::check_static_consistency_resp::Row {
                 resolution: c.resolution.to_iso8601(),
                 initial_timestamp_rfc3339: c.initial_timestamp.to_rfc3339(),
                 length: c.length as u64,
             })
             .collect();
-        Ok(Response::new(ConsistencyResp { rows }))
-    }
-
-    async fn resolve_metadata(
-        &self,
-        request: Request<pb::ResolveMetadataReq>,
-    ) -> Result<Response<TimeSeriesMetadata>, Status> {
-        let req = request.into_inner();
-        let category = pb::OwnerCategory::try_from(req.owner_category)
-            .map_err(|_| {
-                Status::invalid_argument(format!("unknown owner_category {}", req.owner_category))
-            })
-            .map(OwnerCategory::from)?;
-        let resolution = req.resolution.as_deref().map(parse_period).transpose()?;
-        let interval = req.interval.as_deref().map(parse_period).transpose()?;
-        let features = match req.features {
-            Some(f) => features_from_pb(f).map_err(map_convert_err)?,
-            None => infrastore_core::Features::new(),
-        };
-        let requested = requested_type_from_pb(
-            req.requested
-                .ok_or_else(|| Status::invalid_argument("missing requested type"))?,
-        )
-        .map_err(map_convert_err)?;
-        let store = self.store.lock().await;
-        let meta = store
-            .resolve_metadata(
-                req.owner_id,
-                category,
-                &req.name,
-                resolution,
-                interval,
-                features,
-                requested,
-            )
-            .map_err(map_err)?;
-        Ok(Response::new(metadata_to_pb(&meta)))
+        Ok(Response::new(CheckStaticConsistencyResp { rows }))
     }
 }

@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::element_type::ElementType;
+use super::id::TimeSeriesId;
 use super::period::Period;
 use super::time_reference::TimeReference;
 use super::time_series::TimeSeriesType;
@@ -349,7 +350,7 @@ pub fn validate_features(features: &Features) -> Result<()> {
         // NaN: SQLite has none, so `sqlite3_bind_double` stores it as NULL while
         // `value_kind` still says 'float', and the read path — which hydrates
         // *every* feature set a listing touches — then fails on the NULL. One
-        // such row made `list_keys`/`list_names`/`get_metadata` fail for the
+        // such row made `list_metadata`/`list_names` fail for the
         // whole store, including series sharing nothing with it, and survived
         // reopen because the bad row was on disk.
         //
@@ -471,8 +472,8 @@ pub struct TimeSeriesMetadata {
     ///
     /// * **Reading** — always `Some`. Every stored row has an id.
     /// * **Writing** — the catalog assigns, and every add ignores whatever this
-    ///   field holds; [`crate::AddedTimeSeries`] reports the id it chose. One
-    ///   writer is the exception:
+    ///   field holds and returns the [`TimeSeriesId`] it chose. One writer is
+    ///   the exception:
     ///   [`Store::import_association_rows`](crate::Store::import_association_rows)
     ///   files each row under the `Some` it carries, so a document that already
     ///   recorded its ids keeps the references it wrote down. That import wants
@@ -487,7 +488,7 @@ pub struct TimeSeriesMetadata {
     ///
     /// [`TimeSeriesError::DuplicateAssociationId`]: crate::TimeSeriesError::DuplicateAssociationId
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<i64>,
+    pub id: Option<TimeSeriesId>,
 }
 
 #[cfg(test)]

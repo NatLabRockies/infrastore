@@ -17,7 +17,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let data = TypedArray::from_f64(vec![24], &values);
     let ts = SingleTimeSeries::new(initial, resolution, data, "load");
 
-    let key = store.add_time_series(
+    // An add hands back the catalog id, which is how every read addresses the
+    // series from then on.
+    let id = store.add_time_series(
         42,
         "Generator",
         OwnerCategory::Component,
@@ -25,7 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Features::new(),
     )?;
 
-    let got = store.get_time_series(key.identity(), None)?;
+    let got = store.read_by_id(id, infrastore_core::ReadWindow::full())?;
     let single = got.as_single().unwrap();
     println!(
         "round-tripped {} values @ {} resolution starting {}",

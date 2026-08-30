@@ -167,7 +167,7 @@ class TestTimeSeriesImport:
                     T0, HOUR, np.full(4, float(i), dtype=np.float64), f"__spacer{i}"
                 ),
             )
-            store.remove_time_series(spacer.key)
+            store.remove_by_ids([spacer])
         expected = {}
         for owner, name in [(1, "load"), (2, "wind")]:
             added = store.add_time_series(
@@ -177,7 +177,7 @@ class TestTimeSeriesImport:
                     T0, HOUR, np.zeros(4, dtype=np.float64), name
                 ),
             )
-            expected[added.id] = name
+            expected[added] = name
         return store, expected
 
     def _target_holding_the_arrays(self):
@@ -230,7 +230,7 @@ class TestTimeSeriesImport:
         empty = Store.create(in_memory=True)
         with pytest.raises(infrastore.InvalidParameterError):
             empty.import_time_series_associations_openapi(exported)
-        assert empty.list_time_series() == []
+        assert empty.list_metadata() == []
 
     def test_rejects_an_irregular_row(self):
         store = Store.create(in_memory=True)

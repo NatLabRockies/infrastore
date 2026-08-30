@@ -16,8 +16,9 @@ use super::time_series::TimeSeriesType;
 /// (`NonSequentialTimeSeries` has no resolution).
 ///
 /// This is **not** an address. A caller names a series by its association
-/// `id` — resolved from attributes by [`crate::Store::resolve_id`] — and every
-/// read, removal and rename takes that id. An identity is how a row is filed
+/// [`crate::TimeSeriesId`] — recovered from attributes by
+/// [`crate::Store::list_metadata`] — and every read, removal and rename takes
+/// that id. An identity is how a row is filed
 /// and de-duplicated, which is why it stays internal to the write path.
 ///
 /// `interval` is part of the identity (matching InfrastructureSystems.jl): two

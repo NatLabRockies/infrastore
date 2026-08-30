@@ -191,9 +191,7 @@ fn load(
     filter: infrastore_core::ListFilter,
 ) -> Result<BTreeMap<String, (TimeSeriesMetadata, String)>, String> {
     let store = store_access::open_readonly(path)?;
-    let rows = store
-        .list_metadata(filter)
-        .map_err(|e| e.to_string())?;
+    let rows = store.list_metadata(filter).map_err(|e| e.to_string())?;
     let mut out = BTreeMap::new();
     for key in rows {
         let hash = key.data_hash;

@@ -15,13 +15,13 @@
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{
     Dtype, Features, NonSequentialTimeSeries, OwnerCategory, SingleTimeSeries, Store,
-    TimeSeriesData, TimeSeriesKey, TypedArray,
+    TimeSeriesData, TimeSeriesId, TypedArray,
 };
 
 mod common;
 use common::for_each_backend;
 
-fn add_single(store: &mut Store, owner: i64, s: SingleTimeSeries) -> TimeSeriesKey {
+fn add_single(store: &mut Store, owner: i64, s: SingleTimeSeries) -> TimeSeriesId {
     store
         .add_time_series(
             owner,
@@ -31,18 +31,18 @@ fn add_single(store: &mut Store, owner: i64, s: SingleTimeSeries) -> TimeSeriesK
             Features::new(),
         )
         .unwrap()
-        .key
 }
 
 /// Read a `SingleTimeSeries` window, returning `(length, initial_timestamp, values)`.
 fn sliced(
     store: &Store,
-    key: &TimeSeriesKey,
+    key: TimeSeriesId,
     start: DateTime<Utc>,
     end: DateTime<Utc>,
 ) -> (usize, DateTime<Utc>, Vec<f64>) {
     let got = store
-        .get_time_series(key.identity(), Some((start, end).into()))
+        .read_by_ids_range(&[key], (start, end).into())
+        .map(|mut v| v.remove(0))
         .unwrap();
     let single = got.as_single().unwrap();
     (
@@ -91,7 +91,9 @@ fn cross_contamination_across_packed_columns() {
             for (i, key) in keys.iter().enumerate() {
                 let base = i as f64 * 1000.0;
 
-                let full = store.get_time_series(key.identity(), None).unwrap();
+                let full = store
+                    .read_by_id(*key, infrastore_core::ReadWindow::full())
+                    .unwrap();
                 let expected: Vec<f64> = (0..len).map(|j| base + j as f64).collect();
                 assert_eq!(
                     full.as_single().unwrap().data.to_f64_vec().unwrap(),
@@ -102,7 +104,7 @@ fn cross_contamination_across_packed_columns() {
                 // Sub-range hours 1..3 -> indices 1, 2 of this column only.
                 let (slen, sinit, svals) = sliced(
                     store,
-                    key,
+                    *key,
                     initial + Duration::hours(1),
                     initial + Duration::hours(3),
                 );
@@ -164,7 +166,9 @@ fn multidim_slice_at_nonzero_column() {
         },
         |store, (ka, kb), backend| {
             // Full read of the second column preserves shape + element order.
-            let full_b = store.get_time_series(kb.identity(), None).unwrap();
+            let full_b = store
+                .read_by_id(*kb, infrastore_core::ReadWindow::full())
+                .unwrap();
             let full_b = full_b.as_single().unwrap();
             assert_eq!(full_b.data.shape, vec![4, 3], "{backend}: full shape");
             assert_eq!(
@@ -175,10 +179,11 @@ fn multidim_slice_at_nonzero_column() {
 
             // Time sub-range rows 1..3 of column b -> timesteps 1 and 2.
             let sub = store
-                .get_time_series(
-                    kb.identity(),
-                    Some((initial + Duration::hours(1), initial + Duration::hours(3)).into()),
+                .read_by_ids_range(
+                    &[*kb],
+                    (initial + Duration::hours(1), initial + Duration::hours(3)).into(),
                 )
+                .map(|mut v| v.remove(0))
                 .unwrap();
             let sub = sub.as_single().unwrap();
             assert_eq!(sub.data.shape, vec![2, 3], "{backend}: sub shape");
@@ -189,7 +194,9 @@ fn multidim_slice_at_nonzero_column() {
             );
 
             // Column a is untouched by reads of column b.
-            let full_a = store.get_time_series(ka.identity(), None).unwrap();
+            let full_a = store
+                .read_by_id(*ka, infrastore_core::ReadWindow::full())
+                .unwrap();
             assert_eq!(
                 full_a.as_single().unwrap().data.to_f64_vec().unwrap(),
                 a,
@@ -276,7 +283,9 @@ fn slice_preserves_all_dtypes() {
             },
             |store, key, backend| {
                 // Full read preserves dtype, shape, and exact bytes.
-                let full = store.get_time_series(key.identity(), None).unwrap();
+                let full = store
+                    .read_by_id(*key, infrastore_core::ReadWindow::full())
+                    .unwrap();
                 let full = full.as_single().unwrap();
                 assert_eq!(full.data.dtype, arr.dtype, "{backend}/{label}: full dtype");
                 assert_eq!(full.data.shape, arr.shape, "{backend}/{label}: full shape");
@@ -284,10 +293,11 @@ fn slice_preserves_all_dtypes() {
 
                 // Slice indices 2..5; byte offsets must respect dtype size.
                 let sub = store
-                    .get_time_series(
-                        key.identity(),
-                        Some((initial + Duration::hours(2), initial + Duration::hours(5)).into()),
+                    .read_by_ids_range(
+                        &[*key],
+                        (initial + Duration::hours(2), initial + Duration::hours(5)).into(),
                     )
+                    .map(|mut v| v.remove(0))
                     .unwrap();
                 let sub = sub.as_single().unwrap();
                 let sz = arr.dtype.size();
@@ -314,12 +324,12 @@ fn single_slice_boundary_semantics() {
         |store| add_single(store, 12, single_6(initial)),
         |store, key, backend| {
             // Aligned window [2, 5) -> 30, 40, 50.
-            let (_, init, vals) = sliced(store, key, h(2), h(5));
+            let (_, init, vals) = sliced(store, *key, h(2), h(5));
             assert_eq!(vals, vec![30.0, 40.0, 50.0], "{backend}: aligned values");
             assert_eq!(init, h(2), "{backend}: aligned initial");
 
             // Unaligned start rounds DOWN (floor): 1.5h -> index 1.
-            let (_, init, vals) = sliced(store, key, initial + Duration::minutes(90), h(5));
+            let (_, init, vals) = sliced(store, *key, initial + Duration::minutes(90), h(5));
             assert_eq!(
                 vals,
                 vec![20.0, 30.0, 40.0, 50.0],
@@ -329,43 +339,43 @@ fn single_slice_boundary_semantics() {
 
             // End exactly on a sample boundary is EXCLUSIVE: [2, 3) -> 30.
             assert_eq!(
-                sliced(store, key, h(2), h(3)).2,
+                sliced(store, *key, h(2), h(3)).2,
                 vec![30.0],
                 "{backend}: end boundary exclusive"
             );
 
             // End one millisecond past the boundary pulls the next sample (ceil).
             assert_eq!(
-                sliced(store, key, h(2), h(3) + Duration::milliseconds(1)).2,
+                sliced(store, *key, h(2), h(3) + Duration::milliseconds(1)).2,
                 vec![30.0, 40.0],
                 "{backend}: end ceil"
             );
 
             // Zero-width range -> empty.
-            let (zlen, _, zvals) = sliced(store, key, h(2), h(2));
+            let (zlen, _, zvals) = sliced(store, *key, h(2), h(2));
             assert_eq!(zlen, 0, "{backend}: zero-width length");
             assert!(zvals.is_empty(), "{backend}: zero-width values");
 
             // Window straddling the start clamps start to index 0.
-            let (_, sinit, svals) = sliced(store, key, h(-2), h(2));
+            let (_, sinit, svals) = sliced(store, *key, h(-2), h(2));
             assert_eq!(svals, vec![10.0, 20.0], "{backend}: straddle start values");
             assert_eq!(sinit, initial, "{backend}: straddle start initial");
 
             // Entirely before / after the series -> empty.
             assert_eq!(
-                sliced(store, key, h(-5), h(-1)).0,
+                sliced(store, *key, h(-5), h(-1)).0,
                 0,
                 "{backend}: before series"
             );
             assert_eq!(
-                sliced(store, key, h(100), h(200)).0,
+                sliced(store, *key, h(100), h(200)).0,
                 0,
                 "{backend}: after series"
             );
 
             // Wider than the series clamps to the full range.
             assert_eq!(
-                sliced(store, key, h(-10), h(100)).2,
+                sliced(store, *key, h(-10), h(100)).2,
                 vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
                 "{backend}: wider than series"
             );
@@ -392,7 +402,9 @@ fn length_one_series_slicing() {
             )
         },
         |store, key, backend| {
-            let full = store.get_time_series(key.identity(), None).unwrap();
+            let full = store
+                .read_by_id(*key, infrastore_core::ReadWindow::full())
+                .unwrap();
             assert_eq!(
                 full.as_single().unwrap().data.to_f64_vec().unwrap(),
                 vec![42.0],
@@ -400,12 +412,12 @@ fn length_one_series_slicing() {
             );
 
             assert_eq!(
-                sliced(store, key, initial, initial + Duration::hours(1)).2,
+                sliced(store, *key, initial, initial + Duration::hours(1)).2,
                 vec![42.0],
                 "{backend}: covering window"
             );
             assert_eq!(
-                sliced(store, key, initial - Duration::hours(2), initial).0,
+                sliced(store, *key, initial - Duration::hours(2), initial).0,
                 0,
                 "{backend}: window before series"
             );
@@ -425,7 +437,8 @@ fn far_future_end_does_not_overflow() {
         |store, key, backend| {
             let end = initial + Duration::nanoseconds(i64::MAX);
             let got = store
-                .get_time_series(key.identity(), Some((initial, end).into()))
+                .read_by_ids_range(&[*key], (initial, end).into())
+                .map(|mut v| v.remove(0))
                 .unwrap();
             assert_eq!(
                 got.as_single().unwrap().data.to_f64_vec().unwrap(),
@@ -474,7 +487,8 @@ fn non_sequential_boundary_semantics() {
         |store, key, backend| {
             let ns = |s: DateTime<Utc>, e: DateTime<Utc>| {
                 let got = store
-                    .get_time_series(key.identity(), Some((s, e).into()))
+                    .read_by_ids_range(&[*key], (s, e).into())
+                    .map(|mut v| v.remove(0))
                     .unwrap();
                 let series = got.as_non_sequential().unwrap();
                 (series.timestamps.clone(), series.data.to_f64_vec().unwrap())

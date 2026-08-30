@@ -31,20 +31,20 @@ pub struct ServerSection {
     pub host: String,
     pub port: u16,
     /// Most keys one `BulkRead` may name. Absent means
-    /// [`crate::service::DEFAULT_MAX_BULK_READ_KEYS`].
+    /// [`crate::service::DEFAULT_MAX_READ_IDS`].
     ///
-    /// `BulkRead` is the only RPC whose response size the caller chooses -- it
-    /// returns a full copy of a series per key and does not collapse duplicates
+    /// `ReadByIds` is the only RPC whose response size the caller chooses -- it
+    /// returns a full copy of a series per id and does not collapse duplicates
     /// -- so without a ceiling a small request can drive an enormous server-side
     /// allocation. Raise it if a client legitimately reads more than the default
     /// in one call; note it bounds the *count*, not the bytes, so a store of very
     /// large series still wants a lower value.
-    #[serde(default = "default_max_bulk_read_keys")]
-    pub max_bulk_read_keys: usize,
+    #[serde(default = "default_max_read_ids")]
+    pub max_read_ids: usize,
 }
 
-fn default_max_bulk_read_keys() -> usize {
-    crate::service::DEFAULT_MAX_BULK_READ_KEYS
+fn default_max_read_ids() -> usize {
+    crate::service::DEFAULT_MAX_READ_IDS
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -181,16 +181,16 @@ files = ["store.h5"]
     fn the_bulk_read_ceiling_defaults_and_can_be_overridden() {
         let cfg: ServerConfig = toml::from_str(BASE).unwrap();
         assert_eq!(
-            cfg.server.max_bulk_read_keys,
-            crate::service::DEFAULT_MAX_BULK_READ_KEYS,
+            cfg.server.max_read_ids,
+            crate::service::DEFAULT_MAX_READ_IDS,
             "an existing config that never heard of the field still loads"
         );
 
         let raised: ServerConfig = toml::from_str(
-            "[server]\nhost = \"127.0.0.1\"\nport = 1\nmax_bulk_read_keys = 99\n\n[data]\nfiles = [\"s.h5\"]\n",
+            "[server]\nhost = \"127.0.0.1\"\nport = 1\nmax_read_ids = 99\n\n[data]\nfiles = [\"s.h5\"]\n",
         )
         .unwrap();
-        assert_eq!(raised.server.max_bulk_read_keys, 99);
+        assert_eq!(raised.server.max_read_ids, 99);
     }
 
     #[test]

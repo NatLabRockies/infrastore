@@ -129,8 +129,7 @@ pub fn arrays(
 
     // BTreeMap keeps the output stably ordered by hash across runs, which
     // matters for diffing two inspections of the same store.
-    let mut groups: BTreeMap<[u8; 32], Vec<infrastore_core::TimeSeriesMetadata>> =
-        BTreeMap::new();
+    let mut groups: BTreeMap<[u8; 32], Vec<infrastore_core::TimeSeriesMetadata>> = BTreeMap::new();
     for key in rows {
         let hash = key.data_hash;
         if let Some(prefix) = &wanted

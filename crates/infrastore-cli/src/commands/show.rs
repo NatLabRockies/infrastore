@@ -30,7 +30,7 @@ pub fn list(
 ) -> Result<(), String> {
     let store = store_access::open_readonly(store_path)?;
     let all = store
-        .list_time_series(selector.to_filter()?)
+        .list_metadata(selector.to_filter()?)
         .map_err(|e| e.to_string())?;
     let total = all.len();
     let metas: &[TimeSeriesMetadata] = match limit {
@@ -556,7 +556,7 @@ fn value_cell(v: &Value) -> String {
     }
 }
 
-fn meta_key(meta: &TimeSeriesMetadata) -> Result<i64, String> {
+fn meta_key(meta: &TimeSeriesMetadata) -> Result<infrastore_core::TimeSeriesId, String> {
     crate::select::id_of(meta)
 }
 

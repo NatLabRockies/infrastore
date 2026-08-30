@@ -74,8 +74,8 @@ class TestDunders:
     def test_round_tripped_series_equal(self):
         store = Store.create(in_memory=True)
         original = sts("load")
-        key = store.add_time_series(1, "Gen", OwnerCategory.Component, original).key
-        fetched = store.get_time_series(key)
+        key = store.add_time_series(1, "Gen", OwnerCategory.Component, original)
+        fetched = store.read_by_id(key)
         assert fetched == original
 
     def test_forecast_len_is_count(self):
@@ -97,12 +97,12 @@ class TestNameGlob:
         store = populated()
         assert store.list_names(name_glob="wind_*") == ["wind_dir", "wind_speed"]
         # Case-sensitive.
-        assert len(store.list_keys(name_glob="Wind*")) == 1
+        assert len(store.list_metadata(name_glob="Wind*")) == 1
 
     def test_glob_composes_with_exact_name(self):
         store = populated()
-        assert len(store.list_keys(name="wind_speed", name_glob="wind_*")) == 1
-        assert store.list_keys(name="wind_speed", name_glob="solar_*") == []
+        assert len(store.list_metadata(name="wind_speed", name_glob="wind_*")) == 1
+        assert store.list_metadata(name="wind_speed", name_glob="solar_*") == []
 
     def test_remove_by_filter_glob(self):
         store = populated()
@@ -112,7 +112,7 @@ class TestNameGlob:
     def test_reader_builder_glob(self):
         store = populated()
         reader = store.build_static_reader(HOUR, name_glob="wind_*")
-        assert sum(len(g["keys"]) for g in reader.groups()) == 2
+        assert sum(len(g["ids"]) for g in reader.groups()) == 2
 
 
 class TestReservedFeatureNames:
@@ -127,7 +127,7 @@ class TestReservedFeatureNames:
                     sts("load"),
                     features={"model_year": 2030, name: "shadowed"},
                 )
-        assert store.get_time_series_keys(1, OwnerCategory.Component) == []
+        assert store.list_metadata(owner_id=1, owner_category=OwnerCategory.Component) == []
 
     def test_reserved_feature_name_raises_in_bulk_add(self):
         store = Store.create(in_memory=True)
@@ -149,8 +149,8 @@ class TestReservedFeatureNames:
                     },
                 ]
             )
-        assert store.get_time_series_keys(1, OwnerCategory.Component) == []
-        assert store.get_time_series_keys(2, OwnerCategory.Component) == []
+        assert store.list_metadata(owner_id=1, owner_category=OwnerCategory.Component) == []
+        assert store.list_metadata(owner_id=2, owner_category=OwnerCategory.Component) == []
 
     def test_near_miss_feature_names_are_accepted(self):
         # The rule is exact and case-sensitive.
@@ -158,8 +158,8 @@ class TestReservedFeatureNames:
         features = {"Name": "load", "resolution_hours": 1, "model_year": 2030}
         key = store.add_time_series(
             1, "Generator", OwnerCategory.Component, sts("load"), features=features
-        ).key
-        assert key.features == features
+        )
+        assert store.get_metadata_by_id(key)['features'] == features
 
 
 class TestKeywordOnly:

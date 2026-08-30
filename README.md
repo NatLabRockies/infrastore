@@ -51,7 +51,8 @@ Under development, unstable API, integrating with parent packages
   which `zoned_timestamp` fuses back into a `ZonedDateTime` (a `DateTime` is what its consumers
   destructure today).
 - **Discovery and maintenance** — `get_intervals`, `list_names`, `list_owner_types`, glob name
-  filters, filtered and bulk delete, rename, time-sliced `bulk_read`, and serde on the core types.
+  filters, filtered and bulk delete, rename, time-sliced `read_by_ids_range`, and serde on the core
+  types.
 - **Read-only gRPC service** — serve a store to remote readers, with optional API-key auth. Writes
   require local filesystem access.
 - **Built for power-systems data** — the data model maps onto
@@ -116,15 +117,16 @@ let ts = SingleTimeSeries::new(
     "load",
 );
 
-let key = store.add_time_series(
+// An add hands back the catalog id, which is how every read addresses the
+// series from then on.
+let id = store.add_time_series(
     42,
     "Generator",
     OwnerCategory::Component,
     TimeSeriesData::SingleTimeSeries(ts),
     Features::new(),
-    Some("MW".into()),
 )?;
-let got = store.get_time_series(key.identity(), None)?;
+let got = store.read_by_id(id, ReadWindow::full())?;
 ```
 
 The full program is
@@ -152,13 +154,15 @@ ts = SingleTimeSeries(
     np.arange(24, dtype=np.float64) + 100,
     "load",   # name (required)
 )
-key = store.add_time_series(
+# The add returns the catalog id -- the handle every read takes, and the one
+# to record in your own object model.
+series_id = store.add_time_series(
     owner_id=42, owner_type="Generator",
     owner_category=OwnerCategory.Component,
     time_series=ts,   # name comes from ts
     features={"model_year": 2030}, units="MW",
 )
-got = store.get_time_series(key)
+got = store.read_by_id(series_id)
 assert np.array_equal(np.asarray(got.data), np.asarray(ts.data))
 ```
 
@@ -181,14 +185,14 @@ julia --project=julia/InfraStore.jl -e 'using Pkg; Pkg.test()'
 using Dates, InfraStore
 store = Store(in_memory=true)
 ts = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(100.0:123.0), "load")
-key = add_time_series!(store, 42, "Generator", Component, ts;
-                       features=Dict("model_year" => 2030), units="MW")
-got = get_time_series(store, key)
+id = add_time_series!(store, 42, "Generator", Component, ts;
+                      features=Dict("model_year" => 2030), units="MW")
+got = read_by_id(store, id)
 @assert got.data == ts.data
 ```
 
-The package overloads `Base` (`==` / `hash` on keys via the core identity, `show`, and `length` /
-`iterate` / `getindex` on values) and supports do-block `Store` / `open_store` forms.
+The package overloads `Base` (`show`, and `length` / `iterate` / `getindex` on values) and supports
+do-block `Store` / `open_store` forms.
 
 ## CLI
 

@@ -5,7 +5,7 @@ The PyO3 binding is importable as the `infrastore` module (package `infrastore`)
 
 ```python
 from infrastore import (
-    Store, SingleTimeSeries, NonSequentialTimeSeries, TimeSeriesKey,
+    Store, SingleTimeSeries, NonSequentialTimeSeries,
     Deterministic, Probabilistic, Scenarios,
     TimeSeriesType, OwnerCategory,
     SupplementalAttributeAssociation, ParentChildAssociation,
@@ -64,7 +64,7 @@ Reads spell the timestamp back the same way — a `ZoneInfo` series returns date
 `ZoneInfo`, including the correct side of a fall-back hour. A **query bound must match**: a naive
 bound against a series that records instants, or an aware bound against a zoneless one, raises
 `InvalidParameterError` rather than being coerced, and so does a `time_range` whose two ends
-disagree. `list_time_series(zoneless=...)`, `build_static_reader(..., zoneless=...)`, and the other
+disagree. `list_metadata(zoneless=...)`, `build_static_reader(..., zoneless=...)`, and the other
 filter-taking methods take a `zoneless` predicate for building a coherent selection. See
 [Time references](../explanation/data-model.md#time-references) for the full rules.
 
@@ -169,7 +169,7 @@ def add_time_series(
     unit_system: str | None = None,   # "natural_units" | "component_base"
     time_reference: str | None = None,   # "utc" | "zoneless" | "-07:00" | "America/Denver"
     component_field: str | None = None,  # e.g. "max_active_power"
-) -> AddedTimeSeries: ...
+) -> int: ...   # the catalog id its row was filed under
 # `time_reference` is normally omitted: it is inferred from the datetime the
 # series was built with (see "Time references" below). Pass it to override.
 # An unrecognized `unit_system` raises InvalidParameterError rather than
@@ -177,10 +177,10 @@ def add_time_series(
 # not the same as declaring natural units.
 # `name` comes from the time_series object
 # (e.g. SingleTimeSeries(..., name=...)), not from this call.
-# A `features` key that shadows a time-series or key field (`name`, `resolution`,
-# `owner_id`, ...) raises InvalidParameterError.
+# A `features` key that shadows a time-series or identity field (`name`,
+# `resolution`, `owner_id`, ...) raises InvalidParameterError.
 
-def add_time_series_bulk(self, items: list[dict]) -> list[AddedTimeSeries]: ...
+def add_time_series_bulk(self, items: list[dict]) -> list[int]: ...
 # Each item dict mirrors add_time_series's parameters: required `owner_id`,
 # `owner_type`, `owner_category`, `time_series`; optional `features`, `units`,
 # `element_type`, `application_data`, `quantity_kind`, `unit_system`,
@@ -188,15 +188,15 @@ def add_time_series_bulk(self, items: list[dict]) -> list[AddedTimeSeries]: ...
 # All items commit in ONE metadata transaction (all-or-nothing), which is much
 # faster than looping over add_time_series. Results are in input order.
 
-class AddedTimeSeries:
-    key: TimeSeriesKey   # names the series
-    id: int              # the catalog row's id — store it to reference the series later
-# Hashable and comparable; the id is never reissued once its row is deleted.
-# No add takes an id — the catalog assigns, and this reports what it chose. The
-# one writer that files rows under supplied ids is
-# import_time_series_associations_openapi.
+# Every write returns the catalog `id` its row was filed under -- the handle to
+# record in your own object model, and what every read, removal and rename
+# takes. It is never reissued once its row is deleted. No add takes an id: the
+# catalog assigns, and the write reports what it chose. The one writer that
+# files rows under supplied ids is import_time_series_associations_openapi.
 
 def get_metadata_by_id(self, id: int) -> dict | None: ...   # None when no row has the id
+def list_metadata_by_ids(self, ids: list[int]) -> list[dict]: ...
+# The listing addressed by id, in the order given; NotFoundError if any is stale.
 def association_exists(self, id: int) -> bool: ...          # no row fetched
 
 def transform_single_time_series(
@@ -213,53 +213,28 @@ def transform_single_time_series(
 
 def copy_time_series(
     self,
-    src: TimeSeriesKey,
+    src: int,
     dst_owner_id: int,
     dst_owner_type: str,
     *,
     new_name: str | None = None,
-) -> TimeSeriesKey: ...
-# Attach the same array to another owner (no data is duplicated); returns the new key.
-def rename_time_series(self, key: TimeSeriesKey, new_name: str) -> TimeSeriesKey: ...
-# Same identity, new name; returns the renamed key.
+) -> int: ...
+# Attach the same array to another owner (no data is duplicated); returns the
+# copy's own id. The source id is untouched and still resolves.
+def rename_time_series(self, id: int, new_name: str) -> None: ...
+# A rename moves the name, not the reference: the id is the same afterwards.
 
-def get_time_series(
-    self,
-    key: TimeSeriesKey,
-    *,
-    time_range: tuple[datetime, datetime] | None = None,
-) -> SingleTimeSeries | NonSequentialTimeSeries | Deterministic | Probabilistic | Scenarios: ...
-def get_metadata(self, key: TimeSeriesKey) -> dict: ...
-# The whole catalog record for one key — the same dict shape list_time_series
-# returns (see Return shapes), without reading the array.
 def get_array_by_hash(self, data_hash: str) -> numpy.ndarray: ...
 # The raw array behind a 64-char hex content hash, bypassing the catalog.
 def count_array_references(self, data_hash: str) -> dict: ...
 # {"sts": int, "dst": int}: SingleTimeSeries and DeterministicSingleTimeSeries
 # associations sharing that array.
-def resolve_id(
-    self,
-    owner_id: int,
-    owner_category: OwnerCategory,
-    name: str,
-    requested_type: TimeSeriesType,
-    *,
-    resolution: timedelta | str | None = None,
-    interval: timedelta | str | None = None,
-    features: dict[str, int | float | bool | str] | None = None,
-) -> TimeSeriesKey: ...
-# Attributes + requested type -> the concrete key. TimeSeriesType.Deterministic
-# also matches a stored DeterministicSingleTimeSeries; the returned key's
-# time_series_type says which was found.
-
-def bulk_read(
-    self,
-    keys: list[TimeSeriesKey],
-    *,
-    time_range: tuple[datetime, datetime] | None = None,
+def read_by_ids_range(
+    self, ids: list[int], time_range: tuple[datetime, datetime]
 ) -> list[SingleTimeSeries | NonSequentialTimeSeries | Deterministic | Probabilistic | Scenarios]: ...
-# `time_range` applies the same window to every key (default: each series in full).
-# Results are returned in the same order as `keys`; an empty list of keys returns an empty list.
+# The bounds read: it CLIPS to what falls between the two instants, where
+# read_by_id's window is CHECKED. Both bounds must be spelled the way the series
+# are; a selection spanning both coherence groups is refused.
 
 def read_by_ids(
     self, ids: list[int]
@@ -280,17 +255,13 @@ def read_by_id(
 # counts timesteps (static types) and `count` counts windows (forecasts);
 # passing the one that does not apply raises InvalidParameterError, as does a
 # `start_time` off the series' grid or an extent past its end. A window is
-# checked where `time_range` is clamped. No keywords reads the whole series.
+# checked where read_by_ids_range clips. No keywords reads the whole series.
 
-def remove_time_series(self, key: TimeSeriesKey) -> None: ...
-def remove_time_series_bulk(self, keys: list[TimeSeriesKey]) -> int: ...
-# All-or-nothing: a key matching nothing fails the whole batch. Returns the count removed.
 def remove_by_ids(self, ids: list[int]) -> int: ...
-# The same removal addressed by catalog association id: one all-or-nothing
-# transaction, NotFoundError if any id names no row (and nothing removed).
-# A repeated id is removed, and counted, once.
+# One all-or-nothing transaction: NotFoundError if any id names no row, and
+# nothing removed. A repeated id is removed, and counted, once.
 def remove_by_filter(self, *, ...) -> int: ...
-# Same keyword-only filter arguments as list_time_series; one all-or-nothing
+# Same keyword-only filter arguments as list_metadata; one all-or-nothing
 # transaction; returns the count removed (0 when nothing matched).
 def clear_time_series(
     self,
@@ -310,7 +281,7 @@ def replace_owner(
 # Reassign every series owned by (old_owner, owner_category) to
 # (new_owner, owner_category). Returns the number of associations moved.
 
-def list_time_series(
+def list_metadata(
     self,
     *,
     owner_id: int | None = None,
@@ -327,11 +298,9 @@ def list_time_series(
 # `component_field` selects every series that varies that field on its owner. A
 # series that declares none matches no value, so it cannot select those rows.
 
-def list_array_groups(self, *, ...) -> list[dict]: ...
-def list_keys(self, *, ...) -> list[TimeSeriesKey]: ...
 def list_names(self, *, ...) -> list[str]:  ...        # distinct names, sorted
 def list_owner_types(self, *, ...) -> list[str]: ...   # distinct owner types, sorted
-# Every `...` above is the same keyword-only filter as list_time_series, and so
+# Every `...` above is the same keyword-only filter as list_metadata, and so
 # is remove_by_filter's.
 # `time_series_type` is a TimeSeriesType (or its member name as a str).
 # TimeSeriesType.Deterministic matches both Deterministic and
@@ -347,15 +316,9 @@ def list_owner_ids(
 ) -> list[int]: ...
 # Distinct owner ids of that category holding time series, ascending.
 
-def get_time_series_keys(
-    self,
-    owner_id: int,
-    owner_category: OwnerCategory,
-) -> list[TimeSeriesKey]: ...
-def has_time_series(self, key: TimeSeriesKey) -> bool: ...
 def has_any_time_series(self, *, ...) -> bool: ...
 # Existence without listing ("does this owner have any time series?"); same
-# keyword-only filter arguments as list_time_series. Index-probe fast.
+# keyword-only filter arguments as list_metadata. Index-probe fast.
 def is_empty(self) -> bool: ...
 # Whether the store holds nothing at all — no time series, no associations in
 # any catalog. One index probe per catalog table, so its cost does not grow with
@@ -403,7 +366,7 @@ in_transaction: bool                        # property
 ```python
 with store.transaction():
     store.add_time_series(...)
-    store.remove_time_series(old_key)
+    store.remove_by_ids([old_id])
 # both applied, or neither -- including the removal
 ```
 
@@ -418,40 +381,38 @@ with store.transaction():
   forecast object (`Deterministic` / `Probabilistic` / `Scenarios`) — see [Forecasts](#forecasts).
   **`transform_single_time_series`** derives a `DeterministicSingleTimeSeries` from every stored
   `SingleTimeSeries` (or the subset its `owner_category` / `resolution` arguments select) and
-  returns the count transformed. **`get_time_series`** returns whichever matches the stored type.
-- **`bulk_read`** returns one typed object per key, in the same order as `keys` (an empty key list
-  returns an empty list). It is the bulk counterpart to `get_time_series`: packed `SingleTimeSeries`
-  are read in one decompress-once pass per dataset instead of one read per key. Pass the
-  keyword-only `time_range=(start, end)` to apply the same window to every key; by default each
-  series comes back in full.
-- **`read_by_ids`** is the same read addressed by catalog
-  [association id](../explanation/data-model.md) rather than by key — the read direction of the id
-  every write reports on its `AddedTimeSeries`, for a caller that recorded ids in its own model
-  instead of keeping an id-to-key map beside the store. Results follow the order the ids are given,
-  repeats included; an id naming no row raises `NotFoundError` and fails the whole call, unlike
+  returns the count transformed. **`read_by_id`** returns whichever matches the stored type — a read
+  names only an id, so the row's own `time_series_type` decides, with no requested type to disagree
+  with it.
+- **`read_by_ids`** returns one typed object per id, in the order the ids are given, repeats
+  included (an empty id list returns an empty list). It is the bulk counterpart to `read_by_id`:
+  packed `SingleTimeSeries` are read in one decompress-once pass per dataset instead of one read
+  each. An id naming no row raises `NotFoundError` and fails the whole call, unlike
   `association_exists`, which asks the question rather than committing to a read.
+- **`read_by_ids_range`** is the bounds read: it _clips_ every series to what falls between the two
+  instants, where `read_by_id`'s window is _checked_. An export names bounds and does not know how
+  many steps each series has inside them.
 - **`remove_by_ids`** is the removal direction of the same reference: one all-or-nothing
   transaction, the count removed, and `NotFoundError` if any id names no row — in which case nothing
-  is removed. A repeated id is removed, and counted, once. It is also the precise removal: a key
-  identity with no interval matches any interval, so `remove_time_series` can take a whole forecast
-  family, where an id is a primary key and takes exactly the row it names.
-- **`list_time_series`** returns a list of dicts (the same shape `get_metadata` returns for one
-  key), each with the keys: `owner_id`, `owner_type`, `owner_category`, `time_series_type`, `name`,
+  is removed. A repeated id is removed, and counted, once.
+- **`list_metadata`** returns a list of dicts (the same shape `get_metadata_by_id` returns for one
+  row), each with the keys: `owner_id`, `owner_type`, `owner_category`, `time_series_type`, `name`,
   `data_hash` (hex string), `initial_timestamp` (RFC 3339 string, or `None` for non-sequential
   series), `length`, `resolution` (ISO 8601 duration string, e.g. `PT1H`, or `None`), `timestamps`,
   `horizon`, `interval`, `count`, `percentiles`, `element_type`, `element_shape`, `features`,
   `units`, `quantity_kind`, `unit_system` (`"natural_units"` / `"component_base"` / `None`),
   `time_reference`, `component_field`, `application_data`. `timestamps` is a list of RFC 3339
   strings for non-sequential series and `None` otherwise; `horizon` / `interval` / `count` are set
-  for forecasts and `percentiles` for `Probabilistic` only. The `features` filter is a **subset**
-  match — rows must contain at least the given pairs — whereas a `TimeSeriesKey` matches its feature
-  map exactly.
-- **`list_array_groups`** accepts the same filters as `list_time_series` and groups the matching
-  series by their underlying stored array. It returns a list of dicts, each with `data_hash` (hex
-  string), `keys` (a list of `TimeSeriesKey`s that resolve to that array), and `ids` (each of those
-  keys' association id, positionally aligned with `keys` — a `TimeSeriesKey` is opaque and carries
-  no id itself; `None` for a row written before ids were minted). Keys sharing one dict share one
-  deduplicated array.
+  for forecasts and `percentiles` for `Probabilistic` only. `timestamps` is always `None` on a
+  listing row — an irregular series' time axis is the one part of a row that costs a read per row,
+  so a listing omits it and `read_by_id` returns the series with its axis. The `features` filter is
+  a **subset** match — rows must contain at least the given pairs.
+- Every row also carries `data_hash`, so grouping a listing by that field finds the series that
+  share one stored array (a deduplicated array, or a `SingleTimeSeries` together with a
+  `DeterministicSingleTimeSeries` derived from it). That replaced a separate array-group listing,
+  which was this same query projected differently.
+- **`list_metadata_by_ids`** is the same listing addressed by id, for a caller hydrating a model
+  full of recorded references: one catalog query for the whole set rather than one call each.
 - **`get_time_series_counts`** returns
   `{"components_with_time_series": int, "static_time_series": int, "forecasts": int}`;
   **`time_series_counts_detailed`** adds `supplemental_attributes_with_time_series` and spells the
@@ -515,26 +476,7 @@ NonSequentialTimeSeries(
 Read-only properties: `timestamps`, `length`, `data`, `name`, and `time_reference`. Timestamps must
 be strictly increasing, match the first data dimension, and agree on one spelling — a vector mixing
 naive and aware values raises `InvalidParameterError`, since one series records one reference.
-`get_time_series` returns this class for a non-sequential key.
-
-## `TimeSeriesKey`
-
-Returned by `add_time_series`, `add_time_series_bulk`, and `get_time_series_keys`, and in the `keys`
-list of every `list_array_groups` row; not constructed directly. Read-only properties:
-
-```python
-key.owner_id          -> int
-key.owner_category    -> OwnerCategory
-key.time_series_type  -> TimeSeriesType
-key.name              -> str
-key.resolution        -> str | None   # ISO 8601 duration, e.g. "PT1H"
-key.interval          -> str | None   # ISO 8601 duration
-key.features          -> dict[str, int | float | bool | str]
-```
-
-Feature names that would shadow one of these key fields, or a field of a time-series object, are
-rejected when the series is added — see
-[reserved feature names](../explanation/data-model.md#reserved-feature-names).
+`read_by_id` returns this class for a non-sequential row.
 
 ## Enums
 
@@ -716,7 +658,7 @@ are partitioned into `(dtype, element_shape)` groups, and each group's values co
 ```python
 class StaticReader:
     def grid(self) -> dict: ...     # {"time_series_type": str, "initial_timestamp": rfc3339 str, "resolution": ISO str | None, "length": int}
-    def groups(self) -> list[dict]: ...  # each: {"dtype": str, "element_type": str, "element_shape": list[int], "keys": list[TimeSeriesKey]}
+    def groups(self) -> list[dict]: ...  # each: {"dtype": str, "element_type": str, "element_shape": list[int], "ids": list[int]}
     def timestamps(self) -> list[datetime]: ...   # every timestamp on the timeline, in order
     def group_values(self, index: int) -> numpy.ndarray: ...  # last read of group `index`
 ```
@@ -756,7 +698,7 @@ forecasts, matching the read request rule.
 ```python
 class ForecastReader:
     def timeline(self) -> dict: ...   # {"initial_timestamp": rfc3339 str, "resolution": ISO str, "interval": ISO str, "count": int, "time_series_type": str}
-    def entries(self) -> list[TimeSeriesKey]: ...   # per-entry keys, in order (parallel to entry_values)
+    def entries(self) -> list[int]: ...   # per-entry catalog ids, in order (parallel to entry_values)
     def timestamps(self) -> list[datetime]: ...     # every window-start timestamp, in order
     def entry_values(self, index: int) -> numpy.ndarray: ...  # last read of entry `index`
     def num_slots(self) -> int: ...          # deduplicated window slots (physical reads per forecast_read)
@@ -982,7 +924,7 @@ Neither association catalog is exposed over the [gRPC server](grpc-api.md) or th
 
 Direct JSON serde of the two association catalogs, in the wire spelling
 [SiennaSchemas](https://github.com/Sienna-Platform/SiennaSchemas) defines (`TimeSeries/*.json`,
-`Core/Associations/SupplementalAttributeAssociation.json`). Unlike `list_time_series` /
+`Core/Associations/SupplementalAttributeAssociation.json`). Unlike `list_metadata` /
 `list_supplemental_attribute_associations`, which return Python objects, these four methods exchange
 the wire JSON verbatim — the format a document author (e.g. PowerTableDataParser) reads and writes
 directly.
@@ -998,10 +940,9 @@ def export_supplemental_attribute_associations_openapi(self) -> str: ...
 def import_supplemental_attribute_associations_openapi(self, json: str) -> int: ...
 ```
 
-`export_time_series_associations_openapi` takes the same filter keywords as `list_time_series`.
-Every row's `uri` and `data_hash` are the hex-encoded content hash the store already has for that
-row — never a caller-supplied locator. With no filter this exports the whole catalog, sorted by
-identity.
+`export_time_series_associations_openapi` takes the same filter keywords as `list_metadata`. Every
+row's `uri` and `data_hash` are the hex-encoded content hash the store already has for that row —
+never a caller-supplied locator. With no filter this exports the whole catalog, sorted by identity.
 
 `export_supplemental_attribute_associations_openapi` exports the whole
 `supplemental_attribute_associations` table, sorted by `(component_id, attribute_id)`;

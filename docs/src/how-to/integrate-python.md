@@ -73,7 +73,7 @@ key = store.add_time_series(
     time_series=ts,
     features={"model_year": 2030}, units="MW",
 )
-assert np.array_equal(np.asarray(store.get_time_series(key).data), np.asarray(ts.data))
+assert np.array_equal(np.asarray(store.read_by_id(series_id).data), np.asarray(ts.data))
 print("ok")
 ```
 

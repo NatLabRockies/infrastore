@@ -23,7 +23,7 @@ ts = SingleTimeSeries(
 
 # The owner is identified by an integer id, an owner type, and a category.
 # Features and units are optional.
-key = add_time_series!(
+id = add_time_series!(
     store,
     42,             # owner_id
     "Generator",    # owner_type
@@ -33,7 +33,7 @@ key = add_time_series!(
     units = "MW",
 )
 
-got = get_time_series(store, key)
+got = read_by_id(store, id)
 println("read $(length(got)) values @ $(got.resolution) from $(got.initial_timestamp)")
 # read 24 values @ 3600000 milliseconds from 2024-01-01T00:00:00
 @assert got.data == ts.data
@@ -44,10 +44,11 @@ println("read $(length(got)) values @ $(got.resolution) from $(got.initial_times
 1. **`Store(in_memory=true)`** built a store backed by an in-memory array backend and an in-memory
    SQLite metadata database.
 2. **`add_time_series!`** hashed the array, wrote it to the backend (deduplicating on the hash), and
-   recorded a metadata association keyed by
-   `(owner_id, owner_category, type, name, resolution, interval, features)`. It returned a
-   [`TimeSeriesKey`](../reference/julia-api.md#types) holding an opaque handle into the store.
-3. **`get_time_series(store, key)`** looked up the association, read the array back by its content
+   recorded a catalog association filed under
+   `(owner_id, owner_category, type, name, resolution, interval, features)`. It returned that row's
+   **id** — the handle to record in your own object model, and what every read, removal and rename
+   takes from here on.
+3. **`read_by_id(store, id)`** looked up the row by primary key, read the array back by its content
    hash, and reconstructed a `SingleTimeSeries`. Note that `resolution` comes back as a
    `Millisecond`.
 
@@ -56,26 +57,26 @@ println("read $(length(got)) values @ $(got.resolution) from $(got.initial_times
 `Bool`; dimensions beyond the first attach a per-step element shape, such as the coefficient tuple
 of a cost curve.
 
-## Look It Up Without the Key
+## Finding a Series You Did Not Just Write
 
-A series known by its attributes is resolved to its catalog id first, and read by that — the store
-identifies in one call and acts in another, so a caller that keeps its own identifiers stores the id
-and skips the first half from then on:
+The store splits _identify_ from _act_. `list_metadata` is the identify half — it answers which
+series exist and hands back the `id` that addresses each — and every read, removal and rename takes
+that id. A caller that records ids in its own object model does the first half once and skips it
+from then on:
 
 ```julia
-id = resolve_id(SingleTimeSeries, store, 42, Component, "load";
-                resolution = Hour(1), features = Dict("model_year" => 2030))
-got = read_by_id(store, id)
+row = only(list_metadata(store; owner_id = 42, name = "load", resolution = Hour(1)))
+got = read_by_id(store, row.id)
 
-for m in list_time_series(store; owner_id = 42)   # Vector{TimeSeriesMetadata}
+for m in list_metadata(store; owner_id = 42)   # Vector{TimeSeriesMetadata}
     println(m.name, " ", m.resolution, " ", m.units)
 end
 # load 3600000 milliseconds MW
 ```
 
-`get_time_series`, `has_time_series`, and `remove_time_series!` all accept either a `TimeSeriesKey`
-or `(owner_id, owner_category, name; resolution, features)` attributes. The attribute form matches
-`features` exactly, which is why the lookup above repeats `model_year`.
+`list_metadata` matches `features` as a subset; pass `exact_features` when you mean the whole set.
+There is deliberately no separate attribute-to-id resolver — a caller that wants exactly one row
+poses the filter and checks that it got one, which is what `only` does above.
 
 ## Writing to Disk
 
@@ -97,8 +98,8 @@ Reopen them later with `open_store("system.h5"; read_only=true)`, which has a do
 
 ```julia
 open_store("system.h5"; read_only=true) do store
-    keys = get_time_series_keys(store, 42, Component)
-    series = get_time_series(SingleTimeSeries, store, keys[1])
+    rows = list_metadata(store; owner_id = 42, owner_category = Component)
+    series = read_by_id(store, rows[1].id)
 end
 ```
 
@@ -106,5 +107,5 @@ end
 
 - Work through the [Julia Developer Guide](../guides/julia.md) for forecasts, readers, associations,
   and error handling.
-- Understand the [Data Model](../explanation/data-model.md): owners, keys, and features.
+- Understand the [Data Model](../explanation/data-model.md): owners, ids, and features.
 - Browse the full [Julia API reference](../reference/julia-api.md).

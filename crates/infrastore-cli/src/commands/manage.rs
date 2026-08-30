@@ -186,7 +186,7 @@ pub fn remove_all(
     let store = store_access::open_readonly(store_path)?;
     let filter = selector.to_filter()?;
     let matches = store
-        .list_time_series(filter.clone())
+        .list_metadata(filter.clone())
         .map_err(|e| e.to_string())?;
     drop(store);
     if matches.is_empty() {
@@ -275,7 +275,10 @@ pub fn clear(
         if let Some((id, cat)) = owner {
             filter = filter.owner_id(id).owner_category(cat);
         }
-        let n = store.list_metadata(filter).map_err(|e| e.to_string())?.len();
+        let n = store
+            .list_metadata(filter)
+            .map_err(|e| e.to_string())?
+            .len();
         return report(
             format,
             || json!({ "dry_run": true, "would_clear": n }),
@@ -316,7 +319,10 @@ pub fn replace_owner(
         let filter = infrastore_core::ListFilter::new()
             .owner_id(old)
             .owner_category(category);
-        let n = store.list_metadata(filter).map_err(|e| e.to_string())?.len();
+        let n = store
+            .list_metadata(filter)
+            .map_err(|e| e.to_string())?
+            .len();
         return report(
             format,
             || json!({ "dry_run": true, "would_reassign": n, "from": old, "to": new }),
@@ -556,7 +562,7 @@ pub fn merge(
     }
     let source = store_access::open_readonly(from)?;
     let metas = source
-        .list_time_series(selector.to_filter()?)
+        .list_metadata(selector.to_filter()?)
         .map_err(|e| e.to_string())?;
     if metas.is_empty() {
         return report(
@@ -586,7 +592,7 @@ pub fn merge(
         );
     }
 
-    let ids: Vec<i64> = metas
+    let ids: Vec<infrastore_core::TimeSeriesId> = metas
         .iter()
         .map(crate::select::id_of)
         .collect::<Result<_, _>>()?;

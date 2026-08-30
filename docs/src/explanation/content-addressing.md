@@ -2,7 +2,7 @@
 
 Every array is identified by the SHA-256 hash of its contents, not by a name or an ID. Two series
 with byte-identical values therefore resolve to the same hash and are stored exactly once. This is
-the mechanism that lets many [keys](./data-model.md#keys) share one underlying array.
+the mechanism that lets many [series](./data-model.md#identity) share one underlying array.
 
 ## The Array Hash
 
@@ -116,7 +116,7 @@ costs one array, one feature set, and a thousand small rows.
 ## Deletion is Reference-Counted
 
 Because arrays are shared, deleting an association cannot blindly delete its array. On
-`remove_time_series` (and `clear_time_series`), `Store`:
+`remove_by_ids` (and `clear_time_series`), `Store`:
 
 1. Deletes the matching association rows inside a SQLite transaction, collecting their
    `data_hash`es.
@@ -157,14 +157,14 @@ the same stored array — without reading any array bytes. Two cases land in the
 that were deduplicated because their content was identical, and a `SingleTimeSeries` together with
 any `DeterministicSingleTimeSeries` derived from it (the DST shares the backing array).
 
-In the Julia binding, `list_array_groups` returns `ArrayGroupRow`s — the `list_keys` fields plus a
-`data_hash` field (the 32 raw bytes, which hash and compare by content and so work directly as a
-`Dict` key); group by it to find the shared sets. `count_array_references` reports, for one hash,
-how many `SingleTimeSeries` and `DeterministicSingleTimeSeries` associations point at it.
+In the Julia binding, `list_metadata` returns `TimeSeriesMetadata` rows, each carrying a `data_hash`
+field (the 32 raw bytes, which hash and compare by content and so work directly as a `Dict` key);
+group by it to find the shared sets. `count_array_references` reports, for one hash, how many
+`SingleTimeSeries` and `DeterministicSingleTimeSeries` associations point at it.
 
 ```julia
-groups = Dict{Vector{UInt8}, Vector{ArrayGroupRow}}()
-for row in list_array_groups(store)
+groups = Dict{Vector{UInt8}, Vector{TimeSeriesMetadata}}()
+for row in list_metadata(store)
     push!(get!(groups, row.data_hash, eltype(values(groups))[]), row)
 end
 shared = filter(((_, rows),) -> length(rows) > 1, groups)   # arrays referenced by >1 series

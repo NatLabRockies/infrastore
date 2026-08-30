@@ -35,40 +35,57 @@ cohort of `NonSequentialTimeSeries` sharing one timestamp vector (its `resolutio
 the latter). The discovery/maintenance surface (`get_intervals`, `list_names`, `list_owner_types`,
 name-pattern filtering via `ListFilter::name_glob` (SQLite `GLOB`), `ListFilter::component_field`
 (exact match; served by the partial index `idx_component_field`, so it can never select rows that
-left the field unset), `remove_by_filter`, `remove_time_series_bulk`, `rename_time_series`,
-time-sliced `bulk_read`, `AddRequest`/`Store::add` preserving `application_data`, and serde on the
-core types) is available in the Rust core and threaded through the C ABI/Julia and Python bindings.
-Two **association catalogs** are available in the Rust core, C ABI, Julia, Python, and the CLI (read
-via `attributes` / `links`, write via `attach` / `detach` / `link` / `unlink` / `reassign`), but not
+left the field unset), `remove_by_filter`, `rename_time_series`, the time-sliced
+`read_by_ids_range`, `AddRequest`/`Store::add` preserving `application_data`, and serde on the core
+types) is available in the Rust core and threaded through the C ABI/Julia and Python bindings. Two
+**association catalogs** are available in the Rust core, C ABI, Julia, Python, and the CLI (read via
+`attributes` / `links`, write via `attach` / `detach` / `link` / `unlink` / `reassign`), but not
 over gRPC: `supplemental_attribute_associations` (component ↔ supplemental attribute, the wider
 surface — counts, counts-by-type, grouped summary) and `parent_child_associations` (directed
 component ↔ component edges, e.g. a generator connected to a bus, deliberately narrower until a
 consumer needs more). Both are independent of time series in both directions, and of each other.
-Every catalog row also carries an **`id`** — an `INTEGER PRIMARY KEY AUTOINCREMENT`, so it is never
-reissued once its row is deleted — which a consumer stores in its own object model to reference a
-series later (a generator's `operation_cost` naming the series that varies it). Writes return it
-(`AddedTimeSeries` in the Rust core, Python, and Julia; an `out_id` across the C ABI), reads resolve
-it (`get_metadata_by_id`, `association_exists`, `read_by_ids`, and `read_by_id`, which is the
-single-id read _and_ the sliced one — a `ReadWindow` of `start`/`len`/`count` resolved against the
-row the primary-key lookup already returned, checked rather than clamped, so a keyed read costs one
-call), a removal takes it (`remove_by_ids` / `remove_by_ids!`, all-or-nothing and the precise
-removal where a key with no interval matches any interval — not on the read-only gRPC server), and
-it crosses the gRPC wire and the OpenAPI one — where the schema spells it `association_id`, a rename
-`openapi.rs` applies the same way it maps `unit_system` between the store's snake_case and the
-schema's SCREAMING_CASE. It is descriptive — outside `TimeSeriesKey` and both content hashes — but
-unlike the descriptors above it describes the _row_ rather than the data: it is per-store, so
-`merge` assigns fresh ids and `diff` ignores it, while `rename`/`reassign`/`compact`/`persist_to`
-all preserve it. **No `add_*` accepts an id** — not `add_time_series`, a bulk add, or either
-association catalog's attach/link — because "never reissued" is a guarantee of `AUTOINCREMENT`, and
-a caller free to name an id could re-file a retired one. The single exception is the rows-only
-import `import_time_series_associations_openapi` (`Store::import_association_rows`), which files
-each row under the `association_id` the document recorded so its references survive: all-or-none
-across the batch, and only above the catalog's high-water mark. It refuses a row whose array is
-absent, a `DeterministicSingleTimeSeries` whose source `SingleTimeSeries` is neither in the document
-nor already stored, and `NonSequentialTimeSeries` outright (its timestamp vector is not on the
-wire). Neither association catalog's wire form carries an id, so both always assign — their row
-types carry an `id` field that a listing populates and an add ignores — with independent counters,
-and equality on both association types deliberately excludes the id.
+Every catalog row carries an **`id`** — an `INTEGER PRIMARY KEY AUTOINCREMENT`, so it is never
+reissued once its row is deleted — and it is **the only way to address a stored time series**. A
+consumer records the id in its own object model and references the series by it (a generator's
+`operation_cost` naming the series that varies it). In the Rust core it is the newtype
+`TimeSeriesId(i64)`, so an `owner_id` cannot be passed where a series id belongs; it is
+`#[serde(transparent)]`, so SQLite, the gRPC wire and the OpenAPI document are unchanged and every
+binding still exchanges a plain integer.
+
+The surface splits into _identify_ and _act_. Identifying is four calls, all returning the same
+`TimeSeriesMetadata` row: `list_metadata(filter)` (by attributes, 0..N), `list_metadata_by_ids(ids)`
+(ordered, `NotFound` on any stale reference), `get_metadata_by_id(id)` (`None` for a stale one,
+because a consumer validating stored references is asking a question), and `association_exists(id)`
+(a primary-key probe that fetches no row). `ListFilter` is the single identity vocabulary and the
+flexible half of the split — there is deliberately no separate attribute-to-id resolver. Acting
+takes ids: `read_by_id(id, ReadWindow)` is the single-id read _and_ the sliced one (a `ReadWindow`
+of `start`/`len`/`count` resolved against the row the primary-key lookup already returned, checked
+rather than clamped, so a keyed read costs one call); `read_by_ids(ids, ReadWindow)` is its bulk
+form and `read_by_ids_range(ids, TimeRange)` the bounds form that clips instead of checking (what an
+export wants, since it knows the bounds and not the step count); `remove_by_ids` / `remove_by_ids!`
+is all-or-nothing; `rename_time_series(id, name)` and `copy_time_series(id, …)` take one. Writes
+return ids and nothing else — `TimeSeriesId` / `Vec<TimeSeriesId>` in the Rust core, `int` in Python
+and Julia, an `out_id` across the C ABI — and a caller wanting the rest of the row asks
+`get_metadata_by_id`. Removals are not on the read-only gRPC server.
+
+The id crosses the gRPC wire and the OpenAPI one — where the schema spells it `association_id`, a
+rename `openapi.rs` applies the same way it maps `unit_system` between the store's snake_case and
+the schema's SCREAMING_CASE. It is descriptive — outside a series' `KeyIdentity` and both content
+hashes — but unlike the descriptors above it describes the _row_ rather than the data: it is
+per-store, so `merge` assigns fresh ids and `diff` ignores it, while
+`rename`/`reassign`/`compact`/`persist_to` all preserve it. `KeyIdentity` — the uniqueness tuple the
+catalog files a row under — survives as an internal write-path type and is explicitly _not_ an
+address. **No `add_*` accepts an id** — not `add_time_series`, a bulk add, or either association
+catalog's attach/link — because "never reissued" is a guarantee of `AUTOINCREMENT`, and a caller
+free to name an id could re-file a retired one. The single exception is the rows-only import
+`import_time_series_associations_openapi` (`Store::import_association_rows`), which files each row
+under the `association_id` the document recorded so its references survive: all-or-none across the
+batch, and only above the catalog's high-water mark. It refuses a row whose array is absent, a
+`DeterministicSingleTimeSeries` whose source `SingleTimeSeries` is neither in the document nor
+already stored, and `NonSequentialTimeSeries` outright (its timestamp vector is not on the wire).
+Neither association catalog's wire form carries an id, so both always assign — their row types carry
+an `id` field that a listing populates and an add ignores — with independent counters, and equality
+on both association types deliberately excludes the id.
 
 Metadata getters surface `element_shape` and `features` in every binding. Alongside `units`, a
 series carries two further unit descriptors in every binding: `quantity_kind` (free-form, QUDT
@@ -79,7 +96,7 @@ natural units). A series also carries `component_field` (free-form; names the fi
 component whose value these values are the time-varying form of, e.g. `max_active_power` — it
 records what the values are _for_, where `name` only says which series they are; it is the one
 descriptor that is also a filter, in every binding). All three are descriptive, so they sit outside
-`TimeSeriesKey` and outside both content hashes, alongside `application_data` — the opaque
+a series' `KeyIdentity` and outside both content hashes, alongside `application_data` — the opaque
 package-owned payload formerly spelled `ext`.
 
 Every series also carries a **`time_reference`** (`TimeReference`: `Utc` | `FixedOffset(minutes)` |
@@ -92,7 +109,7 @@ bearing `ZoneInfo` → `Zone`), Julia from `DateTime` vs `ZonedDateTime` (`Fixed
 key and both hashes, so two series differing only in it are a duplicate), but it is _not_ inert:
 query bounds must match the series' spelling (`TimeRange` carries a `zoneless` flag and the core
 refuses a mismatch rather than coercing), and a selection spanning both coherence groups is refused
-by `bulk_read_range` and `build_static_reader`, with `ListFilter::zoneless`
+by `read_by_ids` / `read_by_ids_range` and `build_static_reader`, with `ListFilter::zoneless`
 (`--spelling zoned|zoneless` in the CLI) as the constructive remedy. A reference is a **spelling,
 not a grid**: `Period::Months` still steps on the UTC calendar (warned about when it meets a zoned
 reference), and a local-clock grid belongs in `NonSequentialTimeSeries`. The core validates a zone
@@ -102,31 +119,33 @@ have one (the CLI via `chrono-tz`, Python via `zoneinfo`, Julia via `TimeZones`)
 refuses the skipped and repeated wall clocks per row rather than guessing. Python ships type stubs
 (`infrastore.pyi` + a pytest drift guard), a full exception hierarchy, and keyword-only optional
 arguments; Julia returns its catalog/metadata/summary query results as structs
-(`TimeSeriesMetadata`, `KeyRow`, `StaticGrid`, … — see
-`docs/src/reference/julia-api.md#result-types`), overloads `Base`
-(`==`/`hash`/`show`/`length`/`iterate`), and offers do-block `Store`/`open_store` forms. A stored
-`DeterministicSingleTimeSeries` always reads back as a `Deterministic` (storage-level view, by
-design); the DST tag remains visible in catalog surfaces (keys, metadata, counts). The CLI
-additionally has `export` (bulk read-direction inverse of `add`; its timestamped CSV is re-readable
-by `add`, which detects the layout from the header), `arrays` / `store-info` and the `data_hash` +
-resolved HDF5 dataset/column on `list`/`info`, `--name-glob` selectors, `--dry-run` on destructive
-commands, store-creation `--compression` flags, shell `completions`, and a `INFRASTORE_STORE` env
-fallback. It also carries a **wide-CSV ingest** (`"layout": "wide"` plus an
-`owner_map`/`owner_id_from` column→owner mapping) and its inverse `grid`, which drives the core's
-`StaticReader`; discovery commands (`names`, `owner-types`, `owners`, `exists`); charting
-(`get
---plot` sparklines and `plot --kind line|duration|heatmap|fan|overlay`, rendered by the
-hand-written `src/chart/` SVG backend — deliberately no charting dependency, because `deny.toml`
-makes one a policy decision); `diff` and `merge` between two stores; `init` and
-`--catalog attached|in-memory`; and an inline flag form of `add` alongside `--descriptor -` (stdin),
-`--dry-run`, `--replace`, and `--batch-size`. A `--endpoint` mode pointing the read commands at the
-gRPC server is still the one documented gap; `src/store_access.rs` is the seam reserved for it. The
-SQLite catalog carries a `time_series_readable` view that hex-encodes both hashes for hand
-inspection. The read-only gRPC server carries the full read surface too: full `TimeSeriesKey`s over
-the wire plus `ListKeys`, `GetMetadata`, `BulkRead`, detailed/per-type counts, `ListOwnerIds`,
-`GetIntervals`, static/forecast summaries, `CheckStaticConsistency`, and `ResolveForecastKey`. Auth
-is `none` (default) or `api_key` via the `x-api-key` header. See `README.md` and
-`docs/src/explanation/data-model.md` for the authoritative feature matrix.
+(`TimeSeriesMetadata`, `StaticGrid`, … — see `docs/src/reference/julia-api.md#result-types`),
+overloads `Base` (`==`/`hash`/`show`/`length`/`iterate` on the value types), and offers do-block
+`Store`/`open_store` forms. A stored `DeterministicSingleTimeSeries` always reads back as a
+`Deterministic` (storage-level view, by design); the DST tag remains visible in catalog surfaces
+(metadata rows, counts). The CLI additionally has `export` (bulk read-direction inverse of `add`;
+its timestamped CSV is re-readable by `add`, which detects the layout from the header), `arrays` /
+`store-info` and the `data_hash` + resolved HDF5 dataset/column on `list`/`info`, `--name-glob`
+selectors, `--dry-run` on destructive commands, store-creation `--compression` flags, shell
+`completions`, and a `INFRASTORE_STORE` env fallback. It also carries a **wide-CSV ingest**
+(`"layout": "wide"` plus an `owner_map`/`owner_id_from` column→owner mapping) and its inverse
+`grid`, which drives the core's `StaticReader`; discovery commands (`names`, `owner-types`,
+`owners`, `exists`); charting (`get
+--plot` sparklines and
+`plot --kind line|duration|heatmap|fan|overlay`, rendered by the hand-written `src/chart/` SVG
+backend — deliberately no charting dependency, because `deny.toml` makes one a policy decision);
+`diff` and `merge` between two stores; `init` and `--catalog attached|in-memory`; and an inline flag
+form of `add` alongside `--descriptor -` (stdin), `--dry-run`, `--replace`, and `--batch-size`. A
+`--endpoint` mode pointing the read commands at the gRPC server is still the one documented gap;
+`src/store_access.rs` is the seam reserved for it. The SQLite catalog carries a
+`time_series_readable` view that hex-encodes both hashes for hand inspection. The read-only gRPC
+server carries the full read surface too, id-addressed like the rest: `ListMetadata` /
+`ListMetadataByIds` (rows each carrying their id), `GetMetadataById`, `AssociationExists`,
+`HasAnyTimeSeries`, `ReadById` / `ReadByIds`, detailed/per-type counts, `ListOwnerIds`,
+`GetIntervals`, static/forecast summaries, and `CheckStaticConsistency`. Every RPC is named for the
+`Store` method it exposes, with `<Rpc>Req` / `<Rpc>Resp` messages. Auth is `none` (default) or
+`api_key` via the `x-api-key` header. See `README.md` and `docs/src/explanation/data-model.md` for
+the authoritative feature matrix.
 
 ## Code Quality Requirements
 

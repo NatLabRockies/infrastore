@@ -460,7 +460,7 @@ fn overlay(store: &Store, selector: &SelectorArgs, opts: &Options<'_>) -> Result
         actual_filter = actual_filter.resolution(r);
     }
     let actuals = store
-        .list_time_series(actual_filter)
+        .list_metadata(actual_filter)
         .map_err(|e| e.to_string())?;
     if let Some(source) = actuals.first() {
         let curve = read_curve(store, source, None)?;
@@ -553,7 +553,7 @@ fn static_curves(
     range: Option<crate::parse::TimeRange>,
 ) -> Result<Vec<Curve>, String> {
     let metas = store
-        .list_time_series(selector.to_filter()?)
+        .list_metadata(selector.to_filter()?)
         .map_err(|e| e.to_string())?;
     let metas: Vec<TimeSeriesMetadata> = metas
         .into_iter()

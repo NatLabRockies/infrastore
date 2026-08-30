@@ -21,14 +21,14 @@
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{
     AddRequest, Deterministic, ListFilter, NonSequentialTimeSeries, OwnerCategory, Period,
-    SingleTimeSeries, Store, TimeSeriesData, TimeSeriesKey, TypedArray, create_store, open_store,
+    SingleTimeSeries, Store, TimeSeriesData, TimeSeriesId, TypedArray, create_store, open_store,
 };
 
 fn t0() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap()
 }
 
-fn add(store: &mut Store, owner: i64, data: TimeSeriesData) -> TimeSeriesKey {
+fn add(store: &mut Store, owner: i64, data: TimeSeriesData) -> TimeSeriesId {
     store
         .add(AddRequest::new(
             owner,
@@ -37,7 +37,6 @@ fn add(store: &mut Store, owner: i64, data: TimeSeriesData) -> TimeSeriesKey {
             data,
         ))
         .unwrap()
-        .key
 }
 
 fn sts_at(name: &str, initial: DateTime<Utc>, resolution: impl Into<Period>) -> TimeSeriesData {
@@ -65,16 +64,23 @@ fn sub_second_resolutions_round_trip() {
         let mut store = create_store(None, true).unwrap();
         let key = add(&mut store, 1, sts_at("load", t0(), resolution));
         let period = Period::fixed(resolution);
-        assert_eq!(key.resolution(), Some(period), "{label}");
+        assert_eq!(
+            store.get_metadata_by_id(key).unwrap().unwrap().resolution,
+            Some(period),
+            "{label}"
+        );
 
-        let got = store.get_time_series(key.identity(), None).unwrap();
+        let got = store
+            .read_by_id(key, infrastore_core::ReadWindow::full())
+            .unwrap();
         assert_eq!(got.as_single().unwrap().resolution, period, "{label}");
 
         // A time-range slice on the sub-second grid selects the right steps.
         let start = resolution;
         let end = resolution * 3;
         let sliced = store
-            .get_time_series(key.identity(), Some((t0() + start, t0() + end).into()))
+            .read_by_ids_range(&[key], (t0() + start, t0() + end).into())
+            .map(|mut v| v.remove(0))
             .unwrap();
         assert_eq!(
             sliced.as_single().unwrap().data.to_f64_vec().unwrap(),
@@ -184,7 +190,7 @@ fn a_resolution_the_store_cannot_represent_is_refused_on_write() {
     );
     assert_eq!(
         store
-            .get_time_series(key.identity(), None)
+            .read_by_id(key, infrastore_core::ReadWindow::full())
             .unwrap()
             .as_single()
             .unwrap()
@@ -217,19 +223,19 @@ fn millisecond_precision_timestamps_round_trip_and_finer_ones_are_refused() {
     };
 
     let store = open_store(path.as_path(), true).unwrap();
-    let meta = store.get_metadata(key.identity()).unwrap();
+    let meta = store.get_metadata_by_id(key).unwrap().unwrap();
     assert_eq!(
         meta.initial_timestamp,
         Some(precise),
         "milliseconds must survive the RFC3339 catalog encoding"
     );
-    let got = store.get_time_series(key.identity(), None).unwrap();
+    let got = store
+        .read_by_id(key, infrastore_core::ReadWindow::full())
+        .unwrap();
     assert_eq!(got.as_single().unwrap().initial_timestamp, precise);
     // And the key carries it too.
     assert_eq!(
-        store.list_keys(ListFilter::new()).unwrap()[0]
-            .identity()
-            .name,
+        store.list_metadata(ListFilter::new()).unwrap()[0].name,
         "load"
     );
 
@@ -279,10 +285,8 @@ fn a_sub_millisecond_offset_from_a_forecast_window_boundary_is_rejected() {
     let static_key = add(&mut store, 1, sts_at("load", t0(), Duration::hours(1)));
     let nudged = t0() + Duration::hours(1) + Duration::nanoseconds(1);
     let sliced = store
-        .get_time_series(
-            static_key.identity(),
-            Some((nudged, t0() + Duration::hours(3)).into()),
-        )
+        .read_by_ids_range(&[static_key], (nudged, t0() + Duration::hours(3)).into())
+        .map(|mut v| v.remove(0))
         .unwrap();
     assert_eq!(
         sliced.as_single().unwrap().initial_timestamp,
@@ -312,10 +316,8 @@ fn a_sub_millisecond_offset_from_a_forecast_window_boundary_is_rejected() {
     ] {
         let start = t0() + Duration::hours(1) + offset;
         let err = store
-            .get_time_series(
-                fc_key.identity(),
-                Some((start, t0() + Duration::hours(3)).into()),
-            )
+            .read_by_ids_range(&[fc_key], (start, t0() + Duration::hours(3)).into())
+            .map(|mut v| v.remove(0))
             .unwrap_err();
         assert!(
             matches!(err, infrastore_core::TimeSeriesError::InvalidParameter(_)),
@@ -325,10 +327,11 @@ fn a_sub_millisecond_offset_from_a_forecast_window_boundary_is_rejected() {
 
     // An exactly-aligned start selects the window the caller named.
     let exact = store
-        .get_time_series(
-            fc_key.identity(),
-            Some((t0() + Duration::hours(1), t0() + Duration::hours(3)).into()),
+        .read_by_ids_range(
+            &[fc_key],
+            (t0() + Duration::hours(1), t0() + Duration::hours(3)).into(),
         )
+        .map(|mut v| v.remove(0))
         .unwrap();
     let exact = exact.as_deterministic().unwrap();
     assert_eq!(exact.initial_timestamp, t0() + Duration::hours(1));
@@ -358,10 +361,8 @@ fn a_forecast_on_a_millisecond_offset_grid_reads_at_its_own_boundaries() {
     // The exact window-1 boundary carries the same 500ms phase.
     let boundary = initial + Duration::hours(1);
     let got = store
-        .get_time_series(
-            key.identity(),
-            Some((boundary, boundary + Duration::hours(2)).into()),
-        )
+        .read_by_ids_range(&[key], (boundary, boundary + Duration::hours(2)).into())
+        .map(|mut v| v.remove(0))
         .unwrap();
     let fc = got.as_deterministic().unwrap();
     assert_eq!(fc.initial_timestamp, boundary);
@@ -371,10 +372,8 @@ fn a_forecast_on_a_millisecond_offset_grid_reads_at_its_own_boundaries() {
     for rounded in [t0() + Duration::hours(1), t0()] {
         assert!(
             store
-                .get_time_series(
-                    key.identity(),
-                    Some((rounded, rounded + Duration::hours(2)).into())
-                )
+                .read_by_ids_range(&[key], (rounded, rounded + Duration::hours(2)).into())
+                .map(|mut v| v.remove(0))
                 .is_err(),
             "a second-rounded bound is off a millisecond-offset grid"
         );
@@ -459,7 +458,7 @@ fn a_forecast_the_store_cannot_read_back_is_refused_on_write() {
     }
 
     // Nothing was written: the failures are all pre-commit.
-    assert!(store.list_keys(ListFilter::new()).unwrap().is_empty());
+    assert!(store.list_metadata(ListFilter::new()).unwrap().is_empty());
 }
 
 #[test]
@@ -474,7 +473,7 @@ fn pre_1970_initial_timestamps_round_trip() {
         Utc.with_ymd_and_hms(1800, 6, 15, 12, 30, 45).unwrap(),
     ];
 
-    let keys: Vec<TimeSeriesKey> = {
+    let keys: Vec<TimeSeriesId> = {
         let mut store = create_store(Some(path.as_path()), false).unwrap();
         let keys = cases
             .iter()
@@ -494,7 +493,9 @@ fn pre_1970_initial_timestamps_round_trip() {
     let store = open_store(path.as_path(), true).unwrap();
     for (key, expected) in keys.iter().zip(&cases) {
         assert!(expected.timestamp() < 0, "{expected} should be pre-1970");
-        let got = store.get_time_series(key.identity(), None).unwrap();
+        let got = store
+            .read_by_id(*key, infrastore_core::ReadWindow::full())
+            .unwrap();
         assert_eq!(
             got.as_single().unwrap().initial_timestamp,
             *expected,
@@ -503,16 +504,15 @@ fn pre_1970_initial_timestamps_round_trip() {
 
         // A time-range slice still resolves against a negative epoch.
         let sliced = store
-            .get_time_series(
-                key.identity(),
-                Some(
-                    (
-                        *expected + Duration::hours(1),
-                        *expected + Duration::hours(3),
-                    )
-                        .into(),
-                ),
+            .read_by_ids_range(
+                &[*key],
+                (
+                    *expected + Duration::hours(1),
+                    *expected + Duration::hours(3),
+                )
+                    .into(),
             )
+            .map(|mut v| v.remove(0))
             .unwrap();
         assert_eq!(
             sliced.as_single().unwrap().data.to_f64_vec().unwrap(),
@@ -543,10 +543,8 @@ fn a_series_spanning_the_epoch_boundary_reads_correctly() {
     let epoch = Utc.timestamp_opt(0, 0).single().unwrap();
     assert_eq!(initial + Duration::hours(2), epoch);
     let sliced = store
-        .get_time_series(
-            key.identity(),
-            Some((epoch, epoch + Duration::hours(2)).into()),
-        )
+        .read_by_ids_range(&[key], (epoch, epoch + Duration::hours(2)).into())
+        .map(|mut v| v.remove(0))
         .unwrap();
     let single = sliced.as_single().unwrap();
     assert_eq!(single.initial_timestamp, epoch);
@@ -586,23 +584,24 @@ fn a_century_spanning_non_sequential_series_round_trips() {
     };
 
     let store = open_store(path.as_path(), true).unwrap();
-    let got = store.get_time_series(key.identity(), None).unwrap();
+    let got = store
+        .read_by_id(key, infrastore_core::ReadWindow::full())
+        .unwrap();
     let ns = got.as_non_sequential().unwrap();
     assert_eq!(ns.timestamps, timestamps, "a 200-year span must round trip");
     assert_eq!(ns.data.to_f64_vec().unwrap(), values);
 
     // A slice across the epoch selects by timestamp, not by index arithmetic.
     let sliced = store
-        .get_time_series(
-            key.identity(),
-            Some(
-                (
-                    Utc.with_ymd_and_hms(1969, 1, 1, 0, 0, 0).unwrap(),
-                    Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
-                )
-                    .into(),
-            ),
+        .read_by_ids_range(
+            &[key],
+            (
+                Utc.with_ymd_and_hms(1969, 1, 1, 0, 0, 0).unwrap(),
+                Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+            )
+                .into(),
         )
+        .map(|mut v| v.remove(0))
         .unwrap();
     let ns = sliced.as_non_sequential().unwrap();
     assert_eq!(ns.timestamps, timestamps[1..4].to_vec());
@@ -649,7 +648,9 @@ fn non_sequential_timestamps_keep_sub_second_precision() {
     };
 
     let store = open_store(path.as_path(), true).unwrap();
-    let got = store.get_time_series(key.identity(), None).unwrap();
+    let got = store
+        .read_by_id(key, infrastore_core::ReadWindow::full())
+        .unwrap();
     assert_eq!(
         got.as_non_sequential().unwrap().timestamps,
         timestamps,
@@ -794,7 +795,7 @@ fn store_is_send_but_not_sync() {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<infrastore_core::StaticReader>();
     assert_send_sync::<infrastore_core::ForecastReader>();
-    assert_send_sync::<infrastore_core::TimeSeriesKey>();
+    assert_send_sync::<infrastore_core::TimeSeriesId>();
     assert_send_sync::<infrastore_core::TimeSeriesData>();
     assert_send_sync::<infrastore_core::TypedArray>();
 }
@@ -807,7 +808,9 @@ fn a_store_can_be_moved_to_another_thread() {
     let key = add(&mut store, 1, sts_at("load", t0(), Duration::hours(1)));
 
     let handle = std::thread::spawn(move || {
-        let got = store.get_time_series(key.identity(), None).unwrap();
+        let got = store
+            .read_by_id(key, infrastore_core::ReadWindow::full())
+            .unwrap();
         got.as_single().unwrap().data.to_f64_vec().unwrap()
     });
     assert_eq!(handle.join().unwrap(), vec![1.0, 2.0, 3.0, 4.0]);
@@ -830,7 +833,9 @@ fn a_second_read_only_handle_on_one_path_can_be_opened() {
     let first = open_store(path.as_path(), true).unwrap();
     let second = open_store(path.as_path(), true).unwrap();
     for (label, store) in [("first", &first), ("second", &second)] {
-        let got = store.get_time_series(key.identity(), None).unwrap();
+        let got = store
+            .read_by_id(key, infrastore_core::ReadWindow::full())
+            .unwrap();
         assert_eq!(
             got.as_single().unwrap().data.to_f64_vec().unwrap(),
             vec![1.0, 2.0, 3.0, 4.0],
@@ -859,7 +864,9 @@ fn a_read_only_handle_alongside_a_writable_one_is_pinned() {
     match open_store(path.as_path(), true) {
         Ok(reader) => {
             // If it opens, it must read the flushed data correctly.
-            let got = reader.get_time_series(key.identity(), None).unwrap();
+            let got = reader
+                .read_by_id(key, infrastore_core::ReadWindow::full())
+                .unwrap();
             assert_eq!(
                 got.as_single().unwrap().data.to_f64_vec().unwrap(),
                 vec![1.0, 2.0, 3.0, 4.0]
@@ -874,7 +881,11 @@ fn a_read_only_handle_alongside_a_writable_one_is_pinned() {
 
     // Once the writable handle is gone, a read-only open definitely works.
     let reader = open_store(path.as_path(), true).unwrap();
-    assert!(reader.get_time_series(key.identity(), None).is_ok());
+    assert!(
+        reader
+            .read_by_id(key, infrastore_core::ReadWindow::full())
+            .is_ok()
+    );
 }
 
 #[test]
@@ -907,7 +918,7 @@ fn a_reader_built_before_a_removal_of_a_shared_array_reads_stale_values() {
     let before = reader.groups()[0].values_to_vec::<f64>().unwrap();
     assert_eq!(before, vec![1.0, 1.0]);
 
-    store.remove_time_series(a.identity()).unwrap();
+    store.remove_by_ids(&[a]).unwrap();
     assert_eq!(
         store.num_distinct_arrays().unwrap(),
         1,
@@ -966,7 +977,7 @@ fn a_reader_built_before_a_removal_of_an_unshared_array_errors() {
     before.sort_by(f64::total_cmp);
     assert_eq!(before, vec![1.0, 100.0]);
 
-    store.remove_time_series(a.identity()).unwrap();
+    store.remove_by_ids(&[a]).unwrap();
     assert_eq!(
         store.num_distinct_arrays().unwrap(),
         1,
@@ -1027,22 +1038,34 @@ fn a_reader_built_before_an_add_does_not_see_the_new_series() {
 #[test]
 fn a_reader_survives_a_rename_of_the_series_it_points_at() {
     // A rename moves only the association row; the array is untouched and the
-    // reader addresses arrays by hash. PIN that a sweep therefore keeps working,
-    // while the reader's cached key still shows the old name.
+    // reader addresses arrays by hash, so a sweep keeps working. The reader
+    // holds *ids*, not a name snapshot, and a rename preserves the id — so
+    // unlike the old key-carrying reader, resolving a column now reports the
+    // new name.
     let mut store = create_store(None, true).unwrap();
     let key = add(&mut store, 1, sts_at("old", t0(), Duration::hours(1)));
 
     let mut reader = store
         .build_static_reader(ListFilter::new().resolution(Duration::hours(1)))
         .unwrap();
-    assert_eq!(reader.groups()[0].keys()[0].name(), "old");
+    let column = reader.groups()[0].ids()[0];
+    assert_eq!(column, key);
+    assert_eq!(
+        store.get_metadata_by_id(column).unwrap().unwrap().name,
+        "old"
+    );
 
-    store.rename_time_series(key.identity(), "new").unwrap();
+    store.rename_time_series(key, "new").unwrap();
 
     assert_eq!(
-        reader.groups()[0].keys()[0].name(),
-        "old",
-        "PIN: the reader's keys are a build-time snapshot"
+        reader.groups()[0].ids()[0],
+        key,
+        "a rename moves the name, not the reference"
+    );
+    assert_eq!(
+        store.get_metadata_by_id(column).unwrap().unwrap().name,
+        "new",
+        "the id resolves to the row as it is now, not as it was at build time"
     );
     store.static_read(&mut reader, t0()).unwrap();
     assert_eq!(

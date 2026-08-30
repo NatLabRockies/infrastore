@@ -15,14 +15,15 @@
 //!   infrastore-bench read [--count N] [--length L] [--steps T]  [--in-memory] [--path DIR]
 //!   infrastore-bench all  [--count N] [--length L] [--steps T]  [--in-memory] [--path DIR]
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration as StdDuration, Instant};
 
 use chrono::{TimeZone, Utc};
 use clap::{Args, Parser, Subcommand};
 use infrastore_core::{
-    AddRequest, Deterministic, Features, KeyIdentity, OwnerCategory, SingleTimeSeries, Store,
-    TimeSeriesData, TimeSeriesType, TypedArray,
+    AddRequest, Deterministic, Features, ListFilter, OwnerCategory, SingleTimeSeries, Store,
+    TimeSeriesData, TimeSeriesId, TimeSeriesType, TypedArray,
 };
 
 // Deterministic forecast horizon, in hours.
@@ -237,43 +238,59 @@ fn make_det_requests(count: usize, length: usize) -> Vec<AddRequest> {
         .collect()
 }
 
-/// Reconstruct TimeSeriesKeys for SingleTimeSeries without querying the store.
+/// The `SingleTimeSeries` association ids the read loop addresses, in owner
+/// order.
 ///
-/// This works because the bench creates deterministic owner_ids and names.
-fn sts_ids(store: &Store, count: usize) -> Result<Vec<i64>, Box<dyn std::error::Error>> {
-    (0..count)
-        .map(|i| {
-            store
-                .resolve_id(
-                    i as i64,
-                    OwnerCategory::Component,
-                    "active_power",
-                    Some(infrastore_core::Period::Fixed(chrono::Duration::hours(1))),
-                    None,
-                    Features::default(),
-                    TimeSeriesType::SingleTimeSeries,
-                )
-                .map_err(Into::into)
-        })
-        .collect()
+/// One catalog query for the whole set rather than one per series: the bench
+/// writes one series per owner under a fixed name, so a listing filtered to that
+/// name and resolution is exactly the set, and the row's `owner_id` puts them
+/// back in the order the loop wants.
+fn sts_ids(store: &Store, count: usize) -> Result<Vec<TimeSeriesId>, Box<dyn std::error::Error>> {
+    let hour = infrastore_core::Period::Fixed(chrono::Duration::hours(1));
+    ids_by_owner(
+        store,
+        ListFilter::new()
+            .owner_category(OwnerCategory::Component)
+            .time_series_type(TimeSeriesType::SingleTimeSeries)
+            .name("active_power")
+            .resolution(hour),
+        count,
+    )
 }
 
-/// Resolve the Deterministic association ids the read loop addresses.
-fn det_ids(store: &Store, count: usize) -> Result<Vec<i64>, Box<dyn std::error::Error>> {
+/// The `Deterministic` association ids the read loop addresses, in owner order.
+fn det_ids(store: &Store, count: usize) -> Result<Vec<TimeSeriesId>, Box<dyn std::error::Error>> {
     let hour = infrastore_core::Period::Fixed(chrono::Duration::hours(1));
-    (0..count)
-        .map(|i| {
-            store
-                .resolve_id(
-                    i as i64,
-                    OwnerCategory::Component,
-                    "active_power_forecast",
-                    Some(hour),
-                    Some(hour),
-                    Features::default(),
-                    TimeSeriesType::Deterministic,
-                )
-                .map_err(Into::into)
+    ids_by_owner(
+        store,
+        ListFilter::new()
+            .owner_category(OwnerCategory::Component)
+            .time_series_type(TimeSeriesType::Deterministic)
+            .name("active_power_forecast")
+            .resolution(hour)
+            .interval(hour),
+        count,
+    )
+}
+
+/// Resolve `filter` to one id per owner `0..count`, in that order.
+fn ids_by_owner(
+    store: &Store,
+    filter: ListFilter,
+    count: usize,
+) -> Result<Vec<TimeSeriesId>, Box<dyn std::error::Error>> {
+    let mut by_owner: HashMap<i64, TimeSeriesId> = HashMap::new();
+    for m in store.list_metadata(filter)? {
+        if let Some(id) = m.id {
+            by_owner.insert(m.owner_id, id);
+        }
+    }
+    (0..count as i64)
+        .map(|owner| {
+            by_owner
+                .get(&owner)
+                .copied()
+                .ok_or_else(|| format!("no series for owner {owner}").into())
         })
         .collect()
 }

@@ -12,7 +12,7 @@ use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{
     Dtype, ElementType, FeatureValue, Features, ListFilter, OwnerCategory, Period, Scenarios,
     SingleTimeSeries, Store, SupplementalAttributeAssociation, TimeReference, TimeSeriesData,
-    TimeSeriesError, TransformPolicy, TypedArray, UnitSystem, create_store,
+    TimeSeriesError, TimeSeriesId, TransformPolicy, TypedArray, UnitSystem, create_store,
 };
 
 // ---- shared helpers ---------------------------------------------------------
@@ -32,7 +32,7 @@ fn advance_ids(store: &mut Store, n: usize) {
             zeros(vec![2]),
             &name,
         );
-        store
+        let spacer = store
             .add(infrastore_core::AddRequest::new(
                 -1,
                 "Spacer",
@@ -41,15 +41,7 @@ fn advance_ids(store: &mut Store, n: usize) {
             ))
             .expect("spacer should add");
         store
-            .remove_time_series(&infrastore_core::KeyIdentity {
-                owner_id: -1,
-                owner_category: OwnerCategory::Component,
-                time_series_type: infrastore_core::TimeSeriesType::SingleTimeSeries,
-                name,
-                resolution: Some(Period::fixed(Duration::hours(1))),
-                interval: None,
-                features: Features::new(),
-            })
+            .remove_by_ids(&[spacer])
             .expect("spacer should remove");
     }
 }
@@ -614,7 +606,7 @@ fn add_rejects_single_time_series_length_mismatch_and_leaves_store_untouched() {
     assert!(matches!(err, TimeSeriesError::InvalidParameter(_)), "{err}");
     assert!(
         store
-            .list_time_series(ListFilter::new())
+            .list_metadata(ListFilter::new())
             .expect("list should succeed")
             .is_empty(),
         "a rejected add must leave the catalog untouched"
@@ -649,7 +641,7 @@ fn add_rejects_deterministic_shape_mismatch_and_leaves_store_untouched() {
     assert!(matches!(err, TimeSeriesError::InvalidParameter(_)), "{err}");
     assert!(
         store
-            .list_time_series(ListFilter::new())
+            .list_metadata(ListFilter::new())
             .expect("list should succeed")
             .is_empty(),
         "a rejected add must leave the catalog untouched"
@@ -695,7 +687,7 @@ fn add_bulk_rejects_geometry_mismatch_and_leaves_the_whole_batch_untouched() {
     assert!(matches!(err, TimeSeriesError::InvalidParameter(_)), "{err}");
     assert!(
         store
-            .list_time_series(ListFilter::new())
+            .list_metadata(ListFilter::new())
             .expect("list should succeed")
             .is_empty(),
         "a rejected bulk add must leave the catalog untouched, including the rows before the \
@@ -1058,7 +1050,7 @@ fn the_full_surface_round_trips_byte_equal_with_identical_metadata() {
 
     let mut target = full_surface_anchor_target();
     let anchors = target
-        .list_time_series(ListFilter::new())
+        .list_metadata(ListFilter::new())
         .expect("listing should succeed")
         .len();
     assert_eq!(
@@ -1091,7 +1083,7 @@ fn the_full_surface_round_trips_byte_equal_with_identical_metadata() {
     // catalog holds, compared by value, resolved through the id the document
     // carried.
     let originals = source
-        .list_time_series(ListFilter::new())
+        .list_metadata(ListFilter::new())
         .expect("listing should succeed");
     assert_eq!(originals.len(), 7);
     for original in originals {
@@ -1127,7 +1119,7 @@ fn an_import_without_array_shape_is_exact_for_a_static_row() {
         .expect("the tuple-typed static is in the export")
         .clone();
     let original = source
-        .get_metadata_by_id(row["association_id"].as_i64().expect("an id"))
+        .get_metadata_by_id(TimeSeriesId(row["association_id"].as_i64().expect("an id")))
         .expect("lookup should succeed")
         .expect("the row exists");
     assert_eq!(original.element_shape, vec![2]);
@@ -1175,7 +1167,7 @@ fn an_import_without_array_shape_is_lossy_for_a_forecast_row() {
         .expect("the deterministic row is in the export")
         .clone();
     let original = source
-        .get_metadata_by_id(row["association_id"].as_i64().expect("an id"))
+        .get_metadata_by_id(TimeSeriesId(row["association_id"].as_i64().expect("an id")))
         .expect("lookup should succeed")
         .expect("the row exists");
     // What the catalog holds: the native `[4, 6, 2]` minus its first axis.
@@ -1235,7 +1227,7 @@ fn an_import_resolves_the_array_by_data_hash_before_uri() {
         .expect("the sparse static is in the export")
         .clone();
     let original = source
-        .get_metadata_by_id(row["association_id"].as_i64().expect("an id"))
+        .get_metadata_by_id(TimeSeriesId(row["association_id"].as_i64().expect("an id")))
         .expect("lookup should succeed")
         .expect("the row exists");
 

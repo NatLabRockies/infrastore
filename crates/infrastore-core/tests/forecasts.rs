@@ -13,9 +13,9 @@
 
 use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{
-    Deterministic, Dtype, Features, ForecastTimeSeriesKey, ListFilter, OwnerCategory, Period,
-    Probabilistic, ReadWindow, Scenarios, SingleTimeSeries, Store, TimeSeriesData, TimeSeriesKey,
-    TimeSeriesType, TypedArray, create_store, open_store,
+    Deterministic, Dtype, Features, ListFilter, OwnerCategory, Period, Probabilistic, ReadWindow,
+    Scenarios, SingleTimeSeries, Store, TimeSeriesData, TimeSeriesError, TimeSeriesId,
+    TimeSeriesMetadata, TimeSeriesType, TypedArray, create_store, open_store,
 };
 
 mod common;
@@ -38,7 +38,7 @@ fn add_forecast(
     count: usize,
     data: TypedArray,
     percentiles: Option<Vec<f64>>,
-) -> TimeSeriesKey {
+) -> TimeSeriesId {
     let data = match ts_type {
         TimeSeriesType::Deterministic => TimeSeriesData::Deterministic(
             Deterministic::new(initial, resolution, horizon, interval, count, data, name).unwrap(),
@@ -89,19 +89,18 @@ fn add_forecast(
             store
                 .transform_single_time_series(horizon, interval, None, None, Default::default())
                 .unwrap();
-            return TimeSeriesKey::Forecast(ForecastTimeSeriesKey::new(
-                owner,
-                OwnerCategory::Component,
-                TimeSeriesType::DeterministicSingleTimeSeries,
-                name.to_string(),
-                resolution,
-                Features::new(),
-                initial,
-                horizon,
-                interval,
-                count,
-                None,
-            ));
+            // The DST is a derived row, so its id comes from the catalog
+            // rather than from the add that seeded it.
+            let rows = store
+                .list_metadata(
+                    ListFilter::new()
+                        .owner_id(owner)
+                        .name(name)
+                        .time_series_type(TimeSeriesType::DeterministicSingleTimeSeries),
+                )
+                .unwrap();
+            assert_eq!(rows.len(), 1, "transform produced one DST row");
+            return rows[0].id.expect("a stored row carries its id");
         }
         other => panic!("add_forecast helper: unsupported type {other:?}"),
     };
@@ -114,7 +113,24 @@ fn add_forecast(
             Features::new(),
         )
         .unwrap()
-        .key
+}
+
+/// The single row matching `filter`, or the error a caller would raise itself.
+///
+/// `resolve_metadata` used to be a `Store` method; it is now a listing plus an
+/// exactly-one check, which is what every binding does since the resolver came
+/// out. The filter reads its type through `TimeSeriesType::accepts`, so asking
+/// for `Deterministic` still spans a stored `DeterministicSingleTimeSeries` —
+/// that rule lives in `ListFilter`, not in a separate entry point.
+fn resolve_one(store: &Store, filter: ListFilter) -> Result<TimeSeriesMetadata, TimeSeriesError> {
+    let mut rows = store.list_metadata(filter)?;
+    match rows.len() {
+        0 => Err(TimeSeriesError::NotFound),
+        1 => Ok(rows.pop().unwrap()),
+        n => Err(TimeSeriesError::InvalidParameter(format!(
+            "{n} rows match; narrow the filter"
+        ))),
+    }
 }
 
 // Convenience: build f64 TypedArray.
@@ -174,7 +190,9 @@ fn deterministic_scalar_roundtrip() {
             }
         },
         |store, key, backend| {
-            let got = store.get_time_series(key.identity(), None).unwrap();
+            let got = store
+                .read_by_id(*key, infrastore_core::ReadWindow::full())
+                .unwrap();
             let det = got.as_deterministic().unwrap();
             assert_eq!(det.count, count, "{backend}: count");
             assert_eq!(det.horizon, horizon, "{backend}: horizon");
@@ -222,7 +240,9 @@ fn deterministic_multidim_element_shape() {
             }
         },
         |store, key, backend| {
-            let got = store.get_time_series(key.identity(), None).unwrap();
+            let got = store
+                .read_by_id(*key, infrastore_core::ReadWindow::full())
+                .unwrap();
             let det = got.as_deterministic().unwrap();
             assert_eq!(det.data.shape, vec![2, 2, 3], "{backend}: shape");
             assert_eq!(det.data.to_f64_vec().unwrap(), vals, "{backend}: values");
@@ -268,7 +288,9 @@ fn probabilistic_roundtrip() {
             }
         },
         |store, key, backend| {
-            let got = store.get_time_series(key.identity(), None).unwrap();
+            let got = store
+                .read_by_id(*key, infrastore_core::ReadWindow::full())
+                .unwrap();
             let prob = got.as_probabilistic().unwrap();
             assert_eq!(prob.percentiles, percentiles, "{backend}: percentiles");
             assert_eq!(prob.count, count, "{backend}: count");
@@ -316,7 +338,9 @@ fn scenarios_roundtrip() {
             }
         },
         |store, key, backend| {
-            let got = store.get_time_series(key.identity(), None).unwrap();
+            let got = store
+                .read_by_id(*key, infrastore_core::ReadWindow::full())
+                .unwrap();
             let scen = got.as_scenarios().unwrap();
             assert_eq!(
                 scen.scenario_count, scenario_count,
@@ -374,7 +398,8 @@ fn window_selection_deterministic() {
             let start = initial + Duration::hours(6);
             let end = initial + Duration::hours(18);
             let got = store
-                .get_time_series(key.identity(), Some((start, end).into()))
+                .read_by_ids_range(&[*key], (start, end).into())
+                .map(|mut v| v.remove(0))
                 .unwrap();
             let det = got.as_deterministic().unwrap();
             assert_eq!(det.count, 2, "{backend}: selected count");
@@ -436,7 +461,8 @@ fn window_selection_probabilistic() {
             let start = initial + Duration::hours(4);
             let end = initial + Duration::hours(12);
             let got = store
-                .get_time_series(key.identity(), Some((start, end).into()))
+                .read_by_ids_range(&[*key], (start, end).into())
+                .map(|mut v| v.remove(0))
                 .unwrap();
             let prob = got.as_probabilistic().unwrap();
             assert_eq!(prob.count, 2, "{backend}: count");
@@ -497,7 +523,8 @@ fn window_selection_scenarios() {
             let start = initial + Duration::hours(8);
             let end = initial + Duration::hours(18);
             let got = store
-                .get_time_series(key.identity(), Some((start, end).into()))
+                .read_by_ids_range(&[*key], (start, end).into())
+                .map(|mut v| v.remove(0))
                 .unwrap();
             let scen = got.as_scenarios().unwrap();
             assert_eq!(scen.count, 2, "{backend}: count");
@@ -557,7 +584,8 @@ fn window_selection_error_cases() {
             let start = initial + Duration::hours(4);
             let end = initial;
             let err = store
-                .get_time_series(key.identity(), Some((start, end).into()))
+                .read_by_ids_range(&[*key], (start, end).into())
+                .map(|mut v| v.remove(0))
                 .unwrap_err();
             assert!(
                 err.to_string().contains("end < start"),
@@ -568,7 +596,8 @@ fn window_selection_error_cases() {
             let misaligned = initial + Duration::hours(3); // interval=4h, not aligned
             let far_end = initial + Duration::hours(20);
             let err = store
-                .get_time_series(key.identity(), Some((misaligned, far_end).into()))
+                .read_by_ids_range(&[*key], (misaligned, far_end).into())
+                .map(|mut v| v.remove(0))
                 .unwrap_err();
             assert!(
                 err.to_string().contains("window boundary"),
@@ -578,7 +607,8 @@ fn window_selection_error_cases() {
             // Empty selection (aligned start with end == start) => count == 0.
             let aligned_start = initial + Duration::hours(4);
             let got = store
-                .get_time_series(key.identity(), Some((aligned_start, aligned_start).into()))
+                .read_by_ids_range(&[*key], (aligned_start, aligned_start).into())
+                .map(|mut v| v.remove(0))
                 .unwrap();
             let det = got.as_deterministic().unwrap();
             assert_eq!(det.count, 0, "{backend}: empty count");
@@ -626,7 +656,9 @@ fn dst_synthesis_overlapping_windows() {
         },
         |store, key, backend| {
             // Full read => synthesized Deterministic, shape [4, 3].
-            let got = store.get_time_series(key.identity(), None).unwrap();
+            let got = store
+                .read_by_id(*key, infrastore_core::ReadWindow::full())
+                .unwrap();
             let det = got.as_deterministic().unwrap();
             assert_eq!(det.count, 3, "{backend}: count");
             assert_eq!(det.data.shape, vec![4, 3], "{backend}: shape");
@@ -646,7 +678,8 @@ fn dst_synthesis_overlapping_windows() {
             let start = initial + interval;
             let end = initial + interval + interval; // exclusive
             let got2 = store
-                .get_time_series(key.identity(), Some((start, end).into()))
+                .read_by_ids_range(&[*key], (start, end).into())
+                .map(|mut v| v.remove(0))
                 .unwrap();
             let det2 = got2.as_deterministic().unwrap();
             assert_eq!(det2.count, 1, "{backend}: selected count");
@@ -700,7 +733,9 @@ fn deterministic_i64_dtype_preserved() {
         },
         |store, key, backend| {
             // Full read preserves dtype and exact bytes.
-            let got = store.get_time_series(key.identity(), None).unwrap();
+            let got = store
+                .read_by_id(*key, infrastore_core::ReadWindow::full())
+                .unwrap();
             let det = got.as_deterministic().unwrap();
             assert_eq!(det.data.dtype, Dtype::I64, "{backend}: dtype");
             assert_eq!(det.data.shape, vec![2, 3], "{backend}: shape");
@@ -710,7 +745,8 @@ fn deterministic_i64_dtype_preserved() {
             let start = initial + Duration::hours(4);
             let end = initial + Duration::hours(8);
             let got2 = store
-                .get_time_series(key.identity(), Some((start, end).into()))
+                .read_by_ids_range(&[*key], (start, end).into())
+                .map(|mut v| v.remove(0))
                 .unwrap();
             let det2 = got2.as_deterministic().unwrap();
             assert_eq!(det2.data.dtype, Dtype::I64, "{backend}: sliced dtype");
@@ -826,7 +862,9 @@ fn dst_synthesis_multidim_element_shape() {
             }
         },
         |store, key, backend| {
-            let got = store.get_time_series(key.identity(), None).unwrap();
+            let got = store
+                .read_by_id(*key, infrastore_core::ReadWindow::full())
+                .unwrap();
             let det = got.as_deterministic().unwrap();
             // Expected output shape: [H=3, C=2, E=2] = [3, 2, 2], 12 elements.
             assert_eq!(det.data.shape, vec![3, 2, 2], "{backend}: shape");
@@ -855,8 +893,6 @@ fn dst_synthesis_multidim_element_shape() {
 // `time_series_type` is the stored form that matched), errors explicitly on
 // ambiguity, and reports a genuine miss as `NotFound` rather than masking it.
 // ---------------------------------------------------------------------------
-
-use infrastore_core::TimeSeriesError;
 
 // Underlying STS values long enough to derive a DST under (H=2, interval=1).
 fn dst_source_vals() -> Vec<f64> {
@@ -892,17 +928,17 @@ fn resolve_deterministic_matches_real_deterministic() {
             }
         },
         |store, _key, backend| {
-            let resolved = store
-                .resolve_metadata(
-                    1,
-                    OwnerCategory::Component,
-                    "load",
-                    Some(Period::Fixed(resolution)),
-                    None,
-                    Features::new(),
-                    TimeSeriesType::Deterministic,
-                )
-                .unwrap();
+            let resolved = resolve_one(
+                store,
+                ListFilter::new()
+                    .owner_id(1)
+                    .owner_category(OwnerCategory::Component)
+                    .name("load")
+                    .time_series_type(TimeSeriesType::Deterministic)
+                    .exact_features(Features::new())
+                    .resolution(Period::Fixed(resolution)),
+            )
+            .unwrap();
             assert_eq!(
                 resolved.time_series_type,
                 TimeSeriesType::Deterministic,
@@ -948,17 +984,17 @@ fn resolve_deterministic_matches_dst() {
             }
         },
         |store, _key, backend| {
-            let resolved = store
-                .resolve_metadata(
-                    7,
-                    OwnerCategory::Component,
-                    "gen",
-                    Some(Period::Fixed(resolution)),
-                    None,
-                    Features::new(),
-                    TimeSeriesType::Deterministic,
-                )
-                .unwrap();
+            let resolved = resolve_one(
+                store,
+                ListFilter::new()
+                    .owner_id(7)
+                    .owner_category(OwnerCategory::Component)
+                    .name("gen")
+                    .time_series_type(TimeSeriesType::Deterministic)
+                    .exact_features(Features::new())
+                    .resolution(Period::Fixed(resolution)),
+            )
+            .unwrap();
             assert_eq!(
                 resolved.time_series_type,
                 TimeSeriesType::DeterministicSingleTimeSeries,
@@ -979,17 +1015,17 @@ fn resolve_deterministic_matches_dst() {
 #[test]
 fn resolve_deterministic_not_found_is_not_masked() {
     let store = create_store(None, true).unwrap();
-    let err = store
-        .resolve_metadata(
-            1,
-            OwnerCategory::Component,
-            "missing",
-            Some(Period::Fixed(Duration::hours(1))),
-            None,
-            Features::new(),
-            TimeSeriesType::Deterministic,
-        )
-        .unwrap_err();
+    let err = resolve_one(
+        &store,
+        ListFilter::new()
+            .owner_id(1)
+            .owner_category(OwnerCategory::Component)
+            .name("missing")
+            .time_series_type(TimeSeriesType::Deterministic)
+            .exact_features(Features::new())
+            .resolution(Period::Fixed(Duration::hours(1))),
+    )
+    .unwrap_err();
     assert!(
         matches!(err, TimeSeriesError::NotFound),
         "expected NotFound, got {err:?}"
@@ -1035,34 +1071,35 @@ fn resolve_deterministic_ambiguous_by_interval_errors() {
 
     // Resolving without an interval is ambiguous: two candidates differ only by
     // interval.
-    let err = store
-        .resolve_metadata(
-            3,
-            OwnerCategory::Component,
-            "dup",
-            Some(Period::Fixed(resolution)),
-            None,
-            Features::new(),
-            TimeSeriesType::Deterministic,
-        )
-        .unwrap_err();
+    let err = resolve_one(
+        &store,
+        ListFilter::new()
+            .owner_id(3)
+            .owner_category(OwnerCategory::Component)
+            .name("dup")
+            .time_series_type(TimeSeriesType::Deterministic)
+            .exact_features(Features::new())
+            .resolution(Period::Fixed(resolution)),
+    )
+    .unwrap_err();
     assert!(
         matches!(err, TimeSeriesError::InvalidParameter(_)),
         "ambiguous interval should error, got {err:?}"
     );
 
     // Specifying the interval disambiguates.
-    let d = store
-        .resolve_metadata(
-            3,
-            OwnerCategory::Component,
-            "dup",
-            Some(Period::Fixed(resolution)),
-            Some(Period::Fixed(Duration::hours(6))),
-            Features::new(),
-            TimeSeriesType::Deterministic,
-        )
-        .unwrap();
+    let d = resolve_one(
+        &store,
+        ListFilter::new()
+            .owner_id(3)
+            .owner_category(OwnerCategory::Component)
+            .name("dup")
+            .time_series_type(TimeSeriesType::Deterministic)
+            .exact_features(Features::new())
+            .resolution(Period::Fixed(resolution))
+            .interval(Period::Fixed(Duration::hours(6))),
+    )
+    .unwrap();
     assert_eq!(d.time_series_type, TimeSeriesType::Deterministic);
     assert_eq!(d.interval, Some(Period::Fixed(Duration::hours(6))));
 }
@@ -1244,12 +1281,16 @@ fn transform_honors_owner_category_and_resolution_filters() {
 
     // The daily source was never touched by any of the above.
     let daily_keys = store
-        .get_time_series_keys(2, OwnerCategory::Component)
+        .list_metadata(
+            ListFilter::new()
+                .owner_id(2)
+                .owner_category(OwnerCategory::Component),
+        )
         .unwrap();
     assert!(
         daily_keys
             .iter()
-            .all(|k| k.time_series_type() != TimeSeriesType::DeterministicSingleTimeSeries),
+            .all(|m| m.time_series_type != TimeSeriesType::DeterministicSingleTimeSeries),
         "the daily component must not have been transformed, got {daily_keys:?}"
     );
 }
@@ -1355,7 +1396,7 @@ fn count_array_references_counts_sts_and_dst() {
         f64_arr(vec![8], &dst_source_vals()),
         None,
     );
-    let meta = store.get_metadata(dst_key.identity()).unwrap();
+    let meta = store.get_metadata_by_id(dst_key).unwrap().unwrap();
     let (sts, dst) = store.count_array_references(&meta.data_hash).unwrap();
     assert_eq!(
         (sts, dst),
@@ -1411,10 +1452,13 @@ fn monthly_deterministic_round_trips_on_both_backends() {
         move |store, key, backend| {
             // The calendar periods survive the ISO-8601 encoding as `Months`,
             // never collapsing into an equivalent-looking `Fixed` span.
-            assert_eq!(key.key.resolution(), Some(Period::Months(1)), "{backend}");
-            assert_eq!(key.key.interval(), Some(Period::Months(1)), "{backend}");
+            let row = store.get_metadata_by_id(*key).unwrap().unwrap();
+            assert_eq!(row.resolution, Some(Period::Months(1)), "{backend}");
+            assert_eq!(row.interval, Some(Period::Months(1)), "{backend}");
 
-            let got = store.get_time_series(key.identity(), None).unwrap();
+            let got = store
+                .read_by_id(*key, infrastore_core::ReadWindow::full())
+                .unwrap();
             let det = got.as_deterministic().unwrap();
             assert_eq!(det.resolution, Period::Months(1), "{backend}");
             assert_eq!(det.horizon, Period::Months(3), "{backend}");
@@ -1453,7 +1497,8 @@ fn monthly_deterministic_window_selection_at_calendar_boundaries() {
         move |store, key, backend| {
             // Select windows 1..3 (Feb 15 and Mar 15).
             let got = store
-                .get_time_series(key.identity(), Some((w(2), w(4)).into()))
+                .read_by_ids_range(&[*key], (w(2), w(4)).into())
+                .map(|mut v| v.remove(0))
                 .unwrap();
             let det = got.as_deterministic().unwrap();
             assert_eq!(det.count, 2, "{backend}: two windows selected");
@@ -1471,14 +1516,16 @@ fn monthly_deterministic_window_selection_at_calendar_boundaries() {
 
             // The last window on its own boundary.
             let got = store
-                .get_time_series(key.identity(), Some((w(4), w(5)).into()))
+                .read_by_ids_range(&[*key], (w(4), w(5)).into())
+                .map(|mut v| v.remove(0))
                 .unwrap();
             assert_eq!(got.as_deterministic().unwrap().count, 1, "{backend}");
 
             // Off-grid start: the 20th is not a calendar step from the 15th.
             let off = Utc.with_ymd_and_hms(2024, 2, 20, 0, 0, 0).unwrap();
             let err = store
-                .get_time_series(key.identity(), Some((off, w(4)).into()))
+                .read_by_ids_range(&[*key], (off, w(4)).into())
+                .map(|mut v| v.remove(0))
                 .unwrap_err();
             assert!(
                 matches!(err, infrastore_core::TimeSeriesError::InvalidParameter(_)),
@@ -1489,10 +1536,8 @@ fn monthly_deterministic_window_selection_at_calendar_boundaries() {
             let past = Utc.with_ymd_and_hms(2024, 5, 15, 0, 0, 0).unwrap();
             assert!(
                 store
-                    .get_time_series(
-                        key.identity(),
-                        Some((past, past + Duration::days(31)).into())
-                    )
+                    .read_by_ids_range(&[*key], (past, past + Duration::days(31)).into())
+                    .map(|mut v| v.remove(0))
                     .is_err(),
                 "{backend}: start past the last window must be rejected"
             );
@@ -1520,7 +1565,8 @@ fn monthly_deterministic_end_of_month_initial_timestamp() {
     let feb29 = Utc.with_ymd_and_hms(2024, 2, 29, 0, 0, 0).unwrap();
     let apr = Utc.with_ymd_and_hms(2024, 4, 30, 0, 0, 0).unwrap();
     let got = store
-        .get_time_series(key.identity(), Some((feb29, apr).into()))
+        .read_by_ids_range(&[key], (feb29, apr).into())
+        .map(|mut v| v.remove(0))
         .unwrap();
     let det = got.as_deterministic().unwrap();
     assert_eq!(det.initial_timestamp, feb29, "clamped boundary is window 1");
@@ -1530,7 +1576,8 @@ fn monthly_deterministic_end_of_month_initial_timestamp() {
     let mar29 = Utc.with_ymd_and_hms(2024, 3, 29, 0, 0, 0).unwrap();
     assert!(
         store
-            .get_time_series(key.identity(), Some((mar29, apr).into()))
+            .read_by_ids_range(&[key], (mar29, apr).into())
+            .map(|mut v| v.remove(0))
             .is_err(),
         "an unclamped day-of-month must not be treated as a window boundary"
     );
@@ -1572,16 +1619,18 @@ fn transform_single_time_series_on_a_monthly_grid() {
     assert_eq!(n, 1, "one series transformed");
 
     let dst_keys = store
-        .list_keys(
+        .list_metadata(
             ListFilter::new().time_series_type(TimeSeriesType::DeterministicSingleTimeSeries),
         )
         .unwrap();
     assert_eq!(dst_keys.len(), 1);
-    assert_eq!(dst_keys[0].resolution(), Some(Period::Months(1)));
-    assert_eq!(dst_keys[0].interval(), Some(Period::Months(1)));
+    assert_eq!(dst_keys[0].resolution, Some(Period::Months(1)));
+    assert_eq!(dst_keys[0].interval, Some(Period::Months(1)));
 
     // Reads back as a Deterministic view (storage-level view, by design).
-    let got = store.get_time_series(dst_keys[0].identity(), None).unwrap();
+    let got = store
+        .read_by_id(dst_keys[0].id.unwrap(), infrastore_core::ReadWindow::full())
+        .unwrap();
     let det = got.as_deterministic().unwrap();
     assert_eq!(det.resolution, Period::Months(1));
     assert_eq!(det.horizon, Period::Months(3));
@@ -1605,7 +1654,8 @@ fn transform_single_time_series_on_a_monthly_grid() {
     let mar = Utc.with_ymd_and_hms(2024, 3, 15, 0, 0, 0).unwrap();
     let apr = Utc.with_ymd_and_hms(2024, 4, 15, 0, 0, 0).unwrap();
     let got = store
-        .get_time_series(dst_keys[0].identity(), Some((mar, apr).into()))
+        .read_by_ids_range(&[dst_keys[0].id.unwrap()], (mar, apr).into())
+        .map(|mut v| v.remove(0))
         .unwrap();
     let det = got.as_deterministic().unwrap();
     assert_eq!(det.count, 1);
@@ -1702,16 +1752,16 @@ fn monthly_and_fixed_periods_never_over_match() {
     }
 
     let monthly = store
-        .list_keys(ListFilter::new().resolution(Period::Months(1)))
+        .list_metadata(ListFilter::new().resolution(Period::Months(1)))
         .unwrap();
     assert_eq!(monthly.len(), 1);
-    assert_eq!(monthly[0].name(), "monthly");
+    assert_eq!(monthly[0].name, "monthly");
 
     let fixed = store
-        .list_keys(ListFilter::new().resolution(Period::fixed(Duration::days(30))))
+        .list_metadata(ListFilter::new().resolution(Period::fixed(Duration::days(30))))
         .unwrap();
     assert_eq!(fixed.len(), 1);
-    assert_eq!(fixed[0].name(), "thirty_day");
+    assert_eq!(fixed[0].name, "thirty_day");
 
     let mut resolutions = store.get_resolutions(None).unwrap();
     resolutions.sort_by_key(|p| p.to_iso8601());
@@ -1871,7 +1921,7 @@ fn deterministic_filter_matches_both_storage_forms() {
         },
         |store, _, backend| {
             let family = ListFilter::new().time_series_type(TimeSeriesType::Deterministic);
-            let keys = store.list_keys(family.clone()).unwrap();
+            let keys = store.list_metadata(family.clone()).unwrap();
             assert_eq!(keys.len(), 2, "{backend}: family list matches Det + DST");
             assert!(
                 store.has_any_time_series(family).unwrap(),
@@ -1924,7 +1974,9 @@ fn zero_interval_single_window_forecast_round_trips() {
             )
         },
         |store, key, backend| {
-            let got = store.get_time_series(key.identity(), None).unwrap();
+            let got = store
+                .read_by_id(*key, infrastore_core::ReadWindow::full())
+                .unwrap();
             let det = got.as_deterministic().unwrap();
             assert_eq!(det.count, 1, "{backend}: count");
             assert!(det.interval.is_zero(), "{backend}: zero interval preserved");
@@ -1932,7 +1984,8 @@ fn zero_interval_single_window_forecast_round_trips() {
 
             // The only valid windowed read starts at `initial`.
             let sliced = store
-                .get_time_series(key.identity(), Some((initial, initial + horizon).into()))
+                .read_by_ids_range(&[*key], (initial, initial + horizon).into())
+                .map(|mut v| v.remove(0))
                 .unwrap();
             assert_eq!(
                 sliced.as_deterministic().unwrap().count,
@@ -1941,10 +1994,11 @@ fn zero_interval_single_window_forecast_round_trips() {
             );
             assert!(
                 store
-                    .get_time_series(
-                        key.identity(),
-                        Some((initial + Duration::hours(1), initial + horizon).into()),
+                    .read_by_ids_range(
+                        &[*key],
+                        (initial + Duration::hours(1), initial + horizon).into()
                     )
+                    .map(|mut v| v.remove(0))
                     .is_err(),
                 "{backend}: an off-initial start is rejected"
             );
@@ -1987,13 +2041,15 @@ fn single_window_transform_stores_the_requested_interval_and_stays_idempotent() 
         1
     );
     let key = store
-        .list_keys(
+        .list_metadata(
             ListFilter::new().time_series_type(TimeSeriesType::DeterministicSingleTimeSeries),
         )
         .unwrap()
         .pop()
         .unwrap();
-    let got = store.get_time_series(key.identity(), None).unwrap();
+    let got = store
+        .read_by_id(key.id.unwrap(), infrastore_core::ReadWindow::full())
+        .unwrap();
     let det = got.as_deterministic().unwrap();
     assert_eq!(det.count, 1);
     assert_eq!(
@@ -2044,13 +2100,15 @@ fn single_window_transform_at_a_smaller_interval_keeps_it() {
         1
     );
     let key = store
-        .list_keys(
+        .list_metadata(
             ListFilter::new().time_series_type(TimeSeriesType::DeterministicSingleTimeSeries),
         )
         .unwrap()
         .pop()
         .unwrap();
-    let got = store.get_time_series(key.identity(), None).unwrap();
+    let got = store
+        .read_by_id(key.id.unwrap(), infrastore_core::ReadWindow::full())
+        .unwrap();
     let det = got.as_deterministic().unwrap();
     assert_eq!(det.count, 1);
     assert_eq!(det.interval, Period::from(interval));
@@ -2124,14 +2182,14 @@ fn normalize_single_window_stores_the_zero_interval() {
     );
 
     let key = store
-        .list_keys(
+        .list_metadata(
             ListFilter::new().time_series_type(TimeSeriesType::DeterministicSingleTimeSeries),
         )
         .unwrap()
         .pop()
         .unwrap();
     let det = store
-        .get_time_series(key.identity(), None)
+        .read_by_id(key.id.unwrap(), infrastore_core::ReadWindow::full())
         .unwrap()
         .as_deterministic()
         .unwrap()
@@ -2277,7 +2335,7 @@ fn a_divergent_static_grid_is_rejected() {
     );
     assert_eq!(
         store
-            .list_keys(
+            .list_metadata(
                 ListFilter::new().time_series_type(TimeSeriesType::DeterministicSingleTimeSeries)
             )
             .unwrap()
@@ -2368,7 +2426,7 @@ fn a_dry_run_validates_without_writing() {
     assert_eq!(outcome.sources, 1);
     assert_eq!(
         store
-            .list_keys(
+            .list_metadata(
                 ListFilter::new().time_series_type(TimeSeriesType::DeterministicSingleTimeSeries)
             )
             .unwrap()
@@ -2461,7 +2519,7 @@ fn a_failed_window_read_invalidates_the_block_cache() {
 
     // Take the array away, then read a window in a *different* block: the
     // failure clears the backing buffer.
-    store.remove_time_series(key.identity()).unwrap();
+    store.remove_by_ids(&[key]).unwrap();
     let far = initial + Duration::hours(2);
     assert!(
         store.forecast_read(&mut reader, far).is_err(),
@@ -2537,7 +2595,8 @@ fn a_zero_width_range_returns_an_empty_forecast_for_either_interval_encoding() {
 
     for (label, key) in [("zero interval", &single_key), ("positive", &many_key)] {
         let empty = store
-            .get_time_series(key.identity(), Some((initial, initial).into()))
+            .read_by_ids_range(&[*key], (initial, initial).into())
+            .map(|mut v| v.remove(0))
             .unwrap_or_else(|e| panic!("{label}: zero-width range should select nothing, got {e}"));
         assert_eq!(
             empty.as_deterministic().unwrap().count,
@@ -2548,10 +2607,16 @@ fn a_zero_width_range_returns_an_empty_forecast_for_either_interval_encoding() {
 
     // And the ordinary queries on the zero-interval forecast still return its
     // one window.
-    for range in [None, Some((initial, initial + Duration::hours(4)).into())] {
-        let got = store.get_time_series(single_key.identity(), range).unwrap();
-        assert_eq!(got.as_deterministic().unwrap().count, 1, "{range:?}");
-    }
+    let whole = store.read_by_id(single_key, ReadWindow::full()).unwrap();
+    assert_eq!(whole.as_deterministic().unwrap().count, 1);
+    let ranged = store
+        .read_by_ids_range(
+            &[single_key],
+            (initial, initial + Duration::hours(4)).into(),
+        )
+        .map(|mut v| v.remove(0))
+        .unwrap();
+    assert_eq!(ranged.as_deterministic().unwrap().count, 1);
 }
 
 /// Two forecasts holding identical bytes under different declared element types
@@ -2614,13 +2679,15 @@ fn identical_bytes_under_different_element_types_do_not_share_a_slot() {
 
     assert_eq!(reader.entries().len(), 2);
     for i in 0..reader.entries().len() {
-        let key = reader.entries()[i].key();
-        let declared = store.get_metadata(key.identity()).unwrap().element_type;
+        let row = store
+            .get_metadata_by_id(reader.entries()[i].id())
+            .unwrap()
+            .unwrap();
         assert_eq!(
             reader.entry_slot(i).element_type(),
-            declared,
+            row.element_type,
             "owner {} must read under its own declared element type",
-            key.owner_id()
+            row.owner_id
         );
     }
 }

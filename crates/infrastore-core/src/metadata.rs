@@ -13,6 +13,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, Savepoint, params};
 use serde::{Deserialize, Serialize};
 
+use crate::types::id::TimeSeriesId;
 use crate::types::period::Period;
 
 use crate::error::{Result, TimeSeriesError};
@@ -1101,7 +1102,7 @@ impl MetadataStore {
         )?;
         let result = insert_stmt
             .execute(params![
-                meta.id,
+                meta.id.map(|i| i.get()),
                 meta.owner_id,
                 meta.owner_type,
                 meta.owner_category.code(),
@@ -1151,7 +1152,7 @@ impl MetadataStore {
                 // sends a caller looking in the wrong place entirely.
                 return Err(match (err.extended_code, meta.id) {
                     (rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY, Some(id)) => {
-                        TimeSeriesError::DuplicateAssociationId(id)
+                        TimeSeriesError::DuplicateAssociationId(id.get())
                     }
                     (rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE, _) => {
                         TimeSeriesError::DuplicateTimeSeries
@@ -1264,19 +1265,6 @@ impl MetadataStore {
         Ok((out, problems))
     }
 
-    /// Delete an association by primary-key tuple. Returns the number of rows
-    /// deleted (0 if no match) and the data_hashes of the removed rows so the
-    /// caller can decide whether to drop the underlying array.
-    ///
-    /// A NULL `interval` in the query matches any interval (rather than only
-    /// rows whose stored interval is NULL). Attribute-based removal does not
-    /// thread an interval — a forecast's interval is derived from its data, not
-    /// supplied by the caller — so a forecast (which always stores a non-null
-    /// interval) would otherwise never match. `time_series_type`, `name`,
-    /// `resolution`, and `features_hash` still pin the row down; to target a
-    /// single interval among otherwise-identical rows, remove by full key
-    /// identity (which carries the exact interval).
- 
     /// Delete the one association filed under `id`. Returns its data_hash and
     /// stored type, or `None` if the catalog holds no such row — the caller
     /// decides whether a stale reference is an error.
@@ -1359,13 +1347,29 @@ impl MetadataStore {
     /// [`TimeSeriesError::DuplicateTimeSeries`].
     /// Rename the association filed under `id`. One row by primary key, so no
     /// predicate can be wider than the caller asked for.
+    /// Move one row to `new_name`, by primary key.
+    ///
+    /// The destination name may already be taken by a sibling sharing the rest
+    /// of the identity, and the uniqueness index catches that. It has to be
+    /// reported as [`TimeSeriesError::DuplicateTimeSeries`], the same as the
+    /// insert path does: a raw `SqliteFailure` naming an index is a caller's
+    /// problem stated in the catalog's vocabulary, and nothing above this can
+    /// classify it.
     pub fn rename_by_id(tx: &Connection, id: i64, new_name: &str) -> Result<usize> {
-        Ok(tx
+        match tx
             .prepare_cached("UPDATE time_series_associations SET name = ?2 WHERE id = ?1")?
-            .execute(rusqlite::params![id, new_name])?)
+            .execute(rusqlite::params![id, new_name])
+        {
+            Ok(n) => Ok(n),
+            Err(rusqlite::Error::SqliteFailure(err, _))
+                if err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE =>
+            {
+                Err(TimeSeriesError::DuplicateTimeSeries)
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
- 
     /// Delete every association in the store. Returns the removed data_hashes.
     pub fn delete_all(tx: &Connection) -> Result<Vec<[u8; 32]>> {
         let bytes_list: Vec<Vec<u8>> = collect_data_hashes(
@@ -1669,7 +1673,6 @@ impl MetadataStore {
             .collect()
     }
 
- 
     /// True iff at least one association matches `filter` — the existence
     /// probe behind [`crate::Store::has_time_series`] and
     /// [`crate::Store::has_any_time_series`], both of which consumers call in
@@ -1784,6 +1787,22 @@ impl MetadataStore {
         ids: &[i64],
         vectors: &dyn StorageBackend,
     ) -> Result<Vec<TimeSeriesMetadata>> {
+        self.list_by_ids_with(ids, |f| self.list(f, vectors))
+    }
+
+    /// [`Self::list_by_ids`] without loading each irregular row's timestamp
+    /// vector — the identity-question form, for a caller that wants the rows
+    /// rather than the series.
+    pub fn list_by_ids_without_timestamps(&self, ids: &[i64]) -> Result<Vec<TimeSeriesMetadata>> {
+        self.list_by_ids_with(ids, |f| self.list_without_timestamps(f))
+    }
+
+    /// The chunking shared by both by-id listings.
+    fn list_by_ids_with(
+        &self,
+        ids: &[i64],
+        mut list: impl FnMut(&MetadataFilter) -> Result<Vec<TimeSeriesMetadata>>,
+    ) -> Result<Vec<TimeSeriesMetadata>> {
         // Each id is one bound `?`, and `list_inner` binds the predicate more
         // than once per statement, so a model-sized set (tens of thousands of
         // references) would trip SQLite's variable limit — and every distinct
@@ -1795,13 +1814,10 @@ impl MetadataStore {
         sorted.dedup();
         let mut rows = Vec::with_capacity(sorted.len());
         for chunk in sorted.chunks(IDS_PER_QUERY) {
-            rows.extend(self.list(
-                &MetadataFilter {
-                    ids: Some(chunk.to_vec()),
-                    ..Default::default()
-                },
-                vectors,
-            )?);
+            rows.extend(list(&MetadataFilter {
+                ids: Some(chunk.to_vec()),
+                ..Default::default()
+            })?);
         }
         Ok(rows)
     }
@@ -1820,7 +1836,6 @@ impl MetadataStore {
         Ok(found.is_some())
     }
 
- 
     pub fn distinct_resolutions(&self, ts_type: Option<TimeSeriesType>) -> Result<Vec<Period>> {
         let mut sql = String::from(
             "SELECT DISTINCT resolution FROM time_series_associations
@@ -3060,7 +3075,7 @@ impl MetaRow {
             application_data: self.application_data,
             // A row that came out of the catalog always has an id; `None` is
             // reserved for the write direction, where it means "assign one".
-            id: Some(self.id),
+            id: Some(TimeSeriesId(self.id)),
         }
     }
 }

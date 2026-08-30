@@ -74,7 +74,7 @@ The read benchmark simulates the access pattern of an energy-simulation step loo
 ```
 for t in 0..T:
     for each component key:
-        store.get_time_series(key, time_range=(t₀ + t·Δt, t₀ + (t+1)·Δt))
+        store.read_by_ids_range(ids, (t₀ + t·Δt, t₀ + (t+1)·Δt))
 ```
 
 For on-disk stores the binary flushes, drops, and reopens the store read-only before the timed loop.
@@ -125,8 +125,8 @@ The key spans emitted by `infrastore-core`:
 | `add_time_series_bulk`    | `Store`      | `count` — number of items in the bulk request    |
 | `get_time_series`         | `Store`      | `owner`, `name`, `has_time_range`                |
 | `copy_time_series`        | `Store`      | `owner`, `name` — of the source series           |
-| `remove_time_series`      | `Store`      | `owner`, `name`                                  |
-| `bulk_read`               | `Store`      | `count` — number of keys read in one pass        |
+| `remove_by_ids`           | `Store`      | `ids`                                            |
+| `read_by_ids`             | `Store`      | `count` — number of keys read in one pass        |
 | `put_array`               | HDF5 backend | `bytes`, `packed`                                |
 | `put_packed`              | HDF5 backend | `bytes`                                          |
 | `put_packed_block`        | HDF5 backend | `n` — series written in one batch-sized block    |

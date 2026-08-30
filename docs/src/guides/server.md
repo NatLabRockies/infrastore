@@ -58,19 +58,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let counts = client.get_counts().await?;
     println!("{} static series", counts.static_time_series);
 
-    // The owner is the (owner_id, owner_category) pair.
-    let keys = client.get_time_series_keys(42, OwnerCategory::Component).await?;
-    if let Some(key) = keys.first() {
-        let data = client.get_time_series(key, None).await?;
+    // Identify, then act. The owner is the (owner_id, owner_category) pair, and
+    // every row carries the catalog id that addresses it.
+    let rows = client
+        .list_metadata(
+            Some(42),
+            Some(OwnerCategory::Component),
+            None, None, None, None, None, None, None, None,
+        )
+        .await?;
+    if let Some(id) = rows.first().and_then(|m| m.id) {
+        let data = client.read_by_id(id, None).await?;
         println!("read {} values", data.as_single().unwrap().length);
     }
     Ok(())
 }
 ```
 
-Available methods: `connect`, `from_channel`, `list_time_series`, `get_time_series`,
-`get_time_series_keys`, `get_resolutions`, `get_counts`, `get_forecast_parameters`,
-`has_time_series`, `verify_integrity`.
+A series is addressed by its catalog **association id**, never by a key: `list_metadata` (or
+`list_metadata_by_ids`, for ids a caller already recorded) hands back rows carrying `id`, and
+`read_by_id` / `read_by_ids` / `get_metadata_by_id` take it. `association_exists` answers whether a
+stored reference still resolves without fetching its row — the cheap way to validate a whole model
+on load.
+
+Available methods: `connect`, `from_channel`, `list_metadata`, `list_metadata_by_ids`,
+`get_metadata_by_id`, `association_exists`, `has_any_time_series`, `read_by_id`, `read_by_ids`,
+`get_resolutions`, `get_intervals`, `get_counts`, `counts_by_type`, `time_series_counts_detailed`,
+`get_forecast_parameters`, `list_owner_ids`, `static_summary`, `forecast_summary`,
+`check_static_consistency`, `verify_integrity`.
 
 ## Authentication
 

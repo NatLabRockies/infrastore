@@ -179,7 +179,7 @@ const _SUPPLEMENTAL_FILTER_API = (
         :infrastore_store_has_supplemental_attribute_association, :bool, nothing),
     # `:owned_rows`, not `:rows`: a no-filter call exports the whole table, so
     # this one export follows the owned-string convention instead of
-    # probe-then-fetch, matching the FFI's `infrastore_store_list_keys` and
+    # probe-then-fetch, matching the FFI's `infrastore_store_list_metadata` and
     # friends (see `crates/infrastore-ffi/src/lib.rs`).
     (:list_supplemental_attribute_associations,
         :infrastore_store_list_supplemental_attribute_associations, :owned_rows, nothing),

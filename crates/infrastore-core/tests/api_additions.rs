@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{
-    AddRequest, Deterministic, FeatureValue, Features, KeyIdentity, ListFilter, OwnerCategory,
-    Period, SingleTimeSeries, TimeSeriesData, TimeSeriesError, TimeSeriesKey, TimeSeriesMetadata,
+    AddRequest, Deterministic, FeatureValue, Features, ListFilter, OwnerCategory, Period,
+    SingleTimeSeries, TimeSeriesData, TimeSeriesError, TimeSeriesId, TimeSeriesMetadata,
     TimeSeriesType, TypedArray, UnitSystem, create_store,
 };
 
@@ -65,7 +65,7 @@ fn store_add_preserves_application_data() {
         )
         .unwrap();
 
-    let meta = store.get_metadata(key.identity()).unwrap();
+    let meta = store.get_metadata_by_id(key).unwrap().unwrap();
     assert_eq!(
         meta.application_data.as_deref(),
         Some("QuadraticFunctionData")
@@ -96,7 +96,8 @@ fn bulk_push_preserves_application_data() {
     assert_eq!(keys.len(), 2);
     assert_eq!(
         store
-            .get_metadata(keys[0].identity())
+            .get_metadata_by_id(keys[0])
+            .unwrap()
             .unwrap()
             .application_data
             .as_deref(),
@@ -104,7 +105,8 @@ fn bulk_push_preserves_application_data() {
     );
     assert_eq!(
         store
-            .get_metadata(keys[1].identity())
+            .get_metadata_by_id(keys[1])
+            .unwrap()
             .unwrap()
             .application_data
             .as_deref(),
@@ -180,7 +182,7 @@ fn write_paths_reject_reserved_feature_names() {
         assert_reserved_err(err, name);
 
         assert!(
-            store.list_keys(ListFilter::new()).unwrap().is_empty(),
+            store.list_metadata(ListFilter::new()).unwrap().is_empty(),
             "{name}: a rejected add must not write anything"
         );
     }
@@ -211,7 +213,7 @@ fn a_reserved_feature_name_rolls_back_the_whole_batch() {
             .unwrap_err(),
         "horizon",
     );
-    assert!(store.list_keys(ListFilter::new()).unwrap().is_empty());
+    assert!(store.list_metadata(ListFilter::new()).unwrap().is_empty());
 }
 
 /// The rule is exact-match: an ordinary feature that merely resembles a field
@@ -236,7 +238,7 @@ fn near_miss_feature_names_are_accepted() {
         )
         .unwrap();
     assert_eq!(
-        store.get_metadata(key.identity()).unwrap().features,
+        store.get_metadata_by_id(key).unwrap().unwrap().features,
         features
     );
 }
@@ -258,7 +260,7 @@ fn remove_by_filter_empty_match_is_ok_zero() {
         .remove_by_filter(ListFilter::new().owner_id(999))
         .unwrap();
     assert_eq!(removed, 0);
-    assert_eq!(store.list_keys(ListFilter::new()).unwrap().len(), 1);
+    assert_eq!(store.list_metadata(ListFilter::new()).unwrap().len(), 1);
 }
 
 // ---- 1.6 time-sliced bulk read --------------------------------------------
@@ -284,11 +286,14 @@ fn bulk_read_range_matches_per_key_get_time_series() {
         .unwrap();
 
     let range = (t0() + Duration::hours(2), t0() + Duration::hours(5));
-    let keys = [k1.identity(), k2.identity()];
+    let keys = [k1, k2];
 
-    let sliced = store.bulk_read_range(&keys, Some(range.into())).unwrap();
+    let sliced = store.read_by_ids_range(&keys, range.into()).unwrap();
     for (i, k) in keys.iter().enumerate() {
-        let per_key = store.get_time_series(k, Some(range.into())).unwrap();
+        let per_key = store
+            .read_by_ids_range(&[*k], range.into())
+            .map(|mut v| v.remove(0))
+            .unwrap();
         assert_eq!(
             sliced[i], per_key,
             "sliced bulk differs from per-key at {i}"
@@ -296,8 +301,15 @@ fn bulk_read_range_matches_per_key_get_time_series() {
     }
 
     // None behaves exactly like bulk_read.
-    let full = store.bulk_read_range(&keys, None).unwrap();
-    assert_eq!(full, store.bulk_read(&keys).unwrap());
+    let full = store
+        .read_by_ids(&keys, infrastore_core::ReadWindow::full())
+        .unwrap();
+    assert_eq!(
+        full,
+        store
+            .read_by_ids(&keys, infrastore_core::ReadWindow::full())
+            .unwrap()
+    );
 }
 
 // ---- 1.7 discovery enumerations -------------------------------------------
@@ -305,19 +317,12 @@ fn bulk_read_range_matches_per_key_get_time_series() {
 // ---- 1.8 rename ------------------------------------------------------------
 
 #[test]
-fn rename_missing_key_is_not_found() {
+fn rename_stale_id_is_not_found() {
     let mut store = create_store(None, true).unwrap();
-    let missing = KeyIdentity {
-        owner_id: 1,
-        owner_category: OwnerCategory::Component,
-        time_series_type: TimeSeriesType::SingleTimeSeries,
-        name: "nope".into(),
-        resolution: Some(Period::fixed(Duration::hours(1))),
-        interval: None,
-        features: Features::new(),
-    };
+    // Ids are never reissued, so one the catalog never minted stays stale.
+    let missing = infrastore_core::TimeSeriesId(999);
     assert!(matches!(
-        store.rename_time_series(&missing, "x"),
+        store.rename_time_series(missing, "x"),
         Err(TimeSeriesError::NotFound)
     ));
 }
@@ -352,13 +357,15 @@ fn metadata_and_data_json_round_trip() {
         ))
         .unwrap();
 
-    let meta = store.get_metadata(key.identity()).unwrap();
+    let meta = store.get_metadata_by_id(key).unwrap().unwrap();
     let json = serde_json::to_string(&meta).unwrap();
     let back: TimeSeriesMetadata = serde_json::from_str(&json).unwrap();
     assert_eq!(meta, back);
 
     // Each TimeSeriesData variant round-trips.
-    let data = store.get_time_series(key.identity(), None).unwrap();
+    let data = store
+        .read_by_id(key, infrastore_core::ReadWindow::full())
+        .unwrap();
     let d_json = serde_json::to_string(&data).unwrap();
     let d_back: TimeSeriesData = serde_json::from_str(&d_json).unwrap();
     assert_eq!(data, d_back);
@@ -408,7 +415,7 @@ fn unit_system_serde_matches_its_as_str_spelling() {
 // Series stay 3–4 steps long to keep the disk variants fast.
 // ===========================================================================
 
-fn add_sts(store: &mut infrastore_core::Store, owner: i64, name: &str, base: f64) -> TimeSeriesKey {
+fn add_sts(store: &mut infrastore_core::Store, owner: i64, name: &str, base: f64) -> TimeSeriesId {
     store
         .add(AddRequest::new(
             owner,
@@ -417,7 +424,6 @@ fn add_sts(store: &mut infrastore_core::Store, owner: i64, name: &str, base: f64
             TimeSeriesData::SingleTimeSeries(sts(name, base, 4)),
         ))
         .unwrap()
-        .key
 }
 
 #[test]
@@ -425,18 +431,27 @@ fn rename_moves_the_association() {
     for_each_backend_mut(
         |store| add_sts(store, 1, "old", 10.0),
         |store, key, backend| {
-            let new_key = store.rename_time_series(key.identity(), "new").unwrap();
-            assert_eq!(new_key.name(), "new", "{backend}");
-            assert!(
-                matches!(
-                    store.get_metadata(key.identity()),
-                    Err(TimeSeriesError::NotFound)
-                ),
-                "{backend}: the old key must be gone"
+            let new_key = store.rename_time_series(*key, "new").unwrap();
+            assert_eq!(new_key.name, "new", "{backend}");
+            // A rename moves the name, not the reference: the id is the same
+            // afterwards, so anything holding it keeps working. This is the
+            // opposite of the old key-addressed behaviour, where the name was
+            // part of the address and a rename retired it.
+            assert_eq!(new_key.id, Some(*key), "{backend}");
+            assert_eq!(
+                store
+                    .get_metadata_by_id(*key)
+                    .unwrap()
+                    .expect("the id still resolves")
+                    .name,
+                "new",
+                "{backend}"
             );
             // The renamed series still reads its original values: a rename must
             // not disturb the array it points at.
-            let got = store.get_time_series(new_key.identity(), None).unwrap();
+            let got = store
+                .read_by_id(*key, infrastore_core::ReadWindow::full())
+                .unwrap();
             assert_eq!(
                 got.as_single().unwrap().data.to_f64_vec().unwrap(),
                 vec![10.0, 11.0, 12.0, 13.0],
@@ -456,7 +471,7 @@ fn rename_collision_is_duplicate() {
             a
         },
         |store, a, backend| {
-            let err = store.rename_time_series(a.identity(), "b").unwrap_err();
+            let err = store.rename_time_series(*a, "b").unwrap_err();
             assert!(
                 matches!(err, TimeSeriesError::DuplicateTimeSeries),
                 "{backend}: got {err:?}"
@@ -481,12 +496,17 @@ fn renaming_one_sharer_of_an_array_leaves_the_other_readable() {
         },
         |store, (a, b), backend| {
             assert_eq!(store.num_distinct_arrays().unwrap(), 1, "{backend}");
-            let renamed = store.rename_time_series(a.identity(), "renamed").unwrap();
+            let renamed = store.rename_time_series(*a, "renamed").unwrap();
             assert_eq!(store.num_distinct_arrays().unwrap(), 1, "{backend}");
 
             let expected = vec![5.0, 6.0, 7.0, 8.0];
-            for (key, who) in [(&renamed, "renamed"), (b, "untouched")] {
-                let got = store.get_time_series(key.identity(), None).unwrap();
+            // A rename moves the name, not the reference: `a` still addresses
+            // the renamed row.
+            assert_eq!(renamed.id, Some(*a));
+            for (key, who) in [(*a, "renamed"), (*b, "untouched")] {
+                let got = store
+                    .read_by_id(key, infrastore_core::ReadWindow::full())
+                    .unwrap();
                 assert_eq!(
                     got.as_single().unwrap().data.to_f64_vec().unwrap(),
                     expected,
@@ -494,7 +514,7 @@ fn renaming_one_sharer_of_an_array_leaves_the_other_readable() {
                 );
             }
             // Both still reference the same array.
-            let meta = store.get_metadata(renamed.identity()).unwrap();
+            let meta = store.get_metadata_by_id(*a).unwrap().unwrap();
             let (sts_refs, dst_refs) = store.count_array_references(&meta.data_hash).unwrap();
             assert_eq!((sts_refs, dst_refs), (2, 0), "{backend}");
         },
@@ -516,15 +536,19 @@ fn remove_by_filter_removes_matching_and_reclaims_arrays() {
                 .unwrap();
             assert_eq!(removed, 1, "{backend}");
             assert_eq!(
-                store.list_keys(ListFilter::new()).unwrap().len(),
+                store.list_metadata(ListFilter::new()).unwrap().len(),
                 2,
                 "{backend}"
             );
             assert_eq!(store.num_distinct_arrays().unwrap(), 2, "{backend}");
             // The survivors still read correctly after the reclaim.
             for owner in [1i64, 3] {
-                let keys = store.list_keys(ListFilter::new().owner_id(owner)).unwrap();
-                let got = store.get_time_series(keys[0].identity(), None).unwrap();
+                let keys = store
+                    .list_metadata(ListFilter::new().owner_id(owner))
+                    .unwrap();
+                let got = store
+                    .read_by_id(keys[0].id.unwrap(), infrastore_core::ReadWindow::full())
+                    .unwrap();
                 let base = owner as f64 * 10.0;
                 assert_eq!(
                     got.as_single().unwrap().data.to_f64_vec().unwrap(),
@@ -541,28 +565,20 @@ fn remove_bulk_rolls_back_on_missing_key() {
     for_each_backend_mut(
         |store| add_sts(store, 1, "load", 10.0),
         |store, k1, backend| {
-            let missing = KeyIdentity {
-                owner_id: 999,
-                owner_category: OwnerCategory::Component,
-                time_series_type: TimeSeriesType::SingleTimeSeries,
-                name: "nope".into(),
-                resolution: Some(Period::fixed(Duration::hours(1))),
-                interval: None,
-                features: Features::new(),
-            };
-            let err = store
-                .remove_time_series_bulk(&[k1.identity(), &missing])
-                .unwrap_err();
+            let missing = infrastore_core::TimeSeriesId(999);
+            let err = store.remove_by_ids(&[*k1, missing]).unwrap_err();
             assert!(matches!(err, TimeSeriesError::NotFound), "{backend}");
-            // All-or-nothing: the valid key and its array both survive.
+            // All-or-nothing: the live id and its array both survive.
             assert_eq!(
-                store.list_keys(ListFilter::new()).unwrap().len(),
+                store.list_metadata(ListFilter::new()).unwrap().len(),
                 1,
                 "{backend}"
             );
             assert_eq!(store.num_distinct_arrays().unwrap(), 1, "{backend}");
             assert!(
-                store.get_time_series(k1.identity(), None).is_ok(),
+                store
+                    .read_by_id(*k1, infrastore_core::ReadWindow::full())
+                    .is_ok(),
                 "{backend}"
             );
         },
@@ -581,23 +597,17 @@ fn remove_bulk_reclaims_a_shared_array_only_when_the_last_reference_goes() {
             assert_eq!(store.num_distinct_arrays().unwrap(), 1, "{backend}");
 
             // Removing one leaves the array alive for the other.
-            assert_eq!(
-                store.remove_time_series_bulk(&[k1.identity()]).unwrap(),
-                1,
-                "{backend}"
-            );
+            assert_eq!(store.remove_by_ids(&[*k1]).unwrap(), 1, "{backend}");
             assert_eq!(store.num_distinct_arrays().unwrap(), 1, "{backend}");
             assert!(
-                store.get_time_series(k2.identity(), None).is_ok(),
+                store
+                    .read_by_id(*k2, infrastore_core::ReadWindow::full())
+                    .is_ok(),
                 "{backend}"
             );
 
             // Removing the last reference reclaims it.
-            assert_eq!(
-                store.remove_time_series_bulk(&[k2.identity()]).unwrap(),
-                1,
-                "{backend}"
-            );
+            assert_eq!(store.remove_by_ids(&[*k2]).unwrap(), 1, "{backend}");
             assert_eq!(store.num_distinct_arrays().unwrap(), 0, "{backend}");
         },
     );
@@ -697,7 +707,7 @@ fn discovery_enumerations_on_an_empty_store() {
                 "{backend}"
             );
             assert!(
-                store.list_keys(ListFilter::new()).unwrap().is_empty(),
+                store.list_metadata(ListFilter::new()).unwrap().is_empty(),
                 "{backend}"
             );
             assert_eq!(store.num_distinct_arrays().unwrap(), 0, "{backend}");
@@ -711,21 +721,24 @@ fn copy_time_series_shares_the_array() {
         |store| add_sts(store, 1, "load", 7.0),
         |store, src, backend| {
             let copy = store
-                .copy_time_series(src.identity(), 2, "Generator", Some("load_copy"))
+                .copy_time_series(*src, 2, "Generator", Some("load_copy"))
                 .unwrap();
-            assert_eq!(copy.key.name(), "load_copy", "{backend}");
+            assert_ne!(copy, *src, "a copy is its own row, with its own id");
 
             // No array data was duplicated.
             assert_eq!(store.num_distinct_arrays().unwrap(), 1, "{backend}");
-            let src_meta = store.get_metadata(src.identity()).unwrap();
-            let copy_meta = store.get_metadata(copy.identity()).unwrap();
+            let src_meta = store.get_metadata_by_id(*src).unwrap().unwrap();
+            let copy_meta = store.get_metadata_by_id(copy).unwrap().unwrap();
             assert_eq!(copy_meta.data_hash, src_meta.data_hash, "{backend}");
             assert_eq!(copy_meta.owner_id, 2, "{backend}");
 
             // Both read the same values.
             let expected = vec![7.0, 8.0, 9.0, 10.0];
-            for key in [src, &copy.key] {
-                let got = store.get_time_series(key.identity(), None).unwrap();
+            assert_eq!(copy_meta.name, "load_copy", "{backend}");
+            for key in [*src, copy] {
+                let got = store
+                    .read_by_id(key, infrastore_core::ReadWindow::full())
+                    .unwrap();
                 assert_eq!(
                     got.as_single().unwrap().data.to_f64_vec().unwrap(),
                     expected,
@@ -735,7 +748,7 @@ fn copy_time_series_shares_the_array() {
 
             // Copying onto an existing identity is a duplicate.
             let err = store
-                .copy_time_series(src.identity(), 2, "Generator", Some("load_copy"))
+                .copy_time_series(*src, 2, "Generator", Some("load_copy"))
                 .unwrap_err();
             assert!(
                 matches!(err, TimeSeriesError::DuplicateTimeSeries),
@@ -743,9 +756,11 @@ fn copy_time_series_shares_the_array() {
             );
 
             // Removing the source leaves the copy readable (shared array kept).
-            store.remove_time_series(src.identity()).unwrap();
+            store.remove_by_ids(&[*src]).unwrap();
             assert_eq!(store.num_distinct_arrays().unwrap(), 1, "{backend}");
-            let got = store.get_time_series(copy.identity(), None).unwrap();
+            let got = store
+                .read_by_id(copy, infrastore_core::ReadWindow::full())
+                .unwrap();
             assert_eq!(
                 got.as_single().unwrap().data.to_f64_vec().unwrap(),
                 expected,
@@ -759,56 +774,64 @@ fn copy_time_series_shares_the_array() {
 // Error and accessor paths with no coverage
 // ===========================================================================
 
-/// A `KeyIdentity` that matches nothing.
-fn missing_identity() -> KeyIdentity {
-    KeyIdentity {
-        owner_id: 999,
-        owner_category: OwnerCategory::Component,
-        time_series_type: TimeSeriesType::SingleTimeSeries,
-        name: "nope".into(),
-        resolution: Some(Period::fixed(Duration::hours(1))),
-        interval: None,
-        features: Features::new(),
-    }
+/// An id the catalog has never minted. Ids are never reissued, so a reference
+/// that names no row stays stale rather than coming to mean a different series.
+fn missing_identity() -> infrastore_core::TimeSeriesId {
+    infrastore_core::TimeSeriesId(999)
 }
 
 #[test]
-fn reading_a_missing_key_is_not_found() {
+fn reading_a_stale_id_is_not_found() {
     let mut store = create_store(None, true).unwrap();
     let missing = missing_identity();
     assert!(matches!(
-        store.get_time_series(&missing, None),
+        store.read_by_id(missing, infrastore_core::ReadWindow::full()),
         Err(TimeSeriesError::NotFound)
     ));
     // A time_range does not change the classification.
     assert!(matches!(
-        store.get_time_series(&missing, Some((t0(), t0() + Duration::hours(2)).into())),
+        store
+            .read_by_ids_range(&[missing], (t0(), t0() + Duration::hours(2)).into())
+            .map(|mut v| v.remove(0)),
         Err(TimeSeriesError::NotFound)
     ));
     assert!(matches!(
-        store.get_metadata(&missing),
+        store.remove_by_ids(&[missing]),
         Err(TimeSeriesError::NotFound)
     ));
-    assert!(!store.has_time_series(&missing).unwrap());
+    // A bulk read is all-or-nothing on a stale member.
     assert!(matches!(
-        store.remove_time_series(&missing),
+        store.read_by_ids(&[missing], infrastore_core::ReadWindow::full()),
         Err(TimeSeriesError::NotFound)
     ));
-    // bulk_read is all-or-nothing on a missing member.
     assert!(matches!(
-        store.bulk_read(&[&missing]),
+        store.list_metadata_by_ids(&[missing]),
         Err(TimeSeriesError::NotFound)
     ));
+
+    // The two that answer instead of failing: a consumer validating references
+    // it stored earlier is asking a question, and a stale one is an answer.
+    assert_eq!(store.get_metadata_by_id(missing).unwrap(), None);
+    assert!(!store.association_exists(missing).unwrap());
 }
 
 #[test]
-fn reading_with_the_wrong_time_series_type_is_not_found() {
+fn selecting_the_wrong_time_series_type_matches_nothing() {
     // The stored row is a SingleTimeSeries. `time_series_type` is part of the
-    // identity, so naming a different type addresses a series that does not
-    // exist — it is a lookup miss, not a decode error.
+    // identity, so naming a different type selects a series that does not
+    // exist. A read cannot express this any more -- an id names one concrete
+    // row, whatever its type -- so the mismatch now lives entirely in the
+    // identify half, which is where it belongs.
     let mut store = create_store(None, true).unwrap();
     let key = add_sts(&mut store, 1, "load", 10.0);
 
+    let by_type = |t| {
+        ListFilter::new()
+            .owner_id(1)
+            .owner_category(OwnerCategory::Component)
+            .name("load")
+            .time_series_type(t)
+    };
     for wrong in [
         TimeSeriesType::NonSequentialTimeSeries,
         TimeSeriesType::Deterministic,
@@ -816,20 +839,28 @@ fn reading_with_the_wrong_time_series_type_is_not_found() {
         TimeSeriesType::Probabilistic,
         TimeSeriesType::Scenarios,
     ] {
-        let mut ident = key.identity().clone();
-        ident.time_series_type = wrong;
         assert!(
-            matches!(
-                store.get_time_series(&ident, None),
-                Err(TimeSeriesError::NotFound)
-            ),
-            "reading as {wrong:?} should miss"
+            store.list_metadata(by_type(wrong)).unwrap().is_empty(),
+            "selecting as {wrong:?} should miss"
         );
-        assert!(!store.has_time_series(&ident).unwrap(), "{wrong:?}");
+        assert!(
+            !store.has_any_time_series(by_type(wrong)).unwrap(),
+            "{wrong:?}"
+        );
     }
 
-    // The correct type still reads.
-    assert!(store.get_time_series(key.identity(), None).is_ok());
+    // The correct type selects it, and the id still reads whatever the filter
+    // said, because a read no longer carries a type at all.
+    let rows = store
+        .list_metadata(by_type(TimeSeriesType::SingleTimeSeries))
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, Some(key));
+    assert!(
+        store
+            .read_by_id(key, infrastore_core::ReadWindow::full())
+            .is_ok()
+    );
 }
 
 #[test]
@@ -894,14 +925,19 @@ fn existence_probes_distinguish_features() {
         )
         .unwrap();
 
-    // The keyed probe matches the feature set by content hash, so a key that
-    // differs only in features is a miss.
-    assert!(store.has_time_series(key.identity()).unwrap());
-    let mut wrong = key.identity().clone();
-    wrong.features = Features::new();
-    assert!(!store.has_time_series(&wrong).unwrap());
-    wrong.features = low.clone();
-    assert!(!store.has_time_series(&wrong).unwrap());
+    // The exact-features probe matches the set by content hash, so a request
+    // that differs only in features is a miss.
+    let exact = |f| {
+        ListFilter::new()
+            .owner_id(1)
+            .owner_category(OwnerCategory::Component)
+            .name("load")
+            .exact_features(f)
+    };
+    assert!(store.has_any_time_series(exact(high.clone())).unwrap());
+    assert!(!store.has_any_time_series(exact(Features::new())).unwrap());
+    assert!(!store.has_any_time_series(exact(low.clone())).unwrap());
+    assert!(store.association_exists(key).unwrap());
 
     // The filtered probe's `features` predicate is a subset match. A complete
     // set is answered by the exact-hash fast path; a wrong value falls through
@@ -1030,17 +1066,27 @@ fn empty_key_lists_are_no_ops_not_errors() {
     let mut store = create_store(None, true).unwrap();
     add_sts(&mut store, 1, "load", 10.0);
 
-    assert!(store.bulk_read(&[]).unwrap().is_empty());
-    assert!(store.bulk_read_range(&[], None).unwrap().is_empty());
     assert!(
         store
-            .bulk_read_range(&[], Some((t0(), t0() + Duration::hours(2)).into()))
+            .read_by_ids(&[], infrastore_core::ReadWindow::full())
             .unwrap()
             .is_empty()
     );
-    assert_eq!(store.remove_time_series_bulk(&[]).unwrap(), 0);
+    assert!(
+        store
+            .read_by_ids(&[], infrastore_core::ReadWindow::full())
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .read_by_ids_range(&[], (t0(), t0() + Duration::hours(2)).into())
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(store.remove_by_ids(&[]).unwrap(), 0);
     // Nothing was disturbed.
-    assert_eq!(store.list_keys(ListFilter::new()).unwrap().len(), 1);
+    assert_eq!(store.list_metadata(ListFilter::new()).unwrap().len(), 1);
     assert_eq!(store.num_distinct_arrays().unwrap(), 1);
 }
 
@@ -1048,7 +1094,7 @@ fn empty_key_lists_are_no_ops_not_errors() {
 fn get_array_by_hash_miss_is_not_found() {
     let mut store = create_store(None, true).unwrap();
     let key = add_sts(&mut store, 1, "load", 10.0);
-    let meta = store.get_metadata(key.identity()).unwrap();
+    let meta = store.get_metadata_by_id(key).unwrap().unwrap();
 
     // The real hash resolves.
     let arr = store.get_array_by_hash(&meta.data_hash).unwrap();
@@ -1077,24 +1123,26 @@ fn replace_owner_moves_every_series_of_that_owner() {
 
             assert!(
                 store
-                    .list_keys(ListFilter::new().owner_id(1))
+                    .list_metadata(ListFilter::new().owner_id(1))
                     .unwrap()
                     .is_empty(),
                 "{backend}: the old owner has nothing left"
             );
             let mut names: Vec<String> = store
-                .list_keys(ListFilter::new().owner_id(7))
+                .list_metadata(ListFilter::new().owner_id(7))
                 .unwrap()
                 .iter()
-                .map(|k| k.name().to_string())
+                .map(|k| k.name.to_string())
                 .collect();
             names.sort();
             assert_eq!(names, vec!["load", "voltage"], "{backend}");
 
             // Owner 2 untouched, and its values still read.
-            let other = store.list_keys(ListFilter::new().owner_id(2)).unwrap();
+            let other = store.list_metadata(ListFilter::new().owner_id(2)).unwrap();
             assert_eq!(other.len(), 1, "{backend}");
-            let got = store.get_time_series(other[0].identity(), None).unwrap();
+            let got = store
+                .read_by_id(other[0].id.unwrap(), infrastore_core::ReadWindow::full())
+                .unwrap();
             assert_eq!(
                 got.as_single().unwrap().data.to_f64_vec().unwrap(),
                 vec![30.0, 31.0, 32.0, 33.0],
@@ -1127,7 +1175,7 @@ fn replace_owner_for_an_owner_with_no_series_is_zero() {
     // The original owner still has its series.
     assert_eq!(
         store
-            .list_keys(ListFilter::new().owner_id(1))
+            .list_metadata(ListFilter::new().owner_id(1))
             .unwrap()
             .len(),
         1
@@ -1140,7 +1188,11 @@ fn replace_owner_onto_itself_is_a_no_op() {
     let key = add_sts(&mut store, 1, "load", 10.0);
     let moved = store.replace_owner(1, 1, OwnerCategory::Component).unwrap();
     assert_eq!(moved, 1, "the row is rewritten with the same value");
-    assert!(store.get_time_series(key.identity(), None).is_ok());
+    assert!(
+        store
+            .read_by_id(key, infrastore_core::ReadWindow::full())
+            .is_ok()
+    );
 }
 
 #[test]
@@ -1164,13 +1216,15 @@ fn replace_owner_into_a_colliding_identity_is_a_duplicate() {
 
     // Both series survive intact with their own values.
     for (key, base) in [(&k1, 10.0f64), (&k2, 20.0)] {
-        let got = store.get_time_series(key.identity(), None).unwrap();
+        let got = store
+            .read_by_id(*key, infrastore_core::ReadWindow::full())
+            .unwrap();
         assert_eq!(
             got.as_single().unwrap().data.to_f64_vec().unwrap(),
             vec![base, base + 1.0, base + 2.0, base + 3.0],
         );
     }
-    assert_eq!(store.list_keys(ListFilter::new()).unwrap().len(), 2);
+    assert_eq!(store.list_metadata(ListFilter::new()).unwrap().len(), 2);
 }
 
 #[test]
@@ -1245,10 +1299,7 @@ fn a_read_only_store_rejects_every_write_entry_point() {
             ))
             .map(|_| ())
     ));
-    assert!(is_ro(store.remove_time_series(key.identity())));
-    assert!(is_ro(
-        store.remove_time_series_bulk(&[key.identity()]).map(|_| ())
-    ));
+    assert!(is_ro(store.remove_by_ids(&[key]).map(|_| ())));
     assert!(is_ro(store.remove_by_filter(ListFilter::new()).map(|_| ())));
     assert!(is_ro(store.clear_time_series(None).map(|_| ())));
     assert!(is_ro(
@@ -1258,14 +1309,10 @@ fn a_read_only_store_rejects_every_write_entry_point() {
     ));
     assert!(is_ro(
         store
-            .copy_time_series(key.identity(), 2, "Generator", None)
+            .copy_time_series(key, 2, "Generator", None)
             .map(|_| ())
     ));
-    assert!(is_ro(
-        store
-            .rename_time_series(key.identity(), "other")
-            .map(|_| ())
-    ));
+    assert!(is_ro(store.rename_time_series(key, "other").map(|_| ())));
     assert!(is_ro(
         store
             .transform_single_time_series(
@@ -1279,8 +1326,12 @@ fn a_read_only_store_rejects_every_write_entry_point() {
     ));
 
     // Reads still work, and nothing changed.
-    assert!(store.get_time_series(key.identity(), None).is_ok());
-    assert_eq!(store.list_keys(ListFilter::new()).unwrap().len(), 1);
+    assert!(
+        store
+            .read_by_id(key, infrastore_core::ReadWindow::full())
+            .is_ok()
+    );
+    assert_eq!(store.list_metadata(ListFilter::new()).unwrap().len(), 1);
 }
 
 /// The descriptive attributes — `element_type`, `units`, `quantity_kind`,
@@ -1317,7 +1368,7 @@ fn series_descriptors_round_trip_on_the_struct() {
         },
         |store, (labeled, bare), backend| {
             // The catalog row records them...
-            let meta = store.get_metadata(labeled.identity()).unwrap();
+            let meta = store.get_metadata_by_id(*labeled).unwrap().unwrap();
             assert_eq!(meta.units.as_deref(), Some("MW"), "{backend}");
             assert_eq!(
                 meta.quantity_kind.as_deref(),
@@ -1341,7 +1392,9 @@ fn series_descriptors_round_trip_on_the_struct() {
             );
 
             // ...and a read puts them back on the series itself.
-            let data = store.get_time_series(labeled.identity(), None).unwrap();
+            let data = store
+                .read_by_id(*labeled, infrastore_core::ReadWindow::full())
+                .unwrap();
             assert_eq!(data.units(), Some("MW"), "{backend}");
             assert_eq!(data.quantity_kind(), Some("ActivePower"), "{backend}");
             assert_eq!(
@@ -1359,10 +1412,8 @@ fn series_descriptors_round_trip_on_the_struct() {
 
             // A slice is the same values over a shorter window, so it keeps them.
             let sliced = store
-                .get_time_series(
-                    labeled.identity(),
-                    Some((t0(), t0() + Duration::hours(2)).into()),
-                )
+                .read_by_ids_range(&[*labeled], (t0(), t0() + Duration::hours(2)).into())
+                .map(|mut v| v.remove(0))
                 .unwrap();
             assert_eq!(sliced.units(), Some("MW"), "{backend}");
             assert_eq!(sliced.quantity_kind(), Some("ActivePower"), "{backend}");
@@ -1380,8 +1431,10 @@ fn series_descriptors_round_trip_on_the_struct() {
 
             // A bulk read takes the packed fast path, which builds its own
             // struct; it must agree with the per-key read rather than drop them.
-            let ids = [labeled.identity()];
-            let bulk = store.bulk_read(&ids).unwrap();
+            let ids = [*labeled];
+            let bulk = store
+                .read_by_ids(&ids, infrastore_core::ReadWindow::full())
+                .unwrap();
             assert_eq!(bulk[0].units(), Some("MW"), "{backend}");
             assert_eq!(bulk[0].quantity_kind(), Some("ActivePower"), "{backend}");
             assert_eq!(
@@ -1401,14 +1454,20 @@ fn series_descriptors_round_trip_on_the_struct() {
             // as `NaturalUnits`: nobody said these values were in natural
             // units, and pretending otherwise would be a claim the writer
             // never made.
-            let plain = store.get_time_series(bare.identity(), None).unwrap();
+            let plain = store
+                .read_by_id(*bare, infrastore_core::ReadWindow::full())
+                .unwrap();
             assert_eq!(plain.units(), None, "{backend}");
             assert_eq!(plain.quantity_kind(), None, "{backend}");
             assert_eq!(plain.unit_system(), None, "{backend}");
             assert_eq!(plain.component_field(), None, "{backend}");
             assert_eq!(plain.application_data(), None, "{backend}");
             assert_eq!(
-                store.get_metadata(bare.identity()).unwrap().unit_system,
+                store
+                    .get_metadata_by_id(*bare)
+                    .unwrap()
+                    .unwrap()
+                    .unit_system,
                 None,
                 "{backend}"
             );
@@ -1435,7 +1494,9 @@ fn forecast_descriptors_round_trip_on_the_struct() {
                 .unwrap()
         },
         |store, key, backend| {
-            let data = store.get_time_series(key.identity(), None).unwrap();
+            let data = store
+                .read_by_id(*key, infrastore_core::ReadWindow::full())
+                .unwrap();
             assert_eq!(data.units(), Some("MW"), "{backend}");
             assert_eq!(data.quantity_kind(), Some("ActivePower"), "{backend}");
             assert_eq!(
@@ -1488,8 +1549,8 @@ fn component_field_is_descriptive_not_identity() {
             TimeSeriesData::SingleTimeSeries(sts("load", 10.0, 4)).with_component_field("rating"),
         ))
         .unwrap();
-    let first = store.get_metadata(key.identity()).unwrap();
-    let second = store.get_metadata(other.identity()).unwrap();
+    let first = store.get_metadata_by_id(key).unwrap().unwrap();
+    let second = store.get_metadata_by_id(other).unwrap().unwrap();
     assert_eq!(first.data_hash, second.data_hash);
     assert_eq!(first.component_field.as_deref(), Some("max_active_power"));
     assert_eq!(second.component_field.as_deref(), Some("rating"));
@@ -1522,7 +1583,7 @@ fn transformed_view_inherits_component_field() {
         .unwrap();
 
     let derived = store
-        .list_time_series(
+        .list_metadata(
             ListFilter::new().time_series_type(TimeSeriesType::DeterministicSingleTimeSeries),
         )
         .unwrap();
@@ -1580,7 +1641,7 @@ fn a_single_time_series_whose_length_disagrees_with_its_array_is_rejected() {
     }
 
     // Nothing was written by either attempt.
-    assert_eq!(store.list_keys(ListFilter::new()).unwrap().len(), 0);
+    assert_eq!(store.list_metadata(ListFilter::new()).unwrap().len(), 0);
 
     // A series whose fields agree is still accepted.
     let good = SingleTimeSeries::new(
@@ -1597,7 +1658,7 @@ fn a_single_time_series_whose_length_disagrees_with_its_array_is_rejected() {
             TimeSeriesData::SingleTimeSeries(good),
         ))
         .unwrap();
-    assert_eq!(store.list_keys(ListFilter::new()).unwrap().len(), 1);
+    assert_eq!(store.list_metadata(ListFilter::new()).unwrap().len(), 1);
 }
 
 /// `Deterministic` and `DeterministicSingleTimeSeries` are mutually exclusive
@@ -1671,10 +1732,10 @@ fn every_write_path_refuses_to_pair_deterministic_with_its_single_view() {
 
     let types_of_owner_1 = |store: &infrastore_core::Store| {
         let mut t: Vec<&'static str> = store
-            .list_keys(ListFilter::new().owner_id(1))
+            .list_metadata(ListFilter::new().owner_id(1))
             .unwrap()
             .iter()
-            .map(|k| k.time_series_type().as_str())
+            .map(|k| k.time_series_type.as_str())
             .collect();
         t.sort_unstable();
         t
@@ -1684,7 +1745,7 @@ fn every_write_path_refuses_to_pair_deterministic_with_its_single_view() {
     let mut store = seeded();
     let src = dense(&mut store, 2, "load");
     let err = store
-        .copy_time_series(src.identity(), 1, "Generator", None)
+        .copy_time_series(src, 1, "Generator", None)
         .unwrap_err();
     assert!(
         matches!(err, TimeSeriesError::InvalidParameter(ref m) if m.contains("mutually exclusive")),
@@ -1714,9 +1775,7 @@ fn every_write_path_refuses_to_pair_deterministic_with_its_single_view() {
     // DST's family.
     let mut store = seeded();
     let other = dense(&mut store, 1, "other");
-    let err = store
-        .rename_time_series(other.identity(), "load")
-        .unwrap_err();
+    let err = store.rename_time_series(other, "load").unwrap_err();
     assert!(
         matches!(err, TimeSeriesError::InvalidParameter(ref m) if m.contains("mutually exclusive")),
         "rename: {err}"
@@ -1724,10 +1783,10 @@ fn every_write_path_refuses_to_pair_deterministic_with_its_single_view() {
     // "other" is a different family, so it legitimately survives untouched.
     assert_eq!(
         store
-            .list_keys(ListFilter::new().owner_id(1))
+            .list_metadata(ListFilter::new().owner_id(1))
             .unwrap()
             .iter()
-            .filter(|k| k.name() == "load")
+            .filter(|k| k.name == "load")
             .count(),
         2
     );
@@ -1736,7 +1795,7 @@ fn every_write_path_refuses_to_pair_deterministic_with_its_single_view() {
     // with no DST, and a copy to a family that is free.
     let mut store = seeded();
     dense(&mut store, 5, "unrelated");
-    assert_eq!(store.list_keys(ListFilter::new()).unwrap().len(), 3);
+    assert_eq!(store.list_metadata(ListFilter::new()).unwrap().len(), 3);
 }
 
 /// A rename names one series, and touches one row or none.
@@ -1777,42 +1836,37 @@ fn renaming_with_an_underspecified_key_changes_nothing() {
             .unwrap();
     }
 
-    let underspecified = KeyIdentity {
-        owner_id: 1,
-        owner_category: OwnerCategory::Component,
-        time_series_type: TimeSeriesType::Deterministic,
-        name: "load".into(),
-        resolution: Some(Duration::hours(1).into()),
-        interval: None,
-        features: Features::new(),
-    };
-    assert!(
-        store
-            .rename_time_series(&underspecified, "renamed")
-            .is_err()
-    );
+    // A rename can no longer be ambiguous: it names one id, and an id names one
+    // row. Where a key with an unset interval used to match a whole forecast
+    // family -- and a rename through it was refused for that reason -- the
+    // ambiguity now surfaces in the identify half, where a caller can see it
+    // and narrow.
+    let underspecified = ListFilter::new()
+        .owner_id(1)
+        .owner_category(OwnerCategory::Component)
+        .name("load")
+        .time_series_type(TimeSeriesType::Deterministic)
+        .exact_features(Features::new())
+        .resolution(Duration::hours(1));
     assert_eq!(
-        store
-            .list_keys(ListFilter::new())
-            .unwrap()
-            .iter()
-            .filter(|k| k.name() == "load")
-            .count(),
+        store.list_metadata(underspecified.clone()).unwrap().len(),
         2,
-        "a failed rename must leave both rows alone"
+        "interval is part of the identity, so both survive an unset one"
     );
 
-    // Naming the interval renames exactly that one.
-    let exact = KeyIdentity {
-        interval: Some(Duration::hours(24).into()),
-        ..underspecified
-    };
-    store.rename_time_series(&exact, "day_ahead").unwrap();
+    // Naming the interval selects exactly one, and renaming it touches only it.
+    let exact = store
+        .list_metadata(underspecified.interval(Duration::hours(24)))
+        .unwrap();
+    assert_eq!(exact.len(), 1);
+    store
+        .rename_time_series(exact[0].id.unwrap(), "day_ahead")
+        .unwrap();
     let mut names: Vec<String> = store
-        .list_keys(ListFilter::new())
+        .list_metadata(ListFilter::new())
         .unwrap()
         .iter()
-        .map(|k| k.name().to_string())
+        .map(|k| k.name.to_string())
         .collect();
     names.sort();
     assert_eq!(names, ["day_ahead", "load"]);
@@ -1862,12 +1916,17 @@ fn reader_columns_are_ordered_by_features_when_nothing_else_separates_them() {
             .unwrap();
         let group = &reader.groups()[0];
         assert_eq!(group.num_columns(), insertion.len());
+        // The reader carries ids, so a column's features come from the row it
+        // resolves to rather than from a key snapshot.
         group
-            .keys()
+            .ids()
             .iter()
-            .map(|k| match k.identity().features.get("scenario") {
-                Some(FeatureValue::Int(v)) => *v,
-                other => panic!("unexpected feature {other:?}"),
+            .map(|id| {
+                let row = store.get_metadata_by_id(*id).unwrap().unwrap();
+                match row.features.get("scenario") {
+                    Some(FeatureValue::Int(v)) => *v,
+                    other => panic!("unexpected feature {other:?}"),
+                }
             })
             .collect()
     };

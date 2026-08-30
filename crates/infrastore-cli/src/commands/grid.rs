@@ -147,7 +147,7 @@ fn column_headers(
     // A reader names its columns by association id; the row behind each supplies
     // the name and owner a header is written from. One lookup per column, off the
     // catalog's primary key, and only while building the header line.
-    let row_of = |id: i64| -> Result<TimeSeriesMetadata, String> {
+    let row_of = |id: infrastore_core::TimeSeriesId| -> Result<TimeSeriesMetadata, String> {
         store
             .get_metadata_by_id(id)
             .map_err(|e| e.to_string())?
