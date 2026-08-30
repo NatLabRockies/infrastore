@@ -118,10 +118,28 @@ function _parameterized_type(
     name::AbstractString, element_type::AbstractString, element_shape
 )
     base = _type_for_name(name)
+    extra = base === DeterministicSingleTimeSeries ? 2 : 1
+    # A composite element type is decoded on read, and the values it decodes to
+    # occupy the trailing axis it was packed across — so the logical rank is one
+    # lower than the stored array's, and `T` is the domain type rather than the
+    # dtype the bytes are held in.
+    if is_composite_element_type(element_type)
+        value_type = _decoded_value_type(element_type)
+        value_type === nothing || return base{value_type, length(element_shape) + extra - 1}
+    end
     dtype = _physical_dtype_of(element_type)
     dtype === nothing && return base
-    extra = base === DeterministicSingleTimeSeries ? 2 : 1
     return base{dtype, length(element_shape) + extra}
+end
+
+# The Julia type a composite `element_type` decodes to, or `nothing` when this
+# version does not map it — in which case the row keeps describing the stored
+# numbers, which is what a read of it hands back.
+function _decoded_value_type(element_type::AbstractString)
+    kind = _element_kind(element_type)
+    kind === :tuple || return get(DEFAULT_ELEMENT_TYPES, kind, nothing)
+    m = match(_TUPLE_TAG, element_type)
+    return m === nothing ? nothing : NTuple{parse(Int, m.captures[1]), Float64}
 end
 
 _row_period(x) = x === nothing ? nothing : _iso_to_period(String(x))

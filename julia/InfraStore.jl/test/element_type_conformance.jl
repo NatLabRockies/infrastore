@@ -158,3 +158,96 @@ end
     # A value type with no encoding.
     @test_throws InfraStore.InvalidParameterError encode_element_values(["a", "b"])
 end
+
+@testset "a series of domain values round-trips as those values" begin
+    # The point of the write and read paths knowing the codec: what a write is
+    # given is what a read hands back, with no encode/decode step in the caller
+    # and no `element_type=` to remember.
+    store = Store(; in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+
+    cases = (
+        ("lin", [InfraStore.LinearFunction(i, 2i) for i in 1.0:4.0], "linear_function"),
+        (
+            "quad",
+            [InfraStore.QuadraticFunction(i, 2i, 3i) for i in 1.0:4.0],
+            "quadratic_function",
+        ),
+        (
+            "pwl",
+            [
+                InfraStore.PiecewiseLinear([(x=0.0, y=i), (x=1.0, y=2i)])
+                for i in 1.0:4.0
+            ],
+            "piecewise_linear",
+        ),
+        (
+            "step",
+            [InfraStore.PiecewiseStep([0.0, 1.0, 2.0], [i, 2i]) for i in 1.0:4.0],
+            "piecewise_step",
+        ),
+        ("tup", [(i, 2i, 3i) for i in 1.0:4.0], "tuple(3,f64)"),
+    )
+
+    for (name, values, tag) in cases
+        ts = SingleTimeSeries(t0, res, values, name)
+        # The constructor names the element type from the values; there is
+        # nothing left for the caller to declare.
+        @test ts.element_type == tag
+        id = add_time_series!(store, 1, "Generator", Component, ts)
+
+        md = get_metadata_by_id(store, id)
+        @test md.element_type == tag
+        read = read_by_id(store, id)
+        @test read.data == values
+        @test typeof(read) === typeof(ts)
+        # The row names what the read hands back, composite types included.
+        @test md.time_series_type == typeof(read)
+        # `raw` keeps the packing: one axis more, held as the physical dtype.
+        packed = read_by_id(store, id; raw=true)
+        @test ndims(packed.data) == ndims(read.data) + 1
+        @test eltype(packed.data) === Float64
+        @test decode_element_values(packed.data, tag) == values
+    end
+
+    # A forecast stacks windows in front of the element axis, so the values keep
+    # the window shape they were written with.
+    windows = [
+        InfraStore.PiecewiseLinear([(x=0.0, y=Float64(h + w)), (x=1.0, y=1.0)])
+        for h in 1:4, w in 1:2
+    ]
+    id = add_time_series!(
+        store, 2, "Generator", Component,
+        Deterministic(t0, res, Hour(4), Hour(1), 2, windows, "det"),
+    )
+    read = read_by_id(store, id)
+    @test read.data == windows
+    @test size(read.data) == (4, 2)
+    @test get_metadata_by_id(store, id).time_series_type ==
+        Deterministic{InfraStore.PiecewiseLinear, 2}
+
+    # A declaration that contradicts the values is an error, not an override.
+    @test_throws InfraStore.InvalidParameterError SingleTimeSeries(
+        t0, res, [InfraStore.LinearFunction(1.0, 2.0)], "bad"; element_type="f64"
+    )
+    close!(store)
+end
+
+@testset "a plain numeric series is untouched by the codec" begin
+    # The codec must not change what a scalar series does: the values are the
+    # numbers, and `element_type` stays the dtype spelling.
+    store = Store(; in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    values = Float64[1, 2, 3, 4]
+    id = add_time_series!(
+        store, 1, "Generator", Component, SingleTimeSeries(t0, Hour(1), values, "load")
+    )
+    md = get_metadata_by_id(store, id)
+    @test md.element_type == "f64"
+    @test md.time_series_type == SingleTimeSeries{Float64, 1}
+    read = read_by_id(store, id)
+    @test read.data == values
+    @test read_by_id(store, id; raw=true).data == values
+    close!(store)
+end

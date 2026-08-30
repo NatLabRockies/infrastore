@@ -511,7 +511,18 @@ end
 # bulk reconstructors it carries `application_data`, `element_type`, and `units`: those live on
 # the series, and the bulk-result getters return them, so a series read in bulk
 # and the same series read individually produce equal structs.
-function _bulk_single(result::Ptr{Cvoid}, idx::Integer, name::AbstractString)
+# The values a read hands back: the stored numbers turned into whatever their
+# `element_type` says they are, so a read returns what the write was given.
+#
+# `raw = true` keeps the packed array — for a caller that wants the bytes as
+# stored, or one whose element type this version does not map (which decodes to
+# the array either way, so the flag is about intent, not capability).
+_read_values(data, ::Nothing, ::Bool) = data
+function _read_values(data, element_type::AbstractString, raw::Bool)
+    return raw ? data : decode_element_values(data, element_type)
+end
+
+function _bulk_single(result::Ptr{Cvoid}, idx::Integer, name::AbstractString, raw::Bool)
     out_initial = Ref{Int64}(0)
     out_resolution = Ref{Ptr{Cchar}}(C_NULL)
     out_dtype = Ref{Int32}(0)
@@ -549,11 +560,13 @@ function _bulk_single(result::Ptr{Cvoid}, idx::Integer, name::AbstractString)
     try
         dims = Int.(unsafe_wrap(Array, out_shape[], Int(out_shape_len[]); own=false))
         bytes = copy(unsafe_wrap(Array, out_data[], Int(out_data_len[]); own=false))
-        data = _decode_array(bytes, out_dtype[], dims)
+        raw_data = _decode_array(bytes, out_dtype[], dims)
+        element_type = _peek_cstr(out_element_type[])
         return SingleTimeSeries(
-            _from_unix_ms(out_initial[]), _peek_period(out_resolution[]), data, name;
+            _from_unix_ms(out_initial[]), _peek_period(out_resolution[]),
+            _read_values(raw_data, element_type, raw), name;
             application_data=_peek_cstr(out_application_data[]),
-            element_type=_peek_cstr(out_element_type[]),
+            element_type=element_type,
             units=_peek_cstr(out_units[]),
             quantity_kind=_peek_cstr(out_quantity_kind[]),
             unit_system=_unit_system(_peek_cstr(out_unit_system[])),
@@ -576,7 +589,9 @@ end
 
 # Reconstruct one NonSequentialTimeSeries from a bulk-read result slot (carrying
 # `application_data` / `element_type` / `units`, as `_bulk_single` does).
-function _bulk_non_sequential(result::Ptr{Cvoid}, idx::Integer, name::AbstractString)
+function _bulk_non_sequential(
+    result::Ptr{Cvoid}, idx::Integer, name::AbstractString, raw::Bool
+)
     out_ts = Ref{Ptr{Int64}}(C_NULL)
     out_ts_len = Ref{UInt64}(0)
     out_dtype = Ref{Int32}(0)
@@ -615,11 +630,12 @@ function _bulk_non_sequential(result::Ptr{Cvoid}, idx::Integer, name::AbstractSt
         ts_ms = copy(unsafe_wrap(Array, out_ts[], Int(out_ts_len[]); own=false))
         dims = Int.(unsafe_wrap(Array, out_shape[], Int(out_shape_len[]); own=false))
         bytes = copy(unsafe_wrap(Array, out_data[], Int(out_data_len[]); own=false))
-        data = _decode_array(bytes, out_dtype[], dims)
+        raw_data = _decode_array(bytes, out_dtype[], dims)
+        element_type = _peek_cstr(out_element_type[])
         return NonSequentialTimeSeries(
-            _from_unix_ms.(ts_ms), data, name;
+            _from_unix_ms.(ts_ms), _read_values(raw_data, element_type, raw), name;
             application_data=_peek_cstr(out_application_data[]),
-            element_type=_peek_cstr(out_element_type[]),
+            element_type=element_type,
             units=_peek_cstr(out_units[]),
             quantity_kind=_peek_cstr(out_quantity_kind[]),
             unit_system=_unit_system(_peek_cstr(out_unit_system[])),
@@ -644,7 +660,7 @@ end
 # bulk-read result slot; `type_code` is the ts_type discriminant. As above, the
 # descriptive attributes come back with the data.
 function _bulk_forecast(
-    result::Ptr{Cvoid}, idx::Integer, type_code::Integer, name::AbstractString
+    result::Ptr{Cvoid}, idx::Integer, type_code::Integer, name::AbstractString, raw::Bool
 )
     out_initial = Ref{Int64}(0)
     out_res = Ref{Ptr{Cchar}}(C_NULL)
@@ -692,7 +708,7 @@ function _bulk_forecast(
             out_component_field::Ref{Ptr{Cchar}},
         )::Int32
     )
-    local data, initial, resolution, horizon, interval, count, percentiles
+    local raw_data, initial, resolution, horizon, interval, count, percentiles
     local application_data, element_type, units, quantity_kind, unit_system
     local time_reference, component_field
     try
@@ -703,7 +719,7 @@ function _bulk_forecast(
         else
             Float64[]
         end
-        data = _decode_array(bytes, out_dtype[], dims)
+        raw_data = _decode_array(bytes, out_dtype[], dims)
         initial = _from_unix_ms(out_initial[])
         resolution = _peek_period(out_res[])
         horizon = _peek_period(out_horizon[])
@@ -731,6 +747,7 @@ function _bulk_forecast(
         _free_cstr(out_time_reference[])
         _free_cstr(out_component_field[])
     end
+    data = _read_values(raw_data, element_type, raw)
     if type_code == INFRASTORE_TYPE_PROBABILISTIC
         return Probabilistic(
             initial, resolution, horizon, interval, count, percentiles, data, name;
@@ -772,7 +789,7 @@ end
 # struct, freeing the handle even when a decode throws. Both the name and the
 # type discriminant come off the handle itself, so the keyed and id-addressed
 # reads decode by exactly the same route.
-function _decode_bulk_result(result::Ptr{Cvoid}, n::Integer)
+function _decode_bulk_result(result::Ptr{Cvoid}, n::Integer, raw::Bool=false)
     out = Vector{Any}(undef, n)
     try
         for i in 1:n
@@ -785,11 +802,11 @@ function _decode_bulk_result(result::Ptr{Cvoid}, n::Integer)
             name = _bulk_item_name(result, i - 1)
             t = Int(out_type[])
             out[i] = if t == INFRASTORE_TYPE_SINGLE
-                _bulk_single(result, i - 1, name)
+                _bulk_single(result, i - 1, name, raw)
             elseif t == INFRASTORE_TYPE_NON_SEQUENTIAL
-                _bulk_non_sequential(result, i - 1, name)
+                _bulk_non_sequential(result, i - 1, name, raw)
             else
-                _bulk_forecast(result, i - 1, t, name)
+                _bulk_forecast(result, i - 1, t, name, raw)
             end
         end
     finally
@@ -827,6 +844,7 @@ function read_by_ids(
     store::Store,
     ids::AbstractVector{<:Integer};
     time_range::TimeRangeArg=nothing,
+    raw::Bool=false,
 )
     n = length(ids)
     n == 0 && return Vector{Any}(undef, 0)
@@ -855,7 +873,7 @@ function read_by_ids(
             )::Int32
         )
     end
-    return _decode_bulk_result(out_result[], n)
+    return _decode_bulk_result(out_result[], n, raw)
 end
 
 """
@@ -893,6 +911,7 @@ function read_by_id(
     start_time=nothing,
     len::Union{Nothing, Integer}=nothing,
     count::Union{Nothing, Integer}=nothing,
+    raw::Bool=false,
 )
     start_present = start_time !== nothing
     start_zoneless = start_present && is_zoneless(_time_reference_of(start_time))
@@ -912,5 +931,5 @@ function read_by_id(
             out_result::Ref{Ptr{Cvoid}},
         )::Int32
     )
-    return only(_decode_bulk_result(out_result[], 1))
+    return only(_decode_bulk_result(out_result[], 1, raw))
 end

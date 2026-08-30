@@ -3925,16 +3925,19 @@ end
     @test typeof(read_by_id(store, dst["a"].id)) == Deterministic{Float64, 2}
     @test typeof(read_by_id(store, dst["wide"].id)) == Deterministic{Float32, 3}
 
-    # A compound element type is a physical array of its own dtype, with the
-    # structure in `element_type` / `element_shape` rather than in `T`.
+    # A composite element type is decoded on read, so the row names the values —
+    # not the packed array they were stored across. The stored rank is one higher,
+    # which `raw = true` hands back.
     tuples = add_time_series!(
         store, 2, "Generator", Component,
         SingleTimeSeries(t0, res, rand(4, 3), "tuples"; element_type="tuple(3,f64)"),
     )
     md = get_metadata_by_id(store, tuples)
     @test md.element_type == "tuple(3,f64)"
-    @test md.time_series_type == SingleTimeSeries{Float64, 2}
+    @test md.element_shape == (3,)
+    @test md.time_series_type == SingleTimeSeries{NTuple{3, Float64}, 1}
     @test md.time_series_type == typeof(read_by_id(store, tuples))
+    @test typeof(read_by_id(store, tuples; raw=true)) == SingleTimeSeries{Float64, 2}
 
     # The counts and summaries group by stored type alone — no dtype in the
     # grouping — so their `time_series_type` stays the bare one.

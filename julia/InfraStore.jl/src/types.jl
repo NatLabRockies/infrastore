@@ -55,6 +55,50 @@ function _physical_dtype_of(element_type::AbstractString)
     return get(_DTYPE_BY_NAME, s, nothing)
 end
 
+# The `element_type` a constructor records for `data`.
+#
+# Domain values name their own — a `Vector{PiecewiseLinear}` is a
+# `piecewise_linear` series and there is nothing for a caller to declare — so
+# `element_type=` is only for the numeric case, where the numbers alone cannot
+# say what they mean. Declaring one that disagrees with the values is an error
+# rather than an override: the values are the more specific statement.
+function _declared_element_type(element_type, data::AbstractArray)
+    isempty(data) && return _maybe_string(element_type)
+    eltype(data) <: _EncodableValue || return _maybe_string(element_type)
+    implied = element_type_tag(vec(data))
+    if element_type !== nothing && String(element_type) != implied
+        throw(
+            InvalidParameterError(
+                "element_type \"$(element_type)\" disagrees with the values, which " *
+                "are $implied",
+            ),
+        )
+    end
+    return implied
+end
+
+# Values this package encodes on the way down, as opposed to numbers it sends as
+# they are.
+const _EncodableValue = Union{FunctionData, NTuple{N, Float64} where {N}}
+
+# What a value array goes down the ABI as: `(element_type, dims, bytes)`.
+#
+# Domain values are encoded *here*, at the boundary, so the struct keeps holding
+# them — which is what lets a read hand back the same thing a write was given,
+# and what makes a metadata row's `{T,N}` describe the values rather than their
+# packing.
+function _wire_array(element_type, data::AbstractArray)
+    if !isempty(data) && eltype(data) <: _EncodableValue
+        array, tag = encode_element_values(data)
+        return (tag, UInt64[size(array)...], _row_major_bytes(array))
+    end
+    return (
+        _element_type_arg(element_type, data),
+        UInt64[size(data)...],
+        _row_major_bytes(data),
+    )
+end
+
 # The `element_type` string a write sends: the caller's declaration when it made
 # one, else plain scalars of the array's own element type.
 #
@@ -156,7 +200,7 @@ function SingleTimeSeries(
         data isa Array ? data : Array(data),
         String(name),
         _maybe_string(application_data),
-        _maybe_string(element_type),
+        _declared_element_type(element_type, data),
         _maybe_string(units),
         _maybe_string(quantity_kind),
         _unit_system(unit_system),
@@ -221,7 +265,7 @@ function NonSequentialTimeSeries(
         arr,
         String(name),
         _maybe_string(application_data),
-        _maybe_string(element_type),
+        _declared_element_type(element_type, data),
         _maybe_string(units),
         _maybe_string(quantity_kind),
         _unit_system(unit_system),
@@ -291,7 +335,7 @@ function Deterministic(
         data isa Array ? data : Array(data),
         String(name),
         _maybe_string(application_data),
-        _maybe_string(element_type),
+        _declared_element_type(element_type, data),
         _maybe_string(units),
         _maybe_string(quantity_kind),
         _unit_system(unit_system),
@@ -354,7 +398,7 @@ function Probabilistic(
         data isa Array ? data : Array(data),
         String(name),
         _maybe_string(application_data),
-        _maybe_string(element_type),
+        _declared_element_type(element_type, data),
         _maybe_string(units),
         _maybe_string(quantity_kind),
         _unit_system(unit_system),
@@ -417,7 +461,7 @@ function Scenarios(
         data isa Array ? data : Array(data),
         String(name),
         _maybe_string(application_data),
-        _maybe_string(element_type),
+        _declared_element_type(element_type, data),
         _maybe_string(units),
         _maybe_string(quantity_kind),
         _unit_system(unit_system),

@@ -244,19 +244,41 @@ not plain numbers (`"tuple(3,f64)"`, `"piecewise_linear"`, … — see
 ## Element values
 
 A composite `element_type` describes a layout, not a number: `"piecewise_linear"` is a curve per
-timestep, packed across the array's trailing axis. Two functions convert between that packing and
-the values it holds, and neither takes a `Store` — they work on any array you already have.
+timestep, packed across the array's trailing axis. **The write and read paths do that packing for
+you** — hand a series its values and get the same values back:
 
 ```julia
 curves = [PiecewiseLinear([(x = 0.0, y = 1.0), (x = 1.0, y = 3.0)]),
           PiecewiseLinear([(x = 0.0, y = 2.0)])]
 
-array, element_type = encode_element_values(curves)      # (2, 5), "piecewise_linear"
-add_time_series!(store, 1, "Generator", Component,
-    SingleTimeSeries(t0, Hour(1), array, "cost"; element_type = element_type))
+ts = SingleTimeSeries(t0, Hour(1), curves, "cost")   # element_type: "piecewise_linear"
+id = add_time_series!(store, 1, "Generator", Component, ts)
 
-md = get_metadata_by_id(store, id)
-values = decode_element_values(read_by_id(store, id).data, md.element_type)
+read_by_id(store, id).data == curves                 # true
+get_metadata_by_id(store, id).time_series_type       # SingleTimeSeries{PiecewiseLinear, 1}
+```
+
+The constructor names the `element_type` from the values, so `element_type=` is only for the numeric
+case where the numbers alone cannot say what they mean; declaring one that contradicts the values is
+an error rather than an override.
+
+`raw = true` on a read hands back the packing instead — one axis more, held as the physical dtype —
+for a caller that wants the bytes as stored:
+
+```julia
+read_by_id(store, id; raw = true).data               # 2×5 Matrix{Float64}
+```
+
+The **readers are deliberately not decoded**. `StaticReader` and `ForecastReader` are the
+per-timestamp simulation path, and `StaticGroup.dtype` is physical by definition; they hand back the
+packed numbers, which `decode_element_values` turns into values if you want them.
+
+The two codec functions are public in their own right, and neither takes a `Store` — they work on
+any array you already have:
+
+```julia
+array, element_type = encode_element_values(curves)      # (2, 5), "piecewise_linear"
+values = decode_element_values(array, element_type)
 ```
 
 `decode_element_values` returns the array's shape **without** its trailing element axis — a vector

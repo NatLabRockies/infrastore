@@ -265,34 +265,31 @@ IS.jl adds all of that on its own side, where it already has the dependency.
 _Size:_ ~400 lines of source, ~150 of tests. _Verified:_ the full InfraStore.jl suite, `Pkg.test()`,
 and the Julia formatter.
 
-### Phase 3 — Julia write path
+### Phase 3 — Julia write path ✅ **done**
 
-- Constructors accept `Vector{<:FunctionData}` (and the forecast ranks), encode to the flat array,
-  and set `element_type` themselves — so `element_type=` becomes unnecessary rather than mandatory
-  for these kinds.
-- `_element_type_arg` (`types.jl`) gains the domain-type branch alongside its existing
-  physical-dtype check.
-- Round-trip tests against a real store: write curves, read raw, assert the bytes match the Rust
-  encoder's for the same values (the shared corpus makes this checkable without a second store).
+- The five constructors accept `Vector{<:FunctionData}` (and the forecast ranks) and name the
+  `element_type` from the values, so `element_type=` is now only for the numeric case. A declaration
+  that contradicts the values is an error rather than an override — the values are the more specific
+  statement.
+- The struct keeps the _values_; encoding happens at the ABI boundary in one helper, `_wire_array`,
+  which the four batch sites now share. That is what makes the write and read symmetric, and what
+  lets a metadata row's `{T,N}` describe the values rather than their packing.
 
-_Size:_ small-to-medium. _Watch:_ padding width is `1 + 2·max(points)` **across the series**, so the
-same curves written as part of different series legitimately produce different bytes and different
-`data_hash`es. That is existing behavior, not new — but it will now be reachable by accident from
-Julia, so it belongs in the docstring.
+### Phase 4 — Julia read path and metadata typing ✅ **done**
 
-### Phase 4 — Julia read path + metadata typing
+- `read_by_id` / `read_by_ids` decode composite element types into their values, with `raw = true`
+  for the packing — one axis more, held as the physical dtype.
+- `_parameterized_type` maps a composite spelling to its domain type and drops one from the rank, so
+  `md.time_series_type == typeof(read_by_id(store, id))` now holds for the composite kinds too, not
+  just the numeric ones. An unmapped spelling keeps describing the stored numbers.
+- **The readers stay raw**, as planned: `StaticReader` / `ForecastReader` are the per-timestamp
+  simulation path and `StaticGroup.dtype` is physical by definition. Documented in `julia-api.md`
+  rather than left to be discovered.
 
-- `read_by_id` / `read_by_ids` decode mapped element types into the domain values; `raw = true`
-  keeps today's behavior (D4).
-- `_parameterized_type` maps the function-data spellings to their domain types and drops one from
-  the rank (the rank rule above).
-- Explicitly **out of scope: the readers.** `StaticReader` / `ForecastReader` are the per-timestamp
-  simulation path and stay raw `Float64`; `StaticGroup.dtype` is physical by definition. Say so in
-  `julia-api.md` rather than leaving it to be discovered.
-- `get_array_by_hash` also stays raw — it is addressed by content hash, which carries no element
-  type.
-
-_Size:_ small. _Risk:_ this is the breaking one.
+_Verified:_ all five composite kinds round-trip as values, static and forecast, plus the `raw`
+escape hatch and the untouched numeric path. One existing assertion changed meaning by design — a
+`tuple(3,f64)` row is now `SingleTimeSeries{NTuple{3,Float64}, 1}` rather than
+`SingleTimeSeries{Float64, 2}` — and was updated with the `raw` form asserted beside it.
 
 ### Phase 5 — Python parity
 
@@ -347,8 +344,8 @@ all bindings before considering it done" convention argues for doing it in the s
 | 0 — decisions                 | —       | yes, everything |
 | 1 — Rust ergonomics + vectors | ✅ done | —               |
 | 2 — Lift IS.jl's codec        | ✅ done | —               |
-| 3 — Julia write               | small   | —               |
-| 4 — Julia read + metadata     | small   | —               |
+| 3 — Julia write               | ✅ done | —               |
+| 4 — Julia read + metadata     | ✅ done | —               |
 | 5 — Python parity             | medium  | no (deferrable) |
 | 6 — CLI + docs                | small   | no              |
 
