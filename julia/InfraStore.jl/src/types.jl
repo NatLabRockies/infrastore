@@ -427,7 +427,7 @@ function Scenarios(
 end
 
 """
-    DeterministicSingleTimeSeries
+    DeterministicSingleTimeSeries{T, N}
 
 Marker type naming a forecast derived from a `SingleTimeSeries` via
 `transform_single_time_series!` (mirrors the InfrastructureSystems.jl type). It
@@ -441,8 +441,16 @@ detail is *inspectable* — it surfaces as the `time_series_type` of every catal
 row from `list_metadata` / `list_metadata_by_ids` / `get_metadata_by_id`, and
 filtering on it narrows a query to the derived forecasts alone (e.g. to audit
 which of a store's forecasts are synthetic).
+
+It is parameterized only so that a metadata row's `time_series_type` carries
+`{T, N}` for *every* stored type. `{T, N}` describes the `Deterministic` the row
+reads back as — never the source `SingleTimeSeries`, whose array it shares —
+so a derived view of a scalar `SingleTimeSeries{Float64, 1}` is a
+`DeterministicSingleTimeSeries{Float64, 2}`, matching its `Deterministic` read.
+Write the bare `DeterministicSingleTimeSeries` when naming it as a request or a
+filter; parameters are ignored there.
 """
-abstract type DeterministicSingleTimeSeries end
+abstract type DeterministicSingleTimeSeries{T, N} end
 
 # Every type accepted as a *requested* forecast type. Internal: it exists for
 # method bounds only, is not exported, and is not part of the public surface —

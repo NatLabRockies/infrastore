@@ -7,7 +7,8 @@
 #
 # `time_series_type` fields hold the Julia type (`SingleTimeSeries`,
 # `Deterministic`, ...), so they can be passed straight to a `time_series_type`
-# filter;
+# filter — on `TimeSeriesMetadata` parameterized `{T,N}` like the value structs,
+# on the counts and summaries bare, because those group by stored type alone;
 # Reader `dtype` fields hold the Julia element type (`Float64`, `Bool`, ...);
 # metadata carries the logical `element_type` string instead.
 
@@ -26,7 +27,17 @@ forecast whose array is described by its window geometry, `percentiles` on
 anything but a `Probabilistic`).
 
 - `owner_id`, `owner_category`, `owner_type`, `name`, `time_series_type` — the
-  association's identity and its owner.
+  association's identity and its owner. `time_series_type` is the *full* Julia
+  type, parameterized `{T,N}` like the value structs, so it names what a read of
+  this row hands back: `md.time_series_type == typeof(read_by_id(store, md.id))`
+  for every stored type, a `DeterministicSingleTimeSeries` (parameterized by the
+  `Deterministic` it becomes) included. `T` is the dtype `element_type`
+  physically stores — a `"tuple(3,f64)"` series is an `Array{Float64}`, with the
+  structure in `element_type`/`element_shape` — and `N` is one more than the rank
+  of `element_shape`. Test *which kind* a row is with `<:`, not `==`. It passes
+  straight back into any `time_series_type=` filter, `has_time_series` or reader,
+  which ignore the parameters: identity carries no element type, so `{T,N}` has
+  nothing to select on.
 - `data_hash` — the 32-byte content hash, ready for [`get_array_by_hash`](@ref)
   and [`count_array_references`](@ref); `bytes2hex` it for the display form.
 - `initial_timestamp`, `resolution`, `length` — the static time grid.

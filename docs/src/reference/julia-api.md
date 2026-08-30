@@ -215,8 +215,10 @@ Scenarios(initial_timestamp, resolution, horizon, interval, count, data, name; a
 # transform_single_time_series! and read back as a Deterministic. You normally
 # do not request it: a Deterministic request matches it too. It surfaces as a
 # key's / row's time_series_type, so which forecasts are synthetic stays
-# inspectable, and passing it narrows a query to the derived ones.
-abstract type DeterministicSingleTimeSeries end
+# inspectable, and passing it narrows a query to the derived ones. {T,N} exists
+# only so a row's time_series_type is parameterized for every stored type; it
+# describes the Deterministic the row reads back as. Write it bare as a request.
+abstract type DeterministicSingleTimeSeries{T,N} end
 
 mutable struct Store
     handle :: Ptr{Cvoid}
@@ -252,11 +254,39 @@ group's `dtype` field holds the **Julia element type** (`Float64`, `Bool`, …).
 carries the store's canonical `element_type` **string**, which names both the meaning and (through
 it) the dtype. An `owner_category` field is an `OwnerCategory`, never a string.
 
-A requested type is always the bare one — `SingleTimeSeries`, never `SingleTimeSeries{Float64}`. A
-series is addressed by its identity (owner, category, type, name, resolution, interval, features),
-which carries no element type, so parameters on a _request_ would have nothing to select on; passing
-them raises `InvalidParameterError` rather than being quietly ignored. The element type comes back
-on the result instead, in its own `{T,N}` and in a reader group's `dtype`.
+`TimeSeriesMetadata.time_series_type` is the **full** type, parameterized `{T,N}` like the value
+structs — `SingleTimeSeries{Float64,1}`, `Deterministic{Float32,3}` — so a row names what a read of
+it hands back, not merely which of the six kinds it is:
+
+```julia
+md = get_metadata_by_id(store, id)
+md.time_series_type == typeof(read_by_id(store, id))   # true for every stored type
+```
+
+Both parameters come off the row itself: `T` is the dtype `element_type` physically stores (a
+`"tuple(3,f64)"` or `"piecewise_linear"` series is an array of `Float64`, with the structure in
+`element_type` and `element_shape`), and `N` is one more than the rank of `element_shape`. A
+`DeterministicSingleTimeSeries` is parameterized by the `Deterministic` it reads back as, not by the
+`SingleTimeSeries` whose array it shares. An `element_type` written by a newer core than the wrapper
+knows leaves the type bare rather than guessing.
+
+Test it with `<:`, not `==`, when you mean "which kind is this row":
+
+```julia
+md.time_series_type <: SingleTimeSeries        # kind
+md.time_series_type == SingleTimeSeries        # false — it is SingleTimeSeries{Float64,1}
+```
+
+A **request** — a `time_series_type=` filter, `has_time_series`, a reader — takes either spelling.
+Parameters on a request are **ignored**, never matched: a series is addressed by its identity
+(owner, category, type, name, resolution, interval, features), which carries no element type, so
+`{T,N}` has nothing to select on. They are accepted so that a row's `time_series_type` round-trips
+straight back into any of those calls;
+`list_metadata(store; time_series_type = SingleTimeSeries{Int32,1})` still matches every stored
+`SingleTimeSeries`. A type that is no kind of time series raises `InvalidParameterError`.
+
+`TimeSeriesTypeCount`, `StaticSummaryRow`, and `ForecastSummaryRow` group by stored type alone — the
+grouping carries no dtype — so their `time_series_type` is always the bare one.
 
 Every write returns the catalog row's `id` as a plain `Int64` — assigned, never reissued, and what
 every read, removal, rename and copy takes.
@@ -266,7 +296,7 @@ struct TimeSeriesMetadata                    # get_metadata_by_id / list_metadat
     owner_id          :: Int64
     owner_type        :: String
     owner_category    :: OwnerCategory
-    time_series_type  :: Type
+    time_series_type  :: Type                # parameterized, e.g. SingleTimeSeries{Float64,1}
     name              :: String
     data_hash         :: Vector{UInt8}       # 32-byte content hash
     initial_timestamp :: Union{Nothing,DateTime}
@@ -503,7 +533,8 @@ wrong shape for "remove everything matching": it takes the same filter as `list_
 it to ids internally, and removes those in one transaction.
 
 Reading a `DeterministicSingleTimeSeries` returns a `Deterministic`, since the type has no
-materialized form. Its row still reports `DeterministicSingleTimeSeries` as its `time_series_type`.
+materialized form. Its row still reports `DeterministicSingleTimeSeries` as its `time_series_type`,
+parameterized by that `Deterministic`.
 
 ## Forecasts
 
@@ -645,7 +676,7 @@ it is in the catalog, not in the read:
 
 ```julia
 get_metadata_by_id(store, id).time_series_type
-# DeterministicSingleTimeSeries
+# DeterministicSingleTimeSeries{Float64,2}     -- test kinds with <:, not ==
 ```
 
 Filtering with `time_series_type=Deterministic` spans both: it matches a directly-stored

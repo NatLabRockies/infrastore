@@ -246,7 +246,9 @@ Three testsets changed subject rather than breaking:
   `Probabilistic` key silently mis-decoding — is structurally impossible now: a read names an id and
   never a type.
 - _"a parameterized request type is rejected"_ moved wholly into the identify half, since a read no
-  longer takes a type at all.
+  longer takes a type at all. It has since been inverted and renamed _"a parameterized type
+  round-trips into every type-taking call"_: a metadata row's `time_series_type` is now the full
+  `{T,N}` type, so every type-taking call has to accept that spelling and ignore its parameters.
 - The `Base` interface testset's key `show` became an assertion that an id is a plain value that
   works as a `Dict` key, with the name living on the row it resolves to.
 

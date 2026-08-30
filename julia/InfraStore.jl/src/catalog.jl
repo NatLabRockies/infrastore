@@ -47,35 +47,32 @@ _type_code(::Type{DeterministicSingleTimeSeries}) = INFRASTORE_TYPE_DETERMINISTI
 _type_code(::Type{Probabilistic}) = INFRASTORE_TYPE_PROBABILISTIC
 _type_code(::Type{Scenarios}) = INFRASTORE_TYPE_SCENARIOS
 function _type_code(::Type{T}) where {T}
-    for base in _TIME_SERIES_TYPES
-        if T !== base && T <: base
-            # `Type{}` is invariant, so a parameterized spelling never matches the
-            # methods above and lands here. The store addresses a series by its
-            # identity — (owner, category, type, name, resolution, interval,
-            # features) — which carries no element type, so one key already
-            # resolves to exactly one stored array. `{T,N}` on a *request* could
-            # only restate what that array is, never select between arrays. What a
-            # read hands back carries the stored dtype and rank in its own `{T,N}`.
-            throw(
-                InvalidParameterError(
-                    "$T names an element type, which is not part of a time series' " *
-                    "identity; pass $base and take the element type from the result",
-                ),
-            )
-        end
-    end
-    return throw(InvalidParameterError("$T is not a time series type"))
+    # `Type{}` is invariant, so a parameterized spelling never matches the
+    # methods above and lands here. Strip the parameters and answer for the base
+    # type: the store addresses a series by its identity — (owner, category,
+    # type, name, resolution, interval, features) — which carries no element
+    # type, so `{T,N}` can only restate what the matched arrays are, never
+    # select between them. It is accepted rather than rejected so that the
+    # parameterized `time_series_type` of a metadata row round-trips into every
+    # type-taking call; what it names beyond the base type is ignored.
+    base = _base_time_series_type(T)
+    base === nothing && throw(InvalidParameterError("$T is not a time series type"))
+    return _type_code(base)
 end
 
-# Reject a request type before any work happens. The readers bound their type
-# argument covariantly (`T <: SingleTimeSeries`) rather than pinning it
-# (`::Type{SingleTimeSeries}`), so that `SingleTimeSeries{Float64}` reaches this
-# explanation instead of a `MethodError` naming a signature nobody wrote.
-_check_request_type(::Type{T}) where {T} = (_type_code(T); nothing)
+# The unparameterized time series type `T` is a spelling of, or `nothing` if it
+# is no kind of time series. `T` itself when it is already bare.
+function _base_time_series_type(::Type{T}) where {T}
+    for base in _TIME_SERIES_TYPES
+        T <: base && return base
+    end
+    return nothing
+end
 
-# The type code a catalog *filter* takes: any stored type. `Deterministic` is
-# widened to both deterministic storage forms by the core's catalog predicate,
-# so a filter never has to name `DeterministicSingleTimeSeries` to see it.
+# The type code a catalog *filter* takes: any stored type, in any spelling.
+# `Deterministic` is widened to both deterministic storage forms by the core's
+# catalog predicate, so a filter never has to name
+# `DeterministicSingleTimeSeries` to see it.
 _filter_type_code(::Type{T}) where {T} = Int32(_type_code(T))
 
 # The Julia time series type for a metadata row's type name (the `as_str` form).
@@ -95,6 +92,36 @@ function _type_for_name(name::AbstractString)
     else
         throw(InvalidParameterError("unknown time series type name $name"))
     end
+end
+
+# The *parameterized* Julia type of a metadata row: the row's stored type with
+# the `{T, N}` of the values it holds, so `md.time_series_type` names what a
+# read of that row hands back rather than only which of the six kinds it is. Both
+# parameters come from the row itself, so this needs no extra query and no
+# change to what is stored.
+#
+# `T` is the element type's *physical* dtype — `"tuple(3,f64)"` and
+# `"piecewise_linear"` are both `Float64` arrays, with the structure in
+# `element_shape` and `element_type`, matching the `Array{T, N}` the value types
+# hold. `N` is one more than the rank of `element_shape`, which the core records
+# as the stored array's shape after its leading axis.
+#
+# A `DeterministicSingleTimeSeries` is the exception, because it is a view: its
+# row carries the `element_shape` of the source `SingleTimeSeries`, while a read
+# materializes the `(H, count, element_dims...)` array of the `Deterministic` it
+# becomes — one axis more.
+#
+# An `element_type` this wrapper does not recognise leaves the base type bare
+# rather than guessing: the core owns the vocabulary, and a row written by a
+# newer one must still decode.
+function _parameterized_type(
+    name::AbstractString, element_type::AbstractString, element_shape
+)
+    base = _type_for_name(name)
+    dtype = _physical_dtype_of(element_type)
+    dtype === nothing && return base
+    extra = base === DeterministicSingleTimeSeries ? 2 : 1
+    return base{dtype, length(element_shape) + extra}
 end
 
 _row_period(x) = x === nothing ? nothing : _iso_to_period(String(x))
@@ -121,11 +148,13 @@ end
 
 function _decode_metadata(r::AbstractDict)
     percentiles = r["percentiles"]
+    element_type = String(r["element_type"])
+    element_shape = Tuple(Int(d) for d in r["element_shape"])
     return TimeSeriesMetadata(
         Int64(r["owner_id"]),
         String(r["owner_type"]),
         _category_for_name(r["owner_category"]),
-        _type_for_name(r["time_series_type"]),
+        _parameterized_type(r["time_series_type"], element_type, element_shape),
         String(r["name"]),
         hex2bytes(String(r["data_hash"])),
         _row_timestamp(r["initial_timestamp_ms"]),
@@ -135,8 +164,8 @@ function _decode_metadata(r::AbstractDict)
         _row_int(r["count"]),
         _row_int(r["length"]),
         percentiles === nothing ? nothing : Vector{Float64}(percentiles),
-        String(r["element_type"]),
-        Tuple(Int(d) for d in r["element_shape"]),
+        element_type,
+        element_shape,
         Dict{String, Any}(r["features"]),
         r["units"] === nothing ? nothing : String(r["units"]),
         r["quantity_kind"] === nothing ? nothing : String(r["quantity_kind"]),

@@ -15,8 +15,11 @@ const _FORECAST_TYPES = (
 )
 
 function _int_for_type(::Type{T}) where {T}
-    T in _FORECAST_TYPES || throw(InvalidParameterError("$T is not a forecast type"))
-    return _type_code(T)
+    # Parameters first, so a metadata row's `time_series_type` names a reader as
+    # readily as the bare type does.
+    base = _base_time_series_type(T)
+    base in _FORECAST_TYPES || throw(InvalidParameterError("$T is not a forecast type"))
+    return _type_code(base)
 end
 
 # Copy `byte_len` bytes at `ptr` into a fresh `T` array and reshape from the
@@ -158,7 +161,10 @@ function build_static_reader(
     component_field::Union{Nothing, AbstractString}=nothing,
     zoneless::Union{Nothing, Bool}=nothing,
 )
-    time_series_type in (SingleTimeSeries, NonSequentialTimeSeries) || throw(
+    # Parameters first, so a metadata row's `time_series_type` names a reader as
+    # readily as the bare type does.
+    static_type = _base_time_series_type(time_series_type)
+    static_type in (SingleTimeSeries, NonSequentialTimeSeries) || throw(
         InvalidParameterError(
             "build_static_reader handles the static types (SingleTimeSeries / " *
             "NonSequentialTimeSeries); got $time_series_type",
@@ -182,7 +188,7 @@ function build_static_reader(
     out = Ref{Ptr{Cvoid}}(C_NULL)
     code = @ccall lib_path().infrastore_store_build_static_reader(
         store::Ptr{Cvoid},
-        _type_code(time_series_type)::Int32,
+        _type_code(static_type)::Int32,
         has_owner::Bool,
         owner_arg::Int64,
         has_category::Bool,
