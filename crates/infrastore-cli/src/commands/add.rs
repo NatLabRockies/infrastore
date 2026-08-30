@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
-use infrastore_core::{AddRequest, Compression, KeyIdentity, Store, TimeSeriesData};
+use infrastore_core::{AddRequest, Compression, Store, TimeSeriesData};
 use serde_json::{Value, json};
 
 use crate::descriptor::{ColumnLayout, Descriptor, OwnerMap};
@@ -365,6 +365,17 @@ fn flush(
         return Ok(0);
     }
     let requests = std::mem::take(pending);
+    // The reporting fields, captured before the requests are consumed by the write.
+    let echo: Vec<(&'static str, String, i64)> = requests
+        .iter()
+        .map(|r| {
+            (
+                r.data.time_series_type().as_str(),
+                r.data.name().to_string(),
+                r.owner_id,
+            )
+        })
+        .collect();
     if replace {
         // Remove-then-add per identity, so a re-run of a load leaves either the
         // new series or the old one — never neither. Identities the store does
@@ -372,26 +383,26 @@ fn flush(
         // "replace it if it is there", which has to hold on the first load into
         // an empty store and on a descriptor that adds a series alongside ones
         // it is replacing.
-        let identities: Vec<KeyIdentity> = requests.iter().map(request_identity).collect();
-        let refs: Vec<&KeyIdentity> = identities.iter().collect();
-        store_access::remove_existing(store, &refs)?;
+        let filters: Vec<infrastore_core::ListFilter> =
+            requests.iter().map(request_identity).collect();
+        store_access::remove_existing(store, &filters)?;
     }
     let keys = store
         .add_time_series_bulk(requests)
         .map_err(|e| e.to_string())?;
-    for a in &keys {
+    for (id, (ts_type, name, owner_id)) in keys.iter().zip(&echo) {
         added.push(AddedRow {
-            id: a.id,
-            time_series_type: a.key.time_series_type().as_str(),
-            name: a.key.name().to_string(),
-            owner_id: a.key.owner_id(),
+            id: *id,
+            time_series_type: ts_type,
+            name: name.clone(),
+            owner_id: *owner_id,
         });
     }
     Ok(keys.len())
 }
 
 /// The identity a request will be stored under, for `--replace`.
-fn request_identity(req: &AddRequest) -> KeyIdentity {
+fn request_identity(req: &AddRequest) -> infrastore_core::ListFilter {
     let (resolution, interval) = match &req.data {
         TimeSeriesData::SingleTimeSeries(s) => (Some(s.resolution), None),
         TimeSeriesData::NonSequentialTimeSeries(_) => (None, None),
@@ -399,14 +410,16 @@ fn request_identity(req: &AddRequest) -> KeyIdentity {
         TimeSeriesData::Probabilistic(p) => (Some(p.resolution), Some(p.interval)),
         TimeSeriesData::Scenarios(s) => (Some(s.resolution), Some(s.interval)),
     };
-    KeyIdentity {
-        owner_id: req.owner_id,
-        owner_category: req.owner_category,
-        time_series_type: req.data.time_series_type(),
-        name: req.data.name().to_string(),
+    infrastore_core::ListFilter {
+        owner_id: Some(req.owner_id),
+        owner_category: Some(req.owner_category),
+        time_series_type: Some(req.data.time_series_type()),
+        name: Some(req.data.name().to_string()),
         resolution,
         interval,
-        features: req.features.clone(),
+        features: Some(req.features.clone()),
+        features_exact: true,
+        ..Default::default()
     }
 }
 

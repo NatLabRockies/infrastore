@@ -4,10 +4,9 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use infrastore_core::{
-    Deterministic, ElementType, FeatureValue, Features, ForecastSummaryRow, ForecastTimeSeriesKey,
-    KeyIdentity, NonSequentialTimeSeries, NonSequentialTimeSeriesKey, OwnerCategory, Period,
-    Probabilistic, Scenarios, SingleTimeSeries, SingleTimeSeriesKey, StaticSummaryRow,
-    TimeReference, TimeSeriesData, TimeSeriesKey, TimeSeriesMetadata, TimeSeriesType, TypedArray,
+    Deterministic, ElementType, FeatureValue, Features, ForecastSummaryRow,
+    NonSequentialTimeSeries, OwnerCategory, Period, Probabilistic, Scenarios, SingleTimeSeries,
+    StaticSummaryRow, TimeReference, TimeSeriesData, TimeSeriesMetadata, TimeSeriesType, TypedArray,
     UnitSystem,
 };
 
@@ -123,132 +122,9 @@ pub fn features_from_pb(f: pb::Features) -> Result<Features, ConvertError> {
 
 // ---- Key + metadata ----
 
-// The identity-only key encoding: maps a [`KeyIdentity`] with the descriptive
-// snapshot fields left absent. Used by the identity-addressed RPCs (get, has),
-// where only the identity tuple is needed to look a series up.
-pub fn key_to_pb(k: &KeyIdentity) -> pb::TimeSeriesKey {
-    pb::TimeSeriesKey {
-        owner_id: k.owner_id,
-        owner_category: pb::OwnerCategory::from(k.owner_category) as i32,
-        time_series_type: pb::TimeSeriesType::from(k.time_series_type) as i32,
-        name: k.name.clone(),
-        resolution: period_to_iso(k.resolution),
-        interval: period_to_iso(k.interval),
-        features: Some(features_to_pb(&k.features)),
-        initial_timestamp_rfc3339: None,
-        length: None,
-        horizon: None,
-        count: None,
-        time_reference: None,
-    }
-}
 
-// The full-key encoding: the identity plus the per-variant descriptive snapshot
-// (the variant is implied by `time_series_type`). Used by the RPCs that return
-// keys to a caller (ListKeys, GetTimeSeriesKeys, ResolveForecastKey).
-pub fn full_key_to_pb(k: &TimeSeriesKey) -> pb::TimeSeriesKey {
-    let mut pb = key_to_pb(k.identity());
-    pb.time_reference = k.time_reference().map(TimeReference::as_storage_string);
-    match k {
-        TimeSeriesKey::Single(s) => {
-            pb.initial_timestamp_rfc3339 = Some(s.initial_timestamp.to_rfc3339());
-            pb.length = Some(s.length as u64);
-        }
-        TimeSeriesKey::NonSequential(s) => {
-            pb.length = Some(s.length as u64);
-        }
-        TimeSeriesKey::Forecast(f) => {
-            pb.initial_timestamp_rfc3339 = Some(f.initial_timestamp.to_rfc3339());
-            pb.horizon = Some(f.horizon.to_iso8601());
-            pb.count = Some(f.count as u64);
-        }
-    }
-    pb
-}
 
-// Decode a full key sent by the server back into the core [`TimeSeriesKey`]
-// enum, reconstructing the variant from `time_series_type`. The descriptive
-// snapshot fields are required for the matched variant (the server always sends
-// them via [`full_key_to_pb`]).
-pub fn full_key_from_pb(k: pb::TimeSeriesKey) -> Result<TimeSeriesKey, ConvertError> {
-    let ts_type_pb = pb::TimeSeriesType::try_from(k.time_series_type).map_err(|_| {
-        ConvertError::InvalidValue {
-            field: "time_series_type",
-            message: format!("unknown enum value {}", k.time_series_type),
-        }
-    })?;
-    let ts_type = TimeSeriesType::from(ts_type_pb);
-    let initial_ts = &k.initial_timestamp_rfc3339;
-    let horizon = &k.horizon;
-    let count = k.count;
-    let length = k.length;
-    let time_reference = parse_time_reference(k.time_reference.as_deref())?;
-    let identity = key_from_pb(k.clone())?;
 
-    let parse_initial = |s: &Option<String>| -> Result<DateTime<Utc>, ConvertError> {
-        let s = s.as_deref().ok_or(ConvertError::MissingField(
-            "TimeSeriesKey.initial_timestamp_rfc3339",
-        ))?;
-        Ok(DateTime::parse_from_rfc3339(s).map(|d| d.with_timezone(&Utc))?)
-    };
-    let require_length = || length.ok_or(ConvertError::MissingField("TimeSeriesKey.length"));
-
-    match ts_type {
-        TimeSeriesType::SingleTimeSeries => Ok(TimeSeriesKey::Single(SingleTimeSeriesKey {
-            identity,
-            initial_timestamp: parse_initial(initial_ts)?,
-            length: require_length()? as usize,
-            time_reference,
-        })),
-        TimeSeriesType::NonSequentialTimeSeries => {
-            Ok(TimeSeriesKey::NonSequential(NonSequentialTimeSeriesKey {
-                identity,
-                length: require_length()? as usize,
-                time_reference,
-            }))
-        }
-        TimeSeriesType::Deterministic
-        | TimeSeriesType::DeterministicSingleTimeSeries
-        | TimeSeriesType::Probabilistic
-        | TimeSeriesType::Scenarios => Ok(TimeSeriesKey::Forecast(ForecastTimeSeriesKey {
-            identity,
-            initial_timestamp: parse_initial(initial_ts)?,
-            horizon: opt_period(horizon.as_deref())?
-                .ok_or(ConvertError::MissingField("TimeSeriesKey.horizon"))?,
-            count: count.ok_or(ConvertError::MissingField("TimeSeriesKey.count"))? as usize,
-            time_reference,
-        })),
-    }
-}
-
-pub fn key_from_pb(k: pb::TimeSeriesKey) -> Result<KeyIdentity, ConvertError> {
-    let owner_category =
-        pb::OwnerCategory::try_from(k.owner_category).map_err(|_| ConvertError::InvalidValue {
-            field: "owner_category",
-            message: format!("unknown enum value {}", k.owner_category),
-        })?;
-    let ts_type = pb::TimeSeriesType::try_from(k.time_series_type).map_err(|_| {
-        ConvertError::InvalidValue {
-            field: "time_series_type",
-            message: format!("unknown enum value {}", k.time_series_type),
-        }
-    })?;
-    let resolution = optional_period(&k.resolution)?;
-    let interval = optional_period(&k.interval)?;
-    let features = match k.features {
-        Some(f) => features_from_pb(f)?,
-        None => Features::new(),
-    };
-    Ok(KeyIdentity {
-        owner_id: k.owner_id,
-        owner_category: OwnerCategory::from(owner_category),
-        time_series_type: TimeSeriesType::from(ts_type),
-        name: k.name,
-        resolution,
-        interval,
-        features,
-    })
-}
 
 pub fn metadata_to_pb(m: &TimeSeriesMetadata) -> pb::TimeSeriesMetadata {
     pb::TimeSeriesMetadata {
@@ -1574,124 +1450,11 @@ mod convert_coverage_tests {
         }))
     }
 
-    #[test]
-    fn full_key_from_pb_requires_the_initial_timestamp() {
-        let mut pb = single_key_pb();
-        pb.initial_timestamp_rfc3339 = None;
-        assert!(matches!(
-            full_key_from_pb(pb),
-            Err(ConvertError::MissingField(
-                "TimeSeriesKey.initial_timestamp_rfc3339"
-            ))
-        ));
-    }
 
-    #[test]
-    fn full_key_from_pb_requires_the_length() {
-        let mut pb = single_key_pb();
-        pb.length = None;
-        assert!(matches!(
-            full_key_from_pb(pb),
-            Err(ConvertError::MissingField("TimeSeriesKey.length"))
-        ));
 
-        // NonSequential needs it too (and does *not* need a timestamp).
-        let mut pb = full_key_to_pb(&TimeSeriesKey::NonSequential(NonSequentialTimeSeriesKey {
-            identity: KeyIdentity {
-                owner_id: 1,
-                owner_category: OwnerCategory::Component,
-                time_series_type: TimeSeriesType::NonSequentialTimeSeries,
-                name: "events".into(),
-                resolution: None,
-                interval: None,
-                features: Features::new(),
-            },
-            length: 3,
-            time_reference: None,
-        }));
-        assert!(pb.initial_timestamp_rfc3339.is_none());
-        pb.length = None;
-        assert!(matches!(
-            full_key_from_pb(pb),
-            Err(ConvertError::MissingField("TimeSeriesKey.length"))
-        ));
-    }
 
-    #[test]
-    fn full_key_from_pb_requires_the_forecast_horizon_and_count() {
-        let forecast = TimeSeriesKey::Forecast(ForecastTimeSeriesKey {
-            identity: KeyIdentity {
-                owner_id: 1,
-                owner_category: OwnerCategory::Component,
-                time_series_type: TimeSeriesType::Deterministic,
-                name: "det".into(),
-                resolution: Some(Period::fixed(Duration::hours(1))),
-                interval: Some(Period::fixed(Duration::hours(6))),
-                features: Features::new(),
-            },
-            initial_timestamp: t0(),
-            horizon: Period::fixed(Duration::hours(4)),
-            count: 3,
-            time_reference: None,
-        });
 
-        let mut pb = full_key_to_pb(&forecast);
-        pb.horizon = None;
-        assert!(matches!(
-            full_key_from_pb(pb),
-            Err(ConvertError::MissingField("TimeSeriesKey.horizon"))
-        ));
 
-        let mut pb = full_key_to_pb(&forecast);
-        pb.count = None;
-        assert!(matches!(
-            full_key_from_pb(pb),
-            Err(ConvertError::MissingField("TimeSeriesKey.count"))
-        ));
-    }
-
-    #[test]
-    fn full_key_from_pb_rejects_an_unknown_type_enum() {
-        let mut pb = single_key_pb();
-        pb.time_series_type = 999;
-        assert!(matches!(
-            full_key_from_pb(pb),
-            Err(ConvertError::InvalidValue {
-                field: "time_series_type",
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn key_from_pb_rejects_an_unknown_owner_category_enum() {
-        let mut pb = single_key_pb();
-        pb.owner_category = 999;
-        assert!(matches!(
-            key_from_pb(pb.clone()),
-            Err(ConvertError::InvalidValue {
-                field: "owner_category",
-                ..
-            })
-        ));
-        assert!(matches!(
-            full_key_from_pb(pb),
-            Err(ConvertError::InvalidValue {
-                field: "owner_category",
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn full_key_from_pb_rejects_a_malformed_initial_timestamp() {
-        let mut pb = single_key_pb();
-        pb.initial_timestamp_rfc3339 = Some("not a timestamp".into());
-        assert!(matches!(
-            full_key_from_pb(pb),
-            Err(ConvertError::BadTimestamp(_))
-        ));
-    }
 
     // ---- DeterministicSingleTimeSeries on the wire ------------------------
 

@@ -240,31 +240,40 @@ fn make_det_requests(count: usize, length: usize) -> Vec<AddRequest> {
 /// Reconstruct TimeSeriesKeys for SingleTimeSeries without querying the store.
 ///
 /// This works because the bench creates deterministic owner_ids and names.
-fn sts_keys(count: usize) -> Vec<KeyIdentity> {
+fn sts_ids(store: &Store, count: usize) -> Result<Vec<i64>, Box<dyn std::error::Error>> {
     (0..count)
-        .map(|i| KeyIdentity {
-            owner_id: i as i64,
-            owner_category: OwnerCategory::Component,
-            time_series_type: TimeSeriesType::SingleTimeSeries,
-            name: "active_power".to_string(),
-            resolution: Some(infrastore_core::Period::Fixed(chrono::Duration::hours(1))),
-            interval: None,
-            features: Features::default(),
+        .map(|i| {
+            store
+                .resolve_id(
+                    i as i64,
+                    OwnerCategory::Component,
+                    "active_power",
+                    Some(infrastore_core::Period::Fixed(chrono::Duration::hours(1))),
+                    None,
+                    Features::default(),
+                    TimeSeriesType::SingleTimeSeries,
+                )
+                .map_err(Into::into)
         })
         .collect()
 }
 
-/// Reconstruct TimeSeriesKeys for Deterministic without querying the store.
-fn det_keys(count: usize) -> Vec<KeyIdentity> {
+/// Resolve the Deterministic association ids the read loop addresses.
+fn det_ids(store: &Store, count: usize) -> Result<Vec<i64>, Box<dyn std::error::Error>> {
+    let hour = infrastore_core::Period::Fixed(chrono::Duration::hours(1));
     (0..count)
-        .map(|i| KeyIdentity {
-            owner_id: i as i64,
-            owner_category: OwnerCategory::Component,
-            time_series_type: TimeSeriesType::Deterministic,
-            name: "active_power_forecast".to_string(),
-            resolution: Some(infrastore_core::Period::Fixed(chrono::Duration::hours(1))),
-            interval: Some(infrastore_core::Period::Fixed(chrono::Duration::hours(1))),
-            features: Features::default(),
+        .map(|i| {
+            store
+                .resolve_id(
+                    i as i64,
+                    OwnerCategory::Component,
+                    "active_power_forecast",
+                    Some(hour),
+                    Some(hour),
+                    Features::default(),
+                    TimeSeriesType::Deterministic,
+                )
+                .map_err(Into::into)
         })
         .collect()
 }
@@ -423,7 +432,7 @@ fn run_read(args: &ReadArgs) -> Result<(), Error> {
         flush_and_reopen(handle)?
     };
 
-    let keys = sts_keys(c.count);
+    let keys = sts_ids(&handle.store, c.count)?;
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
 
     let mut step_times: Vec<StdDuration> = Vec::with_capacity(actual_steps);
@@ -431,11 +440,9 @@ fn run_read(args: &ReadArgs) -> Result<(), Error> {
         let t_start = initial + chrono::Duration::milliseconds(step as i64 * HOUR_MS);
         let t_end = initial + chrono::Duration::milliseconds((step + 1) as i64 * HOUR_MS);
         let t0 = Instant::now();
-        for key in &keys {
-            let _ = handle
-                .store
-                .get_time_series(key, Some((t_start, t_end).into()))?;
-        }
+        let _ = handle
+            .store
+            .read_by_ids_range(&keys, (t_start, t_end).into())?;
         step_times.push(t0.elapsed());
     }
 
@@ -471,18 +478,16 @@ fn run_read(args: &ReadArgs) -> Result<(), Error> {
         flush_and_reopen(handle)?
     };
 
-    let keys = det_keys(c.count);
+    let keys = det_ids(&handle.store, c.count)?;
 
     let mut step_times: Vec<StdDuration> = Vec::with_capacity(actual_steps);
     for step in 0..actual_steps {
         let t_start = initial + chrono::Duration::milliseconds(step as i64 * HOUR_MS);
         let t_end = initial + chrono::Duration::milliseconds((step + 1) as i64 * HOUR_MS);
         let t0 = Instant::now();
-        for key in &keys {
-            let _ = handle
-                .store
-                .get_time_series(key, Some((t_start, t_end).into()))?;
-        }
+        let _ = handle
+            .store
+            .read_by_ids_range(&keys, (t_start, t_end).into())?;
         step_times.push(t0.elapsed());
     }
 

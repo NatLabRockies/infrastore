@@ -41,7 +41,6 @@ use crate::error::{Result, TimeSeriesError};
 use crate::storage::common::window_block_cols;
 use crate::types::array::{Dtype, Element};
 use crate::types::element_type::ElementType;
-use crate::types::key::TimeSeriesKey;
 use crate::types::metadata::{Features, TimeSeriesMetadata};
 use crate::types::period::Period;
 use crate::types::time_reference::TimeReference;
@@ -110,10 +109,11 @@ impl Timeline {
 pub struct StaticGroup {
     element_type: ElementType,
     element_shape: Vec<usize>,
-    /// Identity of each column, in buffer order. Returned once; stable for the
-    /// reader's lifetime.
-    keys: Vec<TimeSeriesKey>,
-    /// Content hash of each column's array, parallel to `keys`. Drives the read.
+    /// Catalog id of each column, in buffer order. Returned once; stable for
+    /// the reader's lifetime — read a column's row with `get_metadata_by_id`
+    /// when its name or grid is wanted.
+    ids: Vec<i64>,
+    /// Content hash of each column's array, parallel to `ids`. Drives the read.
     hashes: Vec<[u8; 32]>,
     /// Reused output buffer: `num_columns * element_count * dtype.size()` bytes.
     buf: Vec<u8>,
@@ -139,13 +139,13 @@ impl StaticGroup {
         &self.element_shape
     }
 
-    /// Column identities, in buffer order.
-    pub fn keys(&self) -> &[TimeSeriesKey] {
-        &self.keys
+    /// Column association ids, in buffer order.
+    pub fn ids(&self) -> &[i64] {
+        &self.ids
     }
 
     pub fn num_columns(&self) -> usize {
-        self.keys.len()
+        self.ids.len()
     }
 
     /// Raw `[num_columns, *element_shape]` bytes from the most recent read.
@@ -533,14 +533,16 @@ pub(crate) fn build_groups(
             groups.push(StaticGroup {
                 element_type: r.element_type,
                 element_shape: r.element_shape.clone(),
-                keys: Vec::new(),
+                ids: Vec::new(),
                 hashes: Vec::new(),
                 buf: Vec::new(),
                 filled: false,
             });
         }
         let g = groups.last_mut().expect("group present");
-        g.keys.push(TimeSeriesKey::from_metadata(&r)?);
+        g.ids.push(r.id.ok_or_else(|| TimeSeriesError::IntegrityError(
+            "a reader column carries no catalog id".into(),
+        ))?);
         g.hashes.push(r.data_hash);
     }
 
@@ -786,19 +788,20 @@ fn gather_window(
     }
 }
 
-/// One forecast's identity, mapped to the [`WindowSlot`] that supplies its
+/// One forecast's catalog id, mapped to the [`WindowSlot`] that supplies its
 /// window. Many entries can reference the same slot when they share an array and
 /// read plan; reach the window bytes via [`ForecastReader::entry_slot`].
 #[derive(Debug)]
 pub struct ForecastEntry {
-    key: TimeSeriesKey,
+    id: i64,
     /// Index into [`ForecastReader::slots`].
     slot: usize,
 }
 
 impl ForecastEntry {
-    pub fn key(&self) -> &TimeSeriesKey {
-        &self.key
+    /// The association id of the forecast this entry reads.
+    pub fn id(&self) -> i64 {
+        self.id
     }
 
     /// Index of the [`WindowSlot`] backing this entry. Entries that share an
@@ -1120,7 +1123,9 @@ pub(crate) fn build_forecast_entries(
                 slots.len() - 1
             });
         entries.push(ForecastEntry {
-            key: TimeSeriesKey::from_metadata(&m)?,
+            id: m.id.ok_or_else(|| TimeSeriesError::IntegrityError(
+                "a reader entry carries no catalog id".into(),
+            ))?,
             slot,
         });
     }

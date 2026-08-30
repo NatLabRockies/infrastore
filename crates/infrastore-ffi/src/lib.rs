@@ -1052,7 +1052,6 @@ pub unsafe extern "C" fn infrastore_store_add_single(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
-    out_key: *mut *mut InfraStoreKeyHandle,
     out_id: *mut i64,
 ) -> i32 {
     clear_error();
@@ -1063,10 +1062,6 @@ pub unsafe extern "C" fn infrastore_store_add_single(
             return INFRASTORE_ERR_NULL_POINTER;
         }
     };
-    if out_key.is_null() {
-        set_error("out_key pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
     let req = match unsafe {
         build_single_request(
             owner_id,
@@ -1094,13 +1089,9 @@ pub unsafe extern "C" fn infrastore_store_add_single(
     };
     match store.inner.add_time_series_bulk(vec![req]) {
         Ok(mut added) => {
-            let added = added.remove(0);
-            let handle = Box::new(InfraStoreKeyHandle {
-                inner: added.key.identity().clone(),
-            });
-            unsafe { *out_key = Box::into_raw(handle) };
+            let id = added.remove(0);
             if !out_id.is_null() {
-                unsafe { *out_id = added.id };
+                unsafe { *out_id = id };
             }
             INFRASTORE_OK
         }
@@ -1230,7 +1221,6 @@ pub unsafe extern "C" fn infrastore_store_add_non_sequential(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
-    out_key: *mut *mut InfraStoreKeyHandle,
     out_id: *mut i64,
 ) -> i32 {
     clear_error();
@@ -1241,10 +1231,6 @@ pub unsafe extern "C" fn infrastore_store_add_non_sequential(
             return INFRASTORE_ERR_NULL_POINTER;
         }
     };
-    if out_key.is_null() {
-        set_error("out_key pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
     let request = match unsafe {
         build_non_sequential_request(
             owner_id,
@@ -1272,14 +1258,9 @@ pub unsafe extern "C" fn infrastore_store_add_non_sequential(
     };
     match store.inner.add_time_series_bulk(vec![request]) {
         Ok(mut added) => {
-            let added = added.remove(0);
-            unsafe {
-                *out_key = Box::into_raw(Box::new(InfraStoreKeyHandle {
-                    inner: added.key.identity().clone(),
-                }))
-            };
+            let id = added.remove(0);
             if !out_id.is_null() {
-                unsafe { *out_id = added.id };
+                unsafe { *out_id = id };
             }
             INFRASTORE_OK
         }
@@ -1289,519 +1270,11 @@ pub unsafe extern "C" fn infrastore_store_add_non_sequential(
 
 // ---- get_single -----------------------------------------------------------
 
-/// Fetch a SingleTimeSeries by key in its native dtype and shape.
-///
-/// When `time_range_present` is `true`, only the steps whose timestamp falls in
-/// `[time_range_start_ms, time_range_end_ms)` are returned (the returned
-/// `out_initial_ts_unix_ms` / shape reflect the slice); pass `false` (with any
-/// millisecond values) to retrieve the whole series.
-///
-/// `out_dtype` receives the element dtype code (see [`time_series_type_from_int`]'s dtype
-/// siblings: f64=0, f32=1, i64=2, i32=3, u64=4, bool=5). `out_shape` /
-/// `out_shape_len` return the full array shape `[length, *element_shape]` (the
-/// first dim is time); `out_data` / `out_data_byte_len` return the raw
-/// little-endian element bytes. The caller owns both buffers and must free
-/// `*out_shape` with `infrastore_buffer_free_i64` and `*out_data` with
-/// `infrastore_buffer_free_u8`, each using its returned length.
-///
-/// `out_application_data`, when non-null, receives the association's opaque extension payload
-/// from the metadata row: null when the series carries no `application_data`, otherwise an
-/// owned C string the caller must free with `infrastore_string_free`.
-///
-/// `out_element_type`, when non-null, receives the canonical `element_type`
-/// string (`"f64"`, `"tuple(3,f64)"`, `"piecewise_linear"`, ...) as an owned C
-/// string the caller must free the same way. It is what tells a caller how to
-/// read the returned bytes as domain values; `out_dtype` is only their physical
-/// width.
-///
-/// `out_quantity_kind`, when non-null, receives the association's quantity kind,
-/// `out_time_reference` receives how the timestamps were spelled — null when unspecified,
-/// which is not a claim they were written as UTC —
-/// and `out_unit_system` its basis as the `natural_units` / `component_base`
-/// spelling — null when unspecified, which is not the same as natural units.
-/// `out_component_field`, when non-null, receives the component field the values
-/// vary over time. All three are owned C strings freed with
-/// `infrastore_string_free`.
-///
-/// `out_units`, when non-null, receives the association's units label: null when
-/// the series carries none, otherwise an owned C string freed the same way.
-/// Unlike `element_type` this is a user-declared label the store never
-/// interprets; it is returned so a caller can hand it back on the reconstructed
-/// series.
-///
-/// # Safety
-///
-/// `handle` and `key` must be live handles created by this library. Every output pointer except
-/// `out_application_data`, `out_element_type`, `out_units`, `out_quantity_kind`,
-/// `out_unit_system`, and `out_component_field` must be valid for writing its
-/// indicated value; those six may be null. The returned shape and data buffers must each be released exactly once
-/// with the matching free function and returned length. `*out_resolution` is an
-/// owned string like the optional six -- it is never null on success, since a
-/// `SingleTimeSeries` always has a resolution -- and it, along with a non-null
-/// `*out_application_data` / `*out_element_type` / `*out_units` /
-/// `*out_quantity_kind` / `*out_unit_system` / `*out_component_field`, must be
-/// freed exactly once with `infrastore_string_free`.
-#[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn infrastore_store_get_single(
-    handle: *const InfraStoreHandle,
-    key: *const InfraStoreKeyHandle,
-    time_range_present: bool,
-    time_range_zoneless: bool,
-    time_range_start_ms: i64,
-    time_range_end_ms: i64,
-    out_initial_ts_unix_ms: *mut i64,
-    out_resolution: *mut *mut c_char,
-    out_dtype: *mut i32,
-    out_shape: *mut *mut i64,
-    out_shape_len: *mut u64,
-    out_data: *mut *mut u8,
-    out_data_byte_len: *mut u64,
-    out_application_data: *mut *mut c_char,
-    out_element_type: *mut *mut c_char,
-    out_units: *mut *mut c_char,
-    out_quantity_kind: *mut *mut c_char,
-    out_unit_system: *mut *mut c_char,
-    out_time_reference: *mut *mut c_char,
-    out_component_field: *mut *mut c_char,
-) -> i32 {
-    clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => {
-            set_error("store handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    let key = match unsafe { key.as_ref() } {
-        Some(k) => k,
-        None => {
-            set_error("key handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    if out_initial_ts_unix_ms.is_null()
-        || out_resolution.is_null()
-        || out_dtype.is_null()
-        || out_shape.is_null()
-        || out_shape_len.is_null()
-        || out_data.is_null()
-        || out_data_byte_len.is_null()
-    {
-        set_error("an out pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let time_range = match build_time_range(
-        time_range_present,
-        time_range_zoneless,
-        time_range_start_ms,
-        time_range_end_ms,
-    ) {
-        Ok(r) => r,
-        Err(c) => return c,
-    };
-    let (data, meta) = match store
-        .inner
-        .get_time_series_with_metadata(&key.inner, time_range)
-    {
-        Ok(pair) => pair,
-        Err(e) => return map_core_error(e),
-    };
-    let single = match data {
-        core_lib::TimeSeriesData::SingleTimeSeries(single) => single,
-        core_lib::TimeSeriesData::NonSequentialTimeSeries(_) => {
-            set_error("key does not identify a SingleTimeSeries");
-            return INFRASTORE_ERR_INVALID_PARAMETER;
-        }
-        // Forecast types are not yet exposed through this FFI entry point.
-        core_lib::TimeSeriesData::Deterministic(_)
-        | core_lib::TimeSeriesData::Probabilistic(_)
-        | core_lib::TimeSeriesData::Scenarios(_) => {
-            set_error("key identifies a forecast type; use the forecast FFI");
-            return INFRASTORE_ERR_INVALID_PARAMETER;
-        }
-    };
-    // The extension payload lives on the metadata row, not on the reconstructed
-    // series; the row came back with the data from the single catalog lookup.
-    // Both attribute strings are built first, before anything is handed to the
-    // caller: they are the only fallible step left, and holding them as
-    // `CString`s means an early return drops them instead of leaking.
-    let application_data_cstr = if out_application_data.is_null() {
-        None
-    } else {
-        match opt_attr_cstring(meta.application_data.as_deref()) {
-            Ok(c) => c,
-            Err(code) => return code,
-        }
-    };
-    // The units label likewise lives on the metadata row, not on the series.
-    let units_cstr = if out_units.is_null() {
-        None
-    } else {
-        match opt_attr_cstring(meta.units.as_deref()) {
-            Ok(c) => c,
-            Err(code) => return code,
-        }
-    };
-    let quantity_kind_cstr = if out_quantity_kind.is_null() {
-        None
-    } else {
-        match opt_attr_cstring(meta.quantity_kind.as_deref()) {
-            Ok(c) => c,
-            Err(code) => return code,
-        }
-    };
-    let component_field_cstr = if out_component_field.is_null() {
-        None
-    } else {
-        match opt_attr_cstring(meta.component_field.as_deref()) {
-            Ok(c) => c,
-            Err(code) => return code,
-        }
-    };
-    // Infallible: `UnitSystem::as_str` is a fixed identifier, so unlike the
-    // user-supplied labels it can never carry an interior NUL.
-    let unit_system_cstr = if out_unit_system.is_null() {
-        std::ptr::null_mut()
-    } else {
-        meta.unit_system
-            .map(|u| owned_cstr(u.as_str()))
-            .unwrap_or(std::ptr::null_mut())
-    };
-    // Same reasoning: every `TimeReference` spelling is a literal, a formatted
-    // offset, or an IANA-shaped zone name.
-    let time_reference_cstr = if out_time_reference.is_null() {
-        std::ptr::null_mut()
-    } else {
-        meta.time_reference
-            .as_ref()
-            .map(|r| owned_cstr(&r.as_storage_string()))
-            .unwrap_or(std::ptr::null_mut())
-    };
-    let element_type_cstr = if out_element_type.is_null() {
-        std::ptr::null_mut()
-    } else {
-        owned_cstr(&meta.element_type.to_string())
-    };
-    let resolution_cstr = period_cstr(single.resolution);
-    let dtype = single.data.dtype;
-    // Full array shape `[length, *element_shape]`, returned as an owned i64 buffer.
-    let shape: Vec<i64> = single.data.shape.iter().map(|&d| d as i64).collect();
-    let (shape_ptr, shape_len) = vec_into_raw(shape);
-    // Native little-endian element bytes, returned as an owned u8 buffer.
-    let (data_ptr, data_len) = vec_into_raw(single.data.bytes);
-    unsafe {
-        *out_initial_ts_unix_ms = datetime_to_unix_ms(single.initial_timestamp);
-        *out_resolution = resolution_cstr;
-        *out_dtype = dtype.code();
-        *out_shape = shape_ptr;
-        *out_shape_len = shape_len;
-        *out_data = data_ptr;
-        *out_data_byte_len = data_len;
-        if !out_application_data.is_null() {
-            *out_application_data = into_raw_or_null(application_data_cstr);
-        }
-        if !out_element_type.is_null() {
-            *out_element_type = element_type_cstr;
-        }
-        if !out_units.is_null() {
-            *out_units = into_raw_or_null(units_cstr);
-        }
-        if !out_quantity_kind.is_null() {
-            *out_quantity_kind = into_raw_or_null(quantity_kind_cstr);
-        }
-        if !out_component_field.is_null() {
-            *out_component_field = into_raw_or_null(component_field_cstr);
-        }
-        if !out_unit_system.is_null() {
-            *out_unit_system = unit_system_cstr;
-        }
-        if !out_time_reference.is_null() {
-            *out_time_reference = time_reference_cstr;
-        }
-    }
-    INFRASTORE_OK
-}
 
-/// Fetch a NonSequentialTimeSeries by key.
-///
-/// When `time_range_present` is `true`, only the points whose timestamp falls in
-/// `[time_range_start_ms, time_range_end_ms)` are returned; pass `false` to
-/// retrieve every point.
-///
-/// `out_shape` returns the full array shape `[length, *element_shape]` (so callers can recover an
-/// N-dimensional per-step element shape, e.g. a `(length, k)` FunctionData encoding); `out_dtype`
-/// and `out_data` carry the row-major element bytes.
-///
-/// `out_application_data`, when non-null, receives the association's opaque extension payload
-/// from the metadata row: null when the series carries no `application_data`, otherwise an
-/// owned C string the caller must free with `infrastore_string_free` — the same
-/// convention as `infrastore_store_get_single`. (Earlier revisions copied it into a
-/// caller-sized buffer, which invited silent truncation.)
-///
-/// `out_element_type`, when non-null, receives the canonical `element_type` string as an owned C
-/// string the caller must free with `infrastore_string_free`. It is what says how to read the
-/// bytes as domain values.
-///
-/// `out_quantity_kind`, when non-null, receives the association's quantity kind, and
-/// `out_unit_system` its basis as the `natural_units` / `component_base` spelling — null when
-/// unspecified, which is not the same as natural units. `out_time_reference` receives how the
-/// timestamps were spelled, on the same terms. `out_component_field`, when non-null,
-/// receives the component field the values vary over time. All three are owned C strings freed
-/// with `infrastore_string_free`.
-///
-/// `out_units`, when non-null, receives the association's user-declared units label as an owned C
-/// string freed the same way; it is null when the series carries none. The store never interprets
-/// it.
-///
-/// The caller owns the `out_timestamps`, `out_shape`, and `out_data` buffers and must release them
-/// with `infrastore_buffer_free_i64`, `infrastore_buffer_free_i64`, and `infrastore_buffer_free_u8` respectively.
-///
-/// # Safety
-///
-/// `handle` and `key` must be live handles created by this library. Every output pointer except
-/// `out_application_data`, `out_element_type`, `out_units`, `out_quantity_kind`,
-/// `out_unit_system`, and `out_component_field` must be valid for writing its
-/// indicated value; those six may be null to skip them. Returned buffers must each be released exactly once with
-/// the matching free function and returned length, and a non-null `*out_application_data` /
-/// `*out_element_type` / `*out_units` / `*out_quantity_kind` / `*out_unit_system` /
-/// `*out_component_field` exactly once with `infrastore_string_free`.
-#[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn infrastore_store_get_non_sequential(
-    handle: *const InfraStoreHandle,
-    key: *const InfraStoreKeyHandle,
-    time_range_present: bool,
-    time_range_zoneless: bool,
-    time_range_start_ms: i64,
-    time_range_end_ms: i64,
-    out_timestamps: *mut *mut i64,
-    out_timestamps_len: *mut u64,
-    out_dtype: *mut i32,
-    out_shape: *mut *mut i64,
-    out_shape_len: *mut u64,
-    out_data: *mut *mut u8,
-    out_data_byte_len: *mut u64,
-    out_application_data: *mut *mut c_char,
-    out_element_type: *mut *mut c_char,
-    out_units: *mut *mut c_char,
-    out_quantity_kind: *mut *mut c_char,
-    out_unit_system: *mut *mut c_char,
-    out_time_reference: *mut *mut c_char,
-    out_component_field: *mut *mut c_char,
-) -> i32 {
-    clear_error();
-    let store = deref_handle!(ref handle);
-    let key = deref_handle!(ref key);
-    if out_timestamps.is_null()
-        || out_timestamps_len.is_null()
-        || out_dtype.is_null()
-        || out_shape.is_null()
-        || out_shape_len.is_null()
-        || out_data.is_null()
-        || out_data_byte_len.is_null()
-    {
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let time_range = match build_time_range(
-        time_range_present,
-        time_range_zoneless,
-        time_range_start_ms,
-        time_range_end_ms,
-    ) {
-        Ok(r) => r,
-        Err(c) => return c,
-    };
-    let (data, meta) = match store
-        .inner
-        .get_time_series_with_metadata(&key.inner, time_range)
-    {
-        Ok(pair) => pair,
-        Err(error) => return map_core_error(error),
-    };
-    let series = match data {
-        core_lib::TimeSeriesData::NonSequentialTimeSeries(series) => series,
-        core_lib::TimeSeriesData::SingleTimeSeries(_) => {
-            set_error("key does not identify a NonSequentialTimeSeries");
-            return INFRASTORE_ERR_INVALID_PARAMETER;
-        }
-        // Forecast types are not yet exposed through this FFI entry point.
-        core_lib::TimeSeriesData::Deterministic(_)
-        | core_lib::TimeSeriesData::Probabilistic(_)
-        | core_lib::TimeSeriesData::Scenarios(_) => {
-            set_error("key identifies a forecast type; use the forecast FFI");
-            return INFRASTORE_ERR_INVALID_PARAMETER;
-        }
-    };
-    // The extension payload lives on the metadata row, not on the reconstructed
-    // series; the row came back with the data from the single catalog lookup.
-    // The attribute strings are the only fallible step and are built first, as
-    // `CString`s, so an early return drops them instead of leaking.
-    let application_data_cstr = if out_application_data.is_null() {
-        None
-    } else {
-        match opt_attr_cstring(meta.application_data.as_deref()) {
-            Ok(c) => c,
-            Err(code) => return code,
-        }
-    };
-    // The units label likewise lives on the metadata row, not on the series.
-    let units_cstr = if out_units.is_null() {
-        None
-    } else {
-        match opt_attr_cstring(meta.units.as_deref()) {
-            Ok(c) => c,
-            Err(code) => return code,
-        }
-    };
-    let quantity_kind_cstr = if out_quantity_kind.is_null() {
-        None
-    } else {
-        match opt_attr_cstring(meta.quantity_kind.as_deref()) {
-            Ok(c) => c,
-            Err(code) => return code,
-        }
-    };
-    let component_field_cstr = if out_component_field.is_null() {
-        None
-    } else {
-        match opt_attr_cstring(meta.component_field.as_deref()) {
-            Ok(c) => c,
-            Err(code) => return code,
-        }
-    };
-    // Infallible: `UnitSystem::as_str` is a fixed identifier, so unlike the
-    // user-supplied labels it can never carry an interior NUL.
-    let unit_system_cstr = if out_unit_system.is_null() {
-        std::ptr::null_mut()
-    } else {
-        meta.unit_system
-            .map(|u| owned_cstr(u.as_str()))
-            .unwrap_or(std::ptr::null_mut())
-    };
-    // Same reasoning: every `TimeReference` spelling is a literal, a formatted
-    // offset, or an IANA-shaped zone name.
-    let time_reference_cstr = if out_time_reference.is_null() {
-        std::ptr::null_mut()
-    } else {
-        meta.time_reference
-            .as_ref()
-            .map(|r| owned_cstr(&r.as_storage_string()))
-            .unwrap_or(std::ptr::null_mut())
-    };
-    let element_type_cstr = if out_element_type.is_null() {
-        std::ptr::null_mut()
-    } else {
-        owned_cstr(&meta.element_type.to_string())
-    };
-    let timestamps: Vec<i64> = series
-        .timestamps
-        .iter()
-        .map(|timestamp| datetime_to_unix_ms(*timestamp))
-        .collect();
-    let (timestamps_ptr, timestamps_len) = vec_into_raw(timestamps);
-
-    // Full array shape `[length, *element_shape]`, returned as an owned i64 buffer.
-    let shape: Vec<i64> = series.data.shape.iter().map(|&d| d as i64).collect();
-    let (shape_ptr, shape_len) = vec_into_raw(shape);
-
-    let dtype = series.data.dtype.code();
-    let (data_ptr, data_byte_len) = vec_into_raw(series.data.bytes);
-    unsafe {
-        *out_timestamps = timestamps_ptr;
-        *out_timestamps_len = timestamps_len;
-        *out_dtype = dtype;
-        *out_shape = shape_ptr;
-        *out_shape_len = shape_len;
-        *out_data = data_ptr;
-        *out_data_byte_len = data_byte_len;
-        if !out_application_data.is_null() {
-            *out_application_data = into_raw_or_null(application_data_cstr);
-        }
-        if !out_element_type.is_null() {
-            *out_element_type = element_type_cstr;
-        }
-        if !out_units.is_null() {
-            *out_units = into_raw_or_null(units_cstr);
-        }
-        if !out_quantity_kind.is_null() {
-            *out_quantity_kind = into_raw_or_null(quantity_kind_cstr);
-        }
-        if !out_component_field.is_null() {
-            *out_component_field = into_raw_or_null(component_field_cstr);
-        }
-        if !out_unit_system.is_null() {
-            *out_unit_system = unit_system_cstr;
-        }
-        if !out_time_reference.is_null() {
-            *out_time_reference = time_reference_cstr;
-        }
-    }
-    INFRASTORE_OK
-}
 
 // ---- remove / has / counts / verify ---------------------------------------
 
-/// Remove the time series identified by `key`.
-///
-/// # Safety
-///
-/// `key` must be a live key handle created by this
-/// library. Neither handle may be used concurrently from another thread for the
-/// duration of the call.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn infrastore_store_remove(
-    handle: *mut InfraStoreHandle,
-    key: *const InfraStoreKeyHandle,
-) -> i32 {
-    clear_error();
-    let store = deref_handle!(mut handle);
-    let key = deref_handle!(ref key);
-    match store.inner.remove_time_series(&key.inner) {
-        Ok(()) => INFRASTORE_OK,
-        Err(e) => map_core_error(e),
-    }
-}
 
-/// Remove several time series in one all-or-nothing transaction. On success
-/// `*out_removed` receives the number of removed associations; on any error
-/// (including a single missing key) nothing is removed.
-///
-/// # Safety
-///
-/// `keys` must point to `len` valid, non-null key-handle pointers created by this library. No
-/// handle may be used concurrently from another thread for the duration of the call.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn infrastore_store_remove_bulk(
-    handle: *mut InfraStoreHandle,
-    keys: *const *const InfraStoreKeyHandle,
-    len: u64,
-    out_removed: *mut u64,
-) -> i32 {
-    clear_error();
-    let store = deref_handle!(mut handle);
-    if out_removed.is_null() || (keys.is_null() && len > 0) {
-        set_error("an out pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let mut identities: Vec<&core_lib::KeyIdentity> = Vec::with_capacity(len as usize);
-    for i in 0..len as usize {
-        match unsafe { (*keys.add(i)).as_ref() } {
-            Some(k) => identities.push(&k.inner),
-            None => {
-                set_error(format!("key {i} is null"));
-                return INFRASTORE_ERR_NULL_POINTER;
-            }
-        }
-    }
-    match store.inner.remove_time_series_bulk(&identities) {
-        Ok(n) => {
-            unsafe { *out_removed = n as u64 };
-            INFRASTORE_OK
-        }
-        Err(e) => map_core_error(e),
-    }
-}
 
 /// Remove many associations named by their catalog `id`, in one all-or-nothing
 /// transaction. On success `*out_removed` receives the number removed.
@@ -1855,31 +1328,6 @@ pub unsafe extern "C" fn infrastore_store_remove_by_ids(
     }
 }
 
-/// Report whether the store contains the time series identified by `key`.
-///
-/// # Safety
-///
-/// `handle` and `key` must be live handles created by this library.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn infrastore_store_has(
-    handle: *const InfraStoreHandle,
-    key: *const InfraStoreKeyHandle,
-    out_present: *mut bool,
-) -> i32 {
-    clear_error();
-    let store = deref_handle!(ref handle);
-    let key = deref_handle!(ref key);
-    if out_present.is_null() {
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    match store.inner.has_time_series(&key.inner) {
-        Ok(b) => {
-            unsafe { *out_present = b };
-            INFRASTORE_OK
-        }
-        Err(e) => map_core_error(e),
-    }
-}
 
 /// Return aggregate time-series counts.
 ///
@@ -2776,13 +2224,18 @@ pub unsafe extern "C" fn infrastore_store_persist_catalog(handle: *mut InfraStor
 // build a `TimeSeriesKey` internally and route to the core store. v0 only
 // resolves SingleTimeSeries.
 
-unsafe fn build_key_from_attrs(
+/// The exact-identity `ListFilter` for a set of addressing attributes: the whole
+/// feature set, matched by hash rather than as a subset. What the `has_*` probes
+/// pose their question with — an existence check asks about one series, so a
+/// sibling carrying an extra feature must not answer for it.
+unsafe fn exact_identity_filter(
     owner_id: i64,
     owner_category: i32,
     name: *const c_char,
     resolution: *const c_char,
+    interval: Option<core_lib::Period>,
     features_json: *const c_char,
-) -> Result<core_lib::KeyIdentity, i32> {
+) -> Result<core_lib::ListFilter, i32> {
     let name = unsafe { cstr_to_str(name) }.inspect_err(|_| {
         set_error("name is invalid");
     })?;
@@ -2796,70 +2249,18 @@ unsafe fn build_key_from_attrs(
     };
     let features = unsafe { parse_features_json(features_json) }?;
     let resolution = unsafe { cstr_to_optional_period(resolution)? };
-    Ok(core_lib::KeyIdentity {
-        owner_id,
-        owner_category,
-        time_series_type: core_lib::TimeSeriesType::SingleTimeSeries,
-        name: name.to_string(),
+    Ok(core_lib::ListFilter {
+        owner_id: Some(owner_id),
+        owner_category: Some(owner_category),
+        name: Some(name.to_string()),
         resolution,
-        interval: None,
-        features,
+        interval,
+        features: Some(features),
+        features_exact: true,
+        ..Default::default()
     })
 }
 
-/// Write the full metadata record for `key` as a JSON object string, using the
-/// probe-then-fetch buffer convention (a null or too-small `buf` reports the
-/// required byte length in `out_len` without copying).
-///
-/// The row shape is identical to one element of the
-/// `infrastore_store_list_time_series` array: `owner_id`, `owner_type`,
-/// `owner_category`, `time_series_type`, `name`, `data_hash` (64-character hex),
-/// `initial_timestamp_ms`, `resolution`, `horizon`, `interval`, `count`,
-/// `length`, `percentiles`, `element_type`, `element_shape`, `features`,
-/// `units`, `quantity_kind`, `unit_system`, `time_reference`, `component_field`, and
-/// `application_data`, with the fields that do not apply to the key's type set to `null`.
-/// (There is no `dtype` field; `element_type` is what says how to read the
-/// values.)
-/// That is the whole `TimeSeriesMetadata` the core holds for the association, so
-/// this one export serves every time series type — static and forecast alike.
-/// Returns `INFRASTORE_ERR_NOT_FOUND` when the key names no stored association.
-///
-/// Build `key` from attributes with `infrastore_make_key_from_attrs`, or take one
-/// from `infrastore_store_add_*` / `infrastore_store_get_time_series_keys`.
-///
-/// # Safety
-///
-/// `handle` must be a live store handle and `key` a live key handle; neither is retained past
-/// the call. `buf`, when non-null, must be valid for writing `cap` bytes.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn infrastore_store_get_metadata_by_key(
-    handle: *const InfraStoreHandle,
-    key: *const InfraStoreKeyHandle,
-    buf: *mut c_char,
-    cap: u64,
-    out_len: *mut u64,
-) -> i32 {
-    clear_error();
-    let store = deref_handle!(ref handle);
-    let key = match unsafe { key.as_ref() } {
-        Some(k) => k,
-        None => {
-            set_error("key handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    if out_len.is_null() {
-        set_error("out_len is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let meta = match store.inner.get_metadata(&key.inner) {
-        Ok(m) => m,
-        Err(e) => return map_core_error(e),
-    };
-    let json = Value::Object(metadata_to_map(&meta)).to_string();
-    unsafe { write_str_out(&json, buf, cap, out_len) };
-    INFRASTORE_OK
-}
 
 /// Fetch the metadata row filed under `association_id`, as one JSON object.
 ///
@@ -2967,13 +2368,13 @@ pub unsafe extern "C" fn infrastore_store_has_by_attrs(
     if out_present.is_null() {
         return INFRASTORE_ERR_NULL_POINTER;
     }
-    let key = match unsafe {
-        build_key_from_attrs(owner_id, owner_category, name, resolution, features_json)
+    let filter = match unsafe {
+        exact_identity_filter(owner_id, owner_category, name, resolution, None, features_json)
     } {
-        Ok(k) => k,
+        Ok(f) => f,
         Err(code) => return code,
     };
-    match store.inner.has_time_series(&key) {
+    match store.inner.has_any_time_series(filter) {
         Ok(b) => {
             unsafe { *out_present = b };
             INFRASTORE_OK
@@ -3278,7 +2679,7 @@ unsafe fn build_typed_key_from_attrs(
     resolution: *const c_char,
     interval: *const c_char,
     features_json: *const c_char,
-) -> Result<core_lib::KeyIdentity, i32> {
+) -> Result<core_lib::ListFilter, i32> {
     let time_series_type = match time_series_type_from_int(ts_type) {
         Some(t) => t,
         None => {
@@ -3286,11 +2687,12 @@ unsafe fn build_typed_key_from_attrs(
             return Err(INFRASTORE_ERR_INVALID_PARAMETER);
         }
     };
-    let mut key =
-        unsafe { build_key_from_attrs(owner_id, owner_category, name, resolution, features_json) }?;
-    key.time_series_type = time_series_type;
-    key.interval = unsafe { cstr_to_optional_period(interval)? };
-    Ok(key)
+    let interval = unsafe { cstr_to_optional_period(interval)? };
+    let mut filter = unsafe {
+        exact_identity_filter(owner_id, owner_category, name, resolution, interval, features_json)
+    }?;
+    filter.time_series_type = Some(time_series_type);
+    Ok(filter)
 }
 
 /// Add a dense forecast. `data_ptr`/`data_byte_len` is the flattened storage
@@ -3331,15 +2733,10 @@ pub unsafe extern "C" fn infrastore_store_add_forecast(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
-    out_key: *mut *mut InfraStoreKeyHandle,
     out_id: *mut i64,
 ) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
-    if out_key.is_null() {
-        set_error("out_key pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
     let req = match unsafe {
         build_forecast_request(
             owner_id,
@@ -3371,13 +2768,9 @@ pub unsafe extern "C" fn infrastore_store_add_forecast(
     };
     match store.inner.add_time_series_bulk(vec![req]) {
         Ok(mut added) => {
-            let added = added.remove(0);
-            let handle = Box::new(InfraStoreKeyHandle {
-                inner: added.key.identity().clone(),
-            });
-            unsafe { *out_key = Box::into_raw(handle) };
+            let id = added.remove(0);
             if !out_id.is_null() {
-                unsafe { *out_id = added.id };
+                unsafe { *out_id = id };
             }
             INFRASTORE_OK
         }
@@ -3558,15 +2951,10 @@ pub unsafe extern "C" fn infrastore_store_add_probabilistic(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
-    out_key: *mut *mut InfraStoreKeyHandle,
     out_id: *mut i64,
 ) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
-    if out_key.is_null() {
-        set_error("out_key pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
     let req = match unsafe {
         build_probabilistic_request(
             owner_id,
@@ -3599,13 +2987,9 @@ pub unsafe extern "C" fn infrastore_store_add_probabilistic(
     };
     match store.inner.add_time_series_bulk(vec![req]) {
         Ok(mut added) => {
-            let added = added.remove(0);
-            let handle = Box::new(InfraStoreKeyHandle {
-                inner: added.key.identity().clone(),
-            });
-            unsafe { *out_key = Box::into_raw(handle) };
+            let id = added.remove(0);
             if !out_id.is_null() {
-                unsafe { *out_id = added.id };
+                unsafe { *out_id = id };
             }
             INFRASTORE_OK
         }
@@ -4060,7 +3444,6 @@ pub unsafe extern "C" fn infrastore_batch_add_probabilistic(
 pub unsafe extern "C" fn infrastore_store_add_batch(
     handle: *mut InfraStoreHandle,
     batch: *mut InfraStoreBatchHandle,
-    out_keys: *mut *mut *mut InfraStoreKeyHandle,
     out_len: *mut u64,
     out_ids: *mut *mut i64,
 ) -> i32 {
@@ -4079,46 +3462,26 @@ pub unsafe extern "C" fn infrastore_store_add_batch(
             return INFRASTORE_ERR_NULL_POINTER;
         }
     };
-    if out_keys.is_null() || out_len.is_null() {
+    if out_ids.is_null() || out_len.is_null() {
         set_error("an out pointer is null");
         return INFRASTORE_ERR_NULL_POINTER;
     }
     let items = std::mem::take(&mut batch.items);
     match store.inner.add_time_series_bulk(items) {
         Ok(added) => {
-            let ids: Vec<i64> = added.iter().map(|a| a.id).collect();
-            let handles: Vec<*mut InfraStoreKeyHandle> = added
-                .into_iter()
-                .map(|a| {
-                    Box::into_raw(Box::new(InfraStoreKeyHandle {
-                        inner: a.key.identity().clone(),
-                    }))
-                })
-                .collect();
-            let len = handles.len() as u64;
-            // An empty batch is reported as null (no free needed); otherwise the
-            // handed-out allocation is exactly `len` elements (see
-            // `vec_into_raw`), which is what `infrastore_keys_buffer_free`
-            // reconstructs.
-            let ptr = if handles.is_empty() {
+            let ids: Vec<i64> = added.clone();
+            let len = added.len() as u64;
+            // An empty batch is reported as null (no free needed); otherwise
+            // the handed-out allocation is exactly `len` elements (see
+            // `vec_into_raw`), released with `infrastore_buffer_free_i64`.
+            let id_ptr = if ids.is_empty() {
                 ptr::null_mut()
             } else {
-                vec_into_raw(handles).0
+                vec_into_raw(ids).0
             };
             unsafe {
-                *out_keys = ptr;
+                *out_ids = id_ptr;
                 *out_len = len;
-            }
-            if !out_ids.is_null() {
-                // Same length and ordering as `out_keys`, and released the same
-                // way. An empty batch hands back null, so there is nothing to
-                // free.
-                let id_ptr = if ids.is_empty() {
-                    ptr::null_mut()
-                } else {
-                    vec_into_raw(ids).0
-                };
-                unsafe { *out_ids = id_ptr };
             }
             INFRASTORE_OK
         }
@@ -4131,79 +3494,6 @@ pub unsafe extern "C" fn infrastore_store_add_batch(
 // every chunk per series. Results are held in a `InfraStoreBulkReadHandle` and read out
 // element-by-element with the same out-parameter shape as `infrastore_store_get_single`.
 
-/// Read many full `SingleTimeSeries` at once. `keys` points to `n` live key
-/// handles; the results are returned through `out_result` as a handle whose
-/// elements line up with `keys` in order. Every key must identify a
-/// `SingleTimeSeries`; a forecast or non-sequential key makes the whole call
-/// fail with `INFRASTORE_ERR_INVALID_PARAMETER`.
-///
-/// Soft-deprecated: prefer `infrastore_store_bulk_read`, which handles every variant
-/// (and optional time-range slicing) through the same result handle. This
-/// entry point is kept for ABI compatibility with single-type callers.
-///
-/// # Safety
-///
-/// `keys` must point to `n` live key handles created by this library (it may be null only when
-/// `n` is 0). On `INFRASTORE_OK` the returned handle must be released exactly once with
-/// `infrastore_bulk_result_free`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn infrastore_store_bulk_read_single(
-    handle: *const InfraStoreHandle,
-    keys: *const *const InfraStoreKeyHandle,
-    n: u64,
-    out_result: *mut *mut InfraStoreBulkReadHandle,
-) -> i32 {
-    clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => {
-            set_error("store handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    if out_result.is_null() {
-        set_error("out_result pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let count = n as usize;
-    if count != 0 && keys.is_null() {
-        set_error("keys pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let key_ptrs = if count == 0 {
-        &[][..]
-    } else {
-        unsafe { std::slice::from_raw_parts(keys, count) }
-    };
-    let mut identities: Vec<&core_lib::KeyIdentity> = Vec::with_capacity(count);
-    for &kp in key_ptrs {
-        match unsafe { kp.as_ref() } {
-            Some(k) => identities.push(&k.inner),
-            None => {
-                set_error("a key handle is null");
-                return INFRASTORE_ERR_NULL_POINTER;
-            }
-        }
-    }
-    let items = match store.inner.bulk_read(&identities) {
-        Ok(d) => d,
-        Err(e) => return map_core_error(e),
-    };
-    // Preserve the single-only contract: reject non-Single results up front.
-    if let Some(bad) = items
-        .iter()
-        .find(|d| !matches!(d, core_lib::TimeSeriesData::SingleTimeSeries(_)))
-    {
-        set_error(format!(
-            "infrastore_store_bulk_read_single requires every key to identify a SingleTimeSeries; \
-             got {}",
-            bad.time_series_type().as_str()
-        ));
-        return INFRASTORE_ERR_INVALID_PARAMETER;
-    }
-    unsafe { *out_result = Box::into_raw(Box::new(InfraStoreBulkReadHandle { items })) };
-    INFRASTORE_OK
-}
 
 /// Write a series' descriptive attributes (`application_data`, `element_type`,
 /// `units`, `quantity_kind`, `unit_system`, `time_reference`, `component_field`)
@@ -4451,79 +3741,6 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_single(
     INFRASTORE_OK
 }
 
-/// Read many series of *any* variant at once, optionally sliced to a time range.
-/// The variant-general counterpart of `infrastore_store_bulk_read_single`: results line
-/// up with `keys` in order, and each element's variant is discovered with
-/// `infrastore_bulk_result_item_type` then read with the matching `infrastore_bulk_result_get_*`.
-///
-/// When `time_range_present` is `true`, every series is sliced to
-/// `[time_range_start_ms, time_range_end_ms)`; pass `false` for whole series.
-///
-/// # Safety
-///
-/// `keys` must point to `n` live key handles created by this library (it may be null only when
-/// `n` is 0). On `INFRASTORE_OK` the returned handle must be released exactly once with
-/// `infrastore_bulk_result_free`.
-#[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn infrastore_store_bulk_read(
-    handle: *const InfraStoreHandle,
-    keys: *const *const InfraStoreKeyHandle,
-    n: u64,
-    time_range_present: bool,
-    time_range_zoneless: bool,
-    time_range_start_ms: i64,
-    time_range_end_ms: i64,
-    out_result: *mut *mut InfraStoreBulkReadHandle,
-) -> i32 {
-    clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => {
-            set_error("store handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    if out_result.is_null() {
-        set_error("out_result pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let count = n as usize;
-    if count != 0 && keys.is_null() {
-        set_error("keys pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let key_ptrs = if count == 0 {
-        &[][..]
-    } else {
-        unsafe { std::slice::from_raw_parts(keys, count) }
-    };
-    let mut identities: Vec<&core_lib::KeyIdentity> = Vec::with_capacity(count);
-    for &kp in key_ptrs {
-        match unsafe { kp.as_ref() } {
-            Some(k) => identities.push(&k.inner),
-            None => {
-                set_error("a key handle is null");
-                return INFRASTORE_ERR_NULL_POINTER;
-            }
-        }
-    }
-    let time_range = match build_time_range(
-        time_range_present,
-        time_range_zoneless,
-        time_range_start_ms,
-        time_range_end_ms,
-    ) {
-        Ok(r) => r,
-        Err(c) => return c,
-    };
-    let items = match store.inner.bulk_read_range(&identities, time_range) {
-        Ok(d) => d,
-        Err(e) => return map_core_error(e),
-    };
-    unsafe { *out_result = Box::into_raw(Box::new(InfraStoreBulkReadHandle { items })) };
-    INFRASTORE_OK
-}
 
 /// Read many series named by their catalog association `id`, in the order the
 /// ids are given. The id-addressed counterpart of `infrastore_store_bulk_read`:
@@ -4567,7 +3784,7 @@ pub unsafe extern "C" fn infrastore_store_read_by_ids(
     } else {
         unsafe { slice::from_raw_parts(ids, count) }
     };
-    let items = match store.inner.read_by_ids(id_slice) {
+    let items = match store.inner.read_by_ids(id_slice, core_lib::ReadWindow::full()) {
         Ok(d) => d,
         Err(e) => return map_core_error(e),
     };
@@ -5138,7 +4355,7 @@ pub unsafe extern "C" fn infrastore_store_transform_single_time_series(
                     // it reports the *planned* count in `*out_count` while
                     // writing nothing, so the pointer, not the count, is the
                     // caller's signal (documented above).
-                    let ids: Vec<i64> = outcome.written.iter().map(|a| a.id).collect();
+                    let ids: Vec<i64> = outcome.written.clone();
                     *out_ids = if ids.is_empty() {
                         ptr::null_mut()
                     } else {
@@ -5267,383 +4484,10 @@ unsafe fn emit_forecast_data(
     }
 }
 
-/// Fetch a forecast (`Deterministic` / `Probabilistic` / `Scenarios`, or a
-/// `DeterministicSingleTimeSeries` synthesized into a `Deterministic`) by key.
-///
-/// This is the key-based counterpart to [`infrastore_store_get_forecast`]: the time
-/// series type comes from `key` rather than an explicit `ts_type` argument. The
-/// outputs and buffer-ownership rules are identical to [`infrastore_store_get_forecast`];
-/// `*out_matched_type` is set from the key's type (no family resolution needed
-/// because the key already names the concrete type).
-///
-/// # Safety
-///
-/// Standard, plus: `out_percentiles` is null with `*out_percentiles_len` 0
-/// unless the match is `Probabilistic`, so only a non-null one needs freeing.
-/// `out_application_data` may be null to skip the metadata lookup entirely.
-#[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn infrastore_store_get_forecast_by_key(
-    handle: *const InfraStoreHandle,
-    key: *const InfraStoreKeyHandle,
-    time_range_present: bool,
-    time_range_zoneless: bool,
-    time_range_start_ms: i64,
-    time_range_end_ms: i64,
-    out_initial_ts_unix_ms: *mut i64,
-    out_resolution: *mut *mut c_char,
-    out_horizon: *mut *mut c_char,
-    out_interval: *mut *mut c_char,
-    out_count: *mut u64,
-    out_scenario_count: *mut u64,
-    out_ndims: *mut u64,
-    out_dims: *mut *mut u64,
-    out_dtype: *mut i32,
-    out_data: *mut *mut u8,
-    out_data_byte_len: *mut u64,
-    out_percentiles: *mut *mut f64,
-    out_percentiles_len: *mut u64,
-    // the concrete type read (taken from the key; provided for symmetry with
-    // `infrastore_store_get_forecast`)
-    out_matched_type: *mut i32,
-    // optional: the association's opaque `application_data` payload (owned C string, freed
-    // with `infrastore_string_free`; null when unset). Pass null to skip the
-    // metadata lookup.
-    out_application_data: *mut *mut c_char,
-    // optional: the canonical `element_type` string (owned C string, freed the
-    // same way).
-    out_element_type: *mut *mut c_char,
-    // optional: the user-declared units label (owned C string, freed the same
-    // way; null when the series carries none).
-    out_units: *mut *mut c_char,
-    out_quantity_kind: *mut *mut c_char,
-    out_unit_system: *mut *mut c_char,
-    out_time_reference: *mut *mut c_char,
-    out_component_field: *mut *mut c_char,
-) -> i32 {
-    clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => {
-            set_error("store handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    let key = match unsafe { key.as_ref() } {
-        Some(k) => k,
-        None => {
-            set_error("key handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    if out_initial_ts_unix_ms.is_null()
-        || out_resolution.is_null()
-        || out_horizon.is_null()
-        || out_interval.is_null()
-        || out_count.is_null()
-        || out_scenario_count.is_null()
-        || out_ndims.is_null()
-        || out_dims.is_null()
-        || out_dtype.is_null()
-        || out_data.is_null()
-        || out_data_byte_len.is_null()
-        || out_percentiles.is_null()
-        || out_percentiles_len.is_null()
-        || out_matched_type.is_null()
-    {
-        set_error("an out pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let matched_type = time_series_type_to_int(key.inner.time_series_type);
-    let time_range = match build_time_range(
-        time_range_present,
-        time_range_zoneless,
-        time_range_start_ms,
-        time_range_end_ms,
-    ) {
-        Ok(r) => r,
-        Err(code) => return code,
-    };
-    let (data, meta) = match store
-        .inner
-        .get_time_series_with_metadata(&key.inner, time_range)
-    {
-        Ok(pair) => pair,
-        Err(e) => return map_core_error(e),
-    };
-    // Only forecast variants reach the emitter; reject anything else up front,
-    // before any allocation is handed to the caller.
-    if !matches!(
-        data,
-        core_lib::TimeSeriesData::Deterministic(_)
-            | core_lib::TimeSeriesData::Probabilistic(_)
-            | core_lib::TimeSeriesData::Scenarios(_)
-    ) {
-        set_error(format!(
-            "key identifies a {} time series; use the matching read function",
-            data.time_series_type().as_str()
-        ));
-        return INFRASTORE_ERR_INVALID_PARAMETER;
-    }
-    // The association's `application_data` / `units` live on the metadata row; the row came
-    // back with the data from the single catalog lookup. Descriptors are
-    // emitted first: they are the only fallible step, and they write nothing on
-    // failure, so no handed-out buffer can be orphaned. After them the emit is
-    // infallible for the forecast variants verified above.
-    let code = unsafe {
-        emit_descriptors(
-            meta.application_data.as_deref(),
-            meta.element_type,
-            meta.units.as_deref(),
-            meta.quantity_kind.as_deref(),
-            meta.unit_system,
-            meta.time_reference.as_ref(),
-            meta.component_field.as_deref(),
-            out_application_data,
-            out_element_type,
-            out_units,
-            out_quantity_kind,
-            out_unit_system,
-            out_time_reference,
-            out_component_field,
-        )
-    };
-    if code != INFRASTORE_OK {
-        return code;
-    }
-    unsafe {
-        *out_matched_type = matched_type;
-        emit_forecast_data(
-            data,
-            out_initial_ts_unix_ms,
-            out_resolution,
-            out_horizon,
-            out_interval,
-            out_count,
-            out_scenario_count,
-            out_ndims,
-            out_dims,
-            out_dtype,
-            out_data,
-            out_data_byte_len,
-            out_percentiles,
-            out_percentiles_len,
-        )
-    }
-}
 
-/// Construct a `TimeSeriesKey` handle from attributes `(owner_id, name,
-/// ts_type, resolution, features)`.
-///
-/// The returned key can be passed to the key-based read functions (e.g.
-/// [`infrastore_store_get_single`], [`infrastore_store_get_non_sequential`],
-/// [`infrastore_store_get_forecast_by_key`]); it lets an attribute-addressed caller
-/// reuse the key-based read path without an `add`/lookup round trip.
-/// an empty `resolution` means "unspecified"; likewise an empty/null `interval`
-/// leaves the forecast interval (part of the identity) unconstrained.
-///
-/// # Safety
-///
-/// `features_json`, when non-null, must be a null-terminated UTF-8 JSON object.
-#[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn infrastore_make_key_from_attrs(
-    owner_id: i64,
-    owner_category: i32,
-    name: *const c_char,
-    ts_type: i32,
-    resolution: *const c_char,
-    interval: *const c_char,
-    features_json: *const c_char,
-    out_key: *mut *mut InfraStoreKeyHandle,
-) -> i32 {
-    clear_error();
-    if out_key.is_null() {
-        set_error("out_key pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    // `build_typed_key_from_attrs` already parses and sets `interval`.
-    let key = match unsafe {
-        build_typed_key_from_attrs(
-            owner_id,
-            owner_category,
-            name,
-            ts_type,
-            resolution,
-            interval,
-            features_json,
-        )
-    } {
-        Ok(k) => k,
-        Err(c) => return c,
-    };
-    let handle = Box::new(InfraStoreKeyHandle { inner: key });
-    unsafe { *out_key = Box::into_raw(handle) };
-    INFRASTORE_OK
-}
 
-/// List every time series key associated with `owner_id`. On success
-/// `*out_keys` points to an array of `*out_len` owned key handles (one per
-/// association, including derived `DeterministicSingleTimeSeries` rows), each
-/// usable with the key-based read functions.
-///
-/// Ownership is two-tiered: free every individual `InfraStoreKey` with `infrastore_key_free`,
-/// then free the array buffer itself with `infrastore_keys_buffer_free`. When the owner
-/// has no series, `*out_keys` is set to null and `*out_len` to 0 (no free
-/// needed).
-///
-/// # Safety
-///
-/// `out_keys` must be valid for writing one pointer and `out_len` for writing one `u64`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn infrastore_store_get_time_series_keys(
-    handle: *const InfraStoreHandle,
-    owner_id: i64,
-    owner_category: i32,
-    out_keys: *mut *mut *mut InfraStoreKeyHandle,
-    out_len: *mut u64,
-) -> i32 {
-    clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => {
-            set_error("store handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    if out_keys.is_null() || out_len.is_null() {
-        set_error("an out pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let category = match owner_category {
-        0 => core_lib::OwnerCategory::Component,
-        1 => core_lib::OwnerCategory::SupplementalAttribute,
-        other => {
-            set_error(format!("invalid owner_category {other}"));
-            return INFRASTORE_ERR_INVALID_PARAMETER;
-        }
-    };
-    let keys = match store.inner.get_time_series_keys(owner_id, category) {
-        Ok(k) => k,
-        Err(e) => return map_core_error(e),
-    };
-    let handles: Vec<*mut InfraStoreKeyHandle> = keys
-        .into_iter()
-        .map(|k| {
-            Box::into_raw(Box::new(InfraStoreKeyHandle {
-                inner: k.identity().clone(),
-            }))
-        })
-        .collect();
-    let len = handles.len() as u64;
-    // An empty listing is reported as null (no free needed); otherwise the
-    // handed-out allocation is exactly `len` elements (see `vec_into_raw`),
-    // which is what `infrastore_keys_buffer_free` reconstructs.
-    let ptr = if handles.is_empty() {
-        ptr::null_mut()
-    } else {
-        vec_into_raw(handles).0
-    };
-    unsafe {
-        *out_keys = ptr;
-        *out_len = len;
-    }
-    INFRASTORE_OK
-}
 
-/// Encode metadata rows as a JSON array string. Each element carries the
-/// association's owner + addressing fields and the temporal parameters the
-/// binding needs to reconstruct a `TimeSeriesMetadata`. Durations are emitted
-/// as ISO-8601 duration strings (e.g. `PT1H`), `initial_timestamp_ms` as Unix
-/// epoch milliseconds, and `data_hash` as a byte array; absent optionals are
-/// `null`.
-// Serialize keys to a JSON array. Each object carries the identity tuple
-// (`owner_id`, `owner_category`, `time_series_type`, `name`, `resolution`,
-// `features`) plus the per-variant descriptive snapshot. Physical storage detail
-// (`data_hash`, `element_type`, `application_data`, `percentiles`) is deliberately absent —
-// it is read on demand via the metadata read descriptors.
-/// Build the JSON object for one key (the per-row shape shared by
-/// `keys_with_id_to_json` and `keys_with_hash_to_json`).
-fn key_to_map(k: &core_lib::TimeSeriesKey) -> serde_json::Map<String, Value> {
-    let dur_ms = |d: Option<core_lib::Period>| -> Value {
-        d.map(|x| Value::from(x.to_iso8601()))
-            .unwrap_or(Value::Null)
-    };
-    let id = k.identity();
-    let mut o = serde_json::Map::new();
-    o.insert("owner_id".into(), Value::from(id.owner_id));
-    o.insert(
-        "owner_category".into(),
-        Value::from(id.owner_category.as_str()),
-    );
-    o.insert(
-        "time_series_type".into(),
-        Value::from(id.time_series_type.as_str()),
-    );
-    o.insert("name".into(), Value::from(id.name.clone()));
-    o.insert("resolution".into(), dur_ms(id.resolution));
-    o.insert(
-        "features".into(),
-        serde_json::from_str(&features_to_json(&id.features))
-            .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
-    );
-    // Per-variant descriptive snapshot.
-    let (initial_timestamp, length, horizon, interval, count) = match k {
-        core_lib::TimeSeriesKey::Single(s) => {
-            (Some(s.initial_timestamp), Some(s.length), None, None, None)
-        }
-        core_lib::TimeSeriesKey::NonSequential(s) => (None, Some(s.length), None, None, None),
-        core_lib::TimeSeriesKey::Forecast(f) => (
-            Some(f.initial_timestamp),
-            None,
-            Some(f.horizon),
-            Some(f.interval()),
-            Some(f.count),
-        ),
-    };
-    o.insert(
-        "initial_timestamp_ms".into(),
-        initial_timestamp
-            .map(datetime_to_unix_ms)
-            .map(Value::from)
-            .unwrap_or(Value::Null),
-    );
-    o.insert(
-        "length".into(),
-        length.map(|l| Value::from(l as u64)).unwrap_or(Value::Null),
-    );
-    o.insert("horizon".into(), dur_ms(horizon));
-    o.insert("interval".into(), dur_ms(interval));
-    o.insert(
-        "count".into(),
-        count.map(|c| Value::from(c as u64)).unwrap_or(Value::Null),
-    );
-    // Descriptive, like the snapshot fields above: a caller holding a key needs
-    // to know how to spell the timestamp the key just handed them.
-    o.insert(
-        "time_reference".into(),
-        k.time_reference()
-            .map(|r| Value::from(r.as_storage_string()))
-            .unwrap_or(Value::Null),
-    );
-    o
-}
 
-/// One `key_to_map` object per row, each carrying the association `id` the catalog
-/// filed it under (`null` for a row written before ids were minted) -- the same
-/// id a write hands back, so a listing resolves straight to a consumer's stored
-/// references without a per-row metadata read.
-fn keys_with_id_to_json(rows: &[(core_lib::TimeSeriesKey, Option<i64>)]) -> String {
-    let arr: Vec<Value> = rows
-        .iter()
-        .map(|(k, id)| {
-            let mut o = key_to_map(k);
-            o.insert("id".into(), id.map(Value::from).unwrap_or(Value::Null));
-            Value::Object(o)
-        })
-        .collect();
-    Value::Array(arr).to_string()
-}
 
 /// Lowercase hex of a 32-byte content hash (64 chars).
 fn hash_to_hex(hash: &[u8; 32]) -> String {
@@ -5655,26 +4499,17 @@ fn hash_to_hex(hash: &[u8; 32]) -> String {
     s
 }
 
-/// One `key_to_map` object per row, each with the association `id` (as in
-/// `keys_with_id_to_json`) and an extra `data_hash` field (the lowercase hex
-/// content hash). Rows that share a stored array share the hash.
-fn keys_with_hash_to_json(rows: &[core_lib::ArrayGroupEntry]) -> String {
-    let arr: Vec<Value> = rows
-        .iter()
-        .map(|(k, h, id)| {
-            let mut o = key_to_map(k);
-            o.insert("id".into(), id.map(Value::from).unwrap_or(Value::Null));
-            o.insert("data_hash".into(), Value::from(hash_to_hex(h)));
-            Value::Object(o)
-        })
-        .collect();
-    Value::Array(arr).to_string()
-}
 
 /// Full-metadata JSON object for one association row: the identity/descriptive
 /// key fields plus the storage columns a key row omits (`data_hash` hex,
 /// `element_type`, `element_shape`, `percentiles`, `units`, `application_data`).
 /// Periods are ISO-8601 strings; `initial_timestamp_ms` is Unix milliseconds.
+/// One `metadata_to_map` object per row, as a JSON array — what every listing
+/// serves now that a listing is rows rather than keys.
+fn metadata_rows_to_json(rows: &[core_lib::TimeSeriesMetadata]) -> String {
+    Value::Array(rows.iter().map(|m| Value::Object(metadata_to_map(m))).collect()).to_string()
+}
+
 fn metadata_to_map(m: &core_lib::TimeSeriesMetadata) -> serde_json::Map<String, Value> {
     let iso = |p: Option<core_lib::Period>| -> Value {
         p.map(|x| Value::from(x.to_iso8601()))
@@ -5865,11 +4700,11 @@ pub unsafe extern "C" fn infrastore_store_list_keys(
         Ok(f) => f,
         Err(c) => return c,
     };
-    let rows = match store.inner.list_keys_with_id(filter) {
+    let rows = match store.inner.list_metadata(filter) {
         Ok(r) => r,
         Err(e) => return map_core_error(e),
     };
-    let json = keys_with_id_to_json(&rows);
+    let json = metadata_rows_to_json(&rows);
     unsafe { write_owned_str_out(json, out_json, out_len) }
 }
 
@@ -6128,48 +4963,29 @@ pub unsafe extern "C" fn infrastore_store_remove_by_filter(
     }
 }
 
-/// Rename the series identified by `key` to `new_name`, returning the renamed
-/// key through `out_key` (same identity, new name). Only the catalog name
-/// changes; the array is untouched. `INFRASTORE_ERR_NOT_FOUND` if the key matches
-/// nothing, or a duplicate error if the new identity already exists.
+/// Rename the association filed under `id` to `new_name`. Only the catalog name
+/// changes; the array is untouched, and the id is the same afterwards — a rename
+/// moves the name, not the reference. `INFRASTORE_ERR_NOT_FOUND` if the id names
+/// no row, or a duplicate error if the new identity already exists.
 ///
 /// # Safety
 ///
-/// `handle` must be a live read-write store handle and `key` a live key handle. `new_name` must
-/// be null-terminated UTF-8.
+/// `handle` must be a live read-write store handle. `new_name` must be
+/// null-terminated UTF-8.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_rename(
     handle: *mut InfraStoreHandle,
-    key: *const InfraStoreKeyHandle,
+    id: i64,
     new_name: *const c_char,
-    out_key: *mut *mut InfraStoreKeyHandle,
 ) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
-    let key = match unsafe { key.as_ref() } {
-        Some(k) => k,
-        None => {
-            set_error("key handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    if out_key.is_null() {
-        set_error("out_key pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
     let new_name = match unsafe { cstr_to_str(new_name) } {
         Ok(s) => s,
         Err(c) => return c,
     };
-    match store.inner.rename_time_series(&key.inner, new_name) {
-        Ok(new_key) => {
-            unsafe {
-                *out_key = Box::into_raw(Box::new(InfraStoreKeyHandle {
-                    inner: new_key.identity().clone(),
-                }))
-            };
-            INFRASTORE_OK
-        }
+    match store.inner.rename_time_series(id, new_name) {
+        Ok(_) => INFRASTORE_OK,
         Err(e) => map_core_error(e),
     }
 }
@@ -6362,92 +5178,7 @@ unsafe fn build_list_filter(
     Ok(filter)
 }
 
-/// List time series keys, each annotated with the hex content hash of the array
-/// it resolves to, as a JSON array string (see `keys_with_hash_to_json` for the
-/// per-row shape — an `infrastore_store_list_keys` row, `id` included, plus a
-/// `data_hash` field). Rows that
-/// share a stored array share their `data_hash`, so a caller can group time
-/// series by their underlying data in one query (no per-row metadata fetch).
-///
-/// Filters and the owned-string return are identical to
-/// `infrastore_store_list_keys`.
-///
-/// # Safety
-///
-/// Identical to `infrastore_store_list_keys`: `handle` must be a live store handle;
-/// `name` / `name_glob` / `features_json` / `resolution` must each be null or a
-/// null-terminated UTF-8 string; `out_json` must be valid for writing one pointer
-/// and `out_len` for writing one `u64`; on success `*out_json` must be released
-/// exactly once with `infrastore_string_free`.
-#[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn infrastore_store_list_array_groups(
-    handle: *const InfraStoreHandle,
-    has_owner: bool,
-    owner_id: i64,
-    has_owner_category: bool,
-    owner_category: i32,
-    has_time_series_type: bool,
-    time_series_type: i32,
-    name: *const c_char,
-    name_glob: *const c_char,
-    resolution: *const c_char,
-    interval: *const c_char,
-    features_json: *const c_char,
-    component_field: *const c_char,
-    zoneless: i32,
-    out_json: *mut *mut c_char,
-    out_len: *mut u64,
-) -> i32 {
-    clear_error();
-    let store = deref_handle!(ref handle);
-    if out_json.is_null() || out_len.is_null() {
-        set_error("a required pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let filter = match unsafe {
-        build_list_filter(
-            has_owner,
-            owner_id,
-            has_owner_category,
-            owner_category,
-            has_time_series_type,
-            time_series_type,
-            name,
-            name_glob,
-            resolution,
-            interval,
-            features_json,
-            component_field,
-            zoneless,
-        )
-    } {
-        Ok(f) => f,
-        Err(c) => return c,
-    };
-    let rows = match store.inner.list_array_groups(filter) {
-        Ok(r) => r,
-        Err(e) => return map_core_error(e),
-    };
-    let json = keys_with_hash_to_json(&rows);
-    unsafe { write_owned_str_out(json, out_json, out_len) }
-}
 
-/// Free the key-handle array returned by `infrastore_store_get_time_series_keys`.
-///
-/// This releases only the array buffer, not the keys it held: transfer each
-/// `InfraStoreKey` out first (the Julia binding wraps each in a finalized object) and
-/// release them individually with `infrastore_key_free`.
-///
-/// # Safety
-///
-/// `ptr` must be null or an array returned by `infrastore_store_get_time_series_keys`
-/// with exactly `len` elements, not previously freed. It must not be used after
-/// this call.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn infrastore_keys_buffer_free(ptr: *mut *mut InfraStoreKeyHandle, len: u64) {
-    unsafe { free_raw_buffer(ptr, len) };
-}
 
 /// Serialize a key's `Features` map to a JSON object string of plain scalar
 /// values (the same shape `parse_features_json` accepts), so it round-trips back
@@ -6467,91 +5198,6 @@ fn features_to_json(features: &core_lib::Features) -> String {
     Value::Object(map).to_string()
 }
 
-/// Read the attributes of a key handle: its time series type code (see
-/// `time_series_type_from_int`), resolution as an owned ISO-8601 duration C string (null
-/// when unset; free with `infrastore_string_free`), the owner
-/// id (an integer), the name string, and the features as a JSON object string
-/// (`"{}"` when empty — the same shape the attribute-addressed entry points
-/// accept).
-///
-/// `out_owner_id` receives the owner id directly. The `name` and `features`
-/// strings follow the probe-then-fetch convention: call with `name_buf` /
-/// `features_buf` null (and capacities `0`) to learn the required lengths via the
-/// matching `out_*_len`, then call again with buffers of at least `len + 1`
-/// bytes. Each returned string is NUL-terminated and truncated to its capacity;
-/// the reported length is always the untruncated byte length.
-///
-/// `out_resolution` is the one output that does not follow that convention: it
-/// is a fresh owned allocation on **every** call that passes it, probe included.
-/// Pass null on the probe call -- the documented two-call flow would otherwise
-/// allocate a resolution string the caller has no reason to keep, and leak it.
-///
-/// # Safety
-///
-/// `key` must be a live key handle created by this library. `out_type`,
-/// `out_owner_id`, `out_owner_category`, `out_name_len`, and `out_features_len`
-/// must each be valid for writing one value. `out_owner_category` receives `0`
-/// (Component) or `1` (SupplementalAttribute). `out_resolution`, `name_buf` and
-/// `features_buf` may each be null; when non-null, `out_resolution` must be
-/// valid for writing one pointer and a non-null `*out_resolution` must be freed
-/// exactly once with `infrastore_string_free`, and `name_buf` / `features_buf`
-/// must be valid for writing `name_cap` / `features_cap` bytes respectively.
-#[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn infrastore_key_attributes(
-    key: *const InfraStoreKeyHandle,
-    out_type: *mut i32,
-    out_resolution: *mut *mut c_char,
-    out_owner_id: *mut i64,
-    out_owner_category: *mut i32,
-    name_buf: *mut c_char,
-    name_cap: u64,
-    out_name_len: *mut u64,
-    features_buf: *mut c_char,
-    features_cap: u64,
-    out_features_len: *mut u64,
-) -> i32 {
-    clear_error();
-    let key = match unsafe { key.as_ref() } {
-        Some(k) => k,
-        None => {
-            set_error("key handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    // `out_resolution` is deliberately absent: it is optional, so a probe call
-    // need not allocate a string it is going to discard.
-    if out_type.is_null()
-        || out_owner_id.is_null()
-        || out_owner_category.is_null()
-        || out_name_len.is_null()
-        || out_features_len.is_null()
-    {
-        set_error("an out pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let k = &key.inner;
-    let category_code = match k.owner_category {
-        core_lib::OwnerCategory::Component => 0,
-        core_lib::OwnerCategory::SupplementalAttribute => 1,
-    };
-    unsafe {
-        *out_type = time_series_type_to_int(k.time_series_type);
-        if !out_resolution.is_null() {
-            *out_resolution = opt_period_cstr(k.resolution);
-        }
-        *out_owner_id = k.owner_id;
-        *out_owner_category = category_code;
-        write_str_out(&k.name, name_buf, name_cap, out_name_len);
-        write_str_out(
-            &features_to_json(&k.features),
-            features_buf,
-            features_cap,
-            out_features_len,
-        );
-    }
-    INFRASTORE_OK
-}
 
 /// Release a `u64` dims buffer returned by `infrastore_store_get_forecast`.
 ///
@@ -6587,7 +5233,7 @@ pub unsafe extern "C" fn infrastore_store_has_typed(
     if out_present.is_null() {
         return INFRASTORE_ERR_NULL_POINTER;
     }
-    let key = match unsafe {
+    let filter = match unsafe {
         build_typed_key_from_attrs(
             owner_id,
             owner_category,
@@ -6598,10 +5244,10 @@ pub unsafe extern "C" fn infrastore_store_has_typed(
             features_json,
         )
     } {
-        Ok(k) => k,
+        Ok(filter) => filter,
         Err(c) => return c,
     };
-    match store.inner.has_time_series(&key) {
+    match store.inner.has_any_time_series(filter) {
         Ok(b) => {
             unsafe { *out_present = b };
             INFRASTORE_OK
@@ -6628,33 +5274,13 @@ pub unsafe extern "C" fn infrastore_store_has_typed(
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_copy_time_series(
     handle: *mut InfraStoreHandle,
-    owner_id: i64,
-    owner_category: i32,
-    name: *const c_char,
-    ts_type: i32,
-    resolution: *const c_char,
-    interval: *const c_char,
-    features_json: *const c_char,
+    src_id: i64,
     dst_owner_id: i64,
     dst_owner_type: *const c_char,
     new_name: *const c_char,
 ) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
-    let key = match unsafe {
-        build_typed_key_from_attrs(
-            owner_id,
-            owner_category,
-            name,
-            ts_type,
-            resolution,
-            interval,
-            features_json,
-        )
-    } {
-        Ok(k) => k,
-        Err(c) => return c,
-    };
     let dst_type = match unsafe { cstr_to_str(dst_owner_type) } {
         Ok(s) => s,
         Err(c) => return c,
@@ -6669,7 +5295,7 @@ pub unsafe extern "C" fn infrastore_store_copy_time_series(
     };
     match store
         .inner
-        .copy_time_series(&key, dst_owner_id, dst_type, renamed)
+        .copy_time_series(src_id, dst_owner_id, dst_type, renamed)
     {
         Ok(_) => INFRASTORE_OK,
         Err(e) => map_core_error(e),
@@ -7728,70 +6354,8 @@ pub unsafe extern "C" fn infrastore_store_import_supplemental_attribute_associat
 
 // ---- Free helpers ---------------------------------------------------------
 
-/// Release a key handle returned by this library.
-///
-/// # Safety
-///
-/// `key` must be null or a live key handle returned by this library that has not already been
-/// freed. The key must not be used after this call.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn infrastore_key_free(key: *mut InfraStoreKeyHandle) {
-    if !key.is_null() {
-        unsafe { drop(Box::from_raw(key)) };
-    }
-}
 
-/// Compare two key handles by identity (owner, category, type, name,
-/// resolution, interval, features). `*out_eq` receives the result.
-///
-/// # Safety
-///
-/// `a` and `b` must be live key handles created by this library and `out_eq`
-/// must be valid for writing one `bool`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn infrastore_key_eq(
-    a: *const InfraStoreKeyHandle,
-    b: *const InfraStoreKeyHandle,
-    out_eq: *mut bool,
-) -> i32 {
-    clear_error();
-    let (a, b) = match (unsafe { a.as_ref() }, unsafe { b.as_ref() }) {
-        (Some(a), Some(b)) => (a, b),
-        _ => return INFRASTORE_ERR_NULL_POINTER,
-    };
-    if out_eq.is_null() {
-        set_error("out_eq is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    unsafe { *out_eq = a.inner == b.inner };
-    INFRASTORE_OK
-}
 
-/// Hash a key handle's identity into `*out_hash`, consistent with `infrastore_key_eq`
-/// (equal keys hash equal). The value is stable only within one process — do
-/// not persist it or compare it across library versions.
-///
-/// # Safety
-///
-/// `key` must be a live key handle created by this library and `out_hash` must
-/// be valid for writing one `u64`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn infrastore_key_identity_hash(
-    key: *const InfraStoreKeyHandle,
-    out_hash: *mut u64,
-) -> i32 {
-    clear_error();
-    let key = deref_handle!(ref key);
-    if out_hash.is_null() {
-        set_error("out_hash is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    key.inner.hash(&mut hasher);
-    unsafe { *out_hash = hasher.finish() };
-    INFRASTORE_OK
-}
 
 /// Release an `f64` buffer returned by this library.
 ///
@@ -8380,7 +6944,6 @@ pub unsafe extern "C" fn infrastore_static_reader_group_key(
     reader: *const InfraStoreStaticReaderHandle,
     group_idx: u64,
     col_idx: u64,
-    out_key: *mut *mut InfraStoreKeyHandle,
 ) -> i32 {
     clear_error();
     let reader = match unsafe { reader.as_ref() } {
@@ -8390,10 +6953,6 @@ pub unsafe extern "C" fn infrastore_static_reader_group_key(
             return INFRASTORE_ERR_NULL_POINTER;
         }
     };
-    if out_key.is_null() {
-        set_error("out_key is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
     let group = match reader.inner.groups().get(group_idx as usize) {
         Some(g) => g,
         None => {
@@ -8401,17 +6960,13 @@ pub unsafe extern "C" fn infrastore_static_reader_group_key(
             return INFRASTORE_ERR_INVALID_PARAMETER;
         }
     };
-    let key = match group.keys().get(col_idx as usize) {
-        Some(k) => k,
+    let id = match group.ids().get(col_idx as usize) {
+        Some(k) => *k,
         None => {
             set_error(format!("column index {col_idx} out of bounds"));
             return INFRASTORE_ERR_INVALID_PARAMETER;
         }
     };
-    let handle = Box::new(InfraStoreKeyHandle {
-        inner: key.identity().clone(),
-    });
-    unsafe { *out_key = Box::into_raw(handle) };
     INFRASTORE_OK
 }
 
@@ -8810,7 +7365,6 @@ pub unsafe extern "C" fn infrastore_forecast_reader_entry_info(
 pub unsafe extern "C" fn infrastore_forecast_reader_entry_key(
     reader: *const InfraStoreForecastReaderHandle,
     entry_idx: u64,
-    out_key: *mut *mut InfraStoreKeyHandle,
 ) -> i32 {
     clear_error();
     let reader = match unsafe { reader.as_ref() } {
@@ -8820,10 +7374,6 @@ pub unsafe extern "C" fn infrastore_forecast_reader_entry_key(
             return INFRASTORE_ERR_NULL_POINTER;
         }
     };
-    if out_key.is_null() {
-        set_error("out_key is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
     let entry = match reader.inner.entries().get(entry_idx as usize) {
         Some(e) => e,
         None => {
@@ -8831,10 +7381,6 @@ pub unsafe extern "C" fn infrastore_forecast_reader_entry_key(
             return INFRASTORE_ERR_INVALID_PARAMETER;
         }
     };
-    let handle = Box::new(InfraStoreKeyHandle {
-        inner: entry.key().identity().clone(),
-    });
-    unsafe { *out_key = Box::into_raw(handle) };
     INFRASTORE_OK
 }
 

@@ -18,7 +18,7 @@
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
-use infrastore_core::{StaticReader, Store, TimeSeriesKey};
+use infrastore_core::{StaticReader, Store, TimeSeriesMetadata};
 use serde_json::{Value, json};
 
 use crate::color;
@@ -58,7 +58,7 @@ pub fn run(
         .build_static_reader(selector.to_filter()?)
         .map_err(|e| e.to_string())?;
 
-    let headers = column_headers(&reader, label);
+    let headers = column_headers(&store, &reader, label)?;
     if headers.len() == 1 {
         return Err("no time series matched the selector".to_string());
     }
@@ -139,33 +139,50 @@ pub fn run(
 /// Groups are ordered by `(dtype, element_shape)` and each group's keys keep
 /// their build order, so the layout is stable across runs of the same
 /// selector — which is what lets two grid exports be diffed.
-fn column_headers(reader: &StaticReader, label: ColumnLabel) -> Vec<String> {
-    let keys: Vec<&TimeSeriesKey> = reader
+fn column_headers(
+    store: &Store,
+    reader: &StaticReader,
+    label: ColumnLabel,
+) -> Result<Vec<String>, String> {
+    // A reader names its columns by association id; the row behind each supplies
+    // the name and owner a header is written from. One lookup per column, off the
+    // catalog's primary key, and only while building the header line.
+    let row_of = |id: i64| -> Result<TimeSeriesMetadata, String> {
+        store
+            .get_metadata_by_id(id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("reader column names association {id}, which is gone"))
+    };
+    let keys: Vec<TimeSeriesMetadata> = reader
         .groups()
         .iter()
-        .flat_map(|g| g.keys().iter())
-        .collect();
+        .flat_map(|g| g.ids().iter().copied())
+        .map(row_of)
+        .collect::<Result<_, _>>()?;
     let one_name = keys
         .first()
-        .map(|k| keys.iter().all(|o| o.name() == k.name()))
+        .map(|k| keys.iter().all(|o| o.name == k.name))
         .unwrap_or(false);
     let bare = match label {
         ColumnLabel::Owner => true,
         ColumnLabel::Full => false,
         ColumnLabel::Auto => one_name,
     };
-    let name_of = |k: &TimeSeriesKey| {
+    let name_of = |k: &TimeSeriesMetadata| {
         if bare {
-            k.owner_id().to_string()
+            k.owner_id.to_string()
         } else {
-            format!("{}@{}", k.name(), k.owner_id())
+            format!("{}@{}", k.name, k.owner_id)
         }
     };
 
     let mut headers = vec!["timestamp".to_string()];
+    let mut col = 0usize;
     for group in reader.groups() {
         let per_step: usize = group.element_shape().iter().product::<usize>().max(1);
-        for key in group.keys() {
+        for _ in group.ids() {
+            let key = &keys[col];
+            col += 1;
             if per_step <= 1 {
                 headers.push(name_of(key));
             } else {
@@ -173,7 +190,7 @@ fn column_headers(reader: &StaticReader, label: ColumnLabel) -> Vec<String> {
             }
         }
     }
-    headers
+    Ok(headers)
 }
 
 /// One row: the timestamp, then every column's value at it.

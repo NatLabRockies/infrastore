@@ -70,11 +70,17 @@ pub fn run(
     }
 
     // One batched read instead of N catalog round-trips.
-    let identities: Vec<_> = metas.iter().map(select::key_of).collect();
-    let refs: Vec<&_> = identities.iter().collect();
-    let datas = store
-        .bulk_read_range(&refs, range)
-        .map_err(|e| e.to_string())?;
+    let ids: Vec<i64> = metas
+        .iter()
+        .map(select::id_of)
+        .collect::<Result<_, _>>()?;
+    // Bounds, not a window: an export names the span it wants and takes
+    // whatever each series has in it.
+    let datas = match range {
+        Some(r) => store.read_by_ids_range(&ids, r),
+        None => store.read_by_ids(&ids, infrastore_core::ReadWindow::full()),
+    }
+    .map_err(|e| e.to_string())?;
 
     match dir {
         None => {

@@ -19,7 +19,6 @@ use crate::error::{Result, TimeSeriesError};
 use crate::hash::{features_hash, timestamps_hash};
 use crate::storage::StorageBackend;
 use crate::types::element_type::ElementType;
-use crate::types::key::{KeyIdentity, TimeSeriesKey};
 use crate::types::metadata::{
     FeatureValue, Features, OwnerCategory, TimeSeriesMetadata, UnitSystem,
 };
@@ -1277,45 +1276,7 @@ impl MetadataStore {
     /// `resolution`, and `features_hash` still pin the row down; to target a
     /// single interval among otherwise-identical rows, remove by full key
     /// identity (which carries the exact interval).
-    pub fn delete_by_key(tx: &Connection, key: &KeyIdentity) -> Result<Vec<[u8; 32]>> {
-        let f_hash = features_hash(&key.features);
-        let resolution_iso = key.resolution.map(period_to_iso);
-        let interval_iso = key.interval.map(period_to_iso);
-        let mut stmt = tx.prepare_cached(
-            "SELECT id, data_hash FROM time_series_associations
-             WHERE owner_id = ?1 AND owner_category = ?2 AND time_series_type = ?3 AND name = ?4
-               AND ((?5 IS NULL AND resolution IS NULL) OR resolution = ?5)
-               AND (?6 IS NULL OR interval = ?6)
-               AND features_hash = ?7",
-        )?;
-        let rows: Vec<(i64, Vec<u8>)> = stmt
-            .query_map(
-                params![
-                    key.owner_id,
-                    key.owner_category.code(),
-                    key.time_series_type.code(),
-                    key.name,
-                    resolution_iso,
-                    interval_iso,
-                    f_hash.as_slice(),
-                ],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
-            )?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-
-        let mut out = Vec::with_capacity(rows.len());
-        for (id, hash_bytes) in rows {
-            tx.prepare_cached("DELETE FROM time_series_associations WHERE id = ?1")?
-                .execute(params![id])?;
-            let mut h = [0u8; 32];
-            if hash_bytes.len() == 32 {
-                h.copy_from_slice(&hash_bytes);
-                out.push(h);
-            }
-        }
-        Ok(out)
-    }
-
+ 
     /// Delete the one association filed under `id`. Returns its data_hash and
     /// stored type, or `None` if the catalog holds no such row — the caller
     /// decides whether a stale reference is an error.
@@ -1396,39 +1357,15 @@ impl MetadataStore {
     /// and hash untouched. Returns the number of rows updated (0 if `key` matches
     /// nothing). A collision with an existing series of the new identity maps to
     /// [`TimeSeriesError::DuplicateTimeSeries`].
-    pub fn rename(tx: &Connection, key: &KeyIdentity, new_name: &str) -> Result<usize> {
-        let f_hash = features_hash(&key.features);
-        let resolution_iso = key.resolution.map(period_to_iso);
-        let interval_iso = key.interval.map(period_to_iso);
-        // Both period predicates distinguish NULL, so this matches exactly the
-        // row the key names. [`Self::delete_by_key`] deliberately treats a NULL
-        // interval as "any interval" — a documented convenience for removal —
-        // and this once copied that predicate without the reasoning behind it.
-        // The two operations do not want the same rule: a rename with
-        // `interval: None` then updated *every* interval of a forecast family,
-        // and since a `KeyIdentity` carries `Some` interval for every forecast
-        // type and `None` only for the static types, the wildcard could not even
-        // be asked for deliberately.
-        tx.execute(
-            "UPDATE time_series_associations SET name = ?1
-             WHERE owner_id = ?2 AND owner_category = ?3 AND time_series_type = ?4 AND name = ?5
-               AND ((?6 IS NULL AND resolution IS NULL) OR resolution = ?6)
-               AND ((?7 IS NULL AND interval IS NULL) OR interval = ?7)
-               AND features_hash = ?8",
-            params![
-                new_name,
-                key.owner_id,
-                key.owner_category.code(),
-                key.time_series_type.code(),
-                key.name,
-                resolution_iso,
-                interval_iso,
-                f_hash.as_slice(),
-            ],
-        )
-        .map_err(map_unique_violation)
+    /// Rename the association filed under `id`. One row by primary key, so no
+    /// predicate can be wider than the caller asked for.
+    pub fn rename_by_id(tx: &Connection, id: i64, new_name: &str) -> Result<usize> {
+        Ok(tx
+            .prepare_cached("UPDATE time_series_associations SET name = ?2 WHERE id = ?1")?
+            .execute(rusqlite::params![id, new_name])?)
     }
 
+ 
     /// Delete every association in the store. Returns the removed data_hashes.
     pub fn delete_all(tx: &Connection) -> Result<Vec<[u8; 32]>> {
         let bytes_list: Vec<Vec<u8>> = collect_data_hashes(
@@ -1467,7 +1404,7 @@ impl MetadataStore {
     /// Like [`Self::list`], but without hydrating the timestamp vectors.
     ///
     /// For callers that only need each row's *identity* — building a
-    /// [`TimeSeriesKey`], which never carries the vector. An irregular series
+    /// an identity, which never carries the vector. An irregular series
     /// comes back with `timestamps: None` and its axis unread, which is what
     /// keeps a key listing from fetching every axis the match spans out of the
     /// array file only to discard it.
@@ -1732,26 +1669,7 @@ impl MetadataStore {
             .collect()
     }
 
-    pub fn list_keys_for_owner(
-        &self,
-        owner_id: i64,
-        owner_category: OwnerCategory,
-    ) -> Result<Vec<TimeSeriesKey>> {
-        // No timestamp hydration: a key never carries the vector, only the
-        // series' identity, so the rows come back with it left unfilled.
-        let (rows, _) = self.list_inner(
-            &MetadataFilter {
-                owner_id: Some(owner_id),
-                owner_category: Some(owner_category),
-                ..Default::default()
-            },
-            None,
-        )?;
-        rows.iter()
-            .map(|(_, meta)| TimeSeriesKey::from_metadata(meta))
-            .collect()
-    }
-
+ 
     /// True iff at least one association matches `filter` — the existence
     /// probe behind [`crate::Store::has_time_series`] and
     /// [`crate::Store::has_any_time_series`], both of which consumers call in
@@ -1902,42 +1820,7 @@ impl MetadataStore {
         Ok(found.is_some())
     }
 
-    pub fn get_by_key(
-        &self,
-        key: &KeyIdentity,
-        vectors: &dyn StorageBackend,
-    ) -> Result<TimeSeriesMetadata> {
-        let mut matches = self.list(
-            &MetadataFilter {
-                owner_id: Some(key.owner_id),
-                owner_category: Some(key.owner_category),
-                time_series_type: Some(TypeMatch::Exact(key.time_series_type)),
-                name: Some(key.name.clone()),
-                resolution: key.resolution,
-                interval: key.interval,
-                // Pinpoint the row via the unique index rather than an in-memory
-                // subset scan; the exact `retain` below guards against the
-                // (astronomically unlikely) hash collision.
-                features: None,
-                features_hash: Some(features_hash(&key.features)),
-                owner_type: None,
-                name_glob: None,
-                component_field: None,
-                zoneless: None,
-                ids: None,
-            },
-            vectors,
-        )?;
-        matches.retain(|m| m.features == key.features);
-        match matches.len() {
-            0 => Err(TimeSeriesError::NotFound),
-            1 => Ok(matches.pop().unwrap()),
-            n => Err(TimeSeriesError::IntegrityError(format!(
-                "expected exactly one match for key, found {n}"
-            ))),
-        }
-    }
-
+ 
     pub fn distinct_resolutions(&self, ts_type: Option<TimeSeriesType>) -> Result<Vec<Period>> {
         let mut sql = String::from(
             "SELECT DISTINCT resolution FROM time_series_associations

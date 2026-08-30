@@ -7,9 +7,9 @@
 
 use chrono::{DateTime, Utc};
 use infrastore_core::{
-    ForecastSummaryRow, KeyIdentity, OwnerCategory, Period, Result as CoreResult,
-    StaticConsistency, StaticSummaryRow, TimeRange, TimeSeriesCountsDetailed, TimeSeriesData,
-    TimeSeriesError, TimeSeriesKey, TimeSeriesMetadata, TimeSeriesType,
+    ForecastSummaryRow, OwnerCategory, Period, Result as CoreResult, StaticConsistency,
+    StaticSummaryRow, TimeRange, TimeSeriesCountsDetailed, TimeSeriesData, TimeSeriesError,
+    TimeSeriesMetadata, TimeSeriesType,
 };
 
 /// Parse an ISO-8601 period received over the wire, mapping failures to a
@@ -30,13 +30,8 @@ fn convert_err(e: impl std::fmt::Display) -> TimeSeriesError {
     TimeSeriesError::IntegrityError(format!("convert: {e}"))
 }
 
-/// Decode a server-sent full key into the core [`TimeSeriesKey`] enum.
-fn decode_full_key(k: infrastore_proto::pb::TimeSeriesKey) -> CoreResult<TimeSeriesKey> {
-    full_key_from_pb(k).map_err(convert_err)
-}
-
 /// Build a `ListReq` from the typed filter params shared by `list_time_series`
-/// and `list_keys`.
+/// and the metadata listings.
 #[allow(clippy::too_many_arguments)]
 fn build_list_req(
     owner_id: Option<i64>,
@@ -64,13 +59,13 @@ fn build_list_req(
     }
 }
 use infrastore_proto::convert::{
-    features_to_pb, forecast_summary_row_from_pb, full_key_from_pb, get_resp_to_time_series_data,
-    key_to_pb, metadata_from_pb, requested_type_to_pb, static_summary_row_from_pb,
+    features_to_pb, forecast_summary_row_from_pb, get_resp_to_time_series_data, metadata_from_pb,
+    requested_type_to_pb, static_summary_row_from_pb,
 };
 use infrastore_proto::pb::{
     self, BulkReadReq, ConsistencyReq, CountsReq, EmptyReq, ForecastParamsReq, GetReq, HasReq,
-    IntervalsReq, KeyReq, KeysReq, ListKeysReq, ListOwnerIdsReq, ListReq, ResolutionsReq,
-    ResolveForecastKeyReq, VerifyReq, catalog_store_client::CatalogStoreClient,
+    IntervalsReq, ListOwnerIdsReq, ListReq, ResolutionsReq, VerifyReq,
+    catalog_store_client::CatalogStoreClient,
 };
 use tokio::sync::Mutex;
 use tonic::transport::Channel;
@@ -160,7 +155,7 @@ impl RemoteClient {
 
     pub async fn get_time_series(
         &self,
-        key: &KeyIdentity,
+        id: i64,
         time_range: Option<TimeRange>,
     ) -> CoreResult<TimeSeriesData> {
         let (start, end) = match time_range {
@@ -168,7 +163,7 @@ impl RemoteClient {
             None => (None, None),
         };
         let req = GetReq {
-            key: Some(key_to_pb(key)),
+            id,
             start_rfc3339: start,
             end_rfc3339: end,
             // The wire form is RFC3339 either way; this is what carries the
@@ -182,26 +177,10 @@ impl RemoteClient {
             .await
             .map_err(Self::map_status)?
             .into_inner();
-        get_resp_to_time_series_data(resp, key.name.clone())
+        get_resp_to_time_series_data(resp, String::new())
             .map_err(|e| TimeSeriesError::IntegrityError(format!("get convert: {e}")))
     }
 
-    pub async fn get_time_series_keys(
-        &self,
-        owner_id: i64,
-        owner_category: OwnerCategory,
-    ) -> CoreResult<Vec<TimeSeriesKey>> {
-        let mut inner = self.inner.lock().await;
-        let resp = inner
-            .get_time_series_keys(KeysReq {
-                owner_id,
-                owner_category: pb::OwnerCategory::from(owner_category) as i32,
-            })
-            .await
-            .map_err(Self::map_status)?
-            .into_inner();
-        resp.keys.into_iter().map(decode_full_key).collect()
-    }
 
     pub async fn get_resolutions(
         &self,
@@ -264,11 +243,27 @@ impl RemoteClient {
         })
     }
 
-    pub async fn has_time_series(&self, key: &KeyIdentity) -> CoreResult<bool> {
+    #[allow(clippy::too_many_arguments)]
+    pub async fn has_time_series(
+        &self,
+        owner_id: i64,
+        owner_category: OwnerCategory,
+        name: &str,
+        time_series_type: Option<TimeSeriesType>,
+        resolution: Option<Period>,
+        interval: Option<Period>,
+        features: infrastore_core::Features,
+    ) -> CoreResult<bool> {
         let mut inner = self.inner.lock().await;
         let resp = inner
             .has_time_series(HasReq {
-                key: Some(key_to_pb(key)),
+                owner_id,
+                owner_category: pb::OwnerCategory::from(owner_category) as i32,
+                name: name.to_string(),
+                time_series_type: time_series_type.map(|t| requested_type_to_pb(t) as i32),
+                resolution: resolution.map(|p| p.to_iso8601()),
+                interval: interval.map(|p| p.to_iso8601()),
+                features: features_to_pb(&features).entries,
             })
             .await
             .map_err(Self::map_status)?
@@ -293,68 +288,12 @@ impl RemoteClient {
     /// List full keys matching the filter, each paired with the array content
     /// hash when `with_hash` is set (`None` otherwise).
     #[allow(clippy::too_many_arguments)]
-    pub async fn list_keys(
-        &self,
-        owner_id: Option<i64>,
-        owner_category: Option<OwnerCategory>,
-        owner_type: Option<String>,
-        time_series_type: Option<TimeSeriesType>,
-        name: Option<String>,
-        component_field: Option<String>,
-        // Coherence predicate on the timestamp spelling; see
-        // `infrastore_core::ListFilter::zoneless`.
-        zoneless: Option<bool>,
-        resolution: Option<Period>,
-        interval: Option<Period>,
-        features: Option<&infrastore_core::Features>,
-        with_hash: bool,
-    ) -> CoreResult<Vec<(TimeSeriesKey, Option<[u8; 32]>)>> {
-        let filter = build_list_req(
-            owner_id,
-            owner_category,
-            owner_type,
-            time_series_type,
-            name,
-            component_field,
-            zoneless,
-            resolution,
-            interval,
-            features,
-        );
-        let mut inner = self.inner.lock().await;
-        let resp = inner
-            .list_keys(ListKeysReq {
-                filter: Some(filter),
-                with_hash,
-            })
-            .await
-            .map_err(Self::map_status)?
-            .into_inner();
-        let mut out = Vec::with_capacity(resp.rows.len());
-        for row in resp.rows {
-            let key = decode_full_key(
-                row.key
-                    .ok_or_else(|| convert_err("ListKeys row missing key"))?,
-            )?;
-            let hash = match row.data_hash {
-                Some(h) => Some(
-                    <[u8; 32]>::try_from(h.as_slice())
-                        .map_err(|_| convert_err("data_hash is not 32 bytes"))?,
-                ),
-                None => None,
-            };
-            out.push((key, hash));
-        }
-        Ok(out)
-    }
 
-    /// Full metadata record for a single key.
-    pub async fn get_metadata(&self, key: &KeyIdentity) -> CoreResult<TimeSeriesMetadata> {
+    /// Full metadata record for one association id.
+    pub async fn get_metadata(&self, id: i64) -> CoreResult<TimeSeriesMetadata> {
         let mut inner = self.inner.lock().await;
         let resp = inner
-            .get_metadata(KeyReq {
-                key: Some(key_to_pb(key)),
-            })
+            .get_metadata(pb::IdReq { id })
             .await
             .map_err(Self::map_status)?
             .into_inner();
@@ -364,7 +303,7 @@ impl RemoteClient {
     /// Read several series at once, optionally time-sliced.
     pub async fn bulk_read(
         &self,
-        keys: &[&KeyIdentity],
+        ids: &[i64],
         time_range: Option<TimeRange>,
     ) -> CoreResult<Vec<TimeSeriesData>> {
         let (start_rfc3339, end_rfc3339) = match time_range {
@@ -374,7 +313,7 @@ impl RemoteClient {
         let mut inner = self.inner.lock().await;
         let resp = inner
             .bulk_read(BulkReadReq {
-                keys: keys.iter().map(|k| key_to_pb(k)).collect(),
+                ids: ids.to_vec(),
                 start_rfc3339,
                 end_rfc3339,
                 bounds_zoneless: time_range.map(|r| r.zoneless),
@@ -516,7 +455,7 @@ impl RemoteClient {
 
     /// Resolve a forecast addressed by attributes plus a requested type.
     #[allow(clippy::too_many_arguments)]
-    pub async fn resolve_forecast_key(
+    pub async fn resolve_metadata(
         &self,
         owner_id: i64,
         owner_category: OwnerCategory,
@@ -525,10 +464,10 @@ impl RemoteClient {
         interval: Option<Period>,
         features: infrastore_core::Features,
         requested: TimeSeriesType,
-    ) -> CoreResult<TimeSeriesKey> {
+    ) -> CoreResult<TimeSeriesMetadata> {
         let mut inner = self.inner.lock().await;
         let resp = inner
-            .resolve_forecast_key(ResolveForecastKeyReq {
+            .resolve_metadata(pb::ResolveMetadataReq {
                 owner_id,
                 owner_category: pb::OwnerCategory::from(owner_category) as i32,
                 name: name.to_string(),
@@ -540,6 +479,6 @@ impl RemoteClient {
             .await
             .map_err(Self::map_status)?
             .into_inner();
-        decode_full_key(resp.key.ok_or_else(|| convert_err("missing key"))?)
+        metadata_from_pb(resp).map_err(convert_err)
     }
 }

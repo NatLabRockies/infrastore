@@ -124,13 +124,15 @@ pub fn arrays(
     let wanted = data_hash.map(parse::parse_hash_prefix).transpose()?;
     let store = store_access::open_readonly(store_path)?;
     let rows = store
-        .list_keys_with_hash(selector.to_filter()?)
+        .list_metadata(selector.to_filter()?)
         .map_err(|e| e.to_string())?;
 
     // BTreeMap keeps the output stably ordered by hash across runs, which
     // matters for diffing two inspections of the same store.
-    let mut groups: BTreeMap<[u8; 32], Vec<infrastore_core::TimeSeriesKey>> = BTreeMap::new();
-    for (key, hash) in rows {
+    let mut groups: BTreeMap<[u8; 32], Vec<infrastore_core::TimeSeriesMetadata>> =
+        BTreeMap::new();
+    for key in rows {
+        let hash = key.data_hash;
         if let Some(prefix) = &wanted
             && !fields::hash_hex(&hash).starts_with(prefix)
         {
@@ -191,9 +193,8 @@ pub fn arrays(
     Ok(())
 }
 
-/// A key as a JSON object, spelling out every identity field.
-fn key_json(key: &infrastore_core::TimeSeriesKey) -> Value {
-    let id = key.identity();
+/// A row as a JSON object, spelling out every identity field.
+fn key_json(id: &infrastore_core::TimeSeriesMetadata) -> Value {
     json!({
         "owner_id": id.owner_id,
         "owner_category": id.owner_category.as_str(),
@@ -207,12 +208,12 @@ fn key_json(key: &infrastore_core::TimeSeriesKey) -> Value {
 
 /// A compact `name (owner N)` list for the table view, truncated so one
 /// heavily-shared array cannot flood the terminal.
-fn summarize_keys(keys: &[infrastore_core::TimeSeriesKey]) -> String {
+fn summarize_keys(keys: &[infrastore_core::TimeSeriesMetadata]) -> String {
     const MAX: usize = 3;
     let mut parts: Vec<String> = keys
         .iter()
         .take(MAX)
-        .map(|k| format!("{} (owner {})", k.name(), k.owner_id()))
+        .map(|k| format!("{} (owner {})", k.name, k.owner_id))
         .collect();
     if keys.len() > MAX {
         parts.push(format!("+{} more", keys.len() - MAX));

@@ -305,9 +305,11 @@ pub fn get(
     let store = store_access::open_readonly(store_path)?;
     let (meta, key) = selector.resolve(&store)?;
     let range = parse::parse_time_range(opts.time_range)?;
-    let data = store
-        .get_time_series(&key, range)
-        .map_err(|e| e.to_string())?;
+    let data = match range {
+        Some(r) => store.read_by_ids_range(&[key], r).map(|mut v| v.remove(0)),
+        None => store.read_by_id(key, infrastore_core::ReadWindow::full()),
+    }
+    .map_err(|e| e.to_string())?;
 
     if opts.plot {
         return render_plot(&meta, &data, opts.plot_width);
@@ -492,7 +494,7 @@ pub fn info(
 
     if !no_stats {
         let data = store
-            .get_time_series(&meta_key(&meta), None)
+            .read_by_id(meta_key(&meta)?, infrastore_core::ReadWindow::full())
             .map_err(|e| e.to_string())?;
         let arr = data_array(&data);
         rows.push(("shape".into(), json!(arr.shape)));
@@ -554,8 +556,8 @@ fn value_cell(v: &Value) -> String {
     }
 }
 
-fn meta_key(meta: &TimeSeriesMetadata) -> infrastore_core::KeyIdentity {
-    crate::select::key_of(meta)
+fn meta_key(meta: &TimeSeriesMetadata) -> Result<i64, String> {
+    crate::select::id_of(meta)
 }
 
 // --- rendering helpers -----------------------------------------------------

@@ -39,7 +39,7 @@ pub use metadata::{
 pub use reader::{ForecastEntry, ForecastReader, StaticGroup, StaticReader, WindowSlot};
 pub use storage::{ArrayLocation, CompactionReport, Compression, IntegrityReport};
 pub use store::{
-    AddRequest, AddedTimeSeries, ArrayGroupEntry, BulkAdd, CatalogMode, ForecastParameters,
+    AddRequest, BulkAdd, CatalogMode, ForecastParameters,
     ListFilter, ReadWindow, StaticConsistency, Store, TimeSeriesCounts, TimeSeriesCountsDetailed,
     TransformOutcome, TransformPolicy, catalog_sqlite_path,
 };
@@ -47,8 +47,7 @@ pub use types::{
     array::{Dtype, Element, TypedArray},
     element_type::ElementType,
     key::{
-        ForecastTimeSeriesKey, KeyIdentity, NonSequentialTimeSeriesKey, SingleTimeSeriesKey,
-        TimeSeriesKey,
+        KeyIdentity,
     },
     metadata::{
         FeatureValue, Features, OwnerCategory, RESERVED_FEATURE_NAMES, TimeSeriesMetadata,

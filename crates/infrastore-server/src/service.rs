@@ -90,15 +90,14 @@ fn parse_time_range(
     }
 }
 use infrastore_proto::convert::{
-    features_from_pb, forecast_summary_row_to_pb, full_key_to_pb, key_from_pb, metadata_to_pb,
-    requested_type_from_pb, static_summary_row_to_pb, time_series_data_to_get_resp,
+    features_from_pb, forecast_summary_row_to_pb, metadata_to_pb, requested_type_from_pb,
+    static_summary_row_to_pb, time_series_data_to_get_resp,
 };
 use infrastore_proto::pb::{
     self, BulkReadReq, BulkReadResp, ConsistencyReq, ConsistencyResp, CountsByTypeResp, CountsReq,
     CountsResp, DetailedCountsResp, EmptyReq, ForecastParamsReq, ForecastParamsResp,
-    ForecastSummaryResp, GetReq, GetResp, HasReq, HasResp, IntervalsReq, IntervalsResp, KeyReq,
-    KeysReq, KeysResp, ListKeysReq, ListKeysResp, ListOwnerIdsReq, ListOwnerIdsResp, ListReq,
-    ListResp, ResolutionsReq, ResolutionsResp, ResolveForecastKeyReq, ResolveForecastKeyResp,
+    ForecastSummaryResp, GetReq, GetResp, HasReq, HasResp, IntervalsReq, IntervalsResp,
+    ListOwnerIdsReq, ListOwnerIdsResp, ListReq, ListResp, ResolutionsReq, ResolutionsResp,
     StaticSummaryResp, TimeSeriesMetadata, VerifyReq, VerifyResp,
     catalog_store_server::{CatalogStore as CatalogStoreSvc, CatalogStoreServer},
 };
@@ -194,36 +193,20 @@ impl CatalogStoreSvc for CatalogStoreService {
 
     async fn get_time_series(&self, request: Request<GetReq>) -> Result<Response<GetResp>, Status> {
         let req = request.into_inner();
-        let key = req
-            .key
-            .ok_or_else(|| Status::invalid_argument("missing key"))?;
-        let key = key_from_pb(key).map_err(map_convert_err)?;
         let time_range = parse_time_range(req.start_rfc3339, req.end_rfc3339, req.bounds_zoneless)?;
         let store = self.store.lock().await;
-        let data = store.get_time_series(&key, time_range).map_err(map_err)?;
+        let data = match time_range {
+            Some(range) => store
+                .read_by_ids_range(&[req.id], range)
+                .map(|mut v| v.remove(0)),
+            None => store.read_by_id(req.id, infrastore_core::ReadWindow::full()),
+        }
+        .map_err(map_err)?;
         // The read already stamped the row's element type onto `data`, so the
         // response describes what its bytes mean without a second catalog trip.
         Ok(Response::new(time_series_data_to_get_resp(&data)))
     }
 
-    async fn get_time_series_keys(
-        &self,
-        request: Request<KeysReq>,
-    ) -> Result<Response<KeysResp>, Status> {
-        let req = request.into_inner();
-        let owner_category = pb::OwnerCategory::try_from(req.owner_category)
-            .map_err(|_| {
-                Status::invalid_argument(format!("unknown owner_category {}", req.owner_category))
-            })
-            .map(OwnerCategory::from)?;
-        let store = self.store.lock().await;
-        let keys = store
-            .get_time_series_keys(req.owner_id, owner_category)
-            .map_err(map_err)?;
-        Ok(Response::new(KeysResp {
-            keys: keys.iter().map(full_key_to_pb).collect(),
-        }))
-    }
 
     async fn get_resolutions(
         &self,
@@ -280,12 +263,27 @@ impl CatalogStoreSvc for CatalogStoreService {
 
     async fn has_time_series(&self, request: Request<HasReq>) -> Result<Response<HasResp>, Status> {
         let req = request.into_inner();
-        let key = req
-            .key
-            .ok_or_else(|| Status::invalid_argument("missing key"))?;
-        let key = key_from_pb(key).map_err(map_convert_err)?;
+        let owner_category = pb::OwnerCategory::try_from(req.owner_category)
+            .map_err(|_| {
+                Status::invalid_argument(format!("unknown owner_category {}", req.owner_category))
+            })
+            .map(OwnerCategory::from)?;
+        let filter = infrastore_core::ListFilter {
+            owner_id: Some(req.owner_id),
+            owner_category: Some(owner_category),
+            name: Some(req.name),
+            time_series_type: req
+                .time_series_type
+                .map(|t| requested_type_from_pb(t).map_err(map_convert_err))
+                .transpose()?,
+            resolution: req.resolution.as_deref().map(parse_period).transpose()?,
+            interval: req.interval.as_deref().map(parse_period).transpose()?,
+            features: Some(features_from_pb(pb::Features { entries: req.features }).map_err(map_convert_err)?),
+            features_exact: true,
+            ..Default::default()
+        };
         let store = self.store.lock().await;
-        let present = store.has_time_series(&key).map_err(map_err)?;
+        let present = store.has_any_time_series(filter).map_err(map_err)?;
         Ok(Response::new(HasResp { present }))
     }
 
@@ -302,48 +300,17 @@ impl CatalogStoreSvc for CatalogStoreService {
 
     // ---- Additive read RPCs (Phase 4.4) ----
 
-    async fn list_keys(
-        &self,
-        request: Request<ListKeysReq>,
-    ) -> Result<Response<ListKeysResp>, Status> {
-        let req = request.into_inner();
-        let filter = filter_from_list_req(req.filter.unwrap_or_default())?;
-        let store = self.store.lock().await;
-        let rows = if req.with_hash {
-            store
-                .list_keys_with_hash(filter)
-                .map_err(map_err)?
-                .into_iter()
-                .map(|(k, h)| pb::list_keys_resp::Row {
-                    key: Some(full_key_to_pb(&k)),
-                    data_hash: Some(h.to_vec()),
-                })
-                .collect()
-        } else {
-            store
-                .list_keys(filter)
-                .map_err(map_err)?
-                .into_iter()
-                .map(|k| pb::list_keys_resp::Row {
-                    key: Some(full_key_to_pb(&k)),
-                    data_hash: None,
-                })
-                .collect()
-        };
-        Ok(Response::new(ListKeysResp { rows }))
-    }
 
     async fn get_metadata(
         &self,
-        request: Request<KeyReq>,
+        request: Request<pb::IdReq>,
     ) -> Result<Response<TimeSeriesMetadata>, Status> {
-        let key = request
-            .into_inner()
-            .key
-            .ok_or_else(|| Status::invalid_argument("missing key"))?;
-        let key = key_from_pb(key).map_err(map_convert_err)?;
+        let id = request.into_inner().id;
         let store = self.store.lock().await;
-        let meta = store.get_metadata(&key).map_err(map_err)?;
+        let meta = store
+            .get_metadata_by_id(id)
+            .map_err(map_err)?
+            .ok_or_else(|| Status::not_found(format!("no association has id {id}")))?;
         Ok(Response::new(metadata_to_pb(&meta)))
     }
 
@@ -357,24 +324,21 @@ impl CatalogStoreSvc for CatalogStoreService {
         // no key is converted or validated, and the store is not touched. The
         // cost of this call is the caller's to choose, so the ceiling applies
         // before that work starts rather than after it.
-        if req.keys.len() > self.max_bulk_read_keys {
+        if req.ids.len() > self.max_bulk_read_keys {
             return Err(Status::resource_exhausted(format!(
-                "bulk_read requested {} keys, more than this server's limit of {}; \
+                "bulk_read requested {} ids, more than this server's limit of {}; \
                  split the request",
-                req.keys.len(),
+                req.ids.len(),
                 self.max_bulk_read_keys
             )));
         }
         let time_range = parse_time_range(req.start_rfc3339, req.end_rfc3339, req.bounds_zoneless)?;
-        let keys = req
-            .keys
-            .into_iter()
-            .map(key_from_pb)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(map_convert_err)?;
-        let refs: Vec<&KeyIdentity> = keys.iter().collect();
         let store = self.store.lock().await;
-        let datas = store.bulk_read_range(&refs, time_range).map_err(map_err)?;
+        let datas = match time_range {
+            Some(range) => store.read_by_ids_range(&req.ids, range),
+            None => store.read_by_ids(&req.ids, infrastore_core::ReadWindow::full()),
+        }
+        .map_err(map_err)?;
         Ok(Response::new(BulkReadResp {
             items: datas.iter().map(time_series_data_to_get_resp).collect(),
         }))
@@ -503,10 +467,10 @@ impl CatalogStoreSvc for CatalogStoreService {
         Ok(Response::new(ConsistencyResp { rows }))
     }
 
-    async fn resolve_forecast_key(
+    async fn resolve_metadata(
         &self,
-        request: Request<ResolveForecastKeyReq>,
-    ) -> Result<Response<ResolveForecastKeyResp>, Status> {
+        request: Request<pb::ResolveMetadataReq>,
+    ) -> Result<Response<TimeSeriesMetadata>, Status> {
         let req = request.into_inner();
         let category = pb::OwnerCategory::try_from(req.owner_category)
             .map_err(|_| {
@@ -536,10 +500,6 @@ impl CatalogStoreSvc for CatalogStoreService {
                 requested,
             )
             .map_err(map_err)?;
-        // The row the resolution already built; no second lookup to reach a key.
-        let key = infrastore_core::TimeSeriesKey::from_metadata(&meta).map_err(map_err)?;
-        Ok(Response::new(ResolveForecastKeyResp {
-            key: Some(full_key_to_pb(&key)),
-        }))
+        Ok(Response::new(metadata_to_pb(&meta)))
     }
 }

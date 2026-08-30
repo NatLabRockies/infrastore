@@ -140,8 +140,8 @@ impl FromStr for UnitSystem {
 /// uniqueness index keys on. So the store already treats `0.0` and `-0.0` as two
 /// different series. Deriving `PartialEq` gave IEEE semantics instead, where
 /// `0.0 == -0.0` — equal values that hashed differently, breaking the `Hash`
-/// contract for `FeatureValue`, `Features`, `KeyIdentity` and `TimeSeriesKey`
-/// alike. A `HashSet<TimeSeriesKey>` would hold two members that compare equal
+/// contract for `FeatureValue`, `Features` and `KeyIdentity` alike. A
+/// `HashSet<KeyIdentity>` would hold two members that compare equal
 /// while `contains` missed one of them, and the type disagreed with the catalog
 /// about what a distinct series is.
 ///
@@ -434,7 +434,7 @@ pub struct TimeSeriesMetadata {
     /// same thing: one component may carry several series for one field — a
     /// forecast and an actual, a set of weather years — distinguished by name
     /// or features, and a series' name is part of its identity where this is
-    /// not. Descriptive, so it sits outside [`crate::TimeSeriesKey`] and
+    /// not. Descriptive, so it sits outside a series' identity and
     /// outside both content hashes.
     ///
     /// Named for the common case. The owner may also be a supplemental
@@ -481,7 +481,7 @@ pub struct TimeSeriesMetadata {
     ///   collides and is refused with
     ///   [`TimeSeriesError::DuplicateAssociationId`].
     ///
-    /// Descriptive, so it sits outside [`crate::TimeSeriesKey`] and outside
+    /// Descriptive, so it sits outside a series' identity and outside
     /// both content hashes: two series differing only in it are the same
     /// series, and it changes nothing about what is stored.
     ///

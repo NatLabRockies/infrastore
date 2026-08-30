@@ -114,17 +114,25 @@ pub fn open_writable_with(
 /// One `has_time_series` probe per identity, on the same connection the removal
 /// then uses. The CLI is a single writer in a single process, so nothing can
 /// insert between the probe and the remove.
-pub fn remove_existing(store: &mut Store, keys: &[&KeyIdentity]) -> Result<usize, String> {
-    let mut present: Vec<&KeyIdentity> = Vec::new();
-    for key in keys {
-        if store.has_time_series(key).map_err(|e| e.to_string())? {
-            present.push(key);
-        }
+pub fn remove_existing(
+    store: &mut Store,
+    filters: &[infrastore_core::ListFilter],
+) -> Result<usize, String> {
+    // Each filter names one identity exactly (`features_exact`), so this
+    // resolves the ids the store actually holds and removes those. Identities
+    // it does not hold contribute nothing, which is what `--replace` wants.
+    let mut present: Vec<i64> = Vec::new();
+    for filter in filters {
+        present.extend(
+            store
+                .list_metadata(filter.clone())
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .filter_map(|m| m.id),
+        );
     }
     if present.is_empty() {
         return Ok(0);
     }
-    store
-        .remove_time_series_bulk(&present)
-        .map_err(|e| e.to_string())
+    store.remove_by_ids(&present).map_err(|e| e.to_string())
 }
