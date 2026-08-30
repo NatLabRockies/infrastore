@@ -7,6 +7,7 @@ appears here; keep the two in sync.
 
 from datetime import datetime, timedelta
 from types import TracebackType
+from collections.abc import Sequence
 from typing import Any, final
 
 import numpy as np
@@ -712,3 +713,8 @@ def decode_element_values(
     element_type: str,
     leading_dims: int = 1,
 ) -> list[Any] | None: ...
+def encode_element_values(
+    values: Sequence[Any],
+    element_type: str,
+    leading_dims: Sequence[int] | None = None,
+) -> Any: ...

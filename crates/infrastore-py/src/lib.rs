@@ -4047,6 +4047,112 @@ fn decoded_to_py<'py>(
     Ok(out.into_any())
 }
 
+/// Encode per-timestep logical values into the flat array the store holds.
+///
+/// The inverse of `decode_element_values`, and the write-side half a caller
+/// needed to build by hand: `values` is a list in the shape that function
+/// returns, `element_type` names the layout to pack them into, and
+/// `leading_dims` is the shape of the axes that precede the per-step element
+/// shape — `(len,)` for a static series, `(H, count)` for a `Deterministic`,
+/// `(P, H, count)` for a `Probabilistic` or `Scenarios`. It defaults to
+/// `(len(values),)`, which is the static case.
+///
+/// Returns a `float64` numpy array of shape `(*leading_dims, width)`, ready to
+/// pass to `add_time_series` alongside the same `element_type`.
+///
+/// The ragged kinds are padded to the widest entry across the whole input, so
+/// the same curve encodes differently in a differently-shaped series — that is
+/// the storage layout, not a property of the value.
+#[pyfunction]
+#[pyo3(signature = (values, element_type, leading_dims=None))]
+fn encode_element_values<'py>(
+    py: Python<'py>,
+    values: &Bound<'py, PyAny>,
+    element_type: &str,
+    leading_dims: Option<Vec<usize>>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let element_type = parse_element_type(element_type)?;
+    let decoded = py_to_decoded(values, element_type)?;
+    let dims = leading_dims.unwrap_or_else(|| vec![decoded.len()]);
+    let array = core_lib::encode(&decoded, &dims).map_err(map_err)?;
+    numpy_from_typed(py, &array)
+}
+
+/// Read a Python payload back into the core's `DecodedValues`, keyed on the
+/// element type it is being encoded as. The shapes are the ones
+/// `decode_element_values` produces, so a round trip through Python needs no
+/// reshaping in between.
+fn py_to_decoded(
+    values: &Bound<'_, PyAny>,
+    element_type: core_lib::ElementType,
+) -> PyResult<core_lib::DecodedValues> {
+    use core_lib::{DecodedValues, ElementType, LinearFunction, QuadraticFunction};
+
+    let rows: Vec<Bound<'_, PyAny>> = values.try_iter()?.collect::<PyResult<_>>()?;
+    let field = |row: &Bound<'_, PyAny>, name: &str| -> PyResult<f64> {
+        row.get_item(name)?.extract::<f64>()
+    };
+    Ok(match element_type {
+        ElementType::Scalar(_) => {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "a scalar element_type has no values to encode: pass the numpy array \
+                 to add_time_series directly",
+            ));
+        }
+        ElementType::Tuple { .. } => DecodedValues::Tuple(
+            rows.iter()
+                .map(|r| r.extract::<Vec<f64>>())
+                .collect::<PyResult<_>>()?,
+        ),
+        ElementType::LinearFunction => DecodedValues::LinearFunction(
+            rows.iter()
+                .map(|r| {
+                    Ok(LinearFunction {
+                        proportional: field(r, "proportional")?,
+                        constant: field(r, "constant")?,
+                    })
+                })
+                .collect::<PyResult<_>>()?,
+        ),
+        ElementType::QuadraticFunction => DecodedValues::QuadraticFunction(
+            rows.iter()
+                .map(|r| {
+                    Ok(QuadraticFunction {
+                        quadratic: field(r, "quadratic")?,
+                        proportional: field(r, "proportional")?,
+                        constant: field(r, "constant")?,
+                    })
+                })
+                .collect::<PyResult<_>>()?,
+        ),
+        ElementType::PiecewiseLinear => DecodedValues::PiecewiseLinear(
+            rows.iter()
+                .map(|step| {
+                    step.try_iter()?
+                        .map(|p| {
+                            let p = p?;
+                            Ok(core_lib::XyPoint {
+                                x: field(&p, "x")?,
+                                y: field(&p, "y")?,
+                            })
+                        })
+                        .collect::<PyResult<Vec<_>>>()
+                })
+                .collect::<PyResult<_>>()?,
+        ),
+        ElementType::PiecewiseStep => DecodedValues::PiecewiseStep(
+            rows.iter()
+                .map(|r| {
+                    Ok(core_lib::StepFunction {
+                        x: r.get_item("x")?.extract::<Vec<f64>>()?,
+                        y: r.get_item("y")?.extract::<Vec<f64>>()?,
+                    })
+                })
+                .collect::<PyResult<_>>()?,
+        ),
+    })
+}
+
 // ---- Module init ----------------------------------------------------------
 
 #[pymodule]
@@ -4111,5 +4217,6 @@ fn infrastore(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_function(wrap_pyfunction!(init_tracing, m)?)?;
     m.add_function(wrap_pyfunction!(decode_element_values, m)?)?;
+    m.add_function(wrap_pyfunction!(encode_element_values, m)?)?;
     Ok(())
 }

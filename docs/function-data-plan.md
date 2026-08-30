@@ -291,22 +291,56 @@ escape hatch and the untouched numeric path. One existing assertion changed mean
 `tuple(3,f64)` row is now `SingleTimeSeries{NTuple{3,Float64}, 1}` rather than
 `SingleTimeSeries{Float64, 2}` — and was updated with the `raw` form asserted beside it.
 
-### Phase 5 — Python parity
+### Phase 5 — Python parity ✅ **done**
 
-Python has decode but no encode, and returns dicts rather than types. For symmetry with Julia:
-`encode_element_values`, plus dataclasses or `TypedDict`s for the four kinds. Needs stub updates
-(`infrastore.pyi`) and the pytest drift guard.
+`encode_element_values(values, element_type, leading_dims)` alongside the decoder it inverts, taking
+the same payload shapes the decoder produces, so a Python round trip needs no reshaping in between.
+`leading_dims` is the _shape_ of the leading axes and defaults to the static case. A scalar
+`element_type` is refused rather than answered with an array that looks like a packing: the numbers
+are already the values.
 
-_Could be deferred_ — it is parity work, not a blocker for the Julia goal — but CLAUDE.md's "check
-all bindings before considering it done" convention argues for doing it in the same cycle.
+Tested against the corpus in both directions — all 15 vectors — plus the pair a caller actually
+uses: encode, store, read, decode.
 
-### Phase 6 — CLI, docs, changelog
+Not done, and deliberately: typed value objects for Python. The decoder returns dicts and lists,
+which is what a numpy-shaped consumer wants; dataclasses would be a second representation to keep in
+step for no gain that showed up here.
 
-- CLI: `get`/`export` currently render function data as raw padded floats. Decoding them for display
-  (and for `--format json`) is the visible payoff of Phase 1's core work.
-- `element-types.md`: the codec table gains Julia; the "Julia does not map tuples" claim is settled
-  by D5.
-- Changelog: D4's break plus the `<:` migration, together.
+### Phase 6 — CLI, docs ✅ **done**
+
+- `get -f json` now carries an `element_values` key beside `values`, holding the self-describing
+  decoded form (`{"kind": "piecewise_linear", "timesteps": …}`) for a composite row.
+- **CSV stays packed on purpose.** That form is what `add` reads back, so it has to remain the
+  store's own layout rather than a rendering of it. Written down in `element-types.md` rather than
+  left as an accident of which code path was touched.
+- `element-types.md` gains an "Extending the codec" section: the two directions extend differently
+  because they start from different things — decoding from a tag string, so a `types` table;
+  encoding from a value, so open dispatch — and `is_element_values` answers by asking whether those
+  methods exist, so opting a type in is exactly defining them.
+
+### IS.jl migration ✅ **done** (the lift's other half)
+
+`InfrastructureSystems.jl/src/infrastore.jl`: **−374/+139**, the additions being twelve small encode
+methods and the decode table. Deleted: `_storage_array`, `_storage_width`,
+`_storage_forecast_array`, `_element_type_name`, the whole `ElementEncoding` hierarchy,
+`_element_encoding`, `_decode_static_values`, `_decode_stored_values`, `_decode_forecast_window`,
+`_decode_ntuples`, `_decode_pwl_step_row`, `_decode_element`, `_forecast_window`.
+
+Three parts needed thought rather than deletion. The `Deterministic` write collapsed to
+`reduce(hcat, windows)` — the dict-to-matrix densification is IS's concern, the element packing is
+the store's. `_dense_forecast_array` survives for `Probabilistic`/`Scenarios`, minus its tagging.
+And the **reader paths still decode**, because the store's readers deliberately hand back packing —
+but through `InfraStore.decode_element_values` now, with the reader structs caching a tag string
+instead of an encoding singleton.
+
+One API addition made it possible: `read_by_id` / `read_by_ids` take `types`, so IS's single read
+site lands directly in `LinearFunctionData` and friends.
+
+**The bug worth remembering:** the write path first decided "are these domain values?" with a fixed
+`Union` of _this package's_ types. A consumer's opted-in types are not in it, so IS's values fell
+through to the numeric path and threw `unsupported element dtype LinearFunctionData`. The test has
+to be dispatch-based — `is_element_values` asks whether the three encode methods exist — or the
+extension point only works for types the package already knows, which is not an extension point.
 
 ## Risks and sharp edges
 
@@ -346,8 +380,8 @@ all bindings before considering it done" convention argues for doing it in the s
 | 2 — Lift IS.jl's codec        | ✅ done | —               |
 | 3 — Julia write               | ✅ done | —               |
 | 4 — Julia read + metadata     | ✅ done | —               |
-| 5 — Python parity             | medium  | no (deferrable) |
-| 6 — CLI + docs                | small   | no              |
+| 5 — Python parity             | ✅ done | —               |
+| 6 — CLI + docs                | ✅ done | —               |
 
-Phases 1–4 are the whole of the stated goal. 5 and 6 are consistency work that CLAUDE.md's
-conventions ask for but that nothing depends on.
+All six phases are done, along with the IS.jl migration that makes Phase 2 a lift rather than a
+fifth implementation.

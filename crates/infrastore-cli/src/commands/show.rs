@@ -607,6 +607,12 @@ fn render_sequential(
                 .collect();
             obj.insert("timestamps".into(), json!(ts));
             obj.insert("values".into(), json!(values));
+            // A composite element type is a layout, not a number: alongside the
+            // packed slots, hand a JSON consumer the curves themselves. The CSV
+            // form stays raw on purpose — it is the shape `add` reads back.
+            if let Some(decoded) = decoded_element_values(meta, arr) {
+                obj.insert("element_values".into(), decoded);
+            }
             output::print_value(f, &Value::Object(obj))?;
         }
         // Every sequential CSV carries its timestamp column, including a
@@ -688,6 +694,12 @@ fn render_forecast(
                 }
                 obj.insert("columns".into(), json!(headers));
                 obj.insert("rows".into(), json!(shown));
+            } else if let Some(decoded) = decoded_element_values(meta, arr) {
+                // A composite element type is a layout, not a number: JSON is
+                // where a consumer wants the curves rather than the padded slots
+                // they are packed into. The CSV form below stays raw on purpose —
+                // it is the shape `add` reads back.
+                obj.insert("element_values".into(), decoded);
             } else {
                 obj.insert("values".into(), json!(csv_io::array_to_json_values(arr)));
             }
@@ -714,6 +726,20 @@ fn report_dropped(dropped: usize) {
                 "... {dropped} more rows (use --full, --limit, or --tail)"
             ))
         );
+    }
+}
+
+/// The per-timestep values of a composite element type, as self-describing JSON,
+/// or `None` for a plain numeric series — where the stored numbers are already
+/// the values and `values` says it better.
+///
+/// `DecodedValues` serializes adjacently tagged, so the payload names its own
+/// kind: `{"kind": "piecewise_linear", "timesteps": [[{"x": …, "y": …}]]}`.
+fn decoded_element_values(meta: &TimeSeriesMetadata, arr: &TypedArray) -> Option<Value> {
+    let leading = meta.time_series_type.leading_dims();
+    match infrastore_core::decode(arr, meta.element_type, leading) {
+        Ok(infrastore_core::DecodedValues::Raw) | Err(_) => None,
+        Ok(values) => serde_json::to_value(values).ok(),
     }
 }
 

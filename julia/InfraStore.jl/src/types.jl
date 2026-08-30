@@ -64,7 +64,7 @@ end
 # rather than an override: the values are the more specific statement.
 function _declared_element_type(element_type, data::AbstractArray)
     isempty(data) && return _maybe_string(element_type)
-    eltype(data) <: _EncodableValue || return _maybe_string(element_type)
+    is_element_values(data) || return _maybe_string(element_type)
     implied = element_type_tag(vec(data))
     if element_type !== nothing && String(element_type) != implied
         throw(
@@ -77,10 +77,6 @@ function _declared_element_type(element_type, data::AbstractArray)
     return implied
 end
 
-# Values this package encodes on the way down, as opposed to numbers it sends as
-# they are.
-const _EncodableValue = Union{FunctionData, NTuple{N, Float64} where {N}}
-
 # What a value array goes down the ABI as: `(element_type, dims, bytes)`.
 #
 # Domain values are encoded *here*, at the boundary, so the struct keeps holding
@@ -88,7 +84,7 @@ const _EncodableValue = Union{FunctionData, NTuple{N, Float64} where {N}}
 # and what makes a metadata row's `{T,N}` describe the values rather than their
 # packing.
 function _wire_array(element_type, data::AbstractArray)
-    if !isempty(data) && eltype(data) <: _EncodableValue
+    if !isempty(data) && is_element_values(data)
         array, tag = encode_element_values(data)
         return (tag, UInt64[size(array)...], _row_major_bytes(array))
     end

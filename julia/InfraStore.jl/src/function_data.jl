@@ -206,12 +206,19 @@ function write_element_row!(row, v::NTuple{N, Float64}) where {N}
     return nothing
 end
 
-function element_type_tag(values::AbstractVector)
-    return throw(
-        InvalidParameterError("no element_type encodes $(eltype(values)) values")
-    )
-end
-element_row_width(values::AbstractVector) = element_type_tag(values)
+"""
+    is_element_values(values) -> Bool
+
+Whether `values` carry an element encoding of their own, as opposed to being
+numbers the store holds as they are.
+
+True exactly when a value type has the three methods above — which is how a
+consumer opts its own domain types in without this package knowing them. It is
+deliberately *not* a check against [`FunctionData`](@ref): that union names what
+this package defines, and a consumer's types are not in it.
+"""
+is_element_values(values::AbstractVector) = applicable(element_type_tag, values)
+is_element_values(values::AbstractArray) = is_element_values(vec(values))
 
 """
     encode_element_values(values) -> (array, element_type)
@@ -237,6 +244,12 @@ array, element_type = encode_element_values(curves)   # (2, 5), "piecewise_linea
 """
 function encode_element_values(values::AbstractArray)
     flat = vec(values)
+    # Checked here rather than as a fallback method on `element_type_tag`: a
+    # fallback would make `applicable` true for every type, and `is_element_values`
+    # is how the write path decides whether there is anything to pack at all.
+    is_element_values(flat) || throw(
+        InvalidParameterError("no element_type encodes $(eltype(flat)) values")
+    )
     tag = element_type_tag(flat)
     width = element_row_width(flat)
     array = zeros(Float64, size(values)..., width)

@@ -97,8 +97,9 @@ Each binding ships a reference codec between the stored bytes and per-timestep v
   `element_type` and the array it describes are two things a caller can get out of step — the store
   rejects the mismatch on write, but deriving both from one set of values means there is none to
   reject.
-- **Python** — `infrastore.decode_element_values(array, element_type, leading_dims)`. Decode only; a
-  write still encodes by hand and declares `element_type=`.
+- **Python** — `infrastore.decode_element_values(array, element_type, leading_dims)` and
+  `encode_element_values(values, element_type, leading_dims)`. A write still passes the encoded
+  array and declares `element_type=`; the encoder is what builds it.
 - **TypeScript** — `@infrastore/codec`, which decodes a gRPC response's `value_bytes` + `shape` +
   `element_type` directly into plottable values.
 - **Julia** — `InfraStore.encode_element_values` / `decode_element_values`, over the value types
@@ -110,8 +111,23 @@ Each binding ships a reference codec between the stored bytes and per-timestep v
   InfrastructureSystems` is not an ambiguity
   error.
 
-The CLI is deliberately not on that list: it renders function-data rows as their raw padded numbers
-rather than decoding them.
+The CLI decodes composite rows for `get -f json`, under an `element_values` key alongside the raw
+`values`. Its **CSV** output stays packed on purpose: that form is what `add` reads back, so it has
+to stay the store's own layout rather than a rendering of it.
+
+## Extending the codec
+
+A consumer with its own domain types does not have to convert at the boundary. In Julia the two
+directions extend differently, because they start from different things:
+
+- **Decoding** starts from an `element_type` string, so the type to build is chosen by name:
+  `decode_element_values(...; types = ...)`, and `read_by_id(store, id; types = ...)`.
+- **Encoding** starts from a value, so it is open dispatch: add `element_type_tag`,
+  `element_row_width` and `write_element_row!` methods for your type and it packs directly.
+
+`is_element_values` is the predicate the write path uses to tell "domain values to pack" from
+"numbers to store as they are", and it answers by asking whether those three methods exist — so
+opting a type in is exactly defining them, with nothing to register.
 
 `conformance/element_type_vectors.json` at the repo root pins encoded bytes against expected decoded
 values for every element type, static and forecast. It is generated from `infrastore-core`'s
