@@ -237,7 +237,7 @@ def get_array_by_hash(self, data_hash: str) -> numpy.ndarray: ...
 def count_array_references(self, data_hash: str) -> dict: ...
 # {"sts": int, "dst": int}: SingleTimeSeries and DeterministicSingleTimeSeries
 # associations sharing that array.
-def resolve_forecast_key(
+def resolve_id(
     self,
     owner_id: int,
     owner_category: OwnerCategory,

@@ -318,7 +318,7 @@ int32_t infrastore_store_get_metadata_by_key(const struct InfraStore *handle,
    INFRASTORE_ERR_INVALID_PARAMETER when several series match (narrow with a concrete
    type, resolution, and/or interval). The name is historical — it is not
    forecast-specific. Free the key with infrastore_key_free. */
-int32_t infrastore_store_resolve_forecast_key(const struct InfraStore *handle,
+int32_t infrastore_store_resolve_metadata(const struct InfraStore *handle,
                                       int64_t owner_id, int32_t owner_category,
                                       const char *name,
                                       const char *resolution, const char *interval,

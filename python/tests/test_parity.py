@@ -563,7 +563,7 @@ def test_check_static_consistency_separates_resolutions():
     assert rows["PT5M"]["length"] == 8
 
 
-def test_resolve_forecast_key():
+def test_resolve_id():
     store = Store.create(in_memory=True)
     C = 3
     data = np.arange(2 * C, dtype=np.float64).reshape(2, C)
@@ -573,15 +573,21 @@ def test_resolve_forecast_key():
         Deterministic(T0, RES_1H, timedelta(hours=2), timedelta(hours=1), C, data, "det"),
     )
 
-    # Concrete type.
-    resolved = store.resolve_forecast_key(
+    # Concrete type. The row comes back whole; the id off it is what the
+    # id-addressed read and removal take.
+    resolved = store.resolve_metadata(
         1, OwnerCategory.Component, "det", TimeSeriesType.Deterministic, resolution=RES_1H
     )
-    assert resolved == key
+    assert resolved["name"] == "det"
+    assert store.resolve_id(
+        1, OwnerCategory.Component, "det", TimeSeriesType.Deterministic, resolution=RES_1H
+    ) == resolved["id"]
+    assert np.asarray(store.read_by_id(resolved["id"]).data).shape == (2, C)
+    assert key is not None
 
     # A name that matches nothing is a miss, not a silent None.
     with pytest.raises(NotFoundError):
-        store.resolve_forecast_key(
+        store.resolve_id(
             1,
             OwnerCategory.Component,
             "absent",
@@ -590,17 +596,17 @@ def test_resolve_forecast_key():
         )
 
 
-def test_resolve_forecast_key_finds_a_transformed_dst():
+def test_resolve_id_finds_a_transformed_dst():
     store = Store.create(in_memory=True)
     _add(store, 1, _sts("load", np.arange(8, dtype=np.float64)))
     assert store.transform_single_time_series(timedelta(hours=2), timedelta(hours=1)) == 1
 
     # Asking for `Deterministic` finds the derived forecast: the transform is a
-    # storage detail. The key still reports the concrete stored type.
-    resolved = store.resolve_forecast_key(
+    # storage detail. The row still reports the concrete stored type.
+    resolved = store.resolve_metadata(
         1, OwnerCategory.Component, "load", TimeSeriesType.Deterministic, resolution=RES_1H
     )
-    assert resolved.time_series_type == TimeSeriesType.DeterministicSingleTimeSeries
+    assert resolved["time_series_type"] == "DeterministicSingleTimeSeries"
 
 
 def _both_forecast_types() -> Store:
@@ -711,7 +717,7 @@ def test_an_unusable_requested_type_is_rejected():
     # and names what would have worked. There is in particular no family
     # sentinel to reach for.
     with pytest.raises(InvalidParameterError, match="abstract_deterministic"):
-        store.resolve_forecast_key(
+        store.resolve_id(
             1, OWNER_CAT, "det", "abstract_deterministic", resolution=RES_1H
         )
     with pytest.raises(InvalidParameterError, match="Deterministic"):

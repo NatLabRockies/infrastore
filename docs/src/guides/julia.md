@@ -306,13 +306,17 @@ for k in get_time_series_keys(store, 42, Component)
 end
 ```
 
-To address one series rather than enumerate an owner, `get_time_series_key` resolves attributes to a
-key — for any stored type, and validated against the catalog (a miss or an ambiguous match throws):
+To address one series rather than enumerate an owner, `resolve_id` resolves attributes to its
+catalog association id — for any stored type, and validated against the catalog (a miss or an
+ambiguous match throws). The id is then what reads and removals take:
 
 ```julia
-k = get_time_series_key(Scenarios, store, 42, Component, "wind"; resolution = Hour(1))
-window = get_time_series(Scenarios, store, k)
+id = resolve_id(Scenarios, store, 42, Component, "wind"; resolution = Hour(1))
+window = read_by_id(store, id)
 ```
+
+`resolve_metadata` is the same call returning the whole row, for when the concrete stored type, the
+grid, or the content hash is wanted alongside the id.
 
 (`list_keys` returns `KeyRow` description structs, not handles; use these two when you need a key to
 pass to a reader or `bulk_read`.)

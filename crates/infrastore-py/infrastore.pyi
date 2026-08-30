@@ -468,7 +468,7 @@ class Store:
     def get_metadata(self, key: TimeSeriesKey) -> dict[str, Any]: ...
     def get_array_by_hash(self, data_hash: str) -> NDArray[Any]: ...
     def count_array_references(self, data_hash: str) -> dict[str, Any]: ...
-    def resolve_forecast_key(
+    def resolve_metadata(
         self,
         owner_id: int,
         owner_category: OwnerCategory,
@@ -478,7 +478,18 @@ class Store:
         resolution: Period | None = None,
         interval: Period | None = None,
         features: dict[str, int | float | bool | str] | None = None,
-    ) -> TimeSeriesKey: ...
+    ) -> dict[str, Any]: ...
+    def resolve_id(
+        self,
+        owner_id: int,
+        owner_category: OwnerCategory,
+        name: str,
+        requested_type: TimeSeriesType,
+        *,
+        resolution: Period | None = None,
+        interval: Period | None = None,
+        features: dict[str, int | float | bool | str] | None = None,
+    ) -> int: ...
 
     # -- readers --
     def build_static_reader(

@@ -206,7 +206,7 @@ impl Store {
 
     // Resolve a forecast addressed by attributes + a requested type to the one
     // matching key. `NotFound` if nothing matches; `InvalidParameter` if ambiguous.
-    pub fn resolve_forecast_key(
+    pub fn resolve_metadata(
         &self,
         owner_id: i64,
         owner_category: OwnerCategory,
@@ -402,7 +402,7 @@ can be moved between threads, but sharing one requires external synchronization 
   array's content hash in the same single catalog query, so callers can group keys by the data
   behind them; `list_keys_with_id` pairs it with the association id the write handed back (`None`
   for a row written before ids were minted); `list_array_groups` carries both.
-- **`resolve_forecast_key`** — Resolves a forecast addressed by attributes plus a
+- **`resolve_metadata`** / **`resolve_id`** — Resolves a series addressed by attributes plus a
   [requested type](#requested-types) to the single matching key, whose `time_series_type` is the
   concrete type that matched. `resolution` and `interval` are optional filters; leave them `None` to
   match across them. `NotFound` if nothing matches, `InvalidParameter` if more than one does.
@@ -1334,9 +1334,9 @@ impl BulkAdd<'_> {
 
 ### Requested types
 
-What a query — [`Store::resolve_forecast_key`](#store), a `ListFilter`, or a reader build — is asked
-to match. Every type matches only itself, with one exception: **`Deterministic` also matches a
-stored `DeterministicSingleTimeSeries`**, since a DST is a synthetic view that reads back as a
+What a query — [`Store::resolve_metadata`](#store), a `ListFilter`, or a reader build — is asked to
+match. Every type matches only itself, with one exception: **`Deterministic` also matches a stored
+`DeterministicSingleTimeSeries`**, since a DST is a synthetic view that reads back as a
 `Deterministic` and callers should not have to know which form a store holds. (The two never coexist
 for one identity, so this never creates ambiguity.) Requesting `DeterministicSingleTimeSeries`
 narrows to the derived form.

@@ -525,8 +525,8 @@ impl CatalogStoreSvc for CatalogStoreService {
         )
         .map_err(map_convert_err)?;
         let store = self.store.lock().await;
-        let key = store
-            .resolve_forecast_key(
+        let meta = store
+            .resolve_metadata(
                 req.owner_id,
                 category,
                 &req.name,
@@ -536,6 +536,8 @@ impl CatalogStoreSvc for CatalogStoreService {
                 requested,
             )
             .map_err(map_err)?;
+        // The row the resolution already built; no second lookup to reach a key.
+        let key = infrastore_core::TimeSeriesKey::from_metadata(&meta).map_err(map_err)?;
         Ok(Response::new(ResolveForecastKeyResp {
             key: Some(full_key_to_pb(&key)),
         }))

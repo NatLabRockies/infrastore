@@ -3137,22 +3137,39 @@ impl Store {
             .collect()
     }
 
-    /// Resolve a forecast addressed by attributes plus a requested
-    /// [`TimeSeriesType`] to the [`TimeSeriesKey`] of the single matching
-    /// association. The returned key's `time_series_type` is the concrete
-    /// stored type that matched, which is how a caller inspects whether it got
-    /// a real or a synthetic forecast.
+    /// Resolve a series addressed by attributes plus a requested
+    /// [`TimeSeriesType`] to the catalog row of the single association that
+    /// matches — the store's answer to "which series do I mean?".
     ///
-    /// Matching follows [`TimeSeriesType::accepts`], so requesting
-    /// `Deterministic` also resolves a stored `DeterministicSingleTimeSeries`.
-    /// The two cannot coexist for one identity (see `insert_association`), so
-    /// this never introduces ambiguity. The catalog — not the caller — decides
-    /// which stored form satisfies the request.
+    /// This is the *identify* half of every by-name operation, and the one place
+    /// the attribute-to-identity rules live. The read and removal halves take an
+    /// id ([`Self::read_by_id`], [`Self::remove_by_ids`]), so a caller that knows
+    /// a series by name resolves it here once and then addresses it by the id it
+    /// got — which is also what lets those halves stay small: one address, no
+    /// per-type attribute overloads, and nothing that can silently match more
+    /// than the caller meant.
+    ///
+    /// The row rather than the bare id, because the resolution has already built
+    /// one and callers wanting more than the id — the concrete stored type, the
+    /// grid, the content hash — would otherwise pay a second lookup for what was
+    /// in hand. [`Self::resolve_id`] is this with `.id` taken.
+    ///
+    /// The returned row's `time_series_type` is the concrete stored type that
+    /// matched, which is how a caller inspects whether it got a real or a
+    /// synthetic forecast: matching follows [`TimeSeriesType::accepts`], so
+    /// requesting `Deterministic` also resolves a stored
+    /// `DeterministicSingleTimeSeries`. The two cannot coexist for one identity
+    /// (see `insert_association`), so this never introduces ambiguity. The
+    /// catalog — not the caller — decides which stored form satisfies the
+    /// request.
     ///
     /// `resolution` and `interval` are optional filters on the identity. Leave
     /// either unset to match across it; supply it to disambiguate when several
     /// series share the other attributes (e.g. a day-ahead and a real-time
     /// forecast that differ only by interval).
+    ///
+    /// The row carries no time axis: an irregular series' timestamps are not
+    /// loaded to answer an identity question. Read the series to get them.
     ///
     /// Errors:
     /// - [`TimeSeriesError::NotFound`] if nothing matches.
@@ -3160,7 +3177,7 @@ impl Store {
     ///   than one stored series matches); the caller must then narrow it with a
     ///   concrete type, a resolution, and/or an interval.
     #[allow(clippy::too_many_arguments)]
-    pub fn resolve_forecast_key(
+    pub fn resolve_metadata(
         &self,
         owner_id: i64,
         owner_category: OwnerCategory,
@@ -3169,14 +3186,14 @@ impl Store {
         interval: Option<Period>,
         features: Features,
         requested: TimeSeriesType,
-    ) -> Result<TimeSeriesKey> {
+    ) -> Result<TimeSeriesMetadata> {
         // List candidates sharing (owner, name, resolution, interval, features),
         // then keep those whose concrete type satisfies the request. A concrete
         // request with resolution+interval pinned resolves to one row via the
         // unique index; looser requests may match several and are reported as
         // ambiguous rather than silently picking one.
         let f_hash = crate::hash::features_hash(&features);
-        // Key-building only, so the rows come back without their time axes.
+        // An identity question, so the rows come back without their time axes.
         let mut matches = self.metadata.list_without_timestamps(&MetadataFilter {
             owner_id: Some(owner_id),
             owner_category: Some(owner_category),
@@ -3189,7 +3206,7 @@ impl Store {
         matches.retain(|m| m.features == features && requested.accepts(m.time_series_type));
         match matches.len() {
             0 => Err(TimeSeriesError::NotFound),
-            1 => TimeSeriesKey::from_metadata(&matches.pop().unwrap()),
+            1 => Ok(matches.pop().unwrap()),
             _ => {
                 // More than one candidate matches: with `resolution`/`interval`
                 // unset this can be several forecasts at different resolutions or
@@ -3212,13 +3229,52 @@ impl Store {
                     .collect();
                 candidates.sort();
                 Err(TimeSeriesError::InvalidParameter(format!(
-                    "ambiguous forecast request for '{name}': {} candidates match \
+                    "ambiguous request for '{name}': {} candidates match \
                      ({}); narrow it with a concrete type, resolution, and/or interval",
                     candidates.len(),
                     candidates.join(", "),
                 )))
             }
         }
+    }
+
+    /// The catalog id of the single association matching these attributes —
+    /// [`Self::resolve_metadata`] with `.id` taken.
+    ///
+    /// The by-name entry point to everything addressed by id: resolve once, then
+    /// [`Self::read_by_id`] or [`Self::remove_by_ids`]. A consumer that keeps its
+    /// own model (a generator's cost function naming the series that varies it)
+    /// stores what this returns and never resolves again.
+    ///
+    /// Errors exactly as [`Self::resolve_metadata`] does: `NotFound` for no
+    /// match, `InvalidParameter` naming the candidates for an ambiguous one.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resolve_id(
+        &self,
+        owner_id: i64,
+        owner_category: OwnerCategory,
+        name: &str,
+        resolution: Option<Period>,
+        interval: Option<Period>,
+        features: Features,
+        requested: TimeSeriesType,
+    ) -> Result<i64> {
+        let meta = self.resolve_metadata(
+            owner_id,
+            owner_category,
+            name,
+            resolution,
+            interval,
+            features,
+            requested,
+        )?;
+        // Every row the catalog returns carries its id; `None` would mean a row
+        // that never came from the catalog, which this cannot produce.
+        meta.id.ok_or_else(|| {
+            TimeSeriesError::IntegrityError(format!(
+                "resolved association '{name}' carries no catalog id"
+            ))
+        })
     }
 
     /// Count `SingleTimeSeries` and `DeterministicSingleTimeSeries` associations

@@ -278,6 +278,6 @@ let data = client.get_time_series(&keys[0], None).await?;
 `get_time_series`, `bulk_read`, `get_time_series_keys`, `get_resolutions`, `get_intervals`,
 `get_counts`, `counts_by_type`, `time_series_counts_detailed`, `get_forecast_parameters`,
 `static_summary`, `forecast_summary`, `list_owner_ids`, `has_time_series`,
-`check_static_consistency`, `resolve_forecast_key`, `verify_integrity` — the full read surface
+`check_static_consistency`, `ResolveForecastKey`, `verify_integrity` — the full read surface
 described above. See the [gRPC Server guide](../guides/server.md) for end-to-end usage and adding an
 API key to client requests.

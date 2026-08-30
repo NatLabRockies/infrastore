@@ -31,7 +31,7 @@ Exported names (types first, then functions):
 `count_supplemental_attributes`, `counts_by_type`, `flush!`, `forecast_entries`,
 `forecast_num_slots`, `forecast_read!`, `forecast_summary`, `forecast_timeline`, `forecast_values`,
 `get_array_by_hash`, `get_compression`, `get_counts`, `get_forecast_parameters`, `get_intervals`,
-`get_metadata`, `get_path`, `get_resolutions`, `get_time_series`, `get_time_series_key`,
+`get_metadata`, `get_path`, `get_resolutions`, `get_time_series`, `resolve_id`, `resolve_metadata`,
 `get_time_series_keys`, `has_any_time_series`, `has_for_owner`, `has_parent_child_association`,
 `has_supplemental_attribute_association`, `has_time_series`, `in_transaction`, `init_logging`,
 `is_empty`, `key_info`, `list_array_groups`, `list_children`, `list_components_with_attributes`,
@@ -491,7 +491,7 @@ asked for and whichever way the record was reached (for a forecast, `element_sha
 array's trailing dims after its first axis).
 
 ```julia
-get_metadata(store, 42, Component, "load"; resolution = Hour(1))
+resolve_metadata(SingleTimeSeries, store, 42, Component, "load"; resolution = Hour(1))
 get_metadata(Scenarios, store, 42, Component, "wind"; resolution = Hour(1))
 ```
 
@@ -529,7 +529,7 @@ exactly one row — and it runs the same orphaned-view guard `remove_time_series
 
 ```julia
 get_time_series_keys(store, owner_id, owner_category::OwnerCategory) -> Vector{TimeSeriesKey}
-get_time_series_key(T::Type, store, owner_id, owner_category::OwnerCategory, name;
+resolve_id(T::Type, store, owner_id, owner_category::OwnerCategory, name;
                     resolution=nothing, interval=nothing, features=Dict()) -> TimeSeriesKey
 key_info(key::TimeSeriesKey) -> KeyInfo
 # fields: owner_id, owner_category, name, time_series_type, resolution, features
@@ -537,11 +537,11 @@ key_info(key::TimeSeriesKey) -> KeyInfo
 
 These two are the ways to obtain a `TimeSeriesKey` for a series already stored (`add_time_series!`
 returns one at write time, and the readers carry them on `StaticGroup` / `ForecastEntry`).
-`get_time_series_key` addresses one series by attributes, `T` being any stored type — with
-`Deterministic` matching a stored `DeterministicSingleTimeSeries` too, the returned key naming the
-concrete form. It resolves against the catalog, so the handle always names something stored: a miss
-throws `NotFoundError` and a request matching several series throws `InvalidParameterError` listing
-the candidates. Note that [`list_keys`](#store-wide-operations) returns `KeyRow` **description
+`resolve_id` addresses one series by attributes, `T` being any stored type — with `Deterministic`
+matching a stored `DeterministicSingleTimeSeries` too, the returned key naming the concrete form. It
+resolves against the catalog, so the handle always names something stored: a miss throws
+`NotFoundError` and a request matching several series throws `InvalidParameterError` listing the
+candidates. Note that [`list_keys`](#store-wide-operations) returns `KeyRow` **description
 structs**, not handles — use `get_time_series_key` (or `get_time_series_keys`) when you need
 something to pass to a key-based reader or `bulk_read`.
 
@@ -720,11 +720,11 @@ auditing which forecasts are synthetic rather than reading values.
 The Rust core resolves this in a single call — there is no guess-and-retry. A genuine miss raises
 `NotFoundError`.
 
-To find out which form you have, read the `time_series_type` on the resolved key or metadata:
+To find out which form you have, read the `time_series_type` off the resolved row:
 
 ```julia
-k = get_time_series_key(Deterministic, store, 400, Component, "dst")
-key_info(k).time_series_type    # DeterministicSingleTimeSeries
+resolve_metadata(Deterministic, store, 400, Component, "dst").time_series_type
+# DeterministicSingleTimeSeries
 ```
 
 The **key-based** readers carry the exact stored type in the key, so the question does not arise: a
@@ -1202,7 +1202,7 @@ Store(in_memory=true) do store
 end
 
 open_store(path; read_only=true) do store
-    get_metadata(store, 1, Component, "load")
+    resolve_metadata(SingleTimeSeries, store, 1, Component, "load")
 end
 ```
 

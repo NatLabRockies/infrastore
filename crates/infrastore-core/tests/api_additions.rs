@@ -1608,7 +1608,7 @@ fn a_single_time_series_whose_length_disagrees_with_its_array_is_rejected() {
 /// `MetadataStore::insert`/`replace_owner`/`rename`, which skip the check, and
 /// each of the three moves a row to a *new* family identity, which is precisely
 /// the operation that can pair the two. The resulting state is one the rest of
-/// the code treats as unreachable: `resolve_forecast_key` reports the family as
+/// the code treats as unreachable: `resolve_metadata` reports the family as
 /// ambiguous with no way to narrow it (both candidates share resolution *and*
 /// interval), and `transform_single_time_series` refuses to run again.
 #[test]

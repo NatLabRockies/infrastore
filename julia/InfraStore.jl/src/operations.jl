@@ -383,64 +383,6 @@ function association_exists(store::Store, id::Integer)
     return out_present[]
 end
 
-function get_metadata(
-    ::Type{T},
-    store::Store,
-    owner_id::Integer,
-    owner_category::OwnerCategory,
-    name::AbstractString;
-    resolution::Union{Nothing, Period}=nothing,
-    interval::Union{Nothing, Period}=nothing,
-    features::Union{Nothing, AbstractDict}=nothing,
-) where {T}
-    code = _type_code(T)
-    # A `Deterministic` request may be satisfied by a stored
-    # `DeterministicSingleTimeSeries`, so its key is not knowable up front: let
-    # the core resolve it. Every other type addresses its key directly.
-    key = if code == INFRASTORE_TYPE_DETERMINISTIC
-        get_time_series_key(
-            T,
-            store,
-            owner_id,
-            owner_category,
-            name;
-            resolution=resolution,
-            interval=interval,
-            features=features,
-        )
-    else
-        _make_key(
-            owner_id,
-            owner_category,
-            name,
-            code;
-            resolution=resolution,
-            interval=interval,
-            features=features,
-        )
-    end
-    return get_metadata(store, key)
-end
-
-function get_metadata(
-    store::Store,
-    owner_id::Integer,
-    owner_category::OwnerCategory,
-    name::AbstractString;
-    resolution::Union{Nothing, Period}=nothing,
-    features::Union{Nothing, AbstractDict}=nothing,
-)
-    return get_metadata(
-        SingleTimeSeries,
-        store,
-        owner_id,
-        owner_category,
-        name;
-        resolution=resolution,
-        features=features,
-    )
-end
-
 """
     rename_time_series!(store, key, new_name) -> TimeSeriesKey
 
@@ -460,26 +402,35 @@ function rename_time_series!(store::Store, key::TimeSeriesRef, new_name::Abstrac
 end
 
 """
-    get_time_series_key(T, store, owner_id, owner_category, name; resolution, interval, features=nothing) -> TimeSeriesKey
+    resolve_metadata(T, store, owner_id, owner_category, name; resolution, interval, features=nothing) -> TimeSeriesMetadata
 
-The [`TimeSeriesKey`](@ref) of the stored time series of type `T` with the given
-attributes — the attribute-addressed counterpart of
-[`get_time_series_keys`](@ref), which enumerates one owner's keys.
+The catalog row of the stored time series of type `T` with the given attributes.
+
+The **identify** half of every by-name operation, and the entry point to the
+id-addressed halves: resolve once here, take `.id` off the row (or call
+[`resolve_id`](@ref)), then [`read_by_id`](@ref) or [`remove_by_ids!`](@ref). A
+consumer that keeps its own model — a generator's cost function naming the series
+that varies it — stores that id and never resolves again.
+
+The row rather than the bare id, because the resolution builds one either way:
+the concrete stored type, the grid, and the content hash come back with it
+instead of costing a second lookup. Its time axis is not loaded — an irregular
+series' timestamps are not read to answer an identity question.
 
 `T` is any stored type. `Deterministic` matches a stored
-`DeterministicSingleTimeSeries` too, and the returned key names the concrete
-stored type either way. `resolution` and `interval` narrow the identity.
+`DeterministicSingleTimeSeries` too. `resolution` and `interval` narrow the
+identity.
 
-The key is resolved against the catalog, so it always names something stored:
-a miss throws `NotFoundError`, and a request matching several series throws
+Resolved against the catalog, so the id always names something stored: a miss
+throws `NotFoundError`, and a request matching several series throws
 `InvalidParameterError` listing the candidates — narrow it with a `resolution`
 and/or an `interval`.
 
-Use the returned handle with the key-based readers, [`bulk_read`](@ref),
-[`get_metadata`](@ref), [`rename_time_series!`](@ref), or
-[`remove_time_series!`](@ref).
+See also [`get_time_series_keys`](@ref), which enumerates one owner's series, and
+[`list_time_series`](@ref), whose rows carry ids alongside the rest of the
+metadata.
 """
-function get_time_series_key(
+function resolve_metadata(
     ::Type{T},
     store::Store,
     owner_id::Integer,
@@ -493,20 +444,48 @@ function get_time_series_key(
     interval_iso = _period_to_cstr(interval)
     features_json =
         (features === nothing || isempty(features)) ? C_NULL : JSON.json(features)
-    out_key = Ref{Ptr{Cvoid}}(C_NULL)
-    code = @ccall lib_path().infrastore_store_resolve_forecast_key(
-        store::Ptr{Cvoid},
-        Int64(owner_id)::Int64,
-        _category_int(owner_category)::Int32,
-        name::Cstring,
-        resolution_iso::Cstring,
-        interval_iso::Cstring,
-        features_json::Cstring,
-        Int32(_type_code(T))::Int32,
-        out_key::Ref{Ptr{Cvoid}},
-    )::Int32
-    _check(code)
-    return TimeSeriesKey(out_key[])
+    json = _probe(
+        (buf, cap, out_len) -> @ccall lib_path().infrastore_store_resolve_metadata(
+            store::Ptr{Cvoid},
+            Int64(owner_id)::Int64,
+            _category_int(owner_category)::Int32,
+            name::Cstring,
+            resolution_iso::Cstring,
+            interval_iso::Cstring,
+            features_json::Cstring,
+            Int32(_type_code(T))::Int32,
+            buf::Ptr{UInt8},
+            cap::UInt64,
+            out_len::Ref{UInt64},
+        )::Int32
+    )
+    return _decode_metadata(JSON.parse(json))
+end
+
+"""
+    resolve_id(T, store, owner_id, owner_category, name; resolution, interval, features=nothing) -> Int64
+
+The catalog association `id` of the stored time series of type `T` with the given
+attributes — [`resolve_metadata`](@ref) with `.id` taken, so it costs the same
+one call.
+
+The usual entry point to everything addressed by id: resolve once here, then
+[`read_by_id`](@ref) or [`remove_by_ids!`](@ref).
+"""
+function resolve_id(
+    ::Type{T},
+    store::Store,
+    owner_id::Integer,
+    owner_category::OwnerCategory,
+    name::AbstractString;
+    resolution::Union{Nothing, Period}=nothing,
+    interval::Union{Nothing, Period}=nothing,
+    features::Union{Nothing, AbstractDict}=nothing,
+) where {T}
+    return resolve_metadata(
+        T, store, owner_id, owner_category, name;
+        resolution=resolution, interval=interval, features=features,
+    ).id
 end
 
 """

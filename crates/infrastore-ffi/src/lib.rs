@@ -3234,7 +3234,7 @@ fn time_series_type_from_int(i: i32) -> Option<core_lib::TimeSeriesType> {
 /// Map a *key resolution* request's type code to a [`core_lib::TimeSeriesType`].
 /// Unlike [`requested_type_from_int`] this accepts every stored type, not just
 /// the forecasts: resolving an identity to its key is meaningful for a
-/// `SingleTimeSeries` too, and `Store::resolve_forecast_key` handles any type
+/// `SingleTimeSeries` too, and `Store::resolve_metadata` handles any type
 /// (it filters candidates by the requested type, nothing more).
 ///
 /// There is no family sentinel: requesting `INFRASTORE_TYPE_DETERMINISTIC`
@@ -5308,7 +5308,7 @@ pub unsafe extern "C" fn infrastore_store_get_forecast(
         }
     };
     // Parse the addressing attributes (the key's type field is unused here; the
-    // catalog decides the concrete type via `resolve_forecast_key`).
+    // catalog decides the concrete type via `resolve_metadata`).
     let attrs = match unsafe {
         build_key_from_attrs(owner_id, owner_category, name, resolution, features_json)
     } {
@@ -5319,7 +5319,7 @@ pub unsafe extern "C" fn infrastore_store_get_forecast(
         Ok(i) => i,
         Err(c) => return c,
     };
-    let key = match store.inner.resolve_forecast_key(
+    let resolved = match store.inner.resolve_metadata(
         attrs.owner_id,
         attrs.owner_category,
         &attrs.name,
@@ -5328,6 +5328,10 @@ pub unsafe extern "C" fn infrastore_store_get_forecast(
         attrs.features,
         requested,
     ) {
+        Ok(m) => m,
+        Err(e) => return map_core_error(e),
+    };
+    let key = match core_lib::TimeSeriesKey::from_metadata(&resolved) {
         Ok(k) => k,
         Err(e) => return map_core_error(e),
     };
@@ -6432,27 +6436,36 @@ pub unsafe extern "C" fn infrastore_store_rename(
 }
 
 /// Resolve a time series addressed by attributes plus a requested type to its
-/// concrete key, returned through `out_key`. `requested_type` is any stored type
-/// code (`0`=SingleTimeSeries, `1`=NonSequentialTimeSeries, `2`=Deterministic,
+/// catalog row, written into `buf` as JSON (probe-then-fetch, like every other
+/// metadata getter).
+///
+/// The *identify* half of every by-name operation, and the entry point to the
+/// id-addressed halves: resolve once here, take `id` off the row, then
+/// `infrastore_store_read_by_id` or `infrastore_store_remove_by_ids`.
+///
+/// The row rather than the bare id, because the resolution builds one either
+/// way: a binding wanting the id alone reads one field, and a binding wanting
+/// the concrete stored type, the grid, or the content hash gets them without a
+/// second lookup. That is what lets this be the *only* attribute-addressed
+/// entry point the C ABI needs. `requested_type` is any stored type code
+/// (`0`=SingleTimeSeries, `1`=NonSequentialTimeSeries, `2`=Deterministic,
 /// `3`=DeterministicSingleTimeSeries, `4`=Probabilistic, `5`=Scenarios);
 /// requesting `2`=Deterministic also matches a stored
-/// `DeterministicSingleTimeSeries`, and the returned key carries the concrete
-/// stored type. `resolution` / `interval`, when non-null, narrow the identity.
-/// Unlike
-/// `infrastore_make_key_from_attrs`, which builds an identity without consulting
-/// the catalog, this validates: an ambiguous request returns
-/// `INFRASTORE_ERR_INVALID_PARAMETER` and a miss returns `INFRASTORE_ERR_NOT_FOUND`.
+/// `DeterministicSingleTimeSeries`. `resolution` / `interval`, when non-null,
+/// narrow the identity.
 ///
-/// Despite the name, the underlying `Store::resolve_forecast_key` is not
-/// forecast-specific.
+/// This validates against the catalog, unlike `infrastore_make_key_from_attrs`,
+/// which builds an identity without consulting it: an ambiguous request returns
+/// `INFRASTORE_ERR_INVALID_PARAMETER` naming the candidates, and a miss returns
+/// `INFRASTORE_ERR_NOT_FOUND`.
 ///
 /// # Safety
 ///
 /// `name` must be null-terminated UTF-8. `resolution`, `interval`, and `features_json` may be
-/// null.
+/// null. `out_len` must be valid for writing one `uint64_t`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn infrastore_store_resolve_forecast_key(
+pub unsafe extern "C" fn infrastore_store_resolve_metadata(
     handle: *const InfraStoreHandle,
     owner_id: i64,
     owner_category: i32,
@@ -6461,12 +6474,14 @@ pub unsafe extern "C" fn infrastore_store_resolve_forecast_key(
     interval: *const c_char,
     features_json: *const c_char,
     requested_type: i32,
-    out_key: *mut *mut InfraStoreKeyHandle,
+    buf: *mut c_char,
+    cap: u64,
+    out_len: *mut u64,
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_key.is_null() {
-        set_error("out_key pointer is null");
+    if out_len.is_null() {
+        set_error("out_len pointer is null");
         return INFRASTORE_ERR_NULL_POINTER;
     }
     let category = match owner_category {
@@ -6502,15 +6517,12 @@ pub unsafe extern "C" fn infrastore_store_resolve_forecast_key(
             return INFRASTORE_ERR_INVALID_PARAMETER;
         }
     };
-    match store.inner.resolve_forecast_key(
+    match store.inner.resolve_metadata(
         owner_id, category, name, resolution, interval, features, requested,
     ) {
-        Ok(key) => {
-            unsafe {
-                *out_key = Box::into_raw(Box::new(InfraStoreKeyHandle {
-                    inner: key.identity().clone(),
-                }))
-            };
+        Ok(meta) => {
+            let json = Value::Object(metadata_to_map(&meta)).to_string();
+            unsafe { write_str_out(&json, buf, cap, out_len) };
             INFRASTORE_OK
         }
         Err(e) => map_core_error(e),

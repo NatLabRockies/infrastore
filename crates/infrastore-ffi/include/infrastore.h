@@ -2114,34 +2114,45 @@ int32_t infrastore_store_rename(struct InfraStore *handle,
 
 /**
  * Resolve a time series addressed by attributes plus a requested type to its
- * concrete key, returned through `out_key`. `requested_type` is any stored type
- * code (`0`=SingleTimeSeries, `1`=NonSequentialTimeSeries, `2`=Deterministic,
+ * catalog row, written into `buf` as JSON (probe-then-fetch, like every other
+ * metadata getter).
+ *
+ * The *identify* half of every by-name operation, and the entry point to the
+ * id-addressed halves: resolve once here, take `id` off the row, then
+ * `infrastore_store_read_by_id` or `infrastore_store_remove_by_ids`.
+ *
+ * The row rather than the bare id, because the resolution builds one either
+ * way: a binding wanting the id alone reads one field, and a binding wanting
+ * the concrete stored type, the grid, or the content hash gets them without a
+ * second lookup. That is what lets this be the *only* attribute-addressed
+ * entry point the C ABI needs. `requested_type` is any stored type code
+ * (`0`=SingleTimeSeries, `1`=NonSequentialTimeSeries, `2`=Deterministic,
  * `3`=DeterministicSingleTimeSeries, `4`=Probabilistic, `5`=Scenarios);
  * requesting `2`=Deterministic also matches a stored
- * `DeterministicSingleTimeSeries`, and the returned key carries the concrete
- * stored type. `resolution` / `interval`, when non-null, narrow the identity.
- * Unlike
- * `infrastore_make_key_from_attrs`, which builds an identity without consulting
- * the catalog, this validates: an ambiguous request returns
- * `INFRASTORE_ERR_INVALID_PARAMETER` and a miss returns `INFRASTORE_ERR_NOT_FOUND`.
+ * `DeterministicSingleTimeSeries`. `resolution` / `interval`, when non-null,
+ * narrow the identity.
  *
- * Despite the name, the underlying `Store::resolve_forecast_key` is not
- * forecast-specific.
+ * This validates against the catalog, unlike `infrastore_make_key_from_attrs`,
+ * which builds an identity without consulting it: an ambiguous request returns
+ * `INFRASTORE_ERR_INVALID_PARAMETER` naming the candidates, and a miss returns
+ * `INFRASTORE_ERR_NOT_FOUND`.
  *
  * # Safety
  *
  * `name` must be null-terminated UTF-8. `resolution`, `interval`, and `features_json` may be
- * null.
+ * null. `out_len` must be valid for writing one `uint64_t`.
  */
-int32_t infrastore_store_resolve_forecast_key(const struct InfraStore *handle,
-                                              int64_t owner_id,
-                                              int32_t owner_category,
-                                              const char *name,
-                                              const char *resolution,
-                                              const char *interval,
-                                              const char *features_json,
-                                              int32_t requested_type,
-                                              struct InfraStoreKey **out_key);
+int32_t infrastore_store_resolve_metadata(const struct InfraStore *handle,
+                                          int64_t owner_id,
+                                          int32_t owner_category,
+                                          const char *name,
+                                          const char *resolution,
+                                          const char *interval,
+                                          const char *features_json,
+                                          int32_t requested_type,
+                                          char *buf,
+                                          uint64_t cap,
+                                          uint64_t *out_len);
 
 /**
  * List time series keys, each annotated with the hex content hash of the array

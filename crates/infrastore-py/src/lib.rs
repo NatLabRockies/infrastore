@@ -3389,15 +3389,21 @@ impl PyStore {
         self.store_mut()?.persist_catalog().map_err(map_err)
     }
 
-    /// Resolve a forecast addressed by attributes plus a requested type to its
-    /// concrete key. `requested_type` is a `TimeSeriesType`;
-    /// `TimeSeriesType.Deterministic` also matches a stored
-    /// `DeterministicSingleTimeSeries`, and the returned key's
-    /// `time_series_type` reports which form was found.
+    /// Resolve a series addressed by attributes plus a requested type to its
+    /// catalog row.
+    ///
+    /// The identify half of every by-name operation. `resolve_id` is this with
+    /// `id` taken, so it costs the same one call; use this form when the
+    /// concrete stored type, the grid, or the content hash is wanted too, rather
+    /// than paying `get_metadata_by_id` for what was already in hand.
+    ///
+    /// Raises `NotFoundError` for no match and `InvalidParameterError`, naming
+    /// the candidates, for an ambiguous one.
     #[pyo3(signature = (owner_id, owner_category, name, requested_type, *, resolution=None, interval=None, features=None))]
     #[allow(clippy::too_many_arguments)]
-    fn resolve_forecast_key(
+    fn resolve_metadata<'py>(
         &self,
+        py: Python<'py>,
         owner_id: i64,
         owner_category: PyOwnerCategory,
         name: &str,
@@ -3405,7 +3411,7 @@ impl PyStore {
         resolution: Option<Bound<'_, PyAny>>,
         interval: Option<Bound<'_, PyAny>>,
         features: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyTimeSeriesKey> {
+    ) -> PyResult<Bound<'py, PyDict>> {
         let requested = pyany_to_requested_type(requested_type, "requested_type")?;
         let resolution = match resolution {
             Some(r) => Some(pyany_to_period(&r)?),
@@ -3416,9 +3422,9 @@ impl PyStore {
             None => None,
         };
         let features = features_from_dict(features)?;
-        let k = self
+        let meta = self
             .store()?
-            .resolve_forecast_key(
+            .resolve_metadata(
                 owner_id,
                 owner_category.into(),
                 name,
@@ -3428,9 +3434,52 @@ impl PyStore {
                 requested,
             )
             .map_err(map_err)?;
-        Ok(PyTimeSeriesKey {
-            inner: k.identity().clone(),
-        })
+        metadata_to_dict(py, &meta)
+    }
+
+    /// Resolve a series addressed by attributes plus a requested type to its
+    /// catalog association id.
+    ///
+    /// The identify half of every by-name operation, and the entry point to the
+    /// id-addressed halves: resolve once here, then `read_by_id` or
+    /// `remove_by_ids`. `requested_type` is a `TimeSeriesType`;
+    /// `TimeSeriesType.Deterministic` also matches a stored
+    /// `DeterministicSingleTimeSeries`. Raises `NotFoundError` for no match and
+    /// `InvalidParameterError`, naming the candidates, for an ambiguous one --
+    /// narrow it with `resolution` and/or `interval`.
+    #[pyo3(signature = (owner_id, owner_category, name, requested_type, *, resolution=None, interval=None, features=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_id(
+        &self,
+        owner_id: i64,
+        owner_category: PyOwnerCategory,
+        name: &str,
+        requested_type: &Bound<'_, PyAny>,
+        resolution: Option<Bound<'_, PyAny>>,
+        interval: Option<Bound<'_, PyAny>>,
+        features: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<i64> {
+        let requested = pyany_to_requested_type(requested_type, "requested_type")?;
+        let resolution = match resolution {
+            Some(r) => Some(pyany_to_period(&r)?),
+            None => None,
+        };
+        let interval = match interval {
+            Some(i) => Some(pyany_to_period(&i)?),
+            None => None,
+        };
+        let features = features_from_dict(features)?;
+        self.store()?
+            .resolve_id(
+                owner_id,
+                owner_category.into(),
+                name,
+                resolution,
+                interval,
+                features,
+                requested,
+            )
+            .map_err(map_err)
     }
 
     // ---- Supplemental-attribute associations ------------------------------

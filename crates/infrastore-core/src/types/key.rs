@@ -85,7 +85,7 @@ pub struct ForecastTimeSeriesKey {
 }
 
 /// Logical handle returned from `add_time_series`, `list_time_series_keys`, and
-/// `resolve_forecast_key`. Carries the identity needed to look the series up
+/// `resolve_metadata`. Carries the identity needed to look the series up
 /// again, plus a per-variant descriptive snapshot (window/shape parameters).
 ///
 /// Equality is **identity-only**: two keys with the same [`KeyIdentity`] are

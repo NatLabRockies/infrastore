@@ -14,7 +14,7 @@
 use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{
     Deterministic, Dtype, Features, ForecastTimeSeriesKey, ListFilter, OwnerCategory, Period,
-    Probabilistic, Scenarios, SingleTimeSeries, Store, TimeSeriesData, TimeSeriesKey,
+    Probabilistic, ReadWindow, Scenarios, SingleTimeSeries, Store, TimeSeriesData, TimeSeriesKey,
     TimeSeriesType, TypedArray, create_store, open_store,
 };
 
@@ -893,7 +893,7 @@ fn resolve_deterministic_matches_real_deterministic() {
         },
         |store, _key, backend| {
             let resolved = store
-                .resolve_forecast_key(
+                .resolve_metadata(
                     1,
                     OwnerCategory::Component,
                     "load",
@@ -904,13 +904,13 @@ fn resolve_deterministic_matches_real_deterministic() {
                 )
                 .unwrap();
             assert_eq!(
-                resolved.time_series_type(),
+                resolved.time_series_type,
                 TimeSeriesType::Deterministic,
                 "{backend}: matched type is the concrete Deterministic"
             );
             assert!(
                 store
-                    .get_time_series(resolved.identity(), None)
+                    .read_by_id(resolved.id.unwrap(), ReadWindow::full())
                     .unwrap()
                     .as_deterministic()
                     .is_some(),
@@ -949,7 +949,7 @@ fn resolve_deterministic_matches_dst() {
         },
         |store, _key, backend| {
             let resolved = store
-                .resolve_forecast_key(
+                .resolve_metadata(
                     7,
                     OwnerCategory::Component,
                     "gen",
@@ -960,13 +960,13 @@ fn resolve_deterministic_matches_dst() {
                 )
                 .unwrap();
             assert_eq!(
-                resolved.time_series_type(),
+                resolved.time_series_type,
                 TimeSeriesType::DeterministicSingleTimeSeries,
                 "{backend}: matched type is the concrete DST"
             );
             assert!(
                 store
-                    .get_time_series(resolved.identity(), None)
+                    .read_by_id(resolved.id.unwrap(), ReadWindow::full())
                     .unwrap()
                     .as_deterministic()
                     .is_some(),
@@ -980,7 +980,7 @@ fn resolve_deterministic_matches_dst() {
 fn resolve_deterministic_not_found_is_not_masked() {
     let store = create_store(None, true).unwrap();
     let err = store
-        .resolve_forecast_key(
+        .resolve_metadata(
             1,
             OwnerCategory::Component,
             "missing",
@@ -1036,7 +1036,7 @@ fn resolve_deterministic_ambiguous_by_interval_errors() {
     // Resolving without an interval is ambiguous: two candidates differ only by
     // interval.
     let err = store
-        .resolve_forecast_key(
+        .resolve_metadata(
             3,
             OwnerCategory::Component,
             "dup",
@@ -1053,7 +1053,7 @@ fn resolve_deterministic_ambiguous_by_interval_errors() {
 
     // Specifying the interval disambiguates.
     let d = store
-        .resolve_forecast_key(
+        .resolve_metadata(
             3,
             OwnerCategory::Component,
             "dup",
@@ -1063,8 +1063,8 @@ fn resolve_deterministic_ambiguous_by_interval_errors() {
             TimeSeriesType::Deterministic,
         )
         .unwrap();
-    assert_eq!(d.time_series_type(), TimeSeriesType::Deterministic);
-    assert_eq!(d.interval(), Some(Period::Fixed(Duration::hours(6))));
+    assert_eq!(d.time_series_type, TimeSeriesType::Deterministic);
+    assert_eq!(d.interval, Some(Period::Fixed(Duration::hours(6))));
 }
 
 #[test]
