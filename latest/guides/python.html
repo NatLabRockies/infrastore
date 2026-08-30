@@ -195,7 +195,7 @@ from infrastore import Store, SingleTimeSeries, OwnerCategory, TimeSeriesType
 </code></pre>
 <p>The module exposes <code>Store</code> and <code>Transaction</code>; the static series classes <code>SingleTimeSeries</code> and
 <code>NonSequentialTimeSeries</code>; the forecast classes <code>Deterministic</code>, <code>Probabilistic</code>, and <code>Scenarios</code>;
-<code>TimeSeriesKey</code>; the readers <code>StaticReader</code> and <code>ForecastReader</code>; the association records
+the readers <code>StaticReader</code> and <code>ForecastReader</code>; the association records
 <code>SupplementalAttributeAssociation</code> and <code>ParentChildAssociation</code>; the <code>TimeSeriesType</code> and
 <code>OwnerCategory</code> enums; the <code>init_tracing</code> and <code>decode_element_values</code> functions; <code>__version__</code>; and
 an exception hierarchy rooted at <code>TimeSeriesError</code>.</p>
@@ -233,7 +233,7 @@ element shape (such as cost-curve coefficients). The required <code>name</code> 
 carried on the object — the same array can be added under different names. Use
 <code>NonSequentialTimeSeries(timestamps, data, name)</code> for explicitly timestamped series.</p>
 <h2 id="add-a-series"><a class="header" href="#add-a-series">Add a Series</a></h2>
-<pre><code class="language-python">added = store.add_time_series(
+<pre><code class="language-python">series_id = store.add_time_series(
     owner_id=42,
     owner_type="Generator",
     owner_category=OwnerCategory.Component,
@@ -241,21 +241,22 @@ carried on the object — the same array can be added under different names. Use
     features={"model_year": 2030, "scenario": "high"},
     units="MW",
 )
-key = added.key   # TimeSeriesKey: re-find the series with it
-added.id          # the catalog row's id: one integer to keep in your own model
+# `series_id` is the catalog row's id: how every read, removal and rename
+# addresses the series, and one integer to keep in your own model.
 </code></pre>
 <p><code>features</code> is a plain dict whose values are <code>int</code>, <code>float</code>, <code>bool</code>, or <code>str</code>. Adding a series whose
-<a href="../explanation/data-model.html#keys">key</a> already exists raises <code>DuplicateTimeSeriesError</code>. The
-returned <code>key</code> exposes <code>owner_id</code>, <code>owner_category</code>, <code>time_series_type</code>, <code>name</code>, <code>resolution</code>,
-<code>interval</code>, and <code>features</code> as read-only properties (<code>resolution</code> and <code>interval</code> are ISO 8601
-duration strings or <code>None</code>).</p>
+<a href="../explanation/data-model.html#identity">identity</a> already exists raises <code>DuplicateTimeSeriesError</code>.
+The add returns the id and nothing else. To see the rest of the row — <code>owner_id</code>, <code>owner_category</code>,
+<code>time_series_type</code>, <code>name</code>, <code>resolution</code>, <code>interval</code>, <code>features</code>, and the descriptors below — ask
+<code>store.get_metadata_by_id(series_id)</code>, or <code>store.list_metadata(...)</code> for a set of them (<code>resolution</code>
+and <code>interval</code> come back as ISO 8601 duration strings or <code>None</code>).</p>
 <h3 id="descriptors"><a class="header" href="#descriptors">Descriptors</a></h3>
 <p>Beyond <code>units</code>, an association can carry <code>quantity_kind</code> (what the values measure — <code>"ActivePower"</code>;
 the one record of what per-unit values mean), <code>unit_system</code> (<code>"natural_units"</code> or
 <code>"component_base"</code>; unset means <em>unspecified</em>, not natural units), <code>component_field</code> (the field on
 the owning component these values vary — <code>"max_active_power"</code>; also a filter), and
 <code>application_data</code> (an opaque string the store returns verbatim — the package-owned slot):</p>
-<pre><code class="language-python">key = store.add_time_series(
+<pre><code class="language-python">series_id = store.add_time_series(
     owner_id=42, owner_type="Generator", owner_category=OwnerCategory.Component,
     time_series=ts,
     units="MW", quantity_kind="ActivePower", unit_system="natural_units",
@@ -278,22 +279,21 @@ descriptor are a duplicate. See
 commits them in one catalog transaction, taking the block-sized HDF5 write path. It is the way to
 load a system: an order of magnitude faster than a loop of single adds, and same-shaped series land
 in the same packed dataset.</p>
-<pre><code class="language-python">added = store.add_time_series_bulk([
+<pre><code class="language-python">ids = store.add_time_series_bulk([
     {"owner_id": i, "owner_type": "Generator", "owner_category": OwnerCategory.Component,
      "time_series": series[i], "units": "MW"}
     for i in range(len(series))
-])   # one AddedTimeSeries per item, in input order; all-or-nothing
-keys = [a.key for a in added]
+])   # one catalog id per item, in input order; all-or-nothing
 </code></pre>
 <h3 id="transactions"><a class="header" href="#transactions">Transactions</a></h3>
 <p>Several operations that must take effect together — replacing a series is an add plus a remove — go
 inside a transaction. Removals are reversible only there; outside one the array bytes are reclaimed
 immediately.</p>
 <pre><code class="language-python">with store.transaction():
-    new_key = store.add_time_series(owner_id=42, owner_type="Generator",
-                                    owner_category=OwnerCategory.Component,
-                                    time_series=updated)
-    store.remove_time_series(old_key)
+    new_id = store.add_time_series(owner_id=42, owner_type="Generator",
+                                   owner_category=OwnerCategory.Component,
+                                   time_series=updated)
+    store.remove_by_ids([old_id])
 # committed on a clean exit, rolled back if the block raised
 </code></pre>
 <p>Blocks nest (each level is a savepoint), and the store holds the SQLite write lock until the
@@ -301,24 +301,28 @@ outermost one ends. A transaction does not batch: use <code>add_time_series_bulk
 writes themselves. <code>begin_transaction</code> / <code>commit_transaction</code> / <code>rollback_transaction</code> are the
 explicit form.</p>
 <h2 id="read-a-series"><a class="header" href="#read-a-series">Read a Series</a></h2>
-<pre><code class="language-python">got = store.get_time_series(key)
+<pre><code class="language-python">got = store.read_by_id(series_id)
 assert np.array_equal(np.asarray(got.data), np.asarray(ts.data))
 print(got.length, got.initial_timestamp, got.resolution)
 </code></pre>
-<p>Slice on the time axis with a <code>(start, end)</code> tuple of datetimes (<code>end</code> exclusive):</p>
-<pre><code class="language-python">window = store.get_time_series(
-    key,
-    time_range=(
+<p>Slice on the time axis with a <code>(start, end)</code> tuple of datetimes (<code>end</code> exclusive). A range <strong>clips</strong>
+to what is there:</p>
+<pre><code class="language-python">(window,) = store.read_by_ids_range(
+    [series_id],
+    (
         datetime(2024, 1, 1, 6, tzinfo=timezone.utc),
         datetime(2024, 1, 1, 12, tzinfo=timezone.utc),
     ),
 )
 </code></pre>
-<p>To read <strong>many whole series at once</strong> — e.g. loading everything for a plot — <code>bulk_read</code> takes a
-list of keys and returns the typed series objects in the same order. Packed <code>SingleTimeSeries</code> are
-read in one decompress-once pass per dataset, which is much faster than a <code>get_time_series</code> per key:</p>
-<pre><code class="language-python">series = store.bulk_read(keys)   # keys: list[TimeSeriesKey]
-window = store.bulk_read(keys, time_range=(start, end))   # the same slice of every key
+<p><code>read_by_id</code> takes the other kind of slice: <code>start_time</code> plus a <code>len</code> of timesteps or a <code>count</code> of
+windows, <strong>checked</strong> rather than clipped, so an over-long request raises rather than quietly
+returning less.</p>
+<p>To read <strong>many whole series at once</strong> — e.g. loading everything for a plot — <code>read_by_ids</code> takes a
+list of ids and returns the typed series objects in the same order. Packed <code>SingleTimeSeries</code> are
+read in one decompress-once pass per dataset, which is much faster than a <code>read_by_id</code> each:</p>
+<pre><code class="language-python">series = store.read_by_ids(ids)
+window = store.read_by_ids_range(ids, (start, end))   # the same clip on every series
 </code></pre>
 <h3 id="datetimes-and-precision"><a class="header" href="#datetimes-and-precision">Datetimes and precision</a></h3>
 <p>Every <code>datetime</code> must be timezone-aware (any zone; converted to UTC on the way in, UTC on the way
@@ -327,22 +331,22 @@ out), and a naive one raises <code>InvalidParameterError</code>. A <strong>store
 <code>datetime.now(timezone.utc)</code> before storing it; query bounds such as <code>time_range</code> are unconstrained.
 See <a href="../reference/python-api.html#datetimes">Datetimes</a>.</p>
 <h2 id="per-timestamp-reads-simulation-loop"><a class="header" href="#per-timestamp-reads-simulation-loop">Per-Timestamp Reads (Simulation Loop)</a></h2>
-<p><code>get_time_series</code> hands back a whole series or forecast. Simulations instead walk the timeline and,
-at each timestamp, want the value of <em>every</em> series at that instant. For that, build a <strong>reader</strong>
-once and drive it in a loop — it pins one resolution and reuses its output buffers, so the loop
-allocates almost nothing. <code>StaticReader</code> serves <code>SingleTimeSeries</code>; <code>ForecastReader</code> serves
-forecasts. (Full signatures: <a href="../reference/python-api.html#readers">Python API reference</a>.)</p>
+<p><code>read_by_id</code> hands back a whole series or forecast. Simulations instead walk the timeline and, at
+each timestamp, want the value of <em>every</em> series at that instant. For that, build a <strong>reader</strong> once
+and drive it in a loop — it pins one resolution and reuses its output buffers, so the loop allocates
+almost nothing. <code>StaticReader</code> serves <code>SingleTimeSeries</code>; <code>ForecastReader</code> serves forecasts. (Full
+signatures: <a href="../reference/python-api.html#readers">Python API reference</a>.)</p>
 <h3 id="static-series"><a class="header" href="#static-series">Static series</a></h3>
 <p>Series are grouped by <code>(dtype, element_shape)</code>; each group's <code>group_values</code> is one dense
-<code>(num_columns, *element_shape)</code> array whose columns line up with that group's <code>keys</code>. All matched
+<code>(num_columns, *element_shape)</code> array whose columns line up with that group's <code>ids</code>. All matched
 series must share one grid (<code>initial_timestamp</code> + <code>length</code>), validated at build.</p>
 <pre><code class="language-python">reader = store.build_static_reader(timedelta(hours=1))
 grid = reader.grid()               # {"initial_timestamp", "resolution", "length", "time_series_type"}
-groups = reader.groups()           # each: {"dtype", "element_type", "element_shape", "keys"}
+groups = reader.groups()           # each: {"dtype", "element_type", "element_shape", "ids"}
 for ts in reader.timestamps():
     store.static_read(reader, ts)
     for i, g in enumerate(groups):
-        vals = reader.group_values(i)   # (num_columns, *element_shape); column j ↔ g["keys"][j]
+        vals = reader.group_values(i)   # (num_columns, *element_shape); column j ↔ g["ids"][j]
 </code></pre>
 <h3 id="forecasts"><a class="header" href="#forecasts">Forecasts</a></h3>
 <p><code>entry_values(i)</code> returns the window backing <code>entries()[i]</code>, shaped <code>(horizon, *element_shape)</code> for
@@ -352,11 +356,11 @@ reader is abstract — it also includes any <code>DeterministicSingleTimeSeries<
 windows).</p>
 <pre><code class="language-python">reader = store.build_forecast_reader(TimeSeriesType.Deterministic, timedelta(hours=1))
 tl = reader.timeline()             # {"initial_timestamp", "resolution", "interval", "count", ...}
-entries = reader.entries()         # list[TimeSeriesKey], parallel to entry_values
+entries = reader.entries()         # list[int]: catalog ids, parallel to entry_values
 for ts in reader.timestamps():
     store.forecast_read(reader, ts)
-    for i, key in enumerate(entries):
-        window = reader.entry_values(i)   # window for key's owner
+    for i, entry_id in enumerate(entries):
+        window = reader.entry_values(i)   # the window for that id's series
 </code></pre>
 <h3 id="shared-forecasts-are-read-once"><a class="header" href="#shared-forecasts-are-read-once">Shared forecasts are read once</a></h3>
 <p>Forecasts that share a backing array (deduplicated identical data, or several
@@ -371,9 +375,9 @@ for i, key in enumerate(entries):
     window = windows.setdefault(reader.entry_slot(i), reader.entry_values(i))
 </code></pre>
 <h2 id="query-metadata"><a class="header" href="#query-metadata">Query Metadata</a></h2>
-<p><code>list_time_series</code> returns a list of plain dicts, filtered by any combination of arguments (the
+<p><code>list_metadata</code> returns a list of plain dicts, filtered by any combination of arguments (the
 <code>features</code> argument is a subset match):</p>
-<pre><code class="language-python">for m in store.list_time_series(
+<pre><code class="language-python">for m in store.list_metadata(
     owner_id=42,
     owner_category=OwnerCategory.Component,
     time_series_type=TimeSeriesType.SingleTimeSeries,
@@ -381,13 +385,14 @@ for i, key in enumerate(entries):
     print(m["name"], m["resolution"], m["units"], m["features"])
 
 # The owner is the (owner_id, owner_category) pair.
-keys = store.get_time_series_keys(42, OwnerCategory.Component)
-exists = store.has_time_series(key)
+rows = store.list_metadata(owner_id=42, owner_category=OwnerCategory.Component)
+ids = [r["id"] for r in rows]
+exists = store.association_exists(ids[0])
 resolutions = store.get_resolutions()          # list[str] (ISO 8601 durations)
 counts = store.get_time_series_counts()        # dict
 </code></pre>
 <h2 id="remove-and-maintain"><a class="header" href="#remove-and-maintain">Remove and Maintain</a></h2>
-<pre><code class="language-python">store.remove_time_series(key)
+<pre><code class="language-python">store.remove_by_ids([series_id])   # one series, or many in one transaction
 # The owner is the (owner_id, owner_category) pair.
 n = store.clear_time_series(owner_id=42, owner_category=OwnerCategory.Component)  # one owner; returns count
 store.clear_time_series()                                  # remove everything
@@ -395,7 +400,7 @@ store.clear_time_series()                                  # remove everything
 # Reassign every series from one owner to another; returns the number moved.
 moved = store.replace_owner(42, 43, OwnerCategory.Component)
 
-report = store.compact()            # rewrites the .h5 from the live set; keys include
+report = store.compact()            # rewrites the .h5 from the live set; the report includes
                                    #  "slots_reclaimed", "datasets_dropped",
                                    #  "feature_sets_reclaimed", "timestamp_sets_reclaimed",
                                    #  "bytes_reclaimed"
@@ -530,13 +535,13 @@ ts = SingleTimeSeries(
     np.arange(24, dtype=np.float64) + 100,
     "load",
 )
-key = store.add_time_series(
+series_id = store.add_time_series(
     owner_id=42, owner_type="Generator",
     owner_category=OwnerCategory.Component,
     time_series=ts,
     features={"model_year": 2030}, units="MW",
 )
-got = store.get_time_series(key)
+got = store.read_by_id(series_id)
 assert got.name == "load"
 assert np.array_equal(np.asarray(got.data), np.asarray(ts.data))
 </code></pre>

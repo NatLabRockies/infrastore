@@ -187,7 +187,7 @@
                         <h1 id="content-addressing"><a class="header" href="#content-addressing">Content Addressing</a></h1>
 <p>Every array is identified by the SHA-256 hash of its contents, not by a name or an ID. Two series
 with byte-identical values therefore resolve to the same hash and are stored exactly once. This is
-the mechanism that lets many <a href="./data-model.html#keys">keys</a> share one underlying array.</p>
+the mechanism that lets many <a href="./data-model.html#identity">series</a> share one underlying array.</p>
 <h2 id="the-array-hash"><a class="header" href="#the-array-hash">The Array Hash</a></h2>
 <p><code>array_hash</code> produces a deterministic 32-byte digest from a
 <a href="./data-model.html#typed-n-dimensional-arrays"><code>TypedArray</code></a>. The hashed byte stream is, in order:</p>
@@ -285,7 +285,7 @@ metadata cost scales with the number of <em>associations</em>. A profile shared 
 costs one array, one feature set, and a thousand small rows.</p>
 <h2 id="deletion-is-reference-counted"><a class="header" href="#deletion-is-reference-counted">Deletion is Reference-Counted</a></h2>
 <p>Because arrays are shared, deleting an association cannot blindly delete its array. On
-<code>remove_time_series</code> (and <code>clear_time_series</code>), <code>Store</code>:</p>
+<code>remove_by_ids</code> (and <code>clear_time_series</code>), <code>Store</code>:</p>
 <ol>
 <li>Deletes the matching association rows inside a SQLite transaction, collecting their
 <code>data_hash</code>es.</li>
@@ -321,12 +321,12 @@ its array's <code>data_hash</code>, so a caller can group series by that hash to
 the same stored array — without reading any array bytes. Two cases land in the same group: arrays
 that were deduplicated because their content was identical, and a <code>SingleTimeSeries</code> together with
 any <code>DeterministicSingleTimeSeries</code> derived from it (the DST shares the backing array).</p>
-<p>In the Julia binding, <code>list_array_groups</code> returns <code>ArrayGroupRow</code>s — the <code>list_keys</code> fields plus a
-<code>data_hash</code> field (the 32 raw bytes, which hash and compare by content and so work directly as a
-<code>Dict</code> key); group by it to find the shared sets. <code>count_array_references</code> reports, for one hash,
-how many <code>SingleTimeSeries</code> and <code>DeterministicSingleTimeSeries</code> associations point at it.</p>
-<pre><code class="language-julia">groups = Dict{Vector{UInt8}, Vector{ArrayGroupRow}}()
-for row in list_array_groups(store)
+<p>In the Julia binding, <code>list_metadata</code> returns <code>TimeSeriesMetadata</code> rows, each carrying a <code>data_hash</code>
+field (the 32 raw bytes, which hash and compare by content and so work directly as a <code>Dict</code> key);
+group by it to find the shared sets. <code>count_array_references</code> reports, for one hash, how many
+<code>SingleTimeSeries</code> and <code>DeterministicSingleTimeSeries</code> associations point at it.</p>
+<pre><code class="language-julia">groups = Dict{Vector{UInt8}, Vector{TimeSeriesMetadata}}()
+for row in list_metadata(store)
     push!(get!(groups, row.data_hash, eltype(values(groups))[]), row)
 end
 shared = filter(((_, rows),) -&gt; length(rows) &gt; 1, groups)   # arrays referenced by &gt;1 series

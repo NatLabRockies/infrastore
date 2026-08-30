@@ -237,17 +237,31 @@ async fn main() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
     let counts = client.get_counts().await?;
     println!("{} static series", counts.static_time_series);
 
-    // The owner is the (owner_id, owner_category) pair.
-    let keys = client.get_time_series_keys(42, OwnerCategory::Component).await?;
-    if let Some(key) = keys.first() {
-        let data = client.get_time_series(key, None).await?;
+    // Identify, then act. The owner is the (owner_id, owner_category) pair, and
+    // every row carries the catalog id that addresses it.
+    let rows = client
+        .list_metadata(
+            Some(42),
+            Some(OwnerCategory::Component),
+            None, None, None, None, None, None, None, None,
+        )
+        .await?;
+    if let Some(id) = rows.first().and_then(|m| m.id) {
+        let data = client.read_by_id(id, None).await?;
         println!("read {} values", data.as_single().unwrap().length);
     }
     Ok(())
 }</code></pre></pre>
-<p>Available methods: <code>connect</code>, <code>from_channel</code>, <code>list_time_series</code>, <code>get_time_series</code>,
-<code>get_time_series_keys</code>, <code>get_resolutions</code>, <code>get_counts</code>, <code>get_forecast_parameters</code>,
-<code>has_time_series</code>, <code>verify_integrity</code>.</p>
+<p>A series is addressed by its catalog <strong>association id</strong>, never by a key: <code>list_metadata</code> (or
+<code>list_metadata_by_ids</code>, for ids a caller already recorded) hands back rows carrying <code>id</code>, and
+<code>read_by_id</code> / <code>read_by_ids</code> / <code>get_metadata_by_id</code> take it. <code>association_exists</code> answers whether a
+stored reference still resolves without fetching its row — the cheap way to validate a whole model
+on load.</p>
+<p>Available methods: <code>connect</code>, <code>from_channel</code>, <code>list_metadata</code>, <code>list_metadata_by_ids</code>,
+<code>get_metadata_by_id</code>, <code>association_exists</code>, <code>has_any_time_series</code>, <code>read_by_id</code>, <code>read_by_ids</code>,
+<code>get_resolutions</code>, <code>get_intervals</code>, <code>get_counts</code>, <code>counts_by_type</code>, <code>time_series_counts_detailed</code>,
+<code>get_forecast_parameters</code>, <code>list_owner_ids</code>, <code>static_summary</code>, <code>forecast_summary</code>,
+<code>check_static_consistency</code>, <code>verify_integrity</code>.</p>
 <h2 id="authentication"><a class="header" href="#authentication">Authentication</a></h2>
 <p>To require an API key, configure the server:</p>
 <pre><code class="language-toml">[authentication]

@@ -238,15 +238,13 @@ let key = store.add_time_series(
     OwnerCategory::Component,
     TimeSeriesData::SingleTimeSeries(ts),
     features,
-    Some("MW".into()),                      // units
 )?;
 <span class="boring">}</span></code></pre></pre>
-<p><code>add_time_series</code> returns an <a href="../reference/rust-api.html#addedtimeseries"><code>AddedTimeSeries</code></a>: its
-<code>key</code> is the <a href="../reference/rust-api.html#timeserieskey"><code>TimeSeriesKey</code></a> — keep it to re-find the
-series, or rebuild it from its fields later — and its <code>id</code> is the catalog row's id, the one integer
-to store in your own object model when it needs to point at the series (see
-<a href="../explanation/data-model.html#association-ids">Association ids</a>). Adding a series whose key already
-exists returns <code>TimeSeriesError::DuplicateTimeSeries</code>.</p>
+<p><code>add_time_series</code> returns a <a href="../reference/rust-api.html#timeseriesid-and-keyidentity"><code>TimeSeriesId</code></a>:
+the catalog row's id, which is both how every read and removal addresses the series and the one
+integer to store in your own object model when it needs to point at it (see
+<a href="../explanation/data-model.html#association-ids">Association ids</a>). Adding a series whose identity
+already exists returns <code>TimeSeriesError::DuplicateTimeSeries</code>.</p>
 <h3 id="bulk-inserts"><a class="header" href="#bulk-inserts">Bulk inserts</a></h3>
 <p>For many series at once, <code>add_time_series_bulk</code> takes a <code>Vec&lt;AddRequest&gt;</code> and commits the whole
 batch atomically — any error rolls back every array and association in the call:</p>
@@ -268,7 +266,7 @@ let added = store.add_time_series_bulk(vec![
     },
     // ...or just AddRequest::new(...).with_features(...)
 ])?;
-let keys: Vec&lt;_&gt; = added.iter().map(|a| a.key.clone()).collect();   // one AddedTimeSeries per request
+// `added` is one TimeSeriesId per request, in push order.
 <span class="boring">}</span></code></pre></pre>
 <p>A bulk insert is also the <strong>fast write path</strong>: packed <code>SingleTimeSeries</code> are grouped by shape and
 written into batch-sized datasets so the timestamp-major HDF5 chunks are filled whole, rather than a
@@ -293,41 +291,44 @@ I/O until <code>commit</code>, which is all-or-nothing. Dropping the session wit
 default-width datasets; that stays space-efficient but writes each column with a read-modify-write,
 so prefer a bulk insert or session when loading in volume.</p>
 <h2 id="read-a-series"><a class="header" href="#read-a-series">Read a Series</a></h2>
-<p>Every lookup method (<code>get_time_series</code>, <code>get_metadata</code>, <code>has_time_series</code>, <code>remove_time_series</code>,
-<code>bulk_read</code>) takes a <code>&amp;KeyIdentity</code> — the identifying tuple inside a key. Call
-<code>TimeSeriesKey::identity()</code> to get it:</p>
+<p>Every read takes a <code>TimeSeriesId</code> — the one an add returned, or one off a <code>list_metadata</code> row. The
+row's own type decides what comes back:</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>let data = store.get_time_series(key.identity(), None)?;
-let single = data.as_single().expect("this key names a SingleTimeSeries");
+</span>use infrastore_core::ReadWindow;
+
+let data = store.read_by_id(id, ReadWindow::full())?;
+let single = data.as_single().expect("this row holds a SingleTimeSeries");
 println!("{} values starting {}", single.length, single.initial_timestamp);
 <span class="boring">}</span></code></pre></pre>
-<p>Slice on the time axis by passing a range; <code>end</code> is exclusive and the returned series'
-<code>initial_timestamp</code>/<code>length</code> reflect the slice:</p>
+<p>Slice on the time axis with a range; <code>end</code> is exclusive, it <strong>clips</strong> to what is there, and the
+returned series' <code>initial_timestamp</code>/<code>length</code> reflect the slice:</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>let start = Utc.with_ymd_and_hms(2024, 1, 1, 6, 0, 0).unwrap();
 let end   = Utc.with_ymd_and_hms(2024, 1, 1, 12, 0, 0).unwrap();
-let window = store.get_time_series(key.identity(), Some((start, end)))?;
+let window = store.read_by_ids_range(&amp;[id], TimeRange::new(start, end))?.remove(0);
 <span class="boring">}</span></code></pre></pre>
+<p>A <code>ReadWindow</code> is the other half of that pair: it names exact steps (<code>start</code> plus a <code>len</code> of
+timesteps or a <code>count</code> of windows) and is <strong>checked</strong>, so an over-long request is an error rather
+than the smaller answer a range would clip to.</p>
 <p>To read <strong>many whole series at once</strong> — say, loading everything for an interactive plot —
-<code>bulk_read</code> takes a slice of keys and returns a <code>TimeSeriesData</code> per key in order. It reads packed
+<code>read_by_ids</code> takes a slice of ids and returns a <code>TimeSeriesData</code> per id in order. It reads packed
 <code>SingleTimeSeries</code> in one decompress-once pass per dataset, which is much cheaper than a
-<code>get_time_series</code> per key (a single full-series read otherwise touches every chunk under the
-timestamp-major layout):</p>
+<code>read_by_id</code> each (a single full-series read otherwise touches every chunk under the timestamp-major
+layout):</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>let ids: Vec&lt;_&gt; = keys.iter().map(|k| k.identity()).collect();
-let series = store.bulk_read(&amp;ids)?;
+</span>let series = store.read_by_ids(&amp;ids, ReadWindow::full())?;
 <span class="boring">}</span></code></pre></pre>
 <h2 id="query-metadata"><a class="header" href="#query-metadata">Query Metadata</a></h2>
-<p><code>list_time_series</code> takes a <a href="../reference/rust-api.html#listfilter"><code>ListFilter</code></a> builder; every clause
-is ANDed, and the <code>features</code> clause is a subset match:</p>
+<p><code>list_metadata</code> takes a <a href="../reference/rust-api.html#listfilter"><code>ListFilter</code></a> builder; every clause is
+ANDed, and the <code>features</code> clause is a subset match:</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>use infrastore_core::{ListFilter, OwnerCategory, TimeSeriesType};
 
-let metas = store.list_time_series(
+let metas = store.list_metadata(
     ListFilter::new()
         .owner_id(42)
         .owner_category(OwnerCategory::Component)
@@ -338,20 +339,23 @@ for m in &amp;metas {
     println!("{} {:?} units={:?}", m.name, m.resolution, m.units);
 }
 
-// All keys for one owner, an existence check, distinct resolutions, counts.
+// Every row for one owner, an existence check, distinct resolutions, counts.
 // The owner is the (owner_id, owner_category) pair.
-let keys = store.get_time_series_keys(42, OwnerCategory::Component)?;
-let present = store.has_time_series(key.identity())?;
+let rows = store.list_metadata(
+    ListFilter::new().owner_id(42).owner_category(OwnerCategory::Component),
+)?;
+let ids: Vec&lt;_&gt; = rows.iter().filter_map(|m| m.id).collect();
+let present = store.association_exists(ids[0])?;
 let resolutions = store.get_resolutions(Some(TimeSeriesType::SingleTimeSeries))?;
 let counts = store.get_time_series_counts()?;
 <span class="boring">}</span></code></pre></pre>
-<p><code>list_keys(filter)</code> is the key-centric counterpart of <code>list_time_series</code>, and
-<code>list_keys_with_hash(filter)</code> pairs each key with the 32-byte content hash of the array it resolves
-to, so you can group series that share stored data:</p>
+<p>Each row carries the 32-byte content hash of the array it resolves to, so grouping a listing by
+<code>data_hash</code> finds the series that share stored data — one query, where this used to be a second
+key-shaped listing:</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>for (key, hash) in store.list_keys_with_hash(ListFilter::new().owner_id(42))? {
-    println!("{} -&gt; {}", key.identity().name, infrastore_core::hash::hash_hex(&amp;hash));
+</span>for m in store.list_metadata(ListFilter::new().owner_id(42))? {
+    println!("{} -&gt; {}", m.name, infrastore_core::hash_hex(&amp;m.data_hash));
 }
 <span class="boring">}</span></code></pre></pre>
 <h3 id="the-low-level-read-path"><a class="header" href="#the-low-level-read-path">The low-level read path</a></h3>
@@ -359,7 +363,7 @@ to, so you can group series that share stored data:</p>
 another store that holds its own keys — resolve metadata and fetch the array by hash:</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>let meta = store.get_metadata(key.identity())?;
+</span>let meta = store.get_metadata_by_id(id)?.expect("the id still resolves");
 let array = store.get_array_by_hash(&amp;meta.data_hash)?;
 <span class="boring">}</span></code></pre></pre>
 <h2 id="forecasts"><a class="header" href="#forecasts">Forecasts</a></h2>
@@ -411,46 +415,45 @@ and <code>resolution</code> arguments are optional filters that restrict which s
     Some(Duration::hours(1).into()),     // resolution filter (Option&lt;Period&gt;; None = every one)
 )?;
 <span class="boring">}</span></code></pre></pre>
-<p><code>get_time_series</code> reconstructs forecasts too, returning a <code>TimeSeriesData::Deterministic</code>,
+<p><code>read_by_id</code> reconstructs forecasts too, returning a <code>TimeSeriesData::Deterministic</code>,
 <code>Probabilistic</code>, or <code>Scenarios</code> variant (a <code>DeterministicSingleTimeSeries</code> is synthesized into a
 <code>Deterministic</code>). Match on the variant or use the <code>as_deterministic</code> / <code>as_probabilistic</code> /
 <code>as_scenarios</code> accessors:</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>if let Some(d) = store.get_time_series(key.identity(), None)?.as_deterministic() {
+</span>if let Some(d) = store.read_by_id(id, ReadWindow::full())?.as_deterministic() {
     // d.data is the TypedArray; d.horizon, d.interval, d.count carry the forecast parameters
 }
 <span class="boring">}</span></code></pre></pre>
-<p>The low-level path is still available when you only need the raw array: <code>get_metadata</code> exposes
+<p>The low-level path is still available when you only need the raw array: <code>get_metadata_by_id</code> exposes
 <code>horizon</code>, <code>interval</code>, <code>count</code>, and <code>percentiles</code>, and <code>get_array_by_hash</code> returns the <code>TypedArray</code>
 in its stored shape (<code>to_f64_vec</code> returns a <code>Result&lt;_, String&gt;</code>, so map the error if your function
 returns <code>TimeSeriesError</code>):</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>let meta = store.get_metadata(key.identity())?;
+</span>let meta = store.get_metadata_by_id(id)?.expect("the id still resolves");
 let arr = store.get_array_by_hash(&amp;meta.data_hash)?;   // arr.shape == [horizon_count, count]
 let values = arr.to_f64_vec().map_err(TimeSeriesError::InvalidParameter)?;
 <span class="boring">}</span></code></pre></pre>
-<p>When a forecast is addressed by its attributes rather than by a key you already hold, use
-<code>resolve_forecast_key</code>: it resolves
-<code>(owner_id, owner_category, name, resolution, interval, features)</code> plus a requested <code>TimeSeriesType</code>
-to the single matching key, erroring with <code>NotFound</code> if nothing matches and <code>InvalidParameter</code> if
-the request is ambiguous. Requesting <code>TimeSeriesType::Deterministic</code> matches a stored
-<code>Deterministic</code> <em>or</em> a <code>DeterministicSingleTimeSeries</code>, so callers need not know which one is
-stored; the returned key's <code>time_series_type</code> reports the form that matched:</p>
+<p>When a forecast is known by its attributes rather than by an id you already hold, <code>list_metadata</code> is
+the identify half. Its type filter reads a <strong>request</strong>: <code>TimeSeriesType::Deterministic</code> matches a
+stored <code>Deterministic</code> <em>or</em> a <code>DeterministicSingleTimeSeries</code>, so a caller need not know which form
+the store holds, and each row still reports the concrete <code>time_series_type</code> that matched. Its <code>id</code>
+is what every read and removal takes:</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>use infrastore_core::TimeSeriesType;
 
-let key = store.resolve_forecast_key(
-    42,
-    OwnerCategory::Component,
-    "load_forecast",
-    None,                                  // resolution: Option&lt;Period&gt; (None = any)
-    None,                                  // interval: Option&lt;Period&gt; (None = any)
-    Features::new(),
-    TimeSeriesType::Deterministic,
+let rows = store.list_metadata(
+    ListFilter::new()
+        .owner_id(42)
+        .owner_category(OwnerCategory::Component)
+        .name("load_forecast")
+        .time_series_type(TimeSeriesType::Deterministic),
 )?;
+// A caller wanting exactly one checks that it got one -- there is no separate
+// resolver, so ambiguity is the caller's to name rather than the store's.
+let [meta] = &amp;rows[..] else { panic!("expected exactly one match: {rows:?}") };
 <span class="boring">}</span></code></pre></pre>
 <h2 id="copy-remove-and-maintain"><a class="header" href="#copy-remove-and-maintain">Copy, Remove, and Maintain</a></h2>
 <p><code>copy_time_series</code> re-points an existing association at another owner, optionally renaming it. It
@@ -461,15 +464,15 @@ produce):</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>let copied = store.copy_time_series(
-    key.identity(),
+    id,
     99,                    // dst_owner_id
     "Generator",           // dst_owner_type
     Some("load_copy"),     // new_name; None keeps the source name
-)?;
+)?;                        // returns the copy's own id; the source's is untouched
 <span class="boring">}</span></code></pre></pre>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>store.remove_time_series(key.identity())?;   // one series
+</span>store.remove_by_ids(&amp;[id])?;           // one series, or many in one transaction
 // The owner is the (owner_id, owner_category) pair.
 store.clear_time_series(Some((42, OwnerCategory::Component)))?;  // all series for an owner
 store.clear_time_series(None)?;        // everything
@@ -479,7 +482,7 @@ let integrity = store.verify_integrity()?;  // stored content vs. the hashes the
 assert!(integrity.errors.is_empty());
 <span class="boring">}</span></code></pre></pre>
 <p>Removal is <a href="../explanation/content-addressing.html#deletion-is-reference-counted">reference-counted</a>:
-a shared array survives until its last referencing key is gone. <code>count_array_references(&amp;hash)</code>
+a shared array survives until its last referencing row is gone. <code>count_array_references(&amp;hash)</code>
 returns the <code>(SingleTimeSeries, DeterministicSingleTimeSeries)</code> association counts on one array,
 which is how you tell whether removing a <code>SingleTimeSeries</code> would orphan a forecast derived from it.</p>
 <h2 id="associations"><a class="header" href="#associations">Associations</a></h2>
@@ -586,7 +589,7 @@ store.persist_to(Path::new("system.h5"))?;   // writes system.h5 + system.h5.sql
 </span><span class="boring">fn main() {
 </span>use infrastore_core::TimeSeriesError;
 
-match store.get_time_series(key.identity(), None) {
+match store.read_by_id(id, ReadWindow::full()) {
     Ok(data) =&gt; { /* ... */ }
     Err(TimeSeriesError::NotFound) =&gt; { /* missing */ }
     Err(TimeSeriesError::ReadOnlyStore) =&gt; unreachable!("this is a read"),

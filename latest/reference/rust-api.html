@@ -189,7 +189,7 @@
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>use infrastore_core::{
-    create_store, open_store, Store, BulkAdd, TimeSeriesKey, KeyIdentity,
+    create_store, open_store, Store, BulkAdd, TimeSeriesId, KeyIdentity,
     SingleTimeSeries, NonSequentialTimeSeries, Deterministic, Probabilistic, Scenarios,
     TimeSeriesData, TimeSeriesType, Period,
     TypedArray, Dtype, Compression, OwnerCategory, FeatureValue, Features, TimeSeriesMetadata,
@@ -273,15 +273,14 @@ changes how data is read back — see the <a href="../explanation/storage-model.
         owner_category: OwnerCategory,
         data: TimeSeriesData,
         features: Features,
-        units: Option&lt;String&gt;,
-    ) -&gt; Result&lt;AddedTimeSeries&gt;;   // `.key` names the series, `.id` is the catalog row's id
-    // The same write from a prebuilt request (sets `application_data`, an
-    // explicit `id`, …).
-    pub fn add(&amp;mut self, request: AddRequest) -&gt; Result&lt;AddedTimeSeries&gt;;
+    ) -&gt; Result&lt;TimeSeriesId&gt;;   // the catalog id its row was filed under
+    // The same write from a prebuilt request (sets `application_data`, the unit
+    // descriptors, …).
+    pub fn add(&amp;mut self, request: AddRequest) -&gt; Result&lt;TimeSeriesId&gt;;
 
     // A managed batch: packed series are written into batch-sized datasets that
     // fill whole HDF5 chunks (the optimized bulk-write path).
-    pub fn add_time_series_bulk(&amp;mut self, items: Vec&lt;AddRequest&gt;) -&gt; Result&lt;Vec&lt;AddedTimeSeries&gt;&gt;;
+    pub fn add_time_series_bulk(&amp;mut self, items: Vec&lt;AddRequest&gt;) -&gt; Result&lt;Vec&lt;TimeSeriesId&gt;&gt;;
 
     // Begin a buffered bulk add. Requests pushed onto the returned guard are
     // accumulated in memory and written together by `BulkAdd::commit` (same
@@ -292,27 +291,30 @@ changes how data is read back — see the <a href="../explanation/storage-model.
     // Copy one association onto another owner (metadata only; the array is shared).
     pub fn copy_time_series(
         &amp;mut self,
-        src: &amp;KeyIdentity,
+        src: TimeSeriesId,
         dst_owner_id: i64,
         dst_owner_type: &amp;str,
         new_name: Option&lt;&amp;str&gt;,   // None keeps the source name
-    ) -&gt; Result&lt;TimeSeriesKey&gt;;
+    ) -&gt; Result&lt;TimeSeriesId&gt;;    // the copy's own id
 
-    pub fn get_time_series(
+    // Read many full series at once. Packed `SingleTimeSeries` are read in one
+    // decompress-once pass per dataset. Results follow the order the ids are
+    // given, repeats included; `NotFound` if any id names no row.
+    pub fn read_by_ids(
         &amp;self,
-        key: &amp;KeyIdentity,
-        time_range: Option&lt;(DateTime&lt;Utc&gt;, DateTime&lt;Utc&gt;)&gt;,
-    ) -&gt; Result&lt;TimeSeriesData&gt;;
+        ids: &amp;[TimeSeriesId],
+        window: ReadWindow,
+    ) -&gt; Result&lt;Vec&lt;TimeSeriesData&gt;&gt;;
 
-    // Read many full series at once (no time-range slicing). Packed
-    // `SingleTimeSeries` are read in one decompress-once pass per dataset; other
-    // types reuse the per-key path. Returns a `TimeSeriesData` per key, in order.
-    pub fn bulk_read(&amp;self, keys: &amp;[&amp;KeyIdentity]) -&gt; Result&lt;Vec&lt;TimeSeriesData&gt;&gt;;
-
-    // The same read, addressed by catalog association id instead of by key.
-    // Results follow the order the ids are given, repeats included;
-    // `NotFound` if any id names no row.
-    pub fn read_by_ids(&amp;self, ids: &amp;[i64]) -&gt; Result&lt;Vec&lt;TimeSeriesData&gt;&gt;;
+    // The bounds read beside the window read. A window says "these exact steps"
+    // and is checked; a range says "whatever falls between these instants" and
+    // clips -- which is what an export wants, since it knows the bounds and not
+    // the step count.
+    pub fn read_by_ids_range(
+        &amp;self,
+        ids: &amp;[TimeSeriesId],
+        time_range: TimeRange,
+    ) -&gt; Result&lt;Vec&lt;TimeSeriesData&gt;&gt;;
 
     // One series by id, whole or windowed, in a single call: the id is a
     // primary-key lookup and its row carries the grid the window resolves
@@ -320,7 +322,7 @@ changes how data is read back — see the <a href="../explanation/storage-model.
     // (forecasts); supplying the other is `InvalidParameter`, as is a start off
     // the grid or an extent past the end -- a window is checked where a
     // `TimeRange` is clamped. `ReadWindow::full()` reads everything.
-    pub fn read_by_id(&amp;self, id: i64, window: ReadWindow) -&gt; Result&lt;TimeSeriesData&gt;;
+    pub fn read_by_id(&amp;self, id: TimeSeriesId, window: ReadWindow) -&gt; Result&lt;TimeSeriesData&gt;;
 
     pub fn transform_single_time_series(
         &amp;mut self,
@@ -330,12 +332,9 @@ changes how data is read back — see the <a href="../explanation/storage-model.
         resolution: Option&lt;Period&gt;,
     ) -&gt; Result&lt;usize&gt;;
 
-    pub fn remove_time_series(&amp;mut self, key: &amp;KeyIdentity) -&gt; Result&lt;()&gt;;
-    // The same removal, addressed by catalog association id: one all-or-nothing
-    // transaction, `NotFound` if any id names no row (and nothing removed).
-    // A repeated id is removed, and counted, once. Precise where a key is not —
-    // a key with no interval matches any interval.
-    pub fn remove_by_ids(&amp;mut self, ids: &amp;[i64]) -&gt; Result&lt;usize&gt;;
+    // One all-or-nothing transaction: `NotFound` if any id names no row, and
+    // nothing removed. A repeated id is removed, and counted, once.
+    pub fn remove_by_ids(&amp;mut self, ids: &amp;[TimeSeriesId]) -&gt; Result&lt;usize&gt;;
     pub fn clear_time_series(
         &amp;mut self,
         owner: Option&lt;(i64, OwnerCategory)&gt;,
@@ -347,34 +346,17 @@ changes how data is read back — see the <a href="../explanation/storage-model.
         owner_category: OwnerCategory,
     ) -&gt; Result&lt;usize&gt;;
 
-    pub fn list_time_series(&amp;self, filter: ListFilter) -&gt; Result&lt;Vec&lt;TimeSeriesMetadata&gt;&gt;;
-    // Key-centric listing: the same rows reduced to their keys, dropping storage
-    // detail (`data_hash`, `dtype`, `application_data`, `percentiles`).
-    pub fn list_keys(&amp;self, filter: ListFilter) -&gt; Result&lt;Vec&lt;TimeSeriesKey&gt;&gt;;
-    // …and with each key's array content hash, so callers can group series that
-    // share stored data (dedup'd arrays; an STS and any DST derived from it).
-    pub fn list_keys_with_hash(
+    // The identify half: which series exist, what each is, which array each
+    // resolves to (`data_hash`), and the `id` to address it by. It replaced five
+    // key-shaped listings, each of which was this one query projected
+    // differently. Rows carry no time axis -- read the series for that.
+    pub fn list_metadata(&amp;self, filter: ListFilter) -&gt; Result&lt;Vec&lt;TimeSeriesMetadata&gt;&gt;;
+    // The same listing addressed by id: one catalog query for a whole model's
+    // worth of recorded references. `NotFound` if any id names no row.
+    pub fn list_metadata_by_ids(
         &amp;self,
-        filter: ListFilter,
-    ) -&gt; Result&lt;Vec&lt;(TimeSeriesKey, [u8; 32])&gt;&gt;;
-    // …and with each key's association id (the id the write handed back; `None`
-    // for a row written before ids were minted), so a consumer holding ids
-    // resolves a listing to them without a metadata read per row.
-    pub fn list_keys_with_id(
-        &amp;self,
-        filter: ListFilter,
-    ) -&gt; Result&lt;Vec&lt;(TimeSeriesKey, Option&lt;i64&gt;)&gt;&gt;;
-    // Both at once: what the bindings' array-group listing serves.
-    pub fn list_array_groups(
-        &amp;self,
-        filter: ListFilter,
-    ) -&gt; Result&lt;Vec&lt;(TimeSeriesKey, [u8; 32], Option&lt;i64&gt;)&gt;&gt;;
-    pub fn get_time_series_keys(
-        &amp;self,
-        owner_id: i64,
-        owner_category: OwnerCategory,
-    ) -&gt; Result&lt;Vec&lt;TimeSeriesKey&gt;&gt;;
-    pub fn has_time_series(&amp;self, key: &amp;KeyIdentity) -&gt; Result&lt;bool&gt;;
+        ids: &amp;[TimeSeriesId],
+    ) -&gt; Result&lt;Vec&lt;TimeSeriesMetadata&gt;&gt;;
     // Existence over a filter without listing: "does this owner have any time
     // series (of type T)?". Both probes answer from a covering index and are
     // safe for hot loops.
@@ -385,20 +367,13 @@ changes how data is read back — see the <a href="../explanation/storage-model.
     // client-side conjunction over the count APIs would miss.
     pub fn is_empty(&amp;self) -&gt; Result&lt;bool&gt;;
 
-    // Resolve a forecast addressed by attributes + a requested type to the one
-    // matching key. `NotFound` if nothing matches; `InvalidParameter` if ambiguous.
-    pub fn resolve_forecast_key(
-        &amp;self,
-        owner_id: i64,
-        owner_category: OwnerCategory,
-        name: &amp;str,
-        resolution: Option&lt;Period&gt;,
-        interval: Option&lt;Period&gt;,
-        features: Features,
-        requested: TimeSeriesType,
-    ) -&gt; Result&lt;TimeSeriesKey&gt;;
-
-    pub fn get_metadata(&amp;self, key: &amp;KeyIdentity) -&gt; Result&lt;TimeSeriesMetadata&gt;;
+    // The row filed under `id`, or `None` if the catalog holds no such row --
+    // a consumer validating references it persisted earlier is asking whether
+    // one still resolves, and a stale reference is an answer.
+    pub fn get_metadata_by_id(&amp;self, id: TimeSeriesId) -&gt; Result&lt;Option&lt;TimeSeriesMetadata&gt;&gt;;
+    // The same question without fetching the row: a primary-key probe, cheap
+    // enough to check every reference in a model on load.
+    pub fn association_exists(&amp;self, id: TimeSeriesId) -&gt; Result&lt;bool&gt;;
     pub fn get_array_by_hash(&amp;self, hash: &amp;[u8; 32]) -&gt; Result&lt;TypedArray&gt;;
     // (SingleTimeSeries, DeterministicSingleTimeSeries) associations on one array.
     pub fn count_array_references(&amp;self, data_hash: &amp;[u8; 32]) -&gt; Result&lt;(usize, usize)&gt;;
@@ -556,12 +531,15 @@ and returns the number of series transformed. This is the only way to create a
 other series untouched.</li>
 <li><strong><code>add_time_series_bulk</code></strong> — All-or-nothing: every array put and association insert in the call
 commits together or rolls back together.</li>
-<li><strong><code>get_time_series</code></strong> — Reconstructs the stored type as a <a href="#timeseriesdata"><code>TimeSeriesData</code></a>
-variant (static series and all forecast types). With <code>time_range = Some((start, end))</code>, slices on
-the time axis; the returned series's <code>initial_timestamp</code> and <code>length</code> reflect the slice. For
-forecasts the window is resolved over the <code>count</code> axis (<code>resolve_windows</code>). <code>start</code> is inclusive
-and <code>end</code> is exclusive — see <a href="#reading-a-time-range">Reading a time range</a> for what each type
-applies that to.</li>
+<li><strong><code>read_by_id</code> / <code>read_by_ids</code></strong> — Reconstruct the stored type as a
+<a href="#timeseriesdata"><code>TimeSeriesData</code></a> variant (static series and all forecast types). A read names
+only an id, so the row's own <code>time_series_type</code> decides what comes back — there is no requested
+type to disagree with it. A <code>ReadWindow</code> is <em>checked</em>: a start off the series' grid, or an extent
+past its end, is <code>InvalidParameter</code> rather than the smaller answer a range would clip to.</li>
+<li><strong><code>read_by_ids_range</code></strong> — The bounds read. <code>start</code> is inclusive and <code>end</code> is exclusive, and it
+<em>clips</em> to what is there — see <a href="#reading-a-time-range">Reading a time range</a> for what each type
+applies that to. Both bounds must be spelled the way the series are, and a selection spanning both
+coherence groups is refused rather than resolved per series.</li>
 <li><strong><code>clear_time_series</code></strong> — <code>Some((id, category))</code> removes one owner's series (the owner is the
 <code>(owner_id, owner_category)</code> pair); <code>None</code> removes all. Returns the count removed. Underlying
 arrays are freed only when their last reference is gone.</li>
@@ -574,19 +552,21 @@ source's <code>owner_category</code> and every descriptive column — crucially 
 <code>Deterministic</code> (what a read-then-write copy through the bindings would produce). Only a metadata
 row is written: the array is content-addressed and shared. <code>new_name = None</code> keeps the source
 name. Errors with <code>DuplicateTimeSeries</code> if the destination identity already exists.</li>
-<li><strong><code>get_time_series_keys</code></strong> — Lists every key for the owner identified by the
-<code>(owner_id, owner_category)</code> pair.</li>
-<li><strong><code>list_keys</code> / <code>list_keys_with_hash</code> / <code>list_keys_with_id</code> / <code>list_array_groups</code></strong> — The
-key-centric listing path (what the bindings use). <code>list_keys_with_hash</code> pairs each key with its
-array's content hash in the same single catalog query, so callers can group keys by the data
-behind them; <code>list_keys_with_id</code> pairs it with the association id the write handed back (<code>None</code>
-for a row written before ids were minted); <code>list_array_groups</code> carries both.</li>
-<li><strong><code>resolve_forecast_key</code></strong> — Resolves a forecast addressed by attributes plus a
-<a href="#requested-types">requested type</a> to the single matching key, whose <code>time_series_type</code> is the
-concrete type that matched. <code>resolution</code> and <code>interval</code> are optional filters; leave them <code>None</code> to
-match across them. <code>NotFound</code> if nothing matches, <code>InvalidParameter</code> if more than one does.</li>
-<li><strong><code>get_metadata</code> / <code>get_array_by_hash</code></strong> — The low-level pair used by external bindings: resolve a
-key to metadata (including <code>data_hash</code>), then read the array directly.</li>
+<li><strong><code>list_metadata</code></strong> — The identify half of the whole surface: which series exist, what type and
+grid each is, which array each resolves to (<code>data_hash</code>), and the <code>id</code> that addresses it. Its
+<a href="#listfilter"><code>ListFilter</code></a> reads <code>time_series_type</code> through
+<a href="#requested-types"><code>TimeSeriesType::accepts</code></a>, so asking for <code>Deterministic</code> also selects a stored
+<code>DeterministicSingleTimeSeries</code>, and each row still reports the concrete type that matched. A
+caller wanting exactly one row poses the filter and checks that it got one — there is deliberately
+no separate attribute-to-id resolver.</li>
+<li><strong><code>list_metadata_by_ids</code></strong> — The same listing addressed by id, for a consumer hydrating a model
+full of recorded references: one catalog query for the whole set rather than one call each.</li>
+<li><strong><code>get_metadata_by_id</code> / <code>association_exists</code></strong> — One row by id, and the same question without
+fetching it. Both answer <code>None</code> / <code>false</code> for a stale reference, because a consumer validating
+what it persisted is asking a question; the reads and removals treat the same reference as a
+failure, because they are already committed to acting on it.</li>
+<li><strong><code>get_array_by_hash</code></strong> — Read an array directly by content hash, given a <code>data_hash</code> off any
+catalog row.</li>
 <li><strong><code>count_array_references</code></strong> — <code>(sts, dst)</code> association counts referencing one <code>data_hash</code>, so a
 caller can tell whether removing a <code>SingleTimeSeries</code> would orphan a
 <code>DeterministicSingleTimeSeries</code> derived from (and sharing) its array.</li>
@@ -606,9 +586,9 @@ in place. A checkpoint, not a mode switch — the catalog stays in RAM afterward
 <code>CatalogMode::Attached</code> store this is <code>flush</code>.</li>
 </ul>
 <h3 id="reading-a-time-range"><a class="header" href="#reading-a-time-range">Reading a time range</a></h3>
-<p><code>get_time_series(key, Some((start, end)))</code> selects on the time axis. The rule is the same for all
-six types — <strong><code>start</code> is inclusive, <code>end</code> is exclusive</strong> — but what it is applied <em>to</em> differs,
-because the types disagree about what a stored value is:</p>
+<p><code>read_by_ids_range(ids, TimeRange::new(start, end))</code> selects on the time axis. The rule is the same
+for all six types — <strong><code>start</code> is inclusive, <code>end</code> is exclusive</strong> — but what it is applied <em>to</em>
+differs, because the types disagree about what a stored value is:</p>
 <div class="table-wrapper"><table><thead><tr><th>Type</th><th>Selected</th></tr></thead><tbody>
 <tr><td><code>NonSequentialTimeSeries</code></td><td>every timestamp <code>t</code> with <code>start &lt;= t &lt; end</code></td></tr>
 <tr><td><code>SingleTimeSeries</code></td><td>every step whose <strong>covered interval</strong> <code>[t, t + resolution)</code> overlaps the range</td></tr>
@@ -687,27 +667,27 @@ series length, and dedups against that series).</p>
 <tr><td><code>Scenarios</code></td><td><code>[scenario_count, H, count, *E]</code></td><td>—</td></tr>
 </tbody></table>
 </div>
-<p><strong>Reading forecasts:</strong> <code>get_time_series</code> reconstructs all forecast types, returning the matching
+<p><strong>Reading forecasts:</strong> <code>read_by_id</code> reconstructs all forecast types, returning the matching
 <a href="#timeseriesdata"><code>TimeSeriesData</code></a> variant — <code>Deterministic</code>, <code>Probabilistic</code>, or <code>Scenarios</code>. A
 <code>DeterministicSingleTimeSeries</code> is synthesized into a <code>Deterministic</code> by gathering its windows from
-the underlying packed array. The low-level pair still works for direct array access: resolve a
-<a href="#timeseriesmetadata"><code>TimeSeriesMetadata</code></a> with <code>get_metadata</code> (it carries <code>horizon</code>, <code>interval</code>,
-<code>count</code>, and <code>percentiles</code>), then fetch the array with <code>get_array_by_hash(&amp;meta.data_hash)</code>.</p>
+the underlying packed array. The low-level pair still works for direct array access: fetch a
+<a href="#timeseriesmetadata"><code>TimeSeriesMetadata</code></a> with <code>get_metadata_by_id</code> (it carries <code>horizon</code>,
+<code>interval</code>, <code>count</code>, and <code>percentiles</code>), then read the array with
+<code>get_array_by_hash(&amp;meta.data_hash)</code>.</p>
 <h3 id="readers"><a class="header" href="#readers">Readers</a></h3>
-<p><code>get_time_series</code> returns a whole series or forecast. To read <strong>many whole series at once</strong> (e.g.
-exploration or plotting), <code>bulk_read</code> takes a slice of keys and reads packed <code>SingleTimeSeries</code> in
-one decompress-once pass per dataset — far cheaper than a <code>get_time_series</code> per key under the
-timestamp-major chunking, where a single full-series read touches every chunk. <code>read_by_ids</code> is the
-same read addressed by catalog <a href="../explanation/data-model.html">association id</a> rather than by key,
-for a consumer that recorded ids in its own model: results follow the order the ids are given, and
-an id naming no row fails the read with <code>NotFound</code> rather than being skipped. For the
-timestamp-oriented access pattern — <em>walk the timeline and read every series' value at each instant</em>
-— build a <strong>reader</strong> instead. A reader is built once over a <a href="#listfilter"><code>ListFilter</code></a>, pins one
-resolution, and holds reusable buffers that each read overwrites in place, so a tight loop allocates
-nothing. The reader is a passive plan: it does not borrow the <code>Store</code>, so reads go through
-<code>Store::static_read</code> / <code>Store::forecast_read</code>, which fill the buffers; the caller then walks the
-groups/entries. There are two: <a href="#staticreader-and-staticgroup"><code>StaticReader</code></a> for the static types
-and <a href="#forecastreader-windowslot-and-forecastentry"><code>ForecastReader</code></a> for forecasts.</p>
+<p><code>read_by_id</code> returns a whole series or forecast. To read <strong>many whole series at once</strong> (e.g.
+exploration or plotting), <code>read_by_ids</code> takes a slice of ids and reads packed <code>SingleTimeSeries</code> in
+one decompress-once pass per dataset — far cheaper than a <code>read_by_id</code> per series under the
+timestamp-major chunking, where a single full-series read touches every chunk. Results follow the
+order the ids are given, repeats included, and an id naming no row fails the read with <code>NotFound</code>
+rather than being skipped. For the timestamp-oriented access pattern — <em>walk the timeline and read
+every series' value at each instant</em> — build a <strong>reader</strong> instead. A reader is built once over a
+<a href="#listfilter"><code>ListFilter</code></a>, pins one resolution, and holds reusable buffers that each read
+overwrites in place, so a tight loop allocates nothing. The reader is a passive plan: it does not
+borrow the <code>Store</code>, so reads go through <code>Store::static_read</code> / <code>Store::forecast_read</code>, which fill
+the buffers; the caller then walks the groups/entries. There are two:
+<a href="#staticreader-and-staticgroup"><code>StaticReader</code></a> for the static types and
+<a href="#forecastreader-windowslot-and-forecastentry"><code>ForecastReader</code></a> for forecasts.</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>// Static: value of every SingleTimeSeries at one timestamp, columnar.
@@ -734,7 +714,7 @@ for k in 0..reader.count() {
     for (i, entry) in reader.entries().iter().enumerate() {
         let slot = reader.entry_slot(i);
         let bytes = slot.window();         // window of slot.window_shape(), row-major LE
-        // entry.key() identifies the forecast/owner
+        // entry.id() names the forecast; get_metadata_by_id resolves its owner
     }
 }
 <span class="boring">}</span></code></pre></pre>
@@ -886,41 +866,28 @@ target.add_parent_child_associations(exported)?;
 <p>Neither association catalog is exposed over the <a href="./grpc-api.html">gRPC server</a> or the
 <a href="./cli.html"><code>infrastore</code> CLI</a>.</p>
 <h2 id="types"><a class="header" href="#types">Types</a></h2>
-<h3 id="timeserieskey-and-keyidentity"><a class="header" href="#timeserieskey-and-keyidentity"><code>TimeSeriesKey</code> and <code>KeyIdentity</code></a></h3>
-<p><code>TimeSeriesKey</code> is an enum: one variant per series family, each pairing the shared identity with a
-per-variant descriptive snapshot (window/shape parameters). Equality is <strong>identity-only</strong> — two keys
-with the same <code>KeyIdentity</code> are equal even if their descriptive snapshots differ, so a key stays a
-reliable handle.</p>
+<h3 id="timeseriesid-and-keyidentity"><a class="header" href="#timeseriesid-and-keyidentity"><code>TimeSeriesId</code> and <code>KeyIdentity</code></a></h3>
+<p><code>TimeSeriesId</code> is the catalog id of one association — the only way to address a stored series. It is
+a newtype over <code>i64</code> rather than a bare integer because the store hands out several unrelated
+integer id streams (this one, <code>owner_id</code>, and the two association catalogs' own ids), and every
+read, removal and rename takes one of them; passing an <code>owner_id</code> where a series id belongs is a
+type error here rather than a lookup that silently finds the wrong row.</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>pub enum TimeSeriesKey {
-    Single(SingleTimeSeriesKey),
-    NonSequential(NonSequentialTimeSeriesKey),
-    Forecast(ForecastTimeSeriesKey),
-}
+</span>#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(transparent)]
+pub struct TimeSeriesId(pub i64);
 
-pub struct SingleTimeSeriesKey {
-    pub identity: KeyIdentity,
-    pub initial_timestamp: DateTime&lt;Utc&gt;,
-    pub length: usize,
-}
-
-pub struct NonSequentialTimeSeriesKey {
-    pub identity: KeyIdentity,
-    pub length: usize,
-}
-
-pub struct ForecastTimeSeriesKey {
-    pub identity: KeyIdentity,
-    pub initial_timestamp: DateTime&lt;Utc&gt;,
-    pub horizon: Period,
-    pub count: usize,
+impl TimeSeriesId {
+    pub const fn get(self) -&gt; i64;   // for a boundary that speaks in scalars
 }
 <span class="boring">}</span></code></pre></pre>
-<p><code>KeyIdentity</code> is the identifying tuple shared by every variant — and the only thing that determines
-equality and is looked up in the catalog. <code>interval</code> is part of the identity (<code>Some</code> for every
-forecast type, <code>None</code> for the static types); <code>resolution</code> is <code>Option</code> because
-<code>NonSequentialTimeSeries</code> has none.</p>
+<p><code>#[serde(transparent)]</code>, so the SQLite catalog, the gRPC wire and the OpenAPI document (which spells
+it <code>association_id</code>) are unchanged by the wrapper, and every binding exchanges a plain integer.</p>
+<p><code>KeyIdentity</code> is the tuple the catalog files a row under, matching its uniqueness constraint. It is
+<strong>not an address</strong>: it stays internal to the write path, and nothing takes one. <code>interval</code> is part
+of the identity (<code>Some</code> for every forecast type, <code>None</code> for the static types); <code>resolution</code> is
+<code>Option</code> because <code>NonSequentialTimeSeries</code> has none.</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>pub struct KeyIdentity {
@@ -933,9 +900,8 @@ forecast type, <code>None</code> for the static types); <code>resolution</code> 
     pub features: Features,
 }
 <span class="boring">}</span></code></pre></pre>
-<p><code>TimeSeriesKey::identity()</code> returns <code>&amp;KeyIdentity</code>; the lookup methods (<code>get_time_series</code>,
-<code>get_metadata</code>, <code>has_time_series</code>, <code>remove_time_series</code>, <code>bulk_read</code>) take <code>&amp;KeyIdentity</code>. See
-<a href="../explanation/data-model.html#keys">Data Model</a>.</p>
+<p>A caller that knows a series by its attributes recovers its id from a <code>list_metadata</code> row. See
+<a href="../explanation/data-model.html">Data Model</a>.</p>
 <h3 id="singletimeseries"><a class="header" href="#singletimeseries"><code>SingleTimeSeries</code></a></h3>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
@@ -1154,14 +1120,14 @@ type. <code>values()</code> is empty until the first <code>Store::static_read</c
 impl StaticGroup {
     pub fn dtype(&amp;self) -&gt; Dtype;
     pub fn element_shape(&amp;self) -&gt; &amp;[usize];  // trailing per-step dims; empty == scalar
-    pub fn keys(&amp;self) -&gt; &amp;[TimeSeriesKey];   // column j identity
+    pub fn ids(&amp;self) -&gt; &amp;[TimeSeriesId];     // column j's catalog id
     pub fn num_columns(&amp;self) -&gt; usize;
     pub fn values(&amp;self) -&gt; &amp;[u8];            // [num_columns, *element_shape], row-major LE
 }
 <span class="boring">}</span></code></pre></pre>
 <h3 id="forecastreader-windowslot-and-forecastentry"><a class="header" href="#forecastreader-windowslot-and-forecastentry"><code>ForecastReader</code>, <code>WindowSlot</code>, and <code>ForecastEntry</code></a></h3>
-<p>The forecast-window reader (see <a href="#readers">Readers</a>). Entries are the per-key forecasts; slots are
-the deduplicated physical reads. <code>WindowSlot::window()</code> is empty until the first
+<p>The forecast-window reader (see <a href="#readers">Readers</a>). Entries are the per-series forecasts; slots
+are the deduplicated physical reads. <code>WindowSlot::window()</code> is empty until the first
 <code>Store::forecast_read</code>.</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
@@ -1178,7 +1144,7 @@ the deduplicated physical reads. <code>WindowSlot::window()</code> is empty unti
 }
 
 impl ForecastEntry {
-    pub fn key(&amp;self) -&gt; &amp;TimeSeriesKey;
+    pub fn id(&amp;self) -&gt; TimeSeriesId;
     pub fn slot(&amp;self) -&gt; usize;              // index into slots(); equal for entries sharing data
 }
 
@@ -1247,14 +1213,15 @@ pub fn is_reserved_feature_name(name: &amp;str) -&gt; bool;
 pub fn validate_features(features: &amp;Features) -&gt; Result&lt;()&gt;;
 <span class="boring">}</span></code></pre></pre>
 <h3 id="timeseriesmetadata"><a class="header" href="#timeseriesmetadata"><code>TimeSeriesMetadata</code></a></h3>
-<p>The full record returned by <code>list_time_series</code> and <code>get_metadata</code>: owner fields, <code>time_series_type</code>,
-<code>name</code>, <code>data_hash: [u8; 32]</code>, the optional temporal fields (<code>initial_timestamp</code>, <code>resolution</code>,
-<code>length</code>, <code>horizon</code>, <code>interval</code>, <code>count</code>, <code>timestamps</code>), <code>features</code>, the descriptors (<code>units</code>,
-<code>quantity_kind: Option&lt;String&gt;</code>, <code>unit_system: Option&lt;UnitSystem&gt;</code>,
-<code>time_reference: Option&lt;TimeReference&gt;</code>, <code>component_field: Option&lt;String&gt;</code>,
-<code>application_data: Option&lt;String&gt;</code>), <code>percentiles: Option&lt;Vec&lt;f64&gt;&gt;</code> (set for <code>Probabilistic</code>), and
-the array typing: <code>dtype: Dtype</code>, <code>element_shape: Vec&lt;usize&gt;</code>. The span fields (<code>resolution</code>,
-<code>horizon</code>, <code>interval</code>) are <code>Option&lt;Period&gt;</code>.</p>
+<p>The full record returned by <code>list_metadata</code> and <code>get_metadata_by_id</code>: owner fields,
+<code>time_series_type</code>, <code>name</code>, <code>data_hash: [u8; 32]</code>, the optional temporal fields
+(<code>initial_timestamp</code>, <code>resolution</code>, <code>length</code>, <code>horizon</code>, <code>interval</code>, <code>count</code>, <code>timestamps</code>),
+<code>features</code>, the descriptors (<code>units</code>, <code>quantity_kind: Option&lt;String&gt;</code>,
+<code>unit_system: Option&lt;UnitSystem&gt;</code>, <code>time_reference: Option&lt;TimeReference&gt;</code>,
+<code>component_field: Option&lt;String&gt;</code>, <code>application_data: Option&lt;String&gt;</code>),
+<code>percentiles: Option&lt;Vec&lt;f64&gt;&gt;</code> (set for <code>Probabilistic</code>), and the array typing: <code>dtype: Dtype</code>,
+<code>element_shape: Vec&lt;usize&gt;</code>. The span fields (<code>resolution</code>, <code>horizon</code>, <code>interval</code>) are
+<code>Option&lt;Period&gt;</code>.</p>
 <h3 id="unitsystem"><a class="header" href="#unitsystem"><code>UnitSystem</code></a></h3>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
@@ -1310,10 +1277,9 @@ impl TimeRange {
 }
 impl From&lt;(DateTime&lt;Utc&gt;, DateTime&lt;Utc&gt;)&gt; for TimeRange;   // zoned
 <span class="boring">}</span></code></pre></pre>
-<p>The <code>time_range</code> argument of <code>get_time_series</code> / <code>get_time_series_with_metadata</code> /
-<code>bulk_read_range</code>. The <code>zoneless</code> flag is what lets the core refuse a bound whose spelling the
-series cannot answer rather than coercing it; a <code>DateTime&lt;Utc&gt;</code> is zoned by construction, so
-<code>(start, end).into()</code> is the native spelling.</p>
+<p>The <code>time_range</code> argument of <code>read_by_ids_range</code>. The <code>zoneless</code> flag is what lets the core refuse a
+bound whose spelling the series cannot answer rather than coercing it; a <code>DateTime&lt;Utc&gt;</code> is zoned by
+construction, so <code>(start, end).into()</code> is the native spelling.</p>
 <h3 id="descriptors"><a class="header" href="#descriptors"><code>Descriptors</code></a></h3>
 <p>The descriptive attributes a series carries alongside its array, applied to a reconstructed series
 by <code>TimeSeriesData::set_descriptors</code>:</p>
@@ -1364,8 +1330,8 @@ index <code>idx_component_field</code>, which costs a store that never sets the 
 the wall-clock series, <code>Some(false)</code> keeps everything that accepts an instant bound — the three
 zoned spellings <em>and</em> the rows that left the reference unset. An exact match could not name that
 second group at all (the trap <code>component_field</code> documents), and here those rows are a coherence
-group rather than an oversight. It is the constructive half of the rules that make <code>bulk_read_range</code>
-and <code>build_static_reader</code> refuse a selection spanning both groups; see
+group rather than an oversight. It is the constructive half of the rules that make
+<code>read_by_ids_range</code> and <code>build_static_reader</code> refuse a selection spanning both groups; see
 <a href="../explanation/data-model.html#time-references">Time references</a>.</p>
 <h3 id="addrequest"><a class="header" href="#addrequest"><code>AddRequest</code></a></h3>
 <p>The element type of <code>add_time_series_bulk</code> (and of <code>BulkAdd::push</code>), mirroring the <code>add_time_series</code>
@@ -1392,21 +1358,10 @@ impl AddRequest {
 }
 <span class="boring">}</span></code></pre></pre>
 <p>A request names no catalog id. Every add — this one, <code>add_time_series</code>, and both association
-catalogs' — lets the catalog assign, and reports the id it chose on <code>AddedTimeSeries</code>. The one
-writer that files rows under ids a caller supplies is <code>import_association_rows</code>, replaying a
-document that already recorded them; see
+catalogs' — lets the catalog assign, and returns the <a href="#timeseriesid-and-keyidentity"><code>TimeSeriesId</code></a>
+it chose. The one writer that files rows under ids a caller supplies is <code>import_association_rows</code>,
+replaying a document that already recorded them; see
 <a href="../explanation/data-model.html#association-ids">Association ids</a>.</p>
-<h3 id="addedtimeseries"><a class="header" href="#addedtimeseries"><code>AddedTimeSeries</code></a></h3>
-<p>What every write returns: the key naming the series, and the catalog id it was filed under. The id
-is deliberately not on <code>TimeSeriesKey</code>, because a key is also an <em>argument</em> (to <code>get</code>, to <code>remove</code>)
-where an id would mean nothing. See <a href="../explanation/data-model.html#association-ids">Association ids</a>.</p>
-<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
-</span><span class="boring">fn main() {
-</span>pub struct AddedTimeSeries {
-    pub key: TimeSeriesKey,
-    pub id: i64,
-}
-<span class="boring">}</span></code></pre></pre>
 <h3 id="bulkadd"><a class="header" href="#bulkadd"><code>BulkAdd</code></a></h3>
 <p>The buffered bulk-add session returned by <a href="#store"><code>Store::bulk_add</code></a>. Requests accumulate in memory
 — no validation and no I/O until <code>commit</code>, which writes every array as a batch-sized block and
@@ -1423,20 +1378,19 @@ committing discards the buffer and writes nothing.</p>
         owner_category: OwnerCategory,
         data: TimeSeriesData,
         features: Features,
-        units: Option&lt;String&gt;,
-    ) -&gt; &amp;mut Self;                                             // application_data = None
+    ) -&gt; &amp;mut Self;
     pub fn len(&amp;self) -&gt; usize;          // requests buffered so far
     pub fn is_empty(&amp;self) -&gt; bool;
-    pub fn commit(self) -&gt; Result&lt;Vec&lt;AddedTimeSeries&gt;&gt;;        // in push order
+    pub fn commit(self) -&gt; Result&lt;Vec&lt;TimeSeriesId&gt;&gt;;           // in push order
 }
 <span class="boring">}</span></code></pre></pre>
 <h3 id="requested-types"><a class="header" href="#requested-types">Requested types</a></h3>
-<p>What a query — <a href="#store"><code>Store::resolve_forecast_key</code></a>, a <code>ListFilter</code>, or a reader build — is asked
-to match. Every type matches only itself, with one exception: <strong><code>Deterministic</code> also matches a
-stored <code>DeterministicSingleTimeSeries</code></strong>, since a DST is a synthetic view that reads back as a
-<code>Deterministic</code> and callers should not have to know which form a store holds. (The two never coexist
-for one identity, so this never creates ambiguity.) Requesting <code>DeterministicSingleTimeSeries</code>
-narrows to the derived form.</p>
+<p>What a query — a <code>ListFilter</code>, whether on <code>list_metadata</code>, an existence probe, or a reader build —
+is asked to match. Every type matches only itself, with one exception: <strong><code>Deterministic</code> also
+matches a stored <code>DeterministicSingleTimeSeries</code></strong>, since a DST is a synthetic view that reads back
+as a <code>Deterministic</code> and callers should not have to know which form a store holds. (The two never
+coexist for one identity, so this never creates ambiguity.) Requesting
+<code>DeterministicSingleTimeSeries</code> narrows to the derived form.</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>impl TimeSeriesType {
@@ -1653,7 +1607,7 @@ crate root — import it (and the backends) from the <code>storage</code> module
         arrays: &amp;[&amp;TypedArray],
         resolution: Period,
     ) -&gt; Result&lt;Vec&lt;bool&gt;&gt;;
-    // Read many whole arrays at once (`Store::bulk_read`): one decompress pass per dataset.
+    // Read many whole arrays at once (`Store::read_by_ids`): one decompress pass per dataset.
     fn read_arrays(&amp;self, hashes: &amp;[[u8; 32]]) -&gt; Result&lt;Vec&lt;TypedArray&gt;&gt;;
     // One time step across co-located arrays (`StaticReader`); `out` is cleared, then
     // filled row-major as [column, *element_shape]. Reusing the buffer keeps the loop

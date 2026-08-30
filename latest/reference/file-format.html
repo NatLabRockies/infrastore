@@ -674,15 +674,16 @@ writable open, at a one-time build cost proportional to catalog size, with no <c
 change. <code>idx_component_field</code> is the exception, because it names a column introduced by a bump — it
 applies only to a catalog already carrying <code>component_field</code>, and an older store never reaches the
 DDL, being rejected by the version check first.</p>
-<p>Together the two unique indexes enforce <a href="../explanation/data-model.html#keys">key uniqueness</a>; a
-violation surfaces as <code>DuplicateTimeSeries</code>. Both <code>owner_id</code> and <code>owner_category</code> are part of the
-key, so a component and a supplemental attribute that share an <code>owner_id</code> are independent owners.
-<code>interval</code> is part of the key, so two forecasts of one variable at the same resolution but different
-intervals are distinct series. SQLite treats <code>NULL</code> values as distinct in a <code>UNIQUE</code> index, so
-<code>uq_ts_assoc</code> does not constrain rows with a <code>NULL</code> <code>resolution</code> or <code>interval</code> (e.g.
-<code>NonSequentialTimeSeries</code>, or any static series, which carry no interval). <code>uq_ts_assoc_coalesced</code>
-covers that case by folding <code>NULL</code> to the empty-string sentinel via <code>COALESCE</code> before enforcing
-uniqueness (the empty string is never a valid ISO-8601 period).</p>
+<p>Together the two unique indexes enforce
+<a href="../explanation/data-model.html#identity">identity uniqueness</a>; a violation surfaces as
+<code>DuplicateTimeSeries</code>. Both <code>owner_id</code> and <code>owner_category</code> are part of the key, so a component and
+a supplemental attribute that share an <code>owner_id</code> are independent owners. <code>interval</code> is part of the
+key, so two forecasts of one variable at the same resolution but different intervals are distinct
+series. SQLite treats <code>NULL</code> values as distinct in a <code>UNIQUE</code> index, so <code>uq_ts_assoc</code> does not
+constrain rows with a <code>NULL</code> <code>resolution</code> or <code>interval</code> (e.g. <code>NonSequentialTimeSeries</code>, or any
+static series, which carry no interval). <code>uq_ts_assoc_coalesced</code> covers that case by folding <code>NULL</code>
+to the empty-string sentinel via <code>COALESCE</code> before enforcing uniqueness (the empty string is never a
+valid ISO-8601 period).</p>
 <p>These two were named <code>uq_assoc</code> and <code>uq_assoc_coalesced</code> before the association tables above existed
 and made a bare "assoc" ambiguous. The DDL drops the old names before creating the new ones, so a
 store written by an earlier build is renamed in place on its first writable open rather than

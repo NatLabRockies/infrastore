@@ -212,9 +212,9 @@ filter it offers takes concrete strings and exact scalars; a parent package that
 richer builds it on top.</p>
 <h2 id="map-your-model-onto-the-catalog"><a class="header" href="#map-your-model-onto-the-catalog">Map Your Model Onto the Catalog</a></h2>
 <p>A series is addressed by an <strong>owner</strong> plus a <strong>key</strong>
-(<a href="../explanation/data-model.html#keys">Data Model § Keys</a>). Deciding how your objects project onto
-those fields is the first integration decision, and the one hardest to change later because it is
-written into every user's artifact.</p>
+(<a href="../explanation/data-model.html#identity">Data Model § Identity</a>). Deciding how your objects project
+onto those fields is the first integration decision, and the one hardest to change later because it
+is written into every user's artifact.</p>
 <p><strong><code>owner_id</code> is a stable <code>i64</code>.</strong> The store keys on it and never sees your object identities. If
 your components are identified by UUIDs (both shipped consumers are), you allocate an integer per
 component, persist that mapping alongside the store, and keep it stable across save/load — the store
@@ -253,17 +253,19 @@ package can carry whatever it needs per association (a serialized type tag, a pr
 without the store knowing. Because the store never validates it, version it yourself if its shape
 may change.</p>
 <h2 id="exact-keys-subset-filters"><a class="header" href="#exact-keys-subset-filters">Exact Keys, Subset Filters</a></h2>
-<p>The two lookup families match features differently, and a parent package that offers its own key
-resolution must know which it is calling:</p>
+<p>A filter matches features two ways, and a parent package that offers its own resolution must know
+which it asked for:</p>
 <ul>
-<li>A <strong><code>TimeSeriesKey</code></strong> — whether built from attributes or returned by an add — is matched
-<strong>exactly</strong>: every field including the full feature map. <code>get_time_series(key)</code>,
-<code>has_time_series(key)</code>, <code>remove_time_series(key)</code> and the attribute-based getters behind them find
-one row or none.</li>
-<li>A <strong>list filter</strong> (<code>list_time_series</code>, <code>list_keys</code>, <code>has_any_time_series</code>, <code>remove_by_filter</code>,
-<code>list_names</code>, …) matches <code>features</code> as a <strong>subset</strong>: a series matches when it carries every
-requested pair, whatever else it carries.</li>
+<li><strong><code>features</code></strong> matches as a <strong>subset</strong>: a series matches when it carries every requested pair,
+whatever else it carries. This is the useful default for a listing — "every series tagged
+<code>scenario=high</code>".</li>
+<li><strong><code>exact_features</code></strong> pins the whole set by its content hash. An existence check posed against a
+complete identity wants this one, or a sibling carrying an extra feature would answer yes about a
+series that does not exist. It is an equality on an indexed column, so it is also the cheaper of
+the two.</li>
 </ul>
+<p>Both are on the same <a href="../reference/rust-api.html#listfilter"><code>ListFilter</code></a>, which every listing,
+existence probe, filtered removal and reader build takes.</p>
 <p>InfrastructureSystems.jl resolves user queries by subset, so it cannot delegate that resolution to a
 keyed lookup; it lists with the filter and then decides what more than one match means. A parent
 package that inherits the same semantics should do the same, and treat ambiguity as its own error to
@@ -373,8 +375,8 @@ access: build a <code>StaticReader</code> or <code>ForecastReader</code> once, t
 distinct backing array once per step and fans it out to every component referencing it, so a
 forecast shared by a hundred components costs one decompression; <code>entry_slot</code> lets your own
 per-component work dedup the same way. The inverse access — one component's full history — is the
-slow direction, and <code>bulk_read</code> over many keys is the right call when you need it, not a loop of
-<code>get_time_series</code>. See the per-language sections:
+slow direction, and <code>read_by_ids</code> over many ids is the right call when you need it, not a loop of
+<code>read_by_id</code>. See the per-language sections:
 <a href="./python.html#per-timestamp-reads-simulation-loop">Python</a>,
 <a href="./julia.html#per-timestamp-reads-simulation-loop">Julia</a>, <a href="./rust.html">Rust</a>.</p>
 <h2 id="time"><a class="header" href="#time">Time</a></h2>

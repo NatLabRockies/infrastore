@@ -209,7 +209,7 @@ ts = SingleTimeSeries(
 
 # The owner is identified by an integer id, an owner type, and a category.
 # Features and units are optional.
-key = store.add_time_series(
+series_id = store.add_time_series(
     owner_id=42,
     owner_type="Generator",
     owner_category=OwnerCategory.Component,
@@ -218,7 +218,7 @@ key = store.add_time_series(
     units="MW",
 )
 
-got = store.get_time_series(key)
+got = store.read_by_id(series_id)
 print(f"read {got.length} values @ {got.resolution} from {got.initial_timestamp}")
 # read 24 values @ PT1H from 2024-01-01 00:00:00+00:00
 assert np.array_equal(np.asarray(got.data), np.asarray(ts.data))
@@ -228,11 +228,12 @@ assert np.array_equal(np.asarray(got.data), np.asarray(ts.data))
 <li><strong><code>Store.create(in_memory=True)</code></strong> built a store backed by an in-memory array backend and an
 in-memory SQLite metadata database.</li>
 <li><strong><code>add_time_series</code></strong> hashed the array, wrote it to the backend (deduplicating on the hash), and
-recorded a metadata association keyed by
-<code>(owner_id, owner_category, type, name, resolution, interval, features)</code>. It returned a
-<a href="../reference/python-api.html#timeserieskey"><code>TimeSeriesKey</code></a> that can re-find the series.</li>
-<li><strong><code>get_time_series(key)</code></strong> looked up the association, read the array back by its content hash,
-and reconstructed a <code>SingleTimeSeries</code>.</li>
+recorded a catalog association filed under
+<code>(owner_id, owner_category, type, name, resolution, interval, features)</code>. It returned that row's
+<strong>id</strong> — the handle to record in your own object model, and what every read, removal and rename
+takes from here on.</li>
+<li><strong><code>read_by_id(series_id)</code></strong> looked up the row by primary key, read the array back by its content
+hash, and reconstructed a <code>SingleTimeSeries</code>.</li>
 </ol>
 <p>The array is any NumPy array whose dtype is <code>float64</code>, <code>float32</code>, <code>int64</code>, <code>int32</code>, <code>int16</code>, <code>int8</code>,
 <code>uint64</code>, <code>uint32</code>, <code>uint16</code>, <code>uint8</code>, or <code>bool</code> — whatever you pass round-trips unchanged. Shapes
@@ -240,17 +241,18 @@ beyond <code>(length,)</code> attach a per-step element shape, such as the coeff
 <h2 id="slice-and-list"><a class="header" href="#slice-and-list">Slice and List</a></h2>
 <p>Pass a <code>(start, end)</code> tuple of datetimes to read a window instead of the whole series (<code>end</code> is
 exclusive):</p>
-<pre><code class="language-python">window = store.get_time_series(
-    key,
-    time_range=(
+<pre><code class="language-python">(window,) = store.read_by_ids_range(
+    [series_id],
+    (
         datetime(2024, 1, 1, 6, tzinfo=timezone.utc),
         datetime(2024, 1, 1, 12, tzinfo=timezone.utc),
     ),
 )
 print(window.length)   # 6
 </code></pre>
-<p><code>list_time_series</code> returns metadata dicts, filtered by any combination of arguments:</p>
-<pre><code class="language-python">for m in store.list_time_series(owner_id=42):
+<p><code>list_metadata</code> is how you find a series you did not just write: it returns one dict per catalog
+row, filtered by any combination of arguments, and each row carries the <code>id</code> to read it by:</p>
+<pre><code class="language-python">for m in store.list_metadata(owner_id=42):
     print(m["name"], m["resolution"], m["units"], m["features"])
 # load PT1H MW {'model_year': 2030}
 </code></pre>

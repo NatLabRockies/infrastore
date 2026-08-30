@@ -242,15 +242,15 @@ infrastore-bench read --count 10000 --length 168 --steps 24
 <p>The read benchmark simulates the access pattern of an energy-simulation step loop:</p>
 <pre><code>for t in 0..T:
     for each component key:
-        store.get_time_series(key, time_range=(t₀ + t·Δt, t₀ + (t+1)·Δt))
+        store.read_by_ids_range(ids, (t₀ + t·Δt, t₀ + (t+1)·Δt))
 </code></pre>
 <p>For on-disk stores the binary flushes, drops, and reopens the store read-only before the timed loop.
 This rebuilds the HDF5 in-memory index and starts the HDF5 chunk cache cold, reflecting real
 simulation startup conditions. The OS page cache may still be warm.</p>
 <p>Reports per-step <strong>min / median / p95 / max</strong> and total <strong>component-reads/s</strong>.</p>
 <blockquote>
-<p><strong>Deterministic note.</strong> The current <code>get_time_series</code> implementation reads the full <code>[H × count]</code>
-array from storage and then slices to the requested window in memory. For large <code>count</code> (e.g. 168
+<p><strong>Deterministic note.</strong> The current <code>read_by_id</code> implementation reads the full <code>[H × count]</code> array
+from storage and then slices to the requested window in memory. For large <code>count</code> (e.g. 168
 windows) each single-step read transfers <code>H × count × 8</code> bytes, which is <code>24 × 168 × 8 = 32 KB</code>
 per component. The benchmark output flags this explicitly so the overhead is visible.</p>
 </blockquote>
@@ -284,10 +284,11 @@ infrastore-bench --log-level debug add --count 100
 <p>The key spans emitted by <code>infrastore-core</code>:</p>
 <div class="table-wrapper"><table><thead><tr><th>Span</th><th>Layer</th><th>Key fields</th></tr></thead><tbody>
 <tr><td><code>add_time_series_bulk</code></td><td><code>Store</code></td><td><code>count</code> — number of items in the bulk request</td></tr>
-<tr><td><code>get_time_series</code></td><td><code>Store</code></td><td><code>owner</code>, <code>name</code>, <code>has_time_range</code></td></tr>
-<tr><td><code>copy_time_series</code></td><td><code>Store</code></td><td><code>owner</code>, <code>name</code> — of the source series</td></tr>
-<tr><td><code>remove_time_series</code></td><td><code>Store</code></td><td><code>owner</code>, <code>name</code></td></tr>
-<tr><td><code>bulk_read</code></td><td><code>Store</code></td><td><code>count</code> — number of keys read in one pass</td></tr>
+<tr><td><code>read_by_id</code></td><td><code>Store</code></td><td><code>id</code>, <code>window</code></td></tr>
+<tr><td><code>copy_time_series</code></td><td><code>Store</code></td><td><code>src_id</code> — the source association</td></tr>
+<tr><td><code>remove_by_ids</code></td><td><code>Store</code></td><td><code>count</code> — number of ids in the request</td></tr>
+<tr><td><code>read_by_ids</code></td><td><code>Store</code></td><td><code>count</code> — number of ids read in one pass</td></tr>
+<tr><td><code>list_metadata_by_ids</code></td><td><code>Store</code></td><td><code>count</code> — number of ids requested</td></tr>
 <tr><td><code>put_array</code></td><td>HDF5 backend</td><td><code>bytes</code>, <code>packed</code></td></tr>
 <tr><td><code>put_packed</code></td><td>HDF5 backend</td><td><code>bytes</code></td></tr>
 <tr><td><code>put_packed_block</code></td><td>HDF5 backend</td><td><code>n</code> — series written in one batch-sized block</td></tr>

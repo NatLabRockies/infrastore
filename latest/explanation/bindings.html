@@ -246,12 +246,12 @@ the Rust buffer with the deallocator matching the buffer's element type —
 <li><strong>Features cross as JSON.</strong> Julia serializes the feature dict to a JSON string, which the FFI
 layer parses into a <code>Features</code> map.</li>
 <li><strong>Forecasts are wrapped.</strong> <code>InfraStore.jl</code> exposes <code>Deterministic</code> / <code>Probabilistic</code> / <code>Scenarios</code>
-structs passed to the generic <code>add_time_series!</code>, type-dispatched <code>get_time_series(Type, …)</code>
-getters, and <code>transform_single_time_series!</code>, so all four forecast types are usable from Julia.</li>
-<li><strong>Bulk reads use a result handle.</strong> <code>bulk_read</code> reads many full <code>SingleTimeSeries</code> at once: the
+structs passed to the generic <code>add_time_series!</code>, id-addressed <code>read_by_id</code> getters, and
+<code>transform_single_time_series!</code>, so all four forecast types are usable from Julia.</li>
+<li><strong>Bulk reads use a result handle.</strong> <code>read_by_ids</code> reads many full <code>SingleTimeSeries</code> at once: the
 FFI fetches them in one decompress-once pass per dataset into a <code>InfraStoreBulkReadHandle</code>
 (<code>infrastore_store_bulk_read_single</code>), and Julia reads each element out, then frees the handle.
-Python's <code>store.bulk_read</code> exposes the same operation directly. <code>read_by_ids</code> addresses the same
+Python's <code>store.read_by_ids</code> exposes the same operation directly. <code>read_by_ids</code> addresses the same
 read by catalog association id and fills the same handle, so both reads decode by the same route:
 <code>infrastore_bulk_result_item_name</code> hands each item's name back beside its values, as
 <code>infrastore_bulk_result_item_type</code> does its type. Managed bulk <em>writes</em> already take the fast
@@ -267,9 +267,9 @@ Release (see <a href="../how-to/integrate-julia.html">Integrate with Julia</a>).
 component identifiers (<code>i64</code>), owner categories map to <code>Component</code> / <code>SupplementalAttribute</code>, and
 features accept string values so InfrastructureSystems.jl's feature dictionaries round-trip
 unchanged. The FFI exposes attribute-based accessors (<code>infrastore_store_has_by_attrs</code>,
-<code>infrastore_store_remove_by_attrs</code>), a whole-record metadata read
+<code>infrastore_store_remove_by_ids</code>), a whole-record metadata read
 (<code>infrastore_store_get_metadata_by_key</code>, reachable from attributes through
-<code>infrastore_make_key_from_attrs</code>), and a hash-based array fetch
+<code>infrastore_store_list_metadata</code>), and a hash-based array fetch
 (<code>infrastore_store_get_array_by_hash</code>) so an InfrastructureSystems.jl-side store can keep its own
 key objects and reach the array layer directly.</p>
 <h2 id="grpc-server-and-client"><a class="header" href="#grpc-server-and-client">gRPC Server and Client</a></h2>
@@ -298,7 +298,7 @@ mode can be added without touching the command handlers; today there is no remot
 <a href="../reference/cli.html">CLI reference</a>.</p>
 <h2 id="what-every-binding-shares"><a class="header" href="#what-every-binding-shares">What Every Binding Shares</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Concern</th><th>Single source of truth</th></tr></thead><tbody>
-<tr><td>Types &amp; validation</td><td><code>infrastore-core</code> (<code>Store</code>, <code>TimeSeriesKey</code>, <code>Features</code>)</td></tr>
+<tr><td>Types &amp; validation</td><td><code>infrastore-core</code> (<code>Store</code>, <code>TimeSeriesId</code>, <code>Features</code>)</td></tr>
 <tr><td>On-disk format</td><td><code>Hdf5Backend</code> + <code>MetadataStore</code> — identical regardless of caller</td></tr>
 <tr><td>Hashing</td><td><code>array_hash</code> / <code>features_hash</code> — the cross-language contract</td></tr>
 <tr><td>Error taxonomy</td><td><code>TimeSeriesError</code>, re-projected into each language's idiom</td></tr>

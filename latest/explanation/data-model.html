@@ -202,7 +202,7 @@ may exist in several variants distinguished by <strong>features</strong>.</p>
 <code>owner_type</code> is descriptive. Component and supplemental-attribute integer-id streams are
 independent, so the same <code>owner_id</code> can name a component <strong>and</strong> a supplemental attribute at once —
 the category disambiguates them, keeping the two owners' series distinct. Owner-scoped operations
-therefore take the category alongside the id (see <a href="#keys">Keys</a>).</p>
+therefore take the category alongside the id (see <a href="#identity">Identity</a>).</p>
 <h2 id="time-series-types"><a class="header" href="#time-series-types">Time-Series Types</a></h2>
 <p>The data model defines six time-series types, all present in the <code>TimeSeriesType</code> enum and the
 metadata schema. Both static series types are implemented across every interface. The four forecast
@@ -340,12 +340,11 @@ sharing the underlying array. Because a <code>DeterministicSingleTimeSeries</cod
 <code>SingleTimeSeries</code>, it is <strong>mutually exclusive</strong> with a real <code>Deterministic</code> for the same family
 (<code>owner</code>, <code>name</code>, <code>resolution</code>, <code>features</code>, regardless of interval): adding a <code>Deterministic</code> when a
 <code>DeterministicSingleTimeSeries</code> view exists — or deriving one when a <code>Deterministic</code> exists — raises
-<code>InvalidParameter</code>. Forecast values read back through the high-level path — <code>get_time_series</code>
-returns a forecast object in the Rust core, Python, and over gRPC, and Julia exposes
-<code>get_time_series(Deterministic, …)</code> / <code>get_time_series(Probabilistic, …)</code> /
-<code>get_time_series(Scenarios, …)</code> — while the low-level metadata + array path remains available for
-raw access. See the <a href="../reference/rust-api.html#forecasts">Rust API</a> and
-<a href="../reference/c-abi.html#forecasts">C ABI</a>.</p>
+<code>InvalidParameter</code>. Forecast values read back through the same path as everything else: <code>read_by_id</code>
+returns the forecast object matching the row's stored type, in every binding and over gRPC — a read
+names only an id, so there is no requested type to disagree with what is stored. The low-level
+metadata + array path remains available for raw access. See the
+<a href="../reference/rust-api.html#forecasts">Rust API</a> and <a href="../reference/c-abi.html#forecasts">C ABI</a>.</p>
 <h2 id="features"><a class="header" href="#features">Features</a></h2>
 <p>Two series can share an owner and a name yet differ — for example a load profile for model year 2030
 versus 2050. <strong>Features</strong> disambiguate them. A feature map is a set of typed key/value pairs:</p>
@@ -354,11 +353,11 @@ versus 2050. <strong>Features</strong> disambiguate them. A feature map is a set
 <p>Feature values are one of four kinds: <code>int</code>, <code>float</code>, <code>bool</code>, or <code>str</code>. Internally the map is sorted
 by key (a <code>BTreeMap</code>), which gives a stable order for hashing and for the uniqueness constraint.</p>
 <h3 id="reserved-feature-names"><a class="header" href="#reserved-feature-names">Reserved feature names</a></h3>
-<p>A feature name may not collide with a field of a time series or of the <a href="#keys">key</a> that addresses
-one. Consumers routinely spread a feature map into a keyword-argument query — for example
-<code>get_time_series(...; name = "load", model_year = 2030)</code> — and a feature called <code>name</code> or
-<code>resolution</code> would shadow the real field there and silently change what the query means. Adding a
-time series with one of these names raises <code>InvalidParameter</code>:</p>
+<p>A feature name may not collide with a field of a time series or of the <a href="#identity">identity</a> a row
+is filed under. Consumers routinely spread a feature map into a keyword-argument query — for example
+<code>list_metadata(...; name = "load", model_year = 2030)</code> — and a feature called <code>name</code> or <code>resolution</code>
+would shadow the real field there and silently change what the query means. Adding a time series
+with one of these names raises <code>InvalidParameter</code>:</p>
 <pre><code class="language-text">application_data, component_field, count, data, data_hash, dtype, element_shape, element_type, ext,
 features, horizon, id, initial_timestamp, interval, length, name, owner_category, owner_id,
 owner_type, percentiles, quantity_kind, resolution, scenario_count, time_reference,
@@ -372,20 +371,19 @@ silently accepted as an ordinary feature.</p>
 rejected, while <code>Resolution</code> and <code>resolution_hours</code> are ordinary feature names. The rule applies to
 writes only, so a store written before it existed stays readable and its series can still be listed
 and removed.</p>
-<h2 id="keys"><a class="header" href="#keys">Keys</a></h2>
-<p>A <strong><code>TimeSeriesKey</code></strong> is the logical handle that re-finds a series. It is exactly the tuple that
-must be unique:</p>
-<pre><code class="language-text">TimeSeriesKey = (owner_id, owner_category, time_series_type, name, resolution, interval, features)
+<h2 id="identity"><a class="header" href="#identity">Identity</a></h2>
+<p>Every association is filed under a tuple that must be unique:</p>
+<pre><code class="language-text">identity = (owner_id, owner_category, time_series_type, name, resolution, interval, features)
 </code></pre>
-<p><code>add_time_series</code> returns a key; <code>get_time_series</code>, <code>has_time_series</code>, and <code>remove_time_series</code> take
-one. Two series with the same key cannot coexist — attempting to add a duplicate raises
-<code>DuplicateTimeSeries</code>. Change any element of the tuple (a different <code>name</code>, a different <code>model_year</code>
-feature, a different <code>resolution</code>, a different forecast <code>interval</code>, or a different <code>owner_category</code>)
-and you have a distinct series. <code>interval</code> is <code>NULL</code> for the static types (which never carry one);
-for forecasts it lets two series of one variable at the same resolution but different intervals
-(e.g. a day-ahead and a real-time forecast) coexist as distinct series. Because <code>owner_category</code> is
-part of the key, a component and a supplemental attribute that share a numeric <code>owner_id</code> keep
-entirely separate sets of series.</p>
+<p>This is what the catalog de-duplicates on — it is <strong>not</strong> how a caller addresses a series. That is
+the <a href="#association-ids">association id</a> below. Two series with the same identity cannot coexist —
+attempting to add a duplicate raises <code>DuplicateTimeSeries</code>. Change any element of the tuple (a
+different <code>name</code>, a different <code>model_year</code> feature, a different <code>resolution</code>, a different forecast
+<code>interval</code>, or a different <code>owner_category</code>) and you have a distinct series. <code>interval</code> is <code>NULL</code>
+for the static types (which never carry one); for forecasts it lets two series of one variable at
+the same resolution but different intervals (e.g. a day-ahead and a real-time forecast) coexist as
+distinct series. Because <code>owner_category</code> is part of the key, a component and a supplemental
+attribute that share a numeric <code>owner_id</code> keep entirely separate sets of series.</p>
 <pre class="mermaid">flowchart LR
     OWNER[&quot;owner_id=42, category=Component, type=Generator&quot;]
     OWNER --&gt; K1[&quot;name=load&lt;br/&gt;year=2030&quot;]
@@ -402,18 +400,25 @@ entirely separate sets of series.</p>
     style A1 fill:#28a745,color:#fff
     style A2 fill:#28a745,color:#fff
 </pre>
-<p>Note that two different keys (<code>K1</code> and <code>K3</code> above) can point at the <em>same</em> underlying array. The key
-is a metadata concept; the array is shared by <a href="./content-addressing.html">content addressing</a>.</p>
+<p>Note that two different series (<code>K1</code> and <code>K3</code> above) can point at the <em>same</em> underlying array. An
+identity is a metadata concept; the array is shared by
+<a href="./content-addressing.html">content addressing</a>.</p>
 <h2 id="association-ids"><a class="header" href="#association-ids">Association IDs</a></h2>
-<p>Every catalog row also has an <strong><code>id</code></strong>: a plain integer, assigned by the store, that names <em>that
-row</em>. It is the second way to re-find a series, and it answers a question a key cannot.</p>
-<p>A key describes a series — owner, name, resolution, features. An id names the row the store filed it
-under. That difference is the point: a consumer that wants to record "this generator's cost curve is
-<em>that</em> series" inside its own object model would otherwise have to embed the whole key tuple, and
-keep it in step with every rename. An id is one integer, and a rename does not move it.</p>
-<pre><code class="language-julia">added = add_time_series!(store, 42, "ThermalStandard", Component, cost_curve)
-generator.operation_cost.variable = added.id   # one integer, stored in the model
+<p>Every catalog row has an <strong><code>id</code></strong>: a plain integer, assigned by the store, that names <em>that row</em>. It
+is <strong>the</strong> way to address a series — every read, removal, rename and copy takes one.</p>
+<p>The identity above describes a series: owner, name, resolution, features. An id names the row the
+store filed it under. That difference is the point: a consumer that wants to record "this
+generator's cost curve is <em>that</em> series" inside its own object model would otherwise have to embed
+the whole identity tuple, and keep it in step with every rename. An id is one integer, and a rename
+does not move it.</p>
+<pre><code class="language-julia">id = add_time_series!(store, 42, "ThermalStandard", Component, cost_curve)
+generator.operation_cost.variable = id   # one integer, stored in the model
 </code></pre>
+<p>The surface splits in two along that line. <strong>Identify</strong> — <code>list_metadata</code> and its by-id companions —
+answers which series exist and hands back the id for each. <strong>Act</strong> — every read, removal, rename and
+copy — takes that id. A caller that knows a series only by its attributes does the first half once
+and keeps the id; there is deliberately no combined resolver, because the two halves have different
+costs and a caller that repeats a lookup it could have cached should be able to see that it is.</p>
 <p>Three properties make an id safe to persist:</p>
 <ul>
 <li><strong>It is never reissued.</strong> Deleting a row strands its id permanently. A reference to a deleted
@@ -423,8 +428,7 @@ a recycled row number would cause silently, with no foreign key anywhere to catc
 new owner keeps the id, as do <code>compact</code> and a save-and-reopen. Those are <code>UPDATE</code>s and file
 copies, not new rows.</li>
 <li><strong>It is not part of identity.</strong> Two series differing only in id are the same series to the
-uniqueness rule and to both content hashes. It sits outside the key deliberately: a key is also an
-<em>argument</em> — to <code>get_time_series</code>, to <code>remove_time_series!</code> — where an id would mean nothing.</li>
+uniqueness rule and to both content hashes. It describes the <em>row</em>, not the data.</li>
 </ul>
 <p><strong>The store assigns it; no add accepts one.</strong> Not <code>add_time_series</code>, not a bulk add, and not either
 association catalog's <code>attach</code> / <code>link</code>. This is what makes "never reissued" a guarantee rather than
@@ -457,14 +461,19 @@ and an import that finds them absent falls back to the schema's own fields.</p>
 alongside the table it came from.</p>
 <p>Writes report the id they used, and reads take one:</p>
 <div class="table-wrapper"><table><thead><tr><th>Direction</th><th>Rust</th><th>Python</th><th>Julia</th></tr></thead><tbody>
-<tr><td>Write</td><td><code>add_time_series</code> → <code>AddedTimeSeries</code></td><td><code>.id</code> on the result</td><td><code>.id</code> on the result</td></tr>
+<tr><td>Write</td><td><code>add_time_series</code> → <code>TimeSeriesId</code></td><td>→ <code>int</code></td><td>→ <code>Int64</code></td></tr>
+<tr><td>Identify</td><td><code>list_metadata</code></td><td><code>list_metadata</code></td><td><code>list_metadata</code></td></tr>
+<tr><td>…by id</td><td><code>list_metadata_by_ids</code></td><td><code>list_metadata_by_ids</code></td><td><code>list_metadata_by_ids</code></td></tr>
 <tr><td>Resolve</td><td><code>get_metadata_by_id</code></td><td><code>get_metadata_by_id</code></td><td><code>get_metadata_by_id</code></td></tr>
 <tr><td>Validate</td><td><code>association_exists</code></td><td><code>association_exists</code></td><td><code>association_exists</code></td></tr>
 <tr><td>Read</td><td><code>read_by_ids</code></td><td><code>read_by_ids</code></td><td><code>read_by_ids</code></td></tr>
 <tr><td>Read one</td><td><code>read_by_id</code></td><td><code>read_by_id</code></td><td><code>read_by_id</code></td></tr>
+<tr><td>Read range</td><td><code>read_by_ids_range</code></td><td><code>read_by_ids_range</code></td><td><code>read_by_ids</code></td></tr>
 <tr><td>Remove</td><td><code>remove_by_ids</code></td><td><code>remove_by_ids</code></td><td><code>remove_by_ids!</code></td></tr>
 </tbody></table>
 </div>
+<p>In the Rust core an id is the newtype <code>TimeSeriesId</code>, so an <code>owner_id</code> cannot be passed where a
+series id belongs; the dynamic bindings exchange a plain integer.</p>
 <p><code>association_exists</code> fetches no row, so a consumer can check every reference in its model on load
 rather than discovering a dangling one mid-simulation.</p>
 <p><code>read_by_ids</code> and <code>remove_by_ids</code> both refuse a set containing an id that names no row — the read
@@ -475,14 +484,12 @@ references are expected to have gone.</p>
 <p><code>read_by_id</code> is the single-id read, and it also takes the slice: a <code>start_time</code> plus a <code>len</code> of
 timesteps or a <code>count</code> of windows. Both halves happen in one call because the primary-key lookup
 already returns the row the window resolves against — a consumer holding an id spends nothing to
-learn a series' <code>resolution</code> or <code>count</code> before asking for the second day of it. Unlike the
-<code>time_range</code> on the keyed reads, a window is <em>checked</em>: a start off the series' own grid, or an
-extent running past its end, is an error rather than the smaller answer a range clamps to. A range
-says "whatever lies between these bounds"; a window says "these exact steps", and a caller that
-asked for 24 and silently received 3 has a bug the store can see and it cannot.</p>
-<p>A removal by id is also the precise one. A key identity with no interval matches any interval, so
-<code>remove_time_series</code> can take a whole forecast family; an id is a primary key and takes exactly the
-row it names.</p>
+learn a series' <code>resolution</code> or <code>count</code> before asking for the second day of it. A window is
+<em>checked</em>, where <code>read_by_ids_range</code> <em>clips</em>: a start off the series' own grid, or an extent running
+past its end, is an error rather than the smaller answer a range would return. A range says
+"whatever lies between these bounds" — which is what an export wants, knowing the bounds and not the
+step count — while a window says "these exact steps", and a caller that asked for 24 and silently
+received 3 has a bug the store can see and it cannot.</p>
 <h2 id="optional-descriptors"><a class="header" href="#optional-descriptors">Optional Descriptors</a></h2>
 <p>Each association can also carry:</p>
 <ul>

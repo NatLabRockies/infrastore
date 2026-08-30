@@ -307,13 +307,13 @@ existed simply gains them on its first writable open — which is why every read
 table being absent.</p>
 <p>A unique index over
 <code>(owner_id, owner_category, time_series_type, name, resolution, interval, features_hash)</code> enforces
-the <a href="./data-model.html#keys">key uniqueness</a> invariant at the database level. <code>owner_category</code> is part
-of the key, so a component and a supplemental attribute that share an <code>owner_id</code> are independent;
-<code>interval</code> is part of the key too, so forecasts of one variable that differ only by interval are
-distinct. Because SQLite treats <code>NULL</code> as distinct in a <code>UNIQUE</code> index, a second index folds <code>NULL</code>
-<code>resolution</code> and <code>interval</code> to a sentinel so series without them (e.g. <code>NonSequentialTimeSeries</code>, or
-any static series, which carry no interval) are still constrained. Indexes on <code>data_hash</code>,
-<code>(owner_id, owner_category)</code>, and <code>resolution</code> keep lookups fast.</p>
+the <a href="./data-model.html#identity">identity uniqueness</a> invariant at the database level.
+<code>owner_category</code> is part of the key, so a component and a supplemental attribute that share an
+<code>owner_id</code> are independent; <code>interval</code> is part of the key too, so forecasts of one variable that
+differ only by interval are distinct. Because SQLite treats <code>NULL</code> as distinct in a <code>UNIQUE</code> index,
+a second index folds <code>NULL</code> <code>resolution</code> and <code>interval</code> to a sentinel so series without them (e.g.
+<code>NonSequentialTimeSeries</code>, or any static series, which carry no interval) are still constrained.
+Indexes on <code>data_hash</code>, <code>(owner_id, owner_category)</code>, and <code>resolution</code> keep lookups fast.</p>
 <h2 id="keeping-the-two-files-consistent"><a class="header" href="#keeping-the-two-files-consistent">Keeping the Two Files Consistent</a></h2>
 <p>Because a write touches both files, <code>Store</code> follows a careful ordering so a failure cannot leave a
 dangling reference:</p>
@@ -327,7 +327,7 @@ dangling reference:</p>
     C-&gt;&gt;M: INSERT association
     alt insert succeeds
         C-&gt;&gt;M: COMMIT
-        C--&gt;&gt;C: return TimeSeriesKey
+        C--&gt;&gt;C: return TimeSeriesId
     else insert fails (duplicate etc.)
         C-&gt;&gt;M: ROLLBACK
         C-&gt;&gt;B: remove_array(staged hashes)
