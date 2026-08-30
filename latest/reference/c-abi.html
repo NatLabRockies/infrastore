@@ -879,8 +879,21 @@ label what they decode.</p>
 <p><code>infrastore_store_remove_by_ids</code> is the removal direction of the same reference, listed with the
 other removals above: one all-or-nothing transaction, the count through <code>out_removed</code>, and
 <code>INFRASTORE_ERR_NOT_FOUND</code> if any id names no row.</p>
+<p><code>infrastore_store_read_by_id</code> is the single-id read, and it also takes the slice. Each optional
+argument is a <code>*_present</code> flag beside its value; with none present it reads the whole series, as
+<code>infrastore_store_read_by_ids</code> would for one id. <code>start_ms</code> is Unix milliseconds, spelled zoned or
+zoneless by <code>start_zoneless</code> like every other bound; <code>len</code> counts timesteps (the static types) and
+<code>count</code> counts windows (the forecasts), and supplying the one that does not apply is
+<code>INFRASTORE_ERR_INVALID_PARAMETER</code> rather than an argument the store drops. So is a start off the
+series' own grid or an extent running past its end — a window is checked where a time range is
+clamped. The result arrives in the same <code>InfraStoreBulkReadHandle</code>, holding one item.</p>
 <pre><code class="language-c">int32_t infrastore_store_read_by_ids(const struct InfraStore *handle, const int64_t *ids,
                              uint64_t n, struct InfraStoreBulkReadHandle **out_result);
+int32_t infrastore_store_read_by_id(const struct InfraStore *handle, int64_t id,
+                             bool start_present, bool start_zoneless, int64_t start_ms,
+                             bool len_present, uint64_t len,
+                             bool count_present, uint64_t count,
+                             struct InfraStoreBulkReadHandle **out_result);
 int32_t infrastore_bulk_result_item_name(const struct InfraStoreBulkReadHandle *result,
                                  uint64_t index, char **out_name);
 </code></pre>

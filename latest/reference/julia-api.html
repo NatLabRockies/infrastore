@@ -203,8 +203,8 @@ or else from the <code>libinfrastore_ffi</code> artifact that <code>Pkg</code> d
 <code>TransformOutcome</code>, <code>UnitSystem</code> (<code>NaturalUnits</code>, <code>ComponentBase</code>), <code>add_parent_child_association!</code>,
 <code>add_parent_child_associations!</code>, <code>add_supplemental_attribute_association!</code>,
 <code>add_supplemental_attribute_associations!</code>, <code>add_time_series!</code>, <code>add_time_series_bulk!</code>,
-<code>build_forecast_reader</code>, <code>build_static_reader</code>, <code>bulk_read</code>, <code>read_by_ids</code>, <code>catalog_mode</code>,
-<code>check_static_consistency</code>, <code>clear!</code>, <code>close!</code>, <code>compact!</code>, <code>copy_time_series!</code>,
+<code>build_forecast_reader</code>, <code>build_static_reader</code>, <code>bulk_read</code>, <code>read_by_ids</code>, <code>read_by_id</code>,
+<code>catalog_mode</code>, <code>check_static_consistency</code>, <code>clear!</code>, <code>close!</code>, <code>compact!</code>, <code>copy_time_series!</code>,
 <code>count_array_references</code>, <code>count_components_with_attributes</code>,
 <code>export_supplemental_attribute_associations_openapi</code>, <code>export_time_series_associations_openapi</code>,
 <code>import_supplemental_attribute_associations_openapi!</code>, <code>import_time_series_associations_openapi!</code>,
@@ -560,6 +560,21 @@ return. An id naming no row throws <code>NotFoundError</code> (the whole call fa
 which id dangled — sift them with <code>association_exists</code> when that matters), and an empty id vector
 returns an empty vector without touching the store.</p>
 <pre><code class="language-julia">series = read_by_ids(store, [added.id, other.id])
+</code></pre>
+<pre><code class="language-julia">read_by_id(store::Store, id::Integer; start_time=nothing, len=nothing, count=nothing)
+</code></pre>
+<p>The single-id read, which also takes the slice. Both halves happen in one call: the id is a
+primary-key lookup and the row it lands on carries the grid the window resolves against, so a caller
+holding an id spends nothing to learn a series' <code>resolution</code> or <code>count</code> before asking for the second
+day of it. With no keywords this is <code>read_by_ids</code> for one id.</p>
+<p><code>start_time</code> is the first timestamp to read — a window boundary (<code>initial_timestamp + k·interval</code>)
+for a forecast — and may be a <code>DateTime</code> or, with TimeZones loaded, a <code>ZonedDateTime</code>. <code>len</code> counts
+timesteps and applies to <code>SingleTimeSeries</code> / <code>NonSequentialTimeSeries</code>; <code>count</code> counts windows and
+applies to the forecasts; passing the one that does not apply throws <code>InvalidParameterError</code>. So
+does a <code>start_time</code> off the series' own grid, or a <code>len</code>/<code>count</code> running past its end — a window is
+checked where the <code>time_range</code> on <code>get_time_series</code> and <code>bulk_read</code> is clamped. <code>NotFoundError</code> if
+the id names no row.</p>
+<pre><code class="language-julia">day_two = read_by_id(store, added.id; start_time = t0 + Day(1), len = 24)
 </code></pre>
 <h2 id="bulk-adds"><a class="header" href="#bulk-adds">Bulk Adds</a></h2>
 <pre><code class="language-julia">batch = AddBatch()

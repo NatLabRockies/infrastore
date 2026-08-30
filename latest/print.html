@@ -1109,6 +1109,7 @@ alongside the table it came from.</p>
 <tr><td>Resolve</td><td><code>get_metadata_by_id</code></td><td><code>get_metadata_by_id</code></td><td><code>get_metadata_by_id</code></td></tr>
 <tr><td>Validate</td><td><code>association_exists</code></td><td><code>association_exists</code></td><td><code>association_exists</code></td></tr>
 <tr><td>Read</td><td><code>read_by_ids</code></td><td><code>read_by_ids</code></td><td><code>read_by_ids</code></td></tr>
+<tr><td>Read one</td><td><code>read_by_id</code></td><td><code>read_by_id</code></td><td><code>read_by_id</code></td></tr>
 <tr><td>Remove</td><td><code>remove_by_ids</code></td><td><code>remove_by_ids</code></td><td><code>remove_by_ids!</code></td></tr>
 </tbody></table>
 </div>
@@ -1119,6 +1120,14 @@ returns nothing, the removal removes nothing. That is deliberate: a caller worki
 it recorded earlier has a model that disagrees with the store, and since an id is never reissued the
 disagreement will not resolve itself. Sift the set with <code>association_exists</code> first when some
 references are expected to have gone.</p>
+<p><code>read_by_id</code> is the single-id read, and it also takes the slice: a <code>start_time</code> plus a <code>len</code> of
+timesteps or a <code>count</code> of windows. Both halves happen in one call because the primary-key lookup
+already returns the row the window resolves against — a consumer holding an id spends nothing to
+learn a series' <code>resolution</code> or <code>count</code> before asking for the second day of it. Unlike the
+<code>time_range</code> on the keyed reads, a window is <em>checked</em>: a start off the series' own grid, or an
+extent running past its end, is an error rather than the smaller answer a range clamps to. A range
+says "whatever lies between these bounds"; a window says "these exact steps", and a caller that
+asked for 24 and silently received 3 has a bug the store can see and it cannot.</p>
 <p>A removal by id is also the precise one. A key identity with no interval matches any interval, so
 <code>remove_time_series</code> can take a whole forecast family; an id is a primary key and takes exactly the
 row it names.</p>
@@ -5182,6 +5191,14 @@ changes how data is read back — see the <a href="reference/../explanation/stor
     // `NotFound` if any id names no row.
     pub fn read_by_ids(&amp;self, ids: &amp;[i64]) -&gt; Result&lt;Vec&lt;TimeSeriesData&gt;&gt;;
 
+    // One series by id, whole or windowed, in a single call: the id is a
+    // primary-key lookup and its row carries the grid the window resolves
+    // against. `len` counts timesteps (static types), `count` counts windows
+    // (forecasts); supplying the other is `InvalidParameter`, as is a start off
+    // the grid or an extent past the end -- a window is checked where a
+    // `TimeRange` is clamped. `ReadWindow::full()` reads everything.
+    pub fn read_by_id(&amp;self, id: i64, window: ReadWindow) -&gt; Result&lt;TimeSeriesData&gt;;
+
     pub fn transform_single_time_series(
         &amp;mut self,
         horizon: impl Into&lt;Period&gt;,
@@ -6801,6 +6818,21 @@ def read_by_ids(
 # The same read addressed by catalog association id. Results follow the order the
 # ids are given, repeats included; NotFoundError if any id names no row.
 
+def read_by_id(
+    self,
+    id: int,
+    *,
+    start_time: datetime | None = None,
+    len: int | None = None,
+    count: int | None = None,
+) -&gt; SingleTimeSeries | NonSequentialTimeSeries | Deterministic | Probabilistic | Scenarios: ...
+# The single-id read, which also takes the slice -- in one call, because the
+# primary-key lookup already returns the row the window resolves against. `len`
+# counts timesteps (static types) and `count` counts windows (forecasts);
+# passing the one that does not apply raises InvalidParameterError, as does a
+# `start_time` off the series' grid or an extent past its end. A window is
+# checked where `time_range` is clamped. No keywords reads the whole series.
+
 def remove_time_series(self, key: TimeSeriesKey) -&gt; None: ...
 def remove_time_series_bulk(self, keys: list[TimeSeriesKey]) -&gt; int: ...
 # All-or-nothing: a key matching nothing fails the whole batch. Returns the count removed.
@@ -7507,8 +7539,8 @@ or else from the <code>libinfrastore_ffi</code> artifact that <code>Pkg</code> d
 <code>TransformOutcome</code>, <code>UnitSystem</code> (<code>NaturalUnits</code>, <code>ComponentBase</code>), <code>add_parent_child_association!</code>,
 <code>add_parent_child_associations!</code>, <code>add_supplemental_attribute_association!</code>,
 <code>add_supplemental_attribute_associations!</code>, <code>add_time_series!</code>, <code>add_time_series_bulk!</code>,
-<code>build_forecast_reader</code>, <code>build_static_reader</code>, <code>bulk_read</code>, <code>read_by_ids</code>, <code>catalog_mode</code>,
-<code>check_static_consistency</code>, <code>clear!</code>, <code>close!</code>, <code>compact!</code>, <code>copy_time_series!</code>,
+<code>build_forecast_reader</code>, <code>build_static_reader</code>, <code>bulk_read</code>, <code>read_by_ids</code>, <code>read_by_id</code>,
+<code>catalog_mode</code>, <code>check_static_consistency</code>, <code>clear!</code>, <code>close!</code>, <code>compact!</code>, <code>copy_time_series!</code>,
 <code>count_array_references</code>, <code>count_components_with_attributes</code>,
 <code>export_supplemental_attribute_associations_openapi</code>, <code>export_time_series_associations_openapi</code>,
 <code>import_supplemental_attribute_associations_openapi!</code>, <code>import_time_series_associations_openapi!</code>,
@@ -7864,6 +7896,21 @@ return. An id naming no row throws <code>NotFoundError</code> (the whole call fa
 which id dangled — sift them with <code>association_exists</code> when that matters), and an empty id vector
 returns an empty vector without touching the store.</p>
 <pre><code class="language-julia">series = read_by_ids(store, [added.id, other.id])
+</code></pre>
+<pre><code class="language-julia">read_by_id(store::Store, id::Integer; start_time=nothing, len=nothing, count=nothing)
+</code></pre>
+<p>The single-id read, which also takes the slice. Both halves happen in one call: the id is a
+primary-key lookup and the row it lands on carries the grid the window resolves against, so a caller
+holding an id spends nothing to learn a series' <code>resolution</code> or <code>count</code> before asking for the second
+day of it. With no keywords this is <code>read_by_ids</code> for one id.</p>
+<p><code>start_time</code> is the first timestamp to read — a window boundary (<code>initial_timestamp + k·interval</code>)
+for a forecast — and may be a <code>DateTime</code> or, with TimeZones loaded, a <code>ZonedDateTime</code>. <code>len</code> counts
+timesteps and applies to <code>SingleTimeSeries</code> / <code>NonSequentialTimeSeries</code>; <code>count</code> counts windows and
+applies to the forecasts; passing the one that does not apply throws <code>InvalidParameterError</code>. So
+does a <code>start_time</code> off the series' own grid, or a <code>len</code>/<code>count</code> running past its end — a window is
+checked where the <code>time_range</code> on <code>get_time_series</code> and <code>bulk_read</code> is clamped. <code>NotFoundError</code> if
+the id names no row.</p>
+<pre><code class="language-julia">day_two = read_by_id(store, added.id; start_time = t0 + Day(1), len = 24)
 </code></pre>
 <h2 id="bulk-adds"><a class="header" href="#bulk-adds">Bulk Adds</a></h2>
 <pre><code class="language-julia">batch = AddBatch()
@@ -9292,8 +9339,21 @@ label what they decode.</p>
 <p><code>infrastore_store_remove_by_ids</code> is the removal direction of the same reference, listed with the
 other removals above: one all-or-nothing transaction, the count through <code>out_removed</code>, and
 <code>INFRASTORE_ERR_NOT_FOUND</code> if any id names no row.</p>
+<p><code>infrastore_store_read_by_id</code> is the single-id read, and it also takes the slice. Each optional
+argument is a <code>*_present</code> flag beside its value; with none present it reads the whole series, as
+<code>infrastore_store_read_by_ids</code> would for one id. <code>start_ms</code> is Unix milliseconds, spelled zoned or
+zoneless by <code>start_zoneless</code> like every other bound; <code>len</code> counts timesteps (the static types) and
+<code>count</code> counts windows (the forecasts), and supplying the one that does not apply is
+<code>INFRASTORE_ERR_INVALID_PARAMETER</code> rather than an argument the store drops. So is a start off the
+series' own grid or an extent running past its end — a window is checked where a time range is
+clamped. The result arrives in the same <code>InfraStoreBulkReadHandle</code>, holding one item.</p>
 <pre><code class="language-c">int32_t infrastore_store_read_by_ids(const struct InfraStore *handle, const int64_t *ids,
                              uint64_t n, struct InfraStoreBulkReadHandle **out_result);
+int32_t infrastore_store_read_by_id(const struct InfraStore *handle, int64_t id,
+                             bool start_present, bool start_zoneless, int64_t start_ms,
+                             bool len_present, uint64_t len,
+                             bool count_present, uint64_t count,
+                             struct InfraStoreBulkReadHandle **out_result);
 int32_t infrastore_bulk_result_item_name(const struct InfraStoreBulkReadHandle *result,
                                  uint64_t index, char **out_name);
 </code></pre>

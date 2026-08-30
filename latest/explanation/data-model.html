@@ -461,6 +461,7 @@ alongside the table it came from.</p>
 <tr><td>Resolve</td><td><code>get_metadata_by_id</code></td><td><code>get_metadata_by_id</code></td><td><code>get_metadata_by_id</code></td></tr>
 <tr><td>Validate</td><td><code>association_exists</code></td><td><code>association_exists</code></td><td><code>association_exists</code></td></tr>
 <tr><td>Read</td><td><code>read_by_ids</code></td><td><code>read_by_ids</code></td><td><code>read_by_ids</code></td></tr>
+<tr><td>Read one</td><td><code>read_by_id</code></td><td><code>read_by_id</code></td><td><code>read_by_id</code></td></tr>
 <tr><td>Remove</td><td><code>remove_by_ids</code></td><td><code>remove_by_ids</code></td><td><code>remove_by_ids!</code></td></tr>
 </tbody></table>
 </div>
@@ -471,6 +472,14 @@ returns nothing, the removal removes nothing. That is deliberate: a caller worki
 it recorded earlier has a model that disagrees with the store, and since an id is never reissued the
 disagreement will not resolve itself. Sift the set with <code>association_exists</code> first when some
 references are expected to have gone.</p>
+<p><code>read_by_id</code> is the single-id read, and it also takes the slice: a <code>start_time</code> plus a <code>len</code> of
+timesteps or a <code>count</code> of windows. Both halves happen in one call because the primary-key lookup
+already returns the row the window resolves against — a consumer holding an id spends nothing to
+learn a series' <code>resolution</code> or <code>count</code> before asking for the second day of it. Unlike the
+<code>time_range</code> on the keyed reads, a window is <em>checked</em>: a start off the series' own grid, or an
+extent running past its end, is an error rather than the smaller answer a range clamps to. A range
+says "whatever lies between these bounds"; a window says "these exact steps", and a caller that
+asked for 24 and silently received 3 has a bug the store can see and it cannot.</p>
 <p>A removal by id is also the precise one. A key identity with no interval matches any interval, so
 <code>remove_time_series</code> can take a whole forecast family; an id is a primary key and takes exactly the
 row it names.</p>

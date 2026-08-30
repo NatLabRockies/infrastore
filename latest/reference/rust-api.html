@@ -314,6 +314,14 @@ changes how data is read back — see the <a href="../explanation/storage-model.
     // `NotFound` if any id names no row.
     pub fn read_by_ids(&amp;self, ids: &amp;[i64]) -&gt; Result&lt;Vec&lt;TimeSeriesData&gt;&gt;;
 
+    // One series by id, whole or windowed, in a single call: the id is a
+    // primary-key lookup and its row carries the grid the window resolves
+    // against. `len` counts timesteps (static types), `count` counts windows
+    // (forecasts); supplying the other is `InvalidParameter`, as is a start off
+    // the grid or an extent past the end -- a window is checked where a
+    // `TimeRange` is clamped. `ReadWindow::full()` reads everything.
+    pub fn read_by_id(&amp;self, id: i64, window: ReadWindow) -&gt; Result&lt;TimeSeriesData&gt;;
+
     pub fn transform_single_time_series(
         &amp;mut self,
         horizon: impl Into&lt;Period&gt;,
