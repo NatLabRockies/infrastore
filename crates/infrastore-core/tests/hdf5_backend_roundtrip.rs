@@ -4,8 +4,8 @@
 
 use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{
-    Deterministic, Features, OwnerCategory, SingleTimeSeries, TimeSeriesData, TypedArray,
-    create_store, open_store,
+    Deterministic, Features, ListFilter, OwnerCategory, SingleTimeSeries, TimeSeriesData,
+    TypedArray, create_store, open_store,
 };
 
 fn series(length: usize, base: f64) -> SingleTimeSeries {
@@ -65,11 +65,17 @@ fn hdf5_store_round_trip_reopen_and_persist() {
     // Reopen: `open_store` validates the backend attribute from the file.
     let mut store = open_store(path.as_path(), false).unwrap();
     let keys = store
-        .get_time_series_keys(1, OwnerCategory::Component)
+        .list_metadata(
+            ListFilter::new()
+                .owner_id(1)
+                .owner_category(OwnerCategory::Component),
+        )
         .unwrap();
     assert_eq!(keys.len(), 2);
     for key in &keys {
-        let _ = store.get_time_series(key.identity(), None).unwrap();
+        let _ = store
+            .read_by_id(key.id.unwrap(), infrastore_core::ReadWindow::full())
+            .unwrap();
     }
     assert!(store.verify_integrity().unwrap().ok());
 
@@ -79,15 +85,21 @@ fn hdf5_store_round_trip_reopen_and_persist() {
     store.persist_to(dest.as_path()).unwrap();
     let copy = open_store(dest.as_path(), true).unwrap();
     assert_eq!(
-        copy.get_time_series_keys(1, OwnerCategory::Component)
-            .unwrap()
-            .len(),
+        copy.list_metadata(
+            ListFilter::new()
+                .owner_id(1)
+                .owner_category(OwnerCategory::Component),
+        )
+        .unwrap()
+        .len(),
         2
     );
     assert!(copy.verify_integrity().unwrap().ok());
 
     // The original store must still be usable after persist (its backend was
     // swapped out for the copy and reopened).
-    let got = store.get_time_series(keys[0].identity(), None).unwrap();
+    let got = store
+        .read_by_id(keys[0].id.unwrap(), infrastore_core::ReadWindow::full())
+        .unwrap();
     drop(got);
 }

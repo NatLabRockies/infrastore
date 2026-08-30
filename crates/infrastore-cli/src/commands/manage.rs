@@ -57,15 +57,8 @@ pub fn remove(
     }
 
     let mut store = store_access::open_writable(store_path)?;
-    // The selector resolved one row, so remove that row by its catalog id when
-    // it has one: an id is a primary key, where a key identity can in principle
-    // match siblings. Only a row predating the id column falls back to the key.
-    match meta.id {
-        Some(id) => {
-            store.remove_by_ids(&[id]).map_err(|e| e.to_string())?;
-        }
-        None => store.remove_time_series(&key).map_err(|e| e.to_string())?,
-    }
+    // The selector resolved one row to its catalog id, and a removal takes ids.
+    store.remove_by_ids(&[key]).map_err(|e| e.to_string())?;
     store.flush().map_err(|e| e.to_string())?;
     report(
         format,
@@ -157,7 +150,7 @@ pub fn rename(
     }
     let mut store = store_access::open_writable(store_path)?;
     store
-        .rename_time_series(&key, new_name)
+        .rename_time_series(key, new_name)
         .map_err(|e| e.to_string())?;
     store.flush().map_err(|e| e.to_string())?;
     report(
@@ -193,7 +186,7 @@ pub fn remove_all(
     let store = store_access::open_readonly(store_path)?;
     let filter = selector.to_filter()?;
     let matches = store
-        .list_time_series(filter.clone())
+        .list_metadata(filter.clone())
         .map_err(|e| e.to_string())?;
     drop(store);
     if matches.is_empty() {
@@ -282,7 +275,10 @@ pub fn clear(
         if let Some((id, cat)) = owner {
             filter = filter.owner_id(id).owner_category(cat);
         }
-        let n = store.list_keys(filter).map_err(|e| e.to_string())?.len();
+        let n = store
+            .list_metadata(filter)
+            .map_err(|e| e.to_string())?
+            .len();
         return report(
             format,
             || json!({ "dry_run": true, "would_clear": n }),
@@ -323,7 +319,10 @@ pub fn replace_owner(
         let filter = infrastore_core::ListFilter::new()
             .owner_id(old)
             .owner_category(category);
-        let n = store.list_keys(filter).map_err(|e| e.to_string())?.len();
+        let n = store
+            .list_metadata(filter)
+            .map_err(|e| e.to_string())?
+            .len();
         return report(
             format,
             || json!({ "dry_run": true, "would_reassign": n, "from": old, "to": new }),
@@ -387,7 +386,7 @@ pub fn copy(
     }
     let mut store = store_access::open_writable(store_path)?;
     store
-        .copy_time_series(&key, dst_owner_id, dst_owner_type, new_name)
+        .copy_time_series(key, dst_owner_id, dst_owner_type, new_name)
         .map_err(|e| e.to_string())?;
     store.flush().map_err(|e| e.to_string())?;
     report(
@@ -563,7 +562,7 @@ pub fn merge(
     }
     let source = store_access::open_readonly(from)?;
     let metas = source
-        .list_time_series(selector.to_filter()?)
+        .list_metadata(selector.to_filter()?)
         .map_err(|e| e.to_string())?;
     if metas.is_empty() {
         return report(
@@ -593,9 +592,13 @@ pub fn merge(
         );
     }
 
-    let identities: Vec<_> = metas.iter().map(crate::select::key_of).collect();
-    let refs: Vec<&_> = identities.iter().collect();
-    let datas = source.bulk_read(&refs).map_err(|e| e.to_string())?;
+    let ids: Vec<infrastore_core::TimeSeriesId> = metas
+        .iter()
+        .map(crate::select::id_of)
+        .collect::<Result<_, _>>()?;
+    let datas = source
+        .read_by_ids(&ids, infrastore_core::ReadWindow::full())
+        .map_err(|e| e.to_string())?;
     drop(source);
 
     // A merge re-adds the source's rows, so the destination assigns them fresh
@@ -616,8 +619,9 @@ pub fn merge(
     if replace {
         // Only what the destination already holds; a merge that brings in a
         // series the destination lacks is the normal case, not a failure.
-        let keys: Vec<&infrastore_core::KeyIdentity> = identities.iter().collect();
-        store_access::remove_existing(&mut store, &keys)?;
+        let filters: Vec<infrastore_core::ListFilter> =
+            metas.iter().map(crate::select::exact_filter).collect();
+        store_access::remove_existing(&mut store, &filters)?;
     }
     let n = store
         .add_time_series_bulk(requests)

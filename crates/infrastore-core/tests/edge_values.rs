@@ -14,7 +14,7 @@
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{
     AddRequest, Deterministic, Dtype, Features, ListFilter, NonSequentialTimeSeries, OwnerCategory,
-    Probabilistic, Scenarios, SingleTimeSeries, Store, TimeSeriesData, TimeSeriesKey, TypedArray,
+    Probabilistic, Scenarios, SingleTimeSeries, Store, TimeSeriesData, TimeSeriesId, TypedArray,
     create_store, open_store,
 };
 
@@ -25,7 +25,7 @@ fn t0() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap()
 }
 
-fn add(store: &mut Store, owner: i64, data: TimeSeriesData) -> TimeSeriesKey {
+fn add(store: &mut Store, owner: i64, data: TimeSeriesData) -> TimeSeriesId {
     store
         .add(AddRequest::new(
             owner,
@@ -34,7 +34,6 @@ fn add(store: &mut Store, owner: i64, data: TimeSeriesData) -> TimeSeriesKey {
             data,
         ))
         .unwrap()
-        .key
 }
 
 fn sts(name: &str, data: TypedArray) -> TimeSeriesData {
@@ -84,7 +83,9 @@ fn non_finite_f64_static_round_trips_bit_exact() {
             move |store| add(store, 1, sts("nonfinite", data.clone()))
         },
         |store, key, backend| {
-            let got = store.get_time_series(key.identity(), None).unwrap();
+            let got = store
+                .read_by_id(*key, infrastore_core::ReadWindow::full())
+                .unwrap();
             let single = got.as_single().unwrap();
             // Byte comparison, not `==`: NaN != NaN and -0.0 == 0.0 would both
             // let a corrupted round trip pass.
@@ -114,7 +115,9 @@ fn non_finite_f32_static_round_trips_bit_exact() {
             move |store| add(store, 1, sts("nonfinite32", data.clone()))
         },
         |store, key, backend| {
-            let got = store.get_time_series(key.identity(), None).unwrap();
+            let got = store
+                .read_by_id(*key, infrastore_core::ReadWindow::full())
+                .unwrap();
             let single = got.as_single().unwrap();
             assert_eq!(single.data.dtype, Dtype::F32, "{backend}");
             assert_eq!(
@@ -155,7 +158,9 @@ fn non_finite_deterministic_round_trips_bit_exact() {
             }
         },
         |store, key, backend| {
-            let got = store.get_time_series(key.identity(), None).unwrap();
+            let got = store
+                .read_by_id(*key, infrastore_core::ReadWindow::full())
+                .unwrap();
             let det = got.as_deterministic().unwrap();
             assert_eq!(
                 det.data.bytes, data.bytes,
@@ -199,7 +204,9 @@ fn differing_nan_bit_patterns_content_address_to_one_array() {
             );
             // All three owners read back the *first* stored array's bytes,
             // because they share one content-addressed array.
-            let got = store.get_time_series(key.identity(), None).unwrap();
+            let got = store
+                .read_by_id(*key, infrastore_core::ReadWindow::full())
+                .unwrap();
             assert_eq!(
                 got.as_single().unwrap().data.bytes,
                 a.bytes,
@@ -237,7 +244,7 @@ fn hdf5_default_fill_value_is_not_special_cased() {
     let store = open_store(path.as_path(), true).unwrap();
     assert_eq!(
         store
-            .get_time_series(k64.identity(), None)
+            .read_by_id(k64, infrastore_core::ReadWindow::full())
             .unwrap()
             .as_single()
             .unwrap()
@@ -248,7 +255,7 @@ fn hdf5_default_fill_value_is_not_special_cased() {
     );
     assert_eq!(
         store
-            .get_time_series(k32.identity(), None)
+            .read_by_id(k32, infrastore_core::ReadWindow::full())
             .unwrap()
             .as_single()
             .unwrap()
@@ -274,11 +281,16 @@ fn zero_length_single_time_series_is_pinned() {
 
     let mut store = create_store(None, true).unwrap();
     let key = add(&mut store, 1, sts("empty", empty.clone()));
-    let got = store.get_time_series(key.identity(), None).unwrap();
+    let got = store
+        .read_by_id(key, infrastore_core::ReadWindow::full())
+        .unwrap();
     let single = got.as_single().unwrap();
     assert_eq!(single.length, 0);
     assert!(single.data.bytes.is_empty());
-    assert_eq!(store.get_metadata(key.identity()).unwrap().length, Some(0));
+    assert_eq!(
+        store.get_metadata_by_id(key).unwrap().unwrap().length,
+        Some(0)
+    );
 }
 
 #[test]
@@ -298,7 +310,9 @@ fn zero_length_single_time_series_on_disk_is_pinned() {
     };
 
     let store = open_store(path.as_path(), true).unwrap();
-    let got = store.get_time_series(key.identity(), None).unwrap();
+    let got = store
+        .read_by_id(key, infrastore_core::ReadWindow::full())
+        .unwrap();
     let single = got.as_single().unwrap();
     assert_eq!(single.length, 0);
     assert!(single.data.bytes.is_empty());
@@ -316,16 +330,16 @@ fn single_element_series_round_trips_on_both_backends() {
             move |store| add(store, 1, sts("one", one.clone()))
         },
         |store, key, backend| {
-            let got = store.get_time_series(key.identity(), None).unwrap();
+            let got = store
+                .read_by_id(*key, infrastore_core::ReadWindow::full())
+                .unwrap();
             let single = got.as_single().unwrap();
             assert_eq!(single.length, 1, "{backend}");
             assert_eq!(single.data.to_f64_vec().unwrap(), vec![42.5], "{backend}");
             // A one-step window is the whole series.
             let sliced = store
-                .get_time_series(
-                    key.identity(),
-                    Some((t0(), t0() + Duration::hours(1)).into()),
-                )
+                .read_by_ids_range(&[*key], (t0(), t0() + Duration::hours(1)).into())
+                .map(|mut v| v.remove(0))
                 .unwrap();
             assert_eq!(
                 sliced.as_single().unwrap().data.to_f64_vec().unwrap(),
@@ -358,17 +372,17 @@ fn deterministic_with_count_one_round_trips_and_window_selects() {
             }
         },
         |store, key, backend| {
-            let got = store.get_time_series(key.identity(), None).unwrap();
+            let got = store
+                .read_by_id(*key, infrastore_core::ReadWindow::full())
+                .unwrap();
             let det = got.as_deterministic().unwrap();
             assert_eq!(det.count, 1, "{backend}");
             assert_eq!(det.data.shape, vec![2, 1], "{backend}");
 
             // Select the only window at its own start.
             let one = store
-                .get_time_series(
-                    key.identity(),
-                    Some((t0(), t0() + Duration::hours(6)).into()),
-                )
+                .read_by_ids_range(&[*key], (t0(), t0() + Duration::hours(6)).into())
+                .map(|mut v| v.remove(0))
                 .unwrap();
             let det = one.as_deterministic().unwrap();
             assert_eq!(det.count, 1, "{backend}: only window selected");
@@ -403,7 +417,9 @@ fn deterministic_with_horizon_count_one_round_trips() {
             }
         },
         |store, key, backend| {
-            let got = store.get_time_series(key.identity(), None).unwrap();
+            let got = store
+                .read_by_id(*key, infrastore_core::ReadWindow::full())
+                .unwrap();
             let det = got.as_deterministic().unwrap();
             assert_eq!(det.data.shape, vec![1, 3], "{backend}");
             assert_eq!(
@@ -438,7 +454,9 @@ fn probabilistic_with_one_percentile_round_trips() {
             }
         },
         |store, key, backend| {
-            let got = store.get_time_series(key.identity(), None).unwrap();
+            let got = store
+                .read_by_id(*key, infrastore_core::ReadWindow::full())
+                .unwrap();
             let p = got.as_probabilistic().unwrap();
             assert_eq!(p.percentiles, vec![0.5], "{backend}");
             assert_eq!(p.data.shape, vec![1, 2, 2], "{backend}");
@@ -469,7 +487,9 @@ fn scenarios_with_one_scenario_round_trips() {
             }
         },
         |store, key, backend| {
-            let got = store.get_time_series(key.identity(), None).unwrap();
+            let got = store
+                .read_by_id(*key, infrastore_core::ReadWindow::full())
+                .unwrap();
             let s = got.as_scenarios().unwrap();
             assert_eq!(s.scenario_count, 1, "{backend}");
             assert_eq!(s.data.shape, vec![1, 2, 2], "{backend}");
@@ -491,7 +511,9 @@ fn extreme_i64_round_trips_through_disk() {
             move |store| add(store, 1, sts("i64", data.clone()))
         },
         |store, key, backend| {
-            let got = store.get_time_series(key.identity(), None).unwrap();
+            let got = store
+                .read_by_id(*key, infrastore_core::ReadWindow::full())
+                .unwrap();
             let single = got.as_single().unwrap();
             assert_eq!(single.data.dtype, Dtype::I64, "{backend}");
             assert_eq!(single.data.to_vec::<i64>().unwrap(), values, "{backend}");
@@ -512,7 +534,9 @@ fn extreme_u64_round_trips_through_disk() {
             move |store| add(store, 1, sts("u64", data.clone()))
         },
         |store, key, backend| {
-            let got = store.get_time_series(key.identity(), None).unwrap();
+            let got = store
+                .read_by_id(*key, infrastore_core::ReadWindow::full())
+                .unwrap();
             let single = got.as_single().unwrap();
             assert_eq!(single.data.dtype, Dtype::U64, "{backend}");
             assert_eq!(single.data.to_vec::<u64>().unwrap(), values, "{backend}");
@@ -531,7 +555,9 @@ fn extreme_i32_round_trips_through_disk() {
             move |store| add(store, 1, sts("i32", data.clone()))
         },
         |store, key, backend| {
-            let got = store.get_time_series(key.identity(), None).unwrap();
+            let got = store
+                .read_by_id(*key, infrastore_core::ReadWindow::full())
+                .unwrap();
             let single = got.as_single().unwrap();
             assert_eq!(single.data.dtype, Dtype::I32, "{backend}");
             assert_eq!(single.data.to_vec::<i32>().unwrap(), values, "{backend}");
@@ -561,7 +587,9 @@ fn extreme_integers_in_a_forecast_round_trip() {
             }
         },
         |store, key, backend| {
-            let got = store.get_time_series(key.identity(), None).unwrap();
+            let got = store
+                .read_by_id(*key, infrastore_core::ReadWindow::full())
+                .unwrap();
             assert_eq!(
                 got.as_deterministic()
                     .unwrap()
@@ -604,12 +632,17 @@ fn hostile_names_round_trip_and_match_exactly() {
         keys.push(add(&mut store, i as i64 + 1, sts(name, data.clone())));
     }
 
-    // Every name is stored verbatim and readable by its own key.
+    // Every name is stored verbatim and readable by its own id.
     for (name, key) in HOSTILE_NAMES.iter().zip(&keys) {
-        assert_eq!(key.name(), *name);
-        let meta = store.get_metadata(key.identity()).unwrap();
+        let meta = store.get_metadata_by_id(*key).unwrap().unwrap();
         assert_eq!(meta.name, *name, "name not stored verbatim");
-        assert!(store.has_time_series(key.identity()).unwrap());
+        // The existence probe stays attribute-addressed, so the hostile name
+        // has to survive the filter path too, not just the id path.
+        assert!(
+            store
+                .has_any_time_series(ListFilter::new().name(*name))
+                .unwrap()
+        );
     }
 
     // `list_names` returns all of them (distinct, sorted).
@@ -685,12 +718,14 @@ fn empty_string_name_is_pinned() {
     let mut store = create_store(None, true).unwrap();
     let data = TypedArray::from_slice(vec![3], &[1.0f64, 2.0, 3.0]).unwrap();
     let key = add(&mut store, 1, sts("", data));
-    assert_eq!(key.name(), "");
-    assert_eq!(store.get_metadata(key.identity()).unwrap().name, "");
+    assert_eq!(store.get_metadata_by_id(key).unwrap().unwrap().name, "");
     assert_eq!(store.list_names(ListFilter::new()).unwrap(), vec![""]);
     // Addressable by exact filter.
     assert_eq!(
-        store.list_keys(ListFilter::new().name("")).unwrap().len(),
+        store
+            .list_metadata(ListFilter::new().name(""))
+            .unwrap()
+            .len(),
         1
     );
 }
@@ -712,7 +747,7 @@ fn ten_kilobyte_name_is_pinned() {
         key
     };
     let store = open_store(path.as_path(), true).unwrap();
-    let meta = store.get_metadata(key.identity()).unwrap();
+    let meta = store.get_metadata_by_id(key).unwrap().unwrap();
     assert_eq!(meta.name.len(), 10_240);
     assert_eq!(meta.name, name);
 }
@@ -736,7 +771,7 @@ fn hostile_owner_type_units_and_ext_round_trip() {
         ))
         .unwrap();
 
-    let meta = store.get_metadata(key.identity()).unwrap();
+    let meta = store.get_metadata_by_id(key).unwrap().unwrap();
     assert_eq!(meta.owner_type, owner_type);
     assert_eq!(meta.units.as_deref(), Some(units));
     assert_eq!(meta.application_data.as_deref(), Some(application_data));
@@ -744,7 +779,7 @@ fn hostile_owner_type_units_and_ext_round_trip() {
     // metacharacters.
     assert_eq!(
         store
-            .list_keys(ListFilter::new().owner_type(owner_type))
+            .list_metadata(ListFilter::new().owner_type(owner_type))
             .unwrap()
             .len(),
         1
@@ -773,7 +808,8 @@ fn application_data_is_stored_verbatim_even_when_not_valid_json() {
         .unwrap();
     assert_eq!(
         store
-            .get_metadata(key.identity())
+            .get_metadata_by_id(key)
+            .unwrap()
             .unwrap()
             .application_data
             .as_deref(),
@@ -804,7 +840,11 @@ fn one_megabyte_ext_round_trips_through_disk() {
     };
     let store = open_store(path.as_path(), true).unwrap();
     assert_eq!(
-        store.get_metadata(key.identity()).unwrap().application_data,
+        store
+            .get_metadata_by_id(key)
+            .unwrap()
+            .unwrap()
+            .application_data,
         Some(payload)
     );
 }
@@ -838,7 +878,7 @@ fn hostile_feature_keys_and_values_round_trip_and_disambiguate() {
         )
         .unwrap();
     assert_eq!(
-        store.get_metadata(key.identity()).unwrap().features,
+        store.get_metadata_by_id(key).unwrap().unwrap().features,
         features
     );
 
@@ -851,8 +891,12 @@ fn hostile_feature_keys_and_values_round_trip_and_disambiguate() {
                 .with_features(other),
         )
         .unwrap();
-    assert_ne!(key.identity().features, key2.identity().features);
-    assert_eq!(store.list_keys(ListFilter::new()).unwrap().len(), 2);
+    assert_ne!(key, key2, "a different feature set is a different series");
+    assert_ne!(
+        store.get_metadata_by_id(key).unwrap().unwrap().features,
+        store.get_metadata_by_id(key2).unwrap().unwrap().features,
+    );
+    assert_eq!(store.list_metadata(ListFilter::new()).unwrap().len(), 2);
 }
 
 #[test]
@@ -875,7 +919,9 @@ fn hostile_names_survive_a_non_sequential_disk_round_trip() {
         key
     };
     let store = open_store(path.as_path(), true).unwrap();
-    let got = store.get_time_series(key.identity(), None).unwrap();
+    let got = store
+        .read_by_id(key, infrastore_core::ReadWindow::full())
+        .unwrap();
     let ns = got.as_non_sequential().unwrap();
     assert_eq!(ns.name, name);
     assert_eq!(ns.timestamps, timestamps);
@@ -921,7 +967,7 @@ fn a_nan_feature_value_is_rejected_and_leaves_the_catalog_readable() {
     );
 
     // The rejection is total: nothing was written, so the catalog still reads.
-    assert_eq!(store.list_keys(ListFilter::new()).unwrap().len(), 1);
+    assert_eq!(store.list_metadata(ListFilter::new()).unwrap().len(), 1);
 
     // Negative zero is refused for the same reason, and separately: SQLite keeps
     // an exactly-integral REAL as an integer, so the sign is lost and it reads
@@ -970,12 +1016,12 @@ fn a_nan_feature_value_is_rejected_and_leaves_the_catalog_readable() {
             )
             .unwrap_or_else(|e| panic!("float feature {v} should be storable: {e}"));
     }
-    assert_eq!(store.list_keys(ListFilter::new()).unwrap().len(), 6);
+    assert_eq!(store.list_metadata(ListFilter::new()).unwrap().len(), 6);
 
     // And what came back is what went in.
-    for key in store.list_keys(ListFilter::new()).unwrap() {
-        if let Some(FeatureValue::Float(v)) = key.identity().features.get("x") {
-            let stored = store.get_metadata(key.identity()).unwrap();
+    for key in store.list_metadata(ListFilter::new()).unwrap() {
+        if let Some(FeatureValue::Float(v)) = key.features.get("x") {
+            let stored = store.get_metadata_by_id(key.id.unwrap()).unwrap().unwrap();
             assert_eq!(
                 stored.features.get("x"),
                 Some(&FeatureValue::Float(*v)),
@@ -1031,7 +1077,7 @@ fn feature_value_equality_hashing_and_ordering_agree() {
     // its bit pattern, and that hash is what the uniqueness index keys on. A
     // derived `PartialEq` gave IEEE semantics instead, so `0.0 == -0.0` compared
     // equal while hashing differently — breaking the `Hash` contract all the way
-    // up through `Features`, `KeyIdentity` and `TimeSeriesKey`.
+    // up through `Features`, `KeyIdentity` and `TimeSeriesId`.
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
@@ -1180,5 +1226,5 @@ fn malformed_inputs_report_errors_rather_than_panicking() {
         store.add_time_series_bulk(vec![request()]).is_err(),
         "bulk add must report it too, not panic"
     );
-    assert_eq!(store.list_keys(ListFilter::new()).unwrap().len(), 0);
+    assert_eq!(store.list_metadata(ListFilter::new()).unwrap().len(), 0);
 }

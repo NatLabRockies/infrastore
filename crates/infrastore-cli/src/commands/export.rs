@@ -42,7 +42,7 @@ pub fn run(
     let range = crate::parse::parse_time_range(time_range)?;
     let store = store_access::open_readonly(store_path)?;
     let metas = store
-        .list_time_series(selector.to_filter()?)
+        .list_metadata(selector.to_filter()?)
         .map_err(|e| e.to_string())?;
     if metas.is_empty() {
         return match dir {
@@ -70,11 +70,15 @@ pub fn run(
     }
 
     // One batched read instead of N catalog round-trips.
-    let identities: Vec<_> = metas.iter().map(select::key_of).collect();
-    let refs: Vec<&_> = identities.iter().collect();
-    let datas = store
-        .bulk_read_range(&refs, range)
-        .map_err(|e| e.to_string())?;
+    let ids: Vec<infrastore_core::TimeSeriesId> =
+        metas.iter().map(select::id_of).collect::<Result<_, _>>()?;
+    // Bounds, not a window: an export names the span it wants and takes
+    // whatever each series has in it.
+    let datas = match range {
+        Some(r) => store.read_by_ids_range(&ids, r),
+        None => store.read_by_ids(&ids, infrastore_core::ReadWindow::full()),
+    }
+    .map_err(|e| e.to_string())?;
 
     match dir {
         None => {

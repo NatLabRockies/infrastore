@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use infrastore_core::TimeSeriesKey;
+use infrastore_core::TimeSeriesMetadata;
 use serde_json::{Value, json};
 
 use crate::color;
@@ -189,13 +189,12 @@ pub fn run(
 fn load(
     path: &Path,
     filter: infrastore_core::ListFilter,
-) -> Result<BTreeMap<String, (TimeSeriesKey, String)>, String> {
+) -> Result<BTreeMap<String, (TimeSeriesMetadata, String)>, String> {
     let store = store_access::open_readonly(path)?;
-    let rows = store
-        .list_keys_with_hash(filter)
-        .map_err(|e| e.to_string())?;
+    let rows = store.list_metadata(filter).map_err(|e| e.to_string())?;
     let mut out = BTreeMap::new();
-    for (key, hash) in rows {
+    for key in rows {
+        let hash = key.data_hash;
         out.insert(identity_key(&key), (key, fields::hash_hex(&hash)));
     }
     Ok(out)
@@ -219,8 +218,19 @@ fn load(
 /// as `null`, so `+inf` and `-inf` features would collide again. The key never
 /// leaves this process — it is built, compared, and dropped within one run — so
 /// `Debug`'s lack of a cross-version stability guarantee does not matter.
-fn identity_key(key: &TimeSeriesKey) -> String {
-    format!("{:?}", key.identity())
+fn identity_key(key: &TimeSeriesMetadata) -> String {
+    format!(
+        "{:?}",
+        (
+            key.owner_id,
+            key.owner_category,
+            key.time_series_type,
+            &key.name,
+            key.resolution,
+            key.interval,
+            &key.features,
+        )
+    )
 }
 
 /// A key rendered for the reader. Every identity field appears, so two series
@@ -228,8 +238,7 @@ fn identity_key(key: &TimeSeriesKey) -> String {
 /// `changed`. This is display only — the pairing is done on [`identity_key`],
 /// because this rendering is ambiguous for features whose text contains `,`
 /// or `=`.
-fn describe(key: &TimeSeriesKey) -> String {
-    let id = key.identity();
+fn describe(id: &TimeSeriesMetadata) -> String {
     format!(
         "owner={} category={} type={} name={} resolution={} interval={} features={}",
         id.owner_id,

@@ -45,7 +45,7 @@ def add(store, owner, ts, **kwargs):
         owner_category=OwnerCategory.Component,
         time_series=ts,
         **kwargs,
-    ).key
+    )
 
 
 class TestInference:
@@ -87,7 +87,7 @@ class TestInference:
         # in CI on UTC. The fields are read as they stand instead.
         store = Store.create(in_memory=True)
         key = add(store, 1, series(datetime(2024, 6, 1, 12)))
-        meta = store.get_metadata(key)
+        meta = store.get_metadata_by_id(key)
         assert meta["initial_timestamp"] == "2024-06-01T12:00:00"
 
     def test_a_timestamp_vector_must_agree_on_one_spelling(self):
@@ -114,10 +114,10 @@ class TestRoundTrip:
     def test_what_comes_out_equals_what_went_in(self, initial, spelling):
         store = Store.create(in_memory=True)
         key = add(store, 1, series(initial))
-        got = store.get_time_series(key)
+        got = store.read_by_id(key)
         assert got.time_reference == spelling
         assert got.initial_timestamp == initial
-        assert store.get_metadata(key)["time_reference"] == spelling
+        assert store.get_metadata_by_id(key)["time_reference"] == spelling
 
     def test_the_fold_of_an_ambiguous_hour_survives(self):
         # Both wall clocks read 01:00 in Denver on the fall-back day. They are
@@ -128,7 +128,7 @@ class TestRoundTrip:
         second = datetime(2020, 11, 1, 1, tzinfo=DENVER, fold=1)
         assert first.utcoffset() != second.utcoffset()
         for owner, written in ((1, first), (2, second)):
-            got = store.get_time_series(add(store, owner, series(written)))
+            got = store.read_by_id(add(store, owner, series(written)))
             assert got.initial_timestamp == written
             assert got.initial_timestamp.utcoffset() == written.utcoffset()
 
@@ -140,14 +140,14 @@ class TestRoundTrip:
             1,
             NonSequentialTimeSeries(stamps, np.arange(3, dtype=np.float64), "events"),
         )
-        got = store.get_time_series(key)
+        got = store.read_by_id(key)
         assert got.time_reference == "zoneless"
         assert got.timestamps == stamps
 
     def test_an_explicit_argument_overrides_the_inference(self):
         store = Store.create(in_memory=True)
         key = add(store, 1, series(datetime(2024, 1, 1)), time_reference="America/Denver")
-        assert store.get_time_series(key).time_reference == "America/Denver"
+        assert store.read_by_id(key).time_reference == "America/Denver"
 
     def test_an_unrecognized_zone_warns_but_stores(self):
         # Existence is audited, never gated: gating would refuse legitimate data
@@ -155,7 +155,7 @@ class TestRoundTrip:
         store = Store.create(in_memory=True)
         with pytest.warns(UserWarning, match="tz database"):
             key = add(store, 1, series(datetime(2024, 1, 1)), time_reference="America/Dever")
-        assert store.get_metadata(key)["time_reference"] == "America/Dever"
+        assert store.get_metadata_by_id(key)["time_reference"] == "America/Dever"
 
 
 class TestQueryBounds:
@@ -169,23 +169,23 @@ class TestQueryBounds:
     def test_an_aware_bound_need_not_match_the_series_offset(self):
         # Slicing is instant arithmetic, and any offset names the same instant.
         start = datetime(2024, 1, 1, 2, tzinfo=DENVER)
-        got = self.store.get_time_series(
-            self.zoned, time_range=(start.astimezone(timezone.utc), start + 2 * HOUR)
+        (got,) = self.store.read_by_ids_range(
+            [self.zoned], (start.astimezone(timezone.utc), start + 2 * HOUR)
         )
         assert len(got.data) == 2
 
     def test_a_wall_clock_bound_against_instants_is_refused(self):
         with pytest.raises(InvalidParameterError, match="wall clock|no zone"):
-            self.store.get_time_series(
-                self.zoned,
-                time_range=(datetime(2024, 1, 1, 2), datetime(2024, 1, 1, 4)),
+            self.store.read_by_ids_range(
+                [self.zoned],
+                (datetime(2024, 1, 1, 2), datetime(2024, 1, 1, 4)),
             )
 
     def test_an_instant_bound_against_wall_clocks_is_refused(self):
         with pytest.raises(InvalidParameterError, match="zoneless"):
-            self.store.get_time_series(
-                self.wall,
-                time_range=(
+            self.store.read_by_ids_range(
+                [self.wall],
+                (
                     datetime(2024, 1, 1, 2, tzinfo=timezone.utc),
                     datetime(2024, 1, 1, 4, tzinfo=timezone.utc),
                 ),
@@ -193,9 +193,9 @@ class TestQueryBounds:
 
     def test_both_ends_of_a_range_must_agree(self):
         with pytest.raises(InvalidParameterError, match="spelled differently"):
-            self.store.get_time_series(
-                self.zoned,
-                time_range=(
+            self.store.read_by_ids_range(
+                [self.zoned],
+                (
                     datetime(2024, 1, 1, 2, tzinfo=timezone.utc),
                     datetime(2024, 1, 1, 4),
                 ),
@@ -215,14 +215,14 @@ class TestMixedSelections:
     def test_an_unranged_bulk_read_is_unaffected(self):
         # Without a bound there is nothing for the two groups to disagree about,
         # and each series carries its own spelling back.
-        got = self.store.bulk_read([self.zoned, self.wall])
+        got = self.store.read_by_ids([self.zoned, self.wall])
         assert [s.time_reference for s in got] == ["utc", "zoneless"]
 
     def test_a_ranged_bulk_read_over_a_mixed_selection_is_refused(self):
         with pytest.raises(InvalidParameterError, match="zoneless"):
-            self.store.bulk_read(
+            self.store.read_by_ids_range(
                 [self.zoned, self.wall],
-                time_range=(
+                (
                     datetime(2024, 1, 1, tzinfo=timezone.utc),
                     datetime(2024, 1, 1, 4, tzinfo=timezone.utc),
                 ),
@@ -238,8 +238,8 @@ class TestMixedSelections:
         for zoneless, spelling in ((True, "zoneless"), (False, "utc")):
             reader = self.store.build_static_reader(HOUR, zoneless=zoneless)
             assert reader.grid()["time_reference"] == spelling
-            assert len(reader.groups()[0]["keys"]) == 1
-            assert len(self.store.list_time_series(zoneless=zoneless)) == 1
+            assert len(reader.groups()[0]["ids"]) == 1
+            assert len(self.store.list_metadata(zoneless=zoneless)) == 1
 
     def test_python_never_leaves_the_reference_unset(self):
         # Unset is reachable from the Rust core (and from a store written before
@@ -262,7 +262,7 @@ class TestMixedSelections:
         ):
             add(store, owner, series(initial))
         assert all(
-            row["time_reference"] is not None for row in store.list_time_series()
+            row["time_reference"] is not None for row in store.list_metadata()
         )
 
 
@@ -290,7 +290,7 @@ class TestReaderAxis:
         add(store, 3, series(instant.astimezone(timezone(timedelta(hours=5, minutes=30)))))
         reader = store.build_static_reader(HOUR)
         assert reader.grid()["time_reference"] == "utc"
-        assert len(reader.groups()[0]["keys"]) == 3
+        assert len(reader.groups()[0]["ids"]) == 3
         assert reader.timestamps()[0] == instant
 
 

@@ -7,7 +7,7 @@ use infrastore_core::{
     Features, OwnerCategory, SingleTimeSeries, Store, TimeSeriesData, TypedArray, create_store,
 };
 use infrastore_proto::pb::{
-    self, CountsReq, GetReq, KeysReq, ListReq, ResolutionsReq, VerifyReq,
+    self, GetCountsReq, GetResolutionsReq, ListMetadataReq, ReadByIdReq, VerifyIntegrityReq,
     catalog_store_client::CatalogStoreClient,
 };
 use infrastore_server::auth::ApiKeyInterceptor;
@@ -65,7 +65,7 @@ async fn channel(addr: &str) -> Channel {
 async fn missing_header_is_rejected() {
     let addr = spawn_authed(vec!["secret-1".into()]).await;
     let mut client = CatalogStoreClient::new(channel(&addr).await);
-    let err = client.get_counts(CountsReq {}).await.unwrap_err();
+    let err = client.get_counts(GetCountsReq {}).await.unwrap_err();
     assert_eq!(err.code(), tonic::Code::Unauthenticated);
 }
 
@@ -80,7 +80,7 @@ async fn wrong_key_is_rejected() {
             Ok(req)
         },
     );
-    let err = client.get_counts(CountsReq {}).await.unwrap_err();
+    let err = client.get_counts(GetCountsReq {}).await.unwrap_err();
     assert_eq!(err.code(), tonic::Code::Unauthenticated);
 }
 
@@ -95,7 +95,11 @@ async fn correct_key_succeeds() {
             Ok(req)
         },
     );
-    let resp = client.get_counts(CountsReq {}).await.unwrap().into_inner();
+    let resp = client
+        .get_counts(GetCountsReq {})
+        .await
+        .unwrap()
+        .into_inner();
     assert_eq!(resp.static_time_series, 1);
 }
 
@@ -119,7 +123,7 @@ async fn a_valid_key_works_across_several_rpcs() {
     // counts
     assert_eq!(
         client
-            .get_counts(CountsReq {})
+            .get_counts(GetCountsReq {})
             .await
             .unwrap()
             .into_inner()
@@ -129,7 +133,7 @@ async fn a_valid_key_works_across_several_rpcs() {
     // list
     assert_eq!(
         client
-            .list_time_series(ListReq::default())
+            .list_metadata(ListMetadataReq::default())
             .await
             .unwrap()
             .into_inner()
@@ -137,20 +141,21 @@ async fn a_valid_key_works_across_several_rpcs() {
             .len(),
         1
     );
-    // keys, then a get through the key that comes back
-    let keys = client
-        .get_time_series_keys(KeysReq {
-            owner_id: 1,
-            owner_category: pb::OwnerCategory::Component as i32,
+    // Identify, then read through the id that comes back.
+    let rows = client
+        .list_metadata(ListMetadataReq {
+            owner_id: Some(1),
+            owner_category: Some(pb::OwnerCategory::Component as i32),
+            ..Default::default()
         })
         .await
         .unwrap()
         .into_inner()
-        .keys;
-    assert_eq!(keys.len(), 1);
+        .metadata;
+    assert_eq!(rows.len(), 1);
     let resp = client
-        .get_time_series(GetReq {
-            key: Some(keys[0].clone()),
+        .read_by_id(ReadByIdReq {
+            id: rows[0].id.expect("a served row carries its id"),
             start_rfc3339: None,
             end_rfc3339: None,
             bounds_zoneless: None,
@@ -162,7 +167,7 @@ async fn a_valid_key_works_across_several_rpcs() {
     // resolutions
     assert_eq!(
         client
-            .get_resolutions(ResolutionsReq {
+            .get_resolutions(GetResolutionsReq {
                 time_series_type: None
             })
             .await
@@ -174,7 +179,7 @@ async fn a_valid_key_works_across_several_rpcs() {
     // verify
     assert!(
         client
-            .verify_integrity(VerifyReq {})
+            .verify_integrity(VerifyIntegrityReq {})
             .await
             .unwrap()
             .into_inner()
@@ -190,28 +195,25 @@ async fn every_rpc_is_rejected_without_a_key() {
 
     let codes = [
         client
-            .get_counts(CountsReq {})
+            .get_counts(GetCountsReq {})
             .await
             .map(|_| ())
             .unwrap_err()
             .code(),
         client
-            .list_time_series(ListReq::default())
+            .list_metadata(ListMetadataReq::default())
             .await
             .map(|_| ())
             .unwrap_err()
             .code(),
         client
-            .get_time_series_keys(KeysReq {
-                owner_id: 1,
-                owner_category: pb::OwnerCategory::Component as i32,
-            })
+            .list_metadata_by_ids(pb::ListMetadataByIdsReq { ids: vec![1] })
             .await
             .map(|_| ())
             .unwrap_err()
             .code(),
         client
-            .get_resolutions(ResolutionsReq {
+            .get_resolutions(GetResolutionsReq {
                 time_series_type: None,
             })
             .await
@@ -219,7 +221,7 @@ async fn every_rpc_is_rejected_without_a_key() {
             .unwrap_err()
             .code(),
         client
-            .verify_integrity(VerifyReq {})
+            .verify_integrity(VerifyIntegrityReq {})
             .await
             .map(|_| ())
             .unwrap_err()
@@ -249,7 +251,7 @@ async fn a_non_ascii_header_value_is_rejected_as_unauthenticated() {
                 Ok(req)
             },
         );
-        let err = client.get_counts(CountsReq {}).await.unwrap_err();
+        let err = client.get_counts(GetCountsReq {}).await.unwrap_err();
         assert_eq!(
             err.code(),
             tonic::Code::Unauthenticated,
@@ -267,6 +269,6 @@ async fn a_non_ascii_header_value_is_rejected_as_unauthenticated() {
             Ok(req)
         },
     );
-    let err = client.get_counts(CountsReq {}).await.unwrap_err();
+    let err = client.get_counts(GetCountsReq {}).await.unwrap_err();
     assert_eq!(err.code(), tonic::Code::Unauthenticated, "{err:?}");
 }

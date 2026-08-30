@@ -53,7 +53,7 @@ end
 # via `dlsym(dlopen(lib_path()), fname)` reopens the library each time — bumping
 # its reference count with no matching `dlclose`, and walking the dynamic symbol
 # table from scratch — about 190x the cost of a cached lookup, measured over a
-# `list_time_series` loop. `_cached_dlsym` opens the library at most once and
+# `list_metadata` loop. `_cached_dlsym` opens the library at most once and
 # memoizes each symbol thereafter; the lock covers both the lazy `dlopen` and
 # the dict, since Julia may call into this from multiple tasks.
 const _SYMBOL_CACHE_LOCK = ReentrantLock()
@@ -370,7 +370,7 @@ series that recorded no reference at all.
 
 ```julia
 using TimeZones
-series = get_time_series(SingleTimeSeries, store, key)
+series = read_by_id(store, id)
 zoned_timestamp(series)   # 2024-01-01T00:00:00-07:00
 ```
 """

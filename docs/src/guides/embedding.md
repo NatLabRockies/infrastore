@@ -32,9 +32,9 @@ richer builds it on top.
 ## Map Your Model Onto the Catalog
 
 A series is addressed by an **owner** plus a **key**
-([Data Model § Keys](../explanation/data-model.md#keys)). Deciding how your objects project onto
-those fields is the first integration decision, and the one hardest to change later because it is
-written into every user's artifact.
+([Data Model § Identity](../explanation/data-model.md#identity)). Deciding how your objects project
+onto those fields is the first integration decision, and the one hardest to change later because it
+is written into every user's artifact.
 
 **`owner_id` is a stable `i64`.** The store keys on it and never sees your object identities. If
 your components are identified by UUIDs (both shipped consumers are), you allocate an integer per
@@ -82,16 +82,19 @@ may change.
 
 ## Exact Keys, Subset Filters
 
-The two lookup families match features differently, and a parent package that offers its own key
-resolution must know which it is calling:
+A filter matches features two ways, and a parent package that offers its own resolution must know
+which it asked for:
 
-- A **`TimeSeriesKey`** — whether built from attributes or returned by an add — is matched
-  **exactly**: every field including the full feature map. `get_time_series(key)`,
-  `has_time_series(key)`, `remove_time_series(key)` and the attribute-based getters behind them find
-  one row or none.
-- A **list filter** (`list_time_series`, `list_keys`, `has_any_time_series`, `remove_by_filter`,
-  `list_names`, …) matches `features` as a **subset**: a series matches when it carries every
-  requested pair, whatever else it carries.
+- **`features`** matches as a **subset**: a series matches when it carries every requested pair,
+  whatever else it carries. This is the useful default for a listing — "every series tagged
+  `scenario=high`".
+- **`exact_features`** pins the whole set by its content hash. An existence check posed against a
+  complete identity wants this one, or a sibling carrying an extra feature would answer yes about a
+  series that does not exist. It is an equality on an indexed column, so it is also the cheaper of
+  the two.
+
+Both are on the same [`ListFilter`](../reference/rust-api.md#listfilter), which every listing,
+existence probe, filtered removal and reader build takes.
 
 InfrastructureSystems.jl resolves user queries by subset, so it cannot delegate that resolution to a
 keyed lookup; it lists with the filter and then decides what more than one match means. A parent
@@ -233,8 +236,8 @@ access: build a `StaticReader` or `ForecastReader` once, then step it. A `Foreca
 distinct backing array once per step and fans it out to every component referencing it, so a
 forecast shared by a hundred components costs one decompression; `entry_slot` lets your own
 per-component work dedup the same way. The inverse access — one component's full history — is the
-slow direction, and `bulk_read` over many keys is the right call when you need it, not a loop of
-`get_time_series`. See the per-language sections:
+slow direction, and `read_by_ids` over many ids is the right call when you need it, not a loop of
+`read_by_id`. See the per-language sections:
 [Python](./python.md#per-timestamp-reads-simulation-loop),
 [Julia](./julia.md#per-timestamp-reads-simulation-loop), [Rust](./rust.md).
 

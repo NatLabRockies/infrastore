@@ -1,12 +1,12 @@
 [server]
 host = "0.0.0.0"
 port = 50051
-# Most keys one BulkRead may name (default 4096). BulkRead is the only RPC whose
-# response size the caller chooses -- it returns a full copy of a series per key
-# and does not collapse duplicates -- so this is what stops a small request
-# driving a huge server-side allocation. It bounds the count, not the bytes, so
-# lower it if the store holds very large series.
-# max_bulk_read_keys = 4096
+# Most ids one ReadByIds may name (default 4096). ReadByIds is the only RPC
+# whose response size the caller chooses -- it returns a full copy of a series
+# per id and does not collapse duplicates -- so this is what stops a small
+# request driving a huge server-side allocation. It bounds the count, not the
+# bytes, so lower it if the store holds very large series.
+# max_read_ids = 4096
 
 [data]
 files = ["./store.h5"]

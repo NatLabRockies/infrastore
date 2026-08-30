@@ -75,7 +75,7 @@ async fn every_spelling_survives_the_wire_unchanged() {
     let client = RemoteClient::connect(addr).await.unwrap();
 
     let metas = client
-        .list_time_series(None, None, None, None, None, None, None, None, None, None)
+        .list_metadata(None, None, None, None, None, None, None, None, None, None)
         .await
         .unwrap();
     assert_eq!(metas.len(), 5);
@@ -100,20 +100,19 @@ async fn every_spelling_survives_the_wire_unchanged() {
         );
     }
 
-    // A key carries it too, not just the metadata row.
-    let keys = client
-        .list_keys(
-            None, None, None, None, None, None, None, None, None, None, false,
-        )
+    // A row fetched by its own id carries it too, not just a listing's rows.
+    let rows = client
+        .list_metadata(None, None, None, None, None, None, None, None, None, None)
         .await
         .unwrap();
-    let (zoneless, _) = keys
+    let zoneless = rows
         .iter()
-        .find(|(k, _)| k.identity().owner_id == 4)
+        .find(|m| m.owner_id == 4)
+        .and_then(|m| m.id)
         .expect("the zoneless series");
     assert_eq!(
         client
-            .get_metadata(zoneless.identity())
+            .get_metadata_by_id(zoneless)
             .await
             .unwrap()
             .time_reference,
@@ -127,7 +126,7 @@ async fn the_zoneless_filter_splits_the_two_coherence_groups() {
     let client = RemoteClient::connect(addr).await.unwrap();
 
     let zoneless = client
-        .list_time_series(
+        .list_metadata(
             None,
             None,
             None,
@@ -148,7 +147,7 @@ async fn the_zoneless_filter_splits_the_two_coherence_groups() {
     // the series that recorded no spelling at all. An unspecified reference is
     // not a floating third group.
     let zoned = client
-        .list_time_series(
+        .list_metadata(
             None,
             None,
             None,
@@ -172,19 +171,15 @@ async fn a_bound_spelled_the_wrong_way_is_refused_over_the_wire() {
     let addr = spawn_server(store_with_every_spelling()).await;
     let client = RemoteClient::connect(addr).await.unwrap();
 
-    let keys = client
-        .list_keys(
-            None, None, None, None, None, None, None, None, None, None, false,
-        )
+    let rows = client
+        .list_metadata(None, None, None, None, None, None, None, None, None, None)
         .await
         .unwrap();
     let by_owner = |owner: i64| {
-        keys.iter()
-            .find(|(k, _)| k.identity().owner_id == owner)
+        rows.iter()
+            .find(|m| m.owner_id == owner)
+            .and_then(|m| m.id)
             .unwrap_or_else(|| panic!("owner {owner}"))
-            .0
-            .identity()
-            .clone()
     };
 
     let start = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
@@ -194,7 +189,7 @@ async fn a_bound_spelled_the_wrong_way_is_refused_over_the_wire() {
     // the refusal has to survive as a refusal -- a bound whose spelling was
     // dropped in conversion would silently return the wrong two rows instead.
     let err = client
-        .get_time_series(&by_owner(4), Some(TimeRange::new(start, end)))
+        .read_by_id(by_owner(4), Some(TimeRange::new(start, end)))
         .await
         .unwrap_err();
     let msg = err.to_string();
@@ -205,7 +200,7 @@ async fn a_bound_spelled_the_wrong_way_is_refused_over_the_wire() {
 
     // And the reverse: a wall-clock bound against a series recording instants.
     let err = client
-        .get_time_series(&by_owner(1), Some(TimeRange::zoneless(start, end)))
+        .read_by_id(by_owner(1), Some(TimeRange::zoneless(start, end)))
         .await
         .unwrap_err();
     let msg = err.to_string();
@@ -216,12 +211,12 @@ async fn a_bound_spelled_the_wrong_way_is_refused_over_the_wire() {
 
     // Matched both ways, the slice is taken.
     let data = client
-        .get_time_series(&by_owner(1), Some(TimeRange::new(start, end)))
+        .read_by_id(by_owner(1), Some(TimeRange::new(start, end)))
         .await
         .unwrap();
     assert_eq!(data.as_single().unwrap().length, 2);
     let data = client
-        .get_time_series(&by_owner(4), Some(TimeRange::zoneless(start, end)))
+        .read_by_id(by_owner(4), Some(TimeRange::zoneless(start, end)))
         .await
         .unwrap();
     assert_eq!(data.as_single().unwrap().length, 2);
@@ -232,14 +227,14 @@ async fn a_ranged_bulk_read_cannot_span_both_coherence_groups() {
     let addr = spawn_server(store_with_every_spelling()).await;
     let client = RemoteClient::connect(addr).await.unwrap();
 
-    let keys = client
-        .list_keys(
-            None, None, None, None, None, None, None, None, None, None, false,
-        )
+    let rows = client
+        .list_metadata(None, None, None, None, None, None, None, None, None, None)
         .await
         .unwrap();
-    let identities: Vec<_> = keys.iter().map(|(k, _)| k.identity().clone()).collect();
-    let refs: Vec<&_> = identities.iter().collect();
+    let ids: Vec<_> = rows
+        .iter()
+        .map(|m| m.id.expect("a served row carries its id"))
+        .collect();
 
     let start = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let end = Utc.with_ymd_and_hms(2024, 1, 1, 2, 0, 0).unwrap();
@@ -247,7 +242,7 @@ async fn a_ranged_bulk_read_cannot_span_both_coherence_groups() {
     // The selection holds both a zoneless series and instant-bearing ones, so
     // one bound cannot mean the right thing for all of them.
     let err = client
-        .bulk_read(&refs, Some(TimeRange::new(start, end)))
+        .read_by_ids(&ids, Some(TimeRange::new(start, end)))
         .await
         .unwrap_err();
     let msg = err.to_string();
@@ -262,14 +257,13 @@ async fn a_ranged_bulk_read_cannot_span_both_coherence_groups() {
 
     // Narrowed to one group it succeeds, which is the constructive remedy the
     // `zoneless` filter exists to provide.
-    let zoned: Vec<_> = identities
+    let zoned: Vec<_> = rows
         .iter()
-        .filter(|k| k.owner_id != 4)
-        .cloned()
+        .filter(|m| m.owner_id != 4)
+        .map(|m| m.id.unwrap())
         .collect();
-    let refs: Vec<&_> = zoned.iter().collect();
     let out = client
-        .bulk_read(&refs, Some(TimeRange::new(start, end)))
+        .read_by_ids(&zoned, Some(TimeRange::new(start, end)))
         .await
         .unwrap();
     assert_eq!(out.len(), 4);
@@ -279,8 +273,7 @@ async fn a_ranged_bulk_read_cannot_span_both_coherence_groups() {
 
     // An unranged bulk read over the whole mixed selection is fine: without
     // bounds there is nothing to disagree about.
-    let refs: Vec<&_> = identities.iter().collect();
-    assert_eq!(client.bulk_read(&refs, None).await.unwrap().len(), 5);
+    assert_eq!(client.read_by_ids(&ids, None).await.unwrap().len(), 5);
 }
 
 /// The irregular type carries a spelling on the same terms, and it is the one
@@ -314,7 +307,7 @@ async fn an_irregular_series_carries_its_spelling_too() {
     let addr = spawn_server(store).await;
     let client = RemoteClient::connect(addr).await.unwrap();
     let metas = client
-        .list_time_series(None, None, None, None, None, None, None, None, None, None)
+        .list_metadata(None, None, None, None, None, None, None, None, None, None)
         .await
         .unwrap();
     assert_eq!(metas[0].time_reference, Some(TimeReference::Zoneless));

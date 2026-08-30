@@ -38,13 +38,19 @@ end
 # ---- StaticReader ---------------------------------------------------------
 
 """
-One `(dtype, element_shape)` columnar group of a [`StaticReader`]. `keys[j]`
-identifies column `j` of the values matrix returned by [`static_values`].
+One `(dtype, element_shape)` columnar group of a [`StaticReader`]. `ids[j]` is
+the catalog association id of column `j` of the values matrix returned by
+[`static_values`].
+
+A group carries ids, not a snapshot of each column's attributes: resolve one
+with [`get_metadata_by_id`](@ref) to recover an owner or a name. That resolves
+against the row as it is *now*, so a rename between building the reader and
+reading a column is visible — where a snapshot would have frozen the old name.
 """
 struct StaticGroup
     dtype::DataType
     element_shape::Vector{Int}
-    keys::Vector{TimeSeriesKey}
+    ids::Vector{Int64}
 end
 
 """
@@ -107,19 +113,19 @@ function _static_group_layout(reader::StaticReader, gi::Integer)
         )::Int32
         _check(code)
     end
-    keys = Vector{TimeSeriesKey}(undef, Int(out_ncols[]))
+    ids = Vector{Int64}(undef, Int(out_ncols[]))
     for col in 0:(Int(out_ncols[]) - 1)
-        out_key = Ref{Ptr{Cvoid}}(C_NULL)
-        code = @ccall lib_path().infrastore_static_reader_group_key(
+        out_id = Ref{Int64}(0)
+        code = @ccall lib_path().infrastore_static_reader_group_id(
             reader::Ptr{Cvoid},
             UInt64(gi)::UInt64,
             UInt64(col)::UInt64,
-            out_key::Ref{Ptr{Cvoid}},
+            out_id::Ref{Int64},
         )::Int32
         _check(code)
-        keys[col + 1] = TimeSeriesKey(out_key[])
+        ids[col + 1] = out_id[]
     end
-    return StaticGroup(_julia_dtype(out_dtype[]), Int.(shape), keys)
+    return StaticGroup(_julia_dtype(out_dtype[]), Int.(shape), ids)
 end
 
 """
@@ -137,7 +143,7 @@ pass no `resolution`: an irregular series has none, and the matched series must
 instead share one timestamp vector (read it with [`static_timestamps`]), which is
 also what pools their arrays on disk.
 
-The remaining keywords are [`list_keys`](@ref)'s filters, `name_glob` (a
+The remaining keywords are [`list_metadata`](@ref)'s filters, `name_glob` (a
 case-sensitive SQLite `GLOB` pattern over the name) included.
 """
 function build_static_reader(
@@ -339,7 +345,8 @@ end
 
 The values from the most recent [`static_read!`] for group `group_index`
 (1-based), as a column-major array of size `(num_columns, element_shape...)`.
-Column `j` corresponds to `static_groups(reader)[group_index].keys[j]`.
+Column `j` corresponds to `static_groups(reader)[group_index].ids[j]`; resolve it
+with [`get_metadata_by_id`](@ref) to recover the series it came from.
 """
 function static_values(reader::StaticReader, group_index::Integer)
     group = reader.groups[group_index]
@@ -353,7 +360,7 @@ function static_values(reader::StaticReader, group_index::Integer)
             out_len::Ref{UInt64},
         )::Int32
     )
-    dims = vcat(length(group.keys), group.element_shape)
+    dims = vcat(length(group.ids), group.element_shape)
     return _reader_values(out_ptr[], out_len[], group.dtype, dims)
 end
 
@@ -371,7 +378,7 @@ materialize each unique window only once.
 struct ForecastEntry
     dtype::DataType
     window_shape::Vector{Int}
-    key::TimeSeriesRef
+    id::Int64
     slot::Int
 end
 
@@ -429,10 +436,10 @@ function _forecast_entry_layout(reader::ForecastReader, ei::Integer)
         )::Int32
         _check(code)
     end
-    out_key = Ref{Ptr{Cvoid}}(C_NULL)
+    out_id = Ref{Int64}(0)
     _check(
-        @ccall lib_path().infrastore_forecast_reader_entry_key(
-            reader::Ptr{Cvoid}, UInt64(ei)::UInt64, out_key::Ref{Ptr{Cvoid}}
+        @ccall lib_path().infrastore_forecast_reader_entry_id(
+            reader::Ptr{Cvoid}, UInt64(ei)::UInt64, out_id::Ref{Int64}
         )::Int32
     )
     out_slot = Ref{UInt64}(0)
@@ -442,7 +449,7 @@ function _forecast_entry_layout(reader::ForecastReader, ei::Integer)
         )::Int32
     )
     return ForecastEntry(
-        _julia_dtype(out_dtype[]), Int.(shape), TimeSeriesKey(out_key[]), Int(out_slot[])
+        _julia_dtype(out_dtype[]), Int.(shape), out_id[], Int(out_slot[])
     )
 end
 
@@ -458,7 +465,7 @@ A `Deterministic` reader is abstract — it also includes
 `resolution` (a `Period`) is required; matched forecasts must share one window
 timeline.
 
-The remaining keywords are [`list_keys`](@ref)'s filters, `name_glob` (a
+The remaining keywords are [`list_metadata`](@ref)'s filters, `name_glob` (a
 case-sensitive SQLite `GLOB` pattern over the name) included.
 """
 function build_forecast_reader(

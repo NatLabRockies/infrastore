@@ -41,12 +41,12 @@ def test_in_memory_round_trip():
         owner_category=OwnerCategory.Component,
         time_series=s,
         units="MW",
-    ).key
-    assert key.owner_id == 42
-    assert key.owner_category == OwnerCategory.Component
-    assert key.time_series_type == TimeSeriesType.SingleTimeSeries
+    )
+    assert store.get_metadata_by_id(key)['owner_id'] == 42
+    assert store.get_metadata_by_id(key)["owner_category"] == "Component"
+    assert store.get_metadata_by_id(key)["time_series_type"] == "SingleTimeSeries"
 
-    got = store.get_time_series(key)
+    got = store.read_by_id(key)
     assert got.length == 24
     assert got.initial_timestamp == s.initial_timestamp
     assert got.name == "load"
@@ -63,15 +63,15 @@ def test_persistent_round_trip(tmp_path):
         owner_type="Generator",
         owner_category=OwnerCategory.Component,
         time_series=s,
-    ).key
+    )
     store.flush()
     del store  # drop file handle
 
     reopened = Store.open(path=str(path), read_only=True)
-    keys = reopened.get_time_series_keys(1, OwnerCategory.Component)
+    keys = reopened.list_metadata(owner_id=1, owner_category=OwnerCategory.Component)
     assert len(keys) == 1
-    assert keys[0].owner_category == OwnerCategory.Component
-    got = reopened.get_time_series(keys[0])
+    assert keys[0]["owner_category"] == "Component"
+    got = reopened.read_by_id(keys[0]["id"])
     assert got.name == "load"
     np.testing.assert_array_equal(np.asarray(got.data), np.asarray(s.data))
 
@@ -105,8 +105,8 @@ def test_compression_round_trip(tmp_path, kwargs):
     if expected == "deflate":
         assert comp["level"] == kwargs.get("compression_level", 3)
         assert comp["shuffle"] == kwargs.get("shuffle", True)
-    keys = reopened.get_time_series_keys(1, OwnerCategory.Component)
-    got = reopened.get_time_series(keys[0])
+    keys = reopened.list_metadata(owner_id=1, owner_category=OwnerCategory.Component)
+    got = reopened.read_by_id(keys[0]["id"])
     np.testing.assert_array_equal(np.asarray(got.data), np.asarray(s.data))
     assert reopened.verify_integrity() == {"ok": True, "errors": []}
 
@@ -146,10 +146,10 @@ def test_features_disambiguate_keys():
         features={"model_year": 2035},
     )
 
-    all_rows = store.list_time_series(owner_id=1)
+    all_rows = store.list_metadata(owner_id=1)
     assert len(all_rows) == 2
 
-    only_2035 = store.list_time_series(features={"model_year": 2035})
+    only_2035 = store.list_metadata(features={"model_year": 2035})
     assert len(only_2035) == 1
     assert only_2035[0]["features"]["model_year"] == 2035
 
@@ -165,10 +165,10 @@ def test_duplicate_key_raises():
 def test_missing_key_raises_not_found():
     store = Store.create(in_memory=True)
     s = make_series()
-    key = store.add_time_series(1, "Generator", OwnerCategory.Component, s).key
-    store.remove_time_series(key)
+    key = store.add_time_series(1, "Generator", OwnerCategory.Component, s)
+    store.remove_by_ids([key])
     with pytest.raises(NotFoundError):
-        store.get_time_series(key)
+        store.read_by_id(key)
 
 
 def test_time_range_slicing():
@@ -177,11 +177,11 @@ def test_time_range_slicing():
     resolution = timedelta(hours=1)
     data = np.array([10.0, 20.0, 30.0, 40.0, 50.0, 60.0])
     s = SingleTimeSeries(initial, resolution, data, "load")
-    key = store.add_time_series(1, "Generator", OwnerCategory.Component, s).key
+    key = store.add_time_series(1, "Generator", OwnerCategory.Component, s)
 
     start = initial + timedelta(hours=2)
     end = initial + timedelta(hours=5)
-    got = store.get_time_series(key, time_range=(start, end))
+    got = store.read_by_ids_range([key], (start, end))[0]
     assert got.length == 3
     assert got.initial_timestamp == start
     np.testing.assert_array_equal(np.asarray(got.data), np.array([30.0, 40.0, 50.0]))
@@ -231,8 +231,8 @@ def test_numpy_array_received_as_ndarray():
     """Sanity check: data round-tripped is a numpy ndarray, with the original dtype."""
     store = Store.create(in_memory=True)
     s = make_series()
-    key = store.add_time_series(1, "Generator", OwnerCategory.Component, s).key
-    got = store.get_time_series(key)
+    key = store.add_time_series(1, "Generator", OwnerCategory.Component, s)
+    got = store.read_by_id(key)
     arr = np.asarray(got.data)
     assert isinstance(arr, np.ndarray)
     assert arr.dtype == np.float64
@@ -256,8 +256,8 @@ def test_byte_order_is_normalised_not_reinterpreted(descr):
     expected = np.array([1, 2, 3], dtype=descr)
 
     series = SingleTimeSeries(initial, timedelta(hours=1), expected, "load")
-    key = store.add_time_series(1, "Generator", OwnerCategory.Component, series).key
-    got = np.asarray(store.get_time_series(key).data)
+    key = store.add_time_series(1, "Generator", OwnerCategory.Component, series)
+    got = np.asarray(store.read_by_id(key).data)
 
     # Values survive, and the caller gets them in the host's own byte order.
     assert np.array_equal(got, expected)
@@ -278,8 +278,8 @@ def test_single_byte_dtypes_are_unaffected_by_byte_order():
         series = SingleTimeSeries(initial, timedelta(hours=1), values, "load")
         key = store.add_time_series(
             owner + 1, "Generator", OwnerCategory.Component, series
-        ).key
-        got = np.asarray(store.get_time_series(key).data)
+        )
+        got = np.asarray(store.read_by_id(key).data)
         assert np.array_equal(got, values)
         assert got.dtype == values.dtype
 
@@ -293,8 +293,8 @@ def test_non_contiguous_big_endian_array_round_trips():
     assert not expected.flags["C_CONTIGUOUS"]
 
     series = SingleTimeSeries(initial, timedelta(hours=1), expected, "load")
-    key = store.add_time_series(1, "Generator", OwnerCategory.Component, series).key
-    got = np.asarray(store.get_time_series(key).data)
+    key = store.add_time_series(1, "Generator", OwnerCategory.Component, series)
+    got = np.asarray(store.read_by_id(key).data)
 
     assert np.array_equal(got, expected)
     assert got.shape == expected.shape
@@ -347,8 +347,8 @@ def test_resolution_must_be_a_whole_positive_millisecond():
 
     # One whole millisecond is the finest grid there is, and it works.
     series = SingleTimeSeries(initial, timedelta(milliseconds=1), values, "load")
-    key = store.add_time_series(1, "Generator", OwnerCategory.Component, series).key
-    assert len(np.asarray(store.get_time_series(key).data)) == 4
+    key = store.add_time_series(1, "Generator", OwnerCategory.Component, series)
+    assert len(np.asarray(store.read_by_id(key).data)) == 4
 
 
 def test_omitted_descriptor_kwargs_keep_what_the_series_carries():
@@ -374,14 +374,14 @@ def test_omitted_descriptor_kwargs_keep_what_the_series_carries():
     )
     key = store.add_time_series(
         1, "Generator", OwnerCategory.Component, series, **described
-    ).key
+    )
 
     # Read it back and re-add it under a new owner, supplying nothing.
-    round_tripped = store.get_time_series(key)
+    round_tripped = store.read_by_id(key)
     key2 = store.add_time_series(
         2, "Generator", OwnerCategory.Component, round_tripped
-    ).key
-    meta = store.get_metadata(key2)
+    )
+    meta = store.get_metadata_by_id(key2)
     for field, expected in described.items():
         assert meta[field] == expected, field
 
@@ -392,11 +392,11 @@ def test_omitted_descriptor_kwargs_keep_what_the_series_carries():
                 "owner_id": 3,
                 "owner_type": "Generator",
                 "owner_category": OwnerCategory.Component,
-                "time_series": store.get_time_series(key),
+                "time_series": store.read_by_id(key),
             }
         ]
     )
-    meta3 = store.get_metadata(added3.key)
+    meta3 = store.get_metadata_by_id(added3)
     for field, expected in described.items():
         assert meta3[field] == expected, f"bulk: {field}"
 
@@ -405,11 +405,11 @@ def test_omitted_descriptor_kwargs_keep_what_the_series_carries():
         4,
         "Generator",
         OwnerCategory.Component,
-        store.get_time_series(key),
+        store.read_by_id(key),
         units="kW",
-    ).key
-    assert store.get_metadata(key4)["units"] == "kW"
-    assert store.get_metadata(key4)["quantity_kind"] == "ActivePower"
+    )
+    assert store.get_metadata_by_id(key4)["units"] == "kW"
+    assert store.get_metadata_by_id(key4)["quantity_kind"] == "ActivePower"
 
 
 def test_non_sequential_round_trip_and_slice():
@@ -423,13 +423,13 @@ def test_non_sequential_round_trip_and_slice():
     series = NonSequentialTimeSeries(timestamps, np.array([10.0, 20.0, 30.0]), "events")
     key = store.add_time_series(
         1, "Generator", OwnerCategory.Component, series,
-    ).key
+    )
 
-    assert key.time_series_type == TimeSeriesType.NonSequentialTimeSeries
-    assert key.resolution is None
-    got = store.get_time_series(
-        key,
-        time_range=(initial + timedelta(hours=1), initial + timedelta(days=3)),
+    assert store.get_metadata_by_id(key)["time_series_type"] == "NonSequentialTimeSeries"
+    assert store.get_metadata_by_id(key)["resolution"] is None
+    (got,) = store.read_by_ids_range(
+        [key],
+        (initial + timedelta(hours=1), initial + timedelta(days=3)),
     )
     assert isinstance(got, NonSequentialTimeSeries)
     assert got.name == "events"
@@ -455,8 +455,8 @@ def test_dtype_round_trip():
 
     for dtype in (np.int64, np.int32, np.float32, np.uint64):
         s = SingleTimeSeries(initial, res, np.array([1, 2, 3], dtype=dtype), f"ts_{dtype.__name__}")
-        key = store.add_time_series(1, "Generator", OwnerCategory.Component, s).key
-        arr = np.asarray(store.get_time_series(key).data)
+        key = store.add_time_series(1, "Generator", OwnerCategory.Component, s)
+        arr = np.asarray(store.read_by_id(key).data)
         assert arr.dtype == dtype
         assert arr.tolist() == [1, 2, 3]
 
@@ -478,10 +478,10 @@ def test_add_time_series_bulk(tmp_path):
     ]
     added = store.add_time_series_bulk(items)
     assert len(added) == 10
-    keys = [a.key for a in added]
+    keys = [a for a in added]
     for i, key in enumerate(keys):
-        assert key.owner_id == i
-        got = store.get_time_series(key)
+        assert store.get_metadata_by_id(key)['owner_id'] == i
+        got = store.read_by_id(key)
         np.testing.assert_array_equal(
             np.asarray(got.data), np.arange(24, dtype=np.float64) + float(i)
         )
@@ -500,20 +500,20 @@ def test_bulk_read(tmp_path):
         }
         for i in range(8)
     ]
-    keys = [a.key for a in store.add_time_series_bulk(items)]
+    keys = [a for a in store.add_time_series_bulk(items)]
 
-    series = store.bulk_read(keys)
+    series = store.read_by_ids(keys)
     assert len(series) == 8
     for i, s in enumerate(series):
         expected = np.arange(12, dtype=np.float64) + float(i * 10)
         np.testing.assert_array_equal(np.asarray(s.data), expected)
         # Same as the per-key read, in order.
         np.testing.assert_array_equal(
-            np.asarray(s.data), np.asarray(store.get_time_series(keys[i]).data)
+            np.asarray(s.data), np.asarray(store.read_by_id(keys[i]).data)
         )
 
     # Empty input returns an empty list.
-    assert store.bulk_read([]) == []
+    assert store.read_by_ids([]) == []
 
 
 def test_add_time_series_bulk_rolls_back_on_error():
@@ -527,7 +527,7 @@ def test_add_time_series_bulk_rolls_back_on_error():
     }
     with pytest.raises(DuplicateTimeSeriesError):
         store.add_time_series_bulk([dup, dict(dup)])
-    assert store.get_time_series_keys(1, OwnerCategory.Component) == []
+    assert store.list_metadata(owner_id=1, owner_category=OwnerCategory.Component) == []
 
 
 def test_add_time_series_bulk_rejects_missing_keys():
@@ -554,7 +554,7 @@ def test_add_time_series_bulk_rejects_unknown_keys():
     with pytest.raises(InvalidParameterError, match="unit_sytem"):
         store.add_time_series_bulk([item])
     # Nothing was written.
-    assert store.list_time_series() == []
+    assert store.list_metadata() == []
     # The error names which item is at fault, and what would have worked.
     with pytest.raises(InvalidParameterError, match="item 1"):
         store.add_time_series_bulk([{k: v for k, v in item.items() if k != "unit_sytem"}, item])
@@ -575,7 +575,7 @@ def _add_for_category(store, owner_id, category, name):
         owner_type="Generator" if category == OwnerCategory.Component else "Outage",
         owner_category=category,
         time_series=make_series(name=name),
-    ).key
+    )
 
 
 def test_owner_pair_distinguishes_same_id_across_categories():
@@ -584,15 +584,18 @@ def test_owner_pair_distinguishes_same_id_across_categories():
     comp_key = _add_for_category(store, 7, OwnerCategory.Component, "comp")
     supp_key = _add_for_category(store, 7, OwnerCategory.SupplementalAttribute, "supp")
 
-    assert comp_key.owner_category == OwnerCategory.Component
-    assert supp_key.owner_category == OwnerCategory.SupplementalAttribute
+    assert store.get_metadata_by_id(comp_key)["owner_category"] == "Component"
+    assert (
+        store.get_metadata_by_id(supp_key)["owner_category"]
+        == "SupplementalAttribute"
+    )
 
-    comp_keys = store.get_time_series_keys(7, OwnerCategory.Component)
-    supp_keys = store.get_time_series_keys(7, OwnerCategory.SupplementalAttribute)
+    comp_keys = store.list_metadata(owner_id=7, owner_category=OwnerCategory.Component)
+    supp_keys = store.list_metadata(owner_id=7, owner_category=OwnerCategory.SupplementalAttribute)
     assert len(comp_keys) == 1
     assert len(supp_keys) == 1
-    assert store.get_time_series(comp_keys[0]).name == "comp"
-    assert store.get_time_series(supp_keys[0]).name == "supp"
+    assert store.read_by_id(comp_keys[0]["id"]).name == "comp"
+    assert store.read_by_id(supp_keys[0]["id"]).name == "supp"
 
 
 def test_list_time_series_emits_and_filters_owner_category():
@@ -600,14 +603,14 @@ def test_list_time_series_emits_and_filters_owner_category():
     _add_for_category(store, 1, OwnerCategory.Component, "comp")
     _add_for_category(store, 1, OwnerCategory.SupplementalAttribute, "supp")
 
-    all_rows = store.list_time_series(owner_id=1)
+    all_rows = store.list_metadata(owner_id=1)
     assert len(all_rows) == 2
     assert {r["owner_category"] for r in all_rows} == {
         "Component",
         "SupplementalAttribute",
     }
 
-    comp_rows = store.list_time_series(
+    comp_rows = store.list_metadata(
         owner_id=1, owner_category=OwnerCategory.Component
     )
     assert len(comp_rows) == 1
@@ -624,8 +627,8 @@ def test_clear_time_series_for_owner_pair():
         owner_id=1, owner_category=OwnerCategory.Component
     )
     assert removed == 1
-    assert store.get_time_series_keys(1, OwnerCategory.Component) == []
-    assert len(store.get_time_series_keys(1, OwnerCategory.SupplementalAttribute)) == 1
+    assert store.list_metadata(owner_id=1, owner_category=OwnerCategory.Component) == []
+    assert len(store.list_metadata(owner_id=1, owner_category=OwnerCategory.SupplementalAttribute)) == 1
 
 
 def test_clear_time_series_all():
@@ -635,7 +638,7 @@ def test_clear_time_series_all():
 
     removed = store.clear_time_series()
     assert removed == 2
-    assert store.list_time_series() == []
+    assert store.list_metadata() == []
 
 
 def test_clear_time_series_requires_both_or_neither():
@@ -652,17 +655,19 @@ def test_replace_owner():
 
     updated = store.replace_owner(1, 2, OwnerCategory.Component)
     assert updated == 1
-    assert store.get_time_series_keys(1, OwnerCategory.Component) == []
-    moved = store.get_time_series_keys(2, OwnerCategory.Component)
+    assert store.list_metadata(owner_id=1, owner_category=OwnerCategory.Component) == []
+    moved = store.list_metadata(owner_id=2, owner_category=OwnerCategory.Component)
     assert len(moved) == 1
-    assert moved[0].owner_id == 2
-    assert store.get_time_series(moved[0]).name == "comp"
+    assert moved[0]['owner_id'] == 2
+    assert store.read_by_id(moved[0]["id"]).name == "comp"
 
 
-def test_key_repr_includes_owner_category():
+def test_a_catalog_row_reports_its_owner_category():
+    # The old opaque key carried the category in its `repr`; a row carries it as
+    # a field, which is what a caller actually reads.
     store = Store.create(in_memory=True)
     key = _add_for_category(store, 1, OwnerCategory.Component, "comp")
-    assert "owner_category" in repr(key)
+    assert store.get_metadata_by_id(key)["owner_category"] == "Component"
 
 
 # ---- timezone handling -----------------------------------------------------
@@ -676,7 +681,7 @@ def test_key_repr_includes_owner_category():
 
 
 def _values(store, key):
-    return store.get_time_series(key).data.tolist()
+    return store.read_by_id(key).data.tolist()
 
 
 def test_aware_datetimes_in_any_zone_name_the_same_instant():
@@ -697,8 +702,8 @@ def test_aware_datetimes_in_any_zone_name_the_same_instant():
         # The constructor normalises: the series reports the same UTC instant
         # whichever zone it was handed.
         assert ts.initial_timestamp == utc, when.tzinfo
-        key = store.add_time_series(1, "Generator", OwnerCategory.Component, ts).key
-        assert store.get_time_series(key).initial_timestamp == utc
+        key = store.add_time_series(1, "Generator", OwnerCategory.Component, ts)
+        assert store.read_by_id(key).initial_timestamp == utc
 
 
 def test_a_zone_is_read_by_its_offset_not_by_what_it_claims_to_equal():
@@ -768,15 +773,15 @@ def test_every_instant_argument_accepts_a_named_zone():
         "Generator",
         OwnerCategory.Component,
         SingleTimeSeries(start.astimezone(denver), timedelta(hours=1), data, "load"),
-    ).key
+    )
 
     # get_time_series / bulk_read time ranges.
     window = (
         start.astimezone(denver),
         (start + timedelta(hours=4)).astimezone(denver),
     )
-    assert _values(store, key)[:4] == store.get_time_series(key, time_range=window).data.tolist()
-    assert store.bulk_read([key], time_range=window)[0].data.tolist() == [0.0, 1.0, 2.0, 3.0]
+    assert _values(store, key)[:4] == store.read_by_ids_range([key], window)[0].data.tolist()
+    assert store.read_by_ids_range([key], window)[0].data.tolist() == [0.0, 1.0, 2.0, 3.0]
 
     # NonSequentialTimeSeries timestamps.
     stamps = [(start + timedelta(hours=i)).astimezone(denver) for i in range(3)]

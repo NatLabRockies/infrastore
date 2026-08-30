@@ -981,7 +981,7 @@ impl Scenarios {
 /// that describes the values without addressing them.
 ///
 /// None of these are part of a series' identity — they are absent from
-/// [`crate::TimeSeriesKey`] and from both content hashes — so the read path
+/// [`crate::KeyIdentity`] and from both content hashes — so the read path
 /// reconstructs a series from its array and then fills these in from the
 /// catalog row via [`TimeSeriesData::set_descriptors`].
 ///

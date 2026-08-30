@@ -20,7 +20,7 @@ Every time series belongs to an owner, identified by three fields:
 `owner_type` is descriptive. Component and supplemental-attribute integer-id streams are
 independent, so the same `owner_id` can name a component **and** a supplemental attribute at once —
 the category disambiguates them, keeping the two owners' series distinct. Owner-scoped operations
-therefore take the category alongside the id (see [Keys](#keys)).
+therefore take the category alongside the id (see [Identity](#identity)).
 
 ## Time-Series Types
 
@@ -185,12 +185,11 @@ sharing the underlying array. Because a `DeterministicSingleTimeSeries` is a syn
 `SingleTimeSeries`, it is **mutually exclusive** with a real `Deterministic` for the same family
 (`owner`, `name`, `resolution`, `features`, regardless of interval): adding a `Deterministic` when a
 `DeterministicSingleTimeSeries` view exists — or deriving one when a `Deterministic` exists — raises
-`InvalidParameter`. Forecast values read back through the high-level path — `get_time_series`
-returns a forecast object in the Rust core, Python, and over gRPC, and Julia exposes
-`get_time_series(Deterministic, …)` / `get_time_series(Probabilistic, …)` /
-`get_time_series(Scenarios, …)` — while the low-level metadata + array path remains available for
-raw access. See the [Rust API](../reference/rust-api.md#forecasts) and
-[C ABI](../reference/c-abi.md#forecasts).
+`InvalidParameter`. Forecast values read back through the same path as everything else: `read_by_id`
+returns the forecast object matching the row's stored type, in every binding and over gRPC — a read
+names only an id, so there is no requested type to disagree with what is stored. The low-level
+metadata + array path remains available for raw access. See the
+[Rust API](../reference/rust-api.md#forecasts) and [C ABI](../reference/c-abi.md#forecasts).
 
 ## Features
 
@@ -206,11 +205,11 @@ by key (a `BTreeMap`), which gives a stable order for hashing and for the unique
 
 ### Reserved feature names
 
-A feature name may not collide with a field of a time series or of the [key](#keys) that addresses
-one. Consumers routinely spread a feature map into a keyword-argument query — for example
-`get_time_series(...; name = "load", model_year = 2030)` — and a feature called `name` or
-`resolution` would shadow the real field there and silently change what the query means. Adding a
-time series with one of these names raises `InvalidParameter`:
+A feature name may not collide with a field of a time series or of the [identity](#identity) a row
+is filed under. Consumers routinely spread a feature map into a keyword-argument query — for example
+`list_metadata(...; name = "load", model_year = 2030)` — and a feature called `name` or `resolution`
+would shadow the real field there and silently change what the query means. Adding a time series
+with one of these names raises `InvalidParameter`:
 
 ```text
 application_data, component_field, count, data, data_hash, dtype, element_shape, element_type, ext,
@@ -229,24 +228,23 @@ rejected, while `Resolution` and `resolution_hours` are ordinary feature names. 
 writes only, so a store written before it existed stays readable and its series can still be listed
 and removed.
 
-## Keys
+## Identity
 
-A **`TimeSeriesKey`** is the logical handle that re-finds a series. It is exactly the tuple that
-must be unique:
+Every association is filed under a tuple that must be unique:
 
 ```text
-TimeSeriesKey = (owner_id, owner_category, time_series_type, name, resolution, interval, features)
+identity = (owner_id, owner_category, time_series_type, name, resolution, interval, features)
 ```
 
-`add_time_series` returns a key; `get_time_series`, `has_time_series`, and `remove_time_series` take
-one. Two series with the same key cannot coexist — attempting to add a duplicate raises
-`DuplicateTimeSeries`. Change any element of the tuple (a different `name`, a different `model_year`
-feature, a different `resolution`, a different forecast `interval`, or a different `owner_category`)
-and you have a distinct series. `interval` is `NULL` for the static types (which never carry one);
-for forecasts it lets two series of one variable at the same resolution but different intervals
-(e.g. a day-ahead and a real-time forecast) coexist as distinct series. Because `owner_category` is
-part of the key, a component and a supplemental attribute that share a numeric `owner_id` keep
-entirely separate sets of series.
+This is what the catalog de-duplicates on — it is **not** how a caller addresses a series. That is
+the [association id](#association-ids) below. Two series with the same identity cannot coexist —
+attempting to add a duplicate raises `DuplicateTimeSeries`. Change any element of the tuple (a
+different `name`, a different `model_year` feature, a different `resolution`, a different forecast
+`interval`, or a different `owner_category`) and you have a distinct series. `interval` is `NULL`
+for the static types (which never carry one); for forecasts it lets two series of one variable at
+the same resolution but different intervals (e.g. a day-ahead and a real-time forecast) coexist as
+distinct series. Because `owner_category` is part of the key, a component and a supplemental
+attribute that share a numeric `owner_id` keep entirely separate sets of series.
 
 ```mermaid
 flowchart LR
@@ -266,23 +264,31 @@ flowchart LR
     style A2 fill:#28a745,color:#fff
 ```
 
-Note that two different keys (`K1` and `K3` above) can point at the _same_ underlying array. The key
-is a metadata concept; the array is shared by [content addressing](./content-addressing.md).
+Note that two different series (`K1` and `K3` above) can point at the _same_ underlying array. An
+identity is a metadata concept; the array is shared by
+[content addressing](./content-addressing.md).
 
 ## Association IDs
 
-Every catalog row also has an **`id`**: a plain integer, assigned by the store, that names _that
-row_. It is the second way to re-find a series, and it answers a question a key cannot.
+Every catalog row has an **`id`**: a plain integer, assigned by the store, that names _that row_. It
+is **the** way to address a series — every read, removal, rename and copy takes one.
 
-A key describes a series — owner, name, resolution, features. An id names the row the store filed it
-under. That difference is the point: a consumer that wants to record "this generator's cost curve is
-_that_ series" inside its own object model would otherwise have to embed the whole key tuple, and
-keep it in step with every rename. An id is one integer, and a rename does not move it.
+The identity above describes a series: owner, name, resolution, features. An id names the row the
+store filed it under. That difference is the point: a consumer that wants to record "this
+generator's cost curve is _that_ series" inside its own object model would otherwise have to embed
+the whole identity tuple, and keep it in step with every rename. An id is one integer, and a rename
+does not move it.
 
 ```julia
-added = add_time_series!(store, 42, "ThermalStandard", Component, cost_curve)
-generator.operation_cost.variable = added.id   # one integer, stored in the model
+id = add_time_series!(store, 42, "ThermalStandard", Component, cost_curve)
+generator.operation_cost.variable = id   # one integer, stored in the model
 ```
+
+The surface splits in two along that line. **Identify** — `list_metadata` and its by-id companions —
+answers which series exist and hands back the id for each. **Act** — every read, removal, rename and
+copy — takes that id. A caller that knows a series only by its attributes does the first half once
+and keeps the id; there is deliberately no combined resolver, because the two halves have different
+costs and a caller that repeats a lookup it could have cached should be able to see that it is.
 
 Three properties make an id safe to persist:
 
@@ -293,8 +299,7 @@ Three properties make an id safe to persist:
   new owner keeps the id, as do `compact` and a save-and-reopen. Those are `UPDATE`s and file
   copies, not new rows.
 - **It is not part of identity.** Two series differing only in id are the same series to the
-  uniqueness rule and to both content hashes. It sits outside the key deliberately: a key is also an
-  _argument_ — to `get_time_series`, to `remove_time_series!` — where an id would mean nothing.
+  uniqueness rule and to both content hashes. It describes the _row_, not the data.
 
 **The store assigns it; no add accepts one.** Not `add_time_series`, not a bulk add, and not either
 association catalog's `attach` / `link`. This is what makes "never reissued" a guarantee rather than
@@ -331,14 +336,20 @@ alongside the table it came from.
 
 Writes report the id they used, and reads take one:
 
-| Direction | Rust                                  | Python               | Julia                |
-| --------- | ------------------------------------- | -------------------- | -------------------- |
-| Write     | `add_time_series` → `AddedTimeSeries` | `.id` on the result  | `.id` on the result  |
-| Resolve   | `get_metadata_by_id`                  | `get_metadata_by_id` | `get_metadata_by_id` |
-| Validate  | `association_exists`                  | `association_exists` | `association_exists` |
-| Read      | `read_by_ids`                         | `read_by_ids`        | `read_by_ids`        |
-| Read one  | `read_by_id`                          | `read_by_id`         | `read_by_id`         |
-| Remove    | `remove_by_ids`                       | `remove_by_ids`      | `remove_by_ids!`     |
+| Direction  | Rust                               | Python                 | Julia                  |
+| ---------- | ---------------------------------- | ---------------------- | ---------------------- |
+| Write      | `add_time_series` → `TimeSeriesId` | → `int`                | → `Int64`              |
+| Identify   | `list_metadata`                    | `list_metadata`        | `list_metadata`        |
+| …by id     | `list_metadata_by_ids`             | `list_metadata_by_ids` | `list_metadata_by_ids` |
+| Resolve    | `get_metadata_by_id`               | `get_metadata_by_id`   | `get_metadata_by_id`   |
+| Validate   | `association_exists`               | `association_exists`   | `association_exists`   |
+| Read       | `read_by_ids`                      | `read_by_ids`          | `read_by_ids`          |
+| Read one   | `read_by_id`                       | `read_by_id`           | `read_by_id`           |
+| Read range | `read_by_ids_range`                | `read_by_ids_range`    | `read_by_ids`          |
+| Remove     | `remove_by_ids`                    | `remove_by_ids`        | `remove_by_ids!`       |
+
+In the Rust core an id is the newtype `TimeSeriesId`, so an `owner_id` cannot be passed where a
+series id belongs; the dynamic bindings exchange a plain integer.
 
 `association_exists` fetches no row, so a consumer can check every reference in its model on load
 rather than discovering a dangling one mid-simulation.
@@ -352,15 +363,12 @@ references are expected to have gone.
 `read_by_id` is the single-id read, and it also takes the slice: a `start_time` plus a `len` of
 timesteps or a `count` of windows. Both halves happen in one call because the primary-key lookup
 already returns the row the window resolves against — a consumer holding an id spends nothing to
-learn a series' `resolution` or `count` before asking for the second day of it. Unlike the
-`time_range` on the keyed reads, a window is _checked_: a start off the series' own grid, or an
-extent running past its end, is an error rather than the smaller answer a range clamps to. A range
-says "whatever lies between these bounds"; a window says "these exact steps", and a caller that
-asked for 24 and silently received 3 has a bug the store can see and it cannot.
-
-A removal by id is also the precise one. A key identity with no interval matches any interval, so
-`remove_time_series` can take a whole forecast family; an id is a primary key and takes exactly the
-row it names.
+learn a series' `resolution` or `count` before asking for the second day of it. A window is
+_checked_, where `read_by_ids_range` _clips_: a start off the series' own grid, or an extent running
+past its end, is an error rather than the smaller answer a range would return. A range says
+"whatever lies between these bounds" — which is what an export wants, knowing the bounds and not the
+step count — while a window says "these exact steps", and a caller that asked for 24 and silently
+received 3 has a bug the store can see and it cannot.
 
 ## Optional Descriptors
 

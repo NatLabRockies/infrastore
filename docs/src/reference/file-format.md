@@ -578,15 +578,16 @@ change. `idx_component_field` is the exception, because it names a column introd
 applies only to a catalog already carrying `component_field`, and an older store never reaches the
 DDL, being rejected by the version check first.
 
-Together the two unique indexes enforce [key uniqueness](../explanation/data-model.md#keys); a
-violation surfaces as `DuplicateTimeSeries`. Both `owner_id` and `owner_category` are part of the
-key, so a component and a supplemental attribute that share an `owner_id` are independent owners.
-`interval` is part of the key, so two forecasts of one variable at the same resolution but different
-intervals are distinct series. SQLite treats `NULL` values as distinct in a `UNIQUE` index, so
-`uq_ts_assoc` does not constrain rows with a `NULL` `resolution` or `interval` (e.g.
-`NonSequentialTimeSeries`, or any static series, which carry no interval). `uq_ts_assoc_coalesced`
-covers that case by folding `NULL` to the empty-string sentinel via `COALESCE` before enforcing
-uniqueness (the empty string is never a valid ISO-8601 period).
+Together the two unique indexes enforce
+[identity uniqueness](../explanation/data-model.md#identity); a violation surfaces as
+`DuplicateTimeSeries`. Both `owner_id` and `owner_category` are part of the key, so a component and
+a supplemental attribute that share an `owner_id` are independent owners. `interval` is part of the
+key, so two forecasts of one variable at the same resolution but different intervals are distinct
+series. SQLite treats `NULL` values as distinct in a `UNIQUE` index, so `uq_ts_assoc` does not
+constrain rows with a `NULL` `resolution` or `interval` (e.g. `NonSequentialTimeSeries`, or any
+static series, which carry no interval). `uq_ts_assoc_coalesced` covers that case by folding `NULL`
+to the empty-string sentinel via `COALESCE` before enforcing uniqueness (the empty string is never a
+valid ISO-8601 period).
 
 These two were named `uq_assoc` and `uq_assoc_coalesced` before the association tables above existed
 and made a bare "assoc" ambiguous. The DDL drops the old names before creating the new ones, so a

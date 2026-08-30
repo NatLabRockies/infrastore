@@ -17,10 +17,10 @@
 
 use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{
-    AddRequest, AddedTimeSeries, FeatureValue, Features, KeyIdentity, ListFilter, OwnerCategory,
-    ParentChildAssociation, Period, ReadWindow, SingleTimeSeries, SupplementalAttributeAssociation,
-    SupplementalAttributeFilter, TimeRange, TimeSeriesData, TimeSeriesError, TimeSeriesType,
-    TransformPolicy, TypedArray, create_store, open_store,
+    AddRequest, FeatureValue, Features, ListFilter, OwnerCategory, ParentChildAssociation, Period,
+    ReadWindow, SingleTimeSeries, Store, SupplementalAttributeAssociation,
+    SupplementalAttributeFilter, TimeRange, TimeSeriesData, TimeSeriesError, TimeSeriesId,
+    TimeSeriesType, TransformPolicy, TypedArray, create_store, open_store,
 };
 
 /// One hourly `SingleTimeSeries` named `name`, three points long.
@@ -30,16 +30,27 @@ fn series(name: &str) -> SingleTimeSeries {
     SingleTimeSeries::new(initial_timestamp, Duration::hours(1), data, name)
 }
 
-fn key(name: &str) -> KeyIdentity {
-    KeyIdentity {
-        owner_id: 1,
-        owner_category: OwnerCategory::Component,
-        time_series_type: TimeSeriesType::SingleTimeSeries,
-        name: name.into(),
-        resolution: Some(Period::fixed(Duration::hours(1))),
-        interval: None,
-        features: Features::new(),
-    }
+/// The catalog id of the series `name` on `owner`.
+///
+/// The identify half, posed as the filter a `KeyIdentity` used to be. It asserts
+/// exactly one match, so a fixture that starts producing two fails here rather
+/// than silently addressing whichever row came back first.
+fn id_of(store: &Store, owner: i64, name: &str) -> TimeSeriesId {
+    let rows = store
+        .list_metadata(
+            ListFilter::new()
+                .owner_id(owner)
+                .owner_category(OwnerCategory::Component)
+                .name(name),
+        )
+        .unwrap();
+    assert_eq!(rows.len(), 1, "expected one row named {name}: {rows:?}");
+    rows[0].id.expect("a stored row carries its id")
+}
+
+/// [`id_of`] for the owner these tests use almost everywhere.
+fn key(store: &Store, name: &str) -> TimeSeriesId {
+    id_of(store, 1, name)
 }
 
 /// Add and drop `n` throwaway rows, so the next id `store` assigns clears `n`.
@@ -58,9 +69,8 @@ fn advance_ids(store: &mut infrastore_core::Store, n: usize) {
                 TimeSeriesData::SingleTimeSeries(series(&name)),
             ))
             .unwrap();
-        let mut k = key(&name);
-        k.owner_id = 999;
-        store.remove_time_series(&k).unwrap();
+        let k = id_of(store, 999, &name);
+        store.remove_by_ids(&[k]).unwrap();
     }
 }
 
@@ -200,7 +210,8 @@ fn an_id_is_not_reused_after_its_row_is_deleted() {
     {
         let mut store = open_store(path.as_path(), false).unwrap();
         let doomed = &before.last().unwrap().0;
-        store.remove_time_series(&key(doomed)).unwrap();
+        let doomed = key(&store, doomed);
+        store.remove_by_ids(&[doomed]).unwrap();
         store
             .add_time_series(
                 1,
@@ -315,10 +326,13 @@ fn a_stored_row_reports_the_id_the_catalog_gave_it() {
         ))
         .unwrap();
 
-    let meta = store.get_metadata(&key("load")).unwrap();
+    let meta = store
+        .get_metadata_by_id(key(&store, "load"))
+        .unwrap()
+        .unwrap();
     assert_eq!(
         meta.id,
-        Some(1),
+        Some(TimeSeriesId(1)),
         "the first row of a fresh catalog is id 1, and a read must report it",
     );
 }
@@ -338,7 +352,14 @@ fn an_add_always_lets_the_catalog_assign() {
             TimeSeriesData::SingleTimeSeries(series("first")),
         ))
         .unwrap();
-    assert_eq!(store.get_metadata(&key("first")).unwrap().id, Some(1));
+    assert_eq!(
+        store
+            .get_metadata_by_id(key(&store, "first"))
+            .unwrap()
+            .unwrap()
+            .id,
+        Some(TimeSeriesId(1))
+    );
 
     // An attachment read back from another store still carries that store's id.
     let mut elsewhere = attach(1, 100);
@@ -402,10 +423,21 @@ fn an_imported_id_is_honored_and_ratchets_the_counter() {
         ))
         .unwrap();
 
-    assert_eq!(target.get_metadata(&key("imported")).unwrap().id, Some(501));
     assert_eq!(
-        target.get_metadata(&key("assigned")).unwrap().id,
-        Some(502),
+        target
+            .get_metadata_by_id(key(&target, "imported"))
+            .unwrap()
+            .unwrap()
+            .id,
+        Some(TimeSeriesId(501))
+    );
+    assert_eq!(
+        target
+            .get_metadata_by_id(key(&target, "assigned"))
+            .unwrap()
+            .unwrap()
+            .id,
+        Some(TimeSeriesId(502)),
         "an assigned id must start past the imported one, not collide with it",
     );
 }
@@ -481,21 +513,28 @@ fn a_copy_gets_its_own_id() {
             TimeSeriesData::SingleTimeSeries(series("load")),
         ))
         .unwrap();
-    let source_id = store.get_metadata(&key("load")).unwrap().id.unwrap();
-
-    store
-        .copy_time_series(&key("load"), 2, "Generator", None)
+    let source_id = store
+        .get_metadata_by_id(key(&store, "load"))
+        .unwrap()
+        .unwrap()
+        .id
         .unwrap();
 
-    let mut copied = key("load");
-    copied.owner_id = 2;
-    let copy_id = store.get_metadata(&copied).unwrap().id.unwrap();
+    store
+        .copy_time_series(key(&store, "load"), 2, "Generator", None)
+        .unwrap();
+
+    let copy_id = id_of(&store, 2, "load");
     assert_ne!(
         copy_id, source_id,
         "a copy must be filed under its own id, not the source's",
     );
     assert_eq!(
-        store.get_metadata(&key("load")).unwrap().id,
+        store
+            .get_metadata_by_id(key(&store, "load"))
+            .unwrap()
+            .unwrap()
+            .id,
         Some(source_id),
         "copying must not disturb the source's id",
     );
@@ -523,7 +562,12 @@ fn a_derived_view_gets_its_own_id() {
             TimeSeriesData::SingleTimeSeries(long),
         ))
         .unwrap();
-    let source_id = store.get_metadata(&key("load")).unwrap().id.unwrap();
+    let source_id = store
+        .get_metadata_by_id(key(&store, "load"))
+        .unwrap()
+        .unwrap()
+        .id
+        .unwrap();
 
     let outcome = store
         .transform_single_time_series(
@@ -537,7 +581,7 @@ fn a_derived_view_gets_its_own_id() {
     assert_eq!(outcome.transformed, 1);
 
     let derived: Vec<_> = store
-        .list_time_series(ListFilter::default())
+        .list_metadata(ListFilter::default())
         .unwrap()
         .into_iter()
         .filter(|m| m.time_series_type == TimeSeriesType::DeterministicSingleTimeSeries)
@@ -591,8 +635,8 @@ fn a_write_reports_the_id_it_used() {
         ))
         .unwrap();
     assert_eq!(
-        store.get_metadata(added.identity()).unwrap().id,
-        Some(added.id)
+        store.get_metadata_by_id(added).unwrap().unwrap().id,
+        Some(added)
     );
 
     let bulk = store
@@ -610,14 +654,14 @@ fn a_write_reports_the_id_it_used() {
                 .collect(),
         )
         .unwrap();
-    let ids: Vec<i64> = bulk.iter().map(|a| a.id).collect();
+    let ids: Vec<i64> = bulk.iter().map(|a| a.get()).collect();
     assert_eq!(
         ids,
-        vec![added.id + 1, added.id + 2, added.id + 3],
+        vec![added.get() + 1, added.get() + 2, added.get() + 3],
         "bulk ids must be assigned in input order",
     );
     for a in &bulk {
-        assert_eq!(store.get_metadata(a.identity()).unwrap().id, Some(a.id));
+        assert_eq!(store.get_metadata_by_id(*a).unwrap().unwrap().id, Some(*a));
     }
 }
 
@@ -657,10 +701,9 @@ fn an_imported_id_cannot_reissue_a_deleted_one() {
             TimeSeriesData::SingleTimeSeries(series("anchor")),
         ))
         .unwrap();
-    let mut anchor_key = key("anchor");
-    anchor_key.owner_id = 9;
-    target.remove_time_series(&anchor_key).unwrap();
-    assert_eq!(anchor.id, 1);
+    let anchor_key = id_of(&target, 9, "anchor");
+    target.remove_by_ids(&[anchor_key]).unwrap();
+    assert_eq!(anchor.get(), 1);
 
     // The array is gone with the row, so put it back under another owner; the
     // rows being imported are the ones that do not exist yet.
@@ -677,10 +720,10 @@ fn an_imported_id_cannot_reissue_a_deleted_one() {
         .import_time_series_associations_openapi(&json)
         .unwrap_err();
     assert!(
-        matches!(err, TimeSeriesError::DuplicateAssociationId(id) if id == anchor.id),
+        matches!(err, TimeSeriesError::DuplicateAssociationId(id) if id == anchor.get()),
         "a retired id must be refused as taken, got {err:?}",
     );
-    assert!(!target.association_exists(anchor.id).unwrap());
+    assert!(!target.association_exists(anchor).unwrap());
 }
 
 // ---------------------------------------------------------------------------
@@ -833,13 +876,18 @@ fn an_id_resolves_to_its_row_or_to_nothing() {
         ))
         .unwrap();
 
-    let meta = store.get_metadata_by_id(added.id).unwrap().unwrap();
+    let meta = store.get_metadata_by_id(added).unwrap().unwrap();
     assert_eq!(meta.name, "load");
-    assert_eq!(meta.id, Some(added.id));
-    assert!(store.association_exists(added.id).unwrap());
+    assert_eq!(meta.id, Some(added));
+    assert!(store.association_exists(added).unwrap());
 
-    assert!(store.get_metadata_by_id(9_999).unwrap().is_none());
-    assert!(!store.association_exists(9_999).unwrap());
+    assert!(
+        store
+            .get_metadata_by_id(TimeSeriesId(9_999))
+            .unwrap()
+            .is_none()
+    );
+    assert!(!store.association_exists(TimeSeriesId(9_999)).unwrap());
 }
 
 /// A removed row's id stops resolving, and — because ids are never reissued —
@@ -858,8 +906,8 @@ fn a_removed_rows_id_stops_resolving_and_is_not_reused() {
             TimeSeriesData::SingleTimeSeries(series("load")),
         ))
         .unwrap();
-    store.remove_time_series(&key("load")).unwrap();
-    assert!(!store.association_exists(added.id).unwrap());
+    store.remove_by_ids(&[added]).unwrap();
+    assert!(!store.association_exists(added).unwrap());
 
     let replacement = store
         .add(AddRequest::new(
@@ -869,9 +917,9 @@ fn a_removed_rows_id_stops_resolving_and_is_not_reused() {
             TimeSeriesData::SingleTimeSeries(series("load")),
         ))
         .unwrap();
-    assert_ne!(replacement.id, added.id);
+    assert_ne!(replacement, added);
     assert!(
-        !store.association_exists(added.id).unwrap(),
+        !store.association_exists(added).unwrap(),
         "the old reference must stay dangling, not resolve to the replacement",
     );
 }
@@ -894,28 +942,34 @@ fn a_bulk_read_by_id_follows_the_order_it_was_given() {
                     OwnerCategory::Component,
                     TimeSeriesData::SingleTimeSeries(s),
                 ))
-                .unwrap()
-                .id,
+                .unwrap(),
         );
     }
 
     // Reversed, with a repeat: neither the catalog's order nor uniqueness is
     // assumed.
     let asked = vec![ids[2], ids[0], ids[2], ids[1]];
-    let got = store.read_by_ids(&asked).unwrap();
+    let got = store.read_by_ids(&asked, ReadWindow::full()).unwrap();
     let firsts: Vec<f64> = got
         .iter()
         .map(|d| d.as_single().unwrap().data.to_f64_vec().unwrap()[0])
         .collect();
     assert_eq!(firsts, vec![100.0, 1.0, 100.0, 10.0]);
 
-    let err = store.read_by_ids(&[ids[0], 9_999]).unwrap_err();
+    let err = store
+        .read_by_ids(&[ids[0], TimeSeriesId(9_999)], ReadWindow::full())
+        .unwrap_err();
     assert!(
         matches!(err, TimeSeriesError::NotFound),
         "an id naming no row must fail the read, got {err:?}",
     );
 
-    assert!(store.read_by_ids(&[]).unwrap().is_empty());
+    assert!(
+        store
+            .read_by_ids(&[], ReadWindow::full())
+            .unwrap()
+            .is_empty()
+    );
 }
 
 /// A removal by id takes exactly the row the reference names, reclaims its
@@ -933,15 +987,14 @@ fn a_removal_by_id_takes_only_the_row_it_names() {
                     OwnerCategory::Component,
                     TimeSeriesData::SingleTimeSeries(series(name)),
                 ))
-                .unwrap()
-                .id,
+                .unwrap(),
         );
     }
 
     assert_eq!(store.remove_by_ids(&[ids[1]]).unwrap(), 1);
     assert!(!store.association_exists(ids[1]).unwrap());
     let left: Vec<String> = store
-        .list_time_series(ListFilter::new())
+        .list_metadata(ListFilter::new())
         .unwrap()
         .into_iter()
         .map(|m| m.name)
@@ -951,7 +1004,7 @@ fn a_removal_by_id_takes_only_the_row_it_names() {
 
     // The rest go together, and the store is empty afterwards.
     assert_eq!(store.remove_by_ids(&[ids[2], ids[0]]).unwrap(), 2);
-    assert!(store.list_keys(ListFilter::new()).unwrap().is_empty());
+    assert!(store.list_metadata(ListFilter::new()).unwrap().is_empty());
     assert_eq!(store.num_distinct_arrays().unwrap(), 0);
 }
 
@@ -973,8 +1026,7 @@ fn a_removal_by_id_is_all_or_nothing() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(series("a")),
         ))
-        .unwrap()
-        .id;
+        .unwrap();
     let b = store
         .add(AddRequest::new(
             1,
@@ -982,17 +1034,18 @@ fn a_removal_by_id_is_all_or_nothing() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(series("b")),
         ))
-        .unwrap()
-        .id;
+        .unwrap();
 
-    let err = store.remove_by_ids(&[a, 9_999, b]).unwrap_err();
+    let err = store
+        .remove_by_ids(&[a, TimeSeriesId(9_999), b])
+        .unwrap_err();
     assert!(
         matches!(err, TimeSeriesError::NotFound),
         "an id naming no row must fail the batch, got {err:?}",
     );
     assert!(store.association_exists(a).unwrap(), "rolled back");
     assert!(store.association_exists(b).unwrap(), "rolled back");
-    assert_eq!(store.list_keys(ListFilter::new()).unwrap().len(), 2);
+    assert_eq!(store.list_metadata(ListFilter::new()).unwrap().len(), 2);
 
     // An empty set is a no-op, not an error.
     assert_eq!(store.remove_by_ids(&[]).unwrap(), 0);
@@ -1015,8 +1068,7 @@ fn a_removal_by_id_reclaims_only_the_last_reference() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(series("load")),
         ))
-        .unwrap()
-        .id;
+        .unwrap();
     let second = store
         .add(AddRequest::new(
             2,
@@ -1024,8 +1076,7 @@ fn a_removal_by_id_reclaims_only_the_last_reference() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(series("load")),
         ))
-        .unwrap()
-        .id;
+        .unwrap();
     assert_eq!(store.num_distinct_arrays().unwrap(), 1);
 
     store.remove_by_ids(&[first]).unwrap();
@@ -1044,7 +1095,7 @@ fn a_removal_by_id_reclaims_only_the_last_reference() {
 #[test]
 fn a_removal_by_id_refuses_to_orphan_a_derived_view() {
     let mut store = create_store(None, true).unwrap();
-    let source = add_long(&mut store, "load").id;
+    let source = add_long(&mut store, "load");
     let view = store
         .transform_single_time_series(
             Duration::hours(6),
@@ -1055,8 +1106,7 @@ fn a_removal_by_id_refuses_to_orphan_a_derived_view() {
         )
         .unwrap()
         .written
-        .remove(0)
-        .id;
+        .remove(0);
 
     let err = store.remove_by_ids(&[source]).unwrap_err();
     assert!(
@@ -1067,7 +1117,7 @@ fn a_removal_by_id_refuses_to_orphan_a_derived_view() {
 
     // Together, in either order.
     assert_eq!(store.remove_by_ids(&[source, view]).unwrap(), 2);
-    assert!(store.list_keys(ListFilter::new()).unwrap().is_empty());
+    assert!(store.list_metadata(ListFilter::new()).unwrap().is_empty());
 }
 
 /// A read-only store refuses the removal before touching the catalog.
@@ -1086,7 +1136,7 @@ fn a_read_only_store_refuses_a_removal_by_id() {
             ))
             .unwrap();
         store.flush().unwrap();
-        added.id
+        added
     };
 
     let mut store = open_store(path.as_path(), true).unwrap();
@@ -1117,7 +1167,7 @@ fn ids_survive_a_persist_and_reopen() {
                     TimeSeriesData::SingleTimeSeries(series(name)),
                 ))
                 .unwrap();
-            out.push((name.to_string(), added.id));
+            out.push((name.to_string(), added.get()));
         }
         store.flush().unwrap();
         out
@@ -1126,7 +1176,7 @@ fn ids_survive_a_persist_and_reopen() {
     let store = open_store(path.as_path(), true).unwrap();
     for (name, id) in &expected {
         let meta = store
-            .get_metadata_by_id(*id)
+            .get_metadata_by_id(TimeSeriesId(*id))
             .unwrap()
             .unwrap_or_else(|| panic!("id {id} did not survive the reopen"));
         assert_eq!(&meta.name, name);
@@ -1149,7 +1199,7 @@ fn long_series(name: &str) -> SingleTimeSeries {
     )
 }
 
-fn add_long(store: &mut infrastore_core::Store, name: &str) -> AddedTimeSeries {
+fn add_long(store: &mut infrastore_core::Store, name: &str) -> TimeSeriesId {
     store
         .add(AddRequest::new(
             1,
@@ -1181,12 +1231,12 @@ fn the_sweep_reports_the_views_it_wrote() {
     assert_eq!(outcome.transformed, 2);
     assert_eq!(outcome.written.len(), 2);
     for added in &outcome.written {
-        let meta = store.get_metadata_by_id(added.id).unwrap().unwrap();
+        let meta = store.get_metadata_by_id(*added).unwrap().unwrap();
         assert_eq!(
             meta.time_series_type,
             TimeSeriesType::DeterministicSingleTimeSeries,
         );
-        assert_eq!(meta.id, Some(added.id));
+        assert_eq!(meta.id, Some(*added));
     }
 
     // A dry run writes nothing, and says so.
@@ -1249,7 +1299,7 @@ fn a_document_round_trips_with_its_ids() {
                 TimeSeriesData::SingleTimeSeries(series(name)),
             ))
             .unwrap();
-        expected.push((name.to_string(), added.id));
+        expected.push((name.to_string(), added.get()));
     }
     let json = source
         .export_time_series_associations_openapi(&ListFilter::default())
@@ -1281,7 +1331,7 @@ fn a_document_round_trips_with_its_ids() {
     );
     for (name, id) in &expected {
         let meta = target
-            .get_metadata_by_id(*id)
+            .get_metadata_by_id(TimeSeriesId(*id))
             .unwrap()
             .unwrap_or_else(|| panic!("id {id} did not survive the import"));
         assert_eq!(&meta.name, name);
@@ -1312,8 +1362,8 @@ fn a_read_by_ids_spans_many_query_chunks() {
     }
     let added = bulk.commit().unwrap();
     // Reversed, so the answer's order is visibly the caller's, not the catalog's.
-    let asked: Vec<i64> = added.iter().rev().map(|a| a.id).collect();
-    let got = store.read_by_ids(&asked).unwrap();
+    let asked: Vec<_> = added.iter().rev().copied().collect();
+    let got = store.read_by_ids(&asked, ReadWindow::full()).unwrap();
     assert_eq!(got.len(), 1_200);
     let firsts: Vec<f64> = got
         .iter()
@@ -1355,7 +1405,7 @@ fn an_imported_row_is_identical_to_the_exported_one() {
             TimeSeriesData::Deterministic(forecast),
         ))
         .unwrap();
-    let original = source.get_metadata_by_id(added.id).unwrap().unwrap();
+    let original = source.get_metadata_by_id(added).unwrap().unwrap();
     assert_eq!(
         original.element_shape,
         vec![365],
@@ -1394,7 +1444,7 @@ fn an_imported_row_is_identical_to_the_exported_one() {
     target
         .import_time_series_associations_openapi(&json)
         .unwrap();
-    let imported = target.get_metadata_by_id(added.id).unwrap().unwrap();
+    let imported = target.get_metadata_by_id(added).unwrap().unwrap();
     assert_eq!(imported, original);
 }
 
@@ -1440,10 +1490,7 @@ fn an_import_refuses_a_document_that_mixes_supplied_and_missing_ids() {
         other => panic!("expected InvalidParameter, got {other:?}"),
     }
     assert_eq!(
-        target
-            .list_time_series(ListFilter::default())
-            .unwrap()
-            .len(),
+        target.list_metadata(ListFilter::default()).unwrap().len(),
         1,
         "nothing from the document may land",
     );
@@ -1511,10 +1558,7 @@ fn an_import_refuses_a_view_without_its_source() {
         other => panic!("expected InvalidParameter, got {other:?}"),
     }
     assert_eq!(
-        target
-            .list_time_series(ListFilter::default())
-            .unwrap()
-            .len(),
+        target.list_metadata(ListFilter::default()).unwrap().len(),
         1
     );
 
@@ -1583,10 +1627,7 @@ fn an_import_refuses_a_row_that_misdescribes_its_array() {
     }
     // Only the anchor; nothing was written.
     assert_eq!(
-        target
-            .list_time_series(ListFilter::default())
-            .unwrap()
-            .len(),
+        target.list_metadata(ListFilter::default()).unwrap().len(),
         1
     );
 
@@ -1629,10 +1670,7 @@ fn an_import_refuses_a_row_whose_array_is_absent() {
         other => panic!("expected InvalidParameter, got {other:?}"),
     }
     // Nothing was written.
-    assert_eq!(
-        empty.list_time_series(ListFilter::default()).unwrap().len(),
-        0
-    );
+    assert_eq!(empty.list_metadata(ListFilter::default()).unwrap().len(), 0);
 }
 
 /// A `NonSequentialTimeSeries` cannot be imported: its timestamp vector is
@@ -1694,7 +1732,7 @@ fn day_series(name: &str) -> SingleTimeSeries {
     SingleTimeSeries::new(initial, Duration::hours(1), data, name)
 }
 
-fn add_day_series(store: &mut infrastore_core::Store, name: &str) -> i64 {
+fn add_day_series(store: &mut infrastore_core::Store, name: &str) -> TimeSeriesId {
     store
         .add(AddRequest::new(
             1,
@@ -1703,7 +1741,6 @@ fn add_day_series(store: &mut infrastore_core::Store, name: &str) -> i64 {
             TimeSeriesData::SingleTimeSeries(day_series(name)),
         ))
         .unwrap()
-        .id
 }
 
 /// A window names exactly the steps asked for, and moves the returned series'
@@ -1757,13 +1794,11 @@ fn a_windowed_read_by_id_refuses_what_a_range_would_clamp() {
 
     // A range asking for 30 hours from hour 22 quietly yields the 2 that exist.
     let clamped = store
-        .get_time_series(
-            &key("load"),
-            Some(TimeRange::new(
-                initial + Duration::hours(22),
-                initial + Duration::hours(52),
-            )),
+        .read_by_ids_range(
+            &[id],
+            TimeRange::new(initial + Duration::hours(22), initial + Duration::hours(52)),
         )
+        .map(|mut v| v.remove(0))
         .unwrap();
     assert_eq!(clamped.as_single().unwrap().length, 2);
 
@@ -1857,8 +1892,7 @@ fn a_windowed_read_by_id_slices_a_forecast_by_count() {
             OwnerCategory::Component,
             TimeSeriesData::Deterministic(det),
         ))
-        .unwrap()
-        .id;
+        .unwrap();
 
     let got = store
         .read_by_id(
@@ -1925,8 +1959,7 @@ fn a_windowed_read_by_id_slices_a_non_sequential_series() {
             OwnerCategory::Component,
             TimeSeriesData::NonSequentialTimeSeries(series),
         ))
-        .unwrap()
-        .id;
+        .unwrap();
 
     let got = store
         .read_by_id(id, ReadWindow::from(timestamps[1]).with_len(2))
@@ -1961,7 +1994,9 @@ fn a_windowed_read_by_id_slices_a_non_sequential_series() {
 fn a_windowed_read_by_id_fails_on_a_dangling_id() {
     let store = create_store(None, true).unwrap();
     assert!(matches!(
-        store.read_by_id(9_999, ReadWindow::full()).unwrap_err(),
+        store
+            .read_by_id(TimeSeriesId(9_999), ReadWindow::full())
+            .unwrap_err(),
         TimeSeriesError::NotFound,
     ));
 }

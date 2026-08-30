@@ -17,7 +17,7 @@
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{
-    Features, ListFilter, OwnerCategory, SingleTimeSeries, Store, TimeSeriesData, TimeSeriesKey,
+    Features, ListFilter, OwnerCategory, SingleTimeSeries, Store, TimeSeriesData, TimeSeriesId,
     TypedArray, create_store, open_store,
 };
 
@@ -37,7 +37,7 @@ fn series(base: f64) -> SingleTimeSeries {
     )
 }
 
-fn add(store: &mut Store, owner: i64, base: f64) -> TimeSeriesKey {
+fn add(store: &mut Store, owner: i64, base: f64) -> TimeSeriesId {
     store
         .add_time_series(
             owner,
@@ -47,11 +47,10 @@ fn add(store: &mut Store, owner: i64, base: f64) -> TimeSeriesKey {
             Features::new(),
         )
         .unwrap()
-        .key
 }
 
 fn count(store: &Store) -> usize {
-    store.list_keys(ListFilter::new()).unwrap().len()
+    store.list_metadata(ListFilter::new()).unwrap().len()
 }
 
 /// Run `body` against a fresh store on each backend. Transactions touch both
@@ -110,7 +109,7 @@ fn commit_makes_adds_durable() {
 fn rollback_keeps_a_shared_array_that_predates_the_transaction() {
     each_backend(|store, backend| {
         let k1 = add(store, 1, 0.0);
-        let hash = store.get_metadata(k1.identity()).unwrap().data_hash;
+        let hash = store.get_metadata_by_id(k1).unwrap().unwrap().data_hash;
 
         store.begin_transaction().unwrap();
         add(store, 2, 0.0); // identical data -> same hash, no new array written
@@ -121,7 +120,9 @@ fn rollback_keeps_a_shared_array_that_predates_the_transaction() {
         // The surviving association must still be readable: the shared array's
         // bytes were never ours to remove.
         assert!(
-            store.get_time_series(k1.identity(), None).is_ok(),
+            store
+                .read_by_id(k1, infrastore_core::ReadWindow::full())
+                .is_ok(),
             "{backend}"
         );
     });
@@ -137,8 +138,8 @@ fn rollback_restores_removed_series_and_their_data() {
         assert_eq!(store.num_distinct_arrays().unwrap(), 2);
 
         store.begin_transaction().unwrap();
-        store.remove_time_series(k1.identity()).unwrap();
-        store.remove_time_series(k2.identity()).unwrap();
+        store.remove_by_ids(&[k1]).unwrap();
+        store.remove_by_ids(&[k2]).unwrap();
         assert_eq!(
             count(store),
             0,
@@ -150,8 +151,12 @@ fn rollback_restores_removed_series_and_their_data() {
         assert_eq!(store.num_distinct_arrays().unwrap(), 2, "{backend}");
         // The point of deferring the free: the arrays are still readable, not
         // just the catalog rows.
-        let v1 = store.get_time_series(k1.identity(), None).unwrap();
-        let v2 = store.get_time_series(k2.identity(), None).unwrap();
+        let v1 = store
+            .read_by_id(k1, infrastore_core::ReadWindow::full())
+            .unwrap();
+        let v2 = store
+            .read_by_id(k2, infrastore_core::ReadWindow::full())
+            .unwrap();
         assert_eq!(
             v1.as_single().unwrap().data.to_f64_vec().unwrap()[0],
             0.0,
@@ -172,7 +177,7 @@ fn commit_applies_deferred_frees() {
         add(store, 2, 100.0);
 
         store.begin_transaction().unwrap();
-        store.remove_time_series(k1.identity()).unwrap();
+        store.remove_by_ids(&[k1]).unwrap();
         store.commit_transaction().unwrap();
 
         assert_eq!(count(store), 1, "{backend}");
@@ -189,15 +194,17 @@ fn commit_applies_deferred_frees() {
 fn deferred_free_is_skipped_when_the_array_is_referenced_again() {
     each_backend(|store, backend| {
         let k1 = add(store, 1, 0.0);
-        let hash = store.get_metadata(k1.identity()).unwrap().data_hash;
+        let hash = store.get_metadata_by_id(k1).unwrap().unwrap().data_hash;
 
         store.begin_transaction().unwrap();
-        store.remove_time_series(k1.identity()).unwrap();
+        store.remove_by_ids(&[k1]).unwrap();
         let k2 = add(store, 2, 0.0); // same content, new owner
         store.commit_transaction().unwrap();
 
         assert_eq!(store.count_array_references(&hash).unwrap(), (1, 0));
-        let restored = store.get_time_series(k2.identity(), None).unwrap();
+        let restored = store
+            .read_by_id(k2, infrastore_core::ReadWindow::full())
+            .unwrap();
         assert_eq!(
             restored.as_single().unwrap().data.to_f64_vec().unwrap()[0],
             0.0,
@@ -216,13 +223,15 @@ fn rollback_undoes_a_mixed_add_and_remove_span() {
 
         store.begin_transaction().unwrap();
         add(store, 2, 100.0);
-        store.remove_time_series(k1.identity()).unwrap();
+        store.remove_by_ids(&[k1]).unwrap();
         assert_eq!(count(store), 1, "{backend}: one added, one removed");
         store.rollback_transaction().unwrap();
 
         assert_eq!(count(store), 1, "{backend}");
         // Specifically the *original* series, not the added one.
-        let restored = store.get_time_series(k1.identity(), None).unwrap();
+        let restored = store
+            .read_by_id(k1, infrastore_core::ReadWindow::full())
+            .unwrap();
         assert_eq!(
             restored.as_single().unwrap().data.to_f64_vec().unwrap()[0],
             0.0,
@@ -322,7 +331,9 @@ fn a_failed_operation_does_not_abort_the_transaction() {
         assert_eq!(count(store), 1, "{backend}: the good add survived");
         store.commit_transaction().unwrap();
         assert!(
-            store.get_time_series(k1.identity(), None).is_ok(),
+            store
+                .read_by_id(k1, infrastore_core::ReadWindow::full())
+                .is_ok(),
             "{backend}"
         );
     });
@@ -346,12 +357,16 @@ fn dst_guard_still_applies_inside_a_transaction() {
         .unwrap();
 
     store.begin_transaction().unwrap();
-    let err = store.remove_time_series(k1.identity());
+    let err = store.remove_by_ids(&[k1]);
     assert!(err.is_err(), "removing the backing STS alone must fail");
     assert!(store.in_transaction());
     store.rollback_transaction().unwrap();
 
-    assert!(store.get_time_series(k1.identity(), None).is_ok());
+    assert!(
+        store
+            .read_by_id(k1, infrastore_core::ReadWindow::full())
+            .is_ok()
+    );
 }
 
 #[test]
@@ -400,14 +415,16 @@ fn rollback_survives_a_reopen() {
 
         store.begin_transaction().unwrap();
         add(&mut store, 2, 100.0);
-        store.remove_time_series(k1.identity()).unwrap();
+        store.remove_by_ids(&[k1]).unwrap();
         store.rollback_transaction().unwrap();
         store.flush().unwrap();
     }
     let store = open_store(path.as_path(), true).unwrap();
     assert_eq!(count(&store), 1);
-    let keys = store.list_keys(ListFilter::new()).unwrap();
-    let restored = store.get_time_series(keys[0].identity(), None).unwrap();
+    let keys = store.list_metadata(ListFilter::new()).unwrap();
+    let restored = store
+        .read_by_id(keys[0].id.unwrap(), infrastore_core::ReadWindow::full())
+        .unwrap();
     assert_eq!(
         restored.as_single().unwrap().data.to_f64_vec().unwrap()[0],
         0.0
@@ -430,7 +447,7 @@ fn an_inner_rollback_removes_the_arrays_that_span_wrote() {
 
         store.begin_transaction().unwrap();
         let inner = add(store, 2, 100.0);
-        let inner_hash = store.get_metadata(inner.identity()).unwrap().data_hash;
+        let inner_hash = store.get_metadata_by_id(inner).unwrap().unwrap().data_hash;
         assert!(
             store.locate_array(&inner_hash).is_ok(),
             "{backend}: the inner add really did write an array"
@@ -458,7 +475,7 @@ fn an_inner_rollback_keeps_an_array_the_outer_span_still_references() {
     each_backend(|store, backend| {
         store.begin_transaction().unwrap();
         let outer = add(store, 1, 0.0);
-        let shared = store.get_metadata(outer.identity()).unwrap().data_hash;
+        let shared = store.get_metadata_by_id(outer).unwrap().unwrap().data_hash;
 
         store.begin_transaction().unwrap();
         // Same values, so the same content-addressed array, under a new owner.

@@ -1,85 +1,8 @@
-# ---- Attribute-addressed static reads --------------------------------------
+# ---- Catalog listings ------------------------------------------------------
 #
-# Every type supports both calling conventions. `get_time_series(T, store, key)`
-# is keyed by a `TimeSeriesKey` handle (returned by `add_time_series!`);
-# `get_time_series(T, store, owner_id, name; ...)` builds a key from attributes
-# (the same `(owner_id, name, resolution, features)` addressing used by
-# `has_time_series` / `remove_time_series!` / `get_metadata`) and routes through
-# the key-based reader.
-
-# Build a `TimeSeriesKey` from attributes via the FFI key constructor.
-function _make_key(
-    owner_id::Integer,
-    owner_category::OwnerCategory,
-    name::AbstractString,
-    ts_type::Integer;
-    resolution::Union{Nothing, Period}=nothing,
-    interval::Union{Nothing, Period}=nothing,
-    features::Union{Nothing, AbstractDict}=nothing,
-)
-    resolution_iso = _period_to_cstr(resolution)
-    interval_iso = _period_to_cstr(interval)
-    features_json = _features_arg(features)
-    out_key = Ref{Ptr{Cvoid}}(C_NULL)
-    code = @ccall lib_path().infrastore_make_key_from_attrs(
-        Int64(owner_id)::Int64,
-        _category_int(owner_category)::Int32,
-        name::Cstring,
-        Int32(ts_type)::Int32,
-        resolution_iso::Cstring,
-        interval_iso::Cstring,
-        features_json::Cstring,
-        out_key::Ref{Ptr{Cvoid}},
-    )::Int32
-    _check(code)
-    return TimeSeriesKey(out_key[])
-end
-
-# The association name carried on a key handle (`KeyIdentity.name`); read off
-# the key itself, so no store access is involved.
-_key_name(key::TimeSeriesRef) = key_info(key).name
-
-"""
-    get_time_series_keys(store, owner_id, owner_category) -> Vector{TimeSeriesKey}
-
-Every key associated with `(owner_id, owner_category)`, one per stored association
-(including `DeterministicSingleTimeSeries` rows derived by
-`transform_single_time_series!`). `owner_category` is the owner's `OwnerCategory`
-(`Component` or `SupplementalAttribute`). Each key can be passed to the key-based
-`get_time_series(Type, store, key)` readers — the way to read a transform-derived
-forecast by key.
-"""
-function get_time_series_keys(
-    store::Store, owner_id::Integer, owner_category::OwnerCategory
-)
-    out_keys = Ref{Ptr{Ptr{Cvoid}}}(C_NULL)
-    out_len = Ref{UInt64}(0)
-    code = @ccall lib_path().infrastore_store_get_time_series_keys(
-        store::Ptr{Cvoid},
-        Int64(owner_id)::Int64,
-        _category_int(owner_category)::Int32,
-        out_keys::Ref{Ptr{Ptr{Cvoid}}},
-        out_len::Ref{UInt64},
-    )::Int32
-    _check(code)
-    n = Int(out_len[])
-    keys = Vector{TimeSeriesKey}(undef, n)
-    if n > 0
-        # Copy each owned handle into a finalized wrapper, then free the array
-        # buffer (the wrappers own the handles and free them via infrastore_key_free).
-        try
-            raw = unsafe_wrap(Array, out_keys[], n; own=false)
-            for i in 1:n
-                keys[i] = TimeSeriesKey(raw[i])
-            end
-        finally
-            @ccall lib_path().infrastore_keys_buffer_free(
-                out_keys[]::Ptr{Ptr{Cvoid}}, out_len[]::UInt64
-            )::Cvoid
-        end
-    end
-    return keys
-end
+# The wire carries no key. `list_metadata` is the identify half — it answers
+# which series exist and hands back the catalog `id` that addresses each — and
+# every read, removal and rename takes that id.
 
 # The Julia time series type for a key's integer type code.
 function _type_for_code(code::Integer)
@@ -196,47 +119,6 @@ function _category_for_name(s::AbstractString)
     end
 end
 
-function _decode_key_row(r::AbstractDict)
-    return KeyRow(
-        Int64(r["owner_id"]),
-        _category_for_name(r["owner_category"]),
-        _type_for_name(r["time_series_type"]),
-        String(r["name"]),
-        _row_timestamp(r["initial_timestamp_ms"]),
-        _row_period(r["resolution"]),
-        _row_int(r["length"]),
-        _row_period(r["horizon"]),
-        _row_period(r["interval"]),
-        _row_int(r["count"]),
-        Dict{String, Any}(r["features"]),
-        _row_time_reference(r),
-        _row_int(get(r, "id", nothing)),
-    )
-end
-
-# An array-group row is a key row plus the content hash of the array it resolves
-# to. The core writes the hash as hex; the binding hands back the 32 bytes every
-# other hash-taking function expects.
-function _decode_array_group_row(r::AbstractDict)
-    k = _decode_key_row(r)
-    return ArrayGroupRow(
-        k.owner_id,
-        k.owner_category,
-        k.time_series_type,
-        k.name,
-        k.initial_timestamp,
-        k.resolution,
-        k.length,
-        k.horizon,
-        k.interval,
-        k.count,
-        k.features,
-        k.time_reference,
-        k.id,
-        hex2bytes(String(r["data_hash"])),
-    )
-end
-
 function _decode_metadata(r::AbstractDict)
     percentiles = r["percentiles"]
     return TimeSeriesMetadata(
@@ -344,11 +226,18 @@ function _filter_list_json(
 end
 
 """
-    list_keys(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
-              name=nothing, resolution=nothing, interval=nothing, features=nothing) -> Vector{KeyRow}
+    list_metadata(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
+              name=nothing, resolution=nothing, interval=nothing, features=nothing) -> Vector{TimeSeriesMetadata}
 
-List the key of every stored time series matching the (all-optional, independent)
-filters, as [`KeyRow`](@ref)s. With no filter set the whole store is listed.
+The catalog row of every stored time series matching the (all-optional,
+independent) filters, as [`TimeSeriesMetadata`](@ref)s. With no filter set the
+whole store is listed.
+
+The listing that answers identity questions: which series exist, what type and
+grid each is, which array each resolves to (`data_hash`), and the `id` that
+addresses it. A row carries no timestamp vector — an irregular series' time axis
+is the one part of a row that costs a read per row, so a listing omits it and
+[`read_by_id`](@ref) returns the series with its axis.
 
 - `owner_id`, `owner_category` (an `OwnerCategory`) — scope to one owner.
 - `time_series_type` — the Julia type (`SingleTimeSeries`, `Deterministic`, ...).
@@ -361,7 +250,7 @@ filters, as [`KeyRow`](@ref)s. With no filter set the whole store is listed.
 - `resolution` — a `Period`.
 - `interval` — a `Period`; forecasts only (static rows carry no interval and
   never match an interval filter).
-- `features` — match keys whose features include all the given entries (subset).
+- `features` — match rows whose features include all the given entries (subset).
 - `component_field` — exact, case-sensitive match on the owning component's
   field (e.g. `"max_active_power"`). A row that declares none matches no value,
   so this cannot select the rows that left it unset.
@@ -372,29 +261,45 @@ filters, as [`KeyRow`](@ref)s. With no filter set the whole store is listed.
   mixed-selection rules split on — one time bound, or one shared timestamp axis,
   cannot serve both.
 """
-function list_keys(store::Store; kwargs...)
-    json = _filter_list_json(:infrastore_store_list_keys, store; kwargs...)
-    return [_decode_key_row(r) for r in JSON.parse(json)]
+function list_metadata(store::Store; kwargs...)
+    json = _filter_list_json(:infrastore_store_list_metadata, store; kwargs...)
+    return TimeSeriesMetadata[_decode_metadata(r) for r in JSON.parse(json)]
 end
 
 """
-    list_time_series(store; owner_id=nothing, owner_category=nothing,
-                     time_series_type=nothing, name=nothing, resolution=nothing,
-                     interval=nothing, features=nothing) -> Vector{TimeSeriesMetadata}
+    list_metadata_by_ids(store, ids) -> Vector{TimeSeriesMetadata}
 
-The full [`TimeSeriesMetadata`](@ref) of every association matching the filter
-(the same filters as [`list_keys`](@ref)) — the listing counterpart of
-[`get_metadata`](@ref), which returns one.
+The catalog rows named by `ids`, in the order the ids are given.
+
+[`list_metadata`](@ref) addressed by id instead of by attributes — the bulk
+companion to [`get_metadata_by_id`](@ref), and what a consumer hydrating a model
+full of recorded ids wants: one catalog query for the whole set rather than one
+call per reference.
+
+Throws `NotFoundError` if any id names no row. A listing by attributes returns
+what matches, but a caller naming ids is asserting they exist, and a silently
+short result would let a stale reference pass as an absent match. Sift the set
+with [`association_exists`](@ref) first when some are expected to have gone.
+Repeats are returned once each, in place.
 """
-function list_time_series(store::Store; kwargs...)
-    json = _filter_list_json(:infrastore_store_list_time_series, store; kwargs...)
+function list_metadata_by_ids(store::Store, ids::AbstractVector{<:Integer})
+    raw = Int64[Int64(i) for i in ids]
+    json = _owned_str(
+        (out_json, out_len) -> @ccall lib_path().infrastore_store_list_metadata_by_ids(
+            store::Ptr{Cvoid},
+            raw::Ptr{Int64},
+            length(raw)::UInt64,
+            out_json::Ref{Ptr{Cchar}},
+            out_len::Ref{UInt64},
+        )::Int32
+    )
     return TimeSeriesMetadata[_decode_metadata(r) for r in JSON.parse(json)]
 end
 
 """
     list_names(store; filters...) -> Vector{String}
 
-Distinct series names matching the filter (same filters as [`list_keys`](@ref)),
+Distinct series names matching the filter (same filters as [`list_metadata`](@ref)),
 sorted.
 """
 function list_names(store::Store; kwargs...)
@@ -405,7 +310,7 @@ end
 """
     list_owner_types(store; filters...) -> Vector{String}
 
-Distinct owner types matching the filter (same filters as [`list_keys`](@ref)),
+Distinct owner types matching the filter (same filters as [`list_metadata`](@ref)),
 sorted.
 """
 function list_owner_types(store::Store; kwargs...)
@@ -416,7 +321,7 @@ end
 """
     remove_by_filter!(store; filters...) -> Int
 
-Remove every series matching the filter (same filters as [`list_keys`](@ref)) in
+Remove every series matching the filter (same filters as [`list_metadata`](@ref)) in
 one all-or-nothing transaction; returns the number removed (0 if none match).
 """
 function remove_by_filter!(
@@ -459,199 +364,15 @@ function remove_by_filter!(
 end
 
 """
-    list_array_groups(store; owner_id=nothing, owner_category=nothing,
-                      time_series_type=nothing, name=nothing, resolution=nothing,
-                      interval=nothing, features=nothing) -> Vector{ArrayGroupRow}
-
-Like [`list_keys`](@ref) (same filters, same row fields), but each
-[`ArrayGroupRow`](@ref) additionally carries `data_hash`: the 32-byte content
-hash of the array the row resolves to. Rows that share a stored array share
-their `data_hash` — both deduplicated identical arrays and a `SingleTimeSeries`
-together with any `DeterministicSingleTimeSeries` derived from it. Group the
-returned rows by `data_hash` to find which time series share their underlying
-data.
-
-Resolved by a single catalog query in the core (the hash is read off each metadata
-row); there are no per-row `get_metadata` round-trips.
-"""
-function list_array_groups(store::Store; kwargs...)
-    json = _filter_list_json(:infrastore_store_list_array_groups, store; kwargs...)
-    return ArrayGroupRow[_decode_array_group_row(r) for r in JSON.parse(json)]
-end
-
-"""
-    key_info(key) -> KeyInfo
-
-Inspect an opaque `TimeSeriesKey` (e.g. one returned by `get_time_series_keys`),
-returning its [`KeyInfo`](@ref). `time_series_type` is the Julia type (one of
-`SingleTimeSeries`, `NonSequentialTimeSeries`, `Deterministic`,
-`DeterministicSingleTimeSeries`, `Probabilistic`, `Scenarios`) — pass it straight
-to `get_time_series(time_series_type, store, key)`.
-"""
-function key_info(key::TimeSeriesRef)
-    out_type = Ref{Int32}(0)
-    out_res = Ref{Ptr{Cchar}}(C_NULL)
-    out_owner = Ref{Int64}(0)
-    out_category = Ref{Int32}(0)
-    name_len = Ref{UInt64}(0)
-    feat_len = Ref{UInt64}(0)
-    # Probe the string lengths (type, resolution, owner id, and owner category are
-    # filled on this call too).
-    # `out_resolution` is null on the probe: it is a fresh allocation on every
-    # call that passes it, so the probe would otherwise hand back a string this
-    # call has no use for and the fetch below would overwrite.
-    code = @ccall lib_path().infrastore_key_attributes(
-        key::Ptr{Cvoid},
-        out_type::Ref{Int32},
-        C_NULL::Ptr{Cvoid},
-        out_owner::Ref{Int64},
-        out_category::Ref{Int32},
-        C_NULL::Ptr{UInt8},
-        UInt64(0)::UInt64,
-        name_len::Ref{UInt64},
-        C_NULL::Ptr{UInt8},
-        UInt64(0)::UInt64,
-        feat_len::Ref{UInt64},
-    )::Int32
-    _check(code)
-    name_buf = Vector{UInt8}(undef, Int(name_len[]) + 1)
-    feat_buf = Vector{UInt8}(undef, Int(feat_len[]) + 1)
-    code = @ccall lib_path().infrastore_key_attributes(
-        key::Ptr{Cvoid},
-        out_type::Ref{Int32},
-        out_res::Ref{Ptr{Cchar}},
-        out_owner::Ref{Int64},
-        out_category::Ref{Int32},
-        name_buf::Ptr{UInt8},
-        UInt64(length(name_buf))::UInt64,
-        name_len::Ref{UInt64},
-        feat_buf::Ptr{UInt8},
-        UInt64(length(feat_buf))::UInt64,
-        feat_len::Ref{UInt64},
-    )::Int32
-    _check(code)
-    name = String(name_buf[1:Int(name_len[])])
-    features = JSON.parse(String(feat_buf[1:Int(feat_len[])]))
-    resolution = _take_period(out_res[])
-    return KeyInfo(
-        out_owner[],
-        OwnerCategory(Int(out_category[])),
-        name,
-        _type_for_code(out_type[]),
-        resolution,
-        features,
-    )
-end
-
-# Key-based alias so `SingleTimeSeries` matches the `get_time_series(T, store, key)`
-# shape the other types use (the bare `get_time_series(store, key)` form is kept).
-function get_time_series(
-    ::Type{T},
-    store::Store,
-    key::TimeSeriesRef;
-    time_range::TimeRangeArg=nothing,
-) where {T <: SingleTimeSeries}
-    _check_request_type(T)
-    return get_time_series(store, key; time_range=time_range)
-end
-
-"""
-    get_time_series(SingleTimeSeries, store, owner_id, owner_category, name; resolution, features, time_range)
-
-Attribute-addressed counterpart to `get_time_series(store, key)`. `owner_category`
-is the owner's `OwnerCategory` (`Component` or `SupplementalAttribute`). The
-optional `time_range` `(start, stop)` slices like the key-based form.
-"""
-function get_time_series(
-    ::Type{T},
-    store::Store,
-    owner_id::Integer,
-    owner_category::OwnerCategory,
-    name::AbstractString;
-    resolution::Union{Nothing, Period}=nothing,
-    features::Union{Nothing, AbstractDict}=nothing,
-    time_range::TimeRangeArg=nothing,
-) where {T <: SingleTimeSeries}
-    _check_request_type(T)
-    key = _make_key(
-        owner_id,
-        owner_category,
-        name,
-        INFRASTORE_TYPE_SINGLE;
-        resolution=resolution,
-        features=features,
-    )
-    return get_time_series(store, key; time_range=time_range)
-end
-
-"""
-    get_time_series(NonSequentialTimeSeries, store, owner_id, owner_category, name; resolution, features, time_range)
-
-Attribute-addressed counterpart to `get_time_series(NonSequentialTimeSeries, store, key)`.
-`owner_category` is the owner's `OwnerCategory` (`Component` or
-`SupplementalAttribute`). The optional `time_range` `(start, stop)` slices like
-the key-based form.
-"""
-function get_time_series(
-    ::Type{T},
-    store::Store,
-    owner_id::Integer,
-    owner_category::OwnerCategory,
-    name::AbstractString;
-    resolution::Union{Nothing, Period}=nothing,
-    features::Union{Nothing, AbstractDict}=nothing,
-    time_range::TimeRangeArg=nothing,
-) where {T <: NonSequentialTimeSeries}
-    _check_request_type(T)
-    key = _make_key(
-        owner_id,
-        owner_category,
-        name,
-        INFRASTORE_TYPE_NON_SEQUENTIAL;
-        resolution=resolution,
-        features=features,
-    )
-    return get_time_series(NonSequentialTimeSeries, store, key; time_range=time_range)
-end
-
-function remove_time_series!(store::Store, key::TimeSeriesRef)
-    code = @ccall lib_path().infrastore_store_remove(
-        store::Ptr{Cvoid}, key::Ptr{Cvoid}
-    )::Int32
-    _check(code)
-    return nothing
-end
-
-"""
-    remove_time_series!(store, keys::AbstractVector{<:TimeSeriesRef}) -> Int
-
-Remove several time series in one all-or-nothing transaction, returning the
-number removed. On any error (including a single missing key) nothing is
-removed.
-"""
-function remove_time_series!(store::Store, keys::AbstractVector{<:TimeSeriesRef})
-    handles = Ptr{Cvoid}[_key(k).handle for k in keys]
-    out_removed = Ref{UInt64}(0)
-    code = GC.@preserve keys @ccall lib_path().infrastore_store_remove_bulk(
-        store::Ptr{Cvoid},
-        handles::Ptr{Ptr{Cvoid}},
-        UInt64(length(handles))::UInt64,
-        out_removed::Ref{UInt64},
-    )::Int32
-    _check(code)
-    return Int(out_removed[])
-end
-
-"""
     remove_by_ids!(store, ids) -> Int
 
 Remove many associations named by their catalog `id`, in one all-or-nothing
 transaction, returning the number removed.
 
-The removal direction of the id every write hands back on its
-`AddedTimeSeries`: a caller that recorded ids in its own model retires one
-without rebuilding the key it was filed under, and an id names exactly one row
-where a key can match a whole forecast family. Throws `NotFoundError` if any id
+The removal direction of the id every write hands back: a caller that recorded
+ids in its own model retires one without rebuilding the identity it was filed
+under, and an id names exactly one row where a key could match a whole forecast
+family. Throws `NotFoundError` if any id
 names no row, leaving the store untouched — sift the set with
 [`association_exists`](@ref) first when some references are expected to have
 gone. A repeated id is removed, and counted, once.
@@ -672,26 +393,21 @@ function remove_by_ids!(store::Store, ids::AbstractVector{<:Integer})
     return Int(out_removed[])
 end
 
-function has_time_series(store::Store, key::TimeSeriesRef)
-    out = Ref{Bool}(false)
-    code = @ccall lib_path().infrastore_store_has(
-        store::Ptr{Cvoid}, key::Ptr{Cvoid}, out::Ref{Bool}
-    )::Int32
-    _check(code)
-    return out[]
-end
-
 """
     has_any_time_series(store; owner_id=nothing, owner_category=nothing,
                         time_series_type=nothing, name=nothing, resolution=nothing,
                         interval=nothing, features=nothing) -> Bool
 
 True iff at least one stored time series matches the filter — the existence
-probe over the same (all-optional, independent) filters as [`list_keys`](@ref),
+probe over the same (all-optional, independent) filters as [`list_metadata`](@ref),
 answered off the catalog indexes without hydrating or marshaling any rows, so
-it is safe for hot per-component loops. `features` is a subset match, unlike
-the exact-key [`has_time_series`](@ref) forms, which compare the whole feature
-set by content hash — but it stays on indexes: the store probes the requested
+it is safe for hot per-component loops.
+
+An existence question is an *identify* operation, which is why it stayed
+attribute-addressed when the reads moved to ids: routing it through a
+resolution would trade an index seek for a row fetch in exactly the loops it
+exists for. `features` is a subset match here — but it stays on indexes: the
+store probes the requested
 set as an exact set (by hash) first, so callers passing the complete feature
 set get a single covering-index seek; only genuinely partial feature lists take
 the indexed per-feature fallback probe.

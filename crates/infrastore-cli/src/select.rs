@@ -1,6 +1,6 @@
 //! Resolving a stored time series from CLI selector flags.
 
-use infrastore_core::{Features, KeyIdentity, ListFilter, Store, TimeSeriesMetadata};
+use infrastore_core::{Features, ListFilter, Store, TimeSeriesId, TimeSeriesMetadata};
 
 use crate::fields;
 use crate::parse;
@@ -150,7 +150,7 @@ impl SelectorArgs {
 
     /// Resolve to exactly one stored series, returning its metadata and key.
     /// Errors with a helpful list when zero or multiple series match.
-    pub fn resolve(&self, store: &Store) -> Result<(TimeSeriesMetadata, KeyIdentity), String> {
+    pub fn resolve(&self, store: &Store) -> Result<(TimeSeriesMetadata, TimeSeriesId), String> {
         if let Some(id) = self.id {
             if self.narrows_further() {
                 return Err(
@@ -159,7 +159,7 @@ impl SelectorArgs {
                 );
             }
             let meta = store
-                .get_metadata_by_id(id)
+                .get_metadata_by_id(TimeSeriesId(id))
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| {
                     format!(
@@ -167,17 +167,17 @@ impl SelectorArgs {
                          resolving stays stale rather than coming to name a different series"
                     )
                 })?;
-            let key = key_of(&meta);
+            let key = id_of(&meta)?;
             return Ok((meta, key));
         }
         let mut matches = store
-            .list_time_series(self.to_filter()?)
+            .list_metadata(self.to_filter()?)
             .map_err(|e| e.to_string())?;
         match matches.len() {
             0 => Err("no time series matched the selector".to_string()),
             1 => {
                 let meta = matches.remove(0);
-                let key = key_of(&meta);
+                let key = id_of(&meta)?;
                 Ok((meta, key))
             }
             n => {
@@ -200,15 +200,25 @@ impl SelectorArgs {
     }
 }
 
-/// Reconstruct the lookup key (identity) from a metadata record.
-pub fn key_of(meta: &TimeSeriesMetadata) -> KeyIdentity {
-    KeyIdentity {
-        owner_id: meta.owner_id,
-        owner_category: meta.owner_category,
-        time_series_type: meta.time_series_type,
-        name: meta.name.clone(),
+/// The exact-identity filter for one row: every identity field pinned, and the
+/// feature set matched whole rather than as a subset. What `--replace` poses its
+/// "is this already here?" question with.
+pub fn exact_filter(meta: &TimeSeriesMetadata) -> infrastore_core::ListFilter {
+    infrastore_core::ListFilter {
+        owner_id: Some(meta.owner_id),
+        owner_category: Some(meta.owner_category),
+        time_series_type: Some(meta.time_series_type),
+        name: Some(meta.name.clone()),
         resolution: meta.resolution,
         interval: meta.interval,
-        features: meta.features.clone(),
+        features: Some(meta.features.clone()),
+        features_exact: true,
+        ..Default::default()
     }
+}
+
+/// The catalog id of a selected row — how every read and removal addresses it.
+pub fn id_of(meta: &TimeSeriesMetadata) -> Result<TimeSeriesId, String> {
+    meta.id
+        .ok_or_else(|| format!("row {:?} carries no catalog id", meta.name))
 }

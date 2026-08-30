@@ -67,13 +67,13 @@ ts = SingleTimeSeries(
     np.arange(24, dtype=np.float64) + 100,
     "load",
 )
-key = store.add_time_series(
+series_id = store.add_time_series(
     owner_id=42, owner_type="Generator",
     owner_category=OwnerCategory.Component,
     time_series=ts,
     features={"model_year": 2030}, units="MW",
 )
-assert np.array_equal(np.asarray(store.get_time_series(key).data), np.asarray(ts.data))
+assert np.array_equal(np.asarray(store.read_by_id(series_id).data), np.asarray(ts.data))
 print("ok")
 ```
 

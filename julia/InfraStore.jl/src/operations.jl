@@ -262,18 +262,19 @@ const _AddableTimeSeries = Union{
 """
     add_time_series!(store, owner_id, owner_type, owner_category, ts;
                      features=nothing, element_type=ts.element_type,
-                     units=ts.units, application_data=ts.application_data) -> TimeSeriesKey
+                     units=ts.units, application_data=ts.application_data) -> Int64
 
 Add a time series (`SingleTimeSeries`, `NonSequentialTimeSeries`,
-`Deterministic`, `Probabilistic`, or `Scenarios`) and return its
-[`TimeSeriesKey`](@ref). `owner_id` identifies the owning component /
-supplemental attribute (a signed 64-bit integer). The association `name` comes
-from the time series object (`ts.name`), as do its `element_type` and `units`
-labels.
+`Deterministic`, `Probabilistic`, or `Scenarios`) and return the catalog `id`
+its row was filed under — the handle every read, removal and rename takes, and
+the one a caller records in its own object model. `owner_id` identifies the
+owning component / supplemental attribute (a signed 64-bit integer). The
+association `name` comes from the time series object (`ts.name`), as do its
+`element_type` and `units` labels.
 
-A `features` key that shadows a field of a time series or of the key that
-addresses one (`name`, `resolution`, `owner_id`, …) is rejected: those names are
-reserved so that a feature can never silently change the meaning of a
+A `features` key that shadows a field of a time series or of the identity a row
+is filed under (`name`, `resolution`, `owner_id`, …) is rejected: those names
+are reserved so that a feature can never silently change the meaning of a
 keyword-argument query.
 
 The same methods accept an [`AddBatch`](@ref) in place of the `Store` to stage
@@ -291,45 +292,6 @@ function add_time_series!(
     batch = AddBatch()
     add_time_series!(batch, owner_id, owner_type, owner_category, ts; kwargs...)
     return only(add_time_series_bulk!(store, batch))
-end
-
-"""
-    get_metadata(store, key) -> TimeSeriesMetadata
-    get_metadata(T, store, owner_id, owner_category, name; resolution, interval, features=nothing) -> TimeSeriesMetadata
-    get_metadata(store, owner_id, owner_category, name; resolution, features=nothing) -> TimeSeriesMetadata
-
-The complete [`TimeSeriesMetadata`](@ref) of one stored association, addressed
-either by a `TimeSeriesKey` or by attributes.
-
-The attribute form takes the time series type as its first argument, exactly like
-[`get_time_series`](@ref): `SingleTimeSeries`, `NonSequentialTimeSeries`,
-`Deterministic`, `Probabilistic`, or `Scenarios` — where `Deterministic`
-resolves a stored `DeterministicSingleTimeSeries` too, and the returned
-metadata's `time_series_type` reports which form was found. `owner_category` is
-the owner's `OwnerCategory` (`Component` or `SupplementalAttribute`); `interval`
-is only needed to disambiguate forecasts that differ solely by interval.
-
-Omitting the type reads a `SingleTimeSeries`, matching the same shorthand on
-[`has_time_series`](@ref) and [`remove_time_series!`](@ref).
-
-Throws `NotFoundError` if absent.
-
-```julia
-get_metadata(store, 42, Component, "load"; resolution=Hour(1))
-get_metadata(Scenarios, store, 42, Component, "wind"; resolution=Hour(1))
-```
-"""
-function get_metadata(store::Store, key::TimeSeriesRef)
-    json = _probe(
-        (buf, cap, out_len) -> @ccall lib_path().infrastore_store_get_metadata_by_key(
-            store::Ptr{Cvoid},
-            key::Ptr{Cvoid},
-            buf::Ptr{UInt8},
-            cap::UInt64,
-            out_len::Ref{UInt64},
-        )::Int32
-    )
-    return _decode_metadata(JSON.parse(json))
 end
 
 """
@@ -383,130 +345,25 @@ function association_exists(store::Store, id::Integer)
     return out_present[]
 end
 
-function get_metadata(
-    ::Type{T},
-    store::Store,
-    owner_id::Integer,
-    owner_category::OwnerCategory,
-    name::AbstractString;
-    resolution::Union{Nothing, Period}=nothing,
-    interval::Union{Nothing, Period}=nothing,
-    features::Union{Nothing, AbstractDict}=nothing,
-) where {T}
-    code = _type_code(T)
-    # A `Deterministic` request may be satisfied by a stored
-    # `DeterministicSingleTimeSeries`, so its key is not knowable up front: let
-    # the core resolve it. Every other type addresses its key directly.
-    key = if code == INFRASTORE_TYPE_DETERMINISTIC
-        get_time_series_key(
-            T,
-            store,
-            owner_id,
-            owner_category,
-            name;
-            resolution=resolution,
-            interval=interval,
-            features=features,
-        )
-    else
-        _make_key(
-            owner_id,
-            owner_category,
-            name,
-            code;
-            resolution=resolution,
-            interval=interval,
-            features=features,
-        )
-    end
-    return get_metadata(store, key)
-end
-
-function get_metadata(
-    store::Store,
-    owner_id::Integer,
-    owner_category::OwnerCategory,
-    name::AbstractString;
-    resolution::Union{Nothing, Period}=nothing,
-    features::Union{Nothing, AbstractDict}=nothing,
-)
-    return get_metadata(
-        SingleTimeSeries,
-        store,
-        owner_id,
-        owner_category,
-        name;
-        resolution=resolution,
-        features=features,
-    )
-end
-
 """
-    rename_time_series!(store, key, new_name) -> TimeSeriesKey
+    rename_time_series!(store, id, new_name) -> Int64
 
-Rename the series identified by `key` to `new_name`, returning the renamed key
-(same identity, new name). Only the catalog name changes.
+Rename the association filed under `id` to `new_name`, returning `id`.
+
+A rename moves the *name*, not the reference: the id is the same afterwards, so
+anything holding it keeps working. Only the catalog row changes — the underlying
+array and its content hash are untouched. Throws `NotFoundError` if `id` names
+no row, or `DuplicateTimeSeriesError` if a series with the new identity already
+exists.
 """
-function rename_time_series!(store::Store, key::TimeSeriesRef, new_name::AbstractString)
-    out_key = Ref{Ptr{Cvoid}}(C_NULL)
+function rename_time_series!(store::Store, id::Integer, new_name::AbstractString)
     code = @ccall lib_path().infrastore_store_rename(
         store::Ptr{Cvoid},
-        key::Ptr{Cvoid},
+        Int64(id)::Int64,
         String(new_name)::Cstring,
-        out_key::Ref{Ptr{Cvoid}},
     )::Int32
     _check(code)
-    return TimeSeriesKey(out_key[])
-end
-
-"""
-    get_time_series_key(T, store, owner_id, owner_category, name; resolution, interval, features=nothing) -> TimeSeriesKey
-
-The [`TimeSeriesKey`](@ref) of the stored time series of type `T` with the given
-attributes — the attribute-addressed counterpart of
-[`get_time_series_keys`](@ref), which enumerates one owner's keys.
-
-`T` is any stored type. `Deterministic` matches a stored
-`DeterministicSingleTimeSeries` too, and the returned key names the concrete
-stored type either way. `resolution` and `interval` narrow the identity.
-
-The key is resolved against the catalog, so it always names something stored:
-a miss throws `NotFoundError`, and a request matching several series throws
-`InvalidParameterError` listing the candidates — narrow it with a `resolution`
-and/or an `interval`.
-
-Use the returned handle with the key-based readers, [`bulk_read`](@ref),
-[`get_metadata`](@ref), [`rename_time_series!`](@ref), or
-[`remove_time_series!`](@ref).
-"""
-function get_time_series_key(
-    ::Type{T},
-    store::Store,
-    owner_id::Integer,
-    owner_category::OwnerCategory,
-    name::AbstractString;
-    resolution::Union{Nothing, Period}=nothing,
-    interval::Union{Nothing, Period}=nothing,
-    features::Union{Nothing, AbstractDict}=nothing,
-) where {T}
-    resolution_iso = _period_to_cstr(resolution)
-    interval_iso = _period_to_cstr(interval)
-    features_json =
-        (features === nothing || isempty(features)) ? C_NULL : JSON.json(features)
-    out_key = Ref{Ptr{Cvoid}}(C_NULL)
-    code = @ccall lib_path().infrastore_store_resolve_forecast_key(
-        store::Ptr{Cvoid},
-        Int64(owner_id)::Int64,
-        _category_int(owner_category)::Int32,
-        name::Cstring,
-        resolution_iso::Cstring,
-        interval_iso::Cstring,
-        features_json::Cstring,
-        Int32(_type_code(T))::Int32,
-        out_key::Ref{Ptr{Cvoid}},
-    )::Int32
-    _check(code)
-    return TimeSeriesKey(out_key[])
+    return Int64(id)
 end
 
 """
@@ -648,113 +505,6 @@ function has_for_owner(
     )::Int32
     _check(code)
     return out[]
-end
-
-"""
-    remove_time_series!(store, owner_id, owner_category, name; resolution, features=nothing)
-
-`owner_category` is the owner's `OwnerCategory` (`Component` or
-`SupplementalAttribute`).
-"""
-function remove_time_series!(
-    store::Store,
-    owner_id::Integer,
-    owner_category::OwnerCategory,
-    name::AbstractString;
-    resolution::Union{Nothing, Period}=nothing,
-    features::Union{Nothing, AbstractDict}=nothing,
-)
-    resolution_iso = _period_to_cstr(resolution)
-    features_json =
-        (features === nothing || isempty(features)) ? C_NULL : JSON.json(features)
-    code = @ccall lib_path().infrastore_store_remove_by_attrs(
-        store::Ptr{Cvoid},
-        Int64(owner_id)::Int64,
-        _category_int(owner_category)::Int32,
-        name::Cstring,
-        resolution_iso::Cstring,
-        features_json::Cstring,
-    )::Int32
-    _check(code)
-    return nothing
-end
-
-function get_time_series(
-    store::Store,
-    key::TimeSeriesRef;
-    time_range::TimeRangeArg=nothing,
-)
-    out_initial = Ref{Int64}(0)
-    out_resolution = Ref{Ptr{Cchar}}(C_NULL)
-    out_dtype = Ref{Int32}(0)
-    out_shape = Ref{Ptr{Int64}}(C_NULL)
-    out_shape_len = Ref{UInt64}(0)
-    out_data = Ref{Ptr{UInt8}}(C_NULL)
-    out_data_len = Ref{UInt64}(0)
-    out_application_data = Ref{Ptr{Cchar}}(C_NULL)
-    out_element_type = Ref{Ptr{Cchar}}(C_NULL)
-    out_units = Ref{Ptr{Cchar}}(C_NULL)
-    out_quantity_kind = Ref{Ptr{Cchar}}(C_NULL)
-    out_unit_system = Ref{Ptr{Cchar}}(C_NULL)
-    out_time_reference = Ref{Ptr{Cchar}}(C_NULL)
-    out_component_field = Ref{Ptr{Cchar}}(C_NULL)
-    tr_present, tr_zoneless, tr_start, tr_end = _time_range_args(time_range)
-    code = @ccall lib_path().infrastore_store_get_single(
-        store::Ptr{Cvoid},
-        key::Ptr{Cvoid},
-        tr_present::Bool,
-        tr_zoneless::Bool,
-        tr_start::Int64,
-        tr_end::Int64,
-        out_initial::Ref{Int64},
-        out_resolution::Ref{Ptr{Cchar}},
-        out_dtype::Ref{Int32},
-        out_shape::Ref{Ptr{Int64}},
-        out_shape_len::Ref{UInt64},
-        out_data::Ref{Ptr{UInt8}},
-        out_data_len::Ref{UInt64},
-        out_application_data::Ref{Ptr{Cchar}},
-        out_element_type::Ref{Ptr{Cchar}},
-        out_units::Ref{Ptr{Cchar}},
-        out_quantity_kind::Ref{Ptr{Cchar}},
-        out_unit_system::Ref{Ptr{Cchar}},
-        out_time_reference::Ref{Ptr{Cchar}},
-        out_component_field::Ref{Ptr{Cchar}},
-    )::Int32
-    _check(code)
-
-    # Decode inside try/finally: every FFI allocation is released exactly once
-    # in the `finally`, so an exception mid-decode cannot leak the rest.
-    try
-        # Full array shape [length, *element_shape] (row-major dims), then bytes.
-        dims = Int.(unsafe_wrap(Array, out_shape[], Int(out_shape_len[]); own=false))
-        bytes = copy(unsafe_wrap(Array, out_data[], Int(out_data_len[]); own=false))
-        data = _decode_array(bytes, out_dtype[], dims)
-        return SingleTimeSeries(
-            _from_unix_ms(out_initial[]),
-            _peek_period(out_resolution[]),
-            data,
-            _key_name(key);
-            application_data=_peek_cstr(out_application_data[]),
-            element_type=_peek_cstr(out_element_type[]),
-            units=_peek_cstr(out_units[]),
-            quantity_kind=_peek_cstr(out_quantity_kind[]),
-            unit_system=_unit_system(_peek_cstr(out_unit_system[])),
-            time_reference=_time_reference(_peek_cstr(out_time_reference[])),
-            component_field=_peek_cstr(out_component_field[]),
-        )
-    finally
-        _free_i64(out_shape[], out_shape_len[])
-        _free_u8(out_data[], out_data_len[])
-        _free_cstr(out_resolution[])
-        _free_cstr(out_application_data[])
-        _free_cstr(out_element_type[])
-        _free_cstr(out_units[])
-        _free_cstr(out_quantity_kind[])
-        _free_cstr(out_unit_system[])
-        _free_cstr(out_time_reference[])
-        _free_cstr(out_component_field[])
-    end
 end
 
 # Reconstruct one SingleTimeSeries from a bulk-read result slot. Like the other
@@ -1005,44 +755,9 @@ function _bulk_forecast(
     end
 end
 
-"""
-    bulk_read(store, keys; time_range=nothing) -> Vector
-
-Read many full series at once, returning one per key in order — dispatching on
-each key's stored type to the proper Julia struct (`SingleTimeSeries`,
-`NonSequentialTimeSeries`, `Deterministic`, `Probabilistic`, or `Scenarios`).
-The packed `SingleTimeSeries` are read in a single decompress-once pass per
-dataset. Pass `time_range = (start, stop)` to slice every series to that window.
-"""
-function bulk_read(
-    store::Store,
-    keys::AbstractVector{<:TimeSeriesRef};
-    time_range::TimeRangeArg=nothing,
-)
-    n = length(keys)
-    out = Vector{Any}(undef, n)
-    n == 0 && return out
-
-    key_handles = Ptr{Cvoid}[_key(k).handle for k in keys]
-    out_result = Ref{Ptr{Cvoid}}(C_NULL)
-    tr_present, tr_zoneless, tr_start, tr_end = _time_range_args(time_range)
-    code = GC.@preserve keys key_handles @ccall lib_path().infrastore_store_bulk_read(
-        store::Ptr{Cvoid},
-        key_handles::Ptr{Ptr{Cvoid}},
-        UInt64(n)::UInt64,
-        tr_present::Bool,
-        tr_zoneless::Bool,
-        tr_start::Int64,
-        tr_end::Int64,
-        out_result::Ref{Ptr{Cvoid}},
-    )::Int32
-    _check(code)
-    return _decode_bulk_result(out_result[], n)
-end
-
 # The name of bulk-read item `idx` (0-based), as an owned C string the FFI hands
 # over. The result handle carries each item's name whichever way the read was
-# addressed, so both `bulk_read` and `read_by_ids` label their items from here.
+# addressed, so both `read_by_id` and `read_by_ids` label their items from here.
 function _bulk_item_name(result::Ptr{Cvoid}, idx::Integer)
     out_name = Ref{Ptr{Cchar}}(C_NULL)
     _check(
@@ -1084,34 +799,62 @@ function _decode_bulk_result(result::Ptr{Cvoid}, n::Integer)
 end
 
 """
-    read_by_ids(store, ids) -> Vector
+    read_by_ids(store, ids; time_range=nothing) -> Vector
 
 Read many full series named by their catalog association `id`, returning one per
 id in the order the ids were given — repeats included, and dispatching on each
-row's stored type to the proper Julia struct exactly as [`bulk_read`](@ref)
-does.
+row's stored type to the proper Julia struct (`SingleTimeSeries`,
+`NonSequentialTimeSeries`, `Deterministic`, `Probabilistic`, or `Scenarios`).
+The packed `SingleTimeSeries` are read in a single decompress-once pass per
+dataset.
 
-The read direction of the id every write hands back on its `AddedTimeSeries`: a
-caller that recorded ids in its own model resolves them here rather than keeping
-an id-to-key map beside the store. Throws `NotFoundError` if any id names no row
-— unlike [`association_exists`](@ref), which asks the question, this call is
-already committed to reading, so a stale reference is a failure rather than an
-answer. The error does not say *which* id dangled; sift them with
-`association_exists` when that matters.
+The read direction of the id every write hands back: a caller that recorded ids
+in its own model resolves them here rather than keeping an id-to-key map beside
+the store. Throws `NotFoundError` if any id names no row — unlike
+[`association_exists`](@ref), which asks the question, this call is already
+committed to reading, so a stale reference is a failure rather than an answer.
+The error does not say *which* id dangled; sift them with `association_exists`
+when that matters.
+
+Pass `time_range = (start, stop)` to clip every series to that window. A range
+*clips* to what is there, where [`read_by_id`](@ref)'s window is *checked* — an
+export names bounds and does not know how many steps each series has inside
+them. Both bounds must be spelled the way the series are, and a selection
+spanning both coherence groups (zoneless and instant-bearing) is refused rather
+than resolved per series; narrow it with `list_metadata`'s `zoneless` filter.
 """
-function read_by_ids(store::Store, ids::AbstractVector{<:Integer})
+function read_by_ids(
+    store::Store,
+    ids::AbstractVector{<:Integer};
+    time_range::TimeRangeArg=nothing,
+)
     n = length(ids)
     n == 0 && return Vector{Any}(undef, 0)
     id_vec = Int64[Int64(id) for id in ids]
     out_result = Ref{Ptr{Cvoid}}(C_NULL)
-    _check(
-        @ccall lib_path().infrastore_store_read_by_ids(
-            store::Ptr{Cvoid},
-            id_vec::Ptr{Int64},
-            UInt64(n)::UInt64,
-            out_result::Ref{Ptr{Cvoid}},
-        )::Int32
-    )
+    if time_range === nothing
+        _check(
+            @ccall lib_path().infrastore_store_read_by_ids(
+                store::Ptr{Cvoid},
+                id_vec::Ptr{Int64},
+                UInt64(n)::UInt64,
+                out_result::Ref{Ptr{Cvoid}},
+            )::Int32
+        )
+    else
+        _, tr_zoneless, tr_start, tr_end = _time_range_args(time_range)
+        _check(
+            @ccall lib_path().infrastore_store_read_by_ids_range(
+                store::Ptr{Cvoid},
+                id_vec::Ptr{Int64},
+                UInt64(n)::UInt64,
+                tr_zoneless::Bool,
+                tr_start::Int64,
+                tr_end::Int64,
+                out_result::Ref{Ptr{Cvoid}},
+            )::Int32
+        )
+    end
     return _decode_bulk_result(out_result[], n)
 end
 
@@ -1137,7 +880,7 @@ and applies to the forecasts. Passing the one that does not apply throws
 
 A window is *checked*, not clamped: a `start_time` off the series' own grid, or a
 `len` / `count` running past its end, throws `InvalidParameterError` — where the
-`time_range` on [`get_time_series`](@ref) and [`bulk_read`](@ref) would quietly
+`time_range` on [`read_by_ids`](@ref) would quietly
 hand back the smaller answer that fits. Throws `NotFoundError` if `id` names no
 row, following [`read_by_ids`](@ref).
 
@@ -1170,85 +913,4 @@ function read_by_id(
         )::Int32
     )
     return only(_decode_bulk_result(out_result[], 1))
-end
-
-function get_time_series(
-    ::Type{T},
-    store::Store,
-    key::TimeSeriesRef;
-    time_range::TimeRangeArg=nothing,
-) where {T <: NonSequentialTimeSeries}
-    _check_request_type(T)
-    out_timestamps = Ref{Ptr{Int64}}(C_NULL)
-    out_timestamps_len = Ref{UInt64}(0)
-    out_dtype = Ref{Int32}(0)
-    out_shape = Ref{Ptr{Int64}}(C_NULL)
-    out_shape_len = Ref{UInt64}(0)
-    out_data = Ref{Ptr{UInt8}}(C_NULL)
-    out_data_len = Ref{UInt64}(0)
-    # `application_data` comes back as an owned C string of its full length, like every other
-    # getter. (An earlier revision copied it into a fixed 256-byte buffer, which
-    # silently truncated any longer payload.)
-    out_application_data = Ref{Ptr{Cchar}}(C_NULL)
-    out_element_type = Ref{Ptr{Cchar}}(C_NULL)
-    out_units = Ref{Ptr{Cchar}}(C_NULL)
-    out_quantity_kind = Ref{Ptr{Cchar}}(C_NULL)
-    out_unit_system = Ref{Ptr{Cchar}}(C_NULL)
-    out_time_reference = Ref{Ptr{Cchar}}(C_NULL)
-    out_component_field = Ref{Ptr{Cchar}}(C_NULL)
-    tr_present, tr_zoneless, tr_start, tr_end = _time_range_args(time_range)
-    code = @ccall lib_path().infrastore_store_get_non_sequential(
-        store::Ptr{Cvoid},
-        key::Ptr{Cvoid},
-        tr_present::Bool,
-        tr_zoneless::Bool,
-        tr_start::Int64,
-        tr_end::Int64,
-        out_timestamps::Ref{Ptr{Int64}},
-        out_timestamps_len::Ref{UInt64},
-        out_dtype::Ref{Int32},
-        out_shape::Ref{Ptr{Int64}},
-        out_shape_len::Ref{UInt64},
-        out_data::Ref{Ptr{UInt8}},
-        out_data_len::Ref{UInt64},
-        out_application_data::Ref{Ptr{Cchar}},
-        out_element_type::Ref{Ptr{Cchar}},
-        out_units::Ref{Ptr{Cchar}},
-        out_quantity_kind::Ref{Ptr{Cchar}},
-        out_unit_system::Ref{Ptr{Cchar}},
-        out_time_reference::Ref{Ptr{Cchar}},
-        out_component_field::Ref{Ptr{Cchar}},
-    )::Int32
-    _check(code)
-
-    try
-        timestamp_ms = copy(
-            unsafe_wrap(Array, out_timestamps[], Int(out_timestamps_len[]); own=false)
-        )
-        # Full array shape [length, *element_shape] (row-major dims), then bytes.
-        dims = Int.(unsafe_wrap(Array, out_shape[], Int(out_shape_len[]); own=false))
-        bytes = copy(unsafe_wrap(Array, out_data[], Int(out_data_len[]); own=false))
-        data = _decode_array(bytes, out_dtype[], dims)
-        return NonSequentialTimeSeries(
-            _from_unix_ms.(timestamp_ms), data, _key_name(key);
-            application_data=_peek_cstr(out_application_data[]),
-            element_type=_peek_cstr(out_element_type[]),
-            units=_peek_cstr(out_units[]),
-            quantity_kind=_peek_cstr(out_quantity_kind[]),
-            unit_system=_unit_system(_peek_cstr(out_unit_system[])),
-            time_reference=_time_reference(_peek_cstr(out_time_reference[])),
-            component_field=_peek_cstr(out_component_field[]),
-        )
-    finally
-        _free_i64(out_timestamps[], out_timestamps_len[])
-        _free_i64(out_shape[], out_shape_len[])
-        _free_u8(out_data[], out_data_len[])
-        _free_cstr(out_application_data[])
-        _free_cstr(out_element_type[])
-        _free_cstr(out_units[])
-        _free_cstr(out_quantity_kind[])
-        _free_cstr(out_unit_system[])
-        _free_cstr(out_time_reference[])
-        _free_cstr(out_component_field[])
-    end
 end

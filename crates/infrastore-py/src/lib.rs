@@ -4,7 +4,7 @@
 //!
 //! ```python
 //! from infrastore import (
-//!     Store, SingleTimeSeries, NonSequentialTimeSeries, TimeSeriesKey,
+//!     Store, SingleTimeSeries, NonSequentialTimeSeries,
 //!     TimeSeriesType, OwnerCategory,
 //!     SupplementalAttributeAssociation, ParentChildAssociation,
 //!     TimeSeriesError, NotFoundError, DuplicateTimeSeriesError, InvalidParameterError,
@@ -1248,131 +1248,6 @@ impl PyNonSequentialTimeSeries {
     }
 }
 
-// ---- AddedTimeSeries ------------------------------------------------------
-
-/// What a write reports: the key naming the series, and the catalog id it was
-/// filed under.
-///
-/// The id is deliberately not a field on `TimeSeriesKey` — a key is also an
-/// argument to `get`/`remove`, where an id means nothing — so a write hands
-/// back the pair instead.
-// Only ever returned, never accepted as an argument, so it needs no
-// `FromPyObject` conversion.
-#[pyclass(name = "AddedTimeSeries", module = "infrastore", skip_from_py_object)]
-#[derive(Clone)]
-pub struct PyAddedTimeSeries {
-    #[pyo3(get)]
-    key: PyTimeSeriesKey,
-    #[pyo3(get)]
-    id: i64,
-}
-
-#[pymethods]
-impl PyAddedTimeSeries {
-    fn __repr__(&self) -> String {
-        format!(
-            "AddedTimeSeries(id={}, name={:?}, owner_id={})",
-            self.id, self.key.inner.name, self.key.inner.owner_id,
-        )
-    }
-
-    fn __eq__(&self, other: &Self) -> bool {
-        self.id == other.id && self.key.inner == other.key.inner
-    }
-
-    fn __hash__(&self) -> u64 {
-        hash_of(&self.id)
-    }
-}
-
-impl PyAddedTimeSeries {
-    fn from_core(added: core_lib::AddedTimeSeries) -> Self {
-        Self {
-            key: PyTimeSeriesKey {
-                inner: added.key.identity().clone(),
-            },
-            id: added.id,
-        }
-    }
-}
-
-// ---- TimeSeriesKey --------------------------------------------------------
-
-#[pyclass(name = "TimeSeriesKey", module = "infrastore", from_py_object)]
-#[derive(Clone)]
-pub struct PyTimeSeriesKey {
-    // Lookup handle: carries the identity tuple, not the descriptive window
-    // fields (those are known only for a key returned from add/list).
-    inner: core_lib::KeyIdentity,
-}
-
-#[pymethods]
-impl PyTimeSeriesKey {
-    #[getter]
-    fn owner_id(&self) -> i64 {
-        self.inner.owner_id
-    }
-
-    #[getter]
-    fn owner_category(&self) -> PyOwnerCategory {
-        self.inner.owner_category.into()
-    }
-
-    #[getter]
-    fn time_series_type(&self) -> PyTimeSeriesType {
-        self.inner.time_series_type.into()
-    }
-
-    #[getter]
-    fn name(&self) -> String {
-        self.inner.name.clone()
-    }
-
-    #[getter]
-    fn resolution(&self) -> Option<String> {
-        self.inner.resolution.map(|p| p.to_iso8601())
-    }
-
-    #[getter]
-    fn interval(&self) -> Option<String> {
-        self.inner.interval.map(|p| p.to_iso8601())
-    }
-
-    #[getter]
-    fn features<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        features_to_dict(py, &self.inner.features)
-    }
-
-    fn __repr__(&self) -> String {
-        format!(
-            "TimeSeriesKey(owner_id={:?}, owner_category={:?}, time_series_type={:?}, name={:?}, \
-             resolution={:?}, interval={:?}, features={:?})",
-            self.inner.owner_id,
-            self.inner.owner_category.as_str(),
-            self.inner.time_series_type.as_str(),
-            self.inner.name,
-            self.inner.resolution.map(|p| p.to_iso8601()),
-            self.inner.interval.map(|p| p.to_iso8601()),
-            self.inner.features,
-        )
-    }
-
-    /// Identity equality: two keys are equal iff their identity tuples match
-    /// (mirrors the core `KeyIdentity` equality the catalog looks up).
-    fn __eq__(&self, other: &PyTimeSeriesKey) -> bool {
-        self.inner == other.inner
-    }
-
-    /// Hash of the identity tuple, consistent with `__eq__`, so keys are usable
-    /// in Python sets and dict keys.
-    fn __hash__(&self) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        self.inner.hash(&mut hasher);
-        hasher.finish()
-    }
-}
-
 // ---- Associations ---------------------------------------------------------
 
 /// One attachment of a supplemental attribute to a component.
@@ -1674,7 +1549,8 @@ impl PyStaticReader {
     }
 
     /// One dict per columnar group: `{"dtype": str, "element_type": str, "element_shape": list[int],
-    /// "keys": list[TimeSeriesKey]}` (column order matches `group_values`).
+    /// "ids": list[int]}` (column order matches `group_values`). Resolve an id
+    /// with `get_metadata_by_id` to recover the series a column came from.
     fn groups<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
         self.inner
             .groups()
@@ -1684,14 +1560,8 @@ impl PyStaticReader {
                 d.set_item("dtype", g.dtype().as_str())?;
                 d.set_item("element_type", g.element_type().to_string())?;
                 d.set_item("element_shape", g.element_shape().to_vec())?;
-                let keys: Vec<PyTimeSeriesKey> = g
-                    .keys()
-                    .iter()
-                    .map(|k| PyTimeSeriesKey {
-                        inner: k.identity().clone(),
-                    })
-                    .collect();
-                d.set_item("keys", keys)?;
+                let ids: Vec<i64> = g.ids().iter().map(|id| id.get()).collect();
+                d.set_item("ids", ids)?;
                 Ok(d)
             })
             .collect()
@@ -1768,15 +1638,9 @@ impl PyForecastReader {
         Ok(d)
     }
 
-    /// The per-entry keys, in order (parallel to `entry_values`).
-    fn entries(&self) -> Vec<PyTimeSeriesKey> {
-        self.inner
-            .entries()
-            .iter()
-            .map(|e| PyTimeSeriesKey {
-                inner: e.key().identity().clone(),
-            })
-            .collect()
+    /// The per-entry association ids, in order (parallel to `entry_values`).
+    fn entries(&self) -> Vec<i64> {
+        self.inner.entries().iter().map(|e| e.id().get()).collect()
     }
 
     /// The number of deduplicated window slots: one physical backend read per
@@ -2123,7 +1987,7 @@ impl PyStore {
         unit_system: Option<String>,
         time_reference: Option<String>,
         component_field: Option<String>,
-    ) -> PyResult<PyAddedTimeSeries> {
+    ) -> PyResult<i64> {
         let features = features_from_dict(features)?;
         let mut data = extract_time_series_data(time_series)?;
         // These describe the series, so they are set on it, not on the request —
@@ -2161,7 +2025,7 @@ impl PyStore {
         let request = core_lib::AddRequest::new(owner_id, owner_type, owner_category.into(), data)
             .with_features(features);
         let added = self.store_mut()?.add(request).map_err(map_err)?;
-        Ok(PyAddedTimeSeries::from_core(added))
+        Ok(added.get())
     }
 
     /// Add many time series in one call, committing the metadata catalog once
@@ -2179,7 +2043,7 @@ impl PyStore {
     /// every other typo, along with whatever it was carrying.
     ///
     /// All-or-nothing: if any item fails, the entire batch is rolled back.
-    /// Returns an `AddedTimeSeries` per item, in input order.
+    /// Returns the catalog `id` of each new row, in input order.
     ///
     /// An item may carry `id` to file its association under a specific catalog
     /// id, for a writer replaying a document that recorded one. Either every
@@ -2187,10 +2051,7 @@ impl PyStore {
     /// assigned id is drawn from the same counter an explicit one advances, so
     /// whether the two collide would depend on the order the items happen to be
     /// in.
-    fn add_time_series_bulk(
-        &mut self,
-        items: Vec<Bound<'_, PyDict>>,
-    ) -> PyResult<Vec<PyAddedTimeSeries>> {
+    fn add_time_series_bulk(&mut self, items: Vec<Bound<'_, PyDict>>) -> PyResult<Vec<i64>> {
         let mut requests = Vec::with_capacity(items.len());
         for (index, item) in items.iter().enumerate() {
             reject_unknown_item_keys(item, index)?;
@@ -2274,7 +2135,7 @@ impl PyStore {
             .add_time_series_bulk(requests)
             .map_err(map_err)?
             .into_iter()
-            .map(PyAddedTimeSeries::from_core)
+            .map(|id| id.get())
             .collect())
     }
 
@@ -2306,12 +2167,6 @@ impl PyStore {
                 Default::default(),
             )
             .map(|outcome| outcome.transformed)
-            .map_err(map_err)
-    }
-
-    fn remove_time_series(&mut self, key: &PyTimeSeriesKey) -> PyResult<()> {
-        self.store_mut()?
-            .remove_time_series(&key.inner)
             .map_err(map_err)
     }
 
@@ -2349,76 +2204,30 @@ impl PyStore {
             .map_err(map_err)
     }
 
-    /// Fetch a static time series by key. `time_range`, if given, is a tuple of
-    /// `(start: datetime, end: datetime)` with end exclusive.
-    #[pyo3(signature = (key, *, time_range=None))]
-    fn get_time_series(
-        &self,
-        py: Python<'_>,
-        key: &PyTimeSeriesKey,
-        time_range: Option<(PyInstant, PyInstant)>,
-    ) -> PyResult<Py<PyAny>> {
-        let data = self
-            .store()?
-            .get_time_series(&key.inner, range_to_core(time_range)?)
-            .map_err(map_err)?;
-        time_series_data_to_py(py, data)
-    }
-
-    /// Read many full series at once, returning a list of typed objects in the
-    /// same order as `keys`. Packed `SingleTimeSeries` are read in one
-    /// decompress-once pass per dataset (the bulk counterpart to
-    /// `get_time_series`); other types reuse the per-key path. `time_range`, if
-    /// given, is a `(start: datetime, end: datetime)` tuple (end exclusive)
-    /// applied to every series.
-    #[pyo3(signature = (keys, *, time_range=None))]
-    fn bulk_read(
-        &self,
-        py: Python<'_>,
-        keys: Vec<PyTimeSeriesKey>,
-        time_range: Option<(PyInstant, PyInstant)>,
-    ) -> PyResult<Vec<Py<PyAny>>> {
-        let identities: Vec<&core_lib::KeyIdentity> = keys.iter().map(|k| &k.inner).collect();
-        let datas = self
-            .store()?
-            .bulk_read_range(&identities, range_to_core(time_range)?)
-            .map_err(map_err)?;
-        datas
-            .into_iter()
-            .map(|d| time_series_data_to_py(py, d))
-            .collect()
-    }
-
-    /// Remove several series at once (all-or-nothing). A key that matches
-    /// nothing fails the whole batch. Returns the number of associations removed.
-    fn remove_time_series_bulk(&mut self, keys: Vec<PyTimeSeriesKey>) -> PyResult<usize> {
-        let identities: Vec<&core_lib::KeyIdentity> = keys.iter().map(|k| &k.inner).collect();
+    /// Rename the association filed under `id`.
+    ///
+    /// Only the catalog name changes, and the id is the same afterwards — a
+    /// rename moves the name, not the reference, so anything holding the id
+    /// keeps working.
+    fn rename_time_series(&mut self, id: i64, new_name: &str) -> PyResult<()> {
         self.store_mut()?
-            .remove_time_series_bulk(&identities)
-            .map_err(map_err)
-    }
-
-    /// Rename the series identified by `key` to `new_name`, returning the renamed
-    /// key (same identity, new name).
-    fn rename_time_series(
-        &mut self,
-        key: &PyTimeSeriesKey,
-        new_name: &str,
-    ) -> PyResult<PyTimeSeriesKey> {
-        let k = self
-            .store_mut()?
-            .rename_time_series(&key.inner, new_name)
+            .rename_time_series(core_lib::TimeSeriesId(id), new_name)
             .map_err(map_err)?;
-        Ok(PyTimeSeriesKey {
-            inner: k.identity().clone(),
-        })
+        Ok(())
     }
 
-    /// Return a list of metadata dicts matching the filter. Each dict has
+    /// Return a list of catalog metadata dicts matching the filter. Each dict
+    /// has `id` — the association id that addresses the series — plus
     /// `owner_id`, `owner_type`, `owner_category`, `time_series_type`, `name`,
     /// `data_hash` (hex string), `length`, `resolution` (ISO 8601 duration
-    /// string, e.g. `PT1H`, or `None`), `timestamps` (list of RFC 3339 strings
-    /// for non-sequential series, `None` otherwise), `features`, `units`.
+    /// string, e.g. `PT1H`, or `None`), `features`, `units`, and the rest of the
+    /// row's descriptors.
+    ///
+    /// The listing that answers identity questions: which series exist, what
+    /// each is, and the `id` to read or remove it by. `timestamps` is always
+    /// `None` here — an irregular series' time axis is the one part of a row
+    /// that costs a read per row, so a listing omits it; `read_by_id` returns
+    /// the series with its axis.
     ///
     /// `name_glob` filters names by a SQLite `GLOB` pattern (case-sensitive,
     /// `*`/`?` wildcards); when both `name` and `name_glob` are given, both
@@ -2439,7 +2248,7 @@ impl PyStore {
         interval=None, features=None
     ))]
     #[allow(clippy::too_many_arguments)]
-    fn list_time_series<'py>(
+    fn list_metadata<'py>(
         &self,
         py: Python<'py>,
         owner_id: Option<i64>,
@@ -2467,7 +2276,7 @@ impl PyStore {
             interval,
             features,
         )?;
-        let metas = self.store()?.list_time_series(filter).map_err(map_err)?;
+        let metas = self.store()?.list_metadata(filter).map_err(map_err)?;
         let mut out = Vec::with_capacity(metas.len());
         for m in &metas {
             out.push(metadata_to_dict(py, m)?);
@@ -2475,97 +2284,9 @@ impl PyStore {
         Ok(out)
     }
 
-    /// Group time series by their underlying stored array. Returns one dict per
-    /// unique content hash, each with `data_hash` (hex str), `keys` (the list of
-    /// `TimeSeriesKey`s that resolve to that array), and `ids` (the association
-    /// id of each of those keys, positionally aligned with `keys`, `None` for a
-    /// row written before ids were minted). Keys sharing one dict share one
-    /// deduplicated array. Accepts the same filters as `list_time_series`.
-    /// Wraps the core `list_array_groups`.
-    #[pyo3(signature = (
-        *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
-        name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
-        interval=None, features=None
-    ))]
-    #[allow(clippy::too_many_arguments)]
-    fn list_array_groups<'py>(
-        &self,
-        py: Python<'py>,
-        owner_id: Option<i64>,
-        owner_category: Option<PyOwnerCategory>,
-        owner_type: Option<String>,
-        time_series_type: Option<Bound<'_, PyAny>>,
-        name: Option<String>,
-        name_glob: Option<String>,
-        component_field: Option<String>,
-        zoneless: Option<bool>,
-        resolution: Option<Bound<'_, PyAny>>,
-        interval: Option<Bound<'_, PyAny>>,
-        features: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<Vec<Bound<'py, PyDict>>> {
-        let filter = build_list_filter(
-            owner_id,
-            owner_category,
-            owner_type,
-            time_series_type.as_ref(),
-            name,
-            name_glob,
-            component_field,
-            zoneless,
-            resolution,
-            interval,
-            features,
-        )?;
-        let rows = self.store()?.list_array_groups(filter).map_err(map_err)?;
-        // `keys` and `ids` are built side by side so a group's nth id belongs to
-        // its nth key: a `TimeSeriesKey` is opaque and carries no id of its own.
-        type Group = (Vec<Py<PyTimeSeriesKey>>, Vec<Option<i64>>);
-        let mut groups: BTreeMap<[u8; 32], Group> = BTreeMap::new();
-        for (key, hash, id) in rows {
-            let pk = Py::new(
-                py,
-                PyTimeSeriesKey {
-                    inner: key.identity().clone(),
-                },
-            )?;
-            let entry = groups.entry(hash).or_default();
-            entry.0.push(pk);
-            entry.1.push(id);
-        }
-        let mut out = Vec::with_capacity(groups.len());
-        for (hash, (keys, ids)) in groups {
-            let d = PyDict::new(py);
-            d.set_item("data_hash", core_lib::hash_hex(&hash))?;
-            d.set_item("keys", keys)?;
-            d.set_item("ids", ids)?;
-            out.push(d);
-        }
-        Ok(out)
-    }
-
-    fn get_time_series_keys(
-        &self,
-        owner_id: i64,
-        owner_category: PyOwnerCategory,
-    ) -> PyResult<Vec<PyTimeSeriesKey>> {
-        Ok(self
-            .store()?
-            .get_time_series_keys(owner_id, owner_category.into())
-            .map_err(map_err)?
-            .into_iter()
-            .map(|k| PyTimeSeriesKey {
-                inner: k.identity().clone(),
-            })
-            .collect())
-    }
-
-    fn has_time_series(&self, key: &PyTimeSeriesKey) -> PyResult<bool> {
-        self.store()?.has_time_series(&key.inner).map_err(map_err)
-    }
-
     /// Return True if at least one time series matches the filters — e.g.
     /// "does this owner have any time series (of type T)?" — without listing
-    /// them. Accepts the same keyword-only filters as `list_time_series`, and
+    /// them. Accepts the same keyword-only filters as `list_metadata`, and
     /// answers from index probes that hydrate no rows — a `features` filter
     /// included — so it is safe to call in hot loops.
     #[pyo3(signature = (
@@ -2904,16 +2625,6 @@ impl PyStore {
 
     // ---- Phase 3 additions ------------------------------------------------
 
-    /// Full metadata dict for a key (same fields as a `list_time_series` row).
-    fn get_metadata<'py>(
-        &self,
-        py: Python<'py>,
-        key: &PyTimeSeriesKey,
-    ) -> PyResult<Bound<'py, PyDict>> {
-        let m = self.store()?.get_metadata(&key.inner).map_err(map_err)?;
-        metadata_to_dict(py, &m)
-    }
-
     /// The metadata row filed under `id`, or `None` if the catalog holds no
     /// such row.
     ///
@@ -2927,10 +2638,39 @@ impl PyStore {
         py: Python<'py>,
         id: i64,
     ) -> PyResult<Option<Bound<'py, PyDict>>> {
-        match self.store()?.get_metadata_by_id(id).map_err(map_err)? {
+        match self
+            .store()?
+            .get_metadata_by_id(core_lib::TimeSeriesId(id))
+            .map_err(map_err)?
+        {
             Some(m) => Ok(Some(metadata_to_dict(py, &m)?)),
             None => Ok(None),
         }
+    }
+
+    /// The catalog metadata dicts named by `ids`, in the order the ids are
+    /// given.
+    ///
+    /// `list_metadata` addressed by id instead of by attributes — the bulk
+    /// companion to `get_metadata_by_id`, and what a consumer hydrating a model
+    /// full of recorded ids wants: one catalog query for the whole set rather
+    /// than one call per reference.
+    ///
+    /// Raises `NotFoundError` if any id names no row: a caller naming ids is
+    /// asserting they exist, and a silently short list would let a stale
+    /// reference pass as an absent match. Sift the set with
+    /// `association_exists` first when some are expected to have gone. Repeats
+    /// are returned once each, in place.
+    fn list_metadata_by_ids<'py>(
+        &self,
+        py: Python<'py>,
+        ids: Vec<i64>,
+    ) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let rows = self
+            .store()?
+            .list_metadata_by_ids(&to_ids(&ids))
+            .map_err(map_err)?;
+        rows.iter().map(|m| metadata_to_dict(py, m)).collect()
     }
 
     /// Whether an association is filed under `id`.
@@ -2939,7 +2679,9 @@ impl PyStore {
     /// reference in its model on load instead of discovering a dangling one
     /// mid-run.
     fn association_exists(&self, id: i64) -> PyResult<bool> {
-        self.store()?.association_exists(id).map_err(map_err)
+        self.store()?
+            .association_exists(core_lib::TimeSeriesId(id))
+            .map_err(map_err)
     }
 
     /// Read many series by catalog id, in the order the ids are given.
@@ -2949,8 +2691,37 @@ impl PyStore {
     /// this call is already committed to reading, so a stale reference is a
     /// failure rather than an answer.
     fn read_by_ids(&self, py: Python<'_>, ids: Vec<i64>) -> PyResult<Vec<Py<PyAny>>> {
+        let ids = to_ids(&ids);
         self.store()?
-            .read_by_ids(&ids)
+            .read_by_ids(&ids, core_lib::ReadWindow::full())
+            .map_err(map_err)?
+            .into_iter()
+            .map(|d| time_series_data_to_py(py, d))
+            .collect()
+    }
+
+    /// Read many series by catalog id, each clipped to whatever lies within
+    /// `time_range`.
+    ///
+    /// The *bounds* read beside `read_by_ids`' *window* read. A window says
+    /// "these exact steps" and is checked; a range says "whatever falls between
+    /// these instants" and clips to what is there — which is what an export
+    /// naming a month of a store it did not write actually wants, since it does
+    /// not know how many steps each series has in them.
+    ///
+    /// Both bounds must be spelled the way the series are — two aware
+    /// datetimes, or two naive ones. A set mixing zoneless and instant-bearing
+    /// series has no single valid spelling and raises `InvalidParameterError`
+    /// rather than being resolved per series.
+    fn read_by_ids_range(
+        &self,
+        py: Python<'_>,
+        ids: Vec<i64>,
+        time_range: (PyInstant, PyInstant),
+    ) -> PyResult<Vec<Py<PyAny>>> {
+        let range = range_to_core(Some(time_range))?.expect("a supplied range is always Some");
+        self.store()?
+            .read_by_ids_range(&to_ids(&ids), range)
             .map_err(map_err)?
             .into_iter()
             .map(|d| time_series_data_to_py(py, d))
@@ -2992,7 +2763,10 @@ impl PyStore {
             len,
             count,
         };
-        let data = self.store()?.read_by_id(id, window).map_err(map_err)?;
+        let data = self
+            .store()?
+            .read_by_id(core_lib::TimeSeriesId(id), window)
+            .map_err(map_err)?;
         time_series_data_to_py(py, data)
     }
 
@@ -3007,52 +2781,8 @@ impl PyStore {
     /// when some references are expected to have gone. A repeated id is removed
     /// once.
     fn remove_by_ids(&mut self, ids: Vec<i64>) -> PyResult<usize> {
+        let ids = to_ids(&ids);
         self.store_mut()?.remove_by_ids(&ids).map_err(map_err)
-    }
-
-    /// List the `TimeSeriesKey`s matching the filter.
-    #[pyo3(signature = (
-        *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
-        name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
-        interval=None, features=None
-    ))]
-    #[allow(clippy::too_many_arguments)]
-    fn list_keys(
-        &self,
-        owner_id: Option<i64>,
-        owner_category: Option<PyOwnerCategory>,
-        owner_type: Option<String>,
-        time_series_type: Option<Bound<'_, PyAny>>,
-        name: Option<String>,
-        name_glob: Option<String>,
-        component_field: Option<String>,
-        zoneless: Option<bool>,
-        resolution: Option<Bound<'_, PyAny>>,
-        interval: Option<Bound<'_, PyAny>>,
-        features: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<Vec<PyTimeSeriesKey>> {
-        let filter = build_list_filter(
-            owner_id,
-            owner_category,
-            owner_type,
-            time_series_type.as_ref(),
-            name,
-            name_glob,
-            component_field,
-            zoneless,
-            resolution,
-            interval,
-            features,
-        )?;
-        Ok(self
-            .store()?
-            .list_keys(filter)
-            .map_err(map_err)?
-            .into_iter()
-            .map(|k| PyTimeSeriesKey {
-                inner: k.identity().clone(),
-            })
-            .collect())
     }
 
     /// Distinct forecast intervals (ISO-8601 strings), optionally scoped to one
@@ -3186,23 +2916,20 @@ impl PyStore {
     #[pyo3(signature = (src, dst_owner_id, dst_owner_type, *, new_name=None))]
     fn copy_time_series(
         &mut self,
-        src: &PyTimeSeriesKey,
+        src: i64,
         dst_owner_id: i64,
         dst_owner_type: &str,
         new_name: Option<String>,
-    ) -> PyResult<PyTimeSeriesKey> {
-        let k = self
-            .store_mut()?
+    ) -> PyResult<i64> {
+        self.store_mut()?
             .copy_time_series(
-                &src.inner,
+                core_lib::TimeSeriesId(src),
                 dst_owner_id,
                 dst_owner_type,
                 new_name.as_deref(),
             )
-            .map_err(map_err)?;
-        Ok(PyTimeSeriesKey {
-            inner: k.key.identity().clone(),
-        })
+            .map_err(map_err)
+            .map(|id| id.get())
     }
 
     /// Distinct owner ids of `owner_category` that have a time series, optionally
@@ -3387,50 +3114,6 @@ impl PyStore {
     /// this is `flush()`.
     fn persist_catalog(&mut self) -> PyResult<()> {
         self.store_mut()?.persist_catalog().map_err(map_err)
-    }
-
-    /// Resolve a forecast addressed by attributes plus a requested type to its
-    /// concrete key. `requested_type` is a `TimeSeriesType`;
-    /// `TimeSeriesType.Deterministic` also matches a stored
-    /// `DeterministicSingleTimeSeries`, and the returned key's
-    /// `time_series_type` reports which form was found.
-    #[pyo3(signature = (owner_id, owner_category, name, requested_type, *, resolution=None, interval=None, features=None))]
-    #[allow(clippy::too_many_arguments)]
-    fn resolve_forecast_key(
-        &self,
-        owner_id: i64,
-        owner_category: PyOwnerCategory,
-        name: &str,
-        requested_type: &Bound<'_, PyAny>,
-        resolution: Option<Bound<'_, PyAny>>,
-        interval: Option<Bound<'_, PyAny>>,
-        features: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyTimeSeriesKey> {
-        let requested = pyany_to_requested_type(requested_type, "requested_type")?;
-        let resolution = match resolution {
-            Some(r) => Some(pyany_to_period(&r)?),
-            None => None,
-        };
-        let interval = match interval {
-            Some(i) => Some(pyany_to_period(&i)?),
-            None => None,
-        };
-        let features = features_from_dict(features)?;
-        let k = self
-            .store()?
-            .resolve_forecast_key(
-                owner_id,
-                owner_category.into(),
-                name,
-                resolution,
-                interval,
-                features,
-                requested,
-            )
-            .map_err(map_err)?;
-        Ok(PyTimeSeriesKey {
-            inner: k.identity().clone(),
-        })
     }
 
     // ---- Supplemental-attribute associations ------------------------------
@@ -3821,7 +3504,7 @@ impl PyStore {
     // a thin wrapper over it.
 
     /// Export `time_series_associations` matching the filter (the same filter
-    /// keywords as `list_time_series`) as a sorted OpenAPI-row JSON array.
+    /// keywords as `list_metadata`) as a sorted OpenAPI-row JSON array.
     /// Each row's `uri` and `data_hash` are the hex-encoded content hash the
     /// store already has for that row — never a caller-supplied locator.
     /// With no filter this exports the whole catalog.
@@ -4161,7 +3844,13 @@ fn build_parent_child_filter(
 }
 
 /// Build the full metadata dict for one association row (shared by
-/// `list_time_series` and `get_metadata`).
+/// `list_metadata` and `get_metadata_by_id`).
+/// Python hands ids over as plain integers; the core addresses series with the
+/// newtype that keeps them apart from every other id stream.
+fn to_ids(ids: &[i64]) -> Vec<core_lib::TimeSeriesId> {
+    ids.iter().copied().map(core_lib::TimeSeriesId).collect()
+}
+
 fn metadata_to_dict<'py>(
     py: Python<'py>,
     m: &core_lib::TimeSeriesMetadata,
@@ -4176,7 +3865,7 @@ fn metadata_to_dict<'py>(
     d.set_item("data_hash", core_lib::hash_hex(&m.data_hash))?;
     // Always set on a row read out of the catalog; `None` only for metadata a
     // caller built itself.
-    d.set_item("id", m.id)?;
+    d.set_item("id", m.id.map(|id| id.get()))?;
     d.set_item(
         "initial_timestamp",
         m.initial_timestamp
@@ -4375,8 +4064,6 @@ fn infrastore(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDeterministic>()?;
     m.add_class::<PyProbabilistic>()?;
     m.add_class::<PyScenarios>()?;
-    m.add_class::<PyTimeSeriesKey>()?;
-    m.add_class::<PyAddedTimeSeries>()?;
     m.add_class::<PyTimeSeriesType>()?;
     m.add_class::<PyOwnerCategory>()?;
     m.add_class::<PySupplementalAttributeAssociation>()?;

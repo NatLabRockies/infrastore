@@ -38,9 +38,13 @@ fn add(store: &mut Store, owner: i64, base: f64) {
 }
 
 fn read_values(store: &Store, owner: i64) -> Vec<f64> {
-    let keys = store.list_keys(ListFilter::new().owner_id(owner)).unwrap();
+    let keys = store
+        .list_metadata(ListFilter::new().owner_id(owner))
+        .unwrap();
     let key = keys.first().expect("a key for this owner");
-    let TimeSeriesData::SingleTimeSeries(s) = store.get_time_series(key.identity(), None).unwrap()
+    let TimeSeriesData::SingleTimeSeries(s) = store
+        .read_by_id(key.id.unwrap(), infrastore_core::ReadWindow::full())
+        .unwrap()
     else {
         panic!("expected a SingleTimeSeries");
     };
@@ -50,10 +54,10 @@ fn read_values(store: &Store, owner: i64) -> Vec<f64> {
 /// Every owner with a key in `store`, sorted.
 fn owners(store: &Store) -> Vec<i64> {
     let mut ids: Vec<i64> = store
-        .list_keys(ListFilter::new())
+        .list_metadata(ListFilter::new())
         .unwrap()
         .iter()
-        .map(|k| k.owner_id())
+        .map(|m| m.owner_id)
         .collect();
     ids.sort_unstable();
     ids
@@ -156,7 +160,7 @@ fn create_replacing_discards_both_halves() {
     let store = open_store(&path, true).unwrap();
     assert!(
         store
-            .list_keys(ListFilter::new().owner_id(1))
+            .list_metadata(ListFilter::new().owner_id(1))
             .unwrap()
             .is_empty(),
         "the replaced store's catalog rows survived"
@@ -192,7 +196,7 @@ fn open_copy_leaves_the_original_alone() {
     let original = open_store(&src, true).unwrap();
     assert!(
         original
-            .list_keys(ListFilter::new().owner_id(2))
+            .list_metadata(ListFilter::new().owner_id(2))
             .unwrap()
             .is_empty(),
         "a mutation of the copy reached the original"
@@ -260,10 +264,10 @@ fn open_copy_carries_rows_still_in_the_sources_wal() {
     let dest = dir.path().join("copy.h5");
     let copy = open_store_copy(&src, &dest, CatalogMode::Attached).unwrap();
     let mut owners: Vec<i64> = copy
-        .list_keys(ListFilter::new())
+        .list_metadata(ListFilter::new())
         .unwrap()
         .iter()
-        .map(|k| k.owner_id())
+        .map(|m| m.owner_id)
         .collect();
     owners.sort_unstable();
     assert_eq!(
@@ -277,7 +281,7 @@ fn open_copy_carries_rows_still_in_the_sources_wal() {
     assert_eq!(
         open_store(&dest, true)
             .unwrap()
-            .list_keys(ListFilter::new())
+            .list_metadata(ListFilter::new())
             .unwrap()
             .len(),
         2
@@ -444,7 +448,7 @@ fn persist_catalog_is_a_checkpoint_not_a_mode_switch() {
         assert_eq!(read_values(&reopened, 1)[0], 100.0);
         assert!(
             reopened
-                .list_keys(ListFilter::new().owner_id(2))
+                .list_metadata(ListFilter::new().owner_id(2))
                 .unwrap()
                 .is_empty(),
             "post-checkpoint changes must not be on disk yet"

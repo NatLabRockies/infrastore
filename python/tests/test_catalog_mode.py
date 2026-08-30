@@ -61,7 +61,7 @@ def test_scratch_store_persists_and_reopens(tmp_path):
 
     with Store.open(dest, read_only=True) as saved:
         assert saved.catalog == "attached"
-        assert len(saved.list_keys()) == 2
+        assert len(saved.list_metadata()) == 2
 
 
 def test_saved_store_loads_into_memory_and_saves_again(tmp_path):
@@ -78,7 +78,7 @@ def test_saved_store_loads_into_memory_and_saves_again(tmp_path):
         loaded.persist_to(first)
 
     with Store.open(first, read_only=True) as saved:
-        assert len(saved.list_keys()) == 2
+        assert len(saved.list_metadata()) == 2
 
 
 def test_catalog_defaults_match_the_backend(tmp_path):
@@ -130,7 +130,7 @@ def test_compaction_still_pairs_with_an_in_memory_catalog(tmp_path):
         store.persist_catalog()
 
     with Store.open(scratch, read_only=True) as reopened:
-        assert [k.owner_id for k in reopened.list_keys()] == [1]
+        assert [k['owner_id'] for k in reopened.list_metadata()] == [1]
         assert reopened.verify_integrity()["ok"]
 
 
@@ -148,7 +148,7 @@ def test_rollback_under_an_in_memory_catalog_takes_its_arrays_with_it(tmp_path):
         store.persist_catalog()
 
     with Store.open(scratch) as reopened:
-        assert [k.owner_id for k in reopened.list_keys()] == [1]
+        assert [k['owner_id'] for k in reopened.list_metadata()] == [1]
         assert reopened.verify_integrity()["ok"]
         assert reopened.compact()["datasets_dropped"] == 0
 
@@ -165,10 +165,10 @@ def test_a_failed_save_leaves_the_store_live(tmp_path):
             store.persist_to(tmp_path / "no-such-dir" / "system.h5")
 
         # Still the same store: readable, writable, saveable.
-        assert len(store.list_keys()) == 1
+        assert len(store.list_metadata()) == 1
         add(store, 2, 200.0)
         good = tmp_path / "system.h5"
         store.persist_to(good)
 
     with Store.open(good, read_only=True) as saved:
-        assert sorted(k.owner_id for k in saved.list_keys()) == [1, 2]
+        assert sorted(k['owner_id'] for k in saved.list_metadata()) == [1, 2]

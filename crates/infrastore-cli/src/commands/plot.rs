@@ -314,7 +314,7 @@ fn heatmap(
 fn fan(store: &Store, selector: &SelectorArgs, opts: &Options<'_>) -> Result<String, String> {
     let (meta, key) = selector.resolve(store)?;
     let data = store
-        .get_time_series(&key, None)
+        .read_by_id(key, infrastore_core::ReadWindow::full())
         .map_err(|e| e.to_string())?;
     let (arr, leading, labels) = match &data {
         TimeSeriesData::Probabilistic(p) => (
@@ -435,7 +435,7 @@ fn overlay(store: &Store, selector: &SelectorArgs, opts: &Options<'_>) -> Result
         ));
     }
     let data = store
-        .get_time_series(&key, None)
+        .read_by_id(key, infrastore_core::ReadWindow::full())
         .map_err(|e| e.to_string())?;
     let arr = match &data {
         TimeSeriesData::Deterministic(d) => &d.data,
@@ -460,7 +460,7 @@ fn overlay(store: &Store, selector: &SelectorArgs, opts: &Options<'_>) -> Result
         actual_filter = actual_filter.resolution(r);
     }
     let actuals = store
-        .list_time_series(actual_filter)
+        .list_metadata(actual_filter)
         .map_err(|e| e.to_string())?;
     if let Some(source) = actuals.first() {
         let curve = read_curve(store, source, None)?;
@@ -553,7 +553,7 @@ fn static_curves(
     range: Option<crate::parse::TimeRange>,
 ) -> Result<Vec<Curve>, String> {
     let metas = store
-        .list_time_series(selector.to_filter()?)
+        .list_metadata(selector.to_filter()?)
         .map_err(|e| e.to_string())?;
     let metas: Vec<TimeSeriesMetadata> = metas
         .into_iter()
@@ -587,9 +587,12 @@ fn read_curve(
     meta: &TimeSeriesMetadata,
     range: Option<crate::parse::TimeRange>,
 ) -> Result<Curve, String> {
-    let data = store
-        .get_time_series(&select::key_of(meta), range)
-        .map_err(|e| e.to_string())?;
+    let id = select::id_of(meta)?;
+    let data = match range {
+        Some(r) => store.read_by_ids_range(&[id], r).map(|mut v| v.remove(0)),
+        None => store.read_by_id(id, infrastore_core::ReadWindow::full()),
+    }
+    .map_err(|e| e.to_string())?;
     let (times, arr) = match &data {
         TimeSeriesData::SingleTimeSeries(s) => {
             let times = (0..s.length)

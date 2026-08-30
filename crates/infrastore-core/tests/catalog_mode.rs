@@ -39,9 +39,13 @@ fn add(store: &mut infrastore_core::Store, owner: i64, base: f64) {
 
 /// The one `SingleTimeSeries` values vector stored for `owner`.
 fn read_values(store: &infrastore_core::Store, owner: i64) -> Vec<f64> {
-    let keys = store.list_keys(ListFilter::new().owner_id(owner)).unwrap();
+    let keys = store
+        .list_metadata(ListFilter::new().owner_id(owner))
+        .unwrap();
     let key = keys.first().expect("a key for this owner");
-    let TimeSeriesData::SingleTimeSeries(s) = store.get_time_series(key.identity(), None).unwrap()
+    let TimeSeriesData::SingleTimeSeries(s) = store
+        .read_by_id(key.id.unwrap(), infrastore_core::ReadWindow::full())
+        .unwrap()
     else {
         panic!("expected a SingleTimeSeries");
     };
@@ -50,7 +54,7 @@ fn read_values(store: &infrastore_core::Store, owner: i64) -> Vec<f64> {
 
 fn keys_for(store: &infrastore_core::Store, owner: i64) -> usize {
     store
-        .list_keys(ListFilter::new().owner_id(owner))
+        .list_metadata(ListFilter::new().owner_id(owner))
         .unwrap()
         .len()
 }
@@ -795,7 +799,10 @@ fn an_unstamped_artifact_that_lost_its_catalog_opens_empty() {
 
     let store = open_store(&path, false).expect("both halves unstamped, so the pair agrees");
     assert!(
-        store.list_keys(ListFilter::default()).unwrap().is_empty(),
+        store
+            .list_metadata(ListFilter::default())
+            .unwrap()
+            .is_empty(),
         "the arrays are still in the file, but nothing names them any more"
     );
     assert!(

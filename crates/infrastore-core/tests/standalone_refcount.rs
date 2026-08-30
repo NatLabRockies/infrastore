@@ -15,9 +15,8 @@
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{
-    Deterministic, Features, KeyIdentity, ListFilter, NonSequentialTimeSeries, OwnerCategory,
-    Probabilistic, Scenarios, Store, TimeSeriesData, TimeSeriesKey, TypedArray, create_store,
-    open_store,
+    Deterministic, Features, ListFilter, NonSequentialTimeSeries, OwnerCategory, Probabilistic,
+    Scenarios, Store, TimeSeriesData, TimeSeriesId, TypedArray, create_store, open_store,
 };
 
 fn t0() -> DateTime<Utc> {
@@ -95,7 +94,7 @@ fn scenarios(base: f64) -> TimeSeriesData {
     )
 }
 
-fn add(store: &mut Store, owner: i64, data: TimeSeriesData) -> TimeSeriesKey {
+fn add(store: &mut Store, owner: i64, data: TimeSeriesData) -> TimeSeriesId {
     store
         .add_time_series(
             owner,
@@ -105,7 +104,6 @@ fn add(store: &mut Store, owner: i64, data: TimeSeriesData) -> TimeSeriesKey {
             Features::new(),
         )
         .unwrap()
-        .key
 }
 
 /// The core shared-then-decrement cycle for one standalone-backed builder:
@@ -120,22 +118,24 @@ fn shares_and_reclaims(build: impl Fn(f64) -> TimeSeriesData) {
 
     // Byte-identical data across two owners -> one content-addressed array.
     assert_eq!(store.num_distinct_arrays().unwrap(), 1);
-    assert_eq!(store.list_keys(ListFilter::new()).unwrap().len(), 2);
+    assert_eq!(store.list_metadata(ListFilter::new()).unwrap().len(), 2);
 
     // Remove the first reference: the array survives because k2 still holds it,
     // and the survivor still reads back its data.
-    store.remove_time_series(k1.identity()).unwrap();
+    store.remove_by_ids(&[k1]).unwrap();
     assert_eq!(
         store.num_distinct_arrays().unwrap(),
         1,
         "array must survive while a second reference exists"
     );
-    store.get_time_series(k2.identity(), None).unwrap();
+    store
+        .read_by_id(k2, infrastore_core::ReadWindow::full())
+        .unwrap();
 
     // Remove the last reference: the array is now unreferenced and dropped.
-    store.remove_time_series(k2.identity()).unwrap();
+    store.remove_by_ids(&[k2]).unwrap();
     assert_eq!(store.num_distinct_arrays().unwrap(), 0);
-    assert!(store.list_keys(ListFilter::new()).unwrap().is_empty());
+    assert!(store.list_metadata(ListFilter::new()).unwrap().is_empty());
     let report = store.verify_integrity().unwrap();
     assert!(report.ok(), "integrity errors: {:?}", report.errors);
 }
@@ -178,7 +178,7 @@ fn remove_by_filter_reclaims_standalone_array() {
     assert_eq!(removed, 1);
     // Owner-2's array had no other reference, so it is dropped.
     assert_eq!(store.num_distinct_arrays().unwrap(), 2);
-    assert_eq!(store.list_keys(ListFilter::new()).unwrap().len(), 2);
+    assert_eq!(store.list_metadata(ListFilter::new()).unwrap().len(), 2);
 }
 
 #[test]
@@ -191,7 +191,7 @@ fn remove_bulk_reclaims_shared_standalone_only_when_last_reference_gone() {
     assert_eq!(store.num_distinct_arrays().unwrap(), 2);
 
     // Removing only one of the two sharers keeps the shared array alive.
-    store.remove_time_series_bulk(&[k1.identity()]).unwrap();
+    store.remove_by_ids(&[k1]).unwrap();
     assert_eq!(
         store.num_distinct_arrays().unwrap(),
         2,
@@ -199,9 +199,7 @@ fn remove_bulk_reclaims_shared_standalone_only_when_last_reference_gone() {
     );
 
     // Removing the last sharer and the distinct array reclaims both.
-    let removed = store
-        .remove_time_series_bulk(&[k2.identity(), k3.identity()])
-        .unwrap();
+    let removed = store.remove_by_ids(&[k2, k3]).unwrap();
     assert_eq!(removed, 2);
     assert_eq!(store.num_distinct_arrays().unwrap(), 0);
 }
@@ -224,12 +222,14 @@ fn standalone_dtype_cycle(data: TypedArray) {
     assert_eq!(store.num_distinct_arrays().unwrap(), 1);
 
     // Dtype and values survive the round trip through the shared array.
-    let got = store.get_time_series(k1.identity(), None).unwrap();
+    let got = store
+        .read_by_id(k1, infrastore_core::ReadWindow::full())
+        .unwrap();
     assert_eq!(got.as_non_sequential().unwrap().data, data);
 
-    store.remove_time_series(k1.identity()).unwrap();
+    store.remove_by_ids(&[k1]).unwrap();
     assert_eq!(store.num_distinct_arrays().unwrap(), 1);
-    store.remove_time_series(k2.identity()).unwrap();
+    store.remove_by_ids(&[k2]).unwrap();
     assert_eq!(store.num_distinct_arrays().unwrap(), 0);
     assert!(store.verify_integrity().unwrap().ok());
 }
@@ -265,7 +265,7 @@ fn standalone_orphan_persists_across_reopen() {
         let _k1 = add(&mut store, 1, deterministic(1.0));
         let k2 = add(&mut store, 2, deterministic(100.0));
         let _k3 = add(&mut store, 3, deterministic(200.0));
-        k2_identity = k2.identity().clone();
+        k2_identity = k2;
         assert_eq!(store.num_distinct_arrays().unwrap(), 3);
         store.flush().unwrap();
     }
@@ -274,11 +274,10 @@ fn standalone_orphan_persists_across_reopen() {
     {
         let mut store = open_store(path.as_path(), false).unwrap();
         assert_eq!(store.num_distinct_arrays().unwrap(), 3);
-        let k1 = KeyIdentity {
-            owner_id: 1,
-            ..k2_identity.clone()
-        };
-        store.remove_time_series(&k1).unwrap();
+        let k1 = store.list_metadata(ListFilter::new().owner_id(1)).unwrap()[0]
+            .id
+            .unwrap();
+        store.remove_by_ids(&[k1]).unwrap();
         assert_eq!(store.num_distinct_arrays().unwrap(), 2);
         store.flush().unwrap();
     }
@@ -293,7 +292,9 @@ fn standalone_orphan_persists_across_reopen() {
             "orphaned standalone array must not reappear after reopen"
         );
         // Surviving owner-2 forecast still reads its original values.
-        let got = store.get_time_series(&k2_identity, None).unwrap();
+        let got = store
+            .read_by_id(k2_identity, infrastore_core::ReadWindow::full())
+            .unwrap();
         assert!(got.as_deterministic().is_some());
 
         let _k4 = add(&mut store, 4, deterministic(500.0));

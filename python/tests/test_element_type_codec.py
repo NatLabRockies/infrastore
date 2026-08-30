@@ -71,11 +71,11 @@ def test_a_stored_piecewise_series_round_trips_through_the_store():
             datetime(2024, 1, 1, tzinfo=timezone.utc), timedelta(hours=1), values, "cost"
         ),
         element_type="piecewise_linear",
-    ).key
-    meta = store.get_metadata(key)
+    )
+    meta = store.get_metadata_by_id(key)
     assert meta["element_type"] == "piecewise_linear"
 
-    read = np.asarray(store.get_time_series(key).data)
+    read = np.asarray(store.read_by_id(key).data)
     assert decode_element_values(read, meta["element_type"]) == [
         [{"x": 0.0, "y": 1.0}, {"x": 1.0, "y": 3.0}],
         [{"x": 0.0, "y": 5.0}],

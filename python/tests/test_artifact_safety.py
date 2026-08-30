@@ -64,7 +64,7 @@ def test_creating_over_a_saved_store_is_refused(tmp_path):
     # Refused means untouched, not partially applied.
     assert path.stat().st_size == before
     with Store.open(path, read_only=True) as store:
-        assert len(store.list_keys()) == 1
+        assert len(store.list_metadata()) == 1
         assert store.verify_integrity()["ok"]
 
 
@@ -94,7 +94,7 @@ def test_overwrite_discards_both_halves(tmp_path):
     # Had the old catalog survived, owner 1 would still be listed with nothing
     # behind it.
     with Store.open(path, read_only=True) as store:
-        assert [k.owner_id for k in store.list_keys()] == [2]
+        assert [k['owner_id'] for k in store.list_metadata()] == [2]
         assert store.verify_integrity()["ok"]
 
 
@@ -112,20 +112,20 @@ def test_open_copy_leaves_the_original_alone(tmp_path):
     original = src.read_bytes()
 
     with Store.open_copy(src, dest) as copy:
-        assert len(copy.list_keys()) == 1
+        assert len(copy.list_metadata()) == 1
         add(copy, 2, 200.0)
         copy.flush()
 
     assert src.read_bytes() == original
     with Store.open(src, read_only=True) as store:
-        assert [k.owner_id for k in store.list_keys()] == [1]
+        assert [k['owner_id'] for k in store.list_metadata()] == [1]
 
     # The round trip a consumer actually runs: change the copy, save back over
     # the original, which one atomic rename replaces.
     with Store.open(dest) as copy:
         copy.persist_to(src)
     with Store.open(src, read_only=True) as reloaded:
-        assert sorted(k.owner_id for k in reloaded.list_keys()) == [1, 2]
+        assert sorted(k['owner_id'] for k in reloaded.list_metadata()) == [1, 2]
         assert reloaded.verify_integrity()["ok"]
 
 
@@ -165,7 +165,7 @@ def test_persist_catalog_pairs_an_in_memory_catalog_with_its_arrays(tmp_path):
         store.persist_catalog()
 
     with Store.open(path, read_only=True) as reopened:
-        assert len(reopened.list_keys()) == 1
+        assert len(reopened.list_metadata()) == 1
         assert reopened.verify_integrity()["ok"]
 
 
@@ -180,11 +180,11 @@ def test_persist_catalog_is_a_checkpoint_not_a_mode_switch(tmp_path):
         store.flush()
 
         with Store.open(path, read_only=True) as reopened:
-            assert [k.owner_id for k in reopened.list_keys()] == [1]
+            assert [k['owner_id'] for k in reopened.list_metadata()] == [1]
 
         store.persist_catalog()
         with Store.open(path, read_only=True) as reopened:
-            assert sorted(k.owner_id for k in reopened.list_keys()) == [1, 2]
+            assert sorted(k['owner_id'] for k in reopened.list_metadata()) == [1, 2]
 
 
 def test_a_failed_catalog_checkpoint_keeps_the_catalog_in_ram(tmp_path):
@@ -208,7 +208,7 @@ def test_a_failed_catalog_checkpoint_keeps_the_catalog_in_ram(tmp_path):
         store.persist_catalog()
 
     with Store.open(scratch, read_only=True) as reopened:
-        assert sorted(k.owner_id for k in reopened.list_keys()) == [1, 2]
+        assert sorted(k['owner_id'] for k in reopened.list_metadata()) == [1, 2]
 
 
 def test_an_abandoned_scratch_file_blocks_recreation(tmp_path):
@@ -232,7 +232,7 @@ def test_an_abandoned_scratch_file_blocks_recreation(tmp_path):
         fresh.persist_catalog()
 
     with Store.open(scratch, read_only=True) as store:
-        assert [k.owner_id for k in store.list_keys()] == [7]
+        assert [k['owner_id'] for k in store.list_metadata()] == [7]
 
 
 def test_open_copy_of_a_half_artifact_refuses_rather_than_reading_it_empty(tmp_path):

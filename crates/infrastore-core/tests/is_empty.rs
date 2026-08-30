@@ -9,9 +9,9 @@
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{
-    KeyIdentity, ListFilter, OwnerCategory, ParentChildAssociation, ParentChildFilter,
-    SingleTimeSeries, SupplementalAttributeAssociation, SupplementalAttributeFilter,
-    TimeSeriesData, TimeSeriesType, TypedArray, create_store,
+    ListFilter, OwnerCategory, ParentChildAssociation, ParentChildFilter, SingleTimeSeries,
+    SupplementalAttributeAssociation, SupplementalAttributeFilter, TimeSeriesData, TypedArray,
+    create_store,
 };
 
 mod common;
@@ -77,17 +77,7 @@ fn time_series_alone_makes_the_store_non_empty() {
         |store, key, backend| {
             assert!(!store.is_empty().unwrap(), "{backend}");
             // Emptiness comes back once the last series goes.
-            store
-                .remove_time_series(&KeyIdentity {
-                    owner_id: 1,
-                    owner_category: OwnerCategory::Component,
-                    time_series_type: TimeSeriesType::SingleTimeSeries,
-                    name: key.key.name().to_string(),
-                    resolution: key.key.resolution(),
-                    interval: None,
-                    features: key.key.features().clone(),
-                })
-                .unwrap();
+            store.remove_by_ids(&[*key]).unwrap();
             assert!(store.is_empty().unwrap(), "{backend}");
         },
     );

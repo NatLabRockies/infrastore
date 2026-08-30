@@ -67,27 +67,60 @@ fn fixture_store() -> Store {
     store
 }
 
+/// The catalog ids of every series an owner holds, in catalog order.
+///
+/// The wire has no key: `list_metadata` is the identify half and every row
+/// carries the id the read half takes.
+async fn owner_ids(client: &RemoteClient, owner: i64) -> Vec<infrastore_core::TimeSeriesId> {
+    owner_rows(client, owner)
+        .await
+        .into_iter()
+        .map(|m| m.id.expect("a served row carries its id"))
+        .collect()
+}
+
+/// The full catalog rows for one owner.
+async fn owner_rows(client: &RemoteClient, owner: i64) -> Vec<infrastore_core::TimeSeriesMetadata> {
+    client
+        .list_metadata(
+            Some(owner),
+            Some(OwnerCategory::Component),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap()
+}
+
+/// Every row in the store.
+async fn all_rows(client: &RemoteClient) -> Vec<infrastore_core::TimeSeriesMetadata> {
+    client
+        .list_metadata(None, None, None, None, None, None, None, None, None, None)
+        .await
+        .unwrap()
+}
+
 #[tokio::test]
 async fn list_and_get_round_trip() {
     let addr = spawn_server(fixture_store()).await;
     let client = RemoteClient::connect(addr).await.unwrap();
 
     let metas = client
-        .list_time_series(None, None, None, None, None, None, None, None, None, None)
+        .list_metadata(None, None, None, None, None, None, None, None, None, None)
         .await
         .unwrap();
     assert_eq!(metas.len(), 2);
 
     // Fetch by key.
-    let keys = client
-        .get_time_series_keys(42, OwnerCategory::Component)
-        .await
-        .unwrap();
-    assert_eq!(keys.len(), 1);
-    let data = client
-        .get_time_series(keys[0].identity(), None)
-        .await
-        .unwrap();
+    let ids = owner_ids(&client, 42).await;
+    assert_eq!(ids.len(), 1);
+    let data = client.read_by_id(ids[0], None).await.unwrap();
     let single = data.as_single().unwrap();
     assert_eq!(single.length, 24);
     assert_eq!(single.data.to_f64_vec().unwrap()[0], 100.0);
@@ -99,15 +132,12 @@ async fn time_range_slicing_over_grpc() {
     let addr = spawn_server(fixture_store()).await;
     let client = RemoteClient::connect(addr).await.unwrap();
 
-    let keys = client
-        .get_time_series_keys(42, OwnerCategory::Component)
-        .await
-        .unwrap();
+    let ids = owner_ids(&client, 42).await;
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let start = initial + Duration::hours(2);
     let end = initial + Duration::hours(5);
     let data = client
-        .get_time_series(keys[0].identity(), Some((start, end).into()))
+        .read_by_id(ids[0], Some((start, end).into()))
         .await
         .unwrap();
     let single = data.as_single().unwrap();
@@ -124,7 +154,7 @@ async fn list_filter_by_features_subset() {
     let mut filter: Features = BTreeMap::new();
     filter.insert("model_year".into(), FeatureValue::Int(2030));
     let metas = client
-        .list_time_series(
+        .list_metadata(
             None,
             None,
             None,
@@ -160,12 +190,29 @@ async fn counts_resolutions_has_verify() {
         .unwrap();
     assert_eq!(resolutions_typed, vec![Duration::hours(1)]);
 
-    let keys = client
-        .get_time_series_keys(42, OwnerCategory::Component)
-        .await
-        .unwrap();
-    let present = client.has_time_series(keys[0].identity()).await.unwrap();
-    assert!(present);
+    // The existence probe stays attribute-addressed — it is answered off the
+    // catalog indexes without hydrating a row, so it never took an id. Its
+    // features match the *whole* set, not a subset: owner 42 carries
+    // `model_year`, so omitting it is a question about a series that does not
+    // exist, and the answer is `false`.
+    let mut features: Features = BTreeMap::new();
+    features.insert("model_year".into(), FeatureValue::Int(2030));
+    let probe = |features: Features| {
+        client.has_any_time_series(
+            42,
+            OwnerCategory::Component,
+            "load",
+            Some(TimeSeriesType::SingleTimeSeries),
+            Some(Period::Fixed(Duration::hours(1))),
+            None,
+            features,
+        )
+    };
+    assert!(probe(features).await.unwrap());
+    assert!(
+        !probe(Features::new()).await.unwrap(),
+        "a subset of the feature set is a different series",
+    );
 
     let report = client.verify_integrity().await.unwrap();
     assert!(report.errors.is_empty());
@@ -176,16 +223,14 @@ async fn missing_key_returns_not_found() {
     let addr = spawn_server(fixture_store()).await;
     let client = RemoteClient::connect(addr).await.unwrap();
 
-    let bogus_key = infrastore_core::KeyIdentity {
-        owner_id: 999,
-        owner_category: OwnerCategory::Component,
-        time_series_type: TimeSeriesType::SingleTimeSeries,
-        name: "load".into(),
-        resolution: Some(Period::Fixed(Duration::hours(1))),
-        interval: None,
-        features: Features::new(),
-    };
-    let err = client.get_time_series(&bogus_key, None).await.unwrap_err();
+    // Ids are never reissued, so one that names no row stays stale rather than
+    // coming to mean a different series -- a read committed to acting on it is
+    // a failure, where `association_exists` is the call that asks.
+    let stale = infrastore_core::TimeSeriesId(9_999);
+    assert!(!client.association_exists(stale).await.unwrap());
+    let err = client.read_by_id(stale, None).await.unwrap_err();
+    assert!(matches!(err, infrastore_core::TimeSeriesError::NotFound));
+    let err = client.get_metadata_by_id(stale).await.unwrap_err();
     assert!(matches!(err, infrastore_core::TimeSeriesError::NotFound));
 }
 
@@ -216,14 +261,11 @@ async fn non_sequential_round_trip_over_grpc() {
 
     let addr = spawn_server(store).await;
     let client = RemoteClient::connect(addr).await.unwrap();
-    let keys = client
-        .get_time_series_keys(44, OwnerCategory::Component)
-        .await
-        .unwrap();
-    assert_eq!(keys[0].resolution(), None);
+    let ids = owner_ids(&client, 44).await;
+    assert_eq!(owner_rows(&client, 44).await[0].resolution, None);
     let got = client
-        .get_time_series(
-            keys[0].identity(),
+        .read_by_id(
+            ids[0],
             Some((initial + Duration::hours(1), initial + Duration::days(3)).into()),
         )
         .await
@@ -257,14 +299,8 @@ async fn dtype_preserved_over_grpc() {
 
     let addr = spawn_server(store).await;
     let client = RemoteClient::connect(addr).await.unwrap();
-    let keys = client
-        .get_time_series_keys(1, OwnerCategory::Component)
-        .await
-        .unwrap();
-    let got = client
-        .get_time_series(keys[0].identity(), None)
-        .await
-        .unwrap();
+    let ids = owner_ids(&client, 1).await;
+    let got = client.read_by_id(ids[0], None).await.unwrap();
     let single = got.as_single().unwrap();
     // dtype + raw bytes survive the round trip.
     assert_eq!(single.data.dtype, Dtype::I64);
@@ -311,27 +347,21 @@ async fn element_type_preserved_over_grpc() {
 
     let addr = spawn_server(store).await;
     let client = RemoteClient::connect(addr).await.unwrap();
-    let keys = client
-        .get_time_series_keys(1, OwnerCategory::Component)
-        .await
-        .unwrap();
+    let ids = owner_ids(&client, 1).await;
 
-    let meta = client.get_metadata(keys[0].identity()).await.unwrap();
+    let meta = client.get_metadata_by_id(ids[0]).await.unwrap();
     assert_eq!(meta.element_type, ElementType::PiecewiseLinear);
     // The catalog id crosses the wire: a client that stores it as a reference
     // (a generator's cost function naming the series that varies it) reads it
     // from a served row, not just a local one.
     assert_eq!(
         meta.id,
-        Some(1),
+        Some(infrastore_core::TimeSeriesId(1)),
         "a served metadata row must carry the id the catalog filed it under",
     );
 
     // And a value read carries it too, so decoding needs no second call.
-    let got = client
-        .get_time_series(keys[0].identity(), None)
-        .await
-        .unwrap();
+    let got = client.read_by_id(ids[0], None).await.unwrap();
     let single = got.as_single().unwrap();
     let decoded = infrastore_core::decode(&single.data, meta.element_type, 1).unwrap();
     assert_eq!(
@@ -355,49 +385,38 @@ async fn additive_read_rpcs() {
     let addr = spawn_server(fixture_store()).await;
     let client = RemoteClient::connect(addr).await.unwrap();
 
-    // Full keys over the wire: get_time_series_keys returns the core enum with
-    // the descriptive snapshot filled (Single -> length).
-    let keys = client
-        .get_time_series_keys(42, OwnerCategory::Component)
-        .await
-        .unwrap();
-    assert_eq!(keys.len(), 1);
-    match &keys[0] {
-        infrastore_core::TimeSeriesKey::Single(s) => assert_eq!(s.length, 24),
-        other => panic!("expected Single key, got {other:?}"),
-    }
+    // One listing carries everything the five key-shaped listings projected:
+    // the identity, the descriptive snapshot (Single -> length), the array's
+    // content hash, and the id every read takes.
+    let owner_42 = owner_rows(&client, 42).await;
+    assert_eq!(owner_42.len(), 1);
+    assert_eq!(
+        owner_42[0].time_series_type,
+        TimeSeriesType::SingleTimeSeries
+    );
+    assert_eq!(owner_42[0].length, Some(24));
+    assert_ne!(owner_42[0].data_hash, [0u8; 32]);
+    assert_eq!(owner_42[0].units.as_deref(), Some("MW"));
 
-    // ListKeys with and without hash.
-    let rows = client
-        .list_keys(
-            None, None, None, None, None, None, None, None, None, None, false,
-        )
-        .await
-        .unwrap();
-    assert_eq!(rows.len(), 2);
-    assert!(rows.iter().all(|(_, h)| h.is_none()));
-    let with_hash = client
-        .list_keys(
-            None, None, None, None, None, None, None, None, None, None, true,
-        )
-        .await
-        .unwrap();
-    assert!(with_hash.iter().all(|(_, h)| h.is_some()));
-
-    // GetMetadata: owner 42 carries units "MW".
-    let meta = client.get_metadata(keys[0].identity()).await.unwrap();
+    // The same row fetched by its own id agrees with the listing's.
+    let id = owner_42[0].id.expect("a served row carries its id");
+    let meta = client.get_metadata_by_id(id).await.unwrap();
     assert_eq!(meta.units.as_deref(), Some("MW"));
+    assert_eq!(meta.id, Some(id));
 
-    // BulkRead the two series.
-    let all_keys = client
-        .list_keys(
-            None, None, None, None, None, None, None, None, None, None, false,
-        )
-        .await
-        .unwrap();
-    let ids: Vec<_> = all_keys.iter().map(|(k, _)| k.identity().clone()).collect();
-    let refs: Vec<_> = ids.iter().collect();
-    let datas = client.bulk_read(&refs, None).await.unwrap();
+    // ListMetadataByIds is the same listing addressed by id.
+    let rows = all_rows(&client).await;
+    assert_eq!(rows.len(), 2);
+    let ids: Vec<_> = rows.iter().map(|m| m.id.unwrap()).collect();
+    let by_ids = client.list_metadata_by_ids(&ids).await.unwrap();
+    assert_eq!(
+        by_ids.iter().map(|m| m.id).collect::<Vec<_>>(),
+        ids.iter().copied().map(Some).collect::<Vec<_>>(),
+        "rows come back in the order the ids were given",
+    );
+
+    // Read both series in one call.
+    let datas = client.read_by_ids(&ids, None).await.unwrap();
     assert_eq!(datas.len(), 2);
 
     // Detailed counts + counts by type.
@@ -459,7 +478,7 @@ async fn component_field_filters_and_round_trips_over_the_wire() {
     let client = RemoteClient::connect(addr).await.unwrap();
 
     let metas = client
-        .list_time_series(
+        .list_metadata(
             None,
             None,
             None,
@@ -480,9 +499,9 @@ async fn component_field_filters_and_round_trips_over_the_wire() {
         Some("max_active_power")
     );
 
-    // The same predicate on the key-listing RPC, which shares `ListReq`.
-    let keys = client
-        .list_keys(
+    // The same predicate naming the other field selects the other owner.
+    let rating = client
+        .list_metadata(
             None,
             None,
             None,
@@ -493,18 +512,17 @@ async fn component_field_filters_and_round_trips_over_the_wire() {
             None,
             None,
             None,
-            false,
         )
         .await
         .unwrap();
-    assert_eq!(keys.len(), 1);
-    assert_eq!(keys[0].0.identity().owner_id, 2);
+    assert_eq!(rating.len(), 1);
+    assert_eq!(rating[0].owner_id, 2);
 
     // The row that declares none is unreachable through the filter, and
     // reports it as absent rather than as an empty string.
     assert!(
         client
-            .list_time_series(
+            .list_metadata(
                 None,
                 None,
                 None,
@@ -521,7 +539,7 @@ async fn component_field_filters_and_round_trips_over_the_wire() {
             .is_empty()
     );
     let all = client
-        .list_time_series(
+        .list_metadata(
             Some(3),
             None,
             None,
@@ -541,7 +559,7 @@ async fn component_field_filters_and_round_trips_over_the_wire() {
 
 /// A value read over gRPC describes its values the way a local one does.
 ///
-/// `GetResp` carried no unit descriptors, so the encoder dropped `units`,
+/// `ReadByIdResp` carried no unit descriptors, so the encoder dropped `units`,
 /// `quantity_kind`, `unit_system` and `component_field` and the decoder wrote
 /// `None` back in. The identical `Store::get_time_series` against a local store
 /// returns them populated — the core attaches them in `materialize_time_series`
@@ -575,23 +593,20 @@ async fn a_value_read_carries_the_unit_descriptors() {
         )
         .unwrap();
 
-    let local_key = store
-        .list_keys(infrastore_core::ListFilter::new().owner_id(42))
+    let local_id = store
+        .list_metadata(infrastore_core::ListFilter::new().owner_id(42))
         .unwrap()[0]
-        .clone();
-    let local_described = store.get_time_series(local_key.identity(), None).unwrap();
+        .id
+        .expect("a catalog row always carries its id");
+    let local_described = store
+        .read_by_id(local_id, infrastore_core::ReadWindow::full())
+        .unwrap();
 
     let addr = spawn_server(store).await;
     let client = RemoteClient::connect(addr).await.unwrap();
 
-    let keys = client
-        .get_time_series_keys(42, OwnerCategory::Component)
-        .await
-        .unwrap();
-    let remote = client
-        .get_time_series(keys[0].identity(), None)
-        .await
-        .unwrap();
+    let ids = owner_ids(&client, 42).await;
+    let remote = client.read_by_id(ids[0], None).await.unwrap();
 
     assert_eq!(remote.units(), Some("MW"));
     assert_eq!(remote.quantity_kind(), Some("ActivePower"));
@@ -608,14 +623,8 @@ async fn a_value_read_carries_the_unit_descriptors() {
     assert_eq!(remote.component_field(), local_described.component_field());
 
     // Unset stays unset rather than becoming an empty string.
-    let bare_keys = client
-        .get_time_series_keys(43, OwnerCategory::Component)
-        .await
-        .unwrap();
-    let bare = client
-        .get_time_series(bare_keys[0].identity(), None)
-        .await
-        .unwrap();
+    let bare_ids = owner_ids(&client, 43).await;
+    let bare = client.read_by_id(bare_ids[0], None).await.unwrap();
     assert_eq!(bare.units(), None);
     assert_eq!(bare.quantity_kind(), None);
     assert_eq!(bare.unit_system(), None);

@@ -48,11 +48,11 @@ def test_deterministic_scalar_round_trip():
     key = store.add_time_series(
         OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Deterministic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data, "det_scalar"),
-    ).key
+    )
 
-    assert key.time_series_type == TimeSeriesType.Deterministic
+    assert store.get_metadata_by_id(key)["time_series_type"] == "Deterministic"
 
-    got = store.get_time_series(key)
+    got = store.read_by_id(key)
     assert isinstance(got, Deterministic)
     assert got.count == C
     assert got.horizon == "PT6H"
@@ -73,9 +73,9 @@ def test_deterministic_multidim_element():
     key = store.add_time_series(
         OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Deterministic(T0, RES_1H, horizon, INTERVAL_12H, C, data, "det_multidim"),
-    ).key
+    )
 
-    got = store.get_time_series(key)
+    got = store.read_by_id(key)
     assert isinstance(got, Deterministic)
     arr = np.asarray(got.data)
     assert arr.shape == (H, C, E)
@@ -92,12 +92,12 @@ def test_deterministic_window_selection():
     key = store.add_time_series(
         OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Deterministic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data, "det_window"),
-    ).key
+    )
 
     # Select windows 2, 3, 4 (0-indexed): start = T0 + 2*interval, end = T0 + 5*interval
     w_start = T0 + 2 * INTERVAL_12H
     w_end = T0 + 5 * INTERVAL_12H
-    got = store.get_time_series(key, time_range=(w_start, w_end))
+    got = store.read_by_ids_range([key], (w_start, w_end))[0]
 
     assert isinstance(got, Deterministic)
     assert got.count == 3
@@ -117,9 +117,9 @@ def test_deterministic_int64_dtype():
     key = store.add_time_series(
         OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Deterministic(T0, RES_1H, horizon, INTERVAL_12H, C, data, "det_int64"),
-    ).key
+    )
 
-    got = store.get_time_series(key)
+    got = store.read_by_id(key)
     arr = np.asarray(got.data)
     assert arr.dtype == np.int64
     np.testing.assert_array_equal(arr, data)
@@ -140,11 +140,11 @@ def test_probabilistic_round_trip():
     key = store.add_time_series(
         OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Probabilistic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, percentiles, data, "prob_basic"),
-    ).key
+    )
 
-    assert key.time_series_type == TimeSeriesType.Probabilistic
+    assert store.get_metadata_by_id(key)["time_series_type"] == "Probabilistic"
 
-    got = store.get_time_series(key)
+    got = store.read_by_id(key)
     assert isinstance(got, Probabilistic)
     assert got.count == C
     assert got.horizon == "PT6H"
@@ -167,12 +167,12 @@ def test_probabilistic_window_selection():
     key = store.add_time_series(
         OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Probabilistic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, percentiles, data, "prob_window"),
-    ).key
+    )
 
     # Windows 1 and 2 (0-indexed): start = T0 + 1*interval, end = T0 + 3*interval
     w_start = T0 + 1 * INTERVAL_12H
     w_end = T0 + 3 * INTERVAL_12H
-    got = store.get_time_series(key, time_range=(w_start, w_end))
+    got = store.read_by_ids_range([key], (w_start, w_end))[0]
 
     assert isinstance(got, Probabilistic)
     assert got.count == 2
@@ -197,11 +197,11 @@ def test_scenarios_round_trip():
     key = store.add_time_series(
         OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Scenarios(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data, "scen_basic"),
-    ).key
+    )
 
-    assert key.time_series_type == TimeSeriesType.Scenarios
+    assert store.get_metadata_by_id(key)["time_series_type"] == "Scenarios"
 
-    got = store.get_time_series(key)
+    got = store.read_by_id(key)
     assert isinstance(got, Scenarios)
     assert got.count == C
     assert got.scenario_count == S
@@ -223,12 +223,12 @@ def test_scenarios_window_selection():
     key = store.add_time_series(
         OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Scenarios(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data, "scen_window"),
-    ).key
+    )
 
     # Select windows 2, 3, 4 (0-indexed)
     w_start = T0 + 2 * INTERVAL_12H
     w_end = T0 + 5 * INTERVAL_12H
-    got = store.get_time_series(key, time_range=(w_start, w_end))
+    got = store.read_by_ids_range([key], (w_start, w_end))[0]
 
     assert isinstance(got, Scenarios)
     assert got.count == 3
@@ -249,9 +249,9 @@ def test_scenarios_int64_dtype():
     key = store.add_time_series(
         OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Scenarios(T0, RES_1H, horizon, INTERVAL_12H, C, data, "scen_int64"),
-    ).key
+    )
 
-    got = store.get_time_series(key)
+    got = store.read_by_id(key)
     arr = np.asarray(got.data)
     assert arr.dtype == np.int64
     np.testing.assert_array_equal(arr, data)
@@ -278,12 +278,13 @@ def test_transform_single_time_series_to_dst():
     transformed = store.transform_single_time_series(horizon, interval)
     assert transformed == 1
 
-    keys = store.get_time_series_keys(OWNER_ID, OWNER_CAT)
+    rows = store.list_metadata(owner_id=OWNER_ID, owner_category=OWNER_CAT)
     dst_key = next(
-        k for k in keys
-        if k.time_series_type == TimeSeriesType.DeterministicSingleTimeSeries
+        r["id"]
+        for r in rows
+        if r["time_series_type"] == "DeterministicSingleTimeSeries"
     )
-    got = store.get_time_series(dst_key)
+    got = store.read_by_id(dst_key)
     assert isinstance(got, Deterministic)
     assert got.count == 3
     assert got.name == "dst_series"
@@ -312,13 +313,13 @@ def test_misaligned_window_start_raises():
     key = store.add_time_series(
         OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Deterministic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data, "det_misalign"),
-    ).key
+    )
 
     # 1 hour off — not a window boundary (interval=12h)
     bad_start = T0 + timedelta(hours=1)
     bad_end = T0 + 2 * INTERVAL_12H
     with pytest.raises(InvalidParameterError):
-        store.get_time_series(key, time_range=(bad_start, bad_end))
+        store.read_by_ids_range([key], (bad_start, bad_end))
 
 
 def test_end_before_start_raises():
@@ -329,12 +330,12 @@ def test_end_before_start_raises():
     key = store.add_time_series(
         OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Deterministic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data, "det_backwards"),
-    ).key
+    )
 
     with pytest.raises(InvalidParameterError):
-        store.get_time_series(
-            key,
-            time_range=(T0 + 2 * INTERVAL_12H, T0),
+        store.read_by_ids_range(
+            [key],
+            (T0 + 2 * INTERVAL_12H, T0),
         )
 
 
@@ -346,12 +347,12 @@ def test_start_past_last_window_raises():
     key = store.add_time_series(
         OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Deterministic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data, "det_past"),
-    ).key
+    )
 
     # Windows exist at indices 0..3; index C (one past the last) does not.
     past_start = T0 + C * INTERVAL_12H
     with pytest.raises(InvalidParameterError):
-        store.get_time_series(key, time_range=(past_start, past_start + INTERVAL_12H))
+        store.read_by_ids_range([key], (past_start, past_start + INTERVAL_12H))
 
 
 def test_empty_window_range():
@@ -362,12 +363,12 @@ def test_empty_window_range():
     key = store.add_time_series(
         OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Deterministic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data, "det_empty"),
-    ).key
+    )
 
     # Aligned start but end == start selects no windows
     w_start = T0 + INTERVAL_12H
     w_end = T0 + INTERVAL_12H  # empty half-open [start, end)
-    got = store.get_time_series(key, time_range=(w_start, w_end))
+    got = store.read_by_ids_range([key], (w_start, w_end))[0]
 
     assert isinstance(got, Deterministic)
     assert got.count == 0
@@ -424,8 +425,8 @@ def test_repr_smoke():
     det_key = store.add_time_series(
         OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Deterministic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, det_data, "det_repr"),
-    ).key
-    det = store.get_time_series(det_key)
+    )
+    det = store.read_by_id(det_key)
     assert "Deterministic" in repr(det)
 
     P = 2
@@ -433,8 +434,8 @@ def test_repr_smoke():
     prob_key = store.add_time_series(
         OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Probabilistic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, [0.1, 0.9], prob_data, "prob_repr"),
-    ).key
-    prob = store.get_time_series(prob_key)
+    )
+    prob = store.read_by_id(prob_key)
     assert "Probabilistic" in repr(prob)
 
     S = 3
@@ -442,6 +443,6 @@ def test_repr_smoke():
     scen_key = store.add_time_series(
         OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Scenarios(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, scen_data, "scen_repr"),
-    ).key
-    scen = store.get_time_series(scen_key)
+    )
+    scen = store.read_by_id(scen_key)
     assert "Scenarios" in repr(scen)

@@ -8,9 +8,9 @@
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{
-    AddRequest, Deterministic, Features, ListFilter, NonSequentialTimeSeries, OwnerCategory,
-    Period, SingleTimeSeries, TimeRange, TimeReference, TimeSeriesData, TimeSeriesError,
-    TimeSeriesType, TypedArray, create_store, open_store,
+    AddRequest, Deterministic, ListFilter, NonSequentialTimeSeries, OwnerCategory, Period,
+    SingleTimeSeries, TimeRange, TimeReference, TimeSeriesData, TimeSeriesError, TimeSeriesType,
+    TypedArray, create_store, open_store,
 };
 
 mod common;
@@ -33,7 +33,7 @@ fn add(
     store: &mut infrastore_core::Store,
     owner: i64,
     data: TimeSeriesData,
-) -> infrastore_core::KeyIdentity {
+) -> infrastore_core::TimeSeriesId {
     store
         .add(AddRequest::new(
             owner,
@@ -42,11 +42,9 @@ fn add(
             data,
         ))
         .unwrap()
-        .identity()
-        .clone()
 }
 
-/// Every spelling survives the catalog, the key snapshot, and a reopen.
+/// Every spelling survives the catalog, a listing, and a reopen.
 ///
 /// The array is untouched by all of this — two series holding equal values pool
 /// into the same dataset and share a `data_hash` whatever their references say,
@@ -74,39 +72,43 @@ fn every_spelling_round_trips_through_the_catalog() {
                     sts("load", 4).with_time_reference(reference.clone()),
                 ),
             );
-            hashes.push(store.get_metadata(&key).unwrap().data_hash);
+            hashes.push(store.get_metadata_by_id(key).unwrap().unwrap().data_hash);
         }
         store.flush().unwrap();
     }
     let store = open_store(path.as_path(), true).unwrap();
     for (i, reference) in references.iter().enumerate() {
-        let key = infrastore_core::KeyIdentity {
-            owner_id: i as i64 + 1,
-            owner_category: OwnerCategory::Component,
-            time_series_type: TimeSeriesType::SingleTimeSeries,
-            name: "load".into(),
-            resolution: Some(Period::Fixed(Duration::hours(1))),
-            interval: None,
-            features: Features::new(),
-        };
-        let data = store.get_time_series(&key, None).unwrap();
+        // Ids are stable across a reopen, and they were minted in owner order.
+        let key = store
+            .list_metadata(ListFilter::new().owner_id(i as i64 + 1))
+            .unwrap()[0]
+            .id
+            .expect("a stored row carries its id");
+        let data = store
+            .read_by_id(key, infrastore_core::ReadWindow::full())
+            .unwrap();
         assert_eq!(
             data.time_reference(),
             Some(reference),
             "the series' own reference"
         );
         assert_eq!(
-            store.get_metadata(&key).unwrap().time_reference.as_ref(),
+            store
+                .get_metadata_by_id(key)
+                .unwrap()
+                .unwrap()
+                .time_reference
+                .as_ref(),
             Some(reference),
             "the catalog row's reference"
         );
         let listed = store
-            .list_keys(ListFilter::new().owner_id(i as i64 + 1))
+            .list_metadata(ListFilter::new().owner_id(i as i64 + 1))
             .unwrap();
         assert_eq!(
-            listed[0].time_reference(),
+            listed[0].time_reference.as_ref(),
             Some(reference),
-            "the key snapshot's reference"
+            "the listing's reference"
         );
     }
     // Identical values, identical array -- the reference reaches neither the
@@ -207,21 +209,30 @@ fn a_query_bound_must_match_the_series_spelling() {
 
     // An aware bound need not match the series' own offset: slicing is instant
     // arithmetic, and any offset names the same instant.
-    for key in [&zoned, &unspecified] {
-        let sliced = store.get_time_series(key, Some(zoned_bound)).unwrap();
+    for key in [zoned, unspecified] {
+        let sliced = store
+            .read_by_ids_range(&[key], zoned_bound)
+            .map(|mut v| v.remove(0))
+            .unwrap();
         assert_eq!(sliced.as_single().unwrap().length, 2);
     }
-    let sliced = store.get_time_series(&wall, Some(wall_bound)).unwrap();
+    let sliced = store
+        .read_by_ids_range(&[wall], wall_bound)
+        .map(|mut v| v.remove(0))
+        .unwrap();
     assert_eq!(sliced.as_single().unwrap().length, 2);
 
     // The two mismatches, in both directions. `None` groups with the zoned
     // variants -- it is not a floating third case.
     for (key, bound, label) in [
-        (&zoned, wall_bound, "wall clock vs instants"),
-        (&unspecified, wall_bound, "wall clock vs unspecified"),
-        (&wall, zoned_bound, "instant vs wall clocks"),
+        (zoned, wall_bound, "wall clock vs instants"),
+        (unspecified, wall_bound, "wall clock vs unspecified"),
+        (wall, zoned_bound, "instant vs wall clocks"),
     ] {
-        let err = store.get_time_series(key, Some(bound)).unwrap_err();
+        let err = store
+            .read_by_ids_range(&[key], bound)
+            .map(|mut v| v.remove(0))
+            .unwrap_err();
         assert!(
             matches!(err, TimeSeriesError::InvalidParameter(_)),
             "{label}: expected a refusal, got {err}"
@@ -249,13 +260,19 @@ fn a_selection_cannot_span_both_coherence_groups() {
 
     // Unranged, there is nothing for the two groups to disagree about: each
     // series carries its own spelling back.
-    assert_eq!(store.bulk_read(&[&zoned, &wall]).unwrap().len(), 2);
+    assert_eq!(
+        store
+            .read_by_ids(&[zoned, wall], infrastore_core::ReadWindow::full())
+            .unwrap()
+            .len(),
+        2
+    );
 
     // Ranged, no single bound is valid for both.
     let err = store
-        .bulk_read_range(
-            &[&zoned, &wall],
-            Some(TimeRange::new(t0(), t0() + Duration::hours(4))),
+        .read_by_ids_range(
+            &[zoned, wall],
+            TimeRange::new(t0(), t0() + Duration::hours(4)),
         )
         .unwrap_err();
     let message = err.to_string();
@@ -311,10 +328,10 @@ fn the_zoneless_filter_puts_unset_rows_with_the_zoned_ones() {
     }
     let owners = |zoneless: bool| {
         let mut ids: Vec<i64> = store
-            .list_keys(ListFilter::new().zoneless(zoneless))
+            .list_metadata(ListFilter::new().zoneless(zoneless))
             .unwrap()
             .iter()
-            .map(|k| k.owner_id())
+            .map(|m| m.owner_id)
             .collect();
         ids.sort_unstable();
         ids
@@ -390,13 +407,14 @@ fn a_calendar_period_on_a_zoned_series_still_steps_on_the_utc_calendar() {
     // The grid is the stored UTC calendar: the reference does not redirect it,
     // because that would let a spelling decide which instants the series holds.
     let sliced = store
-        .get_time_series(
-            &key,
-            Some(TimeRange::new(
+        .read_by_ids_range(
+            &[key],
+            TimeRange::new(
                 months.add_to(t0(), 1).unwrap(),
                 months.add_to(t0(), 2).unwrap(),
-            )),
+            ),
         )
+        .map(|mut v| v.remove(0))
         .unwrap();
     assert_eq!(
         sliced.as_single().unwrap().initial_timestamp,
@@ -422,7 +440,9 @@ fn every_series_type_carries_its_reference() {
         1,
         TimeSeriesData::NonSequentialTimeSeries(irregular),
     );
-    let read = store.get_time_series(&key, None).unwrap();
+    let read = store
+        .read_by_id(key, infrastore_core::ReadWindow::full())
+        .unwrap();
     assert_eq!(read.time_reference(), Some(&TimeReference::Zoneless));
     assert_eq!(read.as_non_sequential().unwrap().timestamps, stamps);
 
@@ -439,11 +459,18 @@ fn every_series_type_carries_its_reference() {
     .with_time_reference(TimeReference::FixedOffset(330));
     let key = add(&mut store, 2, TimeSeriesData::Deterministic(forecast));
     assert_eq!(
-        store.get_time_series(&key, None).unwrap().time_reference(),
+        store
+            .read_by_id(key, infrastore_core::ReadWindow::full())
+            .unwrap()
+            .time_reference(),
         Some(&TimeReference::FixedOffset(330))
     );
     assert_eq!(
-        store.get_metadata(&key).unwrap().time_reference,
+        store
+            .get_metadata_by_id(key)
+            .unwrap()
+            .unwrap()
+            .time_reference,
         Some(TimeReference::FixedOffset(330))
     );
 }

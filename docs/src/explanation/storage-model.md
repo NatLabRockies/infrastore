@@ -139,13 +139,13 @@ table being absent.
 
 A unique index over
 `(owner_id, owner_category, time_series_type, name, resolution, interval, features_hash)` enforces
-the [key uniqueness](./data-model.md#keys) invariant at the database level. `owner_category` is part
-of the key, so a component and a supplemental attribute that share an `owner_id` are independent;
-`interval` is part of the key too, so forecasts of one variable that differ only by interval are
-distinct. Because SQLite treats `NULL` as distinct in a `UNIQUE` index, a second index folds `NULL`
-`resolution` and `interval` to a sentinel so series without them (e.g. `NonSequentialTimeSeries`, or
-any static series, which carry no interval) are still constrained. Indexes on `data_hash`,
-`(owner_id, owner_category)`, and `resolution` keep lookups fast.
+the [identity uniqueness](./data-model.md#identity) invariant at the database level.
+`owner_category` is part of the key, so a component and a supplemental attribute that share an
+`owner_id` are independent; `interval` is part of the key too, so forecasts of one variable that
+differ only by interval are distinct. Because SQLite treats `NULL` as distinct in a `UNIQUE` index,
+a second index folds `NULL` `resolution` and `interval` to a sentinel so series without them (e.g.
+`NonSequentialTimeSeries`, or any static series, which carry no interval) are still constrained.
+Indexes on `data_hash`, `(owner_id, owner_category)`, and `resolution` keep lookups fast.
 
 ## Keeping the Two Files Consistent
 
@@ -163,7 +163,7 @@ sequenceDiagram
     C->>M: INSERT association
     alt insert succeeds
         C->>M: COMMIT
-        C-->>C: return TimeSeriesKey
+        C-->>C: return TimeSeriesId
     else insert fails (duplicate etc.)
         C->>M: ROLLBACK
         C->>B: remove_array(staged hashes)

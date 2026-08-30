@@ -7,7 +7,7 @@
 use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{
     Compression, Deterministic, Features, ListFilter, NonSequentialTimeSeries, OwnerCategory,
-    Probabilistic, Scenarios, SingleTimeSeries, TimeSeriesData, TimeSeriesError, TimeSeriesKey,
+    Probabilistic, Scenarios, SingleTimeSeries, TimeSeriesData, TimeSeriesError, TimeSeriesId,
     TimeSeriesType, TypedArray, create_store, create_store_with_compression, open_store,
 };
 
@@ -43,10 +43,16 @@ fn persistent_round_trip() {
     // Reopen and read back.
     let store = open_store(path.as_path(), true).unwrap();
     let keys = store
-        .get_time_series_keys(42, OwnerCategory::Component)
+        .list_metadata(
+            ListFilter::new()
+                .owner_id(42)
+                .owner_category(OwnerCategory::Component),
+        )
         .unwrap();
     assert_eq!(keys.len(), 1);
-    let got = store.get_time_series(keys[0].identity(), None).unwrap();
+    let got = store
+        .read_by_id(keys[0].id.unwrap(), infrastore_core::ReadWindow::full())
+        .unwrap();
     let single = got.as_single().unwrap();
     assert_eq!(single.length, 24);
     assert_eq!(
@@ -89,7 +95,11 @@ fn on_disk_persist_copies_and_leaves_the_source_usable() {
     // The source store survived the close/reopen: it still reads, still verifies,
     // and still accepts writes.
     let keys = store
-        .get_time_series_keys(42, OwnerCategory::Component)
+        .list_metadata(
+            ListFilter::new()
+                .owner_id(42)
+                .owner_category(OwnerCategory::Component),
+        )
         .unwrap();
     assert_eq!(keys.len(), 1);
     assert!(store.verify_integrity().unwrap().ok());
@@ -107,11 +117,15 @@ fn on_disk_persist_copies_and_leaves_the_source_usable() {
     // The copy is a complete, independent store holding the pre-persist state.
     let copy = open_store(dest.as_path(), true).unwrap();
     let copied = copy
-        .get_time_series_keys(42, OwnerCategory::Component)
+        .list_metadata(
+            ListFilter::new()
+                .owner_id(42)
+                .owner_category(OwnerCategory::Component),
+        )
         .unwrap();
     assert_eq!(copied.len(), 1);
     assert_eq!(
-        copy.get_time_series(copied[0].identity(), None)
+        copy.read_by_id(copied[0].id.unwrap(), infrastore_core::ReadWindow::full())
             .unwrap()
             .as_single()
             .unwrap()
@@ -148,10 +162,16 @@ fn in_memory_persist_round_trip() {
 
     let store = open_store(path.as_path(), true).unwrap();
     let keys = store
-        .get_time_series_keys(42, OwnerCategory::Component)
+        .list_metadata(
+            ListFilter::new()
+                .owner_id(42)
+                .owner_category(OwnerCategory::Component),
+        )
         .unwrap();
     assert_eq!(keys.len(), 1);
-    let got = store.get_time_series(keys[0].identity(), None).unwrap();
+    let got = store
+        .read_by_id(keys[0].id.unwrap(), infrastore_core::ReadWindow::full())
+        .unwrap();
     assert_eq!(
         got.as_single().unwrap().data.to_f64_vec().unwrap(),
         (0..24).map(|i| 100.0 + i as f64).collect::<Vec<_>>()
@@ -256,10 +276,16 @@ fn in_memory_persist_preserves_forecast_window_reads() {
     // Whole-series reads work for every type.
     for owner in [1i64, 2, 3] {
         let keys = store
-            .get_time_series_keys(owner, OwnerCategory::Component)
+            .list_metadata(
+                ListFilter::new()
+                    .owner_id(owner)
+                    .owner_category(OwnerCategory::Component),
+            )
             .unwrap();
         assert_eq!(keys.len(), 1, "owner {owner}");
-        store.get_time_series(keys[0].identity(), None).unwrap();
+        store
+            .read_by_id(keys[0].id.unwrap(), infrastore_core::ReadWindow::full())
+            .unwrap();
     }
     assert!(store.verify_integrity().unwrap().ok());
 }
@@ -319,10 +345,16 @@ fn compression_policies_round_trip() {
         let store = open_store(path.as_path(), true).unwrap();
         for (owner, base) in [(7i64, 100.0), (8, 200.0)] {
             let keys = store
-                .get_time_series_keys(owner, OwnerCategory::Component)
+                .list_metadata(
+                    ListFilter::new()
+                        .owner_id(owner)
+                        .owner_category(OwnerCategory::Component),
+                )
                 .unwrap();
             assert_eq!(keys.len(), 1, "{compression:?}");
-            let got = store.get_time_series(keys[0].identity(), None).unwrap();
+            let got = store
+                .read_by_id(keys[0].id.unwrap(), infrastore_core::ReadWindow::full())
+                .unwrap();
             assert_eq!(
                 got.as_single().unwrap().data.to_f64_vec().unwrap(),
                 (0..24).map(|i| base + i as f64).collect::<Vec<_>>(),
@@ -369,10 +401,16 @@ fn read_only_open_works_on_write_protected_files() {
     {
         let mut store = open_store(path.as_path(), true).unwrap();
         let keys = store
-            .get_time_series_keys(1, OwnerCategory::Component)
+            .list_metadata(
+                ListFilter::new()
+                    .owner_id(1)
+                    .owner_category(OwnerCategory::Component),
+            )
             .unwrap();
         assert_eq!(keys.len(), 1);
-        let got = store.get_time_series(keys[0].identity(), None).unwrap();
+        let got = store
+            .read_by_id(keys[0].id.unwrap(), infrastore_core::ReadWindow::full())
+            .unwrap();
         assert_eq!(got.as_single().unwrap().length, 24);
         // Writes through a read-only store are rejected, not attempted.
         let err = store
@@ -436,7 +474,7 @@ fn deduplication_persists() {
 
     let store = open_store(path.as_path(), true).unwrap();
     // Three associations exist…
-    assert_eq!(store.list_time_series(ListFilter::new()).unwrap().len(), 3);
+    assert_eq!(store.list_metadata(ListFilter::new()).unwrap().len(), 3);
     // …but verify_integrity reads each only once at the array level — the
     // single underlying column hashes correctly.
     let report = store.verify_integrity().unwrap();
@@ -514,7 +552,8 @@ fn time_range_slicing_through_disk() {
     let start = initial + Duration::hours(3);
     let end = initial + Duration::hours(7);
     let got = store
-        .get_time_series(key.identity(), Some((start, end).into()))
+        .read_by_ids_range(&[key], (start, end).into())
+        .map(|mut v| v.remove(0))
         .unwrap();
     let single = got.as_single().unwrap();
     assert_eq!(single.length, 4);
@@ -567,10 +606,16 @@ fn spill_into_new_dataset_past_capacity() {
 
     // Quick spot-check: the very last one — which must have spilled — reads back.
     let keys = store
-        .get_time_series_keys(total as i64, OwnerCategory::Component)
+        .list_metadata(
+            ListFilter::new()
+                .owner_id(total as i64)
+                .owner_category(OwnerCategory::Component),
+        )
         .unwrap();
     assert_eq!(keys.len(), 1);
-    let last = store.get_time_series(keys[0].identity(), None).unwrap();
+    let last = store
+        .read_by_id(keys[0].id.unwrap(), infrastore_core::ReadWindow::full())
+        .unwrap();
     let single = last.as_single().unwrap();
     assert_eq!(
         single.data.to_f64_vec().unwrap(),
@@ -633,9 +678,15 @@ fn bulk_add_session_writes_block_and_round_trips() {
     );
     for i in 0..n {
         let keys = store
-            .get_time_series_keys((i + 1) as i64, OwnerCategory::Component)
+            .list_metadata(
+                ListFilter::new()
+                    .owner_id((i + 1) as i64)
+                    .owner_category(OwnerCategory::Component),
+            )
             .unwrap();
-        let got = store.get_time_series(keys[0].identity(), None).unwrap();
+        let got = store
+            .read_by_id(keys[0].id.unwrap(), infrastore_core::ReadWindow::full())
+            .unwrap();
         let expected: Vec<f64> = (0..12).map(|t| i as f64 * 10.0 + t as f64).collect();
         assert_eq!(
             got.as_single().unwrap().data.to_f64_vec().unwrap(),
@@ -644,9 +695,15 @@ fn bulk_add_session_writes_block_and_round_trips() {
     }
     // The duplicate-content owner reads back the same values as series 0.
     let dup_keys = store
-        .get_time_series_keys(10_000, OwnerCategory::Component)
+        .list_metadata(
+            ListFilter::new()
+                .owner_id(10_000)
+                .owner_category(OwnerCategory::Component),
+        )
         .unwrap();
-    let dup = store.get_time_series(dup_keys[0].identity(), None).unwrap();
+    let dup = store
+        .read_by_id(dup_keys[0].id.unwrap(), infrastore_core::ReadWindow::full())
+        .unwrap();
     let expected0: Vec<f64> = (0..12).map(|t| t as f64).collect();
     assert_eq!(
         dup.as_single().unwrap().data.to_f64_vec().unwrap(),
@@ -723,17 +780,25 @@ fn bulk_read_matches_get_time_series_across_types() {
     let mut keys = Vec::new();
     for owner in 0..=(n as i64) {
         let k = store
-            .get_time_series_keys(owner, OwnerCategory::Component)
+            .list_metadata(
+                ListFilter::new()
+                    .owner_id(owner)
+                    .owner_category(OwnerCategory::Component),
+            )
             .unwrap();
         keys.push(k.into_iter().next().unwrap());
     }
-    let ids: Vec<_> = keys.iter().map(|k| k.identity()).collect();
+    let ids: Vec<_> = keys.iter().map(|m| m.id.unwrap()).collect();
 
-    let bulk = store.bulk_read(&ids).unwrap();
+    let bulk = store
+        .read_by_ids(&ids, infrastore_core::ReadWindow::full())
+        .unwrap();
     assert_eq!(bulk.len(), n + 1);
-    // Every bulk result equals the per-key get_time_series result, in order.
+    // Every bulk result equals the per-id read, in order.
     for (i, data) in bulk.iter().enumerate() {
-        let expected = store.get_time_series(ids[i], None).unwrap();
+        let expected = store
+            .read_by_id(ids[i], infrastore_core::ReadWindow::full())
+            .unwrap();
         match (data, &expected) {
             (TimeSeriesData::SingleTimeSeries(got), TimeSeriesData::SingleTimeSeries(want)) => {
                 assert_eq!(got.data, want.data)
@@ -791,7 +856,7 @@ fn compact_rewrites_the_file_and_reports_reclaimed_slots() {
 
     // Remove the middle association — its underlying array is dropped because
     // no other association references it.
-    store.remove_time_series(k1.identity()).unwrap();
+    store.remove_by_ids(&[k1]).unwrap();
 
     // compact() should report >=1 reclaimed slot. (The full dataset was
     // pre-allocated at MAX_COLS, so it'll actually report MAX_COLS-2.)
@@ -800,7 +865,7 @@ fn compact_rewrites_the_file_and_reports_reclaimed_slots() {
     // The rewrite is the file, not a report: the survivors still read, and the
     // dropped array is still gone.
     assert!(matches!(
-        store.get_time_series(k1.identity(), None),
+        store.read_by_id(k1, infrastore_core::ReadWindow::full()),
         Err(TimeSeriesError::NotFound)
     ));
 
@@ -870,7 +935,9 @@ fn disk_roundtrips_multidim_element_tuples() {
     };
 
     let store = open_store(path.as_path(), true).unwrap();
-    let got = store.get_time_series(key.identity(), None).unwrap();
+    let got = store
+        .read_by_id(key, infrastore_core::ReadWindow::full())
+        .unwrap();
     let single = got.as_single().unwrap();
     assert_eq!(single.data.shape, vec![4, 3]);
     assert_eq!(single.data, data);
@@ -921,7 +988,9 @@ fn non_sequential_persistent_round_trip() {
     };
 
     let store = open_store(&path, true).unwrap();
-    let got = store.get_time_series(key.identity(), None).unwrap();
+    let got = store
+        .read_by_id(key, infrastore_core::ReadWindow::full())
+        .unwrap();
     let irregular = got.as_non_sequential().unwrap();
     assert_eq!(irregular.timestamps, timestamps);
     assert_eq!(irregular.data, data);
@@ -1031,7 +1100,7 @@ fn opening_an_older_format_store_for_writing_is_rejected_before_the_catalog_ddl_
 
 /// Build a small on-disk store and return `(dir, h5_path, key)`. The temp dir is
 /// returned so the caller keeps it alive.
-fn store_on_disk() -> (tempfile::TempDir, std::path::PathBuf, TimeSeriesKey) {
+fn store_on_disk() -> (tempfile::TempDir, std::path::PathBuf, TimeSeriesId) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
     let key = {
@@ -1044,8 +1113,7 @@ fn store_on_disk() -> (tempfile::TempDir, std::path::PathBuf, TimeSeriesKey) {
                 TimeSeriesData::SingleTimeSeries(series(2024, 8, 1.0)),
                 Features::new(),
             )
-            .unwrap()
-            .key;
+            .unwrap();
         store.flush().unwrap();
         key
     };
@@ -1150,7 +1218,9 @@ fn verify_integrity_reports_a_catalog_hash_that_names_no_stored_array() {
     // And the key genuinely no longer resolves, which is what the report used
     // to leave unsurfaced.
     assert!(
-        store.get_time_series(key.identity(), None).is_err(),
+        store
+            .read_by_id(key, infrastore_core::ReadWindow::full())
+            .is_err(),
         "the corrupted association must not still read successfully"
     );
 }
@@ -1558,7 +1628,7 @@ fn compact_reports_the_shrink_a_caller_can_measure() {
             Features::new(),
         )
         .unwrap();
-    store.remove_time_series(drop_me.identity()).unwrap();
+    store.remove_by_ids(&[drop_me]).unwrap();
 
     // Exactly what a caller does: size it, compact, size it again.
     let before = std::fs::metadata(&path).unwrap().len();
@@ -1600,7 +1670,7 @@ fn compact_shrinks_the_file_after_a_removal() {
         .unwrap();
     store.flush().unwrap();
 
-    store.remove_time_series(drop_me.identity()).unwrap();
+    store.remove_by_ids(&[drop_me]).unwrap();
     store.flush().unwrap();
     // Removal unlinks the dataset but HDF5 keeps the space: the file is no
     // smaller until it is rewritten.
@@ -1616,7 +1686,9 @@ fn compact_shrinks_the_file_after_a_removal() {
     assert_eq!(report.bytes_reclaimed, before - after);
     assert!(report.bytes_reclaimed > 0);
     // The survivor is intact and the store is still usable in place.
-    let got = store.get_time_series(keep.identity(), None).unwrap();
+    let got = store
+        .read_by_id(keep, infrastore_core::ReadWindow::full())
+        .unwrap();
     assert_eq!(
         got.as_single().unwrap().data.to_f64_vec().unwrap(),
         (0..24).map(|i| 1.0 + i as f64).collect::<Vec<_>>()
@@ -1733,18 +1805,25 @@ fn compact_preserves_every_stored_time_series_type() {
         .unwrap();
     store.flush().unwrap();
 
-    // Snapshot every key's data, compact, and demand it back byte for byte.
-    let keys: Vec<TimeSeriesKey> = store.list_keys(ListFilter::default()).unwrap();
-    assert_eq!(keys.len(), 6, "expected one key per stored type: {keys:?}");
+    // Snapshot every series' data, compact, and demand it back byte for byte.
+    let rows = store.list_metadata(ListFilter::default()).unwrap();
+    assert_eq!(rows.len(), 6, "expected one row per stored type: {rows:?}");
+    let keys: Vec<TimeSeriesId> = rows.iter().map(|m| m.id.unwrap()).collect();
     let before: Vec<TimeSeriesData> = keys
         .iter()
-        .map(|k| store.get_time_series(k.identity(), None).unwrap())
+        .map(|k| {
+            store
+                .read_by_id(*k, infrastore_core::ReadWindow::full())
+                .unwrap()
+        })
         .collect();
 
     store.compact().unwrap();
 
     for (key, want) in keys.iter().zip(&before) {
-        let got = store.get_time_series(key.identity(), None).unwrap();
+        let got = store
+            .read_by_id(*key, infrastore_core::ReadWindow::full())
+            .unwrap();
         assert_eq!(&got, want, "mismatch after compact for {key:?}");
     }
     assert!(store.verify_integrity().unwrap().ok());
@@ -1754,7 +1833,9 @@ fn compact_preserves_every_stored_time_series_type() {
     drop(store);
     let store = open_store(path.as_path(), false).unwrap();
     for (key, want) in keys.iter().zip(&before) {
-        let got = store.get_time_series(key.identity(), None).unwrap();
+        let got = store
+            .read_by_id(*key, infrastore_core::ReadWindow::full())
+            .unwrap();
         assert_eq!(&got, want, "mismatch after reopen for {key:?}");
     }
     assert!(store.verify_integrity().unwrap().ok());
@@ -1789,7 +1870,9 @@ fn compact_is_idempotent_and_safe_with_no_dead_space() {
     assert_eq!(second.bytes_reclaimed, 0);
     assert_eq!(std::fs::metadata(&path).unwrap().len(), size);
 
-    let got = store.get_time_series(key.identity(), None).unwrap();
+    let got = store
+        .read_by_id(key, infrastore_core::ReadWindow::full())
+        .unwrap();
     assert_eq!(got.as_single().unwrap().length, 24);
     assert!(store.verify_integrity().unwrap().ok());
 }
@@ -2052,23 +2135,26 @@ fn compaction_unlinks_a_time_axis_nothing_references() {
     irregular_store(&path, 3);
 
     let mut store = open_store(path.as_path(), false).unwrap();
-    let keys = store.list_keys(ListFilter::new()).unwrap();
+    let keys = store.list_metadata(ListFilter::new()).unwrap();
     assert_eq!(keys.len(), 3);
     // Two of three go: the axis is still referenced, so nothing is reclaimed.
     for key in &keys[..2] {
-        store.remove_time_series(key.identity()).unwrap();
+        store.remove_by_ids(&[key.id.unwrap()]).unwrap();
     }
     assert_eq!(store.compact().unwrap().timestamp_sets_reclaimed, 0);
     assert_eq!(timestamp_datasets(&path).len(), 1);
     // The survivor still reads back on it.
-    match store.get_time_series(keys[2].identity(), None).unwrap() {
+    match store
+        .read_by_id(keys[2].id.unwrap(), infrastore_core::ReadWindow::full())
+        .unwrap()
+    {
         TimeSeriesData::NonSequentialTimeSeries(ns) => assert_eq!(ns.timestamps.len(), 6),
         other => panic!("expected a NonSequentialTimeSeries, got {other:?}"),
     }
 
     // The last reference goes, and now the dataset does too — once, and then not
     // again.
-    store.remove_time_series(keys[2].identity()).unwrap();
+    store.remove_by_ids(&[keys[2].id.unwrap()]).unwrap();
     assert_eq!(store.compact().unwrap().timestamp_sets_reclaimed, 1);
     assert_eq!(store.compact().unwrap().timestamp_sets_reclaimed, 0);
     drop(store);
@@ -2108,9 +2194,11 @@ fn verify_integrity_reports_a_time_axis_perturbed_behind_its_hash() {
     // The arrays are untouched, so the read still succeeds — which is exactly
     // why the check has to exist: it hands back an axis that is not the one
     // written.
-    match store.get_time_series(
-        store.list_keys(ListFilter::new()).unwrap()[0].identity(),
-        None,
+    match store.read_by_id(
+        store.list_metadata(ListFilter::new()).unwrap()[0]
+            .id
+            .unwrap(),
+        infrastore_core::ReadWindow::full(),
     ) {
         Ok(TimeSeriesData::NonSequentialTimeSeries(got)) => assert_ne!(got.timestamps, stamps),
         other => panic!("expected the altered series to read, got {other:?}"),
@@ -2169,7 +2257,7 @@ fn rolling_back_a_transaction_removes_the_time_axis_it_wrote() {
     store.rollback_transaction().unwrap();
     store.flush().unwrap();
     assert!(
-        store.list_keys(ListFilter::new()).unwrap().is_empty(),
+        store.list_metadata(ListFilter::new()).unwrap().is_empty(),
         "the catalog rolled back"
     );
     assert!(
@@ -2218,9 +2306,11 @@ fn rolling_back_a_transaction_removes_the_time_axis_it_wrote() {
         "the surviving series' axis was swept with the rollback"
     );
     match store
-        .get_time_series(
-            store.list_keys(ListFilter::new()).unwrap()[0].identity(),
-            None,
+        .read_by_id(
+            store.list_metadata(ListFilter::new()).unwrap()[0]
+                .id
+                .unwrap(),
+            infrastore_core::ReadWindow::full(),
         )
         .unwrap()
     {
@@ -2256,9 +2346,25 @@ fn a_missing_time_axis_is_reported_and_refuses_the_read() {
         report.errors
     );
 
-    let err = store.list_time_series(ListFilter::new()).unwrap_err();
+    // A listing answers an identity question and never loads a time axis, so it
+    // still succeeds -- and that is the point of the split: the corruption
+    // surfaces where the axis is actually needed, not on every catalog query.
+    let rows = store.list_metadata(ListFilter::new()).unwrap();
+    assert_eq!(rows.len(), 2);
     assert!(
-        matches!(err, TimeSeriesError::IntegrityError(ref m) if m.contains("timestamp vector")),
-        "{err:?}"
+        rows.iter().all(|m| m.timestamps.is_none()),
+        "a listing carries no time axis",
     );
+
+    // Reading the series does need it, and fails rather than handing back a
+    // vectorless `NonSequentialTimeSeries`.
+    for row in &rows {
+        let err = store
+            .read_by_id(row.id.unwrap(), infrastore_core::ReadWindow::full())
+            .unwrap_err();
+        assert!(
+            matches!(err, TimeSeriesError::IntegrityError(ref m) if m.contains("timestamp vector")),
+            "{err:?}"
+        );
+    }
 }

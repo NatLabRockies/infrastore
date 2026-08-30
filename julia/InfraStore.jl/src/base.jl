@@ -1,43 +1,7 @@
 # ---- Base interface --------------------------------------------------------
 #
-# Key equality/hash delegate to the Rust core identity semantics via the FFI so
-# Julia never re-implements them. The value types delegate their container
-# interface to the wrapped `data` array; forecast `length` is the window count.
-
-"""
-Identity equality (owner, category, type, name, resolution, interval,
-features), delegated to the Rust core. Consistent with `hash`, so keys work as
-`Dict`/`Set` members.
-"""
-function Base.:(==)(a::TimeSeriesKey, b::TimeSeriesKey)
-    out = Ref{Bool}(false)
-    _check(
-        @ccall lib_path().infrastore_key_eq(
-            a::Ptr{Cvoid}, b::Ptr{Cvoid}, out::Ref{Bool}
-        )::Int32
-    )
-    return out[]
-end
-
-function Base.hash(k::TimeSeriesKey, h::UInt)
-    out = Ref{UInt64}(0)
-    _check(
-        @ccall lib_path().infrastore_key_identity_hash(
-            k::Ptr{Cvoid}, out::Ref{UInt64}
-        )::Int32
-    )
-    return hash(out[], h)
-end
-
-function Base.show(io::IO, k::TimeSeriesKey)
-    k.handle == C_NULL && return print(io, "TimeSeriesKey(freed)")
-    i = key_info(k)
-    return print(
-        io,
-        "TimeSeriesKey($(i.time_series_type) name=$(repr(i.name)) " *
-        "owner_id=$(i.owner_id) owner_category=$(i.owner_category))",
-    )
-end
+# The value types delegate their container interface to the wrapped `data`
+# array; forecast `length` is the window count.
 
 function Base.show(io::IO, s::Store)
     s.handle == C_NULL && return print(io, "Store(closed)")

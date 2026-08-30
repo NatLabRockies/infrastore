@@ -234,7 +234,7 @@ end
 #
 # Dense forecasts mirror the InfrastructureSystems.jl objects. `data` is a Julia
 # (column-major) array in the canonical shape noted on each type; it round-trips
-# through `add_time_series!` / `get_time_series`. `DeterministicSingleTimeSeries`
+# through `add_time_series!` / `read_by_id`. `DeterministicSingleTimeSeries`
 # is a marker type with no materialized form: it is derived from a stored
 # `SingleTimeSeries` via `transform_single_time_series!` and read back as a
 # `Deterministic` (see the type below). Requesting `Deterministic` matches it
@@ -435,12 +435,12 @@ is never constructed or added directly and has no materialized struct.
 
 **You do not normally ask for this type.** Whether a forecast is stored densely
 or derived from a `SingleTimeSeries` is a storage detail:
-`get_time_series(Deterministic, …)` matches either and returns a
-[`Deterministic`] both ways. This type exists so the detail is *inspectable* —
-it surfaces as the `time_series_type` of keys and metadata from
-`get_time_series_keys` / `key_info` / `list_keys`, and passing it as a requested
-type narrows a query to the derived forecasts alone (e.g. to audit which of a
-store's forecasts are synthetic).
+[`read_by_id`](@ref) returns a [`Deterministic`] either way, and a
+`time_series_type=Deterministic` filter matches both. This type exists so the
+detail is *inspectable* — it surfaces as the `time_series_type` of every catalog
+row from `list_metadata` / `list_metadata_by_ids` / `get_metadata_by_id`, and
+filtering on it narrows a query to the derived forecasts alone (e.g. to audit
+which of a store's forecasts are synthetic).
 """
 abstract type DeterministicSingleTimeSeries end
 

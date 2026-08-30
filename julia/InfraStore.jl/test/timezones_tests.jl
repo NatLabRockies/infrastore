@@ -19,7 +19,7 @@ using TimeZones
         store, 1, "Generator", Component,
         SingleTimeSeries(zoned, Hour(1), collect(1.0:3.0), "load"),
     )
-    @test get_time_series(store, key).initial_timestamp == DateTime(2024, 1, 1, 14)
+    @test read_by_id(store, key).initial_timestamp == DateTime(2024, 1, 1, 14)
 
     # The same instant written any other way is the same instant.
     @test InfraStore._utc_datetime(ZonedDateTime(DateTime(2024, 1, 1, 14), tz"UTC")) ==
@@ -36,16 +36,18 @@ end
         store, 2, "Generator", Component,
         NonSequentialTimeSeries(stamps, collect(1.0:3.0), "events"),
     )
-    got = get_time_series(NonSequentialTimeSeries, store, key)
+    got = read_by_id(store, key)
     @test got.timestamps ==
         [DateTime(2024, 1, 1, 7), DateTime(2024, 1, 1, 13), DateTime(2024, 1, 1, 19)]
 
     # A time_range built from ZonedDateTimes selects by instant.
-    sliced = get_time_series(
-        NonSequentialTimeSeries, store, key;
-        time_range=(
-            ZonedDateTime(DateTime(2024, 1, 1, 6), denver),
-            ZonedDateTime(DateTime(2024, 1, 1, 12), denver),
+    sliced = only(
+        read_by_ids(
+            store, [key];
+            time_range=(
+                ZonedDateTime(DateTime(2024, 1, 1, 6), denver),
+                ZonedDateTime(DateTime(2024, 1, 1, 12), denver),
+            ),
         ),
     )
     @test sliced.timestamps == [DateTime(2024, 1, 1, 13)]
@@ -68,7 +70,7 @@ end
     @test static_grid(reader).time_reference == ZoneReference("America/Denver")
     static_read!(reader, ZonedDateTime(DateTime(2024, 1, 1, 2), denver))  # = 09:00Z
     @test static_values(reader, 1)[1] == 12.0
-    @test has_time_series(store, sts_key)
+    @test association_exists(store, sts_key)
 
     # A wall clock against that same instant-bearing axis is refused, as it is
     # on a ranged read.
@@ -126,7 +128,7 @@ end
         SingleTimeSeries(zoned, Hour(1), collect(1.0:3.0), "load"),
     )
 
-    got = get_time_series(store, key)
+    got = read_by_id(store, key)
     # The read is unchanged: a `DateTime` holding the instant.
     @test got.initial_timestamp == DateTime(2024, 1, 1, 14)
     @test got.time_reference == ZoneReference("America/Denver")
@@ -135,9 +137,9 @@ end
     @test zoned_timestamp(got) == zoned
 
     # The catalog surfaces report it too.
-    @test get_metadata(store, key).time_reference == ZoneReference("America/Denver")
-    @test list_keys(store)[1].time_reference == ZoneReference("America/Denver")
-    @test list_time_series(store)[1].time_reference == ZoneReference("America/Denver")
+    @test get_metadata_by_id(store, key).time_reference == ZoneReference("America/Denver")
+    @test list_metadata(store)[1].time_reference == ZoneReference("America/Denver")
+    @test list_metadata(store)[1].time_reference == ZoneReference("America/Denver")
 end
 
 @testset "the fold of an ambiguous local hour survives the round trip" begin
@@ -153,7 +155,7 @@ end
             store, owner, "Generator", Component,
             SingleTimeSeries(zoned, Hour(1), collect(1.0:2.0), "load"),
         )
-        got = get_time_series(store, key)
+        got = read_by_id(store, key)
         @test got.initial_timestamp == instant
         @test zoned_timestamp(got) == zoned
     end
@@ -175,24 +177,26 @@ end
 
     # An aware bound need not match the series' own offset: both name the same
     # instant, and slicing is instant arithmetic.
-    sliced = get_time_series(
-        store, zoned_key;
-        time_range=(
-            ZonedDateTime(DateTime(2024, 1, 1, 8), tz"UTC"),
-            ZonedDateTime(DateTime(2024, 1, 1, 10), tz"UTC"),
+    sliced = only(
+        read_by_ids(
+            store, [zoned_key];
+            time_range=(
+                ZonedDateTime(DateTime(2024, 1, 1, 8), tz"UTC"),
+                ZonedDateTime(DateTime(2024, 1, 1, 10), tz"UTC"),
+            ),
         ),
     )
     @test sliced.initial_timestamp == DateTime(2024, 1, 1, 8)
 
     # A wall-clock bound against a series that records instants is a category
     # error, not a rounding one, so it is refused rather than coerced.
-    @test_throws InfraStore.InvalidParameterError get_time_series(
-        store, zoned_key;
+    @test_throws InfraStore.InvalidParameterError read_by_ids(
+        store, [zoned_key];
         time_range=(DateTime(2024, 1, 1, 1), DateTime(2024, 1, 1, 3)),
     )
     # And the mirror image.
-    @test_throws InfraStore.InvalidParameterError get_time_series(
-        store, naive_key;
+    @test_throws InfraStore.InvalidParameterError read_by_ids(
+        store, [naive_key];
         time_range=(
             ZonedDateTime(DateTime(2024, 1, 1, 1), tz"UTC"),
             ZonedDateTime(DateTime(2024, 1, 1, 3), tz"UTC"),
@@ -200,8 +204,8 @@ end
     )
 
     # A range is one request, so both of its bounds have to agree on a spelling.
-    @test_throws InfraStore.InvalidParameterError get_time_series(
-        store, zoned_key;
+    @test_throws InfraStore.InvalidParameterError read_by_ids(
+        store, [zoned_key];
         time_range=(ZonedDateTime(DateTime(2024, 1, 1), tz"UTC"), DateTime(2024, 1, 1, 3)),
     )
 end
@@ -221,7 +225,7 @@ end
 
     # One bound cannot be valid for both groups, so a ranged bulk read over a
     # mixed selection is refused outright.
-    @test_throws InfraStore.InvalidParameterError bulk_read(
+    @test_throws InfraStore.InvalidParameterError read_by_ids(
         store, [zoned_key, naive_key];
         time_range=(
             ZonedDateTime(DateTime(2024, 1, 1), tz"UTC"),
@@ -229,7 +233,7 @@ end
         ),
     )
     # Unranged, there is nothing for them to disagree about.
-    @test length(bulk_read(store, [zoned_key, naive_key])) == 2
+    @test length(read_by_ids(store, [zoned_key, naive_key])) == 2
 
     # A reader materializes one timestamp axis, so a mixed cohort has no
     # spelling for it -- and the refusal is at build time, where the message can
@@ -240,8 +244,8 @@ end
     # `zoneless` is the constructive half: it is how a caller builds a coherent
     # selection instead of merely being told theirs is not.
     @test build_static_reader(store; resolution=Hour(1), zoneless=false) isa Any
-    @test length(list_keys(store; zoneless=true)) == 1
-    @test length(list_keys(store; zoneless=false)) == 1
+    @test length(list_metadata(store; zoneless=true)) == 1
+    @test length(list_metadata(store; zoneless=false)) == 1
 end
 
 @testset "a zoneless series has no ZonedDateTime to hand back" begin

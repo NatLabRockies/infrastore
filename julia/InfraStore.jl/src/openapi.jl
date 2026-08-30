@@ -17,7 +17,7 @@
         component_field=nothing) -> String
 
 Export `time_series_associations` matching the filter (the same filter
-keywords as [`list_time_series`](@ref)) as a sorted OpenAPI-row JSON array.
+keywords as [`list_metadata`](@ref)) as a sorted OpenAPI-row JSON array.
 Each row's `uri` and `data_hash` are the hex-encoded content hash the store
 already has for that row — never a caller-supplied locator. With no filter
 this exports the whole catalog.

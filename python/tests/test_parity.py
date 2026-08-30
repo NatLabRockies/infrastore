@@ -49,7 +49,7 @@ def _sts(name: str, data: np.ndarray, initial: datetime = T0) -> SingleTimeSerie
 
 
 def _add(store: Store, owner: int, ts, **kwargs):
-    return store.add_time_series(owner, OWNER_TYPE, OWNER_CAT, ts, **kwargs).key
+    return store.add_time_series(owner, OWNER_TYPE, OWNER_CAT, ts, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +69,7 @@ def test_every_dtype_round_trips_as_a_static_series():
         else:
             values = np.array([1, 2, 3], dtype=dtype)
         key = _add(store, i + 1, _sts(f"ts_{np.dtype(dtype).name}", values))
-        arr = np.asarray(store.get_time_series(key).data)
+        arr = np.asarray(store.read_by_id(key).data)
         assert arr.dtype == np.dtype(dtype), np.dtype(dtype).name
         np.testing.assert_array_equal(arr, values)
 
@@ -93,7 +93,7 @@ def test_every_dtype_round_trips_through_disk(tmp_path):
 
     reopened = Store.open(str(path), read_only=True)
     for name, key in keys.items():
-        arr = np.asarray(reopened.get_time_series(key).data)
+        arr = np.asarray(reopened.read_by_id(key).data)
         assert arr.dtype == expected[name].dtype, name
         np.testing.assert_array_equal(arr, expected[name], err_msg=name)
     assert reopened.verify_integrity() == {"ok": True, "errors": []}
@@ -105,11 +105,11 @@ def test_bool_static_series_keeps_true_and_false():
     store = Store.create(in_memory=True)
     values = np.array([True, True, False, True, False, False], dtype=np.bool_)
     key = _add(store, 1, _sts("outage", values))
-    arr = np.asarray(store.get_time_series(key).data)
+    arr = np.asarray(store.read_by_id(key).data)
     assert arr.dtype == np.bool_
     np.testing.assert_array_equal(arr, values)
     # A time slice of a bool series is still bool.
-    sliced = store.get_time_series(key, time_range=(T0, T0 + timedelta(hours=3)))
+    sliced = store.read_by_ids_range([key], (T0, T0 + timedelta(hours=3)))[0]
     sliced_arr = np.asarray(sliced.data)
     assert sliced_arr.dtype == np.bool_
     np.testing.assert_array_equal(sliced_arr, values[:3])
@@ -120,7 +120,7 @@ def test_float32_static_round_trip_is_exact():
     store = Store.create(in_memory=True)
     values = np.array([1.5, -2.25, 3.125], dtype=np.float32)
     key = _add(store, 1, _sts("f32", values))
-    arr = np.asarray(store.get_time_series(key).data)
+    arr = np.asarray(store.read_by_id(key).data)
     assert arr.dtype == np.float32
     # Exact equality: these values are all representable in float32.
     np.testing.assert_array_equal(arr, values)
@@ -134,18 +134,18 @@ def test_multidimensional_element_shape_on_a_static_series():
     values = np.arange(4 * 2 * 3, dtype=np.float64).reshape(4, 2, 3)
     key = _add(store, 1, _sts("curve", values))
 
-    got = store.get_time_series(key)
+    got = store.read_by_id(key)
     assert got.length == 4
     arr = np.asarray(got.data)
     assert arr.shape == (4, 2, 3)
     np.testing.assert_array_equal(arr, values)
 
-    meta = store.get_metadata(key)
+    meta = store.get_metadata_by_id(key)
     assert meta["element_shape"] == [2, 3]
 
     # A time slice keeps the element shape and slices only the time axis.
     sliced = np.asarray(
-        store.get_time_series(key, time_range=(T0 + RES_1H, T0 + 3 * RES_1H)).data
+        store.read_by_ids_range([key], (T0 + RES_1H, T0 + 3 * RES_1H))[0].data
     )
     assert sliced.shape == (2, 2, 3)
     np.testing.assert_array_equal(sliced, values[1:3])
@@ -155,7 +155,7 @@ def test_multidimensional_element_shape_at_a_non_default_dtype():
     store = Store.create(in_memory=True)
     values = np.arange(3 * 4, dtype=np.int32).reshape(3, 4)
     key = _add(store, 1, _sts("int_curve", values))
-    arr = np.asarray(store.get_time_series(key).data)
+    arr = np.asarray(store.read_by_id(key).data)
     assert arr.dtype == np.int32
     assert arr.shape == (3, 4)
     np.testing.assert_array_equal(arr, values)
@@ -170,7 +170,7 @@ def test_non_finite_values_round_trip_through_numpy():
         dtype=np.float64,
     )
     key = _add(store, 1, _sts("nonfinite", values))
-    arr = np.asarray(store.get_time_series(key).data)
+    arr = np.asarray(store.read_by_id(key).data)
     assert arr.tobytes() == values.tobytes()
     assert np.isnan(arr[0])
     assert arr[1] == np.inf and arr[2] == -np.inf
@@ -179,7 +179,7 @@ def test_non_finite_values_round_trip_through_numpy():
     # float32 too.
     values32 = np.array([np.nan, np.inf, -np.inf, -0.0], dtype=np.float32)
     key32 = _add(store, 2, _sts("nonfinite32", values32))
-    arr32 = np.asarray(store.get_time_series(key32).data)
+    arr32 = np.asarray(store.read_by_id(key32).data)
     assert arr32.dtype == np.float32
     assert arr32.tobytes() == values32.tobytes()
 
@@ -212,7 +212,7 @@ def test_non_float64_forecast_dtypes():
         1,
         Deterministic(T0, RES_1H, horizon, interval, C, det_data, "det_i64"),
     )
-    det = store.get_time_series(det_key)
+    det = store.read_by_id(det_key)
     det_arr = np.asarray(det.data)
     assert det_arr.dtype == np.int64
     np.testing.assert_array_equal(det_arr, det_data)
@@ -223,7 +223,7 @@ def test_non_float64_forecast_dtypes():
         2,
         Probabilistic(T0, RES_1H, horizon, interval, C, [0.1, 0.9], prob_data, "prob_f32"),
     )
-    prob = store.get_time_series(prob_key)
+    prob = store.read_by_id(prob_key)
     prob_arr = np.asarray(prob.data)
     assert prob_arr.dtype == np.float32
     np.testing.assert_array_equal(prob_arr, prob_data)
@@ -236,7 +236,7 @@ def test_non_float64_forecast_dtypes():
         # `scenario_count` is inferred from the leading dimension.
         Scenarios(T0, RES_1H, horizon, interval, C, scen_data, "scen_i32"),
     )
-    scen = store.get_time_series(scen_key)
+    scen = store.read_by_id(scen_key)
     scen_arr = np.asarray(scen.data)
     assert scen_arr.dtype == np.int32
     np.testing.assert_array_equal(scen_arr, scen_data)
@@ -267,19 +267,19 @@ def test_forecast_persists_and_reopens(tmp_path):
     store.close()
 
     reopened = Store.open(str(path), read_only=True)
-    det = reopened.get_time_series(det_key)
+    det = reopened.read_by_id(det_key)
     assert isinstance(det, Deterministic)
     assert det.count == C
     assert det.horizon == "PT2H"
     assert det.interval == "PT1H"
     np.testing.assert_array_equal(np.asarray(det.data), det_data)
 
-    prob = reopened.get_time_series(prob_key)
+    prob = reopened.read_by_id(prob_key)
     assert isinstance(prob, Probabilistic)
     assert prob.percentiles == [0.5, 0.95]
     np.testing.assert_array_equal(np.asarray(prob.data), prob_data)
 
-    scen = reopened.get_time_series(scen_key)
+    scen = reopened.read_by_id(scen_key)
     assert isinstance(scen, Scenarios)
     assert scen.scenario_count == 3
     np.testing.assert_array_equal(np.asarray(scen.data), scen_data)
@@ -287,7 +287,7 @@ def test_forecast_persists_and_reopens(tmp_path):
     assert reopened.verify_integrity() == {"ok": True, "errors": []}
 
     # A window read off disk selects the right window.
-    windowed = reopened.get_time_series(det_key, time_range=(T0 + RES_1H, T0 + 2 * RES_1H))
+    windowed = reopened.read_by_ids_range([det_key], (T0 + RES_1H, T0 + 2 * RES_1H))[0]
     assert windowed.count == 1
     np.testing.assert_array_equal(
         np.asarray(windowed.data), det_data[:, 1:2]
@@ -309,7 +309,7 @@ def test_non_finite_forecast_round_trips_through_disk(tmp_path):
     store.close()
 
     reopened = Store.open(str(path), read_only=True)
-    arr = np.asarray(reopened.get_time_series(key).data)
+    arr = np.asarray(reopened.read_by_id(key).data)
     assert arr.tobytes() == data.tobytes()
 
 
@@ -321,10 +321,10 @@ def test_non_finite_forecast_round_trips_through_disk(tmp_path):
 def test_has_time_series():
     store = Store.create(in_memory=True)
     key = _add(store, 1, _sts("load", np.arange(4, dtype=np.float64)))
-    assert store.has_time_series(key) is True
+    assert store.association_exists(key) is True
 
-    store.remove_time_series(key)
-    assert store.has_time_series(key) is False
+    store.remove_by_ids([key])
+    assert store.association_exists(key) is False
 
 
 def test_has_any_time_series():
@@ -369,24 +369,24 @@ def test_remove_time_series_bulk():
     k2 = _add(store, 2, _sts("load", np.arange(4, dtype=np.float64) + 10))
     k3 = _add(store, 3, _sts("load", np.arange(4, dtype=np.float64) + 20))
 
-    assert store.remove_time_series_bulk([k1, k2]) == 2
-    assert store.has_time_series(k3) is True
-    assert len(store.list_keys()) == 1
+    assert store.remove_by_ids([k1, k2]) == 2
+    assert store.association_exists(k3) is True
+    assert len(store.list_metadata()) == 1
 
     # An empty batch removes nothing and is not an error.
-    assert store.remove_time_series_bulk([]) == 0
+    assert store.remove_by_ids([]) == 0
 
 
 def test_remove_time_series_bulk_is_all_or_nothing():
     store = Store.create(in_memory=True)
     k1 = _add(store, 1, _sts("load", np.arange(4, dtype=np.float64)))
     k2 = _add(store, 2, _sts("load", np.arange(4, dtype=np.float64) + 10))
-    store.remove_time_series(k2)  # k2 now matches nothing
+    store.remove_by_ids([k2])  # k2 now matches nothing
 
     with pytest.raises(NotFoundError):
-        store.remove_time_series_bulk([k1, k2])
+        store.remove_by_ids([k1, k2])
     # k1 survived: nothing in the failed batch was removed.
-    assert store.has_time_series(k1) is True
+    assert store.association_exists(k1) is True
 
 
 def test_counts_by_type():
@@ -409,7 +409,7 @@ def test_counts_by_type():
 
     counts = store.counts_by_type()
     assert counts == {"SingleTimeSeries": 2, "Deterministic": 1}
-    assert sum(counts.values()) == len(store.list_keys())
+    assert sum(counts.values()) == len(store.list_metadata())
 
     assert Store.create(in_memory=True).counts_by_type() == {}
 
@@ -468,7 +468,7 @@ def test_static_summary():
         assert row["resolution"] == "PT1H"
         assert row["time_step_count"] == 4
     # The counts add up to the association total.
-    assert sum(r["count"] for r in rows) == len(store.list_keys())
+    assert sum(r["count"] for r in rows) == len(store.list_metadata())
 
     assert Store.create(in_memory=True).static_summary() == []
 
@@ -563,7 +563,30 @@ def test_check_static_consistency_separates_resolutions():
     assert rows["PT5M"]["length"] == 8
 
 
-def test_resolve_forecast_key():
+def _resolve_one(store, owner_id, name, ts_type, **filters):
+    """The single row matching these attributes.
+
+    `resolve_metadata` used to be a `Store` method; it is now a listing plus an
+    exactly-one check, which is what every binding does since the resolver came
+    out. The filter reads its type through `TimeSeriesType::accepts`, so asking
+    for `Deterministic` still spans a stored `DeterministicSingleTimeSeries` --
+    that rule lives in the filter, not in a separate entry point.
+    """
+    rows = store.list_metadata(
+        owner_id=owner_id,
+        owner_category=OwnerCategory.Component,
+        name=name,
+        time_series_type=ts_type,
+        **filters,
+    )
+    if not rows:
+        raise NotFoundError(f"no series named {name}")
+    if len(rows) != 1:
+        raise InvalidParameterError(f"{len(rows)} rows match {name}; narrow the filter")
+    return rows[0]
+
+
+def test_a_filter_resolves_to_one_row_and_its_id():
     store = Store.create(in_memory=True)
     C = 3
     data = np.arange(2 * C, dtype=np.float64).reshape(2, C)
@@ -573,34 +596,33 @@ def test_resolve_forecast_key():
         Deterministic(T0, RES_1H, timedelta(hours=2), timedelta(hours=1), C, data, "det"),
     )
 
-    # Concrete type.
-    resolved = store.resolve_forecast_key(
-        1, OwnerCategory.Component, "det", TimeSeriesType.Deterministic, resolution=RES_1H
+    # Concrete type. The row comes back whole; the id off it is what the
+    # id-addressed read and removal take.
+    resolved = _resolve_one(
+        store, 1, "det", TimeSeriesType.Deterministic, resolution=RES_1H
     )
-    assert resolved == key
+    assert resolved["name"] == "det"
+    assert resolved["id"] == key
+    assert np.asarray(store.read_by_id(resolved["id"]).data).shape == (2, C)
 
     # A name that matches nothing is a miss, not a silent None.
     with pytest.raises(NotFoundError):
-        store.resolve_forecast_key(
-            1,
-            OwnerCategory.Component,
-            "absent",
-            TimeSeriesType.Deterministic,
-            resolution=RES_1H,
+        _resolve_one(
+            store, 1, "absent", TimeSeriesType.Deterministic, resolution=RES_1H
         )
 
 
-def test_resolve_forecast_key_finds_a_transformed_dst():
+def test_the_deterministic_family_filter_finds_a_transformed_dst():
     store = Store.create(in_memory=True)
     _add(store, 1, _sts("load", np.arange(8, dtype=np.float64)))
     assert store.transform_single_time_series(timedelta(hours=2), timedelta(hours=1)) == 1
 
     # Asking for `Deterministic` finds the derived forecast: the transform is a
-    # storage detail. The key still reports the concrete stored type.
-    resolved = store.resolve_forecast_key(
-        1, OwnerCategory.Component, "load", TimeSeriesType.Deterministic, resolution=RES_1H
+    # storage detail. The row still reports the concrete stored type.
+    resolved = _resolve_one(
+        store, 1, "load", TimeSeriesType.Deterministic, resolution=RES_1H
     )
-    assert resolved.time_series_type == TimeSeriesType.DeterministicSingleTimeSeries
+    assert resolved["time_series_type"] == "DeterministicSingleTimeSeries"
 
 
 def _both_forecast_types() -> Store:
@@ -623,7 +645,7 @@ def test_the_deterministic_filter_matches_both_stored_forms():
     while `DeterministicSingleTimeSeries` narrows to the derived ones."""
     store = _both_forecast_types()
 
-    rows = store.list_time_series(time_series_type=TimeSeriesType.Deterministic)
+    rows = store.list_metadata(time_series_type=TimeSeriesType.Deterministic)
     # Both forms match, and each row still reports the type it is stored as, so
     # a caller auditing which forecasts are synthetic can still tell.
     assert {(r["owner_id"], r["time_series_type"]) for r in rows} == {
@@ -632,15 +654,15 @@ def test_the_deterministic_filter_matches_both_stored_forms():
     }
     assert [
         r["owner_id"]
-        for r in store.list_time_series(
+        for r in store.list_metadata(
             time_series_type=TimeSeriesType.DeterministicSingleTimeSeries
         )
     ] == [2]
 
     # The same value threads through every other filter-taking surface.
     det = TimeSeriesType.Deterministic
-    assert len(store.list_keys(time_series_type=det)) == 2
-    assert len(store.list_array_groups(time_series_type=det)) == 2
+    assert len(store.list_metadata(time_series_type=det)) == 2
+    assert len(store.list_metadata(time_series_type=det)) == 2
     assert store.list_names(time_series_type=det) == ["det", "load"]
     assert store.list_owner_types(time_series_type=det) == [OWNER_TYPE]
     assert sorted(store.list_owner_ids(OWNER_CAT, time_series_type=det)) == [1, 2]
@@ -679,9 +701,9 @@ def test_remove_by_filter_spans_both_deterministic_forms():
     store = _both_forecast_types()
     det = TimeSeriesType.Deterministic
     assert store.remove_by_filter(time_series_type=det) == 2
-    assert not store.list_time_series(time_series_type=det)
+    assert not store.list_metadata(time_series_type=det)
     # Removing the derived view leaves the SingleTimeSeries it viewed in place.
-    assert len(store.list_time_series(time_series_type=TimeSeriesType.SingleTimeSeries)) == 1
+    assert len(store.list_metadata(time_series_type=TimeSeriesType.SingleTimeSeries)) == 1
 
 
 def test_every_time_series_type_name_is_accepted():
@@ -694,8 +716,8 @@ def test_every_time_series_type_name_is_accepted():
     store = _both_forecast_types()
     for name in (n for n in dir(TimeSeriesType) if not n.startswith("_")):
         member = getattr(TimeSeriesType, name)
-        assert store.list_time_series(time_series_type=name) == (
-            store.list_time_series(time_series_type=member)
+        assert store.list_metadata(time_series_type=name) == (
+            store.list_metadata(time_series_type=member)
         ), name
 
 
@@ -704,18 +726,16 @@ def test_an_unusable_requested_type_is_rejected():
     # A `TimeSeriesType` or one of its own names, and nothing else. The name is
     # what the docstrings and the type stub have always shown, and it is what a
     # metadata row reports, so both spellings select the same rows.
-    assert store.list_time_series(time_series_type="Deterministic") == (
-        store.list_time_series(time_series_type=TimeSeriesType.Deterministic)
+    assert store.list_metadata(time_series_type="Deterministic") == (
+        store.list_metadata(time_series_type=TimeSeriesType.Deterministic)
     )
     # A string that is not a type name says so, inside the exception hierarchy,
     # and names what would have worked. There is in particular no family
     # sentinel to reach for.
     with pytest.raises(InvalidParameterError, match="abstract_deterministic"):
-        store.resolve_forecast_key(
-            1, OWNER_CAT, "det", "abstract_deterministic", resolution=RES_1H
-        )
+        store.list_metadata(time_series_type="abstract_deterministic")
     with pytest.raises(InvalidParameterError, match="Deterministic"):
-        store.list_time_series(time_series_type="deterministic")  # case-sensitive
+        store.list_metadata(time_series_type="deterministic")  # case-sensitive
     # Neither a type nor a name.
     with pytest.raises(TypeError):
         store.has_any_time_series(time_series_type=5)
@@ -727,14 +747,14 @@ def test_copy_time_series():
     src = _add(store, 1, _sts("load", values))
 
     copy = store.copy_time_series(src, 2, OWNER_TYPE, new_name="load_copy")
-    assert copy.owner_id == 2
-    assert copy.name == "load_copy"
+    assert store.get_metadata_by_id(copy)['owner_id'] == 2
+    assert store.get_metadata_by_id(copy)['name'] == "load_copy"
 
     # No array was duplicated, and both keys read the same values.
     assert store.num_distinct_arrays() == 1
     for key in (src, copy):
-        np.testing.assert_array_equal(np.asarray(store.get_time_series(key).data), values)
-    assert store.get_metadata(copy)["data_hash"] == store.get_metadata(src)["data_hash"]
+        np.testing.assert_array_equal(np.asarray(store.read_by_id(key).data), values)
+    assert store.get_metadata_by_id(copy)["data_hash"] == store.get_metadata_by_id(src)["data_hash"]
 
     # Copying onto the same identity twice collides.
     with pytest.raises(DuplicateTimeSeriesError):
@@ -742,7 +762,7 @@ def test_copy_time_series():
 
     # Without a new name, the copy keeps the source's name.
     same_name = store.copy_time_series(src, 3, OWNER_TYPE)
-    assert same_name.name == "load"
+    assert store.get_metadata_by_id(same_name)['name'] == "load"
 
 
 def test_compact(tmp_path):
@@ -764,7 +784,7 @@ def test_compact(tmp_path):
     )
     store.flush()
 
-    store.remove_time_series(drop)
+    store.remove_by_ids([drop])
     store.flush()
     # HDF5 cannot hand the freed space back in place: the file only shrinks
     # once compact rewrites it.
@@ -783,7 +803,7 @@ def test_compact(tmp_path):
     assert report["bytes_reclaimed"] == before - after > 0
 
     np.testing.assert_array_equal(
-        np.asarray(store.get_time_series(keep).data), keep_values
+        np.asarray(store.read_by_id(keep).data), keep_values
     )
     assert store.verify_integrity() == {"ok": True, "errors": []}
 
@@ -799,7 +819,7 @@ def test_count_array_references_and_num_distinct_arrays():
     key = _add(store, 1, _sts("load", values))
     assert store.num_distinct_arrays() == 1
 
-    data_hash = store.get_metadata(key)["data_hash"]
+    data_hash = store.get_metadata_by_id(key)["data_hash"]
     assert store.count_array_references(data_hash) == {"sts": 1, "dst": 0}
 
     # A DST derived from the STS shares the array.
@@ -823,7 +843,7 @@ def test_get_array_by_hash():
     values = np.arange(2 * 3, dtype=np.int32).reshape(2, 3)
     key = _add(store, 1, _sts("curve", values))
 
-    data_hash = store.get_metadata(key)["data_hash"]
+    data_hash = store.get_metadata_by_id(key)["data_hash"]
     arr = store.get_array_by_hash(data_hash)
     assert arr.dtype == np.int32
     assert arr.shape == (2, 3)
@@ -835,41 +855,45 @@ def test_get_array_by_hash():
     assert exc.type is not AssertionError
 
 
-def test_list_array_groups():
+def test_one_listing_groups_by_the_underlying_array():
     store = Store.create(in_memory=True)
     shared = np.arange(4, dtype=np.float64)
     k1 = _add(store, 1, _sts("load", shared))
     k2 = _add(store, 2, _sts("load", shared))
     k3 = _add(store, 3, _sts("load", shared + 100))
 
-    groups = store.list_array_groups()
-    assert len(groups) == 2, groups
-    by_size = sorted(groups, key=lambda g: len(g["keys"]))
-    assert len(by_size[0]["keys"]) == 1
-    assert len(by_size[1]["keys"]) == 2
+    # One listing carries the content hash beside the id, so grouping by array
+    # is a `groupby` over its rows rather than a second projection of the same
+    # query -- which is what `list_array_groups` was.
+    rows = store.list_metadata()
+    by_hash = {}
+    for r in rows:
+        by_hash.setdefault(r["data_hash"], []).append(r)
+    assert len(by_hash) == 2, rows
+    by_size = sorted(by_hash.values(), key=len)
+    assert len(by_size[0]) == 1
+    assert len(by_size[1]) == 2
 
-    # The two-key group is the shared array, and its hash matches the metadata.
+    # The two-row group is the shared array, and its hash matches the metadata.
     shared_group = by_size[1]
-    assert {k.owner_id for k in shared_group["keys"]} == {1, 2}
-    assert shared_group["data_hash"] == store.get_metadata(k1)["data_hash"]
-    assert shared_group["data_hash"] == store.get_metadata(k2)["data_hash"]
-    assert by_size[0]["keys"][0].owner_id == 3
-    assert by_size[0]["data_hash"] == store.get_metadata(k3)["data_hash"]
+    assert {r["owner_id"] for r in shared_group} == {1, 2}
+    assert shared_group[0]["data_hash"] == store.get_metadata_by_id(k1)["data_hash"]
+    assert shared_group[1]["data_hash"] == store.get_metadata_by_id(k2)["data_hash"]
+    assert by_size[0][0]["owner_id"] == 3
+    assert by_size[0][0]["data_hash"] == store.get_metadata_by_id(k3)["data_hash"]
 
-    # Each group's ids line up positionally with its keys, and are the ids the
-    # writes handed back.
-    for group in groups:
-        assert len(group["ids"]) == len(group["keys"])
-        for key, id_ in zip(group["keys"], group["ids"]):
-            assert id_ == store.get_metadata(key)["id"]
-    assert sorted(i for g in groups for i in g["ids"]) == [1, 2, 3]
+    # Every row carries the id its write handed back, and agrees with the row a
+    # by-id fetch returns.
+    assert sorted(r["id"] for r in rows) == sorted([k1, k2, k3])
+    for r in rows:
+        assert store.get_metadata_by_id(r["id"]) == r
 
     # Filters apply.
-    filtered = store.list_array_groups(owner_id=3)
+    filtered = store.list_metadata(owner_id=3)
     assert len(filtered) == 1
-    assert filtered[0]["data_hash"] == store.get_metadata(k3)["data_hash"]
-    assert filtered[0]["ids"] == [store.get_metadata(k3)["id"]]
-    assert store.list_array_groups(name="absent") == []
+    assert filtered[0]["data_hash"] == store.get_metadata_by_id(k3)["data_hash"]
+    assert filtered[0]["id"] == k3
+    assert store.list_metadata(name="absent") == []
 
 
 def test_time_series_counts_detailed():
@@ -923,8 +947,8 @@ def test_non_sequential_at_every_dtype():
             OWNER_TYPE,
             OWNER_CAT,
             NonSequentialTimeSeries(timestamps, values, name),
-        ).key
-        got = store.get_time_series(key)
+        )
+        got = store.read_by_id(key)
         assert got.timestamps == timestamps
         arr = np.asarray(got.data)
         assert arr.dtype == np.dtype(dtype), name
@@ -967,12 +991,12 @@ def test_millisecond_datetimes_round_trip():
     precise = datetime(2024, 1, 1, 0, 0, 0, 123000, tzinfo=timezone.utc)
     key = _add(store, 1, _sts("load", np.arange(4, dtype=np.float64), initial=precise))
 
-    got = store.get_time_series(key)
+    got = store.read_by_id(key)
     assert got.initial_timestamp == precise
     assert got.initial_timestamp.microsecond == 123000
     # `get_metadata` returns the timestamp as an RFC3339 string, not a datetime
     # (FINDING F8), but the milliseconds are still there.
-    assert store.get_metadata(key)["initial_timestamp"] == "2024-01-01T00:00:00.123+00:00"
+    assert store.get_metadata_by_id(key)["initial_timestamp"] == "2024-01-01T00:00:00.123+00:00"
 
 
 def test_millisecond_datetimes_round_trip_through_disk(tmp_path):
@@ -984,7 +1008,7 @@ def test_millisecond_datetimes_round_trip_through_disk(tmp_path):
     store.close()
 
     reopened = Store.open(str(path), read_only=True)
-    assert reopened.get_time_series(key).initial_timestamp == precise
+    assert reopened.read_by_id(key).initial_timestamp == precise
 
 
 def test_sub_millisecond_datetimes_are_refused():
@@ -1033,8 +1057,8 @@ def test_a_microsecond_resolution_is_refused_rather_than_truncated():
             T0, timedelta(milliseconds=1), np.arange(4, dtype=np.float64), "milli"
         ),
     )
-    assert key.resolution == "PT0.001S"
-    assert store.get_time_series(key).length == 4
+    assert store.get_metadata_by_id(key)['resolution'] == "PT0.001S"
+    assert store.read_by_id(key).length == 4
 
 
 def test_sub_second_resolutions_are_exact_down_to_one_millisecond():
@@ -1054,13 +1078,13 @@ def test_sub_second_resolutions_are_exact_down_to_one_millisecond():
                 T0, resolution, np.arange(4, dtype=np.float64), f"res_{i}"
             ),
         )
-        assert key.resolution == label
-        assert store.get_time_series(key).resolution == label
+        assert store.get_metadata_by_id(key)['resolution'] == label
+        assert store.read_by_id(key).resolution == label
 
         # And the grid slices correctly at that resolution.
-        sliced = store.get_time_series(
-            key, time_range=(T0 + resolution, T0 + 3 * resolution)
-        )
+        sliced = store.read_by_ids_range(
+            [key], (T0 + resolution, T0 + 3 * resolution)
+        )[0]
         np.testing.assert_array_equal(
             np.asarray(sliced.data), np.array([1.0, 2.0])
         )
@@ -1110,7 +1134,7 @@ def test_pre_1970_and_far_future_timestamps_round_trip(tmp_path):
 
     reopened = Store.open(str(path), read_only=True)
     for name, key in keys.items():
-        assert reopened.get_time_series(key).initial_timestamp == cases[name], name
+        assert reopened.read_by_id(key).initial_timestamp == cases[name], name
 
 
 def test_non_sequential_timestamps_keep_millisecond_spacing():
@@ -1128,8 +1152,8 @@ def test_non_sequential_timestamps_keep_millisecond_spacing():
         NonSequentialTimeSeries(
             timestamps, np.arange(4, dtype=np.float64), "precise"
         ),
-    ).key
-    got = store.get_time_series(key)
+    )
+    got = store.read_by_id(key)
     assert got.timestamps == timestamps, (
         "millisecond spacing must survive; a second-quantized encoding would "
         "collapse the first three"
@@ -1177,12 +1201,12 @@ def test_a_century_spanning_non_sequential_series_round_trips(tmp_path):
         OWNER_TYPE,
         OWNER_CAT,
         NonSequentialTimeSeries(timestamps, values, "century"),
-    ).key
+    )
     store.flush()
     store.close()
 
     reopened = Store.open(str(path), read_only=True)
-    got = reopened.get_time_series(key)
+    got = reopened.read_by_id(key)
     assert got.timestamps == timestamps
     np.testing.assert_array_equal(np.asarray(got.data), values)
 
@@ -1207,7 +1231,7 @@ def test_a_reader_built_before_a_removal_errors_on_the_next_read():
     before = np.sort(reader.group_values(0))
     np.testing.assert_array_equal(before, np.array([0.0, 100.0]))
 
-    store.remove_time_series(k1)
+    store.remove_by_ids([k1])
     assert store.num_distinct_arrays() == 1
 
     with pytest.raises(NotFoundError):
@@ -1234,7 +1258,7 @@ def test_a_reader_built_before_a_removal_of_a_shared_array_reads_stale_values():
     before = reader.group_values(0)
     assert before.shape == (2,)
 
-    store.remove_time_series(k1)
+    store.remove_by_ids([k1])
     assert store.num_distinct_arrays() == 1
 
     store.static_read(reader, T0)

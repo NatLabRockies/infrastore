@@ -14,7 +14,6 @@ import numpy as np
 import pytest
 
 from infrastore import (
-    AddedTimeSeries,
     InvalidParameterError,
     NotFoundError,
     OwnerCategory,
@@ -36,7 +35,7 @@ def _sts(name: str, base: float = 0.0, length: int = 4) -> SingleTimeSeries:
 
 def _add(
     store: Store, name: str, *, owner: int = 1, base: float = 0.0, **kwargs
-) -> AddedTimeSeries:
+) -> int:
     return store.add_time_series(
         owner, "Generator", OwnerCategory.Component, _sts(name, base), **kwargs
     )
@@ -46,10 +45,10 @@ class TestWriting:
     def test_a_write_reports_the_id_it_used(self):
         store = Store.create(in_memory=True)
         added = _add(store, "load")
-        assert isinstance(added, AddedTimeSeries)
-        assert added.id == 1
-        assert added.key.name == "load"
-        assert store.get_metadata(added.key)["id"] == added.id
+        assert isinstance(added, int)
+        assert added == 1
+        assert store.get_metadata_by_id(added)['name'] == "load"
+        assert store.get_metadata_by_id(added)["id"] == added
 
     def test_bulk_reports_one_id_per_item_in_order(self):
         store = Store.create(in_memory=True)
@@ -63,8 +62,8 @@ class TestWriting:
             for i in range(3)
         ]
         added = store.add_time_series_bulk(items)
-        assert [a.id for a in added] == [1, 2, 3]
-        assert [a.key.owner_id for a in added] == [0, 1, 2]
+        assert [a for a in added] == [1, 2, 3]
+        assert [store.get_metadata_by_id(a)['owner_id'] for a in added] == [0, 1, 2]
 
     def test_a_result_hashes_stably(self):
         # Regression: ``__hash__`` once seeded a fresh hasher per call, so the
@@ -89,9 +88,9 @@ class TestWriting:
             _add(store, "load", id=500)
 
         added = _add(store, "load")
-        store.remove_time_series(added.key)
+        store.remove_by_ids([added])
         # The id is retired rather than free: the next add gets a new one.
-        assert _add(store, "second", owner=2).id == added.id + 1
+        assert _add(store, "second", owner=2) == added + 1
 
     def test_an_identity_collision_still_says_so(self):
         store = Store.create(in_memory=True)
@@ -111,11 +110,11 @@ class TestReading:
         store = Store.create(in_memory=True)
         added = _add(store, "load")
 
-        meta = store.get_metadata_by_id(added.id)
+        meta = store.get_metadata_by_id(added)
         assert meta is not None
         assert meta["name"] == "load"
-        assert meta["id"] == added.id
-        assert store.association_exists(added.id)
+        assert meta["id"] == added
+        assert store.association_exists(added)
 
         # A miss is an answer, not an exception: a caller validating the
         # references in its model is asking whether one still resolves.
@@ -125,16 +124,16 @@ class TestReading:
     def test_a_removed_rows_id_stops_resolving_and_is_not_reused(self):
         store = Store.create(in_memory=True)
         added = _add(store, "load")
-        store.remove_time_series(added.key)
-        assert not store.association_exists(added.id)
+        store.remove_by_ids([added])
+        assert not store.association_exists(added)
 
         replacement = _add(store, "load")
-        assert replacement.id != added.id
-        assert not store.association_exists(added.id)
+        assert replacement != added
+        assert not store.association_exists(added)
 
     def test_read_by_ids_follows_the_order_it_was_given(self):
         store = Store.create(in_memory=True)
-        ids = [_add(store, name, base=base).id for name, base in
+        ids = [_add(store, name, base=base) for name, base in
                [("a", 1.0), ("b", 10.0), ("c", 100.0)]]
 
         got = store.read_by_ids([ids[2], ids[0], ids[2]])
@@ -156,40 +155,40 @@ class TestReading:
         )
 
         # No keywords is the whole series, the answer read_by_ids gives.
-        assert np.asarray(store.read_by_id(added.id).data).tolist() == data.tolist()
+        assert np.asarray(store.read_by_id(added).data).tolist() == data.tolist()
 
         # A window names exactly the steps asked for and moves the returned
         # series' initial timestamp onto the one it starts at -- and it does so
         # without a metadata read first.
         sliced = store.read_by_id(
-            added.id, start_time=_t0() + timedelta(hours=4), len=3
+            added, start_time=_t0() + timedelta(hours=4), len=3
         )
         assert np.asarray(sliced.data).tolist() == [4.0, 5.0, 6.0]
         assert sliced.initial_timestamp == _t0() + timedelta(hours=4)
-        assert np.asarray(store.read_by_id(added.id, len=2).data).tolist() == [0.0, 1.0]
+        assert np.asarray(store.read_by_id(added, len=2).data).tolist() == [0.0, 1.0]
 
-        # A window is checked where a time range is clamped: the same over-long
-        # request yields the two steps that exist through get_time_series, and
+        # A window is checked where a time range is clipped: the same over-long
+        # request yields the two steps that exist through read_by_ids_range, and
         # is a mistake through read_by_id.
-        clamped = store.get_time_series(
-            added.key,
-            time_range=(
+        (clamped,) = store.read_by_ids_range(
+            [added],
+            (
                 _t0() + timedelta(hours=22),
                 _t0() + timedelta(hours=52),
             ),
         )
         assert len(np.asarray(clamped.data)) == 2
         with pytest.raises(InvalidParameterError):
-            store.read_by_id(added.id, start_time=_t0() + timedelta(hours=22), len=30)
+            store.read_by_id(added, start_time=_t0() + timedelta(hours=22), len=30)
 
         # A start between two steps is off the grid, not rounded onto it.
         with pytest.raises(InvalidParameterError):
-            store.read_by_id(added.id, start_time=_t0() + timedelta(minutes=30))
+            store.read_by_id(added, start_time=_t0() + timedelta(minutes=30))
 
         # count selects forecast windows; on a static series it is refused
         # rather than silently dropped.
         with pytest.raises(InvalidParameterError):
-            store.read_by_id(added.id, count=2)
+            store.read_by_id(added, count=2)
 
         # A read is already committed to acting on the reference.
         with pytest.raises(NotFoundError):
@@ -197,7 +196,7 @@ class TestReading:
 
     def test_remove_by_ids_is_all_or_nothing(self):
         store = Store.create(in_memory=True)
-        ids = [_add(store, name).id for name in ("a", "b", "c")]
+        ids = [_add(store, name) for name in ("a", "b", "c")]
 
         # One dangling id fails the batch and leaves every row in place: a
         # stale reference says the caller's model disagrees with the store.
@@ -211,7 +210,7 @@ class TestReading:
         assert not store.association_exists(ids[0])
         assert not store.association_exists(ids[1])
         assert store.association_exists(ids[2])
-        assert [k.name for k in store.list_keys()] == ["c"]
+        assert [r["name"] for r in store.list_metadata()] == ["c"]
 
         assert store.remove_by_ids([]) == 0
 
@@ -222,8 +221,8 @@ class TestReading:
         key; the two owners here share one content-addressed array.
         """
         store = Store.create(in_memory=True)
-        first = _add(store, "load", owner=1).id
-        second = _add(store, "load", owner=2).id
+        first = _add(store, "load", owner=1)
+        second = _add(store, "load", owner=2)
         assert store.num_distinct_arrays() == 1
 
         store.remove_by_ids([first])
@@ -291,7 +290,7 @@ def test_ids_survive_a_persist_and_reopen(tmp_path):
     not rewritten, so every reference stored against it stays valid."""
     path = tmp_path / "store.h5"
     store = Store.create(path=str(path), in_memory=False)
-    expected = {name: _add(store, name).id for name in ("first", "second", "third")}
+    expected = {name: _add(store, name) for name in ("first", "second", "third")}
     store.flush()
     del store
 

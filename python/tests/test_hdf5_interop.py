@@ -54,13 +54,13 @@ def _infrastore_roundtrip(path):
         owner_category=OwnerCategory.Component,
         time_series=ts,
         units="MW",
-    ).key
-    assert np.array_equal(np.asarray(store.get_time_series(key).data), values)
+    )
+    assert np.array_equal(np.asarray(store.read_by_id(key).data), values)
     del store
 
     # Reopen from disk so the read path runs against a fresh HDF5 handle.
     reopened = Store.open(str(path))
-    assert np.array_equal(np.asarray(reopened.get_time_series(key).data), values)
+    assert np.array_equal(np.asarray(reopened.read_by_id(key).data), values)
 
 
 def test_infrastore_then_netcdf4_then_h5py(tmp_path):

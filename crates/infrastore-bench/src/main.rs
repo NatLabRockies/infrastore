@@ -15,14 +15,15 @@
 //!   infrastore-bench read [--count N] [--length L] [--steps T]  [--in-memory] [--path DIR]
 //!   infrastore-bench all  [--count N] [--length L] [--steps T]  [--in-memory] [--path DIR]
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration as StdDuration, Instant};
 
 use chrono::{TimeZone, Utc};
 use clap::{Args, Parser, Subcommand};
 use infrastore_core::{
-    AddRequest, Deterministic, Features, KeyIdentity, OwnerCategory, SingleTimeSeries, Store,
-    TimeSeriesData, TimeSeriesType, TypedArray,
+    AddRequest, Deterministic, Features, ListFilter, OwnerCategory, SingleTimeSeries, Store,
+    TimeSeriesData, TimeSeriesId, TimeSeriesType, TypedArray,
 };
 
 // Deterministic forecast horizon, in hours.
@@ -237,34 +238,59 @@ fn make_det_requests(count: usize, length: usize) -> Vec<AddRequest> {
         .collect()
 }
 
-/// Reconstruct TimeSeriesKeys for SingleTimeSeries without querying the store.
+/// The `SingleTimeSeries` association ids the read loop addresses, in owner
+/// order.
 ///
-/// This works because the bench creates deterministic owner_ids and names.
-fn sts_keys(count: usize) -> Vec<KeyIdentity> {
-    (0..count)
-        .map(|i| KeyIdentity {
-            owner_id: i as i64,
-            owner_category: OwnerCategory::Component,
-            time_series_type: TimeSeriesType::SingleTimeSeries,
-            name: "active_power".to_string(),
-            resolution: Some(infrastore_core::Period::Fixed(chrono::Duration::hours(1))),
-            interval: None,
-            features: Features::default(),
-        })
-        .collect()
+/// One catalog query for the whole set rather than one per series: the bench
+/// writes one series per owner under a fixed name, so a listing filtered to that
+/// name and resolution is exactly the set, and the row's `owner_id` puts them
+/// back in the order the loop wants.
+fn sts_ids(store: &Store, count: usize) -> Result<Vec<TimeSeriesId>, Box<dyn std::error::Error>> {
+    let hour = infrastore_core::Period::Fixed(chrono::Duration::hours(1));
+    ids_by_owner(
+        store,
+        ListFilter::new()
+            .owner_category(OwnerCategory::Component)
+            .time_series_type(TimeSeriesType::SingleTimeSeries)
+            .name("active_power")
+            .resolution(hour),
+        count,
+    )
 }
 
-/// Reconstruct TimeSeriesKeys for Deterministic without querying the store.
-fn det_keys(count: usize) -> Vec<KeyIdentity> {
-    (0..count)
-        .map(|i| KeyIdentity {
-            owner_id: i as i64,
-            owner_category: OwnerCategory::Component,
-            time_series_type: TimeSeriesType::Deterministic,
-            name: "active_power_forecast".to_string(),
-            resolution: Some(infrastore_core::Period::Fixed(chrono::Duration::hours(1))),
-            interval: Some(infrastore_core::Period::Fixed(chrono::Duration::hours(1))),
-            features: Features::default(),
+/// The `Deterministic` association ids the read loop addresses, in owner order.
+fn det_ids(store: &Store, count: usize) -> Result<Vec<TimeSeriesId>, Box<dyn std::error::Error>> {
+    let hour = infrastore_core::Period::Fixed(chrono::Duration::hours(1));
+    ids_by_owner(
+        store,
+        ListFilter::new()
+            .owner_category(OwnerCategory::Component)
+            .time_series_type(TimeSeriesType::Deterministic)
+            .name("active_power_forecast")
+            .resolution(hour)
+            .interval(hour),
+        count,
+    )
+}
+
+/// Resolve `filter` to one id per owner `0..count`, in that order.
+fn ids_by_owner(
+    store: &Store,
+    filter: ListFilter,
+    count: usize,
+) -> Result<Vec<TimeSeriesId>, Box<dyn std::error::Error>> {
+    let mut by_owner: HashMap<i64, TimeSeriesId> = HashMap::new();
+    for m in store.list_metadata(filter)? {
+        if let Some(id) = m.id {
+            by_owner.insert(m.owner_id, id);
+        }
+    }
+    (0..count as i64)
+        .map(|owner| {
+            by_owner
+                .get(&owner)
+                .copied()
+                .ok_or_else(|| format!("no series for owner {owner}").into())
         })
         .collect()
 }
@@ -423,7 +449,7 @@ fn run_read(args: &ReadArgs) -> Result<(), Error> {
         flush_and_reopen(handle)?
     };
 
-    let keys = sts_keys(c.count);
+    let keys = sts_ids(&handle.store, c.count)?;
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
 
     let mut step_times: Vec<StdDuration> = Vec::with_capacity(actual_steps);
@@ -431,11 +457,9 @@ fn run_read(args: &ReadArgs) -> Result<(), Error> {
         let t_start = initial + chrono::Duration::milliseconds(step as i64 * HOUR_MS);
         let t_end = initial + chrono::Duration::milliseconds((step + 1) as i64 * HOUR_MS);
         let t0 = Instant::now();
-        for key in &keys {
-            let _ = handle
-                .store
-                .get_time_series(key, Some((t_start, t_end).into()))?;
-        }
+        let _ = handle
+            .store
+            .read_by_ids_range(&keys, (t_start, t_end).into())?;
         step_times.push(t0.elapsed());
     }
 
@@ -471,18 +495,16 @@ fn run_read(args: &ReadArgs) -> Result<(), Error> {
         flush_and_reopen(handle)?
     };
 
-    let keys = det_keys(c.count);
+    let keys = det_ids(&handle.store, c.count)?;
 
     let mut step_times: Vec<StdDuration> = Vec::with_capacity(actual_steps);
     for step in 0..actual_steps {
         let t_start = initial + chrono::Duration::milliseconds(step as i64 * HOUR_MS);
         let t_end = initial + chrono::Duration::milliseconds((step + 1) as i64 * HOUR_MS);
         let t0 = Instant::now();
-        for key in &keys {
-            let _ = handle
-                .store
-                .get_time_series(key, Some((t_start, t_end).into()))?;
-        }
+        let _ = handle
+            .store
+            .read_by_ids_range(&keys, (t_start, t_end).into())?;
         step_times.push(t0.elapsed());
     }
 

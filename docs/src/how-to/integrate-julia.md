@@ -81,7 +81,7 @@ using Dates, InfraStore
 
 store = Store(in_memory=true)
 ts = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(100.0:123.0), "load")
-key = add_time_series!(
+id = add_time_series!(
     store,
     42,
     "Generator",
@@ -90,7 +90,7 @@ key = add_time_series!(
     features=Dict("model_year" => 2030),
     units="MW",
 )
-got = get_time_series(store, key)
+got = read_by_id(store, id)
 @assert got.data == ts.data
 @assert got.name == "load"
 println("ok")

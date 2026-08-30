@@ -81,6 +81,7 @@ use serde_json::{Map, Value};
 use crate::error::Result;
 use crate::metadata::{SupplementalAttributeAssociation, SupplementalAttributeFilter};
 use crate::store::{ListFilter, Store};
+use crate::types::id::TimeSeriesId;
 use crate::types::metadata::{FeatureValue, Features, TimeSeriesMetadata, UnitSystem};
 use crate::types::time_reference::TimeReference;
 use crate::types::time_series::TimeSeriesType;
@@ -239,7 +240,7 @@ fn ts_row_to_json(meta: &TimeSeriesMetadata) -> Value {
     // Required by the schema, so a row without one is a row that never came
     // from a catalog — which nothing exports.
     if let Some(id) = meta.id {
-        row.insert("association_id".into(), Value::from(id));
+        row.insert("association_id".into(), Value::from(id.get()));
     }
     row.insert(
         "element_type".into(),
@@ -330,10 +331,10 @@ fn ts_row_to_json(meta: &TimeSeriesMetadata) -> Value {
 }
 
 /// Export `time_series_associations` as a sorted OpenAPI-row JSON array. Pure
-/// mapping over rows [`Store::list_time_series`] already produced — see the
+/// mapping over rows [`Store::list_metadata`] already produced — see the
 /// module docs for the wire contract and sort order.
 fn export_ts_rows(store: &Store, filter: &ListFilter) -> Result<String> {
-    let rows = store.list_time_series(filter.clone())?;
+    let rows = store.list_with_timestamps(filter.clone())?;
     let mut keyed: Vec<(SortKey, Value)> = rows
         .iter()
         .map(|meta| (sort_key(meta), ts_row_to_json(meta)))
@@ -571,7 +572,7 @@ impl RawTsRow {
             element_type,
             element_shape,
             application_data: self.application_data,
-            id: self.association_id,
+            id: self.association_id.map(TimeSeriesId),
         })
     }
 }

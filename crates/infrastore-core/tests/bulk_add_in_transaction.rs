@@ -16,7 +16,8 @@
 use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{
     AddRequest, CatalogMode, Compression, Features, ListFilter, OwnerCategory, SingleTimeSeries,
-    SupplementalAttributeAssociation, TimeSeriesData, TypedArray, create_store_with_catalog,
+    SupplementalAttributeAssociation, TimeSeriesData, TimeSeriesId, TypedArray,
+    create_store_with_catalog,
 };
 use std::time::Instant;
 
@@ -88,7 +89,7 @@ fn successive_bulk_adds_in_one_transaction_do_not_slow_down() {
         let t = Instant::now();
         let added = store.add_time_series_bulk(requests(b)).unwrap();
         elapsed.push(t.elapsed());
-        ids.extend(added.into_iter().map(|a| a.id));
+        ids.extend(added);
     }
     store.commit_transaction().unwrap();
 
@@ -144,27 +145,27 @@ fn list_keys_with_id_reports_the_ids_the_writes_handed_back() {
     let added = store.add_time_series_bulk(requests(0)).unwrap();
 
     let listed = store
-        .list_keys_with_id(ListFilter::new().owner_category(OwnerCategory::Component))
+        .list_metadata(ListFilter::new().owner_category(OwnerCategory::Component))
         .unwrap();
     assert_eq!(listed.len(), added.len());
-    let mut by_owner: std::collections::HashMap<i64, i64> = listed
+    let mut by_owner: std::collections::HashMap<i64, TimeSeriesId> = listed
         .into_iter()
-        .map(|(key, id)| (key.identity().owner_id, id.expect("a minted id")))
+        .map(|m| (m.owner_id, m.id.expect("a minted id")))
         .collect();
-    for a in &added {
-        assert_eq!(by_owner.remove(&a.key.identity().owner_id), Some(a.id));
+    // The adds are in owner order, so the nth id belongs to owner n + 1.
+    for (i, id) in added.iter().enumerate() {
+        assert_eq!(by_owner.remove(&(i as i64 + 1)), Some(*id));
     }
     assert!(by_owner.is_empty());
 
-    // The array-group listing carries the same id beside the hash.
-    let groups = store.list_array_groups(ListFilter::new()).unwrap();
+    // One listing now carries the id beside the hash, where the array-group
+    // listing used to be a separate projection of the same query.
+    let groups = store.list_metadata(ListFilter::new()).unwrap();
     assert_eq!(groups.len(), added.len());
-    let mut by_owner: std::collections::HashMap<i64, i64> = groups
-        .into_iter()
-        .map(|(key, _hash, id)| (key.identity().owner_id, id.expect("a minted id")))
-        .collect();
-    for a in &added {
-        assert_eq!(by_owner.remove(&a.key.identity().owner_id), Some(a.id));
-    }
-    assert!(by_owner.is_empty());
+    assert!(
+        groups
+            .iter()
+            .all(|m| m.id.is_some() && m.data_hash != [0u8; 32]),
+        "every row carries both its id and its array's content hash",
+    );
 }

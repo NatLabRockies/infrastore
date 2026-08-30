@@ -14,7 +14,7 @@ from infrastore import Store, SingleTimeSeries, OwnerCategory, TimeSeriesType
 
 The module exposes `Store` and `Transaction`; the static series classes `SingleTimeSeries` and
 `NonSequentialTimeSeries`; the forecast classes `Deterministic`, `Probabilistic`, and `Scenarios`;
-`TimeSeriesKey`; the readers `StaticReader` and `ForecastReader`; the association records
+the readers `StaticReader` and `ForecastReader`; the association records
 `SupplementalAttributeAssociation` and `ParentChildAssociation`; the `TimeSeriesType` and
 `OwnerCategory` enums; the `init_tracing` and `decode_element_values` functions; `__version__`; and
 an exception hierarchy rooted at `TimeSeriesError`.
@@ -64,7 +64,7 @@ carried on the object — the same array can be added under different names. Use
 ## Add a Series
 
 ```python
-added = store.add_time_series(
+series_id = store.add_time_series(
     owner_id=42,
     owner_type="Generator",
     owner_category=OwnerCategory.Component,
@@ -72,15 +72,16 @@ added = store.add_time_series(
     features={"model_year": 2030, "scenario": "high"},
     units="MW",
 )
-key = added.key   # TimeSeriesKey: re-find the series with it
-added.id          # the catalog row's id: one integer to keep in your own model
+# `series_id` is the catalog row's id: how every read, removal and rename
+# addresses the series, and one integer to keep in your own model.
 ```
 
 `features` is a plain dict whose values are `int`, `float`, `bool`, or `str`. Adding a series whose
-[key](../explanation/data-model.md#keys) already exists raises `DuplicateTimeSeriesError`. The
-returned `key` exposes `owner_id`, `owner_category`, `time_series_type`, `name`, `resolution`,
-`interval`, and `features` as read-only properties (`resolution` and `interval` are ISO 8601
-duration strings or `None`).
+[identity](../explanation/data-model.md#identity) already exists raises `DuplicateTimeSeriesError`.
+The add returns the id and nothing else. To see the rest of the row — `owner_id`, `owner_category`,
+`time_series_type`, `name`, `resolution`, `interval`, `features`, and the descriptors below — ask
+`store.get_metadata_by_id(series_id)`, or `store.list_metadata(...)` for a set of them (`resolution`
+and `interval` come back as ISO 8601 duration strings or `None`).
 
 ### Descriptors
 
@@ -91,7 +92,7 @@ the owning component these values vary — `"max_active_power"`; also a filter),
 `application_data` (an opaque string the store returns verbatim — the package-owned slot):
 
 ```python
-key = store.add_time_series(
+series_id = store.add_time_series(
     owner_id=42, owner_type="Generator", owner_category=OwnerCategory.Component,
     time_series=ts,
     units="MW", quantity_kind="ActivePower", unit_system="natural_units",
@@ -120,12 +121,11 @@ load a system: an order of magnitude faster than a loop of single adds, and same
 in the same packed dataset.
 
 ```python
-added = store.add_time_series_bulk([
+ids = store.add_time_series_bulk([
     {"owner_id": i, "owner_type": "Generator", "owner_category": OwnerCategory.Component,
      "time_series": series[i], "units": "MW"}
     for i in range(len(series))
-])   # one AddedTimeSeries per item, in input order; all-or-nothing
-keys = [a.key for a in added]
+])   # one catalog id per item, in input order; all-or-nothing
 ```
 
 ### Transactions
@@ -136,10 +136,10 @@ immediately.
 
 ```python
 with store.transaction():
-    new_key = store.add_time_series(owner_id=42, owner_type="Generator",
-                                    owner_category=OwnerCategory.Component,
-                                    time_series=updated)
-    store.remove_time_series(old_key)
+    new_id = store.add_time_series(owner_id=42, owner_type="Generator",
+                                   owner_category=OwnerCategory.Component,
+                                   time_series=updated)
+    store.remove_by_ids([old_id])
 # committed on a clean exit, rolled back if the block raised
 ```
 
@@ -151,30 +151,35 @@ explicit form.
 ## Read a Series
 
 ```python
-got = store.get_time_series(key)
+got = store.read_by_id(series_id)
 assert np.array_equal(np.asarray(got.data), np.asarray(ts.data))
 print(got.length, got.initial_timestamp, got.resolution)
 ```
 
-Slice on the time axis with a `(start, end)` tuple of datetimes (`end` exclusive):
+Slice on the time axis with a `(start, end)` tuple of datetimes (`end` exclusive). A range **clips**
+to what is there:
 
 ```python
-window = store.get_time_series(
-    key,
-    time_range=(
+(window,) = store.read_by_ids_range(
+    [series_id],
+    (
         datetime(2024, 1, 1, 6, tzinfo=timezone.utc),
         datetime(2024, 1, 1, 12, tzinfo=timezone.utc),
     ),
 )
 ```
 
-To read **many whole series at once** — e.g. loading everything for a plot — `bulk_read` takes a
-list of keys and returns the typed series objects in the same order. Packed `SingleTimeSeries` are
-read in one decompress-once pass per dataset, which is much faster than a `get_time_series` per key:
+`read_by_id` takes the other kind of slice: `start_time` plus a `len` of timesteps or a `count` of
+windows, **checked** rather than clipped, so an over-long request raises rather than quietly
+returning less.
+
+To read **many whole series at once** — e.g. loading everything for a plot — `read_by_ids` takes a
+list of ids and returns the typed series objects in the same order. Packed `SingleTimeSeries` are
+read in one decompress-once pass per dataset, which is much faster than a `read_by_id` each:
 
 ```python
-series = store.bulk_read(keys)   # keys: list[TimeSeriesKey]
-window = store.bulk_read(keys, time_range=(start, end))   # the same slice of every key
+series = store.read_by_ids(ids)
+window = store.read_by_ids_range(ids, (start, end))   # the same clip on every series
 ```
 
 ### Datetimes and precision
@@ -187,26 +192,26 @@ See [Datetimes](../reference/python-api.md#datetimes).
 
 ## Per-Timestamp Reads (Simulation Loop)
 
-`get_time_series` hands back a whole series or forecast. Simulations instead walk the timeline and,
-at each timestamp, want the value of _every_ series at that instant. For that, build a **reader**
-once and drive it in a loop — it pins one resolution and reuses its output buffers, so the loop
-allocates almost nothing. `StaticReader` serves `SingleTimeSeries`; `ForecastReader` serves
-forecasts. (Full signatures: [Python API reference](../reference/python-api.md#readers).)
+`read_by_id` hands back a whole series or forecast. Simulations instead walk the timeline and, at
+each timestamp, want the value of _every_ series at that instant. For that, build a **reader** once
+and drive it in a loop — it pins one resolution and reuses its output buffers, so the loop allocates
+almost nothing. `StaticReader` serves `SingleTimeSeries`; `ForecastReader` serves forecasts. (Full
+signatures: [Python API reference](../reference/python-api.md#readers).)
 
 ### Static series
 
 Series are grouped by `(dtype, element_shape)`; each group's `group_values` is one dense
-`(num_columns, *element_shape)` array whose columns line up with that group's `keys`. All matched
+`(num_columns, *element_shape)` array whose columns line up with that group's `ids`. All matched
 series must share one grid (`initial_timestamp` + `length`), validated at build.
 
 ```python
 reader = store.build_static_reader(timedelta(hours=1))
 grid = reader.grid()               # {"initial_timestamp", "resolution", "length", "time_series_type"}
-groups = reader.groups()           # each: {"dtype", "element_type", "element_shape", "keys"}
+groups = reader.groups()           # each: {"dtype", "element_type", "element_shape", "ids"}
 for ts in reader.timestamps():
     store.static_read(reader, ts)
     for i, g in enumerate(groups):
-        vals = reader.group_values(i)   # (num_columns, *element_shape); column j ↔ g["keys"][j]
+        vals = reader.group_values(i)   # (num_columns, *element_shape); column j ↔ g["ids"][j]
 ```
 
 ### Forecasts
@@ -220,11 +225,11 @@ windows).
 ```python
 reader = store.build_forecast_reader(TimeSeriesType.Deterministic, timedelta(hours=1))
 tl = reader.timeline()             # {"initial_timestamp", "resolution", "interval", "count", ...}
-entries = reader.entries()         # list[TimeSeriesKey], parallel to entry_values
+entries = reader.entries()         # list[int]: catalog ids, parallel to entry_values
 for ts in reader.timestamps():
     store.forecast_read(reader, ts)
-    for i, key in enumerate(entries):
-        window = reader.entry_values(i)   # window for key's owner
+    for i, entry_id in enumerate(entries):
+        window = reader.entry_values(i)   # the window for that id's series
 ```
 
 ### Shared forecasts are read once
@@ -245,11 +250,11 @@ for i, key in enumerate(entries):
 
 ## Query Metadata
 
-`list_time_series` returns a list of plain dicts, filtered by any combination of arguments (the
+`list_metadata` returns a list of plain dicts, filtered by any combination of arguments (the
 `features` argument is a subset match):
 
 ```python
-for m in store.list_time_series(
+for m in store.list_metadata(
     owner_id=42,
     owner_category=OwnerCategory.Component,
     time_series_type=TimeSeriesType.SingleTimeSeries,
@@ -257,8 +262,9 @@ for m in store.list_time_series(
     print(m["name"], m["resolution"], m["units"], m["features"])
 
 # The owner is the (owner_id, owner_category) pair.
-keys = store.get_time_series_keys(42, OwnerCategory.Component)
-exists = store.has_time_series(key)
+rows = store.list_metadata(owner_id=42, owner_category=OwnerCategory.Component)
+ids = [r["id"] for r in rows]
+exists = store.association_exists(ids[0])
 resolutions = store.get_resolutions()          # list[str] (ISO 8601 durations)
 counts = store.get_time_series_counts()        # dict
 ```
@@ -266,7 +272,7 @@ counts = store.get_time_series_counts()        # dict
 ## Remove and Maintain
 
 ```python
-store.remove_time_series(key)
+store.remove_by_ids([series_id])   # one series, or many in one transaction
 # The owner is the (owner_id, owner_category) pair.
 n = store.clear_time_series(owner_id=42, owner_category=OwnerCategory.Component)  # one owner; returns count
 store.clear_time_series()                                  # remove everything
@@ -274,7 +280,7 @@ store.clear_time_series()                                  # remove everything
 # Reassign every series from one owner to another; returns the number moved.
 moved = store.replace_owner(42, 43, OwnerCategory.Component)
 
-report = store.compact()            # rewrites the .h5 from the live set; keys include
+report = store.compact()            # rewrites the .h5 from the live set; the report includes
                                    #  "slots_reclaimed", "datasets_dropped",
                                    #  "feature_sets_reclaimed", "timestamp_sets_reclaimed",
                                    #  "bytes_reclaimed"
@@ -445,13 +451,13 @@ ts = SingleTimeSeries(
     np.arange(24, dtype=np.float64) + 100,
     "load",
 )
-key = store.add_time_series(
+series_id = store.add_time_series(
     owner_id=42, owner_type="Generator",
     owner_category=OwnerCategory.Component,
     time_series=ts,
     features={"model_year": 2030}, units="MW",
 )
-got = store.get_time_series(key)
+got = store.read_by_id(series_id)
 assert got.name == "load"
 assert np.array_equal(np.asarray(got.data), np.asarray(ts.data))
 ```
