@@ -27,6 +27,7 @@ pub(crate) mod timestamps;
 
 pub use codec::{
     DecodedValues, LinearFunction, QuadraticFunction, StepFunction, XyPoint, decode, encode,
+    encode_as,
 };
 pub use error::{Result, TimeSeriesError};
 // The two hashing utilities a binding genuinely needs: `array_hash` to

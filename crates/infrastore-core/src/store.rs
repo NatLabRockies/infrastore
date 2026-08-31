@@ -1876,6 +1876,43 @@ impl Store {
     /// removed (and counted) once.
     #[tracing::instrument(skip(self, ids), fields(count = ids.len()))]
     pub fn remove_by_ids(&mut self, ids: &[TimeSeriesId]) -> Result<usize> {
+        self.remove_by_ids_inner(ids, None)
+    }
+
+    /// [`Self::remove_by_ids`], but removing only rows that belong to `owner` —
+    /// every id is confirmed against the catalog and deleted inside one
+    /// transaction, and a single mismatch rolls the whole batch back with
+    /// [`TimeSeriesError::OwnerMismatch`].
+    ///
+    /// For the consumer whose model addresses a series by id but *reasons* about
+    /// it as one owner's — "retire this component's series" — where the id alone
+    /// is the wrong request. Such a caller cannot assemble this out of the
+    /// unguarded parts: an id survives [`Self::replace_owner`], so
+    /// a `get_metadata_by_id` that confirms the owner and a `remove_by_ids` that
+    /// then deletes are two calls with a window between them, and a reassignment
+    /// landing in that window makes the removal retire the *new* owner's series
+    /// — precisely what checking the owner was meant to prevent. Here the check
+    /// and the delete are the same transaction, so there is no window.
+    ///
+    /// An owner is `(owner_id, owner_category)`; the category matters as well as
+    /// the id, since a component and a supplemental attribute can share one.
+    #[tracing::instrument(skip(self, ids), fields(count = ids.len()))]
+    pub fn remove_by_ids_for_owner(
+        &mut self,
+        ids: &[TimeSeriesId],
+        owner: (i64, OwnerCategory),
+    ) -> Result<usize> {
+        self.remove_by_ids_inner(ids, Some(owner))
+    }
+
+    /// The shared body of the two id-addressed removals. `expected_owner` is the
+    /// guard the [`Self::remove_by_ids_for_owner`] form sets; `None` removes
+    /// whatever the ids name.
+    fn remove_by_ids_inner(
+        &mut self,
+        ids: &[TimeSeriesId],
+        expected_owner: Option<(i64, OwnerCategory)>,
+    ) -> Result<usize> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
@@ -1887,8 +1924,10 @@ impl Store {
             if !seen_ids.insert(id) {
                 continue;
             }
-            // Dropping the tx rolls the batch back.
-            let Some((hash, ts_type)) = MetadataStore::delete_by_id(&tx, id.get())? else {
+            // Dropping the tx rolls the batch back — an owner mismatch on the
+            // last id undoes the deletes the earlier ones already did.
+            let Some((hash, ts_type)) = MetadataStore::delete_by_id(&tx, id.get(), expected_owner)?
+            else {
                 return Err(TimeSeriesError::NotFound);
             };
             if ts_type == TimeSeriesType::SingleTimeSeries {
@@ -2914,10 +2953,51 @@ impl Store {
     /// it as an answer.
     #[tracing::instrument(skip(self))]
     pub fn read_by_id(&self, id: TimeSeriesId, window: ReadWindow) -> Result<TimeSeriesData> {
+        self.read_by_id_inner(id, None, window)
+    }
+
+    /// [`Self::read_by_id`], but reading only a row that belongs to `owner`,
+    /// and [`TimeSeriesError::OwnerMismatch`] otherwise.
+    ///
+    /// The read-direction counterpart of [`Self::remove_by_ids_for_owner`], and
+    /// for the same caller: one that holds an id but means "this owner's
+    /// series", and would otherwise have to confirm the owner in a call of its
+    /// own — a second round trip whose answer is about the row as it was, not
+    /// the row being read. Here the owner comes off the very row the values are
+    /// materialized from, so the two cannot disagree, and the guarded read costs
+    /// exactly what the unguarded one does.
+    #[tracing::instrument(skip(self))]
+    pub fn read_by_id_for_owner(
+        &self,
+        id: TimeSeriesId,
+        owner: (i64, OwnerCategory),
+        window: ReadWindow,
+    ) -> Result<TimeSeriesData> {
+        self.read_by_id_inner(id, Some(owner), window)
+    }
+
+    /// The shared body of the two id-addressed reads.
+    fn read_by_id_inner(
+        &self,
+        id: TimeSeriesId,
+        expected_owner: Option<(i64, OwnerCategory)>,
+        window: ReadWindow,
+    ) -> Result<TimeSeriesData> {
         let meta = self
             .metadata
             .get_by_id(id.get(), &*self.backend)?
             .ok_or(TimeSeriesError::NotFound)?;
+        if let Some((expected_id, expected_category)) = expected_owner
+            && (meta.owner_id != expected_id || meta.owner_category != expected_category)
+        {
+            return Err(TimeSeriesError::OwnerMismatch {
+                id: id.get(),
+                expected_id,
+                expected_category: expected_category.as_str(),
+                actual_id: meta.owner_id,
+                actual_category: meta.owner_category.as_str(),
+            });
+        }
         let time_range = window.resolve(&meta)?;
         self.materialize_time_series(&meta, time_range)
     }

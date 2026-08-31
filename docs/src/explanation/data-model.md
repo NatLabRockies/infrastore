@@ -370,6 +370,24 @@ past its end, is an error rather than the smaller answer a range would return. A
 step count — while a window says "these exact steps", and a caller that asked for 24 and silently
 received 3 has a bug the store can see and it cannot.
 
+### The owner guard
+
+`read_by_id` and `remove_by_ids` each take an optional **expected owner** — `read_by_id_for_owner` /
+`remove_by_ids_for_owner` in the Rust core, an `owner=(id, category)` keyword in Julia, keyword-only
+`owner_id` / `owner_category` in Python, `has_owner` beside the two across the C ABI. The row is
+held to that owner, and one belonging to anyone else is `OwnerMismatch` rather than a read or a
+delete.
+
+It exists because the two halves cannot be checked separately. An id is the whole address and it
+survives `replace_owner`, so a consumer whose model says "this component's series" — and which
+therefore wants to confirm the owner before acting — has a window between the confirming call and
+the acting one. A reassignment landing in that window makes the removal retire the _new_ owner's
+series, which is exactly what checking the owner was meant to prevent. Passing the owner into the
+call closes the window: the check and the act are one transaction. On the read side there is no
+window either way, but the guard is still the cheaper spelling — the owner comes off the same row
+the values are materialized from, so it costs nothing, where a separate check is a second round
+trip.
+
 ## Optional Descriptors
 
 Each association can also carry:

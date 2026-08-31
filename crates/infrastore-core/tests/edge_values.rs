@@ -1184,13 +1184,22 @@ fn malformed_inputs_report_errors_rather_than_panicking() {
         Period::fixed(Duration::days(1) + Duration::hours(2))
     );
 
-    // 2. `element_type_of` manufactures `tuple(0,f64)` for an empty Tuple, and
-    //    `validate_array` accepts it, so the crate's own round trip reached a
-    //    `chunks_exact(0)`.
+    // 2. An empty `Tuple` has no arity to record: `element_type_of` would
+    //    manufacture `tuple(0,f64)`, which `ElementType::parse` rejects, so a row
+    //    written under it could not be read back. `encode` refuses it rather than
+    //    letting the value reach storage.
     let empty = DecodedValues::Tuple(vec![]);
-    let et = codec::element_type_of(&empty).unwrap();
-    let arr = codec::encode(&empty, &[0]).unwrap();
-    let err = codec::decode(&arr, et, 1).unwrap_err();
+    let err = codec::encode(&empty, &[0]).unwrap_err();
+    assert!(
+        matches!(err, infrastore_core::TimeSeriesError::InvalidParameter(ref m)
+            if m.contains("carries no arity")),
+        "{err}"
+    );
+    //    The decode-side guard stays as defence in depth: a zero-width array can
+    //    still be built by hand and paired with the spelling.
+    let by_hand = TypedArray::from_f64(vec![0, 0], &[]);
+    let et = codec::element_type_of(&DecodedValues::Tuple(vec![vec![]])).unwrap();
+    let err = codec::decode(&by_hand, et, 1).unwrap_err();
     assert!(
         matches!(err, infrastore_core::TimeSeriesError::InvalidParameter(ref m)
             if m.contains("nothing to decode")),

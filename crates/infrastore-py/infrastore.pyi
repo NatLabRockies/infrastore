@@ -7,6 +7,7 @@ appears here; keep the two in sync.
 
 from datetime import datetime, timedelta
 from types import TracebackType
+from collections.abc import Sequence
 from typing import Any, final
 
 import numpy as np
@@ -25,6 +26,7 @@ __version__: str
 
 class TimeSeriesError(Exception): ...
 class NotFoundError(TimeSeriesError): ...
+class OwnerMismatchError(TimeSeriesError): ...
 class DuplicateTimeSeriesError(TimeSeriesError): ...
 class DuplicateAssociationError(TimeSeriesError): ...
 class DuplicateAssociationIdError(TimeSeriesError): ...
@@ -355,6 +357,8 @@ class Store:
         start_time: datetime | None = None,
         len: int | None = None,
         count: int | None = None,
+        owner_id: int | None = None,
+        owner_category: OwnerCategory | None = None,
     ) -> TimeSeriesData: ...
     def transform_single_time_series(
         self,
@@ -364,7 +368,13 @@ class Store:
         owner_category: OwnerCategory | None = None,
         resolution: Period | None = None,
     ) -> int: ...
-    def remove_by_ids(self, ids: list[int]) -> int: ...
+    def remove_by_ids(
+        self,
+        ids: list[int],
+        *,
+        owner_id: int | None = None,
+        owner_category: OwnerCategory | None = None,
+    ) -> int: ...
     def remove_by_filter(
         self,
         *,
@@ -712,3 +722,8 @@ def decode_element_values(
     element_type: str,
     leading_dims: int = 1,
 ) -> list[Any] | None: ...
+def encode_element_values(
+    values: Sequence[Any],
+    element_type: str,
+    leading_dims: Sequence[int] | None = None,
+) -> Any: ...

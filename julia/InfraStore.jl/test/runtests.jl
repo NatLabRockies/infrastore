@@ -1,5 +1,6 @@
 using Test
 using Dates
+using JSON
 using InfraStore
 
 # ---- Identify, then act ----------------------------------------------------
@@ -632,7 +633,7 @@ end
     # The detail stays inspectable: the resolved row reports the stored type.
     @test resolve_metadata(
         Deterministic, store, 400, Component, "dst"
-    ).time_series_type == DeterministicSingleTimeSeries
+    ).time_series_type <: DeterministicSingleTimeSeries
 
     # `AbstractDeterministic` is not part of the public surface.
     @test !isdefined(InfraStore, :AbstractDeterministic)
@@ -642,14 +643,15 @@ end
     keys = owner_ids(store, 400, Component)
     @test length(keys) == 2
     infos = [get_metadata_by_id(store, k) for k in keys]
-    # time_series_type is the actual Julia type, as in InfrastructureSystems.jl.
+    # time_series_type is the actual Julia type, parameterized by the values the
+    # row holds, as in InfrastructureSystems.jl.
     @test Set(i.time_series_type for i in infos) ==
-        Set([SingleTimeSeries, DeterministicSingleTimeSeries])
+        Set([SingleTimeSeries{Float64, 1}, DeterministicSingleTimeSeries{Float64, 2}])
     @test all(
         i -> i.owner_id == 400 && i.owner_category == Component && i.name == "dst", infos
     )
 
-    dst_idx = findfirst(i -> i.time_series_type == DeterministicSingleTimeSeries, infos)
+    dst_idx = findfirst(i -> i.time_series_type <: DeterministicSingleTimeSeries, infos)
     # The actual type drives the read directly; a DST has no struct so it returns
     # a Deterministic.
     fc_key = read_by_id(store, keys[dst_idx])
@@ -659,7 +661,7 @@ end
     @test fc_key.name == "dst"
 
     # The source SingleTimeSeries id still reads back as the underlying series.
-    sts_idx = findfirst(i -> i.time_series_type == SingleTimeSeries, infos)
+    sts_idx = findfirst(i -> i.time_series_type <: SingleTimeSeries, infos)
     @test read_by_id(store, keys[sts_idx]).data == underlying
 
     # Reference counting lives in the core: the STS and its derived DST share one
@@ -724,7 +726,7 @@ end
     # counts_by_type: all four are SingleTimeSeries here.
     cbt = counts_by_type(store)
     @test length(cbt) == 1
-    @test cbt[1].time_series_type == SingleTimeSeries
+    @test cbt[1].time_series_type <: SingleTimeSeries
     @test cbt[1].count == 4
     # num_distinct_arrays: the two "load" Hour(1) series share content (same vals,
     # initial, resolution) and dedup to one array; "wind" and the supp-attr "load"
@@ -979,7 +981,7 @@ end
     load_row = only(filter(r -> r.name == "load", ss))
     @test load_row.count == 2                     # grouped across owners 1 and 2
     @test load_row.time_step_count == 4
-    @test load_row.time_series_type == SingleTimeSeries
+    @test load_row.time_series_type <: SingleTimeSeries
     @test load_row.owner_type == "Generator"
     @test load_row.resolution == Millisecond(Hour(1))
     @test only(filter(r -> r.name == "wind", ss)).count == 1
@@ -991,7 +993,7 @@ end
     @test fs[1].window_count == 2
     @test fs[1].horizon == Millisecond(Hour(2))
     @test fs[1].interval == Millisecond(Hour(1))
-    @test fs[1].time_series_type == Deterministic
+    @test fs[1].time_series_type <: Deterministic
 end
 
 @testset "Deterministic resolution: miss and ambiguity" begin
@@ -1105,7 +1107,7 @@ end
     @test info.owner_id == 500
     @test info.owner_category == Component
     @test info.name == "load"
-    @test info.time_series_type == SingleTimeSeries
+    @test info.time_series_type <: SingleTimeSeries
     @test info.resolution == Millisecond(res)
     # Features round-trip (JSON-scalar values preserve their types).
     @test info.features["model_year"] == 2030
@@ -1577,8 +1579,8 @@ end
     ents = forecast_entries(r)
     @test length(ents) == 2
     types = [get_metadata_by_id(store, e.id).time_series_type for e in ents]
-    @test DeterministicSingleTimeSeries in types
-    @test Deterministic in types
+    @test any(T -> T <: DeterministicSingleTimeSeries, types)
+    @test any(T -> T <: Deterministic, types)
 
     for k in 0:4
         forecast_read!(r, t0 + Hour(k))
@@ -3467,7 +3469,7 @@ end
     @test md isa TimeSeriesMetadata
     @test md.owner_type == "Generator"
     @test md.owner_category == Component
-    @test md.time_series_type == SingleTimeSeries
+    @test md.time_series_type <: SingleTimeSeries
     # Fields that do not apply to a static series are `nothing`, not zero.
     @test md.horizon === nothing && md.count === nothing && md.percentiles === nothing
     @test md.element_type == "f64"
@@ -3503,7 +3505,7 @@ end
     row = only(list_metadata(store; owner_id=9))
     @test row isa TimeSeriesMetadata
     @test row.owner_category == SupplementalAttribute
-    @test row.time_series_type == SingleTimeSeries
+    @test row.time_series_type <: SingleTimeSeries
     @test row.horizon === nothing
     @test row.data_hash isa Vector{UInt8}
     @test length(row.data_hash) == 32
@@ -3607,7 +3609,7 @@ end
 
     row = only(list_metadata(store))
     @test row.percentiles == [0.1, 0.9]
-    @test row.time_series_type == Probabilistic
+    @test row.time_series_type <: Probabilistic
 end
 
 @testset "get_metadata covers every stored time series type" begin
@@ -3664,7 +3666,7 @@ end
     )
         md = resolve_metadata(T, store, 1, Component, name)
         @test md isa TimeSeriesMetadata
-        @test md.time_series_type == T
+        @test md.time_series_type <: T
         @test md.name == name
         @test md.owner_type == "Generator"
         @test md.element_type == "f64"
@@ -3674,9 +3676,9 @@ end
     # family sentinel alongside it.
     @test transform_single_time_series!(store, Hour(2), Hour(1)).transformed == 1
     dst = resolve_metadata(DeterministicSingleTimeSeries, store, 1, Component, "a")
-    @test dst.time_series_type == DeterministicSingleTimeSeries
+    @test dst.time_series_type <: DeterministicSingleTimeSeries
     @test resolve_metadata(Deterministic, store, 1, Component, "a") == dst
-    @test resolve_metadata(Deterministic, store, 1, Component, "c").time_series_type ==
+    @test resolve_metadata(Deterministic, store, 1, Component, "c").time_series_type <:
         Deterministic
 
     # The type-less shorthand is the SingleTimeSeries one, as on has_time_series.
@@ -3727,7 +3729,7 @@ end
     @test copy_b != src_b
     @test association_exists(store, src_b)
     @test has_time_series(Scenarios, store, 2, Component, "b"; resolution=res)
-    @test only(list_metadata(store; owner_id=2)).time_series_type == Scenarios
+    @test only(list_metadata(store; owner_id=2)).time_series_type <: Scenarios
     @test get_metadata_by_id(store, copy_b).owner_id == 2
     # Arrays are content-addressed, so the copy adds an association, not data.
     @test num_distinct_arrays(store) == 2
@@ -3744,7 +3746,7 @@ end
         DeterministicSingleTimeSeries, store, 1, Component, "a"; resolution=res
     )
     copy_time_series!(store, src_dst, 4, "Generator")
-    @test only(list_metadata(store; owner_id=4)).time_series_type ==
+    @test only(list_metadata(store; owner_id=4)).time_series_type <:
         DeterministicSingleTimeSeries
 
     # Every filter keyword takes the type too.
@@ -3770,7 +3772,7 @@ end
     # transform-derived / copied DSTs).
     family = list_metadata(store; time_series_type=Deterministic)
     @test length(family) == 3
-    @test all(k.time_series_type == DeterministicSingleTimeSeries for k in family)
+    @test all(k.time_series_type <: DeterministicSingleTimeSeries for k in family)
     @test get_resolutions(store; time_series_type=Deterministic) ==
         [Millisecond(res)]
     # A type that is not a time series type at all is rejected everywhere.
@@ -3782,12 +3784,13 @@ end
     )
 end
 
-@testset "a parameterized request type is rejected, not ignored" begin
-    # A request names a stored type, never an element type: the store addresses a
-    # series by identity, which carries no dtype, so `SingleTimeSeries{Float64}`
-    # has nothing to select on. Every entry point that takes a type must say so
-    # the same way — this used to be three different failures, one of them a
-    # `MethodError` raised only after the data had already been read.
+@testset "a parameterized type round-trips into every type-taking call" begin
+    # A metadata row's `time_series_type` is parameterized, so it has to be
+    # accepted wherever the bare type is: a caller that identified a series and
+    # then wants to filter, probe or sweep with what it just read must not have
+    # to strip the parameters itself. Identity carries no dtype — (owner,
+    # category, type, name, resolution, interval, features) — so `{T,N}` has
+    # nothing to select on and is ignored, never used to narrow the match.
     store = Store(in_memory=true)
     t0 = DateTime(2024, 1, 1)
     res = Hour(1)
@@ -3804,42 +3807,49 @@ end
         Deterministic(t0, Hour(1), Hour(4), Hour(1), 2, rand(4, 2), "d"),
     )
 
-    # Every surviving type-taking entry point. A read is no longer one of them:
-    # it names an id, and an id carries no type at all — which is why the
-    # rejection had to move wholly into the identify half.
-    @test_throws InfraStore.InvalidParameterError list_metadata(
-        store; time_series_type=SingleTimeSeries{Float64}
+    # Every type-taking entry point. A read is not one of them: it names an id,
+    # and an id carries no type at all.
+    @test length(list_metadata(store; time_series_type=SingleTimeSeries{Float64, 1})) == 1
+    @test length(
+        list_metadata(store; time_series_type=NonSequentialTimeSeries{Float64, 1})
+    ) == 1
+    @test length(list_metadata(store; time_series_type=Deterministic{Float64, 2})) == 1
+    @test has_time_series(
+        SingleTimeSeries{Float64, 1}, store, 1, Component, "a"; resolution=res
     )
-    @test_throws InfraStore.InvalidParameterError list_metadata(
-        store; time_series_type=NonSequentialTimeSeries{Float64, 1}
-    )
-    @test_throws InfraStore.InvalidParameterError list_metadata(
-        store; time_series_type=Deterministic{Float64, 2}
-    )
-    @test_throws InfraStore.InvalidParameterError has_time_series(
-        SingleTimeSeries{Float64}, store, 1, Component, "a"; resolution=res
-    )
-    @test_throws InfraStore.InvalidParameterError has_any_time_series(
-        store; time_series_type=Scenarios{Float64, 3}
-    )
-    @test_throws InfraStore.InvalidParameterError remove_by_filter!(
-        store; time_series_type=Scenarios{Float64, 3}
-    )
-    @test_throws InfraStore.InvalidParameterError build_static_reader(
-        store; time_series_type=SingleTimeSeries{Float64}, resolution=res
-    )
+    @test has_any_time_series(store; time_series_type=Deterministic{Float64, 2})
+    @test list_names(store; time_series_type=SingleTimeSeries{Float64, 1}) == ["a"]
+    @test build_static_reader(
+        store; time_series_type=SingleTimeSeries{Float64, 1}, resolution=res
+    ) isa StaticReader
+    @test build_forecast_reader(
+        store, Deterministic{Float64, 2}; resolution=res
+    ) isa ForecastReader
 
-    # The message names the type to pass instead, and is distinct from the one a
-    # type that is no kind of time series gets.
+    # Straight from a row, without naming a type by hand.
+    for md in list_metadata(store)
+        @test only(
+            list_metadata(store; time_series_type=md.time_series_type, name=md.name)
+        ).id == md.id
+    end
+
+    # The parameters are ignored, not matched: a spelling naming a dtype no row
+    # holds still matches every row of that stored type.
+    @test length(list_metadata(store; time_series_type=SingleTimeSeries{Int32, 1})) == 1
+
+    # A type that is no kind of time series is still rejected, in one message.
     err = try
-        list_metadata(store; time_series_type=SingleTimeSeries{Float64})
+        list_metadata(store; time_series_type=Vector{Float64})
     catch e
         e
     end
-    @test occursin("pass SingleTimeSeries", err.msg)
-    @test occursin("not part of a time series' identity", err.msg)
-    @test_throws InfraStore.InvalidParameterError list_metadata(
-        store; time_series_type=Vector{Float64}
+    @test err isa InfraStore.InvalidParameterError
+    @test occursin("is not a time series type", err.msg)
+    @test_throws InfraStore.InvalidParameterError build_static_reader(
+        store; time_series_type=Deterministic{Float64, 2}, resolution=res
+    )
+    @test_throws InfraStore.InvalidParameterError build_forecast_reader(
+        store, SingleTimeSeries{Float64, 1}; resolution=res
     )
 
     # An id read is unaffected either way: it takes no type, so a removed series
@@ -3852,6 +3862,88 @@ end
     @test typeof(read_by_id(store, sts)) == SingleTimeSeries{Float64, 1}
     @test typeof(read_by_id(store, nsts)) == NonSequentialTimeSeries{Float64, 1}
     @test has_time_series(SingleTimeSeries, store, 1, Component, "a"; resolution=res)
+    close!(store)
+end
+
+@testset "a metadata row's time_series_type names what a read hands back" begin
+    # `time_series_type` is the full Julia type, not just which of the six kinds
+    # the row is: `{T,N}` is the element type and rank of the array the row
+    # holds, so `md.time_series_type == typeof(read_by_id(store, md.id))` for
+    # every stored type. Both parameters come off the row itself
+    # (`element_type` + `element_shape`), so this costs no extra query.
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+    add_time_series!(
+        store, 1, "Generator", Component,
+        SingleTimeSeries(t0, res, Float64[1, 2, 3, 4], "a"),
+    )
+    # Multidimensional per-timestep values push the rank up by one per dim.
+    add_time_series!(
+        store, 1, "Generator", Component,
+        SingleTimeSeries(t0, res, rand(Float32, 4, 3), "wide"),
+    )
+    add_time_series!(
+        store, 1, "Generator", Component,
+        NonSequentialTimeSeries([t0, t0 + Hour(2)], Int64[9, 8], "b"),
+    )
+    add_time_series!(
+        store, 1, "Generator", Component,
+        Deterministic(t0, res, Hour(4), Hour(1), 2, rand(4, 2), "d"),
+    )
+    add_time_series!(
+        store, 1, "Generator", Component,
+        Probabilistic(t0, res, Hour(4), Hour(1), 2, [0.1, 0.9], rand(2, 4, 2), "p"),
+    )
+    add_time_series!(
+        store, 1, "Generator", Component,
+        Scenarios(t0, res, Hour(4), Hour(1), 2, rand(3, 4, 2), "sc"),
+    )
+
+    for md in list_metadata(store)
+        @test md.time_series_type == typeof(read_by_id(store, md.id))
+    end
+    by_name = Dict(md.name => md.time_series_type for md in list_metadata(store))
+    @test by_name["a"] == SingleTimeSeries{Float64, 1}
+    @test by_name["wide"] == SingleTimeSeries{Float32, 2}
+    @test by_name["b"] == NonSequentialTimeSeries{Int64, 1}
+    @test by_name["d"] == Deterministic{Float64, 2}
+    @test by_name["p"] == Probabilistic{Float64, 3}
+    @test by_name["sc"] == Scenarios{Float64, 3}
+
+    # A DeterministicSingleTimeSeries is the one row whose stored array is not
+    # the array a read returns: it shares the source SingleTimeSeries', while the
+    # read materializes the (H, count) windows of a Deterministic. Its
+    # parameters describe the read, so the rule above holds for it too.
+    @test transform_single_time_series!(store, Hour(2), Hour(1)).transformed == 2
+    dst = Dict(
+        md.name => md for
+        md in list_metadata(store; time_series_type=DeterministicSingleTimeSeries)
+    )
+    @test dst["a"].time_series_type == DeterministicSingleTimeSeries{Float64, 2}
+    @test dst["wide"].time_series_type == DeterministicSingleTimeSeries{Float32, 3}
+    @test typeof(read_by_id(store, dst["a"].id)) == Deterministic{Float64, 2}
+    @test typeof(read_by_id(store, dst["wide"].id)) == Deterministic{Float32, 3}
+
+    # A composite element type is decoded on read, so the row names the values —
+    # not the packed array they were stored across. The stored rank is one higher,
+    # which `raw = true` hands back.
+    tuples = add_time_series!(
+        store, 2, "Generator", Component,
+        SingleTimeSeries(t0, res, rand(4, 3), "tuples"; element_type="tuple(3,f64)"),
+    )
+    md = get_metadata_by_id(store, tuples)
+    @test md.element_type == "tuple(3,f64)"
+    @test md.element_shape == (3,)
+    @test md.time_series_type == SingleTimeSeries{NTuple{3, Float64}, 1}
+    @test md.time_series_type == typeof(read_by_id(store, tuples))
+    @test typeof(read_by_id(store, tuples; raw=true)) == SingleTimeSeries{Float64, 2}
+
+    # The counts and summaries group by stored type alone — no dtype in the
+    # grouping — so their `time_series_type` stays the bare one.
+    @test all(
+        c -> c.time_series_type in InfraStore._TIME_SERIES_TYPES, counts_by_type(store)
+    )
     close!(store)
 end
 
@@ -3887,7 +3979,7 @@ end
     # An id resolved from attributes round-trips through the id-based reader,
     # and the row it came from answers the identity questions.
     sm = resolve_metadata(SingleTimeSeries, store, 1, Component, "a"; resolution=res)
-    @test sm.time_series_type == SingleTimeSeries
+    @test sm.time_series_type <: SingleTimeSeries
     @test sm.name == "a"
     @test read_by_id(store, sm.id).data == Float64[1, 2, 3, 4]
     @test association_exists(store, sm.id)
@@ -3898,7 +3990,7 @@ end
     cid = resolve_id(Scenarios, store, 1, Component, "c"; resolution=res)
     @test resolve_metadata(
         Scenarios, store, 1, Component, "c"; resolution=res
-    ).time_series_type == Scenarios
+    ).time_series_type <: Scenarios
 
     # Ids from attributes feed a bulk read directly.
     @test length(read_by_ids(store, [sm.id, nid, cid])) == 3
@@ -3916,7 +4008,7 @@ end
     @test transform_single_time_series!(store, Hour(2), Hour(1)).transformed == 1
     @test resolve_metadata(
         Deterministic, store, 1, Component, "a"; resolution=res
-    ).time_series_type == DeterministicSingleTimeSeries
+    ).time_series_type <: DeterministicSingleTimeSeries
 
     @test_throws InfraStore.InvalidParameterError resolve_id(
         Store, store, 1, Component, "a"
@@ -4525,13 +4617,13 @@ end
     kdst = only(
         filter(
             k ->
-                get_metadata_by_id(store, k).time_series_type ==
+                get_metadata_by_id(store, k).time_series_type <:
                 DeterministicSingleTimeSeries,
             owner_ids(store, 3, Component),
         ),
     )
     @test read_by_id(store, kdst) isa Deterministic
-    @test get_metadata_by_id(store, kdst).time_series_type ==
+    @test get_metadata_by_id(store, kdst).time_series_type <:
         DeterministicSingleTimeSeries
 end
 
@@ -4984,4 +5076,44 @@ end
     @test stored in Set([fresh])
 
     close!(store)
+end
+
+include("element_type_conformance.jl")
+
+@testset "owner-guarded id addressing" begin
+    store = Store(in_memory=true)
+    initial = DateTime(2024, 1, 1)
+    resolution = Hour(1)
+    ts = SingleTimeSeries(initial, resolution, collect(1.0:3.0), "load")
+    id = add_time_series!(store, 1, "Generator", Component, ts)
+
+    # The guard serves the owner that holds the row...
+    @test read_by_id(store, id; owner=(1, Component)).data == collect(1.0:3.0)
+
+    # ...and refuses every other owner. The category is half the owner, so the
+    # same integer id in the other category is a different owner.
+    @test_throws InfraStore.OwnerMismatchError read_by_id(store, id; owner=(2, Component))
+    @test_throws InfraStore.OwnerMismatchError read_by_id(
+        store, id; owner=(1, SupplementalAttribute)
+    )
+
+    # A dangling id is still NotFound, not a mismatch: nothing owns it.
+    @test_throws InfraStore.NotFoundError read_by_id(store, 9_999; owner=(1, Component))
+
+    # A guarded removal that names the wrong owner deletes nothing.
+    @test_throws InfraStore.OwnerMismatchError remove_by_ids!(
+        store, [id]; owner=(2, Component)
+    )
+    @test association_exists(store, id) == true
+
+    # The race the guard closes: the row moves after a caller would have checked
+    # it, and the removal refuses rather than retiring the new owner's series.
+    replace_owner!(store, 1, 3, Component)
+    @test_throws InfraStore.OwnerMismatchError remove_by_ids!(
+        store, [id]; owner=(1, Component)
+    )
+    @test association_exists(store, id) == true
+
+    @test remove_by_ids!(store, [id]; owner=(3, Component)) == 1
+    @test association_exists(store, id) == false
 end

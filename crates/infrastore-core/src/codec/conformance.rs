@@ -123,6 +123,61 @@ pub fn vectors() -> Vec<ConformanceVector> {
                     .collect(),
             ),
         ),
+        // The fixed-width kinds over forecast leading dims. `quadratic_function`
+        // already covers a `Deterministic`; these two cover the remaining pairs
+        // a binding has to get right — a second fixed width, and the only
+        // element type whose row width is not implied by its name.
+        vector(
+            "linear_function_deterministic",
+            ElementType::LinearFunction,
+            TimeSeriesType::Deterministic,
+            // [H = 2, count = 2, 2]
+            &[2, 2],
+            DecodedValues::LinearFunction(
+                (0..4)
+                    .map(|i| LinearFunction {
+                        proportional: i as f64 * 1.5,
+                        constant: 10.0 - i as f64,
+                    })
+                    .collect(),
+            ),
+        ),
+        vector(
+            "tuple3_deterministic",
+            ElementType::Tuple {
+                arity: 3,
+                dtype: crate::types::array::Dtype::F64,
+            },
+            TimeSeriesType::Deterministic,
+            // [H = 2, count = 2, 3]
+            &[2, 2],
+            DecodedValues::Tuple(vec![
+                vec![1.0, 2.0, 3.0],
+                vec![4.0, 5.0, 6.0],
+                vec![-7.5, 0.0, 8.25],
+                vec![9.0, 10.0, 11.0],
+            ]),
+        ),
+        // `Scenarios` shares `Probabilistic`'s three leading axes but names a
+        // different leading dimension, and no vector covered it. Paired with a
+        // fixed-width kind, so a binding cannot pass it by treating the last
+        // axis as ragged.
+        vector(
+            "quadratic_function_scenarios",
+            ElementType::QuadraticFunction,
+            TimeSeriesType::Scenarios,
+            // [S = 2, H = 2, count = 1, 3]
+            &[2, 2, 1],
+            DecodedValues::QuadraticFunction(
+                (0..4)
+                    .map(|i| QuadraticFunction {
+                        quadratic: 0.25 * i as f64,
+                        proportional: -(i as f64),
+                        constant: 100.0 + i as f64,
+                    })
+                    .collect(),
+            ),
+        ),
         vector(
             "tuple3_static",
             ElementType::Tuple {
@@ -212,6 +267,36 @@ pub fn vectors() -> Vec<ConformanceVector> {
                 },
                 StepFunction {
                     x: vec![],
+                    y: vec![],
+                },
+            ]),
+        ),
+        // The narrowest non-empty ragged rows there are. `piecewise_linear` with
+        // one point per timestep is width 3, and `piecewise_step` with one
+        // x-coordinate is width 2 and *no* y-values — the `n - 1` rule at its
+        // boundary, which a decoder that assumes at least one y gets wrong.
+        vector(
+            "piecewise_linear_static_single_point",
+            ElementType::PiecewiseLinear,
+            TimeSeriesType::SingleTimeSeries,
+            &[2],
+            DecodedValues::PiecewiseLinear(vec![
+                vec![XyPoint { x: 3.0, y: 4.0 }],
+                vec![XyPoint { x: -1.5, y: 0.0 }],
+            ]),
+        ),
+        vector(
+            "piecewise_step_single_coordinate",
+            ElementType::PiecewiseStep,
+            TimeSeriesType::SingleTimeSeries,
+            &[2],
+            DecodedValues::PiecewiseStep(vec![
+                StepFunction {
+                    x: vec![2.5],
+                    y: vec![],
+                },
+                StepFunction {
+                    x: vec![-4.0],
                     y: vec![],
                 },
             ]),

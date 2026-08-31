@@ -54,9 +54,7 @@ function add_time_series!(
     application_data::Union{Nothing, AbstractString}=ts.application_data,
     element_type::Union{Nothing, AbstractString}=ts.element_type,
 )
-    element_type_arg = _element_type_arg(element_type, ts.data)
-    dims = UInt64[size(ts.data)...]
-    bytes = _row_major_bytes(ts.data)
+    element_type_arg, dims, bytes = _wire_array(element_type, ts.data)
     code = @ccall lib_path().infrastore_batch_add_single(
         batch::Ptr{Cvoid},
         Int64(owner_id)::Int64,
@@ -101,9 +99,7 @@ function add_time_series!(
     element_type::Union{Nothing, AbstractString}=ts.element_type,
 )
     timestamps = Int64[_to_unix_ms(timestamp) for timestamp in ts.timestamps]
-    element_type_arg = _element_type_arg(element_type, ts.data)
-    dims = UInt64[size(ts.data)...]
-    bytes = _row_major_bytes(ts.data)
+    element_type_arg, dims, bytes = _wire_array(element_type, ts.data)
     code = @ccall lib_path().infrastore_batch_add_non_sequential(
         batch::Ptr{Cvoid},
         Int64(owner_id)::Int64,
@@ -232,9 +228,7 @@ function _batch_add_dense_forecast!(
     application_data::Union{Nothing, AbstractString}=nothing,
     element_type::Union{Nothing, AbstractString}=nothing,
 )
-    element_type_arg = _element_type_arg(element_type, data)
-    dims = UInt64[size(data)...]
-    bytes = _row_major_bytes(data)
+    element_type_arg, dims, bytes = _wire_array(element_type, data)
     code = @ccall lib_path().infrastore_batch_add_forecast(
         batch::Ptr{Cvoid},
         Int64(owner_id)::Int64,
@@ -282,9 +276,7 @@ function add_time_series!(
     application_data::Union{Nothing, AbstractString}=ts.application_data,
     element_type::Union{Nothing, AbstractString}=ts.element_type,
 )
-    element_type_arg = _element_type_arg(element_type, ts.data)
-    dims = UInt64[size(ts.data)...]
-    bytes = _row_major_bytes(ts.data)
+    element_type_arg, dims, bytes = _wire_array(element_type, ts.data)
     code = @ccall lib_path().infrastore_batch_add_probabilistic(
         batch::Ptr{Cvoid},
         Int64(owner_id)::Int64,

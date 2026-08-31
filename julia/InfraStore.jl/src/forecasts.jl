@@ -17,6 +17,17 @@ end
 _category_int(c::OwnerCategory) = Int32(Int(c))
 
 """
+The ABI triple for an optional owner guard: `(has_owner, owner_id, category)`.
+
+`nothing` is spelled as a flag rather than a sentinel id because every `Int64`
+is a legitimate owner id, so no value is free to mean "unset".
+"""
+_owner_guard(::Nothing) = (false, Int64(0), Int32(0))
+function _owner_guard(owner::Tuple{Integer, OwnerCategory})
+    return (true, Int64(owner[1]), _category_int(owner[2]))
+end
+
+"""
 Everything [`transform_single_time_series!`](@ref) resolved, beyond the number of
 series it wrote.
 

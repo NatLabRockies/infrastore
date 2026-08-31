@@ -91,12 +91,43 @@ records what its bytes mean.
 
 Each binding ships a reference codec between the stored bytes and per-timestep values:
 
-- **Rust** — `infrastore_core::{decode, encode}` over `TypedArray` + `ElementType`, used by the CLI
-  for human-readable dumps.
-- **Python** — `infrastore.decode_element_values(array, element_type, leading_dims)`.
+- **Rust** — `infrastore_core::{decode, encode}` over `TypedArray` + `ElementType`. Prefer the
+  paired forms: every value type has a `from_values` constructor that encodes the values _and_
+  declares the element type they imply, and `TimeSeriesData::decoded_values` reads them back. An
+  `element_type` and the array it describes are two things a caller can get out of step — the store
+  rejects the mismatch on write, but deriving both from one set of values means there is none to
+  reject.
+- **Python** — `infrastore.decode_element_values(array, element_type, leading_dims)` and
+  `encode_element_values(values, element_type, leading_dims)`. A write still passes the encoded
+  array and declares `element_type=`; the encoder is what builds it.
 - **TypeScript** — `@infrastore/codec`, which decodes a gRPC response's `value_bytes` + `shape` +
   `element_type` directly into plottable values.
-- **Julia** — InfrastructureSystems.jl decodes straight to its own `FunctionData` types.
+- **Julia** — `InfraStore.encode_element_values` / `decode_element_values`, over the value types
+  `LinearFunction`, `QuadraticFunction`, `PiecewiseLinear` and `PiecewiseStep`. Decode takes a
+  `types` keyword, so a consumer with its own domain types — InfrastructureSystems.jl's
+  `FunctionData` — decodes straight into them and pays no conversion; encode is three small generic
+  functions it extends instead. The names follow the wire vocabulary (`PiecewiseLinear`, not
+  `PiecewiseLinearData`) so that `using InfraStore,
+  InfrastructureSystems` is not an ambiguity
+  error.
+
+The CLI decodes composite rows for `get -f json`, under an `element_values` key alongside the raw
+`values`. Its **CSV** output stays packed on purpose: that form is what `add` reads back, so it has
+to stay the store's own layout rather than a rendering of it.
+
+## Extending the codec
+
+A consumer with its own domain types does not have to convert at the boundary. In Julia the two
+directions extend differently, because they start from different things:
+
+- **Decoding** starts from an `element_type` string, so the type to build is chosen by name:
+  `decode_element_values(...; types = ...)`, and `read_by_id(store, id; types = ...)`.
+- **Encoding** starts from a value, so it is open dispatch: add `element_type_tag`,
+  `element_row_width` and `write_element_row!` methods for your type and it packs directly.
+
+`is_element_values` is the predicate the write path uses to tell "domain values to pack" from
+"numbers to store as they are", and it answers by asking whether those three methods exist — so
+opting a type in is exactly defining them, with nothing to register.
 
 `conformance/element_type_vectors.json` at the repo root pins encoded bytes against expected decoded
 values for every element type, static and forecast. It is generated from `infrastore-core`'s
@@ -108,7 +139,11 @@ UPDATE_CONFORMANCE_VECTORS=1 cargo test -p infrastore-core conformance
 ```
 
 A binding may reject what it cannot represent — the grammar allows `tuple(4,i32)`, which the Julia
-binding does not map — but the store accepts the full grammar.
+binding does not map — but the store accepts the full grammar. A binding's _codec_ is the other way
+round: it has to represent everything the store accepts, which is why the Julia value types take the
+zero- and one-point piecewise curves that a domain type like InfrastructureSystems.jl's
+`PiecewiseLinearData` rejects. A curve too short to interpolate is still a row a read has to hand
+back.
 
 Because consumers go through the codecs, a future storage optimization (a true ragged layout with an
 offsets array instead of zero padding) can land behind this boundary without touching them.

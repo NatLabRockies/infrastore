@@ -55,6 +55,49 @@ function _physical_dtype_of(element_type::AbstractString)
     return get(_DTYPE_BY_NAME, s, nothing)
 end
 
+# The `element_type` a constructor records for `data`.
+#
+# Domain values name their own — a `Vector{PiecewiseLinear}` is a
+# `piecewise_linear` series and there is nothing for a caller to declare — so
+# `element_type=` is only for the numeric case, where the numbers alone cannot
+# say what they mean. Declaring one that disagrees with the values is an error
+# rather than an override: the values are the more specific statement.
+function _declared_element_type(element_type, data::AbstractArray)
+    is_element_values(data) || return _maybe_string(element_type)
+    implied = element_type_tag(vec(data))
+    if element_type !== nothing && String(element_type) != implied
+        throw(
+            InvalidParameterError(
+                "element_type \"$(element_type)\" disagrees with the values, which " *
+                "are $implied",
+            ),
+        )
+    end
+    return implied
+end
+
+# What a value array goes down the ABI as: `(element_type, dims, bytes)`.
+#
+# Domain values are encoded *here*, at the boundary, so the struct keeps holding
+# them — which is what lets a read hand back the same thing a write was given,
+# and what makes a metadata row's `{T,N}` describe the values rather than their
+# packing.
+function _wire_array(element_type, data::AbstractArray)
+    if is_element_values(data)
+        # Checked, not ignored: a write is the other door into the same rule the
+        # constructors enforce, so `element_type=` contradicting the values has
+        # to be an error here too rather than a declaration silently dropped.
+        _declared_element_type(element_type, data)
+        array, tag = encode_element_values(data)
+        return (tag, UInt64[size(array)...], _row_major_bytes(array))
+    end
+    return (
+        _element_type_arg(element_type, data),
+        UInt64[size(data)...],
+        _row_major_bytes(data),
+    )
+end
+
 # The `element_type` string a write sends: the caller's declaration when it made
 # one, else plain scalars of the array's own element type.
 #
@@ -156,7 +199,7 @@ function SingleTimeSeries(
         data isa Array ? data : Array(data),
         String(name),
         _maybe_string(application_data),
-        _maybe_string(element_type),
+        _declared_element_type(element_type, data),
         _maybe_string(units),
         _maybe_string(quantity_kind),
         _unit_system(unit_system),
@@ -221,7 +264,7 @@ function NonSequentialTimeSeries(
         arr,
         String(name),
         _maybe_string(application_data),
-        _maybe_string(element_type),
+        _declared_element_type(element_type, data),
         _maybe_string(units),
         _maybe_string(quantity_kind),
         _unit_system(unit_system),
@@ -291,7 +334,7 @@ function Deterministic(
         data isa Array ? data : Array(data),
         String(name),
         _maybe_string(application_data),
-        _maybe_string(element_type),
+        _declared_element_type(element_type, data),
         _maybe_string(units),
         _maybe_string(quantity_kind),
         _unit_system(unit_system),
@@ -354,7 +397,7 @@ function Probabilistic(
         data isa Array ? data : Array(data),
         String(name),
         _maybe_string(application_data),
-        _maybe_string(element_type),
+        _declared_element_type(element_type, data),
         _maybe_string(units),
         _maybe_string(quantity_kind),
         _unit_system(unit_system),
@@ -417,7 +460,7 @@ function Scenarios(
         data isa Array ? data : Array(data),
         String(name),
         _maybe_string(application_data),
-        _maybe_string(element_type),
+        _declared_element_type(element_type, data),
         _maybe_string(units),
         _maybe_string(quantity_kind),
         _unit_system(unit_system),
@@ -427,7 +470,7 @@ function Scenarios(
 end
 
 """
-    DeterministicSingleTimeSeries
+    DeterministicSingleTimeSeries{T, N}
 
 Marker type naming a forecast derived from a `SingleTimeSeries` via
 `transform_single_time_series!` (mirrors the InfrastructureSystems.jl type). It
@@ -441,8 +484,16 @@ detail is *inspectable* — it surfaces as the `time_series_type` of every catal
 row from `list_metadata` / `list_metadata_by_ids` / `get_metadata_by_id`, and
 filtering on it narrows a query to the derived forecasts alone (e.g. to audit
 which of a store's forecasts are synthetic).
+
+It is parameterized only so that a metadata row's `time_series_type` carries
+`{T, N}` for *every* stored type. `{T, N}` describes the `Deterministic` the row
+reads back as — never the source `SingleTimeSeries`, whose array it shares —
+so a derived view of a scalar `SingleTimeSeries{Float64, 1}` is a
+`DeterministicSingleTimeSeries{Float64, 2}`, matching its `Deterministic` read.
+Write the bare `DeterministicSingleTimeSeries` when naming it as a request or a
+filter; parameters are ignored there.
 """
-abstract type DeterministicSingleTimeSeries end
+abstract type DeterministicSingleTimeSeries{T, N} end
 
 # Every type accepted as a *requested* forecast type. Internal: it exists for
 # method bounds only, is not exported, and is not part of the public surface —

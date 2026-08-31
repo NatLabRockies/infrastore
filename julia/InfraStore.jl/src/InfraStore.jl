@@ -5,6 +5,19 @@ using Dates
 using JSON: JSON
 using Libdl: dlopen, dlsym
 
+export LinearFunction,
+    QuadraticFunction,
+    PiecewiseLinear,
+    PiecewiseStep,
+    XYCoords,
+    encode_element_values,
+    decode_element_values,
+    is_composite_element_type,
+    is_element_values,
+    element_type_tag,
+    element_row_width,
+    write_element_row!,
+    DEFAULT_ELEMENT_TYPES
 export Store,
     SingleTimeSeries,
     NonSequentialTimeSeries,
@@ -144,6 +157,7 @@ export Store,
 # the other files define). Everything in between only requires that structs are
 # defined before the methods that mention them in signatures.
 include("lib.jl")
+include("function_data.jl")
 include("types.jl")
 include("results.jl")
 include("store.jl")

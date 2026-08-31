@@ -47,35 +47,32 @@ _type_code(::Type{DeterministicSingleTimeSeries}) = INFRASTORE_TYPE_DETERMINISTI
 _type_code(::Type{Probabilistic}) = INFRASTORE_TYPE_PROBABILISTIC
 _type_code(::Type{Scenarios}) = INFRASTORE_TYPE_SCENARIOS
 function _type_code(::Type{T}) where {T}
-    for base in _TIME_SERIES_TYPES
-        if T !== base && T <: base
-            # `Type{}` is invariant, so a parameterized spelling never matches the
-            # methods above and lands here. The store addresses a series by its
-            # identity — (owner, category, type, name, resolution, interval,
-            # features) — which carries no element type, so one key already
-            # resolves to exactly one stored array. `{T,N}` on a *request* could
-            # only restate what that array is, never select between arrays. What a
-            # read hands back carries the stored dtype and rank in its own `{T,N}`.
-            throw(
-                InvalidParameterError(
-                    "$T names an element type, which is not part of a time series' " *
-                    "identity; pass $base and take the element type from the result",
-                ),
-            )
-        end
-    end
-    return throw(InvalidParameterError("$T is not a time series type"))
+    # `Type{}` is invariant, so a parameterized spelling never matches the
+    # methods above and lands here. Strip the parameters and answer for the base
+    # type: the store addresses a series by its identity — (owner, category,
+    # type, name, resolution, interval, features) — which carries no element
+    # type, so `{T,N}` can only restate what the matched arrays are, never
+    # select between them. It is accepted rather than rejected so that the
+    # parameterized `time_series_type` of a metadata row round-trips into every
+    # type-taking call; what it names beyond the base type is ignored.
+    base = _base_time_series_type(T)
+    base === nothing && throw(InvalidParameterError("$T is not a time series type"))
+    return _type_code(base)
 end
 
-# Reject a request type before any work happens. The readers bound their type
-# argument covariantly (`T <: SingleTimeSeries`) rather than pinning it
-# (`::Type{SingleTimeSeries}`), so that `SingleTimeSeries{Float64}` reaches this
-# explanation instead of a `MethodError` naming a signature nobody wrote.
-_check_request_type(::Type{T}) where {T} = (_type_code(T); nothing)
+# The unparameterized time series type `T` is a spelling of, or `nothing` if it
+# is no kind of time series. `T` itself when it is already bare.
+function _base_time_series_type(::Type{T}) where {T}
+    for base in _TIME_SERIES_TYPES
+        T <: base && return base
+    end
+    return nothing
+end
 
-# The type code a catalog *filter* takes: any stored type. `Deterministic` is
-# widened to both deterministic storage forms by the core's catalog predicate,
-# so a filter never has to name `DeterministicSingleTimeSeries` to see it.
+# The type code a catalog *filter* takes: any stored type, in any spelling.
+# `Deterministic` is widened to both deterministic storage forms by the core's
+# catalog predicate, so a filter never has to name
+# `DeterministicSingleTimeSeries` to see it.
 _filter_type_code(::Type{T}) where {T} = Int32(_type_code(T))
 
 # The Julia time series type for a metadata row's type name (the `as_str` form).
@@ -95,6 +92,58 @@ function _type_for_name(name::AbstractString)
     else
         throw(InvalidParameterError("unknown time series type name $name"))
     end
+end
+
+# The *parameterized* Julia type of a metadata row: the row's stored type with
+# the `{T, N}` of the values it holds, so `md.time_series_type` names what a
+# read of that row hands back rather than only which of the six kinds it is. Both
+# parameters come from the row itself, so this needs no extra query and no
+# change to what is stored.
+#
+# For a plain numeric series `T` is the dtype and `N` is one more than the rank of
+# `element_shape`, which the core records as the stored array's shape after its
+# leading axis.
+#
+# For a *composite* element type the row names what a read hands back, which is
+# the decoded values: `T` is the domain type — `PiecewiseLinear`,
+# `NTuple{3, Float64}` — and `N` is one *lower*, because the axis the values were
+# packed across is the axis decoding consumes. Keep this in step with
+# `_read_values`: the two describe the same read, one as a type and one as data.
+#
+# A `DeterministicSingleTimeSeries` is the exception, because it is a view: its
+# row carries the `element_shape` of the source `SingleTimeSeries`, while a read
+# materializes the `(H, count, element_dims...)` array of the `Deterministic` it
+# becomes — one axis more.
+#
+# An `element_type` this wrapper does not recognise leaves the base type bare
+# rather than guessing: the core owns the vocabulary, and a row written by a
+# newer one must still decode.
+function _parameterized_type(
+    name::AbstractString, element_type::AbstractString, element_shape
+)
+    base = _type_for_name(name)
+    extra = base === DeterministicSingleTimeSeries ? 2 : 1
+    # A composite element type is decoded on read, and the values it decodes to
+    # occupy the trailing axis it was packed across — so the logical rank is one
+    # lower than the stored array's, and `T` is the domain type rather than the
+    # dtype the bytes are held in.
+    if is_composite_element_type(element_type)
+        value_type = _decoded_value_type(element_type)
+        value_type === nothing || return base{value_type, length(element_shape) + extra - 1}
+    end
+    dtype = _physical_dtype_of(element_type)
+    dtype === nothing && return base
+    return base{dtype, length(element_shape) + extra}
+end
+
+# The Julia type a composite `element_type` decodes to, or `nothing` when this
+# version does not map it — in which case the row keeps describing the stored
+# numbers, which is what a read of it hands back.
+function _decoded_value_type(element_type::AbstractString)
+    kind = _element_kind(element_type)
+    kind === :tuple || return get(DEFAULT_ELEMENT_TYPES, kind, nothing)
+    m = match(_TUPLE_TAG, element_type)
+    return m === nothing ? nothing : NTuple{parse(Int, m.captures[1]), Float64}
 end
 
 _row_period(x) = x === nothing ? nothing : _iso_to_period(String(x))
@@ -121,11 +170,13 @@ end
 
 function _decode_metadata(r::AbstractDict)
     percentiles = r["percentiles"]
+    element_type = String(r["element_type"])
+    element_shape = Tuple(Int(d) for d in r["element_shape"])
     return TimeSeriesMetadata(
         Int64(r["owner_id"]),
         String(r["owner_type"]),
         _category_for_name(r["owner_category"]),
-        _type_for_name(r["time_series_type"]),
+        _parameterized_type(r["time_series_type"], element_type, element_shape),
         String(r["name"]),
         hex2bytes(String(r["data_hash"])),
         _row_timestamp(r["initial_timestamp_ms"]),
@@ -135,8 +186,8 @@ function _decode_metadata(r::AbstractDict)
         _row_int(r["count"]),
         _row_int(r["length"]),
         percentiles === nothing ? nothing : Vector{Float64}(percentiles),
-        String(r["element_type"]),
-        Tuple(Int(d) for d in r["element_shape"]),
+        element_type,
+        element_shape,
         Dict{String, Any}(r["features"]),
         r["units"] === nothing ? nothing : String(r["units"]),
         r["quantity_kind"] === nothing ? nothing : String(r["quantity_kind"]),
@@ -364,7 +415,7 @@ function remove_by_filter!(
 end
 
 """
-    remove_by_ids!(store, ids) -> Int
+    remove_by_ids!(store, ids; owner=nothing) -> Int
 
 Remove many associations named by their catalog `id`, in one all-or-nothing
 transaction, returning the number removed.
@@ -377,16 +428,36 @@ names no row, leaving the store untouched — sift the set with
 [`association_exists`](@ref) first when some references are expected to have
 gone. A repeated id is removed, and counted, once.
 
+Pass `owner = (owner_id, category)` to hold every id to that owner: the row's
+owner is read and the row deleted by the same transaction, and a row belonging
+to anyone else throws [`OwnerMismatchError`](@ref) with the whole batch rolled
+back.
+
+A caller that means "retire *this* owner's series" must use the guard rather
+than confirming the owner in a call of its own. An id survives a reassignment,
+so a separate check has a window after it in which the row can move to another
+owner, and the removal then retires that owner's series — the very thing the
+check was for. The category is half the owner, since a component and a
+supplemental attribute can share an integer id.
+
 See also [`read_by_ids`](@ref), the read direction of the same reference.
 """
-function remove_by_ids!(store::Store, ids::AbstractVector{<:Integer})
+function remove_by_ids!(
+    store::Store,
+    ids::AbstractVector{<:Integer};
+    owner::Union{Nothing, Tuple{Integer, OwnerCategory}}=nothing,
+)
     isempty(ids) && return 0
     id_vec = Int64[Int64(id) for id in ids]
+    (has_owner, owner_id, owner_category) = _owner_guard(owner)
     out_removed = Ref{UInt64}(0)
     code = GC.@preserve id_vec @ccall lib_path().infrastore_store_remove_by_ids(
         store::Ptr{Cvoid},
         id_vec::Ptr{Int64},
         UInt64(length(id_vec))::UInt64,
+        has_owner::Bool,
+        owner_id::Int64,
+        owner_category::Int32,
         out_removed::Ref{UInt64},
     )::Int32
     _check(code)

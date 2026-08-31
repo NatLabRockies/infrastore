@@ -2000,3 +2000,164 @@ fn a_windowed_read_by_id_fails_on_a_dangling_id() {
         TimeSeriesError::NotFound,
     ));
 }
+
+// ---- Owner-guarded id addressing -------------------------------------------
+//
+// An id is the whole address, and it survives `replace_owner`. A consumer that
+// addresses a series by id but means "this owner's series" therefore cannot
+// check the owner in a call of its own: between that check and the operation
+// the row can move. The guarded forms take the owner as an argument so the
+// check and the act are one transaction.
+
+/// Two owners, each with one series, and the ids of both.
+fn two_owners() -> (Store, TimeSeriesId, TimeSeriesId) {
+    let mut store = create_store(None, true).unwrap();
+    for owner in [1, 2] {
+        store
+            .add(AddRequest::new(
+                owner,
+                "Gen",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(series("load")),
+            ))
+            .unwrap();
+    }
+    let first = id_of(&store, 1, "load");
+    let second = id_of(&store, 2, "load");
+    (store, first, second)
+}
+
+#[test]
+fn a_guarded_read_serves_the_owner_that_holds_the_row() {
+    let (store, id, _) = two_owners();
+    let data = store
+        .read_by_id_for_owner(id, (1, OwnerCategory::Component), ReadWindow::full())
+        .unwrap();
+    match data {
+        TimeSeriesData::SingleTimeSeries(sts) => {
+            assert_eq!(sts.data.to_f64_vec().unwrap(), vec![1.0, 2.0, 3.0]);
+        }
+        other => panic!("expected a SingleTimeSeries, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_guarded_read_refuses_another_owners_row() {
+    let (store, id, _) = two_owners();
+    let err = store
+        .read_by_id_for_owner(id, (2, OwnerCategory::Component), ReadWindow::full())
+        .unwrap_err();
+    match err {
+        TimeSeriesError::OwnerMismatch {
+            id: reported,
+            expected_id,
+            actual_id,
+            ..
+        } => {
+            assert_eq!(reported, id.get());
+            assert_eq!(expected_id, 2);
+            assert_eq!(actual_id, 1);
+        }
+        other => panic!("expected OwnerMismatch, got {other:?}"),
+    }
+}
+
+/// The category is half the owner: a component and a supplemental attribute can
+/// carry the same integer id, so matching on the id alone would let one stand
+/// in for the other.
+#[test]
+fn a_guarded_read_refuses_the_same_id_in_the_other_category() {
+    let (store, id, _) = two_owners();
+    assert!(matches!(
+        store
+            .read_by_id_for_owner(
+                id,
+                (1, OwnerCategory::SupplementalAttribute),
+                ReadWindow::full()
+            )
+            .unwrap_err(),
+        TimeSeriesError::OwnerMismatch { .. },
+    ));
+}
+
+#[test]
+fn a_guarded_read_of_a_dangling_id_is_not_found_not_a_mismatch() {
+    let (store, _, _) = two_owners();
+    assert!(matches!(
+        store
+            .read_by_id_for_owner(
+                TimeSeriesId(9_999),
+                (1, OwnerCategory::Component),
+                ReadWindow::full()
+            )
+            .unwrap_err(),
+        TimeSeriesError::NotFound,
+    ));
+}
+
+#[test]
+fn a_guarded_removal_retires_the_owners_own_row() {
+    let (mut store, id, other) = two_owners();
+    assert_eq!(
+        store
+            .remove_by_ids_for_owner(&[id], (1, OwnerCategory::Component))
+            .unwrap(),
+        1
+    );
+    assert!(!store.association_exists(id).unwrap());
+    assert!(store.association_exists(other).unwrap());
+}
+
+/// The whole point of the guard: the removal that names another owner's row
+/// deletes nothing, where the unguarded form would delete it.
+#[test]
+fn a_guarded_removal_refuses_another_owners_row_and_keeps_it() {
+    let (mut store, id, _) = two_owners();
+    let err = store
+        .remove_by_ids_for_owner(&[id], (2, OwnerCategory::Component))
+        .unwrap_err();
+    assert!(matches!(err, TimeSeriesError::OwnerMismatch { .. }));
+    assert!(store.association_exists(id).unwrap());
+}
+
+/// All-or-nothing across the batch, like the unguarded removal: a mismatch on
+/// the second id rolls back the delete the first one already did.
+#[test]
+fn a_guarded_removal_rolls_the_whole_batch_back_on_a_mismatch() {
+    let (mut store, first, second) = two_owners();
+    store
+        .add(AddRequest::new(
+            1,
+            "Gen",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series("other")),
+        ))
+        .unwrap();
+    let also_first = id_of(&store, 1, "other");
+    let err = store
+        .remove_by_ids_for_owner(&[also_first, second], (1, OwnerCategory::Component))
+        .unwrap_err();
+    assert!(matches!(err, TimeSeriesError::OwnerMismatch { .. }));
+    assert!(store.association_exists(also_first).unwrap());
+    assert!(store.association_exists(second).unwrap());
+    assert!(store.association_exists(first).unwrap());
+}
+
+/// The race the guard closes, played out in order: the row moves after the
+/// caller would have checked it, and the guarded removal — which checks inside
+/// its own transaction — refuses rather than retiring the new owner's series.
+#[test]
+fn a_row_reassigned_after_a_check_is_refused_by_the_guarded_removal() {
+    let (mut store, id, _) = two_owners();
+    // What a caller's separate `get_metadata_by_id` would have confirmed.
+    assert_eq!(store.get_metadata_by_id(id).unwrap().unwrap().owner_id, 1);
+    // ... and then the row moves.
+    store.replace_owner(1, 3, OwnerCategory::Component).unwrap();
+    assert!(matches!(
+        store
+            .remove_by_ids_for_owner(&[id], (1, OwnerCategory::Component))
+            .unwrap_err(),
+        TimeSeriesError::OwnerMismatch { .. },
+    ));
+    assert!(store.association_exists(id).unwrap());
+}

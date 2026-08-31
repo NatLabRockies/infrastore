@@ -215,8 +215,10 @@ Scenarios(initial_timestamp, resolution, horizon, interval, count, data, name; a
 # transform_single_time_series! and read back as a Deterministic. You normally
 # do not request it: a Deterministic request matches it too. It surfaces as a
 # key's / row's time_series_type, so which forecasts are synthetic stays
-# inspectable, and passing it narrows a query to the derived ones.
-abstract type DeterministicSingleTimeSeries end
+# inspectable, and passing it narrows a query to the derived ones. {T,N} exists
+# only so a row's time_series_type is parameterized for every stored type; it
+# describes the Deterministic the row reads back as. Write it bare as a request.
+abstract type DeterministicSingleTimeSeries{T,N} end
 
 mutable struct Store
     handle :: Ptr{Cvoid}
@@ -239,6 +241,84 @@ not plain numbers (`"tuple(3,f64)"`, `"piecewise_linear"`, … — see
 [Element types](./element-types.md)); it defaults to the object's own `element_type`, which is
 `nothing` for plain scalars.
 
+## Element values
+
+A composite `element_type` describes a layout, not a number: `"piecewise_linear"` is a curve per
+timestep, packed across the array's trailing axis. **The write and read paths do that packing for
+you** — hand a series its values and get the same values back:
+
+```julia
+curves = [PiecewiseLinear([(x = 0.0, y = 1.0), (x = 1.0, y = 3.0)]),
+          PiecewiseLinear([(x = 0.0, y = 2.0)])]
+
+ts = SingleTimeSeries(t0, Hour(1), curves, "cost")   # element_type: "piecewise_linear"
+id = add_time_series!(store, 1, "Generator", Component, ts)
+
+read_by_id(store, id).data == curves                 # true
+get_metadata_by_id(store, id).time_series_type       # SingleTimeSeries{PiecewiseLinear, 1}
+```
+
+The constructor names the `element_type` from the values, so `element_type=` is only for the numeric
+case where the numbers alone cannot say what they mean; declaring one that contradicts the values is
+an error rather than an override.
+
+`raw = true` on a read hands back the packing instead — one axis more, held as the physical dtype —
+for a caller that wants the bytes as stored:
+
+```julia
+read_by_id(store, id; raw = true).data               # 2×5 Matrix{Float64}
+```
+
+The **readers are deliberately not decoded**. `StaticReader` and `ForecastReader` are the
+per-timestamp simulation path, and `StaticGroup.dtype` is physical by definition; they hand back the
+packed numbers, which `decode_element_values` turns into values if you want them.
+
+The two codec functions are public in their own right, and neither takes a `Store` — they work on
+any array you already have:
+
+```julia
+array, element_type = encode_element_values(curves)      # (2, 5), "piecewise_linear"
+values = decode_element_values(array, element_type)
+```
+
+`decode_element_values` returns the array's shape **without** its trailing element axis — a vector
+for a static series, an `(H, count)` matrix for a `Deterministic`, an `(P, H, count)` array for a
+`Probabilistic` or `Scenarios` — so a forecast comes back windowed rather than flattened. A scalar
+`element_type` is returned unchanged, because there the stored numbers already are the values;
+`is_composite_element_type` tells the cases apart, and an unrecognized spelling reads back as raw
+numbers rather than throwing.
+
+| Value type          | `element_type`       | Constructor                           |
+| ------------------- | -------------------- | ------------------------------------- |
+| `LinearFunction`    | `linear_function`    | `(proportional, constant)`            |
+| `QuadraticFunction` | `quadratic_function` | `(quadratic, proportional, constant)` |
+| `PiecewiseLinear`   | `piecewise_linear`   | `(points)`, a vector of `XYCoords`    |
+| `PiecewiseStep`     | `piecewise_step`     | `(x_coords, y_values)`                |
+| `NTuple{N,Float64}` | `tuple(N,f64)`       | —                                     |
+
+These types are **permissive on purpose**: they accept everything the store accepts, including the
+zero- and one-point piecewise curves that a domain type such as InfrastructureSystems.jl's
+`PiecewiseLinearData` rejects. A codec that could not represent a stored row could not read a store
+back. They are named for the wire vocabulary for a second reason: so that
+`using InfraStore, InfrastructureSystems` is not an ambiguity error.
+
+A consumer with its own domain types never materializes them. Decode takes a `types` keyword whose
+entries have exactly the constructor signatures in the table above:
+
+```julia
+decode_element_values(array, "piecewise_linear";
+    types = merge(DEFAULT_ELEMENT_TYPES, (piecewise_linear = MyCurve,)))
+```
+
+and encode is open dispatch — add methods to `element_type_tag`, `element_row_width` and
+`write_element_row!` for your own type and it encodes without a conversion step.
+
+The encodings themselves are the store's, specified in [Element types](./element-types.md) and
+pinned across every binding by `conformance/element_type_vectors.json`, which this package's tests
+read. One consequence worth knowing: the ragged kinds are padded to the widest entry **in the series
+being written**, so equal curves in differently-shaped series encode to different bytes and do not
+share a stored array.
+
 ## Result Types
 
 The catalog, metadata, and summary queries return **structs**, not `NamedTuple`s or `Dict`s. Each is
@@ -252,11 +332,54 @@ group's `dtype` field holds the **Julia element type** (`Float64`, `Bool`, …).
 carries the store's canonical `element_type` **string**, which names both the meaning and (through
 it) the dtype. An `owner_category` field is an `OwnerCategory`, never a string.
 
-A requested type is always the bare one — `SingleTimeSeries`, never `SingleTimeSeries{Float64}`. A
-series is addressed by its identity (owner, category, type, name, resolution, interval, features),
-which carries no element type, so parameters on a _request_ would have nothing to select on; passing
-them raises `InvalidParameterError` rather than being quietly ignored. The element type comes back
-on the result instead, in its own `{T,N}` and in a reader group's `dtype`.
+`TimeSeriesMetadata.time_series_type` is the **full** type, parameterized `{T,N}` like the value
+structs — `SingleTimeSeries{Float64,1}`, `Deterministic{Float32,3}` — so a row names what a read of
+it hands back, not merely which of the six kinds it is:
+
+```julia
+md = get_metadata_by_id(store, id)
+md.time_series_type == typeof(read_by_id(store, id))   # every stored type but DST
+```
+
+The one exception is a derived `DeterministicSingleTimeSeries`: its row keeps the DST tag, since
+that is where the derivation stays visible, while a read of it hands back the `Deterministic` it
+becomes. The `{T,N}` agree; the outer types do not, and they are unrelated, so neither `==` nor `<:`
+holds between them. Dispatch on the read's type when the two have to agree, and on the row's when
+you mean "was this derived?".
+
+Both parameters come off the row itself. For a plain numeric series `T` is the dtype and `N` is one
+more than the rank of `element_shape`. For a **composite** `element_type` — one a read decodes — `T`
+is the domain type and `N` is one _lower_, because the axis the values were packed across is the one
+decoding consumes:
+
+| `element_type`     | `element_shape` | `time_series_type`                      | with `raw = true`             |
+| ------------------ | --------------- | --------------------------------------- | ----------------------------- |
+| `f64`              | `()`            | `SingleTimeSeries{Float64,1}`           | same                          |
+| `piecewise_linear` | `(7,)`          | `SingleTimeSeries{PiecewiseLinear,1}`   | `SingleTimeSeries{Float64,2}` |
+| `tuple(3,f64)`     | `(3,)`          | `SingleTimeSeries{NTuple{3,Float64},1}` | `SingleTimeSeries{Float64,2}` |
+
+A `DeterministicSingleTimeSeries` is parameterized by the `Deterministic` it reads back as, not by
+the `SingleTimeSeries` whose array it shares — the parameters follow the read, the outer type does
+not. An `element_type` written by a newer core than the wrapper knows leaves the row describing the
+stored numbers, which is what a read of it hands back.
+
+Test it with `<:`, not `==`, when you mean "which kind is this row":
+
+```julia
+md.time_series_type <: SingleTimeSeries        # kind
+md.time_series_type == SingleTimeSeries        # false — it is SingleTimeSeries{Float64,1}
+```
+
+A **request** — a `time_series_type=` filter, `has_time_series`, a reader — takes either spelling.
+Parameters on a request are **ignored**, never matched: a series is addressed by its identity
+(owner, category, type, name, resolution, interval, features), which carries no element type, so
+`{T,N}` has nothing to select on. They are accepted so that a row's `time_series_type` round-trips
+straight back into any of those calls;
+`list_metadata(store; time_series_type = SingleTimeSeries{Int32,1})` still matches every stored
+`SingleTimeSeries`. A type that is no kind of time series raises `InvalidParameterError`.
+
+`TimeSeriesTypeCount`, `StaticSummaryRow`, and `ForecastSummaryRow` group by stored type alone — the
+grouping carries no dtype — so their `time_series_type` is always the bare one.
 
 Every write returns the catalog row's `id` as a plain `Int64` — assigned, never reissued, and what
 every read, removal, rename and copy takes.
@@ -266,7 +389,7 @@ struct TimeSeriesMetadata                    # get_metadata_by_id / list_metadat
     owner_id          :: Int64
     owner_type        :: String
     owner_category    :: OwnerCategory
-    time_series_type  :: Type
+    time_series_type  :: Type                # parameterized, e.g. SingleTimeSeries{Float64,1}
     name              :: String
     data_hash         :: Vector{UInt8}       # 32-byte content hash
     initial_timestamp :: Union{Nothing,DateTime}
@@ -344,7 +467,8 @@ add_time_series!(
 ) -> Int64   # the catalog row's id -- what every read, removal and rename takes
 
 read_by_id(store::Store, id::Integer;
-          start_time=nothing, len=nothing, count=nothing) -> SingleTimeSeries | ...
+          start_time=nothing, len=nothing, count=nothing,
+          owner=nothing) -> SingleTimeSeries | ...
 read_by_ids(store::Store, ids::AbstractVector{<:Integer};
            time_range=nothing) -> Vector
 ```
@@ -366,6 +490,9 @@ records ids in its own model does the first half once.
 
 To read every series' value at one timestamp in a loop (the simulation pattern), use a
 [`StaticReader`](#staticreader) rather than calling `read_by_id` per series.
+
+`owner = (owner_id, category)` holds the row to that owner, throwing `OwnerMismatchError` when it
+belongs to another — see [the owner guard](#the-owner-guard).
 
 ### Bulk reads
 
@@ -484,7 +611,7 @@ directly; `bytes2hex` gives the display form.
 ### Removal
 
 ```julia
-remove_by_ids!(store, ids::AbstractVector{<:Integer}) -> Int
+remove_by_ids!(store, ids::AbstractVector{<:Integer}; owner=nothing) -> Int
 remove_by_filter!(store; owner_id=nothing, name=nothing, ...) -> Int
 ```
 
@@ -498,12 +625,35 @@ when it is the last backing series (the DST is a view of that array), raising
 `InvalidParameterError` — remove the derived forecast first, or use an owner-scoped `clear!`, which
 is exempt.
 
+#### The owner guard
+
+```julia
+remove_by_ids!(store, ids; owner = (7, Component))       # only rows owned by component 7
+read_by_id(store, id; owner = (7, Component))            # only if component 7 owns it
+```
+
+Both id-addressed calls take an optional `owner = (owner_id, category)`. The addressed row is held
+to that owner and one belonging to anyone else throws `OwnerMismatchError`; for the removal the
+check and the delete are one transaction, so a refused batch removes nothing.
+
+A caller whose model says "this component's series" must pass the owner rather than confirm it in a
+call of its own. An id is the whole address and it survives `replace_owner!`, so a
+`get_metadata_by_id` that confirms the owner and a `remove_by_ids!` that then deletes are two calls
+with a window between them — and a reassignment landing in that window makes the removal retire the
+_new_ owner's series, the very thing the check was for. The category is half the owner: a component
+and a supplemental attribute can carry the same integer id.
+
+On the read side there is no window either way, but the guard is still the cheaper spelling: the
+owner comes off the same row the values are materialized from, so it costs nothing, where a separate
+check is a second round trip.
+
 `remove_by_filter!` is the one removal that does not take ids, because enumerating them first is the
 wrong shape for "remove everything matching": it takes the same filter as `list_metadata`, resolves
 it to ids internally, and removes those in one transaction.
 
 Reading a `DeterministicSingleTimeSeries` returns a `Deterministic`, since the type has no
-materialized form. Its row still reports `DeterministicSingleTimeSeries` as its `time_series_type`.
+materialized form. Its row still reports `DeterministicSingleTimeSeries` as its `time_series_type`,
+parameterized by that `Deterministic`.
 
 ## Forecasts
 
@@ -645,7 +795,7 @@ it is in the catalog, not in the read:
 
 ```julia
 get_metadata_by_id(store, id).time_series_type
-# DeterministicSingleTimeSeries
+# DeterministicSingleTimeSeries{Float64,2}     -- test kinds with <:, not ==
 ```
 
 Filtering with `time_series_type=Deterministic` spans both: it matches a directly-stored
@@ -1095,6 +1245,7 @@ All subtype `TimeSeriesException`:
 | `IOError`                   | `INFRASTORE_ERR_IO`                                                                                |
 | `StoreExistsError`          | `INFRASTORE_ERR_STORE_EXISTS`                                                                      |
 | `MismatchedArtifactError`   | `INFRASTORE_ERR_MISMATCHED_ARTIFACT`                                                               |
+| `OwnerMismatchError`        | `INFRASTORE_ERR_OWNER_MISMATCH`                                                                    |
 | `GenericError`              | Any other non-zero code (carries the numeric `code`)                                               |
 
 The message text comes from the FFI layer's thread-local error buffer.

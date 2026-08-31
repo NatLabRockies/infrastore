@@ -72,6 +72,28 @@ pub enum DecodedValues {
     PiecewiseStep(Vec<StepFunction>),
 }
 
+impl DecodedValues {
+    /// How many timesteps these values describe.
+    ///
+    /// `0` for [`Self::Raw`], which carries no values of its own — the stored
+    /// array is the answer there, and its `length` is on the array.
+    pub fn len(&self) -> usize {
+        match self {
+            DecodedValues::Raw => 0,
+            DecodedValues::Tuple(rows) => rows.len(),
+            DecodedValues::LinearFunction(rows) => rows.len(),
+            DecodedValues::QuadraticFunction(rows) => rows.len(),
+            DecodedValues::PiecewiseLinear(rows) => rows.len(),
+            DecodedValues::PiecewiseStep(rows) => rows.len(),
+        }
+    }
+
+    /// Whether there are no timesteps. Always true for [`Self::Raw`].
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 /// Decode `array` according to `element_type`.
 ///
 /// `leading_dims` is how many leading axes precede the per-step element shape —
@@ -175,6 +197,18 @@ pub fn encode(values: &DecodedValues, leading_dims: &[usize]) -> Result<TypedArr
         }
         DecodedValues::Tuple(rows) => {
             let width = rows.first().map(Vec::len).unwrap_or(0);
+            // A tuple's arity is carried by its rows, so a series with no rows —
+            // or rows of no values — cannot say what it is. `ElementType::parse`
+            // refuses the `tuple(0,…)` spelling this would produce, so encoding
+            // it would write a row that cannot be read back.
+            if width == 0 {
+                return Err(TimeSeriesError::InvalidParameter(
+                    "an empty tuple carries no arity, and tuple(0,…) is not a valid \
+                     element type: use encode_as to declare the arity, or build the \
+                     TypedArray directly"
+                        .into(),
+                ));
+            }
             if let Some(bad) = rows.iter().position(|r| r.len() != width) {
                 return Err(TimeSeriesError::InvalidParameter(format!(
                     "tuple rows must all have the same arity: row {bad} has {} values, \
@@ -246,8 +280,72 @@ pub fn encode(values: &DecodedValues, leading_dims: &[usize]) -> Result<TypedArr
     TypedArray::from_slice(shape, &flat).map_err(TimeSeriesError::InvalidParameter)
 }
 
+/// Encode `values` under a *declared* [`ElementType`], and check the result
+/// against it.
+///
+/// [`encode`] infers the layout from the values, which is enough for every kind
+/// whose width is implied by its own rows. A tuple is the exception: its arity
+/// lives in its rows, so a series with none — a legal, storable, zero-length
+/// series — cannot say what it is, and [`encode`] refuses it. Here the arity is
+/// not missing: `element_type` declared it, so the empty packing is built from
+/// the declaration.
+///
+/// Everything else defers to [`encode`] and is then validated, so the array that
+/// comes back is one `element_type` actually describes — ready to pair with it
+/// on a write, the way the `from_values` constructors pair them for a caller
+/// whose values can name their own type.
+///
+/// ```
+/// # use infrastore_core::{DecodedValues, Dtype, ElementType, Period, SingleTimeSeries, encode_as};
+/// # use chrono::{Duration, TimeZone, Utc};
+/// let tuple3 = ElementType::Tuple { arity: 3, dtype: Dtype::F64 };
+/// let array = encode_as(&DecodedValues::Tuple(Vec::new()), &[0], tuple3)?;
+/// assert_eq!(array.shape, vec![0, 3]);
+/// let series = SingleTimeSeries::new(
+///     Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
+///     Period::Fixed(Duration::hours(1)),
+///     array,
+///     "variable_cost",
+/// )
+/// .with_element_type(tuple3);
+/// assert_eq!(series.length, 0);
+/// # Ok::<(), infrastore_core::TimeSeriesError>(())
+/// ```
+pub fn encode_as(
+    values: &DecodedValues,
+    leading_dims: &[usize],
+    element_type: ElementType,
+) -> Result<TypedArray> {
+    let array = match (values, element_type) {
+        (DecodedValues::Tuple(rows), ElementType::Tuple { arity, .. }) if rows.is_empty() => {
+            let expected_rows: usize = leading_dims.iter().product();
+            if expected_rows != 0 {
+                return Err(TimeSeriesError::InvalidParameter(format!(
+                    "0 decoded timesteps do not fill leading dims {leading_dims:?} \
+                     ({expected_rows} expected)"
+                )));
+            }
+            let mut shape = leading_dims.to_vec();
+            shape.push(arity);
+            TypedArray::new(Dtype::F64, shape, Vec::new())
+                .map_err(TimeSeriesError::InvalidParameter)?
+        }
+        _ => encode(values, leading_dims)?,
+    };
+    // The values decide the packing and `element_type` is what the row is stored
+    // under, so the two can disagree: `tuple(3,f64)` given two-value rows packs
+    // to width 2. Checking here is what lets a caller pair them without waiting
+    // for `Store::add` to reject the pair after the fact.
+    element_type.validate_array(&array, leading_dims.len())?;
+    Ok(array)
+}
+
 /// The element type an encode of `values` produces, for callers that need to
 /// declare it on the write request.
+///
+/// A `Tuple` with no rows has no arity to report, so this names `tuple(0,f64)`,
+/// which is not a legal element type. Declare the arity to [`encode_as`] rather
+/// than asking here.
 pub fn element_type_of(values: &DecodedValues) -> Option<ElementType> {
     Some(match values {
         DecodedValues::Raw => return None,
@@ -366,5 +464,61 @@ mod tests {
             decode(&array, ElementType::PiecewiseStep, 1).unwrap(),
             values
         );
+    }
+
+    const TUPLE3: ElementType = ElementType::Tuple {
+        arity: 3,
+        dtype: Dtype::F64,
+    };
+
+    #[test]
+    fn encode_as_takes_an_empty_tuple_series_arity_from_the_declaration() {
+        // The case `encode` cannot serve: no rows, so no arity in the values.
+        let empty = DecodedValues::Tuple(Vec::new());
+        assert!(encode(&empty, &[0]).is_err());
+
+        let array = encode_as(&empty, &[0], TUPLE3).unwrap();
+        assert_eq!(array.shape, vec![0, 3]);
+        assert!(array.bytes.is_empty());
+        // And it reads back as the empty series it is, rather than as a row the
+        // decoder has to refuse.
+        assert_eq!(
+            decode(&array, TUPLE3, 1).unwrap(),
+            DecodedValues::Tuple(Vec::new())
+        );
+    }
+
+    #[test]
+    fn encode_as_still_holds_an_empty_tuple_series_to_its_leading_dims() {
+        let empty = DecodedValues::Tuple(Vec::new());
+        let err = encode_as(&empty, &[4], TUPLE3).unwrap_err();
+        assert!(
+            err.to_string().contains("do not fill leading dims"),
+            "{err}"
+        );
+        // A forecast whose window geometry multiplies out to zero is still empty.
+        assert_eq!(
+            encode_as(&empty, &[6, 0], TUPLE3).unwrap().shape,
+            vec![6, 0, 3]
+        );
+    }
+
+    #[test]
+    fn encode_as_defers_to_encode_and_checks_the_declaration() {
+        let rows = DecodedValues::Tuple(vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]]);
+        assert_eq!(
+            encode_as(&rows, &[2], TUPLE3)
+                .unwrap()
+                .to_f64_vec()
+                .unwrap(),
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+        );
+        // The values pack to width 2, which is not what the declaration says.
+        let narrow = DecodedValues::Tuple(vec![vec![1.0, 2.0]]);
+        let err = encode_as(&narrow, &[1], TUPLE3).unwrap_err();
+        assert!(err.to_string().contains("element dims"), "{err}");
+        // A declaration of the wrong *kind* is caught the same way.
+        let err = encode_as(&rows, &[2], ElementType::LinearFunction).unwrap_err();
+        assert!(err.to_string().contains("element dims"), "{err}");
     }
 }

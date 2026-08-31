@@ -279,7 +279,7 @@ is, so `transform_single_time_series!` needs no separate enumeration path:
 
 ```julia
 for row in list_metadata(store; owner_id = 42, time_series_type = Deterministic)
-    row.time_series_type   # Deterministic or DeterministicSingleTimeSeries
+    row.time_series_type <: DeterministicSingleTimeSeries   # derived, or densely stored?
     series = read_by_id(store, row.id)   # a Deterministic either way
 end
 ```
@@ -305,6 +305,26 @@ Every `time_series_type` filter keyword takes the Julia type as well:
 list_metadata(store; time_series_type = Deterministic)
 get_resolutions(store; time_series_type = SingleTimeSeries)
 ```
+
+A metadata row's `time_series_type` is the **full** type — `SingleTimeSeries{Float64,1}`,
+`Deterministic{Float32,3}` — so a row names what a read of it hands back rather than only which of
+the six kinds it is, and a consumer holding InfrastructureSystems.jl-style parameterized types gets
+them back intact:
+
+```julia
+md = get_metadata_by_id(store, id)
+md.time_series_type == typeof(read_by_id(store, id))   # every stored type but DST
+md.time_series_type <: SingleTimeSeries                # ask for the kind with <:, not ==
+```
+
+A derived `DeterministicSingleTimeSeries` is the exception: its row keeps the DST tag while a read
+of it hands back a `Deterministic` with the same `{T,N}`. Dispatch on the read's type when the two
+have to agree, and on the row's when you mean "was this derived?".
+
+That type passes straight back into any filter, `has_time_series`, or reader. The parameters are
+ignored there — a series is addressed by identity, which carries no element type — so they never
+narrow a match; they are accepted so a row you just read round-trips without being taken apart
+first.
 
 The low-level `get_metadata_by_id` + `get_array_by_hash` path is still available for raw access. See
 the [Julia API reference](../reference/julia-api.md#forecasts).
