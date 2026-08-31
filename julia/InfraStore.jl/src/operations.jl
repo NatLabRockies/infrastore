@@ -890,7 +890,7 @@ function read_by_ids(
 end
 
 """
-    read_by_id(store, id; start_time=nothing, len=nothing, count=nothing)
+    read_by_id(store, id; start_time=nothing, len=nothing, count=nothing, owner=nothing)
 
 Read the series filed under catalog association `id`, or the window of it these
 arguments name, in **one** call — dispatching on the row's stored type to the
@@ -915,6 +915,13 @@ A window is *checked*, not clamped: a `start_time` off the series' own grid, or 
 hand back the smaller answer that fits. Throws `NotFoundError` if `id` names no
 row, following [`read_by_ids`](@ref).
 
+Pass `owner = (owner_id, category)` to hold the row to that owner, and get
+[`OwnerMismatchError`](@ref) when it belongs to someone else. The owner comes off
+the same row the values are materialized from, so the guarded read costs exactly
+what the unguarded one does — where confirming the owner in a call of its own
+would be a second round trip whose answer describes the row as it was rather than
+the row being read.
+
 See also [`read_by_ids`](@ref), [`remove_by_ids!`](@ref), and
 [`get_metadata_by_id`](@ref).
 """
@@ -924,12 +931,14 @@ function read_by_id(
     start_time=nothing,
     len::Union{Nothing, Integer}=nothing,
     count::Union{Nothing, Integer}=nothing,
+    owner::Union{Nothing, Tuple{Integer, OwnerCategory}}=nothing,
     raw::Bool=false,
     types::NamedTuple=DEFAULT_ELEMENT_TYPES,
 )
     start_present = start_time !== nothing
     start_zoneless = start_present && is_zoneless(_time_reference_of(start_time))
     start_ms = start_present ? _to_unix_ms(start_time) : Int64(0)
+    (has_owner, owner_id, owner_category) = _owner_guard(owner)
     out_result = Ref{Ptr{Cvoid}}(C_NULL)
     _check(
         @ccall lib_path().infrastore_store_read_by_id(
@@ -942,6 +951,9 @@ function read_by_id(
             UInt64(len === nothing ? 0 : len)::UInt64,
             (count !== nothing)::Bool,
             UInt64(count === nothing ? 0 : count)::UInt64,
+            has_owner::Bool,
+            owner_id::Int64,
+            owner_category::Int32,
             out_result::Ref{Ptr{Cvoid}},
         )::Int32
     )

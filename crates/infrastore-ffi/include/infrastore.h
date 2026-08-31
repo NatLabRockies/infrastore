@@ -109,6 +109,16 @@
  */
 #define INFRASTORE_ERR_DUPLICATE_ASSOCIATION_ID 13
 
+/**
+ * An id-addressed call that was given an expected owner named a row belonging
+ * to a different one.
+ *
+ * Distinct from `INFRASTORE_ERR_NOT_FOUND`, which says the id names no row at
+ * all: here the row is there and the caller's belief about who owns it is
+ * what has gone stale — a series can be reassigned, and the id follows it.
+ */
+#define INFRASTORE_ERR_OWNER_MISMATCH 14
+
 #define INFRASTORE_ERR_INTERNAL 99
 
 /**
@@ -403,6 +413,16 @@ int32_t infrastore_store_add_non_sequential(struct InfraStore *handle,
  * `infrastore_store_association_exists` first when some references are
  * expected to have gone. A repeated id is removed, and counted, once.
  *
+ * Set `has_owner` to hold every id to the owner `(owner_id, owner_category)`:
+ * the row's owner is read and the row deleted by the same transaction, and a
+ * row belonging to anyone else is `INFRASTORE_ERR_OWNER_MISMATCH` with the
+ * whole batch rolled back. A caller that means "retire this owner's series"
+ * must use the guard rather than checking the owner in a call of its own — an
+ * id survives a reassignment, so a separate check has a window after it in
+ * which the row can move, and the removal would then retire the new owner's
+ * series. `owner_id` and `owner_category` are ignored when `has_owner` is
+ * false.
+ *
  * # Safety
  *
  * `handle` must be a live store handle created by this library and must not be
@@ -413,6 +433,9 @@ int32_t infrastore_store_add_non_sequential(struct InfraStore *handle,
 int32_t infrastore_store_remove_by_ids(struct InfraStore *handle,
                                        const int64_t *ids,
                                        uint64_t n,
+                                       bool has_owner,
+                                       int64_t owner_id,
+                                       int32_t owner_category,
                                        uint64_t *out_removed);
 
 /**
@@ -1319,6 +1342,14 @@ int32_t infrastore_store_read_by_ids_range(const struct InfraStore *handle,
  * extent running past its end, which a raw time range would instead clamp.
  * `INFRASTORE_ERR_NOT_FOUND` if the id names no row.
  *
+ * Set `has_owner` to hold the row to the owner `(owner_id, owner_category)`,
+ * and get `INFRASTORE_ERR_OWNER_MISMATCH` when it belongs to someone else. The
+ * owner is taken off the same row the values are materialized from, so the
+ * guarded read costs exactly what the unguarded one does — where confirming
+ * the owner in a call of its own would be a second round trip whose answer
+ * describes the row as it was rather than the row being read. `owner_id` and
+ * `owner_category` are ignored when `has_owner` is false.
+ *
  * # Safety
  *
  * `out_result` must be valid for writing one pointer. On `INFRASTORE_OK` the
@@ -1334,6 +1365,9 @@ int32_t infrastore_store_read_by_id(const struct InfraStore *handle,
                                     uint64_t len,
                                     bool count_present,
                                     uint64_t count,
+                                    bool has_owner,
+                                    int64_t owner_id,
+                                    int32_t owner_category,
                                     struct InfraStoreBulkReadHandle **out_result);
 
 /**

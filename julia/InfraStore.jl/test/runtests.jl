@@ -5079,3 +5079,41 @@ end
 end
 
 include("element_type_conformance.jl")
+
+@testset "owner-guarded id addressing" begin
+    store = Store(in_memory=true)
+    initial = DateTime(2024, 1, 1)
+    resolution = Hour(1)
+    ts = SingleTimeSeries(initial, resolution, collect(1.0:3.0), "load")
+    id = add_time_series!(store, 1, "Generator", Component, ts)
+
+    # The guard serves the owner that holds the row...
+    @test read_by_id(store, id; owner=(1, Component)).data == collect(1.0:3.0)
+
+    # ...and refuses every other owner. The category is half the owner, so the
+    # same integer id in the other category is a different owner.
+    @test_throws InfraStore.OwnerMismatchError read_by_id(store, id; owner=(2, Component))
+    @test_throws InfraStore.OwnerMismatchError read_by_id(
+        store, id; owner=(1, SupplementalAttribute)
+    )
+
+    # A dangling id is still NotFound, not a mismatch: nothing owns it.
+    @test_throws InfraStore.NotFoundError read_by_id(store, 9_999; owner=(1, Component))
+
+    # A guarded removal that names the wrong owner deletes nothing.
+    @test_throws InfraStore.OwnerMismatchError remove_by_ids!(
+        store, [id]; owner=(2, Component)
+    )
+    @test association_exists(store, id) == true
+
+    # The race the guard closes: the row moves after a caller would have checked
+    # it, and the removal refuses rather than retiring the new owner's series.
+    replace_owner!(store, 1, 3, Component)
+    @test_throws InfraStore.OwnerMismatchError remove_by_ids!(
+        store, [id]; owner=(1, Component)
+    )
+    @test association_exists(store, id) == true
+
+    @test remove_by_ids!(store, [id]; owner=(3, Component)) == 1
+    @test association_exists(store, id) == false
+end

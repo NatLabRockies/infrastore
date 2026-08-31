@@ -1273,18 +1273,49 @@ impl MetadataStore {
     /// [`Self::delete_by_key`], whose NULL-interval wildcard can sweep a whole
     /// forecast family, a removal by reference removes only what the reference
     /// points at.
-    pub fn delete_by_id(tx: &Connection, id: i64) -> Result<Option<([u8; 32], TimeSeriesType)>> {
-        let row: Option<(Vec<u8>, i64)> = tx
+    ///
+    /// `expected_owner`, when given, is a guard: the row is deleted only if it
+    /// belongs to that owner, and otherwise nothing is deleted and
+    /// [`TimeSeriesError::OwnerMismatch`] is returned. The owner is read by the
+    /// same statement pair, under the caller's transaction, that does the
+    /// delete — which is the whole point of taking it here rather than letting
+    /// the caller check first: an id survives reassignment, so an owner
+    /// confirmed by an earlier call can be the wrong one by the time the
+    /// `DELETE` runs.
+    pub fn delete_by_id(
+        tx: &Connection,
+        id: i64,
+        expected_owner: Option<(i64, OwnerCategory)>,
+    ) -> Result<Option<([u8; 32], TimeSeriesType)>> {
+        let row: Option<(Vec<u8>, i64, i64, i64)> = tx
             .prepare_cached(
-                "SELECT data_hash, time_series_type FROM time_series_associations WHERE id = ?1",
+                "SELECT data_hash, time_series_type, owner_id, owner_category \
+                 FROM time_series_associations WHERE id = ?1",
             )?
             .query_row(params![id], |r| {
-                Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?))
+                Ok((
+                    r.get::<_, Vec<u8>>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
             })
             .optional()?;
-        let Some((hash_bytes, type_code)) = row else {
+        let Some((hash_bytes, type_code, owner_id, owner_category_code)) = row else {
             return Ok(None);
         };
+        if let Some((expected_id, expected_category)) = expected_owner {
+            let actual_category = decode_category(owner_category_code)?;
+            if owner_id != expected_id || actual_category != expected_category {
+                return Err(TimeSeriesError::OwnerMismatch {
+                    id,
+                    expected_id,
+                    expected_category: expected_category.as_str(),
+                    actual_id: owner_id,
+                    actual_category: actual_category.as_str(),
+                });
+            }
+        }
         tx.prepare_cached("DELETE FROM time_series_associations WHERE id = ?1")?
             .execute(params![id])?;
         let hash = bytes_to_hash32(&hash_bytes).ok_or_else(|| {

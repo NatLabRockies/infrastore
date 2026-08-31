@@ -115,6 +115,13 @@ pub const INFRASTORE_ERR_MISMATCHED_ARTIFACT: i32 = 12;
 /// identity colliding. The three mean different things to a caller: a taken id
 /// says the ids being imported do not fit this store.
 pub const INFRASTORE_ERR_DUPLICATE_ASSOCIATION_ID: i32 = 13;
+/// An id-addressed call that was given an expected owner named a row belonging
+/// to a different one.
+///
+/// Distinct from `INFRASTORE_ERR_NOT_FOUND`, which says the id names no row at
+/// all: here the row is there and the caller's belief about who owns it is
+/// what has gone stale — a series can be reassigned, and the id follows it.
+pub const INFRASTORE_ERR_OWNER_MISMATCH: i32 = 14;
 pub const INFRASTORE_ERR_INTERNAL: i32 = 99;
 
 thread_local! {
@@ -143,10 +150,36 @@ fn map_core_error(e: core_lib::TimeSeriesError) -> i32 {
         E::IncompatibleFormat { .. } => INFRASTORE_ERR_INCOMPATIBLE_FORMAT,
         E::StoreExists { .. } => INFRASTORE_ERR_STORE_EXISTS,
         E::MismatchedArtifact { .. } => INFRASTORE_ERR_MISMATCHED_ARTIFACT,
+        E::OwnerMismatch { .. } => INFRASTORE_ERR_OWNER_MISMATCH,
         _ => INFRASTORE_ERR_INTERNAL,
     };
     set_error(e.to_string());
     code
+}
+
+/// The optional owner guard an id-addressed call carries: `None` when
+/// `has_owner` is false, and otherwise the `(owner_id, owner_category)` pair to
+/// hold the addressed row to.
+///
+/// The ABI spells "no guard" as a flag rather than a sentinel owner id, because
+/// every `i64` is a legitimate owner id and no value is free to mean "unset".
+fn optional_owner(
+    has_owner: bool,
+    owner_id: i64,
+    owner_category: i32,
+) -> Result<Option<(i64, core_lib::OwnerCategory)>, i32> {
+    if !has_owner {
+        return Ok(None);
+    }
+    let category = match owner_category {
+        0 => core_lib::OwnerCategory::Component,
+        1 => core_lib::OwnerCategory::SupplementalAttribute,
+        other => {
+            set_error(format!("invalid owner_category {other}"));
+            return Err(INFRASTORE_ERR_INVALID_PARAMETER);
+        }
+    };
+    Ok(Some((owner_id, category)))
 }
 
 /// Dereference a raw handle pointer or return `INFRASTORE_ERR_NULL_POINTER`.
@@ -1276,6 +1309,16 @@ pub unsafe extern "C" fn infrastore_store_add_non_sequential(
 /// `infrastore_store_association_exists` first when some references are
 /// expected to have gone. A repeated id is removed, and counted, once.
 ///
+/// Set `has_owner` to hold every id to the owner `(owner_id, owner_category)`:
+/// the row's owner is read and the row deleted by the same transaction, and a
+/// row belonging to anyone else is `INFRASTORE_ERR_OWNER_MISMATCH` with the
+/// whole batch rolled back. A caller that means "retire this owner's series"
+/// must use the guard rather than checking the owner in a call of its own — an
+/// id survives a reassignment, so a separate check has a window after it in
+/// which the row can move, and the removal would then retire the new owner's
+/// series. `owner_id` and `owner_category` are ignored when `has_owner` is
+/// false.
+///
 /// # Safety
 ///
 /// `handle` must be a live store handle created by this library and must not be
@@ -1287,6 +1330,9 @@ pub unsafe extern "C" fn infrastore_store_remove_by_ids(
     handle: *mut InfraStoreHandle,
     ids: *const i64,
     n: u64,
+    has_owner: bool,
+    owner_id: i64,
+    owner_category: i32,
     out_removed: *mut u64,
 ) -> i32 {
     clear_error();
@@ -1313,7 +1359,15 @@ pub unsafe extern "C" fn infrastore_store_remove_by_ids(
         .copied()
         .map(core_lib::TimeSeriesId)
         .collect();
-    match store.inner.remove_by_ids(&id_slice) {
+    let owner = match optional_owner(has_owner, owner_id, owner_category) {
+        Ok(owner) => owner,
+        Err(code) => return code,
+    };
+    let removed = match owner {
+        Some(owner) => store.inner.remove_by_ids_for_owner(&id_slice, owner),
+        None => store.inner.remove_by_ids(&id_slice),
+    };
+    match removed {
         Ok(removed) => {
             unsafe { *out_removed = removed as u64 };
             INFRASTORE_OK
@@ -3889,6 +3943,14 @@ pub unsafe extern "C" fn infrastore_store_read_by_ids_range(
 /// extent running past its end, which a raw time range would instead clamp.
 /// `INFRASTORE_ERR_NOT_FOUND` if the id names no row.
 ///
+/// Set `has_owner` to hold the row to the owner `(owner_id, owner_category)`,
+/// and get `INFRASTORE_ERR_OWNER_MISMATCH` when it belongs to someone else. The
+/// owner is taken off the same row the values are materialized from, so the
+/// guarded read costs exactly what the unguarded one does — where confirming
+/// the owner in a call of its own would be a second round trip whose answer
+/// describes the row as it was rather than the row being read. `owner_id` and
+/// `owner_category` are ignored when `has_owner` is false.
+///
 /// # Safety
 ///
 /// `out_result` must be valid for writing one pointer. On `INFRASTORE_OK` the
@@ -3906,6 +3968,9 @@ pub unsafe extern "C" fn infrastore_store_read_by_id(
     len: u64,
     count_present: bool,
     count: u64,
+    has_owner: bool,
+    owner_id: i64,
+    owner_category: i32,
     out_result: *mut *mut InfraStoreBulkReadHandle,
 ) -> i32 {
     clear_error();
@@ -3950,7 +4015,17 @@ pub unsafe extern "C" fn infrastore_store_read_by_id(
         len,
         count,
     };
-    let item = match store.inner.read_by_id(core_lib::TimeSeriesId(id), window) {
+    let owner = match optional_owner(has_owner, owner_id, owner_category) {
+        Ok(owner) => owner,
+        Err(code) => return code,
+    };
+    let read = match owner {
+        Some(owner) => store
+            .inner
+            .read_by_id_for_owner(core_lib::TimeSeriesId(id), owner, window),
+        None => store.inner.read_by_id(core_lib::TimeSeriesId(id), window),
+    };
+    let item = match read {
         Ok(d) => d,
         Err(e) => return map_core_error(e),
     };
@@ -7797,6 +7872,9 @@ mod reader_ffi_tests {
                     0,
                     false,
                     0,
+                    false,
+                    0,
+                    0,
                     &mut result,
                 )
             },
@@ -8086,6 +8164,9 @@ mod abi_tests {
                     0,
                     false,
                     0,
+                    false,
+                    0,
+                    0,
                     &mut result,
                 )
             },
@@ -8258,7 +8339,21 @@ mod abi_tests {
     fn abi_read_by_id(store: *mut InfraStoreHandle, id: i64) -> (i32, Vec<i64>, Vec<u8>) {
         let mut result: *mut InfraStoreBulkReadHandle = ptr::null_mut();
         let rc = unsafe {
-            infrastore_store_read_by_id(store, id, false, false, 0, false, 0, false, 0, &mut result)
+            infrastore_store_read_by_id(
+                store,
+                id,
+                false,
+                false,
+                0,
+                false,
+                0,
+                false,
+                0,
+                false,
+                0,
+                0,
+                &mut result,
+            )
         };
         assert_eq!(rc, INFRASTORE_OK, "read_by_id failed: {}", last_error());
 
@@ -8505,6 +8600,9 @@ mod abi_tests {
                     0,
                     false,
                     0,
+                    false,
+                    0,
+                    0,
                     &mut out_result,
                 )
             },
@@ -8521,6 +8619,9 @@ mod abi_tests {
                     false,
                     0,
                     false,
+                    0,
+                    false,
+                    0,
                     0,
                     ptr::null_mut(),
                 )
@@ -8539,7 +8640,9 @@ mod abi_tests {
         // A non-null `ids` is only required when the count is non-zero.
         let mut removed = 0u64;
         assert_eq!(
-            unsafe { infrastore_store_remove_by_ids(store, ptr::null(), 1, &mut removed) },
+            unsafe {
+                infrastore_store_remove_by_ids(store, ptr::null(), 1, false, 0, 0, &mut removed)
+            },
             INFRASTORE_ERR_NULL_POINTER
         );
 
@@ -9168,7 +9271,9 @@ mod abi_tests {
         let missing = 9_999i64;
         let mut removed = 0u64;
         assert_eq!(
-            unsafe { infrastore_store_remove_by_ids(store, &missing, 1, &mut removed) },
+            unsafe {
+                infrastore_store_remove_by_ids(store, &missing, 1, false, 0, 0, &mut removed)
+            },
             INFRASTORE_ERR_NOT_FOUND
         );
         assert!(!last_error().is_empty());
@@ -9192,7 +9297,7 @@ mod abi_tests {
         assert_eq!(k, 0, "a refused add mints no id");
         let mut removed = 0u64;
         assert_eq!(
-            unsafe { infrastore_store_remove_by_ids(ro, &missing, 1, &mut removed) },
+            unsafe { infrastore_store_remove_by_ids(ro, &missing, 1, false, 0, 0, &mut removed) },
             INFRASTORE_ERR_READ_ONLY
         );
         let mut report: *mut c_char = ptr::null_mut();
@@ -9222,6 +9327,9 @@ mod abi_tests {
                 false,
                 0,
                 false,
+                0,
+                false,
+                0,
                 0,
                 &mut result,
             )
@@ -9958,7 +10066,7 @@ mod abi_tests {
             let id = abi_add_f64(store, -1, &name, &[i as f64, 0.0, 0.0]);
             let mut removed: u64 = 0;
             assert_eq!(
-                unsafe { infrastore_store_remove_by_ids(store, &id, 1, &mut removed) },
+                unsafe { infrastore_store_remove_by_ids(store, &id, 1, false, 0, 0, &mut removed) },
                 INFRASTORE_OK,
                 "spacer remove failed: {}",
                 last_error()
@@ -10079,6 +10187,128 @@ mod abi_tests {
         unsafe { infrastore_store_free(store) };
     }
 
+    /// The owner guard crosses the ABI on both id-addressed calls: it holds the
+    /// row to the owner the caller names, and reports a mismatch by its own
+    /// code rather than as a missing row.
+    #[test]
+    fn abi_owner_guarded_read_and_removal_hold_a_row_to_its_owner() {
+        let store = abi_create_in_memory();
+        let a = abi_add_f64(store, 1, "a", &[1.0, 2.0, 3.0]);
+
+        // Guarded read: the owner that holds it is served, another is refused.
+        let mut result: *mut InfraStoreBulkReadHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                infrastore_store_read_by_id(
+                    store,
+                    a,
+                    false,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    0,
+                    true,
+                    1,
+                    0,
+                    &mut result,
+                )
+            },
+            INFRASTORE_OK
+        );
+        assert_eq!(unsafe { infrastore_bulk_result_len(result) }, 1);
+        unsafe { infrastore_bulk_result_free(result) };
+
+        let mut refused: *mut InfraStoreBulkReadHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                infrastore_store_read_by_id(
+                    store,
+                    a,
+                    false,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    0,
+                    true,
+                    2,
+                    0,
+                    &mut refused,
+                )
+            },
+            INFRASTORE_ERR_OWNER_MISMATCH
+        );
+        assert!(refused.is_null());
+
+        // The same id under the other owner category is a different owner.
+        assert_eq!(
+            unsafe {
+                infrastore_store_read_by_id(
+                    store,
+                    a,
+                    false,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    0,
+                    true,
+                    1,
+                    1,
+                    &mut refused,
+                )
+            },
+            INFRASTORE_ERR_OWNER_MISMATCH
+        );
+
+        // An owner_category outside the enum is a bad argument, not a mismatch.
+        assert_eq!(
+            unsafe {
+                infrastore_store_read_by_id(
+                    store,
+                    a,
+                    false,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    0,
+                    true,
+                    1,
+                    7,
+                    &mut refused,
+                )
+            },
+            INFRASTORE_ERR_INVALID_PARAMETER
+        );
+
+        // Guarded removal: refused for the wrong owner, and the row survives.
+        let mut removed = 0u64;
+        assert_eq!(
+            unsafe { infrastore_store_remove_by_ids(store, &a, 1, true, 2, 0, &mut removed) },
+            INFRASTORE_ERR_OWNER_MISMATCH
+        );
+        let mut present = false;
+        assert_eq!(
+            unsafe { infrastore_store_association_exists(store, a, &mut present) },
+            INFRASTORE_OK
+        );
+        assert!(present, "a refused removal must leave the row in place");
+
+        assert_eq!(
+            unsafe { infrastore_store_remove_by_ids(store, &a, 1, true, 1, 0, &mut removed) },
+            INFRASTORE_OK
+        );
+        assert_eq!(removed, 1);
+
+        unsafe { infrastore_store_free(store) };
+    }
+
     /// `infrastore_store_remove_by_ids` removes exactly the rows its ids name,
     /// is all-or-nothing when one of them dangles, and reports the count.
     #[test]
@@ -10092,7 +10322,9 @@ mod abi_tests {
         let doomed = [a, 9_999, b];
         let mut removed = 0u64;
         assert_eq!(
-            unsafe { infrastore_store_remove_by_ids(store, doomed.as_ptr(), 3, &mut removed) },
+            unsafe {
+                infrastore_store_remove_by_ids(store, doomed.as_ptr(), 3, false, 0, 0, &mut removed)
+            },
             INFRASTORE_ERR_NOT_FOUND
         );
         for id in [a, b, c] {
@@ -10107,7 +10339,9 @@ mod abi_tests {
         // The good pair goes together; a repeated id counts once.
         let asked = [a, b, a];
         assert_eq!(
-            unsafe { infrastore_store_remove_by_ids(store, asked.as_ptr(), 3, &mut removed) },
+            unsafe {
+                infrastore_store_remove_by_ids(store, asked.as_ptr(), 3, false, 0, 0, &mut removed)
+            },
             INFRASTORE_OK,
             "remove_by_ids failed: {}",
             last_error()
@@ -10125,12 +10359,16 @@ mod abi_tests {
         // An empty request is valid; a null `ids` with a non-zero length is not,
         // and neither is a null out pointer.
         assert_eq!(
-            unsafe { infrastore_store_remove_by_ids(store, ptr::null(), 0, &mut removed) },
+            unsafe {
+                infrastore_store_remove_by_ids(store, ptr::null(), 0, false, 0, 0, &mut removed)
+            },
             INFRASTORE_OK
         );
         assert_eq!(removed, 0);
         assert_eq!(
-            unsafe { infrastore_store_remove_by_ids(store, ptr::null(), 1, &mut removed) },
+            unsafe {
+                infrastore_store_remove_by_ids(store, ptr::null(), 1, false, 0, 0, &mut removed)
+            },
             INFRASTORE_ERR_NULL_POINTER
         );
         assert!(
@@ -10139,7 +10377,17 @@ mod abi_tests {
             last_error()
         );
         assert_eq!(
-            unsafe { infrastore_store_remove_by_ids(store, asked.as_ptr(), 1, ptr::null_mut()) },
+            unsafe {
+                infrastore_store_remove_by_ids(
+                    store,
+                    asked.as_ptr(),
+                    1,
+                    false,
+                    0,
+                    0,
+                    ptr::null_mut(),
+                )
+            },
             INFRASTORE_ERR_NULL_POINTER
         );
         assert!(

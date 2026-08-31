@@ -87,6 +87,7 @@ const INFRASTORE_ERR_DUPLICATE_ASSOCIATION = Int32(10)
 const INFRASTORE_ERR_DUPLICATE_ASSOCIATION_ID = Int32(13)
 const INFRASTORE_ERR_STORE_EXISTS = Int32(11)
 const INFRASTORE_ERR_MISMATCHED_ARTIFACT = Int32(12)
+const INFRASTORE_ERR_OWNER_MISMATCH = Int32(14)
 const INFRASTORE_ERR_INTERNAL = Int32(99)
 
 # ---- Owner category --------------------------------------------------------
@@ -483,6 +484,22 @@ struct MismatchedArtifactError <: TimeSeriesException
     msg::String
 end
 
+"""
+    OwnerMismatchError
+
+An id-addressed call that was given an `owner` named a row belonging to a
+different one — [`read_by_id`](@ref) or [`remove_by_ids!`](@ref) with the guard
+set.
+
+Distinct from [`NotFoundError`](@ref), which says the id names no row at all:
+here the row is there and the caller's belief about who owns it has gone stale.
+A series can be reassigned and its id follows it, which is exactly why the owner
+belongs in the call rather than in a check beside it.
+"""
+struct OwnerMismatchError <: TimeSeriesException
+    msg::String
+end
+
 struct GenericError <: TimeSeriesException
     msg::String
     code::Int32
@@ -533,6 +550,8 @@ function _check(code::Int32)
         throw(StoreExistsError(msg))
     elseif code == INFRASTORE_ERR_MISMATCHED_ARTIFACT
         throw(MismatchedArtifactError(msg))
+    elseif code == INFRASTORE_ERR_OWNER_MISMATCH
+        throw(OwnerMismatchError(msg))
     else
         throw(GenericError(msg, code))
     end

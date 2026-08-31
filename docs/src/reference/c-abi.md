@@ -53,22 +53,23 @@ do not hand-edit it. The [Julia binding](./julia-api.md) is the primary consumer
 
 ## Status Codes
 
-| Macro                                  | Value | Meaning                                                                                                                                                                                        |
-| -------------------------------------- | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `INFRASTORE_OK`                        | 0     | Success                                                                                                                                                                                        |
-| `INFRASTORE_ERR_NULL_POINTER`          | 1     | A required pointer was `NULL`                                                                                                                                                                  |
-| `INFRASTORE_ERR_INVALID_UTF8`          | 2     | A string argument was not UTF-8                                                                                                                                                                |
-| `INFRASTORE_ERR_INVALID_PARAMETER`     | 3     | A bad argument value                                                                                                                                                                           |
-| `INFRASTORE_ERR_NOT_FOUND`             | 4     | No matching series / array                                                                                                                                                                     |
-| `INFRASTORE_ERR_DUPLICATE`             | 5     | Key already exists                                                                                                                                                                             |
-| `INFRASTORE_ERR_INTEGRITY`             | 6     | On-disk inconsistency                                                                                                                                                                          |
-| `INFRASTORE_ERR_READ_ONLY`             | 7     | Write on a read-only store                                                                                                                                                                     |
-| `INFRASTORE_ERR_IO`                    | 8     | I/O failure                                                                                                                                                                                    |
-| `INFRASTORE_ERR_INCOMPATIBLE_FORMAT`   | 9     | The store on disk was written in a different, incompatible on-disk format than this build reads. There is no in-place upgrade.                                                                 |
-| `INFRASTORE_ERR_DUPLICATE_ASSOCIATION` | 10    | An attachment or parent/child edge with the same identity already exists. Distinct from `INFRASTORE_ERR_DUPLICATE`, which is about time-series identity.                                       |
-| `INFRASTORE_ERR_STORE_EXISTS`          | 11    | A store already exists where one was about to be created. Creating there would discard its arrays while keeping its catalog. Use `infrastore_store_create_replacing` to discard it on purpose. |
-| `INFRASTORE_ERR_MISMATCHED_ARTIFACT`   | 12    | The HDF5 file and its `.sqlite` catalog do not carry the same generation stamp: they are halves of two different saves.                                                                        |
-| `INFRASTORE_ERR_INTERNAL`              | 99    | Unexpected internal error                                                                                                                                                                      |
+| Macro                                  | Value | Meaning                                                                                                                                                                                                                 |
+| -------------------------------------- | ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `INFRASTORE_OK`                        | 0     | Success                                                                                                                                                                                                                 |
+| `INFRASTORE_ERR_NULL_POINTER`          | 1     | A required pointer was `NULL`                                                                                                                                                                                           |
+| `INFRASTORE_ERR_INVALID_UTF8`          | 2     | A string argument was not UTF-8                                                                                                                                                                                         |
+| `INFRASTORE_ERR_INVALID_PARAMETER`     | 3     | A bad argument value                                                                                                                                                                                                    |
+| `INFRASTORE_ERR_NOT_FOUND`             | 4     | No matching series / array                                                                                                                                                                                              |
+| `INFRASTORE_ERR_DUPLICATE`             | 5     | Key already exists                                                                                                                                                                                                      |
+| `INFRASTORE_ERR_INTEGRITY`             | 6     | On-disk inconsistency                                                                                                                                                                                                   |
+| `INFRASTORE_ERR_READ_ONLY`             | 7     | Write on a read-only store                                                                                                                                                                                              |
+| `INFRASTORE_ERR_IO`                    | 8     | I/O failure                                                                                                                                                                                                             |
+| `INFRASTORE_ERR_INCOMPATIBLE_FORMAT`   | 9     | The store on disk was written in a different, incompatible on-disk format than this build reads. There is no in-place upgrade.                                                                                          |
+| `INFRASTORE_ERR_DUPLICATE_ASSOCIATION` | 10    | An attachment or parent/child edge with the same identity already exists. Distinct from `INFRASTORE_ERR_DUPLICATE`, which is about time-series identity.                                                                |
+| `INFRASTORE_ERR_STORE_EXISTS`          | 11    | A store already exists where one was about to be created. Creating there would discard its arrays while keeping its catalog. Use `infrastore_store_create_replacing` to discard it on purpose.                          |
+| `INFRASTORE_ERR_MISMATCHED_ARTIFACT`   | 12    | The HDF5 file and its `.sqlite` catalog do not carry the same generation stamp: they are halves of two different saves.                                                                                                 |
+| `INFRASTORE_ERR_OWNER_MISMATCH`        | 14    | An id-addressed call carrying an expected owner named a row that belongs to a different one. Distinct from `INFRASTORE_ERR_NOT_FOUND`: the row is there, and it is the caller's belief about who owns it that is stale. |
+| `INFRASTORE_ERR_INTERNAL`              | 99    | Unexpected internal error                                                                                                                                                                                               |
 
 ## Lifecycle
 
@@ -134,9 +135,14 @@ int32_t infrastore_store_add_single(struct InfraStore *handle,
 
 /* All-or-nothing removal by catalog association id: an id naming no row returns
    INFRASTORE_ERR_NOT_FOUND and removes nothing. A repeated id is removed, and
-   counted, once. `ids` may be null only when `n` is 0. */
+   counted, once. `ids` may be null only when `n` is 0.
+   Set has_owner to hold every id to (owner_id, owner_category): the owner is read
+   and the row deleted by the same transaction, and a row belonging to anyone else
+   is INFRASTORE_ERR_OWNER_MISMATCH with the whole batch rolled back. */
 int32_t infrastore_store_remove_by_ids(struct InfraStore *handle, const int64_t *ids,
-                             uint64_t n, uint64_t *out_removed);
+                             uint64_t n,
+                             bool has_owner, int64_t owner_id, int32_t owner_category,
+                             uint64_t *out_removed);
 
 /* Whether an association is filed under `id` -- a primary-key probe that fetches
    no row, so a consumer can validate every reference in its own model on load
@@ -605,6 +611,15 @@ back as an owned C string, freed with `infrastore_string_free` — the companion
 other removals above: one all-or-nothing transaction, the count through `out_removed`, and
 `INFRASTORE_ERR_NOT_FOUND` if any id names no row.
 
+Both id-addressed calls carry an optional **owner guard** — `has_owner` beside `owner_id` and
+`owner_category`, ignored when the flag is false — that holds the addressed row to one owner and
+returns `INFRASTORE_ERR_OWNER_MISMATCH` when it belongs to another. A consumer that addresses a
+series by id but means "this owner's series" has to use it rather than confirming the owner in a
+call of its own: an id survives a reassignment, so a separate check has a window after it in which
+the row can move, and a removal issued after that window retires the new owner's series. The guard
+puts the check and the act in one transaction, and costs the read nothing at all — the owner comes
+off the same row the values are materialized from.
+
 `infrastore_store_read_by_id` also takes a window. Each optional argument is a `*_present` flag
 beside its value; with none present it reads the whole series. `start_ms` is Unix milliseconds,
 spelled zoned or zoneless by `start_zoneless` like every other bound; `len` counts timesteps (the
@@ -620,6 +635,7 @@ int32_t infrastore_store_read_by_id(const struct InfraStore *handle, int64_t id,
                              bool start_present, bool start_zoneless, int64_t start_ms,
                              bool len_present, uint64_t len,
                              bool count_present, uint64_t count,
+                             bool has_owner, int64_t owner_id, int32_t owner_category,
                              struct InfraStoreBulkRead **out_result);
 int32_t infrastore_bulk_result_item_name(const struct InfraStoreBulkRead *result,
                                  uint64_t index, char **out_name);

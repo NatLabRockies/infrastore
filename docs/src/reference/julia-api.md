@@ -460,7 +460,8 @@ add_time_series!(
 ) -> Int64   # the catalog row's id -- what every read, removal and rename takes
 
 read_by_id(store::Store, id::Integer;
-          start_time=nothing, len=nothing, count=nothing) -> SingleTimeSeries | ...
+          start_time=nothing, len=nothing, count=nothing,
+          owner=nothing) -> SingleTimeSeries | ...
 read_by_ids(store::Store, ids::AbstractVector{<:Integer};
            time_range=nothing) -> Vector
 ```
@@ -482,6 +483,9 @@ records ids in its own model does the first half once.
 
 To read every series' value at one timestamp in a loop (the simulation pattern), use a
 [`StaticReader`](#staticreader) rather than calling `read_by_id` per series.
+
+`owner = (owner_id, category)` holds the row to that owner, throwing `OwnerMismatchError` when it
+belongs to another — see [the owner guard](#the-owner-guard).
 
 ### Bulk reads
 
@@ -600,7 +604,7 @@ directly; `bytes2hex` gives the display form.
 ### Removal
 
 ```julia
-remove_by_ids!(store, ids::AbstractVector{<:Integer}) -> Int
+remove_by_ids!(store, ids::AbstractVector{<:Integer}; owner=nothing) -> Int
 remove_by_filter!(store; owner_id=nothing, name=nothing, ...) -> Int
 ```
 
@@ -613,6 +617,28 @@ It refuses to remove a `SingleTimeSeries` whose array still backs a `Determinist
 when it is the last backing series (the DST is a view of that array), raising
 `InvalidParameterError` — remove the derived forecast first, or use an owner-scoped `clear!`, which
 is exempt.
+
+#### The owner guard
+
+```julia
+remove_by_ids!(store, ids; owner = (7, Component))       # only rows owned by component 7
+read_by_id(store, id; owner = (7, Component))            # only if component 7 owns it
+```
+
+Both id-addressed calls take an optional `owner = (owner_id, category)`. The addressed row is held
+to that owner and one belonging to anyone else throws `OwnerMismatchError`; for the removal the
+check and the delete are one transaction, so a refused batch removes nothing.
+
+A caller whose model says "this component's series" must pass the owner rather than confirm it in a
+call of its own. An id is the whole address and it survives `replace_owner!`, so a
+`get_metadata_by_id` that confirms the owner and a `remove_by_ids!` that then deletes are two calls
+with a window between them — and a reassignment landing in that window makes the removal retire the
+_new_ owner's series, the very thing the check was for. The category is half the owner: a component
+and a supplemental attribute can carry the same integer id.
+
+On the read side there is no window either way, but the guard is still the cheaper spelling: the
+owner comes off the same row the values are materialized from, so it costs nothing, where a separate
+check is a second round trip.
 
 `remove_by_filter!` is the one removal that does not take ids, because enumerating them first is the
 wrong shape for "remove everything matching": it takes the same filter as `list_metadata`, resolves
@@ -1212,6 +1238,7 @@ All subtype `TimeSeriesException`:
 | `IOError`                   | `INFRASTORE_ERR_IO`                                                                                |
 | `StoreExistsError`          | `INFRASTORE_ERR_STORE_EXISTS`                                                                      |
 | `MismatchedArtifactError`   | `INFRASTORE_ERR_MISMATCHED_ARTIFACT`                                                               |
+| `OwnerMismatchError`        | `INFRASTORE_ERR_OWNER_MISMATCH`                                                                    |
 | `GenericError`              | Any other non-zero code (carries the numeric `code`)                                               |
 
 The message text comes from the FFI layer's thread-local error buffer.

@@ -415,7 +415,7 @@ function remove_by_filter!(
 end
 
 """
-    remove_by_ids!(store, ids) -> Int
+    remove_by_ids!(store, ids; owner=nothing) -> Int
 
 Remove many associations named by their catalog `id`, in one all-or-nothing
 transaction, returning the number removed.
@@ -428,16 +428,36 @@ names no row, leaving the store untouched — sift the set with
 [`association_exists`](@ref) first when some references are expected to have
 gone. A repeated id is removed, and counted, once.
 
+Pass `owner = (owner_id, category)` to hold every id to that owner: the row's
+owner is read and the row deleted by the same transaction, and a row belonging
+to anyone else throws [`OwnerMismatchError`](@ref) with the whole batch rolled
+back.
+
+A caller that means "retire *this* owner's series" must use the guard rather
+than confirming the owner in a call of its own. An id survives a reassignment,
+so a separate check has a window after it in which the row can move to another
+owner, and the removal then retires that owner's series — the very thing the
+check was for. The category is half the owner, since a component and a
+supplemental attribute can share an integer id.
+
 See also [`read_by_ids`](@ref), the read direction of the same reference.
 """
-function remove_by_ids!(store::Store, ids::AbstractVector{<:Integer})
+function remove_by_ids!(
+    store::Store,
+    ids::AbstractVector{<:Integer};
+    owner::Union{Nothing, Tuple{Integer, OwnerCategory}}=nothing,
+)
     isempty(ids) && return 0
     id_vec = Int64[Int64(id) for id in ids]
+    (has_owner, owner_id, owner_category) = _owner_guard(owner)
     out_removed = Ref{UInt64}(0)
     code = GC.@preserve id_vec @ccall lib_path().infrastore_store_remove_by_ids(
         store::Ptr{Cvoid},
         id_vec::Ptr{Int64},
         UInt64(length(id_vec))::UInt64,
+        has_owner::Bool,
+        owner_id::Int64,
+        owner_category::Int32,
         out_removed::Ref{UInt64},
     )::Int32
     _check(code)

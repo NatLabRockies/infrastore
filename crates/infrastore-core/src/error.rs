@@ -8,6 +8,32 @@ pub enum TimeSeriesError {
     #[error("time series not found")]
     NotFound,
 
+    /// An id-addressed operation named a row belonging to an owner other than
+    /// the one the caller expected.
+    ///
+    /// Raised only by the owner-guarded forms — [`crate::Store::read_by_id_for_owner`]
+    /// and [`crate::Store::remove_by_ids_for_owner`] — which exist because the
+    /// two halves cannot be checked separately: an id survives
+    /// [`crate::Store::replace_owner`], so a row confirmed by one
+    /// call and acted on by the next can move between them, and the removal
+    /// that meant to retire *this* owner's series retires the new owner's
+    /// instead.
+    ///
+    /// Distinct from [`Self::NotFound`], which says no row carries the id at
+    /// all: here the row exists and the caller's belief about it is what is
+    /// stale.
+    #[error(
+        "association {id} belongs to owner {actual_id} ({actual_category}), not \
+         to the expected owner {expected_id} ({expected_category})"
+    )]
+    OwnerMismatch {
+        id: i64,
+        expected_id: i64,
+        expected_category: &'static str,
+        actual_id: i64,
+        actual_category: &'static str,
+    },
+
     #[error("a time series with the same key already exists")]
     DuplicateTimeSeries,
 
