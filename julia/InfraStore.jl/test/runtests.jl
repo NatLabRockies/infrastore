@@ -188,6 +188,31 @@ end
     @test get_metadata_by_id(store, id).time_series_type <: PersistentTimeSeries
     @test resolve_id(PersistentTimeSeries, store, 7, Component, "gas_price") == id
 
+    # The lookup that defines the type, on all four boundary regions. It is a
+    # property of the series, so it works on one the store just handed back --
+    # which is the case that matters, since a caller re-deriving hold-last
+    # against a curve it read is exactly the drift this exists to prevent.
+    for (at, expected) in (
+        # 1. At a breakpoint -> that breakpoint (right-continuous).
+        (DateTime(2024, 1, 1), 1),
+        (DateTime(2024, 4, 1), 2),
+        (DateTime(2024, 7, 1), 3),
+        # 2. Between two -> the earlier one. Where a NonSequentialTimeSeries
+        #    has no value at all.
+        (DateTime(2024, 2, 15), 1),
+        (DateTime(2024, 4, 1, 0, 0, 1), 2),
+        # 3. Past the last -> the last, forever.
+        (DateTime(2024, 12, 31), 3),
+        (DateTime(2099, 1, 1), 3),
+    )
+        @test index_in_force_at(got, at) == expected
+        @test got.data[index_in_force_at(got, at)] == series.data[expected]
+    end
+    # 4. Before the first -> an error naming the series, never a clamp.
+    @test_throws InfraStore.InvalidParameterError index_in_force_at(
+        got, DateTime(2023, 12, 31)
+    )
+
     # A range whose start is not a breakpoint still yields the value in force
     # there: the slice begins one breakpoint earlier than the window does. This
     # is the case where a NonSequentialTimeSeries would start at July instead.

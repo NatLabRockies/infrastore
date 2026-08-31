@@ -234,3 +234,62 @@ def test_a_bulk_read_reconstructs_the_type():
     out = store.read_by_ids(ids)
     assert all(isinstance(s, PersistentTimeSeries) for s in out)
     assert [len(s) for s in out] == [2, 3]
+
+
+def test_index_in_force_at_covers_the_four_boundary_cases():
+    """The lookup that defines the type, reachable from the binding that needs
+    it. Without this a consumer round-trips a curve through the store and still
+    has to reimplement hold-last client-side, leaving two implementations free
+    to drift."""
+    months = [1, 4, 7]
+    c = curve("gas", months)
+
+    def value_at(at: datetime) -> float:
+        return float(c.data[c.index_in_force_at(at)])
+
+    # 1. Exactly at a breakpoint -> that breakpoint's value (right-continuous).
+    for m in months:
+        assert value_at(month(m)) == m * 10.0
+
+    # 2. Between breakpoints -> the previous value. This is the case that
+    #    diverges from NonSequentialTimeSeries, where it is a hard error.
+    assert value_at(month(2)) == 10.0
+    assert value_at(month(4) + timedelta(seconds=1)) == 40.0
+
+    # 3. After the last breakpoint -> the last value, forever.
+    assert value_at(month(12)) == 70.0
+    assert value_at(datetime(2099, 1, 1, tzinfo=timezone.utc)) == 70.0
+
+    # 4. Before the first -> an error naming the series, never a clamp.
+    with pytest.raises(InvalidParameterError) as excinfo:
+        c.index_in_force_at(month(1) - timedelta(milliseconds=1))
+    assert "gas" in str(excinfo.value)
+    assert "before the first breakpoint" in str(excinfo.value)
+
+
+def test_index_in_force_at_agrees_with_a_series_read_back_from_a_store():
+    """The lookup is a property of the series, so it must survive the round
+    trip -- which is the whole point, since the consumer asking is holding a
+    curve the store handed it."""
+    months = [1, 3, 6, 11]
+    store = Store.create(in_memory=True)
+    ident = add(store, 1, curve("fuel", months))
+    back = store.read_by_id(ident)
+    for m in range(1, 13):
+        at = month(m)
+        assert float(back.data[back.index_in_force_at(at)]) == hold_last(months, at)
+
+
+def test_index_in_force_at_refuses_a_query_spelled_unlike_the_series():
+    """A naive datetime does not name an instant, so it cannot be resolved
+    against breakpoints that do -- the same rule a ranged read applies, rather
+    than silently reading the wall clock as UTC."""
+    aware = curve("aware", [1, 4])
+    with pytest.raises(InvalidParameterError):
+        aware.index_in_force_at(datetime(2024, 2, 1))
+
+    naive_stamps = [datetime(2024, 1, 1), datetime(2024, 4, 1)]
+    zoneless = PersistentTimeSeries(naive_stamps, np.array([1.0, 2.0]), "wall_clock")
+    assert zoneless.index_in_force_at(datetime(2024, 2, 1)) == 0
+    with pytest.raises(InvalidParameterError):
+        zoneless.index_in_force_at(month(2))

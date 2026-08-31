@@ -4466,6 +4466,86 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_persistent(
     }
 }
 
+/// The 0-based row of the breakpoint **in force at** `at_unix_ms` for the
+/// `PersistentTimeSeries` at `index` — the greatest breakpoint `<= at`, whose
+/// value the step function holds there.
+///
+/// This is the type's defining semantic and the store owns it. A caller could
+/// bisect the breakpoint vector `infrastore_bulk_result_get_persistent` hands
+/// back and get the same answer today, but that is a second implementation of
+/// hold-last free to drift from this one; the row indexes the same `out_data`
+/// that call produced, so nothing else is needed to read the value.
+///
+/// Returns `INFRASTORE_ERR_INVALID_PARAMETER` when `at_unix_ms` is strictly
+/// before the first breakpoint, where a step function is undefined. It is never
+/// clamped. Past the last breakpoint the value is held forward, so a later `at`
+/// yields the final row.
+///
+/// `at_unix_ms` is Unix milliseconds, matching every other instant across this
+/// ABI, and is compared against the series' breakpoints as they are stored —
+/// this call does not consult the series' `time_reference`, so a caller mixing
+/// a wall clock with an instant-bearing series gets a well-defined answer to
+/// the wrong question. Spell the query the way the series is spelled.
+///
+/// # Safety
+///
+/// `result` must be a valid pointer to a live handle returned by a bulk read
+/// and not yet freed, and must not be mutated or freed by another thread for
+/// the duration of the call. `out_row` must be non-null and valid for writing
+/// one `size_t`; it is written only on `INFRASTORE_OK`. The handle is only
+/// read, so the returned row stays valid as long as the handle does.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_bulk_result_persistent_index_in_force_at(
+    result: *const InfraStoreBulkReadHandle,
+    index: u64,
+    at_unix_ms: i64,
+    out_row: *mut u64,
+) -> i32 {
+    clear_error();
+    let result = match unsafe { result.as_ref() } {
+        Some(r) => r,
+        None => {
+            set_error("bulk-read result handle is null");
+            return INFRASTORE_ERR_NULL_POINTER;
+        }
+    };
+    if out_row.is_null() {
+        set_error("out_row is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let series = match result.items.get(index as usize) {
+        Some(core_lib::TimeSeriesData::PersistentTimeSeries(s)) => s,
+        Some(other) => {
+            set_error(format!(
+                "bulk-read item {index} is a {}, not a PersistentTimeSeries",
+                other.time_series_type().as_str()
+            ));
+            return INFRASTORE_ERR_INVALID_PARAMETER;
+        }
+        None => {
+            set_error("bulk-read index out of bounds");
+            return INFRASTORE_ERR_INVALID_PARAMETER;
+        }
+    };
+    let at = match chrono::DateTime::from_timestamp_millis(at_unix_ms) {
+        Some(at) => at,
+        None => {
+            set_error(format!("{at_unix_ms} is not a representable instant"));
+            return INFRASTORE_ERR_INVALID_PARAMETER;
+        }
+    };
+    match series.index_in_force_at(at) {
+        Ok(row) => {
+            unsafe { *out_row = row as u64 };
+            INFRASTORE_OK
+        }
+        Err(msg) => {
+            set_error(msg);
+            INFRASTORE_ERR_INVALID_PARAMETER
+        }
+    }
+}
+
 /// Shared body of the two irregular-static bulk element readers. `want` selects
 /// which stored type is accepted; the payload is identical.
 ///
@@ -10831,5 +10911,83 @@ mod abi_tests {
             infrastore_store_free(target);
             infrastore_store_free(empty);
         }
+    }
+
+    /// The hold-last lookup across the ABI, on all four boundary regions.
+    ///
+    /// Built from a handle directly rather than through a store read: the
+    /// function only reads the handle's items, and the round trip is already
+    /// covered elsewhere. What is under test is that a foreign caller holding a
+    /// bulk-read result can ask which breakpoint applies without bisecting the
+    /// vector itself.
+    #[test]
+    fn the_persistent_lookup_reaches_a_foreign_caller() {
+        let months: Vec<chrono::DateTime<chrono::Utc>> = [1u32, 4, 7]
+            .iter()
+            .map(|m| {
+                chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2024, *m, 1, 0, 0, 0).unwrap()
+            })
+            .collect();
+        let series = core_lib::PersistentTimeSeries::new(
+            months.clone(),
+            core_lib::TypedArray::from_f64(vec![3], &[10.0, 40.0, 70.0]),
+            "gas",
+        )
+        .unwrap();
+        let handle = InfraStoreBulkReadHandle {
+            items: vec![core_lib::TimeSeriesData::PersistentTimeSeries(series)],
+        };
+        let row_at = |ms: i64| {
+            let mut row = u64::MAX;
+            let code = unsafe {
+                infrastore_bulk_result_persistent_index_in_force_at(&handle, 0, ms, &mut row)
+            };
+            (code, row)
+        };
+        let ms = |d: chrono::DateTime<chrono::Utc>| d.timestamp_millis();
+
+        // At a breakpoint, and between two: right-continuous, holding last.
+        assert_eq!(row_at(ms(months[0])), (INFRASTORE_OK, 0));
+        assert_eq!(row_at(ms(months[1])), (INFRASTORE_OK, 1));
+        assert_eq!(row_at(ms(months[1]) + 1), (INFRASTORE_OK, 1));
+
+        // Past the last breakpoint the value is held forward, not exhausted.
+        assert_eq!(row_at(ms(months[2]) + 86_400_000), (INFRASTORE_OK, 2));
+
+        // Before the first, an error naming the series -- never a clamp to 0.
+        let (code, _) = row_at(ms(months[0]) - 1);
+        assert_eq!(code, INFRASTORE_ERR_INVALID_PARAMETER);
+        assert!(last_error().contains("gas"), "{}", last_error());
+        assert!(
+            last_error().contains("before the first breakpoint"),
+            "{}",
+            last_error()
+        );
+
+        // A null out-pointer, an out-of-range index, and a slot holding some
+        // other type each report themselves rather than writing anything.
+        assert_eq!(
+            unsafe {
+                infrastore_bulk_result_persistent_index_in_force_at(
+                    &handle,
+                    0,
+                    ms(months[0]),
+                    ptr::null_mut(),
+                )
+            },
+            INFRASTORE_ERR_NULL_POINTER
+        );
+        let mut row = 0u64;
+        assert_eq!(
+            unsafe {
+                infrastore_bulk_result_persistent_index_in_force_at(
+                    &handle,
+                    9,
+                    ms(months[0]),
+                    &mut row,
+                )
+            },
+            INFRASTORE_ERR_INVALID_PARAMETER
+        );
     }
 }

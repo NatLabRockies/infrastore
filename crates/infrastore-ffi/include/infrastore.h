@@ -1563,6 +1563,41 @@ int32_t infrastore_bulk_result_get_persistent(const struct InfraStoreBulkReadHan
                                               char **out_component_field);
 
 /**
+ * The 0-based row of the breakpoint **in force at** `at_unix_ms` for the
+ * `PersistentTimeSeries` at `index` — the greatest breakpoint `<= at`, whose
+ * value the step function holds there.
+ *
+ * This is the type's defining semantic and the store owns it. A caller could
+ * bisect the breakpoint vector `infrastore_bulk_result_get_persistent` hands
+ * back and get the same answer today, but that is a second implementation of
+ * hold-last free to drift from this one; the row indexes the same `out_data`
+ * that call produced, so nothing else is needed to read the value.
+ *
+ * Returns `INFRASTORE_ERR_INVALID_PARAMETER` when `at_unix_ms` is strictly
+ * before the first breakpoint, where a step function is undefined. It is never
+ * clamped. Past the last breakpoint the value is held forward, so a later `at`
+ * yields the final row.
+ *
+ * `at_unix_ms` is Unix milliseconds, matching every other instant across this
+ * ABI, and is compared against the series' breakpoints as they are stored —
+ * this call does not consult the series' `time_reference`, so a caller mixing
+ * a wall clock with an instant-bearing series gets a well-defined answer to
+ * the wrong question. Spell the query the way the series is spelled.
+ *
+ * # Safety
+ *
+ * `result` must be a valid pointer to a live handle returned by a bulk read
+ * and not yet freed, and must not be mutated or freed by another thread for
+ * the duration of the call. `out_row` must be non-null and valid for writing
+ * one `size_t`; it is written only on `INFRASTORE_OK`. The handle is only
+ * read, so the returned row stays valid as long as the handle does.
+ */
+int32_t infrastore_bulk_result_persistent_index_in_force_at(const struct InfraStoreBulkReadHandle *result,
+                                                            uint64_t index,
+                                                            int64_t at_unix_ms,
+                                                            uint64_t *out_row);
+
+/**
  * Read a forecast element (`Deterministic`, `Probabilistic`, or `Scenarios`)
  * out of a read result. The out-params carry the forecast window parameters
  * (`out_scenario_count` is nonzero only for `Scenarios`; `out_percentiles` is
