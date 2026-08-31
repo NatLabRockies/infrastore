@@ -1,0 +1,548 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Releasing - infrastore Documentation</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Time-series storage for power-systems and energy simulations, with Rust, Python, and Julia bindings">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon.svg">
+        <link rel="shortcut icon" href="favicon.png">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="custom.css">
+        <link rel="stylesheet" href="pagetoc.css">
+        <link rel="stylesheet" href="version-selector.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">infrastore Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/NatLabRockies/infrastore" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/NatLabRockies/infrastore/tree/v0.11.0/docs/src/releasing.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="releasing"><a class="header" href="#releasing">Releasing</a></h1>
+<p>infrastore ships from one repository to three registries, plus prebuilt binaries on the repository's
+own releases. This page is the procedure.</p>
+<div class="table-wrapper"><table><thead><tr><th>Channel</th><th>Package(s)</th><th>Registry</th></tr></thead><tbody>
+<tr><td>Rust</td><td><code>infrastore-core</code>, <code>infrastore-proto</code>, <code>infrastore-ffi</code>, <code>infrastore-server</code>, <code>infrastore-cli</code></td><td>crates.io</td></tr>
+<tr><td>Python</td><td><code>infrastore</code></td><td>PyPI</td></tr>
+<tr><td>Julia</td><td><code>InfraStore</code> (binaries via <code>Artifacts.toml</code> → GitHub Releases)</td><td>Julia General</td></tr>
+<tr><td>Binaries</td><td><code>infrastore</code>, <code>infrastore-server</code>, <code>libinfrastore_ffi</code> + header</td><td>GitHub Releases</td></tr>
+</tbody></table>
+</div>
+<p><code>infrastore-py</code> and <code>infrastore-bench</code> set <code>publish = false</code>: the first ships as the <code>infrastore</code>
+wheel on PyPI rather than as a crate, and the second is an internal benchmarking tool.</p>
+<h2 id="versioning"><a class="header" href="#versioning">Versioning</a></h2>
+<p>The Rust crates, <code>InfraStore.jl</code>, and the Python package share the workspace version. Bump them
+together and tag the repo once per release, so every registry pins the same commit.</p>
+<p>The version lives in four places that must agree, and <code>cargo release</code> (below) writes all four:</p>
+<div class="table-wrapper"><table><thead><tr><th>File</th><th>Field</th><th>Written by</th></tr></thead><tbody>
+<tr><td><code>Cargo.toml</code></td><td><code>[workspace.package] version</code></td><td>cargo-release, natively</td></tr>
+<tr><td><code>Cargo.toml</code></td><td><code>[workspace.dependencies]</code> pins on <code>infrastore-core</code>/<code>-proto</code></td><td>cargo-release, natively</td></tr>
+<tr><td><code>crates/infrastore-py/pyproject.toml</code></td><td><code>[project] version</code></td><td><code>crates/infrastore-core/release.toml</code></td></tr>
+<tr><td><code>julia/InfraStore.jl/Project.toml</code></td><td><code>version</code></td><td><code>crates/infrastore-core/release.toml</code></td></tr>
+</tbody></table>
+</div>
+<p>The <code>[workspace.dependencies]</code> pins are easy to miss and fail late: <code>cargo publish</code> uploads
+<code>infrastore-core</code> at the new version, then rejects <code>infrastore-proto</code> because its requirement still
+names the old one. cargo-release moves <code>Cargo.lock</code> in the same commit.</p>
+<p>Two more version strings ride along, neither load-bearing: the <code>VERSION=v0.8.0</code> download example in
+<code>docs/src/getting-started/installation.md</code> and in <code>docs/src/how-to/use-cli.md</code>, so a version's
+published docs point at that version's own binaries.</p>
+<p>Two workflows guard this. <code>crates-release</code> refuses to publish if the tag does not match the
+workspace version, and <code>python-wheels</code> opens with a <code>versions agree</code> job that parses all four files
+above and fails unless they agree with each other and with the tag.</p>
+<p>That job exists because v0.5.0 was tagged with <code>pyproject.toml</code> still at <code>0.4.0</code>. maturin lets
+<code>[project] version</code> win over the Cargo workspace version, so every wheel job built and tested
+<code>0.4.0</code> artifacts and passed; only the upload caught it, with <code>400 File already exists</code>, because
+<code>0.4.0</code> was long since on PyPI. A PyPI filename can never be reused, so that tag was unpublishable
+and the release had to move to <code>0.5.1</code>. The guard runs before the wheel matrix, so the same mistake
+now costs seconds instead of a burnt version number.</p>
+<h2 id="hdf5-linkage"><a class="header" href="#hdf5-linkage">HDF5 linkage</a></h2>
+<p>Every distribution channel — the Rust crates, the Python wheel, and <code>InfraStore_jll</code> — ships with
+the <code>vendored</code> feature: HDF5 and zlib are compiled from source and linked statically.
+<code>pip install infrastore</code> and <code>cargo add infrastore-core</code> need no system libraries, only <code>cmake</code> and
+a C compiler at build time, and every channel is backed by the exact HDF5 version infrastore was
+tested against rather than whatever the target environment resolves.</p>
+<p>For the JLL this is a deliberate departure from Julia-ecosystem convention (linking <code>HDF5_jll</code>),
+made for two reasons:</p>
+<ul>
+<li><strong>Format control.</strong> The store is a data artifact with a compatibility contract
+(<code>DATA_FORMAT_VERSION</code>); pinning the HDF5 that backs it removes an entire class of
+environment-dependent behavior. An <code>HDF5_jll</code> upgrade in a user's environment must not change how
+infrastore files are read or written.</li>
+<li><strong>No MPI dependency.</strong> <code>HDF5_jll</code> is MPI-augmented and publishes no serial variant, so linking it
+forces an MPI runtime dependency and a 17-triplet build matrix onto a library that never calls MPI
+— and propagates that dependency to <code>InfraStore.jl</code> and InfrastructureSystems.jl.</li>
+</ul>
+<p>Two libhdf5 copies in one Julia process (ours plus HDF5.jl's) is safe here: the cdylib exports only
+its own <code>infrastore_*</code> symbols — the statically linked HDF5 symbols stay local, so nothing can
+cross-resolve. The one scenario that is genuinely hazardous, opening a live store's <code>.h5</code> file
+directly with HDF5.jl/NCDatasets.jl while a <code>Store</code> handle is open, is explicitly unsupported.</p>
+<blockquote>
+<p><strong>Never set <code>HDF5_DIR</code> in CI.</strong> The vendored HDF5 build forwards it to cmake as <code>HDF5_ROOT</code> while
+still requesting static libraries; against a shared-only install such as conda-forge's this fails
+with <code>Could NOT find HDF5 (missing: HDF5_LIBRARIES HDF5_HL_LIBRARIES)</code>. To build against system
+libraries, use <code>--no-default-features</code> instead.</p>
+</blockquote>
+<h3 id="multiple-hdf5-copies-in-one-python-interpreter"><a class="header" href="#multiple-hdf5-copies-in-one-python-interpreter">Multiple HDF5 copies in one Python interpreter</a></h3>
+<p>The same hazard applies in reverse to the wheels, which carry a statically linked HDF5 while a
+typical downstream environment also has <code>netCDF4</code> and <code>h5py</code>, each bundling its own. This is a
+tested property, not an assumption: <code>python/tests/test_hdf5_interop.py</code> drives real reads and writes
+through all three libraries in one process, in both initialization orders, and cibuildwheel runs the
+suite against every built wheel in its target environment (<code>test-requires</code> / <code>test-command</code> in
+<code>pyproject.toml</code>). Imports alone are not enough — on Linux a collision surfaces as silent symbol
+interposition rather than a clean error, which is why the test exercises I/O.</p>
+<p>If that check ever fails on a new platform, the fallbacks are to build that platform's wheels with
+<code>--no-default-features</code> against system libraries, or to hide the HDF5 symbols with a version script.</p>
+<p><strong>musllinux</strong> stays in <code>skip</code> in <code>pyproject.toml</code>. Vendoring removed the original blocker (the
+RPM-based <code>before-all</code> could not install HDF5 on musl), but the target has never been built, so
+un-skipping it is a separate change that needs its own CI run.</p>
+<h2 id="cutting-a-release"><a class="header" href="#cutting-a-release">Cutting a release</a></h2>
+<h3 id="1-bump-and-tag"><a class="header" href="#1-bump-and-tag">1. Bump and tag</a></h3>
+<p>The bump is automated with <a href="https://github.com/crate-ci/cargo-release">cargo-release</a>
+(<code>cargo install cargo-release</code>), configured by <code>release.toml</code> at the workspace root and
+<code>crates/infrastore-core/release.toml</code>. From a clean tree on a branch:</p>
+<pre><code class="language-sh">cargo release minor            # dry run -- prints every edit, changes nothing
+cargo release minor --execute  # 0.8.0 -&gt; 0.9.0, one commit
+</code></pre>
+<p><code>patch</code> and <code>major</code> work the same way, and an explicit <code>cargo release 1.2.3 --execute</code> sets a
+version outright. That one command rewrites <code>[workspace.package] version</code>, the
+<code>[workspace.dependencies]</code> pins, <code>Cargo.lock</code>, <code>pyproject.toml</code>, <code>InfraStore.jl</code>'s <code>Project.toml</code>,
+and the two docs download examples, then commits them as <code>Release v0.9.0</code>. The pre-commit hook runs
+rustfmt, Clippy, dprint, and shellcheck on the way through.</p>
+<p>Three details of the configuration are deliberate:</p>
+<ul>
+<li><strong>It does not publish.</strong> <code>crates-release.yml</code> and <code>python-wheels.yml</code> own that, on the tag, with
+trusted publishing and no local credentials. Rehearse packaging separately with
+<code>cargo publish --workspace --dry-run</code>, which verifies every crate packages and builds.</li>
+<li><strong>It does not tag or push.</strong> The tag drives all three release workflows, so it has to name the
+commit that ends up on <code>main</code> — not the local bump commit, which changes identity when the pull
+request merges.</li>
+<li><strong>It refuses to run on a dirty tree.</strong> Untracked scratch files count; park them in
+<code>.git/info/exclude</code> if you keep any.</li>
+</ul>
+<p>So open the bump as a pull request, and once it is merged:</p>
+<pre><code class="language-sh">git switch main &amp;&amp; git pull
+git tag v0.9.0
+git push origin v0.9.0
+</code></pre>
+<p>Pushing the tag triggers three workflows: <code>crates-release</code>, <code>python-wheels</code>, and <code>release</code>.</p>
+<p>Tag the merge commit once its own CI is green. <code>crates-release</code> now enforces this itself (see
+<a href="#2-rust--cratesio">step 2</a>), so a tag on a red or untested commit fails the gate instead of
+publishing — but it enforces it by <em>waiting</em>, so tagging ahead of CI just means the release job sits
+there. Nothing is lost either way; the tag does not need to be re-pushed once Test finishes.</p>
+<p>When a version string moves to a new file, add a <code>[[pre-release-replacements]]</code> entry for it in
+<code>crates/infrastore-core/release.toml</code> — not in the root <code>release.toml</code>, where cargo-release would
+resolve it relative to each of the seven crate directories in turn. Every entry requires at least
+one match, so a file that gets renamed fails the release instead of quietly going stale.</p>
+<h3 id="2-rust--cratesio"><a class="header" href="#2-rust--cratesio">2. Rust → crates.io</a></h3>
+<p>Handled by <code>.github/workflows/crates-release.yml</code> on the tag.</p>
+<p>Its <code>verify-ci</code> job runs first and refuses to publish a commit that has not passed <code>Test</code> on all
+three platforms. The check is worth understanding, because the two workflows are joined by commit
+rather than by ref: <code>crates-release</code> fires on the tag, but <code>test.yml</code> fires on pushes to <code>main</code> and
+<code>dev</code> and never on tags, so there is no Test run attached to the tag itself. <code>verify-ci</code> looks up
+the run for the <strong>commit</strong> the tag names — which exists because the release commit reaches <code>main</code>
+before it is tagged — and requires <code>conclusion == "success"</code>.</p>
+<p>It fails closed. A tag on a commit that never reached <code>main</code> has no Test run at all, and that is an
+error rather than a pass; so is a run that is still going after 70 minutes. A tag pushed in the same
+breath as the branch gets a 15-minute grace period for its run to appear before the job gives up.</p>
+<p>This exists because an upload is irreversible in a way the rest of the pipeline is not: crates.io
+never lets a version number be reused, so publishing from a broken commit burns that version
+permanently, and the recovery is to abandon it and release the next one — which is what happened to
+v0.5.0 on the PyPI side. Waiting for CI by hand worked only as long as whoever pushed the tag
+remembered to; local checks are not a substitute either, since a maintainer runs them on one OS.</p>
+<p><code>cargo publish --workspace</code> resolves the intra-workspace order itself (<code>infrastore-core</code> →
+<code>infrastore-proto</code> → <code>infrastore-ffi</code> / <code>infrastore-server</code> / <code>infrastore-cli</code>) and waits for each
+crate to land in the index before publishing its dependents, so the crates must not be published
+individually.</p>
+<p>Authentication uses crates.io <a href="https://crates.io/docs/trusted-publishing">trusted publishing</a>, which
+needs a one-time setup per crate: on the crate's page, <strong>Settings → Trusted Publishing → Add</strong>, with
+owner <code>NatLabRockies</code>, repository <code>infrastore</code>, workflow <code>crates-release.yml</code>, environment
+<code>crates-io</code>. No token is stored in the repository.</p>
+<blockquote>
+<p><strong>Bootstrapping.</strong> Unlike PyPI, crates.io has no "pending publisher" — a trusted publisher can
+only be attached to a crate that already exists, so the <em>first</em> version of any new crate must be
+published by hand with an API token (<code>cargo publish --workspace</code> with <code>CARGO_REGISTRY_TOKEN</code> set).
+This is how v0.1.0 went out. It applies again only if a new crate joins the workspace, not to
+subsequent releases of the existing ones.</p>
+</blockquote>
+<p>Because of that, and because a re-run of a release should not fail, the workflow first checks the
+registry for each publishable crate at the workspace version and skips the upload entirely when they
+are all present. Publishing a version that already exists is an error on crates.io, so without that
+check, tagging after a manual publish would fail the job.</p>
+<p>To rehearse without uploading, run the workflow manually with <code>dry_run</code> left checked.</p>
+<h3 id="3-python--pypi"><a class="header" href="#3-python--pypi">3. Python → PyPI</a></h3>
+<p>Handled by <code>.github/workflows/python-wheels.yml</code> on the tag. cibuildwheel builds one abi3 wheel per
+platform, runs the full pytest suite against each, and the <code>publish</code> job uploads to PyPI via trusted
+publishing (environment <code>pypi</code>).</p>
+<p>The abi3 floor is <code>abi3-py311</code>, set in three places that must agree: the <code>pyo3</code> feature in
+<code>crates/infrastore-py/Cargo.toml</code>, <code>build = "cp311-*"</code> in <code>pyproject.toml</code>, and <code>requires-python</code>.</p>
+<h3 id="4-github-release-binaries"><a class="header" href="#4-github-release-binaries">4. GitHub Release binaries</a></h3>
+<p>Handled by <code>.github/workflows/release.yml</code> on the tag. It builds the <code>infrastore</code> CLI, the
+<code>infrastore-server</code> binary, and the <code>libinfrastore_ffi</code> cdylib plus its generated header, then
+attaches one archive per platform — each with a <code>.sha256</code> sidecar — to a <strong>draft</strong> GitHub Release
+with generated release notes. Review the notes and publish the draft by hand.</p>
+<p>Because the workflow creates the draft itself, cut releases by pushing the tag rather than by
+authoring a release in the GitHub UI first. A hand-made release is not a shortcut that saves the
+wait — it is an <strong>empty</strong> release until <code>create-release</code> runs, and that job is gated on the whole
+build matrix, so the assets do not exist until the slowest target (Windows) finishes. Two things
+follow from that, both of which have bitten a release:</p>
+<ul>
+<li><strong>Step 5 below cannot start early.</strong> <code>generate_artifacts.jl</code> downloads every
+<code>libinfrastore_ffi.&lt;triplet&gt;.tar.gz</code> to hash it, so against an assetless release it fails, and
+against a partially uploaded one it would hash whatever happens to be there.</li>
+<li><strong>Publishing it early does not stick reliably.</strong> <code>softprops/action-gh-release</code> updates the
+existing release for the tag rather than erroring, and it sends <code>draft: true</code> in that update. It
+has left an already-published release published, but do not count on that: check the release's
+state after the workflow finishes, and publish it (again, if need be) once the assets are
+attached.</li>
+</ul>
+<p>The supported sequence is: push the tag, wait for <code>release</code> to go green, then review and publish the
+draft it left.</p>
+<div class="table-wrapper"><table><thead><tr><th>Target</th><th>Runner</th><th>Archive contents</th></tr></thead><tbody>
+<tr><td><code>aarch64-apple-darwin</code></td><td><code>macos-14</code></td><td>executables and C library</td></tr>
+<tr><td><code>x86_64-unknown-linux-musl</code></td><td><code>ubuntu-latest</code></td><td>executables only</td></tr>
+<tr><td><code>x86_64-unknown-linux-gnu</code></td><td><code>ubuntu-latest</code></td><td>C library only</td></tr>
+<tr><td><code>x86_64-pc-windows-msvc</code></td><td><code>windows-latest</code></td><td>executables and C library</td></tr>
+</tbody></table>
+</div>
+<p>Linux is built twice on purpose. musl gives statically linked executables that run on any
+distribution, including HPC login nodes with an older glibc than the runner — but a musl-built
+cdylib loaded into a glibc Julia or Python process puts two C libraries in one address space, so the
+shared library comes from a separate gnu build. On macOS the packaging step rewrites the dylib's
+<code>LC_ID_DYLIB</code> to <code>@rpath/libinfrastore_ffi.dylib</code>; cargo otherwise bakes in the runner's absolute
+build path.</p>
+<p>The workflow builds selected packages rather than <code>--workspace</code>, which would drag in the PyO3 cdylib
+(it needs an interpreter to link against, and ships as a wheel instead) and <code>infrastore-bench</code>. It
+also uses <code>--locked</code>, so a release builds exactly what CI tested.</p>
+<p>The same workflow deploys <strong>versioned documentation</strong> to a <code>/infrastore/&lt;tag&gt;/</code> subdirectory of
+<code>gh-pages</code> and updates <code>versions.json</code>, which drives the docs version picker. It keeps the five most
+recent releases and prunes older ones from both the manifest and disk. It shares the <code>pages</code>
+concurrency group with <code>docs.yml</code>, which owns the <code>latest</code> build from <code>main</code>; the two must not push
+to <code>gh-pages</code> at once.</p>
+<p>To rehearse the builds without cutting a release, run the workflow manually — the <code>create-release</code>
+and docs jobs are both gated on a tag ref, so a <code>workflow_dispatch</code> run only exercises the matrix.</p>
+<h3 id="5-julia--general"><a class="header" href="#5-julia--general">5. Julia → General</a></h3>
+<p><code>InfraStore.jl</code> ships its binaries as a self-hosted artifact: <code>julia/InfraStore.jl/Artifacts.toml</code>
+names one <code>libinfrastore_ffi.&lt;triplet&gt;.tar.gz</code> per platform, built and attached to the GitHub
+Release by <code>release.yml</code> on the tag. No JLL and no Yggdrasil review sits in the release path; the
+only human gates are General's one-time three-day review of a new package and the 15-minute
+AutoMerge on every version after. (The Yggdrasil recipe still exists for the day its PR merges — see
+<a href="#switching-back-to-the-jll">Switching back to the JLL</a>.)</p>
+<p>The ordering wrinkle this flow exists to solve: <code>Artifacts.toml</code> cannot be in the tagged commit,
+because its URLs and hashes do not exist until the tag's binaries are built and uploaded.
+Registration is therefore decoupled from the tag — Registrator registers whatever commit the comment
+lands on:</p>
+<ol>
+<li>
+<p><strong>Publish the GitHub Release</strong> for the tag (CI leaves it as a draft). This must come first: a
+draft's asset URLs are not publicly downloadable.</p>
+</li>
+<li>
+<p><strong>Regenerate <code>Artifacts.toml</code></strong> on a branch:</p>
+<pre><code class="language-sh">julia julia/generate_artifacts.jl v0.6.0
+</code></pre>
+</li>
+<li>
+<p><strong>Run the suite against the artifact</strong>, with <code>INFRASTORE_LIB</code> unset — this is the path users get,
+and CI's <code>julia-artifact</code> job only smoke-tests it (between releases the wrapper on <code>main</code> may
+call FFI exports the released binary does not carry yet, so the full suite cannot run in CI
+unconditionally):</p>
+<pre><code class="language-sh">julia --project=julia/InfraStore.jl -e 'using Pkg; Pkg.instantiate()'
+julia --project=julia/InfraStore.jl julia/InfraStore.jl/test/runtests.jl
+</code></pre>
+</li>
+<li>
+<p><strong>Merge, then comment on the merged commit</strong> with
+<a href="https://github.com/JuliaRegistries/Registrator.jl">Registrator</a>, passing the subdirectory, which
+is required because the package is not at the repository root:</p>
+<pre><code>@JuliaRegistrator register subdir=julia/InfraStore.jl
+</code></pre>
+<p>The Registrator GitHub app must be installed on the repository (an org owner approves that); the
+JuliaHub web interface is the fallback.</p>
+<p><strong>Write the release notes into that same comment.</strong> They are read from the trigger comment and
+nowhere else — there is no TagBot here and the GitHub Release's own notes are not consulted, so
+notes omitted at this point can only be restored by editing the registry PR body by hand, between
+its <code>&lt;!-- BEGIN RELEASE NOTES --&gt;</code> markers, before AutoMerge closes it. Put a blank line after
+the register line, then a <code>Release notes:</code> line, then the notes:</p>
+<pre><code>@JuliaRegistrator register subdir=julia/InfraStore.jl
+
+Release notes:
+
+## Breaking changes
+
+- ...
+</code></pre>
+<p>Write them for someone consuming the Julia package, not for someone reading this repository's
+commits: what breaks, what is new, and what an existing artifact costs. A <code>DATA_FORMAT_VERSION</code>
+bump belongs at the top of "Breaking changes" every time it happens — it rejects every store an
+earlier version wrote, and the Julia user has no other channel that tells them so.</p>
+</li>
+</ol>
+<p>General's AutoMerge requires a public repository, an OSI-approved license file in the package
+directory, and <code>[compat]</code> bounds for every non-stdlib dependency including <code>julia</code>. There is no
+initial-version requirement — only prerelease and build metadata are rejected — so a package may
+first register at any plain version (this one registered at 0.6.0). New packages sit a three-day
+waiting period before merge. AutoMerge installs and loads the package on Linux x86_64, which
+downloads the artifact, so a wrong hash or URL in <code>Artifacts.toml</code> fails registration instead of
+shipping.</p>
+<p><strong>Release assets are permanent.</strong> Every registered version's <code>Artifacts.toml</code> points at this
+repository's release URLs forever. Deleting an asset or a release — or moving the repository without
+a redirect — breaks <code>Pkg.add</code> for every registered version that references it.</p>
+<h4 id="switching-back-to-the-jll"><a class="header" href="#switching-back-to-the-jll">Switching back to the JLL</a></h4>
+<p>The Yggdrasil route was the original plan and remains the eventual destination; it stalled because
+no maintainer would review a Rust recipe (see <code>JULIA_ARTIFACT_PLAN.md</code> for the full history). The
+recipe lives on under <code>yggdrasil/</code>, pinned to the release it was last synced with. When the
+<a href="https://github.com/JuliaPackaging/Yggdrasil/pull/14290">Yggdrasil PR</a> finally merges:</p>
+<ol>
+<li>
+<p>Refresh the recipe's <code>version</code> and <code>GitSource</code> SHA to the current release
+(<code>git rev-parse vX.Y.Z^{commit}</code>; Yggdrasil requires a full commit SHA, not a tag). Only changes
+under <code>crates/</code>, <code>Cargo.toml</code>, or <code>Cargo.lock</code> need a new SHA — edits to the recipe itself do
+not, since Yggdrasil builds from its own copy. To test it locally (BinaryBuilder needs Docker on
+macOS):</p>
+<pre><code class="language-sh">cd yggdrasil
+julia build_tarballs.jl --verbose --debug x86_64-linux-gnu
+</code></pre>
+<p>A platform argument replaces the recipe's <code>platforms</code> list rather than filtering it; the listed
+platforms carry no extra tags, so bare triplets are exactly right.</p>
+</li>
+<li>
+<p>Once <code>InfraStore_jll</code> is registered, cut the next <code>InfraStore.jl</code> version: delete
+<code>Artifacts.toml</code> and <code>julia/generate_artifacts.jl</code>, swap <code>lib_path()</code> to the JLL (the shape is
+parked on the <code>julia-jll-dep</code> branch), add <code>InfraStore_jll</code> to <code>[deps]</code> with a <code>[compat]</code> bound
+matching the version the JLL <strong>first registers as</strong> (check the registry: a bound below the
+earliest published version resolves to nothing), and drop the <code>julia-artifact</code> CI job. JLL UUIDs
+are deterministic — <code>BinaryBuilder.jll_uuid("InfraStore_jll")</code>.</p>
+</li>
+<li>
+<p>Register that version with the same Registrator comment; it auto-merges in about 15 minutes. The
+artifact-era release assets stay up forever regardless (see above).</p>
+</li>
+</ol>
+<p>The recipe builds with the default <code>vendored</code> feature — see <a href="#hdf5-linkage">HDF5 linkage</a> for why
+the JLL statically links its own HDF5/zlib instead of depending on <code>HDF5_jll</code>. Expect Yggdrasil
+reviewers to ask about that; the rationale is written out in the recipe's header comment. <code>HDF5_DIR</code>
+must remain unset during the build. The recipe patches one thing in the source tree: it drops sha2's
+<code>asm</code> feature, because BinaryBuilder forbids forcing an arch via <code>-march</code> and the ARMv8 crypto
+kernels cannot be assembled there (x86-64 still detects SHA-NI at runtime).</p>
+<h3 id="6-downstream"><a class="header" href="#6-downstream">6. Downstream</a></h3>
+<p><code>InfrastructureSystems.jl</code> depends on <code>InfraStore.jl</code> for its Rust time-series backend: add
+<code>InfraStore</code> to its <code>[deps]</code> and replace the raw <code>ccall</code>s in <code>src/rust_time_series_store.jl</code> with
+calls into the package. <code>infrasys</code> consumes the PyPI wheel.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="contributing.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="contributing.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr.min.js"></script>
+        <script src="mark.min.js"></script>
+        <script src="searcher.js"></script>
+
+        <script src="clipboard.min.js"></script>
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="mermaid.min.js"></script>
+        <script src="mermaid-init.js"></script>
+        <script src="pagetoc.js"></script>
+        <script src="version-selector.js"></script>
+
+
+
+    </div>
+    </body>
+</html>
