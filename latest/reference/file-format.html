@@ -224,10 +224,38 @@ what makes a save interrupted between its two renames detectable — see
 no <code>data_format_version</code> change: a store written before it existed has neither the attribute nor the
 table, which reads as "unstamped" and skips the check rather than failing. Compaction preserves the
 existing value rather than minting a new one, since it rewrites only the HDF5 half.</p>
-<p>Opening a store whose recorded version differs from the version this build reads fails with
-<code>IncompatibleFormat</code>, naming both versions. Every bump is backward-incompatible by definition, so
-the check is exact equality and there is no in-place upgrade path: regenerate the store with the
-matching build.</p>
+<p>Opening a store sorts its recorded version into one of three tiers, not two:</p>
+<ul>
+<li>
+<p><strong>Current</strong> — the stamp equals this build's <code>DATA_FORMAT_VERSION</code>. Opened as-is.</p>
+</li>
+<li>
+<p><strong>Upgradable</strong> — the stamp is at least <code>MIN_UPGRADABLE_VERSION</code> and older. The array layout is
+compatible, so the file is read as it stands; a <strong>writable</strong> open runs the catalog migration
+ladder and then re-stamps the file. A <strong>read-only</strong> open changes nothing and leaves the stamp
+alone.</p>
+<p>Whether a read-only open <em>succeeds</em> is decided by the catalog half, not by this tier.
+<code>CatalogMigrationRequired</code> comes from a stale <code>CATALOG_SCHEMA_REVISION</code>; an upgradable stamp
+sitting over an already-current catalog opens fine. That is not a hypothetical combination — it is
+what an interrupted writable open leaves behind, and the
+<a href="../explanation/design-choices.html#the-ordering-that-makes-it-safe">step ordering</a> is chosen to
+make it the harmless outcome.</p>
+</li>
+<li>
+<p><strong>Incompatible</strong> — older than <code>MIN_UPGRADABLE_VERSION</code>, newer than this build, or unparseable
+(including an unstamped file). Fails with <code>IncompatibleFormat</code>, naming both versions. There is no
+upgrade path: regenerate the store with the matching build.</p>
+</li>
+</ul>
+<p>The catalog carries its own revision in <code>schema_version</code> (<code>CATALOG_SCHEMA_REVISION</code>), independent of
+the artifact version above. <strong>Any catalog change the idempotent DDL cannot make to an existing table
+— a new column, a changed <code>CHECK</code>, a rebuilt table, a backfill — needs a <code>CATALOG_SCHEMA_REVISION</code>
+bump plus an append-only migration</strong>, not a re-created store. A catalog written by a newer build is
+<code>CatalogTooNew</code> and is refused in both directions. Catalog revision 2, which widens the
+<code>time_series_type</code> <code>CHECK</code> from <code>BETWEEN 0 AND 5</code> to <code>&gt;= 0</code>, is the first such change and takes <strong>no
+<code>DATA_FORMAT_VERSION</code> bump at all</strong> — nothing in the HDF5 file moves, so a <code>0.19.0</code> store upgrades
+in place on its first writable open. See
+<a href="../explanation/design-choices.html#upgrade-a-store-in-place-rather-than-bricking-it">Upgrade a store in place</a>.</p>
 <p>(<code>0.19.0</code> moved a <code>NonSequentialTimeSeries</code>'s timestamps out of the SQLite catalog and into the HDF5
 file: the <code>timestamp_sets</code> table is gone, and each distinct time axis is now an <code>i64</code> dataset of
 unix milliseconds under <code>time_series/timestamps/</code>, named by the same content hash the association
@@ -485,7 +513,7 @@ the error surfaces with the compacting store still open on the original file.</p
 <tr><td><code>owner_id</code></td><td>INTEGER</td><td>Owner identity; signed 64-bit integer identifier (part of key)</td></tr>
 <tr><td><code>owner_type</code></td><td>TEXT</td><td>Owner's concrete type, descriptive</td></tr>
 <tr><td><code>owner_category</code></td><td>INTEGER</td><td>Code, <code>CHECK</code> in (0, 1); part of key — see below</td></tr>
-<tr><td><code>time_series_type</code></td><td>INTEGER</td><td>Code, <code>CHECK</code> between 0 and 5; part of key — see below</td></tr>
+<tr><td><code>time_series_type</code></td><td>INTEGER</td><td>Code, <code>CHECK &gt;= 0</code>; part of key — see below</td></tr>
 <tr><td><code>name</code></td><td>TEXT</td><td>Series name</td></tr>
 <tr><td><code>initial_timestamp</code></td><td>TEXT</td><td>RFC 3339 string; <code>NULL</code> for <code>NonSequentialTimeSeries</code></td></tr>
 <tr><td><code>resolution</code></td><td>TEXT</td><td>ISO-8601 duration (<code>PT1H</code>, <code>P1M</code>, …); <code>NULL</code> for non-sequential</td></tr>

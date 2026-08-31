@@ -289,8 +289,12 @@ column is needed. A feature set is therefore stored <strong>once and shared</str
 hash matches, not copied per association; an empty map stores no rows at all. Because the rows are
 shared, there is deliberately no foreign key to <code>time_series_associations</code> and no
 <code>ON DELETE CASCADE</code> (see <a href="#compaction">Compaction</a> below).</li>
-<li><strong><code>schema_version</code></strong> — a single <code>version</code> column holding the catalog schema version (currently
-<code>1</code>).</li>
+<li><strong><code>schema_version</code></strong> — a single <code>version</code> column holding the catalog schema revision
+(<code>CATALOG_SCHEMA_REVISION</code>, currently <code>2</code>). Its own contract, independent of the artifact's
+<code>data_format_version</code>: a catalog change the idempotent DDL cannot make to an existing table needs
+a revision bump and an append-only migration. A catalog predating the stamp reads as revision <code>1</code>.
+See
+<a href="design-choices.html#upgrade-a-store-in-place-rather-than-bricking-it">Upgrade a store in place</a>.</li>
 <li><strong><code>supplemental_attribute_associations</code></strong> — which supplemental attributes are attached to which
 components, as <code>(component_id, component_type, attribute_id, attribute_type)</code>. Identity is the
 <code>(component_id, attribute_id)</code> pair.</li>

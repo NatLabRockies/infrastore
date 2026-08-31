@@ -837,6 +837,77 @@ timeout. And a transaction is not a substitute for batching: block-sized HDF5 wr
 dedup come from <code>bulk_add</code>, and a loop of single adds gets neither just because it is wrapped in a
 transaction. The two compose — batch each operation, and use a transaction when several of them must
 be atomic together.</p>
+<h2 id="upgrade-a-store-in-place-rather-than-bricking-it"><a class="header" href="#upgrade-a-store-in-place-rather-than-bricking-it">Upgrade a Store In Place Rather Than Bricking It</a></h2>
+<p><code>DATA_FORMAT_VERSION</code> used to be checked by strict equality on open, which made every bump a wall:
+"re-create the store." It was bumped six times between 0.12 and 0.19 and each one meant exactly
+that. The reason it had to be a wall is that the catalog DDL is <code>CREATE TABLE IF NOT EXISTS</code> —
+idempotent, so a new <em>table</em> or <em>index</em> lands on an existing store for free, but not
+version-agnostic: it will not alter a table that already exists, so a new column or a changed
+<code>CHECK</code> never reaches an old catalog at all.</p>
+<p>This release replaces the wall with a <strong>three-tier compatibility model</strong> plus a migration ladder.</p>
+<h3 id="two-revisions-answering-different-questions"><a class="header" href="#two-revisions-answering-different-questions">Two revisions, answering different questions</a></h3>
+<ul>
+<li><strong><code>DATA_FORMAT_VERSION</code></strong> describes the <strong>artifact as a whole</strong> and is stamped on the HDF5 root.
+It moves for anything that changes the meaning of bytes already on disk: the array layout, the
+dtype encoding, the timestamp encoding, a hash domain.</li>
+<li><strong><code>CATALOG_SCHEMA_REVISION</code></strong> describes the <strong>SQLite catalog</strong> alone and lives in its
+<code>schema_version</code> table. <strong>Any catalog change the idempotent DDL cannot make to an existing table —
+a new column, a changed <code>CHECK</code>, a rebuilt table, a backfill — needs a <code>CATALOG_SCHEMA_REVISION</code>
+bump plus an append-only entry in <code>MIGRATIONS</code>.</strong></li>
+</ul>
+<p><code>MIN_UPGRADABLE_VERSION</code> says how far back the ladder reaches. A stamp between it and
+<code>DATA_FORMAT_VERSION</code> is <code>Upgradable</code>; anything older, anything newer, and anything unparseable is
+<code>Incompatible</code> and is refused exactly as before. When a bump genuinely does strand older stores,
+<code>MIN_UPGRADABLE_VERSION</code> is raised to match it; when the ladder can absorb it, it is left alone.</p>
+<h3 id="a-writable-open-upgrades-a-read-only-open-reports"><a class="header" href="#a-writable-open-upgrades-a-read-only-open-reports">A writable open upgrades; a read-only open reports</a></h3>
+<p>Opening a store for <strong>writing</strong> runs every migration above the catalog's recorded revision, in
+order, each in its own transaction. Opening it <strong>read-only</strong> cannot change anything, so it reports
+<code>CatalogMigrationRequired</code> — an error that names the remedy (open it once for writing) instead of a
+raw <code>no such column</code> from inside some later query. This is what a read-only consumer such as the
+gRPC server now sees against a store that has not yet been upgraded.</p>
+<p>A catalog written by a <em>newer</em> build is <code>CatalogTooNew</code> and is refused in both directions. There is
+no downgrade path, and this build's DDL and ladder both describe an older shape.</p>
+<h3 id="the-ordering-that-makes-it-safe"><a class="header" href="#the-ordering-that-makes-it-safe">The ordering that makes it safe</a></h3>
+<p>Three steps, and each one is load-bearing:</p>
+<ol>
+<li>Open the HDF5 half and evaluate its version stamp. This must come first so a store too old to
+migrate reports <code>IncompatibleFormat</code> rather than a confusing SQLite error, and so a bad path does
+not leave a freshly created empty <code>.sqlite</code> behind. An upgradable stamp is <em>noted</em>, not yet
+rewritten.</li>
+<li>Open the catalog, which is where the ladder runs.</li>
+<li>Only if (2) succeeded, and only for a writable open, re-stamp the HDF5 half.</li>
+</ol>
+<p>The two stamps cannot be written atomically together, so the order decides which half is ahead when
+something fails in between. Catalog-first leaves a migrated catalog under an older array-file stamp:
+an older build then opens the store and simply never writes a row of a type it does not know, which
+is harmless. The reverse would leave a store <em>claiming</em> the new format over an un-migrated catalog —
+the exact failure the ladder exists to eliminate.</p>
+<p>Migration is <strong>not a save</strong>: the paired generation stamps that pair the two halves are carried
+across untouched.</p>
+<h3 id="append-only-never-edited"><a class="header" href="#append-only-never-edited">Append-only, never edited</a></h3>
+<p>A landed <code>MIGRATIONS</code> entry is frozen. Stores in the wild have already run it, so editing it changes
+nothing for them and silently diverges the shape a fresh store gets from the shape an upgraded one
+gets. Add a new entry instead. For the same reason each migration carries a <strong>frozen snapshot</strong> of
+the table shape it produces rather than deriving it from the live DDL, which will keep moving.</p>
+<p>Revision 1 is <em>defined</em> as whatever a pre-ladder build stamped — which is exactly what every
+existing store already says, since the <code>schema_version</code> table was seeded with a literal <code>1</code> and
+never read back. That is why the ladder needs no detection heuristic. It is deliberately not a claim
+about one particular table shape, though: nothing stamped a revision while the catalog was still
+moving, so <code>1</code> spans several, and a migration must tolerate any of them. The ladder starts there
+rather than trying to resurrect the 0.12–0.16 formats, which changed the meaning of bytes on disk
+and are still rejected outright.</p>
+<h3 id="the-first-rung"><a class="header" href="#the-first-rung">The first rung</a></h3>
+<p>Revision 2 widens the <code>time_series_associations</code> <code>time_series_type</code> <code>CHECK</code> from <code>BETWEEN 0 AND 5</code>
+to <code>&gt;= 0</code>. <code>TimeSeriesType::from_code</code> is the real gate on that domain and runs on every write and
+every read, so the numeric bound bought nothing SQLite had to enforce — while turning the eventual
+appending of a seventh type into a table rebuild. Moving the domain onto the enum leaves the <code>CHECK</code>
+as a non-negativity test, which still refuses a corrupted value.</p>
+<p>SQLite has no <code>ALTER TABLE … DROP CONSTRAINT</code>, so applying it <em>is</em> the table rebuild, and the
+rebuild is what makes the two subtle parts of the ladder concrete: the <code>time_series_readable</code> view
+has to be dropped first (SQLite refuses to drop a table a view still names), and the <code>AUTOINCREMENT</code>
+high-water mark has to be carried across by hand, because <code>DROP TABLE</code> takes the old table's
+<code>sqlite_sequence</code> row with it and the copy would restart the counter at <code>max(id)</code> — handing back an
+id a deleted row already used, which is the one thing <code>AUTOINCREMENT</code> is there to prevent.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="data-model"><a class="header" href="#data-model">Data Model</a></h1>
 <p>The data model mirrors the time-series concepts originally developed in
 <a href="https://github.com/Sienna-Platform/InfrastructureSystems.jl">InfrastructureSystems.jl</a>: a
@@ -1484,8 +1555,12 @@ column is needed. A feature set is therefore stored <strong>once and shared</str
 hash matches, not copied per association; an empty map stores no rows at all. Because the rows are
 shared, there is deliberately no foreign key to <code>time_series_associations</code> and no
 <code>ON DELETE CASCADE</code> (see <a href="explanation/storage-model.html#compaction">Compaction</a> below).</li>
-<li><strong><code>schema_version</code></strong> — a single <code>version</code> column holding the catalog schema version (currently
-<code>1</code>).</li>
+<li><strong><code>schema_version</code></strong> — a single <code>version</code> column holding the catalog schema revision
+(<code>CATALOG_SCHEMA_REVISION</code>, currently <code>2</code>). Its own contract, independent of the artifact's
+<code>data_format_version</code>: a catalog change the idempotent DDL cannot make to an existing table needs
+a revision bump and an append-only migration. A catalog predating the stamp reads as revision <code>1</code>.
+See
+<a href="explanation/design-choices.html#upgrade-a-store-in-place-rather-than-bricking-it">Upgrade a store in place</a>.</li>
 <li><strong><code>supplemental_attribute_associations</code></strong> — which supplemental attributes are attached to which
 components, as <code>(component_id, component_type, attribute_id, attribute_type)</code>. Identity is the
 <code>(component_id, attribute_id)</code> pair.</li>
@@ -4440,10 +4515,38 @@ what makes a save interrupted between its two renames detectable — see
 no <code>data_format_version</code> change: a store written before it existed has neither the attribute nor the
 table, which reads as "unstamped" and skips the check rather than failing. Compaction preserves the
 existing value rather than minting a new one, since it rewrites only the HDF5 half.</p>
-<p>Opening a store whose recorded version differs from the version this build reads fails with
-<code>IncompatibleFormat</code>, naming both versions. Every bump is backward-incompatible by definition, so
-the check is exact equality and there is no in-place upgrade path: regenerate the store with the
-matching build.</p>
+<p>Opening a store sorts its recorded version into one of three tiers, not two:</p>
+<ul>
+<li>
+<p><strong>Current</strong> — the stamp equals this build's <code>DATA_FORMAT_VERSION</code>. Opened as-is.</p>
+</li>
+<li>
+<p><strong>Upgradable</strong> — the stamp is at least <code>MIN_UPGRADABLE_VERSION</code> and older. The array layout is
+compatible, so the file is read as it stands; a <strong>writable</strong> open runs the catalog migration
+ladder and then re-stamps the file. A <strong>read-only</strong> open changes nothing and leaves the stamp
+alone.</p>
+<p>Whether a read-only open <em>succeeds</em> is decided by the catalog half, not by this tier.
+<code>CatalogMigrationRequired</code> comes from a stale <code>CATALOG_SCHEMA_REVISION</code>; an upgradable stamp
+sitting over an already-current catalog opens fine. That is not a hypothetical combination — it is
+what an interrupted writable open leaves behind, and the
+<a href="reference/../explanation/design-choices.html#the-ordering-that-makes-it-safe">step ordering</a> is chosen to
+make it the harmless outcome.</p>
+</li>
+<li>
+<p><strong>Incompatible</strong> — older than <code>MIN_UPGRADABLE_VERSION</code>, newer than this build, or unparseable
+(including an unstamped file). Fails with <code>IncompatibleFormat</code>, naming both versions. There is no
+upgrade path: regenerate the store with the matching build.</p>
+</li>
+</ul>
+<p>The catalog carries its own revision in <code>schema_version</code> (<code>CATALOG_SCHEMA_REVISION</code>), independent of
+the artifact version above. <strong>Any catalog change the idempotent DDL cannot make to an existing table
+— a new column, a changed <code>CHECK</code>, a rebuilt table, a backfill — needs a <code>CATALOG_SCHEMA_REVISION</code>
+bump plus an append-only migration</strong>, not a re-created store. A catalog written by a newer build is
+<code>CatalogTooNew</code> and is refused in both directions. Catalog revision 2, which widens the
+<code>time_series_type</code> <code>CHECK</code> from <code>BETWEEN 0 AND 5</code> to <code>&gt;= 0</code>, is the first such change and takes <strong>no
+<code>DATA_FORMAT_VERSION</code> bump at all</strong> — nothing in the HDF5 file moves, so a <code>0.19.0</code> store upgrades
+in place on its first writable open. See
+<a href="reference/../explanation/design-choices.html#upgrade-a-store-in-place-rather-than-bricking-it">Upgrade a store in place</a>.</p>
 <p>(<code>0.19.0</code> moved a <code>NonSequentialTimeSeries</code>'s timestamps out of the SQLite catalog and into the HDF5
 file: the <code>timestamp_sets</code> table is gone, and each distinct time axis is now an <code>i64</code> dataset of
 unix milliseconds under <code>time_series/timestamps/</code>, named by the same content hash the association
@@ -4701,7 +4804,7 @@ the error surfaces with the compacting store still open on the original file.</p
 <tr><td><code>owner_id</code></td><td>INTEGER</td><td>Owner identity; signed 64-bit integer identifier (part of key)</td></tr>
 <tr><td><code>owner_type</code></td><td>TEXT</td><td>Owner's concrete type, descriptive</td></tr>
 <tr><td><code>owner_category</code></td><td>INTEGER</td><td>Code, <code>CHECK</code> in (0, 1); part of key — see below</td></tr>
-<tr><td><code>time_series_type</code></td><td>INTEGER</td><td>Code, <code>CHECK</code> between 0 and 5; part of key — see below</td></tr>
+<tr><td><code>time_series_type</code></td><td>INTEGER</td><td>Code, <code>CHECK &gt;= 0</code>; part of key — see below</td></tr>
 <tr><td><code>name</code></td><td>TEXT</td><td>Series name</td></tr>
 <tr><td><code>initial_timestamp</code></td><td>TEXT</td><td>RFC 3339 string; <code>NULL</code> for <code>NonSequentialTimeSeries</code></td></tr>
 <tr><td><code>resolution</code></td><td>TEXT</td><td>ISO-8601 duration (<code>PT1H</code>, <code>P1M</code>, …); <code>NULL</code> for non-sequential</td></tr>
@@ -7533,6 +7636,8 @@ json_str = store.export_time_series_associations_openapi()
 <tr><td><code>StorageError</code></td><td>SQLite catalog or serialization failure</td></tr>
 <tr><td><code>StoreExistsError</code></td><td>Creating a store where one already exists</td></tr>
 <tr><td><code>MismatchedArtifactError</code></td><td>The <code>.h5</code> and <code>.sqlite</code> halves came from two saves</td></tr>
+<tr><td><code>CatalogMigrationRequiredError</code></td><td>Read-only open of a store whose catalog needs upgrading</td></tr>
+<tr><td><code>CatalogTooNewError</code></td><td>The catalog was written by a newer infrastore</td></tr>
 </tbody></table>
 </div>
 <p>A malformed ISO 8601 period string raises <code>InvalidParameterError</code> (inside the hierarchy), as does a
@@ -8581,6 +8686,8 @@ the add boundary (<code>InvalidParameterError</code>), loudly and without writin
 <tr><td><code>StoreExistsError</code></td><td><code>INFRASTORE_ERR_STORE_EXISTS</code></td></tr>
 <tr><td><code>MismatchedArtifactError</code></td><td><code>INFRASTORE_ERR_MISMATCHED_ARTIFACT</code></td></tr>
 <tr><td><code>OwnerMismatchError</code></td><td><code>INFRASTORE_ERR_OWNER_MISMATCH</code></td></tr>
+<tr><td><code>CatalogMigrationRequiredError</code></td><td><code>INFRASTORE_ERR_CATALOG_MIGRATION_REQUIRED</code></td></tr>
+<tr><td><code>CatalogTooNewError</code></td><td><code>INFRASTORE_ERR_CATALOG_TOO_NEW</code></td></tr>
 <tr><td><code>GenericError</code></td><td>Any other non-zero code (carries the numeric <code>code</code>)</td></tr>
 </tbody></table>
 </div>
@@ -8781,7 +8888,10 @@ output they are owned <code>char *</code> strings — free each with <code>infra
 <tr><td><code>INFRASTORE_ERR_DUPLICATE_ASSOCIATION</code></td><td>10</td><td>An attachment or parent/child edge with the same identity already exists. Distinct from <code>INFRASTORE_ERR_DUPLICATE</code>, which is about time-series identity.</td></tr>
 <tr><td><code>INFRASTORE_ERR_STORE_EXISTS</code></td><td>11</td><td>A store already exists where one was about to be created. Creating there would discard its arrays while keeping its catalog. Use <code>infrastore_store_create_replacing</code> to discard it on purpose.</td></tr>
 <tr><td><code>INFRASTORE_ERR_MISMATCHED_ARTIFACT</code></td><td>12</td><td>The HDF5 file and its <code>.sqlite</code> catalog do not carry the same generation stamp: they are halves of two different saves.</td></tr>
+<tr><td><code>INFRASTORE_ERR_DUPLICATE_ASSOCIATION_ID</code></td><td>13</td><td>An import supplied an <code>association_id</code> a live row already holds. Distinct from <code>INFRASTORE_ERR_DUPLICATE_ASSOCIATION</code> (the endpoint pair collides) and <code>INFRASTORE_ERR_DUPLICATE</code> (a series' identity collides).</td></tr>
 <tr><td><code>INFRASTORE_ERR_OWNER_MISMATCH</code></td><td>14</td><td>An id-addressed call carrying an expected owner named a row that belongs to a different one. Distinct from <code>INFRASTORE_ERR_NOT_FOUND</code>: the row is there, and it is the caller's belief about who owns it that is stale.</td></tr>
+<tr><td><code>INFRASTORE_ERR_CATALOG_MIGRATION_REQUIRED</code></td><td>15</td><td>The <code>.sqlite</code> catalog is at an older schema revision than this build and the store was opened read-only, so nothing could migrate it. Open it once for writing (or run <code>infrastore upgrade</code>) and the ladder runs.</td></tr>
+<tr><td><code>INFRASTORE_ERR_CATALOG_TOO_NEW</code></td><td>16</td><td>The <code>.sqlite</code> catalog was written by a newer infrastore than this build understands. The mirror of <code>INFRASTORE_ERR_CATALOG_MIGRATION_REQUIRED</code>, with the other remedy: upgrade the software, not the store.</td></tr>
 <tr><td><code>INFRASTORE_ERR_INTERNAL</code></td><td>99</td><td>Unexpected internal error</td></tr>
 </tbody></table>
 </div>
@@ -9913,6 +10023,22 @@ fetched directly by id come back without it. Every other descriptor — <code>na
 <code>quantity_kind</code>, <code>unit_system</code>, <code>component_field</code>, <code>time_reference</code> — is on the response, so a
 read by id returns the same described series a local read does.</li>
 </ul>
+<h2 id="catalog-revision-and-read-only-opens"><a class="header" href="#catalog-revision-and-read-only-opens">Catalog Revision and Read-Only Opens</a></h2>
+<p>The server opens its store <strong>read-only</strong>, which means it cannot upgrade a catalog. A store whose
+catalog is at an older <code>CATALOG_SCHEMA_REVISION</code> is refused with <code>CatalogMigrationRequired</code>.</p>
+<p>That refusal is a <strong>startup failure, not an RPC status</strong>: the store is opened once, by
+<code>CatalogStoreService::from_path</code>, before any service exists to answer a request. The process exits
+with the error on stderr and no client ever connects. Look for it in the server's own output, not in
+a response.</p>
+<p><strong>The store must be opened once for writing before the server can serve it.</strong> The CLI command for
+exactly that is <code>infrastore --store &lt;path&gt; upgrade</code>, which does nothing but the writable open and is
+a no-op on a store that is already current. Every <em>read</em> command, <code>store-info</code> included, opens the
+store read-only and so cannot upgrade it.</p>
+<p><code>infrastore store-info</code> reports <code>catalog_schema_revision</code> beside <code>data_format_version</code> once the
+store is readable, which is how to confirm the upgrade landed.</p>
+<p>A catalog written by a <em>newer</em> build is <code>CatalogTooNew</code> and is refused outright; there is no
+downgrade. See
+<a href="reference/../explanation/design-choices.html#upgrade-a-store-in-place-rather-than-bricking-it">Upgrade a store in place</a>.</p>
 <h2 id="authentication-1"><a class="header" href="#authentication-1">Authentication</a></h2>
 <p>When the server is configured with <code>method = "api_key"</code>, clients must send the key in the
 <strong><code>x-api-key</code></strong> request metadata (header). The server checks the supplied key against every
@@ -10250,7 +10376,8 @@ in-terminal check, <code>get --plot</code> draws a sparkline with no file involv
 <h3 id="inspect-the-store"><a class="header" href="#inspect-the-store">Inspect the store</a></h3>
 <div class="table-wrapper"><table><thead><tr><th>Command</th><th>Purpose</th></tr></thead><tbody>
 <tr><td><code>stats</code></td><td>Association, owner, and distinct-array counts.</td></tr>
-<tr><td><code>store-info</code></td><td>HDF5 + SQLite paths and sizes, on-disk format version, compression.</td></tr>
+<tr><td><code>store-info</code></td><td>HDF5 + SQLite paths and sizes, on-disk format version, catalog revision.</td></tr>
+<tr><td><code>upgrade</code></td><td>Bring a store written by an older build up to this one's catalog revision.</td></tr>
 <tr><td><code>arrays</code></td><td>Distinct stored arrays: content hash, HDF5 location, series sharing each.</td></tr>
 <tr><td><code>summary</code></td><td>Grouped static and/or forecast summaries (<code>--static-only</code>/<code>--forecast-only</code>).</td></tr>
 <tr><td><code>resolutions</code></td><td>List distinct resolutions and forecast intervals.</td></tr>
@@ -10259,11 +10386,17 @@ in-terminal check, <code>get --plot</code> draws a sparkline with no file involv
 </div>
 <pre><code class="language-sh">infrastore --store demo.h5 stats
 infrastore --store demo.h5 store-info
+infrastore --store demo.h5 upgrade
 infrastore --store demo.h5 arrays --data-hash 2018057b
 infrastore --store demo.h5 summary --static-only
 infrastore --store demo.h5 resolutions
 infrastore --store demo.h5 params --resolution PT1H --interval PT1H
 </code></pre>
+<p><code>upgrade</code> is the writable open that runs the catalog migration ladder. It is needed only for a store
+written by an older infrastore: such a store reports <code>the store's catalog is at revision N …</code> on
+every read, because every read command opens it <strong>read-only</strong> and therefore cannot upgrade it.
+<code>upgrade</code> does nothing else, and is a no-op on a store that is already current. Run it once against
+any artifact the read-only gRPC server is about to serve.</p>
 <h3 id="associations-7"><a class="header" href="#associations-7">Associations</a></h3>
 <div class="table-wrapper"><table><thead><tr><th>Command</th><th>Purpose</th></tr></thead><tbody>
 <tr><td><code>attributes</code></td><td>Component &lt;-&gt; supplemental-attribute associations (<code>--summary</code> for counts).</td></tr>
@@ -10357,6 +10490,7 @@ infrastore --store &lt;PATH&gt; persist --dest &lt;PATH.h5&gt; [--force] [--dry-
 infrastore --store &lt;PATH&gt; compact [--force]
 infrastore --store &lt;PATH&gt; stats
 infrastore --store &lt;PATH&gt; store-info
+infrastore --store &lt;PATH&gt; upgrade
 infrastore --store &lt;PATH&gt; arrays [SELECTOR...] [--data-hash &lt;HEX&gt;]
 infrastore --store &lt;PATH&gt; attributes [--component-id &lt;I&gt;] [--attribute-id &lt;I&gt;] [--component-type &lt;T&gt;] [--attribute-type &lt;T&gt;] [--summary]
 infrastore --store &lt;PATH&gt; links [--parent-id &lt;I&gt;] [--child-id &lt;I&gt;] [--parent-type &lt;T&gt;] [--child-type &lt;T&gt;]

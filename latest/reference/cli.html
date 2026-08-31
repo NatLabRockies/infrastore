@@ -402,7 +402,8 @@ in-terminal check, <code>get --plot</code> draws a sparkline with no file involv
 <h3 id="inspect-the-store"><a class="header" href="#inspect-the-store">Inspect the store</a></h3>
 <div class="table-wrapper"><table><thead><tr><th>Command</th><th>Purpose</th></tr></thead><tbody>
 <tr><td><code>stats</code></td><td>Association, owner, and distinct-array counts.</td></tr>
-<tr><td><code>store-info</code></td><td>HDF5 + SQLite paths and sizes, on-disk format version, compression.</td></tr>
+<tr><td><code>store-info</code></td><td>HDF5 + SQLite paths and sizes, on-disk format version, catalog revision.</td></tr>
+<tr><td><code>upgrade</code></td><td>Bring a store written by an older build up to this one's catalog revision.</td></tr>
 <tr><td><code>arrays</code></td><td>Distinct stored arrays: content hash, HDF5 location, series sharing each.</td></tr>
 <tr><td><code>summary</code></td><td>Grouped static and/or forecast summaries (<code>--static-only</code>/<code>--forecast-only</code>).</td></tr>
 <tr><td><code>resolutions</code></td><td>List distinct resolutions and forecast intervals.</td></tr>
@@ -411,11 +412,17 @@ in-terminal check, <code>get --plot</code> draws a sparkline with no file involv
 </div>
 <pre><code class="language-sh">infrastore --store demo.h5 stats
 infrastore --store demo.h5 store-info
+infrastore --store demo.h5 upgrade
 infrastore --store demo.h5 arrays --data-hash 2018057b
 infrastore --store demo.h5 summary --static-only
 infrastore --store demo.h5 resolutions
 infrastore --store demo.h5 params --resolution PT1H --interval PT1H
 </code></pre>
+<p><code>upgrade</code> is the writable open that runs the catalog migration ladder. It is needed only for a store
+written by an older infrastore: such a store reports <code>the store's catalog is at revision N …</code> on
+every read, because every read command opens it <strong>read-only</strong> and therefore cannot upgrade it.
+<code>upgrade</code> does nothing else, and is a no-op on a store that is already current. Run it once against
+any artifact the read-only gRPC server is about to serve.</p>
 <h3 id="associations"><a class="header" href="#associations">Associations</a></h3>
 <div class="table-wrapper"><table><thead><tr><th>Command</th><th>Purpose</th></tr></thead><tbody>
 <tr><td><code>attributes</code></td><td>Component &lt;-&gt; supplemental-attribute associations (<code>--summary</code> for counts).</td></tr>
@@ -509,6 +516,7 @@ infrastore --store &lt;PATH&gt; persist --dest &lt;PATH.h5&gt; [--force] [--dry-
 infrastore --store &lt;PATH&gt; compact [--force]
 infrastore --store &lt;PATH&gt; stats
 infrastore --store &lt;PATH&gt; store-info
+infrastore --store &lt;PATH&gt; upgrade
 infrastore --store &lt;PATH&gt; arrays [SELECTOR...] [--data-hash &lt;HEX&gt;]
 infrastore --store &lt;PATH&gt; attributes [--component-id &lt;I&gt;] [--attribute-id &lt;I&gt;] [--component-type &lt;T&gt;] [--attribute-type &lt;T&gt;] [--summary]
 infrastore --store &lt;PATH&gt; links [--parent-id &lt;I&gt;] [--child-id &lt;I&gt;] [--parent-type &lt;T&gt;] [--child-type &lt;T&gt;]

@@ -434,6 +434,22 @@ fetched directly by id come back without it. Every other descriptor — <code>na
 <code>quantity_kind</code>, <code>unit_system</code>, <code>component_field</code>, <code>time_reference</code> — is on the response, so a
 read by id returns the same described series a local read does.</li>
 </ul>
+<h2 id="catalog-revision-and-read-only-opens"><a class="header" href="#catalog-revision-and-read-only-opens">Catalog Revision and Read-Only Opens</a></h2>
+<p>The server opens its store <strong>read-only</strong>, which means it cannot upgrade a catalog. A store whose
+catalog is at an older <code>CATALOG_SCHEMA_REVISION</code> is refused with <code>CatalogMigrationRequired</code>.</p>
+<p>That refusal is a <strong>startup failure, not an RPC status</strong>: the store is opened once, by
+<code>CatalogStoreService::from_path</code>, before any service exists to answer a request. The process exits
+with the error on stderr and no client ever connects. Look for it in the server's own output, not in
+a response.</p>
+<p><strong>The store must be opened once for writing before the server can serve it.</strong> The CLI command for
+exactly that is <code>infrastore --store &lt;path&gt; upgrade</code>, which does nothing but the writable open and is
+a no-op on a store that is already current. Every <em>read</em> command, <code>store-info</code> included, opens the
+store read-only and so cannot upgrade it.</p>
+<p><code>infrastore store-info</code> reports <code>catalog_schema_revision</code> beside <code>data_format_version</code> once the
+store is readable, which is how to confirm the upgrade landed.</p>
+<p>A catalog written by a <em>newer</em> build is <code>CatalogTooNew</code> and is refused outright; there is no
+downgrade. See
+<a href="../explanation/design-choices.html#upgrade-a-store-in-place-rather-than-bricking-it">Upgrade a store in place</a>.</p>
 <h2 id="authentication"><a class="header" href="#authentication">Authentication</a></h2>
 <p>When the server is configured with <code>method = "api_key"</code>, clients must send the key in the
 <strong><code>x-api-key</code></strong> request metadata (header). The server checks the supplied key against every

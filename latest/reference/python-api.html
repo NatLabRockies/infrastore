@@ -1112,6 +1112,8 @@ json_str = store.export_time_series_associations_openapi()
 <tr><td><code>StorageError</code></td><td>SQLite catalog or serialization failure</td></tr>
 <tr><td><code>StoreExistsError</code></td><td>Creating a store where one already exists</td></tr>
 <tr><td><code>MismatchedArtifactError</code></td><td>The <code>.h5</code> and <code>.sqlite</code> halves came from two saves</td></tr>
+<tr><td><code>CatalogMigrationRequiredError</code></td><td>Read-only open of a store whose catalog needs upgrading</td></tr>
+<tr><td><code>CatalogTooNewError</code></td><td>The catalog was written by a newer infrastore</td></tr>
 </tbody></table>
 </div>
 <p>A malformed ISO 8601 period string raises <code>InvalidParameterError</code> (inside the hierarchy), as does a

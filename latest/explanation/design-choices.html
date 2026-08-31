@@ -302,6 +302,77 @@ timeout. And a transaction is not a substitute for batching: block-sized HDF5 wr
 dedup come from <code>bulk_add</code>, and a loop of single adds gets neither just because it is wrapped in a
 transaction. The two compose — batch each operation, and use a transaction when several of them must
 be atomic together.</p>
+<h2 id="upgrade-a-store-in-place-rather-than-bricking-it"><a class="header" href="#upgrade-a-store-in-place-rather-than-bricking-it">Upgrade a Store In Place Rather Than Bricking It</a></h2>
+<p><code>DATA_FORMAT_VERSION</code> used to be checked by strict equality on open, which made every bump a wall:
+"re-create the store." It was bumped six times between 0.12 and 0.19 and each one meant exactly
+that. The reason it had to be a wall is that the catalog DDL is <code>CREATE TABLE IF NOT EXISTS</code> —
+idempotent, so a new <em>table</em> or <em>index</em> lands on an existing store for free, but not
+version-agnostic: it will not alter a table that already exists, so a new column or a changed
+<code>CHECK</code> never reaches an old catalog at all.</p>
+<p>This release replaces the wall with a <strong>three-tier compatibility model</strong> plus a migration ladder.</p>
+<h3 id="two-revisions-answering-different-questions"><a class="header" href="#two-revisions-answering-different-questions">Two revisions, answering different questions</a></h3>
+<ul>
+<li><strong><code>DATA_FORMAT_VERSION</code></strong> describes the <strong>artifact as a whole</strong> and is stamped on the HDF5 root.
+It moves for anything that changes the meaning of bytes already on disk: the array layout, the
+dtype encoding, the timestamp encoding, a hash domain.</li>
+<li><strong><code>CATALOG_SCHEMA_REVISION</code></strong> describes the <strong>SQLite catalog</strong> alone and lives in its
+<code>schema_version</code> table. <strong>Any catalog change the idempotent DDL cannot make to an existing table —
+a new column, a changed <code>CHECK</code>, a rebuilt table, a backfill — needs a <code>CATALOG_SCHEMA_REVISION</code>
+bump plus an append-only entry in <code>MIGRATIONS</code>.</strong></li>
+</ul>
+<p><code>MIN_UPGRADABLE_VERSION</code> says how far back the ladder reaches. A stamp between it and
+<code>DATA_FORMAT_VERSION</code> is <code>Upgradable</code>; anything older, anything newer, and anything unparseable is
+<code>Incompatible</code> and is refused exactly as before. When a bump genuinely does strand older stores,
+<code>MIN_UPGRADABLE_VERSION</code> is raised to match it; when the ladder can absorb it, it is left alone.</p>
+<h3 id="a-writable-open-upgrades-a-read-only-open-reports"><a class="header" href="#a-writable-open-upgrades-a-read-only-open-reports">A writable open upgrades; a read-only open reports</a></h3>
+<p>Opening a store for <strong>writing</strong> runs every migration above the catalog's recorded revision, in
+order, each in its own transaction. Opening it <strong>read-only</strong> cannot change anything, so it reports
+<code>CatalogMigrationRequired</code> — an error that names the remedy (open it once for writing) instead of a
+raw <code>no such column</code> from inside some later query. This is what a read-only consumer such as the
+gRPC server now sees against a store that has not yet been upgraded.</p>
+<p>A catalog written by a <em>newer</em> build is <code>CatalogTooNew</code> and is refused in both directions. There is
+no downgrade path, and this build's DDL and ladder both describe an older shape.</p>
+<h3 id="the-ordering-that-makes-it-safe"><a class="header" href="#the-ordering-that-makes-it-safe">The ordering that makes it safe</a></h3>
+<p>Three steps, and each one is load-bearing:</p>
+<ol>
+<li>Open the HDF5 half and evaluate its version stamp. This must come first so a store too old to
+migrate reports <code>IncompatibleFormat</code> rather than a confusing SQLite error, and so a bad path does
+not leave a freshly created empty <code>.sqlite</code> behind. An upgradable stamp is <em>noted</em>, not yet
+rewritten.</li>
+<li>Open the catalog, which is where the ladder runs.</li>
+<li>Only if (2) succeeded, and only for a writable open, re-stamp the HDF5 half.</li>
+</ol>
+<p>The two stamps cannot be written atomically together, so the order decides which half is ahead when
+something fails in between. Catalog-first leaves a migrated catalog under an older array-file stamp:
+an older build then opens the store and simply never writes a row of a type it does not know, which
+is harmless. The reverse would leave a store <em>claiming</em> the new format over an un-migrated catalog —
+the exact failure the ladder exists to eliminate.</p>
+<p>Migration is <strong>not a save</strong>: the paired generation stamps that pair the two halves are carried
+across untouched.</p>
+<h3 id="append-only-never-edited"><a class="header" href="#append-only-never-edited">Append-only, never edited</a></h3>
+<p>A landed <code>MIGRATIONS</code> entry is frozen. Stores in the wild have already run it, so editing it changes
+nothing for them and silently diverges the shape a fresh store gets from the shape an upgraded one
+gets. Add a new entry instead. For the same reason each migration carries a <strong>frozen snapshot</strong> of
+the table shape it produces rather than deriving it from the live DDL, which will keep moving.</p>
+<p>Revision 1 is <em>defined</em> as whatever a pre-ladder build stamped — which is exactly what every
+existing store already says, since the <code>schema_version</code> table was seeded with a literal <code>1</code> and
+never read back. That is why the ladder needs no detection heuristic. It is deliberately not a claim
+about one particular table shape, though: nothing stamped a revision while the catalog was still
+moving, so <code>1</code> spans several, and a migration must tolerate any of them. The ladder starts there
+rather than trying to resurrect the 0.12–0.16 formats, which changed the meaning of bytes on disk
+and are still rejected outright.</p>
+<h3 id="the-first-rung"><a class="header" href="#the-first-rung">The first rung</a></h3>
+<p>Revision 2 widens the <code>time_series_associations</code> <code>time_series_type</code> <code>CHECK</code> from <code>BETWEEN 0 AND 5</code>
+to <code>&gt;= 0</code>. <code>TimeSeriesType::from_code</code> is the real gate on that domain and runs on every write and
+every read, so the numeric bound bought nothing SQLite had to enforce — while turning the eventual
+appending of a seventh type into a table rebuild. Moving the domain onto the enum leaves the <code>CHECK</code>
+as a non-negativity test, which still refuses a corrupted value.</p>
+<p>SQLite has no <code>ALTER TABLE … DROP CONSTRAINT</code>, so applying it <em>is</em> the table rebuild, and the
+rebuild is what makes the two subtle parts of the ladder concrete: the <code>time_series_readable</code> view
+has to be dropped first (SQLite refuses to drop a table a view still names), and the <code>AUTOINCREMENT</code>
+high-water mark has to be carried across by hand, because <code>DROP TABLE</code> takes the old table's
+<code>sqlite_sequence</code> row with it and the copy would restart the counter at <code>max(id)</code> — handing back an
+id a deleted row already used, which is the one thing <code>AUTOINCREMENT</code> is there to prevent.</p>
 
                     </main>
 
