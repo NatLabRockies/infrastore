@@ -4,7 +4,7 @@
 //!
 //! ```python
 //! from infrastore import (
-//!     Store, SingleTimeSeries, NonSequentialTimeSeries,
+//!     Store, SingleTimeSeries, NonSequentialTimeSeries, PersistentTimeSeries,
 //!     TimeSeriesType, OwnerCategory,
 //!     SupplementalAttributeAssociation, ParentChildAssociation,
 //!     TimeSeriesError, NotFoundError, OwnerMismatchError, DuplicateTimeSeriesError,
@@ -441,6 +441,7 @@ fn catalog_name(catalog: core_lib::CatalogMode) -> &'static str {
 pub enum PyTimeSeriesType {
     SingleTimeSeries,
     NonSequentialTimeSeries,
+    PersistentTimeSeries,
     Deterministic,
     DeterministicSingleTimeSeries,
     Probabilistic,
@@ -453,6 +454,9 @@ impl From<PyTimeSeriesType> for core_lib::TimeSeriesType {
             PyTimeSeriesType::SingleTimeSeries => core_lib::TimeSeriesType::SingleTimeSeries,
             PyTimeSeriesType::NonSequentialTimeSeries => {
                 core_lib::TimeSeriesType::NonSequentialTimeSeries
+            }
+            PyTimeSeriesType::PersistentTimeSeries => {
+                core_lib::TimeSeriesType::PersistentTimeSeries
             }
             PyTimeSeriesType::Deterministic => core_lib::TimeSeriesType::Deterministic,
             PyTimeSeriesType::DeterministicSingleTimeSeries => {
@@ -470,6 +474,9 @@ impl From<core_lib::TimeSeriesType> for PyTimeSeriesType {
             core_lib::TimeSeriesType::SingleTimeSeries => PyTimeSeriesType::SingleTimeSeries,
             core_lib::TimeSeriesType::NonSequentialTimeSeries => {
                 PyTimeSeriesType::NonSequentialTimeSeries
+            }
+            core_lib::TimeSeriesType::PersistentTimeSeries => {
+                PyTimeSeriesType::PersistentTimeSeries
             }
             core_lib::TimeSeriesType::Deterministic => PyTimeSeriesType::Deterministic,
             core_lib::TimeSeriesType::DeterministicSingleTimeSeries => {
@@ -1259,6 +1266,97 @@ impl PyNonSequentialTimeSeries {
     }
 }
 
+// ---- PersistentTimeSeries -------------------------------------------------
+
+/// A sparse step function: breakpoints plus one value each, holding the last
+/// value forward.
+///
+/// Constructed exactly like a `NonSequentialTimeSeries` — a strictly increasing
+/// list of timestamps and an array with one value per timestamp — and the
+/// timestamp spelling is inferred from the input the same way (naive datetimes
+/// are zoneless, a `ZoneInfo` with a `key` names its zone). The difference is
+/// what a read *between* the breakpoints means: the value at breakpoint `i`
+/// stays in force until breakpoint `i + 1`, and past the last one forever,
+/// where a `NonSequentialTimeSeries` has no value there at all. There is no
+/// value before the first breakpoint.
+#[pyclass(name = "PersistentTimeSeries", module = "infrastore", from_py_object)]
+#[derive(Clone)]
+pub struct PyPersistentTimeSeries {
+    inner: core_lib::PersistentTimeSeries,
+}
+
+#[pymethods]
+impl PyPersistentTimeSeries {
+    /// `name` is required.
+    #[new]
+    #[pyo3(signature = (timestamps, data, name))]
+    fn new(timestamps: Vec<PyInstant>, data: &Bound<'_, PyAny>, name: String) -> PyResult<Self> {
+        let typed = typed_array_from_numpy(data)?;
+        // One series records one spelling, so the vector has to agree on one.
+        let reference = vector_reference(&timestamps)?;
+        let mut inner =
+            core_lib::PersistentTimeSeries::new(instants_to_utc(&timestamps), typed, name)
+                .map_err(InvalidParameterError::new_err)?;
+        inner.time_reference = reference;
+        Ok(Self { inner })
+    }
+
+    #[getter]
+    fn name(&self) -> String {
+        self.inner.name.clone()
+    }
+
+    /// The breakpoint vector, spelled the way it was written.
+    #[getter]
+    fn timestamps<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyAny>>> {
+        spell_instants(
+            py,
+            &self.inner.timestamps,
+            self.inner.time_reference.as_ref(),
+        )
+    }
+
+    /// How this series' breakpoints were spelled: `"utc"`, `"zoneless"`, a fixed
+    /// offset (`"-07:00"`), an IANA zone name, or `None` for unspecified.
+    #[getter]
+    fn time_reference(&self) -> Option<String> {
+        self.inner
+            .time_reference
+            .as_ref()
+            .map(core_lib::TimeReference::as_storage_string)
+    }
+
+    #[getter]
+    fn length(&self) -> usize {
+        self.inner.length
+    }
+
+    #[getter]
+    fn data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        numpy_from_typed(py, &self.inner.data)
+    }
+
+    /// Value equality: all fields including the data array (bitwise).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    /// Number of breakpoints (`length`).
+    fn __len__(&self) -> usize {
+        self.inner.length
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "PersistentTimeSeries(name={:?}, length={}, shape={:?}, time_reference={})",
+            self.inner.name,
+            self.inner.length,
+            self.inner.data.shape,
+            reference_label(self.inner.time_reference.as_ref()),
+        )
+    }
+}
+
 // ---- Associations ---------------------------------------------------------
 
 /// One attachment of a supplemental attribute to a component.
@@ -1458,12 +1556,15 @@ fn required_item<'py, T: pyo3::conversion::FromPyObjectOwned<'py>>(
 }
 
 /// Pull the core data off a Python time-series object (`SingleTimeSeries`,
-/// `NonSequentialTimeSeries`, `Deterministic`, `Probabilistic`, or `Scenarios`).
+/// `NonSequentialTimeSeries`, `PersistentTimeSeries`, `Deterministic`,
+/// `Probabilistic`, or `Scenarios`).
 fn extract_time_series_data(time_series: &Bound<'_, PyAny>) -> PyResult<core_lib::TimeSeriesData> {
     if let Ok(single) = time_series.extract::<PySingleTimeSeries>() {
         Ok(core_lib::TimeSeriesData::SingleTimeSeries(single.inner))
     } else if let Ok(ns) = time_series.extract::<PyNonSequentialTimeSeries>() {
         Ok(core_lib::TimeSeriesData::NonSequentialTimeSeries(ns.inner))
+    } else if let Ok(p) = time_series.extract::<PyPersistentTimeSeries>() {
+        Ok(core_lib::TimeSeriesData::PersistentTimeSeries(p.inner))
     } else if let Ok(det) = time_series.extract::<PyDeterministic>() {
         Ok(core_lib::TimeSeriesData::Deterministic(det.inner))
     } else if let Ok(prob) = time_series.extract::<PyProbabilistic>() {
@@ -1473,7 +1574,7 @@ fn extract_time_series_data(time_series: &Bound<'_, PyAny>) -> PyResult<core_lib
     } else {
         Err(InvalidParameterError::new_err(
             "time_series must be SingleTimeSeries, NonSequentialTimeSeries, \
-                 Deterministic, Probabilistic, or Scenarios",
+                 PersistentTimeSeries, Deterministic, Probabilistic, or Scenarios",
         ))
     }
 }
@@ -1485,6 +1586,9 @@ fn time_series_data_to_py(py: Python<'_>, data: core_lib::TimeSeriesData) -> PyR
     match data {
         core_lib::TimeSeriesData::SingleTimeSeries(s) => {
             Ok(Py::new(py, PySingleTimeSeries { inner: s })?.into_any())
+        }
+        core_lib::TimeSeriesData::PersistentTimeSeries(s) => {
+            Ok(Py::new(py, PyPersistentTimeSeries { inner: s })?.into_any())
         }
         core_lib::TimeSeriesData::NonSequentialTimeSeries(s) => {
             Ok(Py::new(py, PyNonSequentialTimeSeries { inner: s })?.into_any())
@@ -1531,7 +1635,8 @@ impl PyStaticReader {
     /// "initial_timestamp": rfc3339 str, "resolution": ISO-8601 str | None,
     /// "length": int, "time_reference": str | None}`.
     ///
-    /// `resolution` is `None` for a `NonSequentialTimeSeries` reader: an
+    /// `resolution` is `None` for a `NonSequentialTimeSeries` or
+    /// `PersistentTimeSeries` reader: an
     /// irregular timeline has no constant step, so walk `timestamps()` instead.
     ///
     /// `time_reference` is the one spelling the axis carries. A reader whose
@@ -2535,8 +2640,17 @@ impl PyStore {
     /// resolution per reader — and all matched series must share one grid. For
     /// `time_series_type="NonSequentialTimeSeries"` pass no resolution (an
     /// irregular series has none): all matched series must instead lie on one
-    /// timestamp vector, which is also what pools their arrays on disk. Drive it
-    /// with `static_read`.
+    /// timestamp vector, which is also what pools their arrays on disk.
+    ///
+    /// `time_series_type="PersistentTimeSeries"` also takes no resolution, and
+    /// is the one case whose columns need **not** share a timeline: a step
+    /// function has a value at every instant from its first breakpoint on, so
+    /// each column resolves hold-last on breakpoints of its own. `timestamps()`
+    /// is then the sorted union of every column's breakpoints, and reading
+    /// before some column's first breakpoint raises `InvalidParameterError`
+    /// naming that column.
+    ///
+    /// Drive any of them with `static_read`.
     #[pyo3(signature = (resolution=None, *, time_series_type=None, owner_id=None, owner_category=None, owner_type=None, name=None, name_glob=None, component_field=None, zoneless=None, features=None))]
     #[allow(clippy::too_many_arguments)]
     fn build_static_reader(
@@ -3695,9 +3809,10 @@ fn pyany_to_requested_type(
 /// Every `TimeSeriesType` spelling, for the messages above. Held here rather
 /// than derived, so a new variant shows up as a failing test rather than a
 /// silently short list.
-const TIME_SERIES_TYPE_NAMES: [&str; 6] = [
+const TIME_SERIES_TYPE_NAMES: [&str; 7] = [
     "SingleTimeSeries",
     "NonSequentialTimeSeries",
+    "PersistentTimeSeries",
     "Deterministic",
     "DeterministicSingleTimeSeries",
     "Probabilistic",
@@ -4239,6 +4354,7 @@ fn infrastore(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyTransaction>()?;
     m.add_class::<PySingleTimeSeries>()?;
     m.add_class::<PyNonSequentialTimeSeries>()?;
+    m.add_class::<PyPersistentTimeSeries>()?;
     m.add_class::<PyDeterministic>()?;
     m.add_class::<PyProbabilistic>()?;
     m.add_class::<PyScenarios>()?;

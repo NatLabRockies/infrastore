@@ -26,8 +26,8 @@ use crate::types::metadata::{Features, OwnerCategory, TimeSeriesMetadata, valida
 use crate::types::period::Period;
 use crate::types::time_reference::{TimeRange, TimeReference};
 use crate::types::time_series::{
-    Descriptors, Deterministic, NonSequentialTimeSeries, Probabilistic, Scenarios,
-    SingleTimeSeries, TimeSeriesData, TimeSeriesType, compute_h,
+    Descriptors, Deterministic, NonSequentialTimeSeries, PersistentTimeSeries, Probabilistic,
+    Scenarios, SingleTimeSeries, TimeSeriesData, TimeSeriesType, compute_h,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -257,7 +257,9 @@ impl ReadWindow {
         }
         let range = match meta.time_series_type {
             TimeSeriesType::SingleTimeSeries => self.resolve_single(meta)?,
-            TimeSeriesType::NonSequentialTimeSeries => self.resolve_non_sequential(meta)?,
+            TimeSeriesType::NonSequentialTimeSeries | TimeSeriesType::PersistentTimeSeries => {
+                self.resolve_non_sequential(meta)?
+            }
             TimeSeriesType::Deterministic
             | TimeSeriesType::DeterministicSingleTimeSeries
             | TimeSeriesType::Probabilistic
@@ -363,16 +365,38 @@ impl ReadWindow {
         Ok(self.range(meta, start, end))
     }
 
+    /// Both irregular static types, which share a shape: a stored vector of
+    /// instants and one value each, so a window is a run of stored rows.
+    ///
+    /// A `PersistentTimeSeries` still has to *start* on a stored breakpoint
+    /// here. The hold-last rule that lets a step function answer at an
+    /// arbitrary instant needs a bound to hold back to, and a `ReadWindow`
+    /// names a row count rather than a bound — a window silently rewound to an
+    /// earlier breakpoint would return `len` rows the caller did not ask for.
+    /// Reading from an arbitrary instant is what the range form is for, and the
+    /// error says so.
     fn resolve_non_sequential(&self, meta: &TimeSeriesMetadata) -> Result<TimeRange> {
-        self.reject_count("a NonSequentialTimeSeries")?;
-        let timestamps = meta.timestamps.as_ref().ok_or_else(|| {
-            TimeSeriesError::IntegrityError("NonSequentialTimeSeries missing timestamps".into())
-        })?;
+        let ts_type = meta.time_series_type;
+        let persistent = ts_type == TimeSeriesType::PersistentTimeSeries;
+        let label = ts_type.as_str();
+        // "breakpoints" is the persistent type's own word for its vector; the
+        // two are the same stored thing, and a message that used the other
+        // type's word would send a reader looking for a second concept.
+        let vector = if persistent {
+            "breakpoints"
+        } else {
+            "timestamps"
+        };
+        self.reject_count(&format!("a {label}"))?;
+        let timestamps = meta
+            .timestamps
+            .as_ref()
+            .ok_or_else(|| TimeSeriesError::IntegrityError(format!("{label} missing {vector}")))?;
         let total = timestamps.len();
         if total == 0 {
-            return Err(TimeSeriesError::InvalidParameter(
-                "cannot select a window of an empty NonSequentialTimeSeries".into(),
-            ));
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "cannot select a window of an empty {label}"
+            )));
         }
         let start = self.start.unwrap_or(timestamps[0]);
         // An irregular series has no grid to round onto, so the start has to be
@@ -380,11 +404,17 @@ impl ReadWindow {
         // a different series than the caller named.
         let start_idx = timestamps.partition_point(|t| *t < start);
         if start_idx >= total || timestamps[start_idx] != start {
+            let remedy = if persistent {
+                ". Read it by time range to begin at the breakpoint in force at an arbitrary \
+                 instant"
+            } else {
+                ""
+            };
             return Err(TimeSeriesError::InvalidParameter(format!(
-                "start_time {start} is not one of this NonSequentialTimeSeries' timestamps"
+                "start_time {start} is not one of this {label}' {vector}{remedy}"
             )));
         }
-        let n = Self::extent(self.len, start_idx, total, "timestamps")?;
+        let n = Self::extent(self.len, start_idx, total, vector)?;
         // The bound is exclusive, so it is the timestamp after the last one
         // selected — or just past the final timestamp when the window runs to
         // the end. One millisecond is the catalog's own timestamp resolution.
@@ -2187,9 +2217,10 @@ impl Store {
     ///   the backend holds: a document naming a real array under a length or
     ///   element shape it was not hashed from would otherwise file a row whose
     ///   metadata and data disagree.
-    /// - `NonSequentialTimeSeries` is refused. The store holds its timestamp
-    ///   vector with the arrays, so the values do arrive with the artifact — but
-    ///   the wire form deliberately carries no `timestamps_hash` (it is
+    /// - Both irregular types — `NonSequentialTimeSeries` and
+    ///   `PersistentTimeSeries` — are refused. The store holds their timestamp
+    ///   vectors with the arrays, so the values do arrive with the artifact —
+    ///   but the wire form deliberately carries no `timestamps_hash` (it is
     ///   store-internal, like `features_hash`), so a document names no time axis
     ///   and no import can tell which of the store's the row sits on.
     /// - A `DeterministicSingleTimeSeries` is a view of a `SingleTimeSeries`,
@@ -2202,11 +2233,21 @@ impl Store {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
         for meta in &rows {
-            if meta.time_series_type == TimeSeriesType::NonSequentialTimeSeries {
+            // Both irregular types sit on a stored timestamp vector, and the
+            // export names neither: a `PersistentTimeSeries` is emitted in the
+            // `NonSequentialTimeSeries` row shape (see `openapi.rs`), which has
+            // no more room for a time axis than the shape it borrows. Importing
+            // one would file a row with a NULL `timestamps_hash` — a read then
+            // fails with "missing breakpoints", and a static reader over *any*
+            // persistent series in the store fails resolving the axis.
+            if matches!(
+                meta.time_series_type,
+                TimeSeriesType::NonSequentialTimeSeries | TimeSeriesType::PersistentTimeSeries
+            ) {
                 return Err(TimeSeriesError::InvalidParameter(format!(
-                    "cannot import NonSequentialTimeSeries '{}': the wire form carries no \
-                     timestamps_hash, so the document does not say which stored time axis \
-                     the row sits on",
+                    "cannot import {} '{}': the wire form carries no timestamps_hash, so the \
+                     document does not say which stored time axis the row sits on",
+                    meta.time_series_type.as_str(),
                     meta.name,
                 )));
             }
@@ -2459,6 +2500,98 @@ impl Store {
                 let series = NonSequentialTimeSeries::new(timestamps, data, meta.name.clone())
                     .map_err(TimeSeriesError::IntegrityError)?;
                 Ok(TimeSeriesData::NonSequentialTimeSeries(series))
+            }
+            TimeSeriesType::PersistentTimeSeries => {
+                let timestamps = meta.timestamps.clone().ok_or_else(|| {
+                    TimeSeriesError::IntegrityError(
+                        "PersistentTimeSeries missing breakpoints".into(),
+                    )
+                })?;
+                let length = meta.length.ok_or_else(|| {
+                    TimeSeriesError::IntegrityError("PersistentTimeSeries missing length".into())
+                })?;
+                if timestamps.len() != length {
+                    return Err(TimeSeriesError::IntegrityError(format!(
+                        "PersistentTimeSeries has {} breakpoints but length {length}",
+                        timestamps.len()
+                    )));
+                }
+
+                let (data, timestamps) = match time_range {
+                    None => (
+                        self.backend
+                            .get_array(&meta.data_hash, meta.element_type.physical_dtype())?,
+                        timestamps,
+                    ),
+                    Some((start, end)) => {
+                        if end < start {
+                            return Err(TimeSeriesError::InvalidParameter("end < start".into()));
+                        }
+                        // Zero width is settled before anything else, because
+                        // the in-force lookup below would otherwise answer a
+                        // question nobody asked: `[t, t)` contains no instant,
+                        // so there is none to hold a value at, and every other
+                        // type returns an empty selection here. That includes
+                        // `SingleTimeSeries`, which is the closest analogue —
+                        // also a step function, whose "covered interval
+                        // overlaps the range" rule selects nothing because an
+                        // empty range cannot be overlapped. Running first also
+                        // means an empty window before the first breakpoint is
+                        // empty rather than an error: the undefined-before-the-
+                        // first rule is about an instant the caller asked for,
+                        // and this caller asked for none.
+                        let (start_idx, end_idx) = if end == start {
+                            let at = timestamps.partition_point(|t| *t < start);
+                            (at, at)
+                        } else {
+                            // The one place a persistent read must diverge from
+                            // the irregular one above, and the divergence is
+                            // the whole point of the type.
+                            //
+                            // The `NonSequentialTimeSeries` arm takes the first
+                            // breakpoint at or after `start`, because that is
+                            // the first instant it defines a value at. A step
+                            // function defines a value at `start` itself — the
+                            // one carried by the breakpoint *in force* there —
+                            // so the slice has to begin one earlier, or the
+                            // caller's window opens on an interval the returned
+                            // series says nothing about. Do not "fix" the
+                            // asymmetry.
+                            let start_idx = crate::timestamps::index_in_force_at(
+                                &timestamps,
+                                start,
+                            )
+                            .ok_or_else(|| {
+                                TimeSeriesError::InvalidParameter(format!(
+                                    "PersistentTimeSeries {:?} on owner {} has no value at the \
+                                     range start {start}: it is before the first breakpoint {}, \
+                                     where a step function is undefined",
+                                    meta.name,
+                                    meta.owner_id,
+                                    timestamps
+                                        .first()
+                                        .map(|t| t.to_string())
+                                        .unwrap_or_else(|| "<none>".into()),
+                                ))
+                            })?;
+                            // The upper bound is unchanged: a breakpoint at or
+                            // after `end` is in force only outside the window.
+                            // No lower clamp is needed — every breakpoint up to
+                            // and including `start_idx` is `<= start < end`, so
+                            // this is already at least `start_idx + 1`.
+                            (start_idx, timestamps.partition_point(|t| *t < end))
+                        };
+                        let data = self.backend.get_slice(
+                            &meta.data_hash,
+                            meta.element_type.physical_dtype(),
+                            start_idx..end_idx,
+                        )?;
+                        (data, timestamps[start_idx..end_idx].to_vec())
+                    }
+                };
+                let series = PersistentTimeSeries::new(timestamps, data, meta.name.clone())
+                    .map_err(TimeSeriesError::IntegrityError)?;
+                Ok(TimeSeriesData::PersistentTimeSeries(series))
             }
             TimeSeriesType::Deterministic => {
                 let arr = self
@@ -2791,9 +2924,38 @@ impl Store {
                 let timestamps = self.metadata.timestamps_for_hash(&hash, &*self.backend)?;
                 crate::reader::build_groups(crate::reader::Timeline::Irregular { timestamps }, rows)
             }
+            TimeSeriesType::PersistentTimeSeries => {
+                if filter.resolution.is_some() {
+                    return Err(TimeSeriesError::InvalidParameter(
+                        "build_static_reader takes no resolution filter for \
+                         PersistentTimeSeries: a step function has none, so the filter would \
+                         match nothing. Its timeline is the union of its columns' breakpoints."
+                            .into(),
+                    ));
+                }
+                // Unlike the irregular arm above, several breakpoint vectors are
+                // *not* an error here: a step function has a value at every
+                // instant from its first breakpoint on, so columns need not
+                // agree on where their breakpoints fall. Each row is interned
+                // against the vector it names, and the reader's public axis is
+                // their union.
+                let (rows, vectors) = self
+                    .metadata
+                    .list_timeline_rows(&filter.into(), self.backend.as_ref())?;
+                if rows.is_empty() {
+                    return Err(TimeSeriesError::InvalidParameter(
+                        "build_static_reader: no PersistentTimeSeries match the filter".into(),
+                    ));
+                }
+                let union = merge_breakpoints(&vectors);
+                crate::reader::build_groups_persistent(
+                    crate::reader::Timeline::Persistent { vectors, union },
+                    rows,
+                )
+            }
             other => Err(TimeSeriesError::InvalidParameter(format!(
                 "build_static_reader handles the static types (SingleTimeSeries / \
-                 NonSequentialTimeSeries); got {}",
+                 NonSequentialTimeSeries / PersistentTimeSeries); got {}",
                 other.as_str()
             ))),
         }
@@ -2808,14 +2970,16 @@ impl Store {
         reader: &mut StaticReader,
         at: chrono::DateTime<chrono::Utc>,
     ) -> Result<()> {
-        let index = reader.index_at(at)?;
-        for group in reader.groups_mut() {
-            group.fill(|hashes, dtype, out| {
-                self.backend.read_index_into(hashes, dtype, index, out)
-            })?;
-        }
-        reader.mark_read(at);
-        Ok(())
+        // Two backend shapes, because a `PersistentTimeSeries` reader resolves
+        // a row per column rather than one for the whole reader. Which one runs
+        // is the reader's decision — see [`StaticReader::read_at`].
+        reader.read_at(
+            at,
+            |hashes, dtype, index, out| self.backend.read_index_into(hashes, dtype, index, out),
+            |hashes, dtype, indices, out| {
+                self.backend.read_indices_into(hashes, dtype, indices, out)
+            },
+        )
     }
 
     /// Build a [`ForecastReader`] over the forecasts matching `filter`.
@@ -3656,7 +3820,10 @@ impl Store {
                 .count_by_type(TimeSeriesType::SingleTimeSeries)?
                 + self
                     .metadata
-                    .count_by_type(TimeSeriesType::NonSequentialTimeSeries)?,
+                    .count_by_type(TimeSeriesType::NonSequentialTimeSeries)?
+                + self
+                    .metadata
+                    .count_by_type(TimeSeriesType::PersistentTimeSeries)?,
             forecasts,
         })
     }
@@ -3676,9 +3843,10 @@ impl Store {
     /// vs forecast). Replaces a binding-side full scan that grouped owners and
     /// hashes in memory.
     pub fn time_series_counts_detailed(&self) -> Result<TimeSeriesCountsDetailed> {
-        const STATIC: [TimeSeriesType; 2] = [
+        const STATIC: [TimeSeriesType; 3] = [
             TimeSeriesType::SingleTimeSeries,
             TimeSeriesType::NonSequentialTimeSeries,
+            TimeSeriesType::PersistentTimeSeries,
         ];
         const FORECAST: [TimeSeriesType; 4] = [
             TimeSeriesType::Deterministic,
@@ -4772,7 +4940,13 @@ fn array_layout_for(ts_type: TimeSeriesType) -> ArrayLayout {
         TimeSeriesType::SingleTimeSeries | TimeSeriesType::DeterministicSingleTimeSeries => {
             ArrayLayout::Packed
         }
-        TimeSeriesType::NonSequentialTimeSeries => ArrayLayout::Packed,
+        // Both irregular static types pool by their explicit time axis, so both
+        // pack. A `PersistentTimeSeries` and a `NonSequentialTimeSeries` on the
+        // same breakpoints share one `nsts_…` dataset, which is deliberate:
+        // `PackGroup` is keyed by the time axis, never by the series type.
+        TimeSeriesType::NonSequentialTimeSeries | TimeSeriesType::PersistentTimeSeries => {
+            ArrayLayout::Packed
+        }
         TimeSeriesType::Deterministic => ArrayLayout::StandaloneWindowed { count_axis: 1 },
         TimeSeriesType::Probabilistic | TimeSeriesType::Scenarios => {
             ArrayLayout::StandaloneWindowed { count_axis: 2 }
@@ -4883,6 +5057,46 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
                     percentiles: None,
                     element_type,
                     element_shape: non_sequential.data.element_shape().to_vec(),
+                    application_data: item.data.application_data().map(str::to_owned),
+                    id: None,
+                },
+            )
+        }
+        TimeSeriesData::PersistentTimeSeries(persistent) => {
+            let hash = array_hash(&persistent.data);
+            (
+                hash,
+                // The same pooling as an irregular series, and deliberately so:
+                // `PackGroup` is keyed by the time axis alone, so a persistent
+                // series and a non-sequential one on the same breakpoints share
+                // one `nsts_…` dataset and one stored array. Nothing about the
+                // storage layer knows the difference between them — the
+                // difference is entirely in how a read resolves an instant.
+                PackGroup::Irregular(crate::hash::timestamps_hash(&persistent.timestamps)),
+                array_layout_for(TimeSeriesType::PersistentTimeSeries),
+                TimeSeriesMetadata {
+                    owner_id: item.owner_id,
+                    owner_type: item.owner_type.clone(),
+                    owner_category: item.owner_category,
+                    time_series_type: TimeSeriesType::PersistentTimeSeries,
+                    name: persistent.name.clone(),
+                    data_hash: hash,
+                    initial_timestamp: None,
+                    resolution: None,
+                    length: Some(persistent.length),
+                    horizon: None,
+                    interval: None,
+                    count: None,
+                    timestamps: Some(persistent.timestamps.clone()),
+                    features: item.features.clone(),
+                    units: item.data.units().map(str::to_owned),
+                    quantity_kind: item.data.quantity_kind().map(str::to_owned),
+                    unit_system: item.data.unit_system(),
+                    time_reference: item.data.time_reference().cloned(),
+                    component_field: item.data.component_field().map(str::to_owned),
+                    percentiles: None,
+                    element_type,
+                    element_shape: persistent.data.element_shape().to_vec(),
                     application_data: item.data.application_data().map(str::to_owned),
                     id: None,
                 },
@@ -5047,6 +5261,26 @@ fn resolve_irregular_layouts(
     }
 }
 
+/// The sorted, deduplicated union of several strictly increasing breakpoint
+/// vectors: every instant at which *some* one of them changes value.
+///
+/// The public axis of a [`Timeline::Persistent`](crate::reader) reader. Between
+/// two consecutive union instants no column changes, so a sweep that visits
+/// only these instants sees every distinct combination of column values — which
+/// is what makes a persistent reader's axis meaningful even though its columns
+/// do not share one.
+fn merge_breakpoints(
+    vectors: &[Vec<chrono::DateTime<chrono::Utc>>],
+) -> Vec<chrono::DateTime<chrono::Utc>> {
+    // Concatenate-then-sort rather than a k-way merge: the vectors are short
+    // (the type exists for sparse curves), and a k-way merge here would buy
+    // nothing but a heap.
+    let mut union: Vec<_> = vectors.iter().flatten().copied().collect();
+    union.sort_unstable();
+    union.dedup();
+    union
+}
+
 /// The value array backing a request, regardless of time-series type.
 fn request_array(item: &AddRequest) -> &TypedArray {
     match &item.data {
@@ -5055,6 +5289,7 @@ fn request_array(item: &AddRequest) -> &TypedArray {
         TimeSeriesData::Deterministic(det) => &det.data,
         TimeSeriesData::Probabilistic(prob) => &prob.data,
         TimeSeriesData::Scenarios(scen) => &scen.data,
+        TimeSeriesData::PersistentTimeSeries(persistent) => &persistent.data,
     }
 }
 
@@ -5255,7 +5490,11 @@ fn validate_time_reference(data: &TimeSeriesData) -> Result<()> {
             ("", None),
             ("", None),
         ],
-        TimeSeriesData::NonSequentialTimeSeries(_) => [("", None), ("", None), ("", None)],
+        // Neither irregular static type carries a calendar period: every instant
+        // is explicit, so there is no grid for a spelling to disagree with.
+        TimeSeriesData::NonSequentialTimeSeries(_) | TimeSeriesData::PersistentTimeSeries(_) => {
+            [("", None), ("", None), ("", None)]
+        }
         TimeSeriesData::Deterministic(d) => [
             ("resolution", Some(d.resolution)),
             ("horizon", Some(d.horizon)),
@@ -5296,6 +5535,7 @@ fn validate_data(data: &TimeSeriesData) -> Result<()> {
         TimeSeriesData::NonSequentialTimeSeries(non_sequential) => {
             validate_non_sequential(non_sequential)
         }
+        TimeSeriesData::PersistentTimeSeries(persistent) => validate_persistent(persistent),
         TimeSeriesData::Deterministic(det) => {
             require_ms(det.initial_timestamp, "Deterministic")?;
             det.validate().map_err(invalid)
@@ -5385,6 +5625,36 @@ fn validate_non_sequential(series: &NonSequentialTimeSeries) -> Result<()> {
     for (i, t) in series.timestamps.iter().enumerate() {
         crate::timestamps::require_millisecond_precision(*t, || {
             format!("NonSequentialTimeSeries timestamp {i}")
+        })
+        .map_err(TimeSeriesError::InvalidParameter)?;
+    }
+    Ok(())
+}
+
+/// Check that a `PersistentTimeSeries` describes its own array.
+///
+/// The rules are [`validate_non_sequential`]'s, for the same reasons: the
+/// breakpoint vector, the declared `length`, and the array must agree; the
+/// breakpoints must be strictly increasing (a repeated breakpoint would make
+/// "the value in force" ambiguous, and an out-of-order one would break the
+/// binary search every read does); and every breakpoint must land on a whole
+/// millisecond, because the C ABI and Julia exchange instants as `i64` unix
+/// milliseconds and a finer one is silently truncated at some binding
+/// boundaries and not others.
+fn validate_persistent(series: &PersistentTimeSeries) -> Result<()> {
+    if series.timestamps.len() != series.data.length() || series.length != series.data.length() {
+        return Err(TimeSeriesError::InvalidParameter(
+            "PersistentTimeSeries breakpoint count, length, and data length must match".into(),
+        ));
+    }
+    if series.timestamps.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(TimeSeriesError::InvalidParameter(
+            "PersistentTimeSeries breakpoints must be strictly increasing".into(),
+        ));
+    }
+    for (i, t) in series.timestamps.iter().enumerate() {
+        crate::timestamps::require_millisecond_precision(*t, || {
+            format!("PersistentTimeSeries breakpoint {i}")
         })
         .map_err(TimeSeriesError::InvalidParameter)?;
     }

@@ -1304,6 +1304,116 @@ impl Inner {
         Ok(())
     }
 
+    /// [`Self::read_index_locked`] with a row index per column.
+    ///
+    /// Bucketed by `(dataset, row)` rather than by dataset alone: the columns
+    /// of a persistent reader can want *different* rows of the same packed
+    /// pool, so one hyperslab per dataset is no longer enough. Columns that do
+    /// happen to want the same row of the same dataset still share one, which
+    /// is the common case — a handful of distinct monthly curves across
+    /// thousands of series.
+    ///
+    /// The cost to know: this is up to one hyperslab per distinct
+    /// `(dataset, row)` pair, against the one-per-dataset the uniform path
+    /// gets. That is the intrinsic price of independent breakpoints, and for
+    /// the data the type exists for — sparse curves, few distinct vectors — it
+    /// is small.
+    fn read_indices_locked(
+        &self,
+        hashes: &[[u8; 32]],
+        dtype: Dtype,
+        indices: &[usize],
+        out: &mut Vec<u8>,
+    ) -> Result<()> {
+        out.clear();
+        if hashes.is_empty() {
+            return Ok(());
+        }
+
+        enum Placement {
+            /// Which `(dataset, row)` bucket this column reads from, and where
+            /// its element sits inside that row.
+            Packed {
+                bucket: (String, usize),
+                col: usize,
+            },
+            Standalone {
+                hash: [u8; 32],
+                index: usize,
+            },
+        }
+
+        let mut placements: Vec<Placement> = Vec::with_capacity(hashes.len());
+        // Widest column wanted per `(dataset, row)`, so each bucket reads
+        // exactly as far as it has to.
+        let mut max_col: HashMap<(String, usize), usize> = HashMap::new();
+        for (hash, &index) in hashes.iter().zip(indices) {
+            match self.by_hash.get(hash).ok_or(TimeSeriesError::NotFound)? {
+                Location::Packed { dataset, col } => {
+                    self.check_packed_dtype(hash, dataset, dtype)?;
+                    let bucket = (dataset.clone(), index);
+                    max_col
+                        .entry(bucket.clone())
+                        .and_modify(|m| *m = (*m).max(*col))
+                        .or_insert(*col);
+                    placements.push(Placement::Packed { bucket, col: *col });
+                }
+                Location::Standalone { .. } => {
+                    placements.push(Placement::Standalone { hash: *hash, index });
+                }
+            }
+        }
+
+        let mut rows: HashMap<(String, usize), (Vec<u8>, usize)> = HashMap::new();
+        for (bucket, &top) in &max_col {
+            let (dataset, index) = bucket;
+            let state = self.datasets.get(dataset).ok_or_else(|| {
+                TimeSeriesError::IntegrityError(format!("dataset {dataset} missing"))
+            })?;
+            if *index >= state.length {
+                return Err(TimeSeriesError::InvalidParameter(format!(
+                    "index {index} out of bounds for dataset {dataset} length {}",
+                    state.length
+                )));
+            }
+            let width = top + 1;
+            let elem_bytes =
+                state.element_shape.iter().product::<usize>().max(1) * state.dtype.size();
+            let ds = self.dataset(dataset)?;
+            let bytes = read_sel(
+                &ds,
+                state.dtype,
+                packed_block_ranges(*index..*index + 1, 0..width, &state.element_shape),
+            )?;
+            rows.insert(bucket.clone(), (bytes, elem_bytes));
+        }
+
+        // Scatter back in the caller's column order, which is what makes the
+        // result line up with `hashes` (and therefore with the reader's keys).
+        // Getting this wrong produces plausible-looking wrong numbers rather
+        // than an error, so it is asserted directly by the reader tests.
+        for placement in &placements {
+            match placement {
+                Placement::Packed { bucket, col } => {
+                    let (row, elem_bytes) = rows.get(bucket).expect("bucket row read above");
+                    let start = col * elem_bytes;
+                    let block = row.get(start..start + elem_bytes).ok_or_else(|| {
+                        TimeSeriesError::IntegrityError(format!(
+                            "column {col} out of row bounds for dataset {}",
+                            bucket.0
+                        ))
+                    })?;
+                    out.extend_from_slice(block);
+                }
+                Placement::Standalone { hash, index } => {
+                    let arr = self.read_locked(hash, dtype, Some(*index..*index + 1))?;
+                    out.extend_from_slice(&arr.bytes);
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn read_arrays_locked(&self, hashes: &[[u8; 32]], dtypes: &[Dtype]) -> Result<Vec<TypedArray>> {
         if hashes.is_empty() {
             return Ok(Vec::new());
@@ -1592,6 +1702,24 @@ impl StorageBackend for Hdf5Backend {
     ) -> Result<()> {
         let inner = self.inner.lock().expect("mutex poisoned");
         inner.read_index_locked(hashes, dtype, index, out)
+    }
+
+    fn read_indices_into(
+        &self,
+        hashes: &[[u8; 32]],
+        dtype: Dtype,
+        indices: &[usize],
+        out: &mut Vec<u8>,
+    ) -> Result<()> {
+        if hashes.len() != indices.len() {
+            return Err(TimeSeriesError::IntegrityError(format!(
+                "read_indices_into got {} hashes and {} indices",
+                hashes.len(),
+                indices.len()
+            )));
+        }
+        let inner = self.inner.lock().expect("mutex poisoned");
+        inner.read_indices_locked(hashes, dtype, indices, out)
     }
 
     #[tracing::instrument(skip(self, hashes), fields(n = hashes.len()))]

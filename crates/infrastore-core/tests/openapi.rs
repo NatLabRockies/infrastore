@@ -298,6 +298,54 @@ fn export_reproduces_every_time_series_fixture() {
     }
 }
 
+/// A `PersistentTimeSeries` row exports in the same shape a
+/// `NonSequentialTimeSeries` row does — `length`, no `resolution` — because
+/// both are static series on an explicit time axis.
+///
+/// It is deliberately **not** a fixture in `build_fixture_store`. The vendored
+/// `TimeSeriesAssociation.json` is a `oneOf` over a closed set of six canonical
+/// Sienna types, and there is no upstream schema for a seventh; inventing one
+/// would misrepresent the vendored contract. `PersistentTimeSeries` is an
+/// infrastore-local extension, so a strict Sienna consumer will reject this
+/// row, and `openapi_schema_conformance.rs::time_series_cases` stays at exactly
+/// six entries.
+#[test]
+fn a_persistent_row_exports_in_the_non_sequential_shape_outside_the_sienna_oneof() {
+    let mut store = create_store(None, true).expect("in-memory store should initialize");
+    let persistent = infrastore_core::PersistentTimeSeries::new(
+        (0..4).map(|i| ts(2030, 1 + i * 3, 1, 0, 0, 0)).collect(),
+        TypedArray::from_f64(vec![4], &[3.5, 4.25, 5.0, 4.75]),
+        "fuel_price",
+    )
+    .expect("persistent row should construct")
+    .with_units("USD/MMBtu")
+    .with_component_field("fuel_cost");
+    store
+        .add_time_series(
+            7,
+            "ThermalStandard",
+            OwnerCategory::Component,
+            TimeSeriesData::PersistentTimeSeries(persistent),
+            Features::new(),
+        )
+        .expect("persistent row should add");
+
+    let json = store
+        .export_time_series_associations_openapi(&ListFilter::new())
+        .expect("export should succeed");
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&json).expect("export is a JSON array");
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert_eq!(row["time_series_type"], "PersistentTimeSeries");
+    assert_eq!(row["length"], 4);
+    assert_eq!(row["units"], "USD/MMBtu");
+    assert_eq!(row["component_field"], "fuel_cost");
+    // The shape fields an irregular row does not carry, and neither does this.
+    assert!(row.get("resolution").is_none(), "{row:#?}");
+    assert!(row.get("initial_timestamp").is_none(), "{row:#?}");
+    assert!(row.get("horizon").is_none(), "{row:#?}");
+}
+
 #[test]
 fn export_sort_order_does_not_depend_on_insertion_order() {
     // Insert the same six rows as `build_fixture_store`, but shuffled: forecast

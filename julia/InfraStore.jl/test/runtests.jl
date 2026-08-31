@@ -160,6 +160,113 @@ end
     @test length(list_metadata(store; owner_id=7, features=nothing)) == 1
 end
 
+@testset "persistent round-trip and step semantics" begin
+    store = Store(in_memory=true)
+    breakpoints = [DateTime(2024, 1, 1), DateTime(2024, 4, 1), DateTime(2024, 7, 1)]
+    series = PersistentTimeSeries(
+        breakpoints,
+        [3.5, 4.25, 5.0],
+        "gas_price";
+        units="USD/MMBtu",
+        component_field="fuel_cost",
+        application_data="{\"as_time_series\":false}",
+    )
+    id = add_time_series!(store, 7, "ThermalStandard", Component, series)
+    got = read_by_id(store, id)
+    @test got isa PersistentTimeSeries
+    @test got.timestamps == breakpoints
+    @test got.data == [3.5, 4.25, 5.0]
+    @test got.name == "gas_price"
+    @test got.units == "USD/MMBtu"
+    @test got.component_field == "fuel_cost"
+    @test got.application_data == "{\"as_time_series\":false}"
+    # A persistent series is static, so it counts as one.
+    @test get_counts(store).static_time_series == 1
+
+    # The catalog row reports the new type, and resolving it by attributes is
+    # how a caller gets from a name to the id that addresses it.
+    @test get_metadata_by_id(store, id).time_series_type <: PersistentTimeSeries
+    @test resolve_id(PersistentTimeSeries, store, 7, Component, "gas_price") == id
+
+    # A range whose start is not a breakpoint still yields the value in force
+    # there: the slice begins one breakpoint earlier than the window does. This
+    # is the case where a NonSequentialTimeSeries would start at July instead.
+    sliced = only(
+        read_by_ids(
+            store, [id]; time_range=(DateTime(2024, 4, 10), DateTime(2024, 9, 1))
+        ),
+    )
+    @test sliced.timestamps == [DateTime(2024, 4, 1), DateTime(2024, 7, 1)]
+    @test sliced.data == [4.25, 5.0]
+
+    # Before the first breakpoint a step function is undefined, and the store
+    # says so rather than clamping.
+    @test_throws InfraStore.InvalidParameterError read_by_ids(
+        store, [id]; time_range=(DateTime(2023, 12, 1), DateTime(2024, 6, 1))
+    )
+
+    # A bulk read reconstructs the right type too.
+    round_tripped = read_by_ids(store, [id])
+    @test length(round_tripped) == 1
+    @test round_tripped[1] isa PersistentTimeSeries
+    @test round_tripped[1].data == [3.5, 4.25, 5.0]
+end
+
+@testset "StaticReader over persistent columns on different breakpoints" begin
+    store = Store(in_memory=true)
+    months(ms) = [DateTime(2024, m, 1) for m in ms]
+    quarterly = [1, 4, 7, 10]
+    semi = [1, 6]
+    add_time_series!(
+        store,
+        1,
+        "Gen",
+        Component,
+        PersistentTimeSeries(months(quarterly), Float64[10, 40, 70, 100], "price"),
+    )
+    add_time_series!(
+        store,
+        2,
+        "Gen",
+        Component,
+        PersistentTimeSeries(months(semi), Float64[1, 6], "price"),
+    )
+
+    r = build_static_reader(store; time_series_type=PersistentTimeSeries)
+    grid = static_grid(r)
+    # No constant step, and the axis is the union of both columns' breakpoints.
+    @test grid.resolution === nothing
+    @test static_timestamps(r) == months([1, 4, 6, 7, 10])
+    @test grid.length == 5
+
+    hold_last(bps, values, at) = values[findlast(<=(at), bps)]
+    for t in static_timestamps(r)
+        static_read!(r, t)
+        @test static_values(r, 1) == [
+            hold_last(months(quarterly), Float64[10, 40, 70, 100], t),
+            hold_last(months(semi), Float64[1, 6], t),
+        ]
+    end
+
+    # A resolution filter makes no sense for a step function either.
+    @test_throws InfraStore.InvalidParameterError build_static_reader(
+        store; time_series_type=PersistentTimeSeries, resolution=Hour(1)
+    )
+
+    # A column that starts later than the union's first instant makes that
+    # instant unreadable, and the error names the column.
+    add_time_series!(
+        store,
+        3,
+        "Gen",
+        Component,
+        PersistentTimeSeries(months([9]), Float64[999], "late"),
+    )
+    r2 = build_static_reader(store; time_series_type=PersistentTimeSeries)
+    @test_throws InfraStore.InvalidParameterError static_read!(r2, DateTime(2024, 1, 1))
+    static_read!(r2, DateTime(2024, 9, 1))
+end
+
 @testset "non-sequential N-D + application_data round-trip" begin
     store = Store(in_memory=true)
     timestamps = [DateTime(2024, 1, 1), DateTime(2024, 1, 1, 4), DateTime(2024, 1, 3)]

@@ -322,6 +322,7 @@ Examples:
   infrastore template SingleTimeSeries
   infrastore template Deterministic > forecast.json
   infrastore template NonSequentialTimeSeries
+  infrastore template PersistentTimeSeries
 
 Needs no --store: it only prints a descriptor to edit.";
 

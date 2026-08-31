@@ -718,6 +718,7 @@ pub fn template(ts_type: &str) -> Result<(), String> {
     let body = match kind {
         SingleTimeSeries => SINGLE,
         NonSequentialTimeSeries => NON_SEQUENTIAL,
+        PersistentTimeSeries => PERSISTENT,
         Deterministic => DETERMINISTIC,
         Probabilistic => PROBABILISTIC,
         Scenarios => SCENARIOS,
@@ -765,6 +766,25 @@ const NON_SEQUENTIAL: &str = r#"{
   "element_type": "f64",
   "units": "MW",
   "csv": "events.csv"
+}
+"#;
+
+// A persistent series takes the same `timestamp,value` CSV as an irregular one;
+// what changes is the read. `component_field` and `application_data` are shown
+// because this is the type where they earn their keep: the field the curve
+// varies, and the consumer's own policy for collapsing a step function.
+const PERSISTENT: &str = r#"{
+  "owner_id": 42,
+  "owner_type": "ThermalStandard",
+  "owner_category": "Component",
+  "name": "gas_price",
+  "type": "PersistentTimeSeries",
+  "element_type": "f64",
+  "units": "USD/MMBtu",
+  "quantity_kind": "Currency",
+  "component_field": "fuel_cost",
+  "application_data": "{\"as_time_series\": false}",
+  "csv": "gas_price.csv"
 }
 "#;
 

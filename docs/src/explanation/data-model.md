@@ -24,24 +24,25 @@ therefore take the category alongside the id (see [Identity](#identity)).
 
 ## Time-Series Types
 
-The data model defines six time-series types, all present in the `TimeSeriesType` enum and the
-metadata schema. Both static series types are implemented across every interface. The four forecast
-types support reading values across the Rust core, the C ABI, Python, Julia, and gRPC. Dense
-forecasts are written through the generic `add_time_series` across the Rust core, Python, and Julia
-(the C ABI keeps the per-type `infrastore_store_add_forecast` / `infrastore_store_add_probabilistic`
-transport functions), and `DeterministicSingleTimeSeries` is derived from stored `SingleTimeSeries`
-via `transform_single_time_series` (gRPC stays read-only):
+The data model defines seven time-series types, all present in the `TimeSeriesType` enum and the
+metadata schema. All three static series types are implemented across every interface. The four
+forecast types support reading values across the Rust core, the C ABI, Python, Julia, and gRPC.
+Dense forecasts are written through the generic `add_time_series` across the Rust core, Python, and
+Julia (the C ABI keeps the per-type `infrastore_store_add_forecast` /
+`infrastore_store_add_probabilistic` transport functions), and `DeterministicSingleTimeSeries` is
+derived from stored `SingleTimeSeries` via `transform_single_time_series` (gRPC stays read-only):
 
 | Type                            | Write path                                | Description                                         |
 | ------------------------------- | ----------------------------------------- | --------------------------------------------------- |
 | `SingleTimeSeries`              | `add_time_series`                         | One array sampled at a fixed resolution             |
 | `NonSequentialTimeSeries`       | `add_time_series`                         | Values at explicit, irregular timestamps            |
+| `PersistentTimeSeries`          | `add_time_series`                         | Sparse step function: breakpoints, hold-last        |
 | `Deterministic`                 | `add_time_series`                         | Forecast: a `(horizon × count)` window matrix       |
 | `DeterministicSingleTimeSeries` | derived by `transform_single_time_series` | Forecast view over an underlying `SingleTimeSeries` |
 | `Probabilistic`                 | `add_time_series`                         | Forecast with percentile bands                      |
 | `Scenarios`                     | `add_time_series`                         | Forecast with discrete scenarios                    |
 
-All six types can be **read** from every interface: the Rust core, the C ABI, Python, Julia, the
+All seven types can be **read** from every interface: the Rust core, the C ABI, Python, Julia, the
 `infrastore` CLI, and the gRPC server. The **write** paths in the table are available in the Rust
 core, the C ABI, Python, Julia, and the CLI — never over gRPC, whose service is read-only. And no
 interface adds a `DeterministicSingleTimeSeries` directly: it only ever comes into existence by
@@ -81,6 +82,90 @@ can sweep them a timestamp at a time. A series alone on its time axis keeps a st
 instead — packing only pays once a cohort is several columns wide. See the
 [storage model](./storage-model.md) for the layout.
 
+### `PersistentTimeSeries`
+
+A `PersistentTimeSeries` is a **sparse step function**: a strictly increasing vector of
+_breakpoints_ plus one value each, where the value at an arbitrary instant is the one belonging to
+the greatest breakpoint at or before it.
+
+```text
+value
+  ^
+  |            +------------------->
+  |     +------+
+  |  +--+
+  |  ?
+  +--+------+--+---------+---------->  time
+     b0     b1 b2
+```
+
+Formally the values define a **right-continuous step function**:
+
+- constant on `[b_k, b_{k+1})` — a read _between_ breakpoints returns the previous breakpoint's
+  value;
+- extending to `+∞` past the last breakpoint — a read after the end returns the last value;
+- **undefined before the first breakpoint** — a read there is an error, never a clamp. A value there
+  was never declared, and inventing one would be a guess.
+
+Structurally it is **identical** to a `NonSequentialTimeSeries` — same fields, same validation, same
+storage. The two even share arrays: a persistent series and an irregular one on the same
+breakpoints, dtype, element shape, and values occupy one content-addressed array in one `nsts_…`
+dataset, because [`PackGroup`](./storage-model.md) is keyed by the time axis and never by the series
+type. The difference is entirely in **read semantics**:
+
+|                                    | `NonSequentialTimeSeries` | `PersistentTimeSeries` |
+| ---------------------------------- | ------------------------- | ---------------------- |
+| value **at** a stored instant      | that instant's value      | that instant's value   |
+| value **between** stored instants  | a hard error              | the previous value     |
+| value **after** the last instant   | a hard error              | the last value         |
+| value **before** the first instant | a hard error              | a hard error           |
+
+That is why it is a separate type rather than a read flag. "An irregular timeline has no value
+between its timestamps" is a guarantee `NonSequentialTimeSeries`'s docs and error messages lean on;
+making it conditional would take it away from everyone.
+
+The motivating data is a monthly fuel or gas price curve: a dozen breakpoints spanning a year, read
+at simulation timestamps that almost never coincide with one. Read as a `NonSequentialTimeSeries`
+that would error at nearly every step.
+
+**A time range slices on the step function's own terms.** The returned series begins at the
+breakpoint _in force at_ `start`, not the first breakpoint at or after it, so the result always
+defines a value at the start of the caller's window. A `start` before the first breakpoint is an
+error. The one exception is a window with no instants in it at all: a zero-width range
+(`end == start`) selects nothing, here as for every other type, and that includes a zero-width range
+before the first breakpoint, which is empty rather than an error.
+
+**Scalar-collapse policy belongs to the application, not the store.** A consumer that needs to know
+whether a curve should be expanded to a full series or evaluated once at a midpoint carries that in
+[`application_data`](#optional-descriptors), the opaque package-owned payload the store never
+interprets. infrastore records breakpoints and values, and nothing else; there are no catalog
+columns for expansion policy and there will not be.
+
+**It is an infrastore-local extension, not a Sienna type.** The vendored
+`conformance/sienna_schemas/TimeSeries/TimeSeriesAssociation.json` is a `oneOf` over a closed set of
+six canonical types owned by the data layer, and there is no upstream schema for a seventh. A
+`PersistentTimeSeries` row is emitted by the OpenAPI export in exactly the shape a
+`NonSequentialTimeSeries` row takes (`length`, no `resolution`), but it sits outside that `oneOf`,
+so a strict Sienna consumer will reject it.
+
+### Reading a step function in a columnar sweep
+
+A [`StaticReader`](../reference/rust-api.md#readers) over `PersistentTimeSeries` columns is the one
+place the "one timeline per reader" rule bends, and only because a step function makes it safe to:
+every column has a value at every instant from its own first breakpoint onward, so the columns need
+**not** share a breakpoint vector. This is deliberate — the motivating data is per-fuel monthly
+price curves whose breakpoints do not line up.
+
+Such a reader interns the distinct vectors and gives each column the one it resolves against. Its
+public axis is the **sorted union** of every column's breakpoints — every instant at which _some_
+column changes value — so a sweep over `reader.timestamps()` sees every distinct combination of
+column values. There is still **no presence mask**: hold-last always resolves once the read instant
+is at or after a column's first breakpoint, and an instant before some column's first breakpoint is
+a hard error naming that column rather than a hole in the result.
+
+`index_at` on such a reader reports a position on the union axis and is **not** a storage row index
+for any column; the read path resolves each column on its own vector instead.
+
 ### `SingleTimeSeries`
 
 A `SingleTimeSeries` is an `initial_timestamp`, a `resolution` (a [period](#periods)), and an array
@@ -116,12 +201,13 @@ ISO-8601 string for either kind, and return the ISO-8601 string).
 
 ### Timestamp precision
 
-Every instant the store records — a `SingleTimeSeries` or forecast `initial_timestamp`, and every
-entry of a `NonSequentialTimeSeries` timestamp vector — is **a whole number of milliseconds**, the
-same floor a fixed period has. One millisecond is the finest resolution a period can express, and it
-is likewise the finest instant a series can be written at.
+Every instant the store records — a `SingleTimeSeries` or forecast `initial_timestamp`, every entry
+of a `NonSequentialTimeSeries` timestamp vector, and every breakpoint of a `PersistentTimeSeries` —
+is **a whole number of milliseconds**, the same floor a fixed period has. One millisecond is the
+finest resolution a period can express, and it is likewise the finest instant a series can be
+written at.
 
-The rule is enforced on write, in the core, for all five addable types: a finer instant is rejected
+The rule is enforced on write, in the core, for all six addable types: a finer instant is rejected
 with an `InvalidParameter` error rather than truncated. This is what makes a timestamp mean the same
 thing in every consumer. The bindings do not share one precision — the C ABI and Julia exchange
 instants as `i64` Unix milliseconds, Python's `datetime` is microsecond, and gRPC and the Rust core
@@ -129,7 +215,7 @@ carry a full RFC 3339 string — so a finer instant would be silently truncated 
 not others, putting the same series on different instants depending on who read it. For a
 `NonSequentialTimeSeries` whose timestamps are less than a millisecond apart it is worse: two
 distinct timestamps collapse into one, and the vector stops being strictly increasing on the way
-back out.
+back out. The same reasoning applies breakpoint for breakpoint to a `PersistentTimeSeries`.
 
 A **leap second** is refused by the same rule, for the same reason, though it is not a matter of
 precision. Chrono spells one as a sub-second component at or above one second (`23:59:60`), which is
@@ -426,7 +512,10 @@ Each association can also carry:
 - **`application_data`** — an opaque, **package-owned** extension payload stored verbatim (typically
   JSON) that a binding writes and reads for its own purposes. The store never parses or interprets
   it, and end users are not expected to set it. Element typing does _not_ live here: that is
-  `element_type` below, a first-class column the store owns and validates.
+  `element_type` below, a first-class column the store owns and validates. This is also where
+  application _policy_ about a series belongs — a consumer's rule for collapsing a
+  [`PersistentTimeSeries`](#persistenttimeseries) to a scalar, say. Such a rule is not storage, and
+  it gets no catalog column.
 - **`element_type`** — what the array's elements _mean_, in the store's own language-neutral
   vocabulary: a dtype spelling (`f64`, `i64`, …) for plain numbers, else `tuple(N,dtype)` or one of
   the function-data kinds (`linear_function`, `quadratic_function`, `piecewise_linear`,

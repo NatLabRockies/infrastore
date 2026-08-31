@@ -17,7 +17,12 @@ from numpy.typing import NDArray
 # datetime.timedelta; it is always returned as an ISO-8601 string.
 Period = str | timedelta
 TimeSeriesData = (
-    SingleTimeSeries | NonSequentialTimeSeries | Deterministic | Probabilistic | Scenarios
+    SingleTimeSeries
+    | NonSequentialTimeSeries
+    | PersistentTimeSeries
+    | Deterministic
+    | Probabilistic
+    | Scenarios
 )
 
 __version__: str
@@ -49,6 +54,7 @@ class CatalogTooNewError(TimeSeriesError): ...
 class TimeSeriesType:
     SingleTimeSeries: TimeSeriesType
     NonSequentialTimeSeries: TimeSeriesType
+    PersistentTimeSeries: TimeSeriesType
     Deterministic: TimeSeriesType
     DeterministicSingleTimeSeries: TimeSeriesType
     Probabilistic: TimeSeriesType
@@ -93,6 +99,27 @@ class SingleTimeSeries:
 
 @final
 class NonSequentialTimeSeries:
+    def __init__(
+        self,
+        timestamps: list[datetime],
+        data: NDArray[Any],
+        name: str,
+    ) -> None: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def timestamps(self) -> list[datetime]: ...
+    @property
+    def time_reference(self) -> str | None: ...
+    @property
+    def length(self) -> int: ...
+    @property
+    def data(self) -> NDArray[Any]: ...
+    def __eq__(self, value: object) -> bool: ...
+    def __len__(self) -> int: ...
+
+@final
+class PersistentTimeSeries:
     def __init__(
         self,
         timestamps: list[datetime],

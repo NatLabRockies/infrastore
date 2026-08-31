@@ -473,6 +473,32 @@ fn every_series_type_carries_its_reference() {
             .time_reference,
         Some(TimeReference::FixedOffset(330))
     );
+
+    // A step function's breakpoints are spelled the same way, and the reference
+    // gates its query bounds like every other type's.
+    let step = infrastore_core::PersistentTimeSeries::new(
+        stamps.clone(),
+        TypedArray::from_f64(vec![3], &[7.0, 8.0, 9.0]),
+        "gas_price",
+    )
+    .unwrap()
+    .with_time_reference(TimeReference::Zoneless);
+    let key = add(&mut store, 3, TimeSeriesData::PersistentTimeSeries(step));
+    let read = store
+        .read_by_id(key, infrastore_core::ReadWindow::full())
+        .unwrap();
+    assert_eq!(read.time_reference(), Some(&TimeReference::Zoneless));
+    assert_eq!(read.as_persistent().unwrap().timestamps, stamps);
+    // A zoned bound against a zoneless series is refused, not coerced --
+    // the rule is the type-independent one in `TimeRange::check_against`.
+    assert!(
+        store
+            .read_by_ids_range(
+                &[key],
+                infrastore_core::TimeRange::new(t0(), t0() + Duration::hours(8))
+            )
+            .is_err()
+    );
 }
 
 /// A mixed cohort is refused for either reader — and the refusal names the one

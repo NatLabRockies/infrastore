@@ -151,6 +151,7 @@ that the read-only gRPC server does not accept any writes:
 | ----------------------------- | --------- | ----- | ------ | ----- | ----------- |
 | `SingleTimeSeries` r/w        | ✅        | ✅    | ✅     | ✅    | read-only   |
 | `NonSequentialTimeSeries` r/w | ✅        | ✅    | ✅     | ✅    | read-only   |
+| `PersistentTimeSeries` r/w    | ✅        | ✅    | ✅     | ✅    | read-only   |
 | dtypes beyond `f64`           | ✅        | ✅    | ✅     | ✅    | read-only   |
 | Create forecasts              | ✅        | ✅    | ✅     | ✅    | ❌          |
 | Read forecast values          | ✅        | ✅    | ✅     | ✅    | ✅          |

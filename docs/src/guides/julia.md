@@ -22,10 +22,10 @@ cargo build -p infrastore-ffi --release
 export INFRASTORE_LIB=$PWD/target/release/libinfrastore_ffi.dylib  # .so on Linux
 ```
 
-Exported names include `Store`, `SingleTimeSeries`, `NonSequentialTimeSeries`, the forecast structs
-(`Deterministic`, `Probabilistic`, `Scenarios`), `OwnerCategory` (`Component`,
-`SupplementalAttribute`), the `add_time_series!` / `read_by_id` / `list_metadata` family, and
-`transform_single_time_series!`. The store type is named **`Store`**.
+Exported names include `Store`, `SingleTimeSeries`, `NonSequentialTimeSeries`,
+`PersistentTimeSeries`, the forecast structs (`Deterministic`, `Probabilistic`, `Scenarios`),
+`OwnerCategory` (`Component`, `SupplementalAttribute`), the `add_time_series!` / `read_by_id` /
+`list_metadata` family, and `transform_single_time_series!`. The store type is named **`Store`**.
 
 ## Open or Create a Store
 

@@ -1713,6 +1713,51 @@ fn an_import_refuses_an_irregular_row() {
     }
 }
 
+/// The same for a `PersistentTimeSeries`, which is the easier one to miss: it
+/// exports in the `NonSequentialTimeSeries` row *shape*, so the document looks
+/// importable, and its own `time_series_type` is the only thing that says
+/// otherwise. Importing one would file a row with a NULL `timestamps_hash` —
+/// a read then fails with "missing breakpoints", and a static reader over any
+/// persistent series in the store fails resolving the axis.
+#[test]
+fn an_import_refuses_a_persistent_row() {
+    let mut store = create_store(None, true).unwrap();
+    let breakpoints = vec![
+        Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
+        Utc.with_ymd_and_hms(2024, 4, 1, 0, 0, 0).unwrap(),
+    ];
+    let persistent = infrastore_core::PersistentTimeSeries::new(
+        breakpoints,
+        TypedArray::from_f64(vec![2], &[3.5, 4.25]),
+        "fuel_price",
+    )
+    .unwrap();
+    store
+        .add(AddRequest::new(
+            1,
+            "ThermalStandard",
+            OwnerCategory::Component,
+            TimeSeriesData::PersistentTimeSeries(persistent),
+        ))
+        .unwrap();
+    let json = store
+        .export_time_series_associations_openapi(&ListFilter::default())
+        .unwrap();
+
+    // Importing into the *same* store, which holds the array: the array being
+    // present is exactly what would let this through if the type check missed.
+    let err = store
+        .import_time_series_associations_openapi(&json)
+        .unwrap_err();
+    match err {
+        TimeSeriesError::InvalidParameter(msg) => {
+            assert!(msg.contains("PersistentTimeSeries"), "{msg}");
+            assert!(msg.contains("timestamps_hash"), "{msg}");
+        }
+        other => panic!("expected InvalidParameter, got {other:?}"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Windowed reads by id (`Store::read_by_id`).
 //

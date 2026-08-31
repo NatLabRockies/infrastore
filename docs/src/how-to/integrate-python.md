@@ -87,8 +87,8 @@ print("ok")
 - **`InvalidParameterError` on add** — In Python, pass a NumPy array (any shape) whose dtype is one
   of `float64`, `float32`, `int64`, `int32`, `int16`, `int8`, `uint64`, `uint32`, `uint16`, `uint8`,
   or `bool`; any other dtype (e.g. `complex128` or a string dtype) raises. Feature values must be
-  `int`/`float`/`bool`/`str`. Timestamps for a `NonSequentialTimeSeries` must be strictly
-  increasing.
+  `int`/`float`/`bool`/`str`. Timestamps for a `NonSequentialTimeSeries` (or the breakpoints of a
+  `PersistentTimeSeries`) must be strictly increasing.
 
 ## Next
 

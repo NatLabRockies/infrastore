@@ -11,6 +11,15 @@
 //! means one shared timestamp vector. The core reports a divergent selection as
 //! an error rather than padding it, and that error is passed through unchanged.
 //!
+//! `PersistentTimeSeries` is the exception, and it is the core's, not the
+//! CLI's: a step function has a value at every instant from its first
+//! breakpoint onward, so its columns may hold *different* breakpoint vectors.
+//! The rows written are then the union of every column's breakpoints — every
+//! instant at which some column changes — and each column shows the value in
+//! force there. A selection whose earliest union instant precedes some column's
+//! first breakpoint is an error naming that column, since a step function has
+//! no value before its first breakpoint.
+//!
 //! One timeline also means one *spelling* for it, so a selection mixing
 //! wall-clock series with instant-bearing ones is refused on the same terms.
 //! `--spelling zoned|zoneless` narrows it to one of the two groups.

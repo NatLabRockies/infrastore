@@ -305,7 +305,18 @@ fn ts_row_to_json(meta: &TimeSeriesMetadata) -> Value {
                 row.insert("length".into(), Value::from(l as u64));
             }
         }
-        TimeSeriesType::NonSequentialTimeSeries => {
+        // `PersistentTimeSeries` is emitted in exactly the
+        // `NonSequentialTimeSeries` row shape: both are static series on an
+        // explicit time axis, so `length` is the only shape field either has.
+        //
+        // It is an **infrastore-local extension**, not a Sienna type. The
+        // vendored `TimeSeriesAssociation.json` is a `oneOf` over a closed set
+        // of six canonical types, and there is no upstream schema for a
+        // seventh — so a strict Sienna consumer will reject this row. That is
+        // accurate rather than unfortunate: inventing an upstream schema would
+        // misrepresent the vendored contract. See
+        // `docs/src/explanation/data-model.md`.
+        TimeSeriesType::NonSequentialTimeSeries | TimeSeriesType::PersistentTimeSeries => {
             if let Some(l) = meta.length {
                 row.insert("length".into(), Value::from(l as u64));
             }

@@ -783,7 +783,8 @@ enum Commands {
     /// `list` / `info` / `export -f json` output for the series it creates.
     #[command(after_help = help::TEMPLATE)]
     Template {
-        /// SingleTimeSeries|NonSequentialTimeSeries|Deterministic|Probabilistic|Scenarios
+        /// SingleTimeSeries|NonSequentialTimeSeries|PersistentTimeSeries|Deterministic|
+        /// Probabilistic|Scenarios
         #[arg(value_name = "TYPE")]
         ts_type: String,
     },

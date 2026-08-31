@@ -419,6 +419,48 @@ int32_t infrastore_store_add_non_sequential(struct InfraStore *handle,
                                             int64_t *out_id);
 
 /**
+ * Add a `PersistentTimeSeries` to the store.
+ *
+ * The arguments are exactly those of `infrastore_store_add_non_sequential`,
+ * because the two types carry the same payload: `timestamps_unix_ms` is a
+ * strictly increasing vector of breakpoints and the array holds one value per
+ * breakpoint. What differs is what a *read* of the result means — the value at
+ * breakpoint `i` stays in force until breakpoint `i + 1`, and past the last
+ * one forever, while a `NonSequentialTimeSeries` has no value between its
+ * timestamps at all. There is no value before the first breakpoint, and asking
+ * for one is an error rather than a clamp.
+ *
+ * # Safety
+ *
+ * `handle` must be a live mutable store handle. `owner_id` is a plain integer. Required string
+ * pointers must reference null-terminated UTF-8 strings; optional string pointers may be null.
+ * `timestamps_unix_ms` must reference `timestamps_len` elements, `dims_ptr` must reference `ndims`
+ * elements when `ndims` is nonzero, and `data_ptr` must reference `data_byte_len` bytes.
+ * `out_id`, when non-null, must be valid for writing one `i64`, and receives the catalog id the
+ * row was filed under.
+ */
+int32_t infrastore_store_add_persistent(struct InfraStore *handle,
+                                        int64_t owner_id,
+                                        const char *owner_type,
+                                        int32_t owner_category,
+                                        const char *name,
+                                        const int64_t *timestamps_unix_ms,
+                                        uint64_t timestamps_len,
+                                        const char *element_type,
+                                        uint64_t ndims,
+                                        const uint64_t *dims_ptr,
+                                        const uint8_t *data_ptr,
+                                        uint64_t data_byte_len,
+                                        const char *application_data,
+                                        const char *features_json,
+                                        const char *units,
+                                        const char *quantity_kind,
+                                        const char *unit_system,
+                                        const char *time_reference,
+                                        const char *component_field,
+                                        int64_t *out_id);
+
+/**
  * Remove many associations named by their catalog `id`, in one all-or-nothing
  * transaction. On success `*out_removed` receives the number removed.
  *
@@ -1141,6 +1183,38 @@ int32_t infrastore_batch_add_non_sequential(struct InfraStoreBatch *batch,
                                             const char *component_field);
 
 /**
+ * Append a `PersistentTimeSeries` to a batch. Arguments match
+ * `infrastore_store_add_persistent` (minus the store handle and `out_id`).
+ *
+ * # Safety
+ *
+ * `batch` must be a live batch handle. `owner_id` is a plain integer. Required
+ * string pointers must reference null-terminated UTF-8 strings; optional string
+ * pointers may be null. `timestamps_unix_ms` must reference `timestamps_len`
+ * elements, `dims_ptr` must reference `ndims` elements when `ndims` is nonzero,
+ * and `data_ptr` must reference `data_byte_len` bytes.
+ */
+int32_t infrastore_batch_add_persistent(struct InfraStoreBatch *batch,
+                                        int64_t owner_id,
+                                        const char *owner_type,
+                                        int32_t owner_category,
+                                        const char *name,
+                                        const int64_t *timestamps_unix_ms,
+                                        uint64_t timestamps_len,
+                                        const char *element_type,
+                                        uint64_t ndims,
+                                        const uint64_t *dims_ptr,
+                                        const uint8_t *data_ptr,
+                                        uint64_t data_byte_len,
+                                        const char *application_data,
+                                        const char *features_json,
+                                        const char *units,
+                                        const char *quantity_kind,
+                                        const char *unit_system,
+                                        const char *time_reference,
+                                        const char *component_field);
+
+/**
  * Append a dense forecast (`ts_type` 2=Deterministic or 5=Scenarios) to a
  * batch. Arguments match `infrastore_store_add_forecast` (minus the store handle and
  * `out_key`).
@@ -1408,6 +1482,7 @@ int32_t infrastore_bulk_result_item_name(const struct InfraStoreBulkReadHandle *
 /**
  * Write the [`time_series_type_to_int`] discriminant of bulk-read item `index` into
  * `out_type` (`0`=SingleTimeSeries, `1`=NonSequentialTimeSeries,
+ * `6`=PersistentTimeSeries,
  * `2`=Deterministic, `4`=Probabilistic, `5`=Scenarios — a bulk read never
  * returns the synthesized `DeterministicSingleTimeSeries`). Lets a caller pick
  * the right `infrastore_bulk_result_get_*` before reading.
@@ -1455,6 +1530,37 @@ int32_t infrastore_bulk_result_get_non_sequential(const struct InfraStoreBulkRea
                                                   char **out_unit_system,
                                                   char **out_time_reference,
                                                   char **out_component_field);
+
+/**
+ * Read a `PersistentTimeSeries` element out of a bulk-read result. The
+ * out-params, the ownership rules, and the descriptor handling are exactly
+ * those of [`infrastore_bulk_result_get_non_sequential`]; `out_timestamps` is
+ * the breakpoint vector, with the value at index `i` in force from
+ * `out_timestamps[i]` until the next breakpoint and past the last one forever.
+ *
+ * # Safety
+ *
+ * `result` must be a live bulk-read handle and `index` less than its length.
+ * Every output pointer must be valid for writing its indicated value. The
+ * returned buffers must each be released with the matching free function, and
+ * each non-null owned string exactly once with `infrastore_string_free`.
+ */
+int32_t infrastore_bulk_result_get_persistent(const struct InfraStoreBulkReadHandle *result,
+                                              uint64_t index,
+                                              int64_t **out_timestamps,
+                                              uint64_t *out_timestamps_len,
+                                              int32_t *out_dtype,
+                                              int64_t **out_shape,
+                                              uint64_t *out_shape_len,
+                                              uint8_t **out_data,
+                                              uint64_t *out_data_byte_len,
+                                              char **out_application_data,
+                                              char **out_element_type,
+                                              char **out_units,
+                                              char **out_quantity_kind,
+                                              char **out_unit_system,
+                                              char **out_time_reference,
+                                              char **out_component_field);
 
 /**
  * Read a forecast element (`Deterministic`, `Probabilistic`, or `Scenarios`)
@@ -2281,6 +2387,10 @@ int32_t infrastore_last_error_message(char *buf, uint64_t buf_len, uint64_t *nee
  * * `SingleTimeSeries` (0): `resolution` must be a non-empty ISO-8601 period —
  *   one resolution per reader — and the matched series must share one grid
  *   (`initial_timestamp` + `length`).
+ * * `PersistentTimeSeries` (6): `resolution` must be null, for the same
+ *   reason -- a step function has no constant step. Unlike the type above, its
+ *   columns may sit on *different* breakpoint vectors; the reader's timeline
+ *   is their union, and each column resolves hold-last on its own vector.
  * * `NonSequentialTimeSeries` (1): `resolution` must be null (an irregular
  *   series has none); the matched series must instead share one timestamp
  *   vector, which is also what pools their arrays on disk. Read that timeline
@@ -2313,7 +2423,8 @@ int32_t infrastore_store_build_static_reader(const struct InfraStore *handle,
  * owned ISO-8601 duration string, e.g. `PT1H` / `P1M`), and the number of
  * timestamps on it.
  *
- * `*out_resolution` is **null** for a `NonSequentialTimeSeries` reader: an
+ * `*out_resolution` is **null** for a `NonSequentialTimeSeries` or
+ * `PersistentTimeSeries` reader: an
  * irregular timeline has no constant step, so read it with
  * `infrastore_static_reader_timestamps` instead.
  *

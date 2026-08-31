@@ -41,6 +41,9 @@ enum TimeSeriesType {
   DETERMINISTIC_SINGLE_TIME_SERIES   = 3;
   PROBABILISTIC                      = 4;
   SCENARIOS                          = 5;
+  // Appended, never renumbered: the numbers are the wire contract, and they
+  // match `TimeSeriesType::code` on the storage side.
+  PERSISTENT_TIME_SERIES             = 6;
 }
 
 enum OwnerCategory {

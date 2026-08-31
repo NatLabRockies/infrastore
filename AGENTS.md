@@ -15,12 +15,18 @@ SQLite. It exposes multiple bindings over a shared core:
   and inspects a store, talking directly to the on-disk HDF5 + SQLite artifact (read+write; no
   gRPC). Output uses a global `-f/--format table|json|csv`.
 
-**Current feature coverage:** `SingleTimeSeries` and `NonSequentialTimeSeries` are implemented
-end-to-end (read+write in the Rust core, C ABI, Python, and Julia; read-only over gRPC).
-`Deterministic`, `DeterministicSingleTimeSeries`, `Probabilistic`, and `Scenarios` support reading
-values across the Rust core, C ABI, Python, Julia, and gRPC. Dense forecasts (`Deterministic`,
-`Probabilistic`, `Scenarios`) are written through the generic `add_time_series` by passing the
-matching forecast object across the Rust core, Python, and Julia (the C ABI keeps per-type
+**Current feature coverage:** `SingleTimeSeries`, `NonSequentialTimeSeries`, and
+`PersistentTimeSeries` are implemented end-to-end (read+write in the Rust core, C ABI, Python,
+Julia, and the CLI; read-only over gRPC). A `PersistentTimeSeries` is a **sparse step function**:
+breakpoints plus one value each, holding the last value forward, undefined before the first
+breakpoint (an error, not a clamp). It is structurally identical to `NonSequentialTimeSeries` and
+shares its storage — the difference is entirely in read semantics. A `StaticReader` over
+`PersistentTimeSeries` columns is the one exception to "one timeline per reader": its columns may
+sit on independent breakpoint vectors, and the reader's axis is their union. `Deterministic`,
+`DeterministicSingleTimeSeries`, `Probabilistic`, and `Scenarios` support reading values across the
+Rust core, C ABI, Python, Julia, and gRPC. Dense forecasts (`Deterministic`, `Probabilistic`,
+`Scenarios`) are written through the generic `add_time_series` by passing the matching forecast
+object across the Rust core, Python, and Julia (the C ABI keeps per-type
 `infrastore_store_add_forecast` / `infrastore_store_add_probabilistic` as low-level transport);
 `DeterministicSingleTimeSeries` is derived from stored `SingleTimeSeries` via
 `transform_single_time_series` rather than added directly. The gRPC service is read-only — every RPC

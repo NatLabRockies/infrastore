@@ -331,9 +331,10 @@ silently invert every relationship. `detach` and `unlink` are the inverses, and 
 
 ## 8. Forecasts
 
-All five writable types work (`SingleTimeSeries`, `NonSequentialTimeSeries`, `Deterministic`,
-`Probabilistic`, `Scenarios`). `infrastore template Deterministic` prints a descriptor to edit, but
-it is plain JSON and says nothing about the data layout, so here is the rule:
+All six writable types work (`SingleTimeSeries`, `NonSequentialTimeSeries`, `PersistentTimeSeries`,
+`Deterministic`, `Probabilistic`, `Scenarios`). `infrastore template Deterministic` prints a
+descriptor to edit, but it is plain JSON and says nothing about the data layout, so here is the
+rule:
 
 Forecast CSVs are a flat, **row-major** stream of values with no structure of their own. The count
 must equal the product of the type's shape:

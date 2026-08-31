@@ -128,6 +128,54 @@ function add_time_series!(
     return batch
 end
 
+# Byte-for-byte the `NonSequentialTimeSeries` method above: the two types send
+# the same payload -- a strictly increasing unix-millisecond vector plus one
+# value each -- and differ only in what a read between those instants means.
+function add_time_series!(
+    batch::AddBatch,
+    owner_id::Integer,
+    owner_type::AbstractString,
+    owner_category::OwnerCategory,
+    ts::PersistentTimeSeries;
+    features::Union{Nothing, AbstractDict}=nothing,
+    units::Union{Nothing, AbstractString}=ts.units,
+    quantity_kind::Union{Nothing, AbstractString}=ts.quantity_kind,
+    unit_system::Union{Nothing, UnitSystem, AbstractString}=ts.unit_system,
+    time_reference::Union{Nothing, TimeReference, AbstractString}=ts.time_reference,
+    component_field::Union{Nothing, AbstractString}=ts.component_field,
+    application_data::Union{Nothing, AbstractString}=ts.application_data,
+    element_type::Union{Nothing, AbstractString}=ts.element_type,
+)
+    timestamps = Int64[_to_unix_ms(timestamp) for timestamp in ts.timestamps]
+    element_type_arg, dims, bytes = _wire_array(element_type, ts.data)
+    code = @ccall lib_path().infrastore_batch_add_persistent(
+        batch::Ptr{Cvoid},
+        Int64(owner_id)::Int64,
+        owner_type::Cstring,
+        _category_int(owner_category)::Int32,
+        ts.name::Cstring,
+        timestamps::Ptr{Int64},
+        UInt64(length(timestamps))::UInt64,
+        element_type_arg::Cstring,
+        UInt64(length(dims))::UInt64,
+        dims::Ptr{UInt64},
+        bytes::Ptr{UInt8},
+        UInt64(length(bytes))::UInt64,
+        _opt_string_arg(application_data)::Cstring,
+        _features_arg(features)::Cstring,
+        _opt_string_arg(units)::Cstring,
+        _opt_string_arg(quantity_kind)::Cstring,
+        _opt_string_arg(_unit_system_str(_unit_system(unit_system)))::Cstring,
+        _opt_string_arg(
+            _time_reference_str(_audit_zone(_time_reference(time_reference)))
+        )::Cstring,
+        _opt_string_arg(component_field)::Cstring,
+    )::Int32
+    _check(code)
+    batch.count += 1
+    return batch
+end
+
 function add_time_series!(
     batch::AddBatch,
     owner_id::Integer,

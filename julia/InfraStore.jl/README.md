@@ -53,7 +53,8 @@ end
 - **One array, stored once** — arrays are addressed by a SHA-256 content hash.
 - **Typed, N-dimensional values** — `Float64`, `Float32`, `Int64`, `Int32`, `UInt64`, and `Bool`,
   with an optional per-timestep element shape.
-- **Six time-series types** — `SingleTimeSeries` and `NonSequentialTimeSeries` read+write;
+- **Seven time-series types** — `SingleTimeSeries`, `NonSequentialTimeSeries`, and
+  `PersistentTimeSeries` (a sparse step function: breakpoints plus hold-last) read+write;
   `Deterministic`, `DeterministicSingleTimeSeries`, `Probabilistic`, and `Scenarios` for forecasts.
 - **Columnar simulation readers** — `StaticReader` / `ForecastReader` serve every series' value at
   one timestamp.

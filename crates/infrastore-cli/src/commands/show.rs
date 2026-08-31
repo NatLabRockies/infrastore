@@ -340,6 +340,16 @@ pub fn get(
             reject_forecast_flags(opts, &meta)?;
             render_sequential(&meta, &ts, &ns.data, format, opts.rows)
         }
+        // Rendered as breakpoint/value pairs, exactly as stored. A step
+        // function's value *between* those rows is not printed: expanding it
+        // would need a target grid the caller has not named, and the rows are
+        // the complete description of the series.
+        TimeSeriesData::PersistentTimeSeries(p) => {
+            let ts: Vec<String> =
+                fields::render_timestamps(&p.timestamps, p.time_reference.as_ref());
+            reject_forecast_flags(opts, &meta)?;
+            render_sequential(&meta, &ts, &p.data, format, opts.rows)
+        }
         _ => {
             let window = resolve_window(&meta, opts)?;
             render_forecast(&meta, &data, format, opts.rows, window)
@@ -954,6 +964,7 @@ fn data_array(d: &TimeSeriesData) -> &TypedArray {
     match d {
         TimeSeriesData::SingleTimeSeries(s) => &s.data,
         TimeSeriesData::NonSequentialTimeSeries(s) => &s.data,
+        TimeSeriesData::PersistentTimeSeries(s) => &s.data,
         TimeSeriesData::Deterministic(d) => &d.data,
         TimeSeriesData::Probabilistic(p) => &p.data,
         TimeSeriesData::Scenarios(s) => &s.data,
