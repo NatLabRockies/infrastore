@@ -47,7 +47,7 @@ use crate::error::{Result, TimeSeriesError};
 use crate::hash::{array_hash, hash_hex};
 use crate::storage::{ArrayLayout, Compression};
 use crate::types::array::{Dtype, TypedArray};
-use crate::version::{Compat, DATA_FORMAT_VERSION, MIN_UPGRADABLE_VERSION};
+use crate::version::{Compat, DATA_FORMAT_VERSION};
 
 use super::common::{
     COMPRESSION_ATTR, HASH_SUFFIX, MAX_CHUNK_BYTES, PackGroup, ROOT_GROUP, SINGLE_GROUP,
@@ -575,7 +575,11 @@ impl Hdf5Backend {
     /// top of a leftover with the same name.
     pub fn create(path: &Path, compression: Compression) -> Result<Self> {
         let file = file_builder().create_excl(path).map_err(map_h5)?;
-        write_str_attr(&file, "data_format_version", DATA_FORMAT_VERSION)?;
+        write_str_attr(
+            &file,
+            "data_format_version",
+            crate::version::active_bounds().1,
+        )?;
         write_str_attr(&file, COMPRESSION_ATTR, &compression.encode())?;
         write_str_attr(&file, BACKEND_ATTR, BACKEND_NAME)?;
         let ts = file.create_group(ROOT_GROUP).map_err(map_h5)?;
@@ -595,30 +599,14 @@ impl Hdf5Backend {
                 timestamp_hashes: HashSet::new(),
                 compression,
                 // A file this build just created carries this build's stamp.
-                format_version: DATA_FORMAT_VERSION.to_string(),
+                format_version: crate::version::active_bounds().1.to_string(),
                 format_upgrade_pending: false,
             }),
         })
     }
 
     pub fn open(path: &Path, read_only: bool) -> Result<Self> {
-        Self::open_within(path, read_only, MIN_UPGRADABLE_VERSION, DATA_FORMAT_VERSION)
-    }
-
-    /// [`Self::open`] against explicit compatibility bounds.
-    ///
-    /// The bounds are a parameter for exactly one reason: `MIN_UPGRADABLE_VERSION`
-    /// equals `DATA_FORMAT_VERSION` today, so no file can classify as
-    /// [`Compat::Upgradable`], and the deferred-re-stamp path below -- the whole
-    /// reason the catalog is migrated before the array file is re-stamped -- has
-    /// no reachable input. Tests pass a wider window to drive it. Nothing else
-    /// should: every real caller gets the bounds this build ships.
-    pub(crate) fn open_within(
-        path: &Path,
-        read_only: bool,
-        min_version: &str,
-        current_version: &str,
-    ) -> Result<Self> {
+        let (min_version, current_version) = crate::version::active_bounds();
         let file = if read_only {
             file_builder().open(path).map_err(map_h5)?
         } else {
@@ -1854,9 +1842,10 @@ impl StorageBackend for Hdf5Backend {
         if inner.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
-        replace_str_attr(&inner.file, "data_format_version", DATA_FORMAT_VERSION)?;
+        let current = crate::version::active_bounds().1;
+        replace_str_attr(&inner.file, "data_format_version", current)?;
         inner.file.flush().map_err(map_h5)?;
-        inner.format_version = DATA_FORMAT_VERSION.to_string();
+        inner.format_version = current.to_string();
         inner.format_upgrade_pending = false;
         Ok(())
     }
@@ -1967,7 +1956,9 @@ mod tests {
         }
 
         // Writable: pending, and the file still says 1.3.0.
-        let mut be = Hdf5Backend::open_within(&path, false, "1.2.0", "1.5.0").unwrap();
+        let mut be =
+            crate::version::test_bounds::with("1.2.0", "1.5.0", || Hdf5Backend::open(&path, false))
+                .unwrap();
         assert!(be.pending_format_upgrade());
         assert_eq!(be.stored_format_version().as_deref(), Some("1.3.0"));
         assert_eq!(stamp_on_disk(&path), "1.3.0");
@@ -2000,7 +1991,9 @@ mod tests {
             replace_str_attr(&inner.file, "data_format_version", "1.3.0").unwrap();
             inner.file.flush().unwrap();
         }
-        let mut be = Hdf5Backend::open_within(&path, true, "1.2.0", "1.5.0").unwrap();
+        let mut be =
+            crate::version::test_bounds::with("1.2.0", "1.5.0", || Hdf5Backend::open(&path, true))
+                .unwrap();
         assert!(
             !be.pending_format_upgrade(),
             "a read-only open has nothing pending: it cannot write the stamp"
@@ -2028,7 +2021,7 @@ mod tests {
                 inner.file.flush().unwrap();
             }
             assert!(matches!(
-                Hdf5Backend::open_within(&path, true, min, cur),
+                crate::version::test_bounds::with(min, cur, || Hdf5Backend::open(&path, true)),
                 Err(TimeSeriesError::IncompatibleFormat { .. })
             ));
         }

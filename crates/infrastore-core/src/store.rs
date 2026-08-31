@@ -4353,12 +4353,20 @@ impl Store {
             // placeholder. The placeholder is never observed: nothing else runs
             // in between.
             Some(src) => {
+                // Read before the handle goes away: `fs::copy` clones the
+                // source's `data_format_version` along with everything else, so
+                // a source still owing a re-stamp (an `InMemory` open, where the
+                // catalog migrated in RAM and the array file was deliberately
+                // left alone) would publish an old stamp over a current catalog
+                // — and nothing at the destination would ever discharge it.
+                let owed = self.backend.pending_format_upgrade();
                 drop(std::mem::replace(
                     &mut self.backend,
                     Box::new(MemoryBackend::new()) as Box<dyn StorageBackend>,
                 ));
                 let staged = std::fs::copy(&src, &tmp_h5)
                     .map_err(TimeSeriesError::from)
+                    .and_then(|_| stamp_staged_copy(&tmp_h5, owed))
                     .and_then(|_| self.stage_persist_catalog(&tmp_h5, &tmp_sqlite, &generation));
                 let swapped = staged
                     .and_then(|()| Self::swap_into_place(&tmp_h5, path, &tmp_sqlite, &sqlite_path));
@@ -4450,7 +4458,21 @@ impl Store {
         })();
         staged.inspect_err(|_| {
             let _ = std::fs::remove_file(&tmp_sqlite);
-        })
+        })?;
+
+        // The migrated catalog is now the one on disk, so the re-stamp that an
+        // `InMemory` open deliberately deferred can finally be discharged. This
+        // is the same three-step ordering `open_with_catalog` uses, spread over
+        // a session instead of an open: the catalog lands durably first, and
+        // only then does the array file claim the newer format.
+        //
+        // After the catalog, never before. A failure here leaves the safe
+        // direction — a current catalog under an older array stamp, which an
+        // older build reads without ever writing a row it does not understand.
+        if self.backend.pending_format_upgrade() {
+            self.backend.finish_format_upgrade()?;
+        }
+        Ok(())
     }
 
     /// Write both halves of a save for a store whose arrays live in memory.
@@ -4716,6 +4738,25 @@ struct RequestParts {
 /// one across), so exactly one stamped half is a half swapped out on its own.
 /// Only *both* unstamped is legitimate — an artifact that predates stamping —
 /// and that compares equal.
+/// Bring a staged HDF5 copy up to the current format version, when the source
+/// it was copied from still owed a re-stamp.
+///
+/// `persist_to`'s copy branch clones the file byte for byte, so the stamp comes
+/// with it. The destination's catalog is the migrated one, so leaving the old
+/// stamp there would publish exactly the pair this whole mechanism defers to
+/// avoid — and unlike the source, the destination has no later writable
+/// `Attached` open guaranteed to fix it up.
+///
+/// The handle must not outlive this call: HDF5 holds a byte-range lock and
+/// `swap_into_place` renames this file out from under it on Windows.
+fn stamp_staged_copy(tmp_h5: &Path, owed: bool) -> Result<()> {
+    if !owed {
+        return Ok(());
+    }
+    let mut staged = open_backend(tmp_h5, false)?;
+    staged.finish_format_upgrade()
+}
+
 fn check_generation_pair(h5: Option<String>, sqlite: Option<String>) -> Result<()> {
     if h5 != sqlite {
         return Err(TimeSeriesError::MismatchedArtifact {
@@ -6153,5 +6194,121 @@ mod resolve_windows_tests {
             rw(24, 12),
             Err(TimeSeriesError::InvalidParameter(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod pending_format_upgrade_tests {
+    //! Closing the loop the `InMemory` open deliberately leaves open.
+    //!
+    //! A writable open at an upgradable stamp owes a re-stamp.
+    //! `open_with_catalog` discharges it immediately for `CatalogMode::Attached`
+    //! — but not for `InMemory`, where the migration happened to a *copy* of the
+    //! catalog and the file on disk is still stale until it is persisted.
+    //! Something has to discharge it once that catalog does land, or the array
+    //! file keeps its old stamp for the life of the store and eventually falls
+    //! off the bottom of the upgrade window.
+    //!
+    //! None of this is reachable through the shipped constants, which is why
+    //! every test here scopes a wider window.
+
+    use super::*;
+    use crate::version::test_bounds;
+
+    const OLD: &str = "1.3.0";
+    const MIN: &str = "1.2.0";
+    const CUR: &str = "1.5.0";
+
+    fn stamp_of(path: &Path) -> String {
+        let file = hdf5_metno::File::open(path).expect("open h5");
+        file.attr("data_format_version")
+            .and_then(|a| a.read_scalar::<hdf5_metno::types::VarLenUnicode>())
+            .map(|v| v.to_string())
+            .expect("stamp")
+    }
+
+    /// A store whose array file is stamped `OLD` and whose catalog is at the
+    /// current revision, built under the real constants and then backdated.
+    fn backdated_store(dir: &Path) -> PathBuf {
+        let path = dir.join("s.h5");
+        {
+            let mut store = Store::create(Some(&path), false).expect("create");
+            store.flush().expect("flush");
+        }
+        let file = hdf5_metno::File::open_rw(&path).expect("open rw");
+        let attr = file.attr("data_format_version").expect("attr");
+        attr.write_scalar(&OLD.parse::<hdf5_metno::types::VarLenUnicode>().unwrap())
+            .expect("backdate");
+        drop(file);
+        path
+    }
+
+    /// `persist_catalog` is the moment an `InMemory` store's migrated catalog
+    /// becomes the one on disk, so it is the moment the deferred re-stamp is
+    /// finally owed to nobody but this call.
+    #[test]
+    fn persist_catalog_discharges_the_deferred_restamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = backdated_store(dir.path());
+        assert_eq!(stamp_of(&path), OLD);
+
+        test_bounds::with(MIN, CUR, || {
+            let mut store =
+                Store::open_with_catalog(&path, false, CatalogMode::InMemory).expect("open");
+            // Deliberately still owed: the catalog on disk has not moved yet.
+            assert!(store.backend.pending_format_upgrade());
+            assert_eq!(stamp_of(&path), OLD, "the open must not re-stamp");
+
+            store.persist_catalog().expect("persist catalog");
+            assert!(!store.backend.pending_format_upgrade());
+        });
+        assert_eq!(
+            stamp_of(&path),
+            CUR,
+            "the catalog landed, so the stamp moves"
+        );
+    }
+
+    /// `persist_to`'s copy branch clones the array file byte for byte, stamp
+    /// included, while writing a *migrated* catalog beside it. Without the
+    /// stamping step the destination is a fresh artifact born already stale,
+    /// and nothing there would ever fix it.
+    #[test]
+    fn persist_to_stamps_the_copy_it_publishes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = backdated_store(dir.path());
+        let dest = dir.path().join("dest.h5");
+
+        test_bounds::with(MIN, CUR, || {
+            let mut store =
+                Store::open_with_catalog(&path, false, CatalogMode::InMemory).expect("open");
+            assert!(store.backend.pending_format_upgrade());
+            store.persist_to(&dest).expect("persist to");
+        });
+
+        assert_eq!(
+            stamp_of(&dest),
+            CUR,
+            "the published copy carries the new stamp"
+        );
+        // The source is untouched: its own catalog on disk never migrated, so
+        // it still legitimately owes the re-stamp.
+        assert_eq!(stamp_of(&path), OLD);
+    }
+
+    /// The `Attached` path already discharges at open, so persisting must not
+    /// depend on it and must stay a no-op here.
+    #[test]
+    fn an_attached_open_has_nothing_left_to_discharge() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = backdated_store(dir.path());
+
+        test_bounds::with(MIN, CUR, || {
+            let mut store =
+                Store::open_with_catalog(&path, false, CatalogMode::Attached).expect("open");
+            assert!(!store.backend.pending_format_upgrade());
+            store.persist_catalog().expect("persist catalog");
+        });
+        assert_eq!(stamp_of(&path), CUR);
     }
 }

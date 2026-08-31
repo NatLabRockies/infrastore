@@ -160,7 +160,54 @@ fn parse_semver(v: &str) -> Option<(u64, u64, u64)> {
 
 /// Which compatibility tier the on-disk stamp `found` falls into.
 pub fn compatibility(found: &str) -> Compat {
-    compatibility_within(found, MIN_UPGRADABLE_VERSION, DATA_FORMAT_VERSION)
+    let (min, current) = active_bounds();
+    compatibility_within(found, min, current)
+}
+
+/// The compatibility window in force: `(min_upgradable, current)`.
+///
+/// The two constants in production. Under `cfg(test)` a scoped override can
+/// widen it, because `MIN_UPGRADABLE_VERSION` equals `DATA_FORMAT_VERSION`
+/// today and therefore *nothing* classifies as [`Compat::Upgradable`] -- the
+/// deferred re-stamp, and every path that owes one, would otherwise have no
+/// reachable input to test against.
+///
+/// Everything that reads or writes a stamp goes through this, so an override is
+/// internally consistent: a file created under it carries its `current`, and a
+/// re-stamp writes the same value the classifier compares against.
+pub(crate) fn active_bounds() -> (&'static str, &'static str) {
+    #[cfg(test)]
+    if let Some(bounds) = test_bounds::get() {
+        return bounds;
+    }
+    (MIN_UPGRADABLE_VERSION, DATA_FORMAT_VERSION)
+}
+
+/// Scoped, thread-local override of [`active_bounds`]. Test-only.
+#[cfg(test)]
+pub(crate) mod test_bounds {
+    use std::cell::Cell;
+
+    thread_local! {
+        static BOUNDS: Cell<Option<(&'static str, &'static str)>> = const { Cell::new(None) };
+    }
+
+    pub(crate) fn get() -> Option<(&'static str, &'static str)> {
+        BOUNDS.with(Cell::get)
+    }
+
+    /// Run `f` with the window widened to `(min, current)`.
+    ///
+    /// Thread-local rather than global so parallel tests cannot see each
+    /// other's window. Restores the previous value even if `f` panics is *not*
+    /// guaranteed -- a panicking test is failing anyway, and the guard would
+    /// cost a `Drop` type for nothing.
+    pub(crate) fn with<T>(min: &'static str, current: &'static str, f: impl FnOnce() -> T) -> T {
+        let previous = BOUNDS.replace(Some((min, current)));
+        let out = f();
+        BOUNDS.set(previous);
+        out
+    }
 }
 
 /// [`compatibility`] against explicit bounds rather than the live constants.
