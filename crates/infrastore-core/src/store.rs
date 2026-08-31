@@ -1268,8 +1268,21 @@ impl Store {
         self.catalog
     }
 
+    /// The `data_format_version` the array file actually carries.
+    ///
+    /// Not the same thing as [`crate::DATA_FORMAT_VERSION`], which is what this
+    /// *build* writes. An upgradable stamp is left in place until the catalog
+    /// migration succeeds, and a read-only open never re-stamps at all, so a
+    /// store can legitimately be open and readable while its file says
+    /// something older. Report this, not the constant.
+    ///
+    /// `None` for a backend with no version stamp -- an in-memory store.
+    pub fn data_format_version(&self) -> Option<String> {
+        self.backend.stored_format_version()
+    }
+
     /// The catalog's schema revision, the SQLite half's counterpart to
-    /// [`crate::DATA_FORMAT_VERSION`].
+    /// [`Self::data_format_version`].
     ///
     /// A writable open brings this to
     /// [`CATALOG_SCHEMA_REVISION`](crate::metadata::migrate::CATALOG_SCHEMA_REVISION)

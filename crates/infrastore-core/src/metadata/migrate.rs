@@ -260,17 +260,25 @@ fn write_revision(conn: &Connection, revision: i64) -> Result<()> {
 ///
 /// A connection with no association table at all is left alone: there is
 /// nothing to migrate and nothing to read, and reporting a migration for an
-/// empty file would be a lie.
+/// empty file would be a lie. The *too-new* check still runs first, though --
+/// see below.
 pub(super) fn check_read_only(conn: &Connection) -> Result<()> {
-    if !super::table_exists(conn, "time_series_associations")? {
-        return Ok(());
-    }
+    // Read the stamp before looking at the table, so `CatalogTooNew` holds
+    // unconditionally. No build produces a stamped catalog without the
+    // association table -- `apply` creates both in one call, and the table is
+    // the DDL's first statement -- so this is a guard against a damaged file
+    // rather than a reachable state. But the refusal is documented as absolute,
+    // and an absolute guarantee that quietly depends on a table being present
+    // is the kind that fails the one time it matters.
     let found = read_revision(conn)?;
     if found > CATALOG_SCHEMA_REVISION {
         return Err(TimeSeriesError::CatalogTooNew {
             found,
             expected: CATALOG_SCHEMA_REVISION,
         });
+    }
+    if !super::table_exists(conn, "time_series_associations")? {
+        return Ok(());
     }
     if found < CATALOG_SCHEMA_REVISION {
         return Err(TimeSeriesError::CatalogMigrationRequired {
@@ -287,6 +295,17 @@ pub(super) fn check_read_only(conn: &Connection) -> Result<()> {
 ///
 /// See the module docs for why the migrations run before the DDL.
 pub(super) fn apply(conn: &Connection) -> Result<usize> {
+    // Same order as `check_read_only`, and for the same reason: a catalog from
+    // a newer build is refused before this one writes anything to it, table or
+    // no table.
+    let found = read_revision(conn)?;
+    if found > CATALOG_SCHEMA_REVISION {
+        return Err(TimeSeriesError::CatalogTooNew {
+            found,
+            expected: CATALOG_SCHEMA_REVISION,
+        });
+    }
+
     // A catalog with no association table has never been written to. Creating
     // it from the current DDL *is* the current revision, so there is no ladder
     // to climb: stamp it and stop.
@@ -294,14 +313,6 @@ pub(super) fn apply(conn: &Connection) -> Result<usize> {
         conn.execute_batch(schema::DDL)?;
         write_revision(conn, CATALOG_SCHEMA_REVISION)?;
         return Ok(0);
-    }
-
-    let found = read_revision(conn)?;
-    if found > CATALOG_SCHEMA_REVISION {
-        return Err(TimeSeriesError::CatalogTooNew {
-            found,
-            expected: CATALOG_SCHEMA_REVISION,
-        });
     }
 
     let mut ran = 0;

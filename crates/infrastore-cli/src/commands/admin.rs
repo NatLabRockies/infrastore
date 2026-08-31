@@ -242,9 +242,18 @@ pub fn store_info(store_path: &Path, format: Format) -> Result<(), String> {
         ("sqlite_path".into(), json!(sqlite.display().to_string())),
         ("sqlite_bytes".into(), size(&sqlite)),
         ("storage_backend".into(), json!("hdf5")),
+        // The stamp the *file* carries, which is not always the one this build
+        // writes: an upgradable store is re-stamped only after its catalog
+        // migrates, and a read-only open never re-stamps at all. Reporting the
+        // constant here would have this command answer a question about the
+        // build while appearing to answer one about the store.
         (
             "data_format_version".into(),
-            json!(infrastore_core::DATA_FORMAT_VERSION),
+            json!(
+                store
+                    .data_format_version()
+                    .unwrap_or_else(|| infrastore_core::DATA_FORMAT_VERSION.to_string())
+            ),
         ),
         // The catalog's own revision, beside the artifact's. They move
         // independently -- see `infrastore_core::metadata::migrate` -- and this
@@ -289,7 +298,11 @@ pub fn upgrade(store_path: &Path, format: Format) -> Result<(), String> {
         ("store".into(), json!(store_path.display().to_string())),
         (
             "data_format_version".into(),
-            json!(infrastore_core::DATA_FORMAT_VERSION),
+            json!(
+                store
+                    .data_format_version()
+                    .unwrap_or_else(|| infrastore_core::DATA_FORMAT_VERSION.to_string())
+            ),
         ),
         (
             "catalog_schema_revision".into(),

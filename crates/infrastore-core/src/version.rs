@@ -1,5 +1,12 @@
 /// Semver version of the on-disk data format, covering the HDF5 layout, the
-/// SQLite catalog shape, and the hash domain.
+/// dtype and timestamp encodings, and the hash domain.
+///
+/// It does **not** cover the SQLite catalog's shape. That has its own contract,
+/// [`CATALOG_SCHEMA_REVISION`](crate::metadata::migrate::CATALOG_SCHEMA_REVISION),
+/// and moves independently: a catalog change the idempotent DDL cannot make to
+/// an existing table needs a revision bump and a migration, not a bump here.
+/// Bumping this constant for a catalog-only change strands every existing store
+/// for no reason -- which is exactly what it used to do.
 ///
 /// # Three-tier compatibility
 ///
@@ -147,16 +154,28 @@ fn parse_semver(v: &str) -> Option<(u64, u64, u64)> {
 
 /// Which compatibility tier the on-disk stamp `found` falls into.
 pub fn compatibility(found: &str) -> Compat {
-    if found == DATA_FORMAT_VERSION {
+    compatibility_within(found, MIN_UPGRADABLE_VERSION, DATA_FORMAT_VERSION)
+}
+
+/// [`compatibility`] against explicit bounds rather than the live constants.
+///
+/// The rule itself, extracted so it can be tested at boundaries the constants
+/// cannot currently express. `MIN_UPGRADABLE_VERSION` equals
+/// `DATA_FORMAT_VERSION` today, so no stamp on earth classifies as
+/// [`Compat::Upgradable`] -- and a rule with an empty middle tier is a rule
+/// whose middle tier has never run. The window becomes non-empty at the first
+/// bump the ladder absorbs; until then this is where that tier is exercised.
+///
+/// Not public: callers get the bounds this build actually ships.
+pub(crate) fn compatibility_within(found: &str, min: &str, current: &str) -> Compat {
+    if found == current {
         return Compat::Current;
     }
     let Some(found) = parse_semver(found) else {
         return Compat::Incompatible;
     };
-    let current = parse_semver(DATA_FORMAT_VERSION)
-        .expect("DATA_FORMAT_VERSION is a MAJOR.MINOR.PATCH literal");
-    let floor = parse_semver(MIN_UPGRADABLE_VERSION)
-        .expect("MIN_UPGRADABLE_VERSION is a MAJOR.MINOR.PATCH literal");
+    let current = parse_semver(current).expect("a MAJOR.MINOR.PATCH literal");
+    let floor = parse_semver(min).expect("a MAJOR.MINOR.PATCH literal");
     // A stamp newer than this build is as unreadable as one that is too old:
     // this build has no idea what the newer format changed.
     if found >= floor && found < current {
@@ -201,6 +220,48 @@ mod tests {
         assert_eq!(compatibility("0.19"), Compat::Incompatible);
         assert_eq!(compatibility("0.19.0.1"), Compat::Incompatible);
         assert_eq!(compatibility("0.19.0-rc1"), Compat::Incompatible);
+    }
+
+    /// The middle tier, which the live constants cannot currently produce.
+    ///
+    /// `MIN_UPGRADABLE_VERSION == DATA_FORMAT_VERSION`, so `compatibility` has
+    /// never once returned `Upgradable` in production or in any other test
+    /// here. The rule is exercised against an explicit window instead, so the
+    /// day the two constants separate they separate onto tested behavior.
+    #[test]
+    fn the_upgradable_tier_is_the_half_open_window_between_the_bounds() {
+        let tier = |v| compatibility_within(v, "1.2.0", "1.5.0");
+
+        // Closed at the floor, open at the top: the floor itself upgrades, and
+        // the current version is its own tier rather than the window's end.
+        assert_eq!(tier("1.2.0"), Compat::Upgradable);
+        assert_eq!(tier("1.3.7"), Compat::Upgradable);
+        assert_eq!(tier("1.4.99"), Compat::Upgradable);
+        assert_eq!(tier("1.5.0"), Compat::Current);
+
+        // One patch below the floor is out, and so is anything past current.
+        assert_eq!(tier("1.1.9"), Compat::Incompatible);
+        assert_eq!(tier("0.9.0"), Compat::Incompatible);
+        assert_eq!(tier("1.5.1"), Compat::Incompatible);
+        assert_eq!(tier("2.0.0"), Compat::Incompatible);
+
+        // Unparseable is refused whatever the window.
+        assert_eq!(tier("unspecified"), Compat::Incompatible);
+    }
+
+    /// An empty window admits nothing to the middle tier -- the state today,
+    /// pinned so that "no test covers Upgradable" stays a deliberate fact
+    /// rather than an oversight someone has to rediscover.
+    #[test]
+    fn an_empty_window_has_no_upgradable_tier() {
+        assert_eq!(
+            compatibility_within("1.5.0", "1.5.0", "1.5.0"),
+            Compat::Current
+        );
+        assert_eq!(
+            compatibility_within("1.4.0", "1.5.0", "1.5.0"),
+            Compat::Incompatible
+        );
     }
 
     #[test]

@@ -3811,6 +3811,40 @@ fn store_info_reports_the_catalog_schema_revision() {
     assert!(info.contains("data_format_version"), "{info}");
 }
 
+/// Both version fields report the *store*, not the build.
+///
+/// `data_format_version` used to be the compile-time constant, which was
+/// indistinguishable from the truth while the version check was strict
+/// equality — an open either matched or failed. It is not indistinguishable any
+/// more: an upgradable stamp is left in place until the catalog migrates, and a
+/// read-only open never re-stamps at all, so the constant and the file can
+/// legitimately disagree. Reporting the constant would have this command answer
+/// a question about the build while appearing to answer one about the store.
+#[test]
+fn store_info_reads_the_format_version_off_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("stamp.h5");
+    run(&store, &["init"]);
+
+    let info = run(&store, &["-f", "json", "store-info"]);
+    let parsed: serde_json::Value = serde_json::from_str(&info).unwrap();
+    // A store this build just created carries this build's stamp, so the value
+    // matches -- but it now arrives from the file rather than from `env!`.
+    assert_eq!(
+        parsed["data_format_version"].as_str().unwrap(),
+        infrastore_core::DATA_FORMAT_VERSION
+    );
+
+    // The same field on `upgrade`, which is the command a stale store is sent
+    // to and therefore the one most likely to be read during a version problem.
+    let up = run(&store, &["-f", "json", "upgrade"]);
+    let parsed: serde_json::Value = serde_json::from_str(&up).unwrap();
+    assert_eq!(
+        parsed["data_format_version"].as_str().unwrap(),
+        infrastore_core::DATA_FORMAT_VERSION
+    );
+}
+
 /// `upgrade` is the writable open that runs the migration ladder, and it is the
 /// only CLI route to one that does nothing else — every read command, including
 /// `store-info`, opens the store read-only and so cannot upgrade it.

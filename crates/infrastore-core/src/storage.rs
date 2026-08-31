@@ -496,6 +496,20 @@ pub(crate) trait StorageBackend: Send + Sync {
         Ok(())
     }
 
+    /// The `data_format_version` this backend's file actually carries, which is
+    /// not always [`DATA_FORMAT_VERSION`](crate::DATA_FORMAT_VERSION).
+    ///
+    /// An upgradable stamp is read as it stands and re-stamped only after the
+    /// catalog migrates, so between those two points -- and for the whole life
+    /// of a read-only open, which never re-stamps at all -- the file says
+    /// something older than this build does. Anything reporting the store's
+    /// version to a user has to ask the file, not the constant.
+    ///
+    /// `None` for a backend with no version stamp to carry.
+    fn stored_format_version(&self) -> Option<String> {
+        None
+    }
+
     /// Whether this backend was opened writable at an older but upgradable
     /// [`DATA_FORMAT_VERSION`](crate::DATA_FORMAT_VERSION), and is therefore
     /// waiting to be re-stamped once the catalog half has migrated.

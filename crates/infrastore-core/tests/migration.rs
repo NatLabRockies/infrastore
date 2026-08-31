@@ -119,6 +119,12 @@ fn stale_store() -> (tempfile::TempDir, std::path::PathBuf) {
         store.flush().unwrap();
     }
 
+    // Note this backdates only the *catalog*. `MIN_UPGRADABLE_VERSION` equals
+    // `DATA_FORMAT_VERSION` today, so writing it leaves the HDF5 half at
+    // `Compat::Current` and nothing here exercises the deferred re-stamp --
+    // that path has no reachable input until the two constants separate, and
+    // is covered against an explicit window in `storage::hdf5`'s own tests.
+    // What this fixture *is* stale in is the half that matters for the ladder.
     set_format_attr(&path, infrastore_core::MIN_UPGRADABLE_VERSION);
     {
         let conn = rusqlite::Connection::open(sqlite_path_of(&path)).unwrap();
@@ -190,11 +196,8 @@ fn fresh_store_stamps_the_current_revision() {
 fn a_revision_1_catalog_upgrades_in_place_on_a_writable_open() {
     let (_dir, path) = stale_store();
     assert_eq!(revision_on_disk(&path), 1);
-    assert_eq!(
-        format_version_on_disk(&path),
-        infrastore_core::MIN_UPGRADABLE_VERSION
-    );
     let before = generation_stamps(&path);
+    let format_before = format_version_on_disk(&path);
 
     let store = open_store(path.as_path(), false).unwrap();
     assert_eq!(store.catalog_schema_revision().unwrap(), 2);
@@ -233,11 +236,12 @@ fn a_revision_1_catalog_upgrades_in_place_on_a_writable_open() {
 
     drop(store);
 
-    // The array half is re-stamped only after the catalog migration lands.
-    assert_eq!(
-        format_version_on_disk(&path),
-        infrastore_core::DATA_FORMAT_VERSION
-    );
+    // The catalog moved. The array half did not need to: its stamp was already
+    // current, so there was no upgrade to defer. Asserting it against
+    // `DATA_FORMAT_VERSION` here would be a tautology while the two version
+    // constants are equal -- assert it is *unchanged*, which is the claim this
+    // fixture can actually make.
+    assert_eq!(format_version_on_disk(&path), format_before);
     assert_eq!(revision_on_disk(&path), 2);
     // Migration is not a save: the paired generation stamps are untouched.
     assert_eq!(generation_stamps(&path), before);

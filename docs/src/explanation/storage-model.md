@@ -120,8 +120,12 @@ between catalog entities and have nothing to do with time series at all.
   hash matches, not copied per association; an empty map stores no rows at all. Because the rows are
   shared, there is deliberately no foreign key to `time_series_associations` and no
   `ON DELETE CASCADE` (see [Compaction](#compaction) below).
-- **`schema_version`** — a single `version` column holding the catalog schema version (currently
-  `1`).
+- **`schema_version`** — a single `version` column holding the catalog schema revision
+  (`CATALOG_SCHEMA_REVISION`, currently `2`). Its own contract, independent of the artifact's
+  `data_format_version`: a catalog change the idempotent DDL cannot make to an existing table needs
+  a revision bump and an append-only migration. A catalog predating the stamp reads as revision `1`.
+  See
+  [Upgrade a store in place](design-choices.md#upgrade-a-store-in-place-rather-than-bricking-it).
 - **`supplemental_attribute_associations`** — which supplemental attributes are attached to which
   components, as `(component_id, component_type, attribute_id, attribute_type)`. Identity is the
   `(component_id, attribute_id)` pair.
