@@ -100,11 +100,15 @@ end
 # parameters come from the row itself, so this needs no extra query and no
 # change to what is stored.
 #
-# `T` is the element type's *physical* dtype — `"tuple(3,f64)"` and
-# `"piecewise_linear"` are both `Float64` arrays, with the structure in
-# `element_shape` and `element_type`, matching the `Array{T, N}` the value types
-# hold. `N` is one more than the rank of `element_shape`, which the core records
-# as the stored array's shape after its leading axis.
+# For a plain numeric series `T` is the dtype and `N` is one more than the rank of
+# `element_shape`, which the core records as the stored array's shape after its
+# leading axis.
+#
+# For a *composite* element type the row names what a read hands back, which is
+# the decoded values: `T` is the domain type — `PiecewiseLinear`,
+# `NTuple{3, Float64}` — and `N` is one *lower*, because the axis the values were
+# packed across is the axis decoding consumes. Keep this in step with
+# `_read_values`: the two describe the same read, one as a type and one as data.
 #
 # A `DeterministicSingleTimeSeries` is the exception, because it is a view: its
 # row carries the `element_shape` of the source `SingleTimeSeries`, while a read

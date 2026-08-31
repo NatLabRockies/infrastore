@@ -4075,6 +4075,14 @@ fn encode_element_values<'py>(
     let decoded = py_to_decoded(values, element_type)?;
     let dims = leading_dims.unwrap_or_else(|| vec![decoded.len()]);
     let array = core_lib::encode(&decoded, &dims).map_err(map_err)?;
+    // The values decide the packing, but `element_type` is what the row will be
+    // stored under, and the two can disagree: `tuple(3,f64)` given two-value rows
+    // packs to width 2, and `tuple(3,i32)` packs f64 either way. Checking the
+    // array against the declared type here is what makes the returned array
+    // actually ready for `add_time_series`, as the docstring promises.
+    element_type
+        .validate_array(&array, dims.len())
+        .map_err(map_err)?;
     numpy_from_typed(py, &array)
 }
 

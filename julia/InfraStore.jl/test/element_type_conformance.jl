@@ -251,3 +251,35 @@ end
     @test read_by_id(store, id; raw=true).data == values
     close!(store)
 end
+
+@testset "an empty series still knows its element type" begin
+    # A zero-length series is storable, and its element type is a property of the
+    # *type* of its values, not of any value in it — so an empty typed array must
+    # not fall through to the numeric path and record no element type at all.
+    t0 = DateTime(2024, 1, 1)
+    for T in (
+        InfraStore.LinearFunction,
+        InfraStore.QuadraticFunction,
+        InfraStore.PiecewiseLinear,
+        InfraStore.PiecewiseStep,
+    )
+        ts = SingleTimeSeries(t0, Hour(1), T[], "empty")
+        @test ts.element_type == InfraStore.element_type_tag(T[])
+        array, tag = encode_element_values(T[])
+        @test tag == ts.element_type
+        @test size(array, 1) == 0
+        @test decode_element_values(array, tag) == T[]
+    end
+end
+
+@testset "a zero-arity tuple has no element type" begin
+    # `NTuple{0, Float64}` is a legal Julia type but `tuple(0,f64)` is not a legal
+    # element type: the core's grammar rejects arity zero, so encoding one would
+    # write a row that could not be read back.
+    @test_throws InfraStore.InvalidParameterError encode_element_values(
+        NTuple{0, Float64}[()]
+    )
+    @test_throws InfraStore.InvalidParameterError decode_element_values(
+        zeros(Float64, 2, 0), "tuple(0,f64)"
+    )
+end

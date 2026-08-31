@@ -197,7 +197,18 @@ function write_element_row!(row, v::PiecewiseStep)
     return nothing
 end
 
-element_type_tag(::AbstractVector{NTuple{N, Float64}}) where {N} = "tuple($N,f64)"
+# A tuple's arity is part of its element type, and the core's grammar has no
+# `tuple(0,…)` spelling — encoding one would write a row that cannot be read
+# back. `NTuple{0, Float64}` is a legal Julia type, so this has to be refused
+# rather than assumed away.
+function element_type_tag(::AbstractVector{NTuple{N, Float64}}) where {N}
+    N == 0 && throw(
+        InvalidParameterError(
+            "a 0-tuple has no element type: tuple(0,f64) is not a valid spelling"
+        ),
+    )
+    return "tuple($N,f64)"
+end
 element_row_width(::AbstractVector{NTuple{N, Float64}}) where {N} = N
 function write_element_row!(row, v::NTuple{N, Float64}) where {N}
     for j in 1:N
@@ -373,6 +384,9 @@ function _decode_rows(kind::Symbol, rows, types::NamedTuple, tag::AbstractString
     m = match(_TUPLE_TAG, tag)
     if m !== nothing
         n = parse(Int, m.captures[1])
+        n == 0 && throw(
+            InvalidParameterError("$tag is not a valid element type: arity 0")
+        )
         size(rows, 2) == n || throw(
             InvalidParameterError(
                 "$tag is $n slots wide, but the array's element axis is " *

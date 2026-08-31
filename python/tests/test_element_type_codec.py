@@ -181,3 +181,26 @@ def test_an_encoded_series_reads_back_through_the_store():
     assert row["element_type"] == "piecewise_linear"
     stored = store.read_by_id(ts_id)
     assert decode_element_values(stored.data, row["element_type"]) == curves
+
+
+def test_encode_validates_the_array_against_the_declared_element_type():
+    """The values decide the packing; `element_type` decides what it is stored as.
+
+    Those can disagree, and the array is documented as ready for
+    `add_time_series` — so the check belongs here rather than at the store.
+    """
+    # Arity: three-wide tag, two-wide rows.
+    with pytest.raises(Exception, match="element dims"):
+        encode_element_values([[1.0, 2.0]], "tuple(3,f64)")
+    # Dtype: the packing is always f64, so an integer tuple cannot be built here.
+    with pytest.raises(Exception, match="i32"):
+        encode_element_values([[1.0, 2.0, 3.0]], "tuple(3,i32)")
+    # The agreeing case still works.
+    assert encode_element_values([[1.0, 2.0, 3.0]], "tuple(3,f64)").shape == (1, 3)
+
+
+def test_a_zero_arity_tuple_has_no_element_type():
+    # `tuple(0,f64)` is not in the core's grammar, so encoding one would produce
+    # an array whose element type cannot be parsed back.
+    with pytest.raises(Exception):
+        encode_element_values([[]], "tuple(0,f64)")

@@ -63,7 +63,6 @@ end
 # say what they mean. Declaring one that disagrees with the values is an error
 # rather than an override: the values are the more specific statement.
 function _declared_element_type(element_type, data::AbstractArray)
-    isempty(data) && return _maybe_string(element_type)
     is_element_values(data) || return _maybe_string(element_type)
     implied = element_type_tag(vec(data))
     if element_type !== nothing && String(element_type) != implied
@@ -84,7 +83,7 @@ end
 # and what makes a metadata row's `{T,N}` describe the values rather than their
 # packing.
 function _wire_array(element_type, data::AbstractArray)
-    if !isempty(data) && is_element_values(data)
+    if is_element_values(data)
         array, tag = encode_element_values(data)
         return (tag, UInt64[size(array)...], _row_major_bytes(array))
     end

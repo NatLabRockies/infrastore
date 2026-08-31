@@ -608,9 +608,10 @@ fn render_sequential(
             obj.insert("timestamps".into(), json!(ts));
             obj.insert("values".into(), json!(values));
             // A composite element type is a layout, not a number: alongside the
-            // packed slots, hand a JSON consumer the curves themselves. The CSV
-            // form stays raw on purpose — it is the shape `add` reads back.
-            if let Some(decoded) = decoded_element_values(meta, arr) {
+            // packed slots, hand a JSON consumer the curves themselves. Narrowed
+            // to the same rows the values above describe. The CSV form stays raw
+            // on purpose — it is the shape `add` reads back.
+            if let Some(decoded) = selected_element_values(meta, arr, sel.iter()) {
                 obj.insert("element_values".into(), decoded);
             }
             output::print_value(f, &Value::Object(obj))?;
@@ -741,6 +742,26 @@ fn decoded_element_values(meta: &TimeSeriesMetadata, arr: &TypedArray) -> Option
         Ok(infrastore_core::DecodedValues::Raw) | Err(_) => None,
         Ok(values) => serde_json::to_value(values).ok(),
     }
+}
+
+/// The same, narrowed to the rows a `--window` / `--stride` selection kept.
+///
+/// The timestamps and values beside it describe only the selection, so decoding
+/// the whole array would pair strided rows with an unstrided list of timesteps —
+/// the same field naming two different row sets. Selecting after the decode
+/// keeps the one decode path: the layouts are per-row, so picking rows out of the
+/// decoded list is the same as decoding the rows that were picked.
+fn selected_element_values(
+    meta: &TimeSeriesMetadata,
+    arr: &TypedArray,
+    rows: impl Iterator<Item = usize>,
+) -> Option<Value> {
+    let all = decoded_element_values(meta, arr)?;
+    let timesteps = all.get("timesteps")?.as_array()?;
+    let picked: Vec<Value> = rows.filter_map(|i| timesteps.get(i).cloned()).collect();
+    let mut out = all.clone();
+    *out.get_mut("timesteps")? = Value::Array(picked);
+    Some(out)
 }
 
 /// `get --plot`: one sparkline per element of the series.

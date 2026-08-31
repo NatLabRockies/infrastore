@@ -197,6 +197,16 @@ pub fn encode(values: &DecodedValues, leading_dims: &[usize]) -> Result<TypedArr
         }
         DecodedValues::Tuple(rows) => {
             let width = rows.first().map(Vec::len).unwrap_or(0);
+            // A tuple's arity is carried by its rows, so a series with no rows —
+            // or rows of no values — cannot say what it is. `ElementType::parse`
+            // refuses the `tuple(0,…)` spelling this would produce, so encoding
+            // it would write a row that cannot be read back.
+            if width == 0 {
+                return Err(TimeSeriesError::InvalidParameter(
+                    "an empty tuple carries no arity, and tuple(0,…) is not a valid                      element type: build the TypedArray directly and declare the arity"
+                        .into(),
+                ));
+            }
             if let Some(bad) = rows.iter().position(|r| r.len() != width) {
                 return Err(TimeSeriesError::InvalidParameter(format!(
                     "tuple rows must all have the same arity: row {bad} has {} values, \

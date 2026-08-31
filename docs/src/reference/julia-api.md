@@ -341,12 +341,20 @@ md = get_metadata_by_id(store, id)
 md.time_series_type == typeof(read_by_id(store, id))   # true for every stored type
 ```
 
-Both parameters come off the row itself: `T` is the dtype `element_type` physically stores (a
-`"tuple(3,f64)"` or `"piecewise_linear"` series is an array of `Float64`, with the structure in
-`element_type` and `element_shape`), and `N` is one more than the rank of `element_shape`. A
-`DeterministicSingleTimeSeries` is parameterized by the `Deterministic` it reads back as, not by the
-`SingleTimeSeries` whose array it shares. An `element_type` written by a newer core than the wrapper
-knows leaves the type bare rather than guessing.
+Both parameters come off the row itself. For a plain numeric series `T` is the dtype and `N` is one
+more than the rank of `element_shape`. For a **composite** `element_type` — one a read decodes — `T`
+is the domain type and `N` is one _lower_, because the axis the values were packed across is the one
+decoding consumes:
+
+| `element_type`     | `element_shape` | `time_series_type`                      | with `raw = true`             |
+| ------------------ | --------------- | --------------------------------------- | ----------------------------- |
+| `f64`              | `()`            | `SingleTimeSeries{Float64,1}`           | same                          |
+| `piecewise_linear` | `(7,)`          | `SingleTimeSeries{PiecewiseLinear,1}`   | `SingleTimeSeries{Float64,2}` |
+| `tuple(3,f64)`     | `(3,)`          | `SingleTimeSeries{NTuple{3,Float64},1}` | `SingleTimeSeries{Float64,2}` |
+
+A `DeterministicSingleTimeSeries` is parameterized by the `Deterministic` it reads back as, not by
+the `SingleTimeSeries` whose array it shares. An `element_type` written by a newer core than the
+wrapper knows leaves the row describing the stored numbers, which is what a read of it hands back.
 
 Test it with `<:`, not `==`, when you mean "which kind is this row":
 

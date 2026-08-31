@@ -31,10 +31,13 @@ anything but a `Probabilistic`).
   type, parameterized `{T,N}` like the value structs, so it names what a read of
   this row hands back: `md.time_series_type == typeof(read_by_id(store, md.id))`
   for every stored type, a `DeterministicSingleTimeSeries` (parameterized by the
-  `Deterministic` it becomes) included. `T` is the dtype `element_type`
-  physically stores — a `"tuple(3,f64)"` series is an `Array{Float64}`, with the
-  structure in `element_type`/`element_shape` — and `N` is one more than the rank
-  of `element_shape`. Test *which kind* a row is with `<:`, not `==`. It passes
+  `Deterministic` it becomes) included. For a plain numeric series `T`
+  is the dtype and `N` is one more than the rank of `element_shape`. For a
+  composite `element_type` — one a read decodes — `T` is the *domain* type
+  (`PiecewiseLinear`, `NTuple{3, Float64}`, …) and `N` is one lower, because the
+  axis the values were packed across is the one decoding consumes; `raw = true`
+  on the read hands back that packing instead. Test *which kind* a row is with
+  `<:`, not `==`. It passes
   straight back into any `time_series_type=` filter, `has_time_series` or reader,
   which ignore the parameters: identity carries no element type, so `{T,N}` has
   nothing to select on.
