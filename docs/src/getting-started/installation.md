@@ -37,7 +37,7 @@ instead: it gets loaded into a running Julia or Python process, and a musl share
 would put two C libraries in one address space.
 
 ```sh
-VERSION=v0.10.0    # pick a release from the Releases page
+VERSION=v0.11.0    # pick a release from the Releases page
 BASE=https://github.com/NatLabRockies/infrastore/releases/download/$VERSION
 curl -fsSLO $BASE/infrastore-aarch64-apple-darwin.tar.gz
 tar xzf infrastore-aarch64-apple-darwin.tar.gz
