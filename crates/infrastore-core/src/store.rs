@@ -1144,8 +1144,10 @@ impl Store {
                 // through committed WAL content, the same way `persist_to`'s
                 // catalog half does, and writes one self-contained file that
                 // needs no sidecar of its own. The source is opened read-only,
-                // so this still never writes to it.
-                MetadataStore::open_path(&src_sqlite, true)?.backup_to(&dest_sqlite)?;
+                // so this still never writes to it — and it is opened *without*
+                // the schema-revision check, because a stale catalog is a
+                // reason to take a writable copy, not a reason to refuse one.
+                MetadataStore::copy_file_to(&src_sqlite, &dest_sqlite)?;
             }
             Ok(())
         })();
@@ -1190,41 +1192,75 @@ impl Store {
     /// onto a destination that predates stamping.
     pub fn open_with_catalog(path: &Path, read_only: bool, catalog: CatalogMode) -> Result<Self> {
         let sqlite_path = catalog_sqlite_path(path);
-        // The HDF5 half opens FIRST, and the order is load-bearing: `open_backend`
-        // is where `data_format_version` is checked, and opening the catalog
-        // writable runs `schema::DDL`, which can only be applied to a catalog of
-        // the current format. The DDL is idempotent but not version-agnostic —
-        // `idx_component_field` names a column added in 0.16.0, so applying it to
-        // an older catalog fails with a raw `no such column`, pre-empting the
-        // `IncompatibleFormat` the version stamp exists to produce. Checking the
-        // version before touching the catalog keeps that error the one a caller
-        // sees, and as a bonus stops a bad path from leaving a freshly created
-        // empty `.sqlite` behind.
+        // Three steps, in this order, and each one is load-bearing.
+        //
+        // 1. Open the HDF5 half. This is where `data_format_version` is
+        //    evaluated (see [`crate::version`]), and it has to come first: a
+        //    store too old to migrate at all should report `IncompatibleFormat`
+        //    rather than a raw SQLite error from inside a later query, and a
+        //    bad path should not leave a freshly created empty `.sqlite`
+        //    behind. An *upgradable* stamp is noted, not yet rewritten.
+        // 2. Open the catalog, which is where the migration ladder runs
+        //    (`crate::metadata::migrate`).
+        // 3. Only if (2) succeeded, and only for a writable open, re-stamp the
+        //    HDF5 half to the current version.
+        //
+        // Catalog-first is the safe order because the two stamps cannot be
+        // written atomically together. If step 3 fails, the catalog is at the
+        // current revision while the array file still claims the older
+        // version; an older build then opens the store and simply never writes
+        // a row of a type it does not know, which is harmless. The reverse
+        // order would leave a store *claiming* the new format over an
+        // un-migrated catalog — the exact failure the ladder exists to
+        // eliminate.
         //
         // A read-only store opens both halves read-only: the HDF5 side needs
         // no write permission (works on read-only media, shared HDF5 lock) and
         // its write paths error with `ReadOnlyStore` as a backstop behind the
-        // `Store::add_*` / `remove_*` guards.
-        let backend = open_backend(path, read_only)?;
+        // `Store::add_*` / `remove_*` guards. Such an open never re-stamps
+        // anything; a stale catalog reports `CatalogMigrationRequired` from
+        // step 2, which is the error that tells the caller what to do.
+        let mut backend = open_backend(path, read_only)?;
+
+        // Whether these two files are halves of the same save is settled
+        // *before* either of them is written to. Opening the catalog runs the
+        // ladder, and a rebuild plus a re-stamp is a lot to do to an artifact
+        // that is then refused -- it mutates two of a user's files in order to
+        // report that they never belonged together. `read_generation_at` reads
+        // the stamp off a raw read-only connection, running no DDL.
+        //
+        // Only when the catalog file is actually there. A *missing* half is not
+        // a stamp disagreement, and reporting "catalog: none" would bury the
+        // one fact that helps -- which file is not where it should be. That
+        // case belongs to the open below, which names it. The post-open check
+        // still catches a catalog that opened but carries no stamp.
+        if sqlite_path.exists() {
+            check_generation_pair(
+                backend.generation(),
+                MetadataStore::read_generation_at(&sqlite_path)?,
+            )?;
+        }
+
         let metadata = match catalog {
             CatalogMode::Attached => MetadataStore::open_path(&sqlite_path, read_only)?,
             CatalogMode::InMemory => MetadataStore::open_path_into_memory(&sqlite_path, read_only)?,
         };
-        // Stamps that disagree mean these files came from different saves — most
-        // likely a `persist_to` interrupted between its two renames. Comparing
-        // the `Option`s directly makes a lone stamp a mismatch too, which is the
-        // point: every path that writes a stamp writes both halves together
-        // (`Store::create`, `persist_to`, and `compact`, which carries the
-        // existing one across), so exactly one stamped half is a half swapped
-        // out on its own. Only *both* unstamped is legitimate — an artifact that
-        // predates stamping — and that compares equal.
-        let (h5, sqlite) = (backend.generation(), metadata.generation()?);
-        if h5 != sqlite {
-            return Err(TimeSeriesError::MismatchedArtifact {
-                h5: h5.unwrap_or_else(|| UNSTAMPED.into()),
-                sqlite: sqlite.unwrap_or_else(|| UNSTAMPED.into()),
-            });
+        if backend.pending_format_upgrade() {
+            // `CatalogMode::InMemory` migrated a *copy*: the catalog on disk is
+            // untouched until `persist_to`, so re-stamping the array file here
+            // would break the pair the next open sees. Only an attached
+            // catalog has actually been upgraded in place.
+            if catalog == CatalogMode::Attached {
+                backend.finish_format_upgrade()?;
+            }
         }
+        // Re-checked against the opened catalog, which is the connection the
+        // rest of the session actually uses. The preflight above reads a
+        // separate handle, so this closes the gap between the two -- and it is
+        // the check that has always been here. A migration cannot change the
+        // generation (migrating is not a save), so on any ordinary path the two
+        // agree and this is free.
+        check_generation_pair(backend.generation(), metadata.generation()?)?;
         Ok(Self {
             backend,
             metadata,
@@ -1242,6 +1278,30 @@ impl Store {
     /// Where this store's catalog lives. See [`CatalogMode`].
     pub fn catalog_mode(&self) -> CatalogMode {
         self.catalog
+    }
+
+    /// The `data_format_version` the array file actually carries.
+    ///
+    /// Not the same thing as [`crate::DATA_FORMAT_VERSION`], which is what this
+    /// *build* writes. An upgradable stamp is left in place until the catalog
+    /// migration succeeds, and a read-only open never re-stamps at all, so a
+    /// store can legitimately be open and readable while its file says
+    /// something older. Report this, not the constant.
+    ///
+    /// `None` for a backend with no version stamp -- an in-memory store.
+    pub fn data_format_version(&self) -> Option<String> {
+        self.backend.stored_format_version()
+    }
+
+    /// The catalog's schema revision, the SQLite half's counterpart to
+    /// [`Self::data_format_version`].
+    ///
+    /// A writable open brings this to
+    /// [`CATALOG_SCHEMA_REVISION`](crate::metadata::migrate::CATALOG_SCHEMA_REVISION)
+    /// before returning, so on a store opened for writing this always reports
+    /// the current revision. See [`crate::metadata::migrate`].
+    pub fn catalog_schema_revision(&self) -> Result<i64> {
+        self.metadata.schema_revision()
     }
 
     /// The SQLite savepoint scoping transaction nesting level `depth`.
@@ -4293,12 +4353,20 @@ impl Store {
             // placeholder. The placeholder is never observed: nothing else runs
             // in between.
             Some(src) => {
+                // Read before the handle goes away: `fs::copy` clones the
+                // source's `data_format_version` along with everything else, so
+                // a source still owing a re-stamp (an `InMemory` open, where the
+                // catalog migrated in RAM and the array file was deliberately
+                // left alone) would publish an old stamp over a current catalog
+                // — and nothing at the destination would ever discharge it.
+                let owed = self.backend.pending_format_upgrade();
                 drop(std::mem::replace(
                     &mut self.backend,
                     Box::new(MemoryBackend::new()) as Box<dyn StorageBackend>,
                 ));
                 let staged = std::fs::copy(&src, &tmp_h5)
                     .map_err(TimeSeriesError::from)
+                    .and_then(|_| stamp_staged_copy(&tmp_h5, owed))
                     .and_then(|_| self.stage_persist_catalog(&tmp_h5, &tmp_sqlite, &generation));
                 let swapped = staged
                     .and_then(|()| Self::swap_into_place(&tmp_h5, path, &tmp_sqlite, &sqlite_path));
@@ -4390,7 +4458,21 @@ impl Store {
         })();
         staged.inspect_err(|_| {
             let _ = std::fs::remove_file(&tmp_sqlite);
-        })
+        })?;
+
+        // The migrated catalog is now the one on disk, so the re-stamp that an
+        // `InMemory` open deliberately deferred can finally be discharged. This
+        // is the same three-step ordering `open_with_catalog` uses, spread over
+        // a session instead of an open: the catalog lands durably first, and
+        // only then does the array file claim the newer format.
+        //
+        // After the catalog, never before. A failure here leaves the safe
+        // direction — a current catalog under an older array stamp, which an
+        // older build reads without ever writing a row it does not understand.
+        if self.backend.pending_format_upgrade() {
+            self.backend.finish_format_upgrade()?;
+        }
+        Ok(())
     }
 
     /// Write both halves of a save for a store whose arrays live in memory.
@@ -4646,6 +4728,45 @@ struct RequestParts {
 /// [`WindowRead::Dense`](crate::reader) slicing (`Deterministic` → axis 1,
 /// `Probabilistic` / `Scenarios` → axis 2), so writes and reads agree on which
 /// axis the windows lie along.
+/// Refuse a pair of halves whose generation stamps disagree.
+///
+/// Stamps that disagree mean these files came from different saves — most
+/// likely a `persist_to` interrupted between its two renames. Comparing the
+/// `Option`s directly makes a lone stamp a mismatch too, which is the point:
+/// every path that writes a stamp writes both halves together
+/// (`Store::create`, `persist_to`, and `compact`, which carries the existing
+/// one across), so exactly one stamped half is a half swapped out on its own.
+/// Only *both* unstamped is legitimate — an artifact that predates stamping —
+/// and that compares equal.
+/// Bring a staged HDF5 copy up to the current format version, when the source
+/// it was copied from still owed a re-stamp.
+///
+/// `persist_to`'s copy branch clones the file byte for byte, so the stamp comes
+/// with it. The destination's catalog is the migrated one, so leaving the old
+/// stamp there would publish exactly the pair this whole mechanism defers to
+/// avoid — and unlike the source, the destination has no later writable
+/// `Attached` open guaranteed to fix it up.
+///
+/// The handle must not outlive this call: HDF5 holds a byte-range lock and
+/// `swap_into_place` renames this file out from under it on Windows.
+fn stamp_staged_copy(tmp_h5: &Path, owed: bool) -> Result<()> {
+    if !owed {
+        return Ok(());
+    }
+    let mut staged = open_backend(tmp_h5, false)?;
+    staged.finish_format_upgrade()
+}
+
+fn check_generation_pair(h5: Option<String>, sqlite: Option<String>) -> Result<()> {
+    if h5 != sqlite {
+        return Err(TimeSeriesError::MismatchedArtifact {
+            h5: h5.unwrap_or_else(|| UNSTAMPED.into()),
+            sqlite: sqlite.unwrap_or_else(|| UNSTAMPED.into()),
+        });
+    }
+    Ok(())
+}
+
 fn array_layout_for(ts_type: TimeSeriesType) -> ArrayLayout {
     match ts_type {
         TimeSeriesType::SingleTimeSeries | TimeSeriesType::DeterministicSingleTimeSeries => {
@@ -6073,5 +6194,121 @@ mod resolve_windows_tests {
             rw(24, 12),
             Err(TimeSeriesError::InvalidParameter(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod pending_format_upgrade_tests {
+    //! Closing the loop the `InMemory` open deliberately leaves open.
+    //!
+    //! A writable open at an upgradable stamp owes a re-stamp.
+    //! `open_with_catalog` discharges it immediately for `CatalogMode::Attached`
+    //! — but not for `InMemory`, where the migration happened to a *copy* of the
+    //! catalog and the file on disk is still stale until it is persisted.
+    //! Something has to discharge it once that catalog does land, or the array
+    //! file keeps its old stamp for the life of the store and eventually falls
+    //! off the bottom of the upgrade window.
+    //!
+    //! None of this is reachable through the shipped constants, which is why
+    //! every test here scopes a wider window.
+
+    use super::*;
+    use crate::version::test_bounds;
+
+    const OLD: &str = "1.3.0";
+    const MIN: &str = "1.2.0";
+    const CUR: &str = "1.5.0";
+
+    fn stamp_of(path: &Path) -> String {
+        let file = hdf5_metno::File::open(path).expect("open h5");
+        file.attr("data_format_version")
+            .and_then(|a| a.read_scalar::<hdf5_metno::types::VarLenUnicode>())
+            .map(|v| v.to_string())
+            .expect("stamp")
+    }
+
+    /// A store whose array file is stamped `OLD` and whose catalog is at the
+    /// current revision, built under the real constants and then backdated.
+    fn backdated_store(dir: &Path) -> PathBuf {
+        let path = dir.join("s.h5");
+        {
+            let mut store = Store::create(Some(&path), false).expect("create");
+            store.flush().expect("flush");
+        }
+        let file = hdf5_metno::File::open_rw(&path).expect("open rw");
+        let attr = file.attr("data_format_version").expect("attr");
+        attr.write_scalar(&OLD.parse::<hdf5_metno::types::VarLenUnicode>().unwrap())
+            .expect("backdate");
+        drop(file);
+        path
+    }
+
+    /// `persist_catalog` is the moment an `InMemory` store's migrated catalog
+    /// becomes the one on disk, so it is the moment the deferred re-stamp is
+    /// finally owed to nobody but this call.
+    #[test]
+    fn persist_catalog_discharges_the_deferred_restamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = backdated_store(dir.path());
+        assert_eq!(stamp_of(&path), OLD);
+
+        test_bounds::with(MIN, CUR, || {
+            let mut store =
+                Store::open_with_catalog(&path, false, CatalogMode::InMemory).expect("open");
+            // Deliberately still owed: the catalog on disk has not moved yet.
+            assert!(store.backend.pending_format_upgrade());
+            assert_eq!(stamp_of(&path), OLD, "the open must not re-stamp");
+
+            store.persist_catalog().expect("persist catalog");
+            assert!(!store.backend.pending_format_upgrade());
+        });
+        assert_eq!(
+            stamp_of(&path),
+            CUR,
+            "the catalog landed, so the stamp moves"
+        );
+    }
+
+    /// `persist_to`'s copy branch clones the array file byte for byte, stamp
+    /// included, while writing a *migrated* catalog beside it. Without the
+    /// stamping step the destination is a fresh artifact born already stale,
+    /// and nothing there would ever fix it.
+    #[test]
+    fn persist_to_stamps_the_copy_it_publishes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = backdated_store(dir.path());
+        let dest = dir.path().join("dest.h5");
+
+        test_bounds::with(MIN, CUR, || {
+            let mut store =
+                Store::open_with_catalog(&path, false, CatalogMode::InMemory).expect("open");
+            assert!(store.backend.pending_format_upgrade());
+            store.persist_to(&dest).expect("persist to");
+        });
+
+        assert_eq!(
+            stamp_of(&dest),
+            CUR,
+            "the published copy carries the new stamp"
+        );
+        // The source is untouched: its own catalog on disk never migrated, so
+        // it still legitimately owes the re-stamp.
+        assert_eq!(stamp_of(&path), OLD);
+    }
+
+    /// The `Attached` path already discharges at open, so persisting must not
+    /// depend on it and must stay a no-op here.
+    #[test]
+    fn an_attached_open_has_nothing_left_to_discharge() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = backdated_store(dir.path());
+
+        test_bounds::with(MIN, CUR, || {
+            let mut store =
+                Store::open_with_catalog(&path, false, CatalogMode::Attached).expect("open");
+            assert!(!store.backend.pending_format_upgrade());
+            store.persist_catalog().expect("persist catalog");
+        });
+        assert_eq!(stamp_of(&path), CUR);
     }
 }

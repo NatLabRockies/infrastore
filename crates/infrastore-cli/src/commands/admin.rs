@@ -242,9 +242,26 @@ pub fn store_info(store_path: &Path, format: Format) -> Result<(), String> {
         ("sqlite_path".into(), json!(sqlite.display().to_string())),
         ("sqlite_bytes".into(), size(&sqlite)),
         ("storage_backend".into(), json!("hdf5")),
+        // The stamp the *file* carries, which is not always the one this build
+        // writes: an upgradable store is re-stamped only after its catalog
+        // migrates, and a read-only open never re-stamps at all. Reporting the
+        // constant here would have this command answer a question about the
+        // build while appearing to answer one about the store.
         (
             "data_format_version".into(),
-            json!(infrastore_core::DATA_FORMAT_VERSION),
+            json!(
+                store
+                    .data_format_version()
+                    .unwrap_or_else(|| infrastore_core::DATA_FORMAT_VERSION.to_string())
+            ),
+        ),
+        // The catalog's own revision, beside the artifact's. They move
+        // independently -- see `infrastore_core::metadata::migrate` -- and this
+        // is the natural place to look after a read-only open reports that a
+        // store needs upgrading.
+        (
+            "catalog_schema_revision".into(),
+            json!(store.catalog_schema_revision().map_err(|e| e.to_string())?),
         ),
         ("compression".into(), json!(compression)),
         (
@@ -254,6 +271,45 @@ pub fn store_info(store_path: &Path, format: Format) -> Result<(), String> {
         ("cli_version".into(), json!(env!("CARGO_PKG_VERSION"))),
     ];
     render_kv("Store", pairs, format)
+}
+
+/// `upgrade`: open the store for **writing**, which is what runs the catalog
+/// migration ladder, and report the revision it left behind.
+///
+/// This command exists because every *read* command opens the store read-only
+/// and therefore cannot upgrade it — a store written by an older build reports
+/// `CatalogMigrationRequired` and tells the caller to open it once for writing,
+/// and this is that open. It performs no other work, so it is safe to run on a
+/// store that is already current: the ladder finds nothing to do and the command
+/// reports the same revision it would have anyway.
+///
+/// It is deliberately *not* folded into `store-info`. A read command taking the
+/// SQLite write lock would be a surprise, and would fail outright on a store on
+/// read-only media or one another process holds open for writing.
+pub fn upgrade(store_path: &Path, format: Format) -> Result<(), String> {
+    if !store_path.exists() {
+        return Err(format!("store not found: {}", store_path.display()));
+    }
+    let store = store_access::open_writable(store_path)?;
+    // Reports the state it *left*, not whether it moved: "already current" and
+    // "upgraded just now" are the same outcome to the caller, and telling them
+    // apart would mean peeking at the catalog before opening it.
+    let pairs = vec![
+        ("store".into(), json!(store_path.display().to_string())),
+        (
+            "data_format_version".into(),
+            json!(
+                store
+                    .data_format_version()
+                    .unwrap_or_else(|| infrastore_core::DATA_FORMAT_VERSION.to_string())
+            ),
+        ),
+        (
+            "catalog_schema_revision".into(),
+            json!(store.catalog_schema_revision().map_err(|e| e.to_string())?),
+        ),
+    ];
+    render_kv("Upgrade", pairs, format)
 }
 
 /// The distinct `time_reference` spellings the catalog holds, with any IANA zone

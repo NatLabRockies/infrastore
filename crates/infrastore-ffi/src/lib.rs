@@ -122,6 +122,17 @@ pub const INFRASTORE_ERR_DUPLICATE_ASSOCIATION_ID: i32 = 13;
 /// all: here the row is there and the caller's belief about who owns it is
 /// what has gone stale — a series can be reassigned, and the id follows it.
 pub const INFRASTORE_ERR_OWNER_MISMATCH: i32 = 14;
+/// The catalog is at an older schema revision than this build and the store was
+/// opened read-only, so nothing could migrate it.
+///
+/// Actionable, which is why it is its own code: open the store once for writing
+/// (or run `infrastore upgrade`) and the ladder runs.
+pub const INFRASTORE_ERR_CATALOG_MIGRATION_REQUIRED: i32 = 15;
+/// The catalog is at a newer schema revision than this build understands.
+///
+/// The mirror of `INFRASTORE_ERR_CATALOG_MIGRATION_REQUIRED`, and the remedy is
+/// the other one: upgrade the software, not the store.
+pub const INFRASTORE_ERR_CATALOG_TOO_NEW: i32 = 16;
 pub const INFRASTORE_ERR_INTERNAL: i32 = 99;
 
 thread_local! {
@@ -151,6 +162,8 @@ fn map_core_error(e: core_lib::TimeSeriesError) -> i32 {
         E::StoreExists { .. } => INFRASTORE_ERR_STORE_EXISTS,
         E::MismatchedArtifact { .. } => INFRASTORE_ERR_MISMATCHED_ARTIFACT,
         E::OwnerMismatch { .. } => INFRASTORE_ERR_OWNER_MISMATCH,
+        E::CatalogMigrationRequired { .. } => INFRASTORE_ERR_CATALOG_MIGRATION_REQUIRED,
+        E::CatalogTooNew { .. } => INFRASTORE_ERR_CATALOG_TOO_NEW,
         _ => INFRASTORE_ERR_INTERNAL,
     };
     set_error(e.to_string());

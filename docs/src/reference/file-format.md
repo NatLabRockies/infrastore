@@ -52,10 +52,33 @@ no `data_format_version` change: a store written before it existed has neither t
 table, which reads as "unstamped" and skips the check rather than failing. Compaction preserves the
 existing value rather than minting a new one, since it rewrites only the HDF5 half.
 
-Opening a store whose recorded version differs from the version this build reads fails with
-`IncompatibleFormat`, naming both versions. Every bump is backward-incompatible by definition, so
-the check is exact equality and there is no in-place upgrade path: regenerate the store with the
-matching build.
+Opening a store sorts its recorded version into one of three tiers, not two:
+
+- **Current** — the stamp equals this build's `DATA_FORMAT_VERSION`. Opened as-is.
+- **Upgradable** — the stamp is at least `MIN_UPGRADABLE_VERSION` and older. The array layout is
+  compatible, so the file is read as it stands; a **writable** open runs the catalog migration
+  ladder and then re-stamps the file. A **read-only** open changes nothing and leaves the stamp
+  alone.
+
+  Whether a read-only open _succeeds_ is decided by the catalog half, not by this tier.
+  `CatalogMigrationRequired` comes from a stale `CATALOG_SCHEMA_REVISION`; an upgradable stamp
+  sitting over an already-current catalog opens fine. That is not a hypothetical combination — it is
+  what an interrupted writable open leaves behind, and the
+  [step ordering](../explanation/design-choices.md#the-ordering-that-makes-it-safe) is chosen to
+  make it the harmless outcome.
+- **Incompatible** — older than `MIN_UPGRADABLE_VERSION`, newer than this build, or unparseable
+  (including an unstamped file). Fails with `IncompatibleFormat`, naming both versions. There is no
+  upgrade path: regenerate the store with the matching build.
+
+The catalog carries its own revision in `schema_version` (`CATALOG_SCHEMA_REVISION`), independent of
+the artifact version above. **Any catalog change the idempotent DDL cannot make to an existing table
+— a new column, a changed `CHECK`, a rebuilt table, a backfill — needs a `CATALOG_SCHEMA_REVISION`
+bump plus an append-only migration**, not a re-created store. A catalog written by a newer build is
+`CatalogTooNew` and is refused in both directions. Catalog revision 2, which widens the
+`time_series_type` `CHECK` from `BETWEEN 0 AND 5` to `>= 0`, is the first such change and takes **no
+`DATA_FORMAT_VERSION` bump at all** — nothing in the HDF5 file moves, so a `0.19.0` store upgrades
+in place on its first writable open. See
+[Upgrade a store in place](../explanation/design-choices.md#upgrade-a-store-in-place-rather-than-bricking-it).
 
 (`0.19.0` moved a `NonSequentialTimeSeries`'s timestamps out of the SQLite catalog and into the HDF5
 file: the `timestamp_sets` table is gone, and each distinct time axis is now an `i64` dataset of
@@ -345,7 +368,7 @@ One row per association between an owner and a stored array.
 | `owner_id`          | INTEGER | Owner identity; signed 64-bit integer identifier (part of key)      |
 | `owner_type`        | TEXT    | Owner's concrete type, descriptive                                  |
 | `owner_category`    | INTEGER | Code, `CHECK` in (0, 1); part of key — see below                    |
-| `time_series_type`  | INTEGER | Code, `CHECK` between 0 and 5; part of key — see below              |
+| `time_series_type`  | INTEGER | Code, `CHECK >= 0`; part of key — see below                         |
 | `name`              | TEXT    | Series name                                                         |
 | `initial_timestamp` | TEXT    | RFC 3339 string; `NULL` for `NonSequentialTimeSeries`               |
 | `resolution`        | TEXT    | ISO-8601 duration (`PT1H`, `P1M`, …); `NULL` for non-sequential     |

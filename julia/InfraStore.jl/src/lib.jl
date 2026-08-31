@@ -88,6 +88,8 @@ const INFRASTORE_ERR_DUPLICATE_ASSOCIATION_ID = Int32(13)
 const INFRASTORE_ERR_STORE_EXISTS = Int32(11)
 const INFRASTORE_ERR_MISMATCHED_ARTIFACT = Int32(12)
 const INFRASTORE_ERR_OWNER_MISMATCH = Int32(14)
+const INFRASTORE_ERR_CATALOG_MIGRATION_REQUIRED = Int32(15)
+const INFRASTORE_ERR_CATALOG_TOO_NEW = Int32(16)
 const INFRASTORE_ERR_INTERNAL = Int32(99)
 
 # ---- Owner category --------------------------------------------------------
@@ -500,6 +502,34 @@ struct OwnerMismatchError <: TimeSeriesException
     msg::String
 end
 
+"""
+    CatalogMigrationRequiredError
+
+The store's SQLite catalog is at an older schema revision than this build, and
+it was opened read-only, so nothing could bring it up to date.
+
+The error names its own remedy: open the store once for writing — with
+`read_only=false`, or `infrastore upgrade` — and the migration ladder runs.
+Distinct from [`IncompatibleFormatError`](@ref), which is the HDF5 half's
+version check and has no such remedy.
+"""
+struct CatalogMigrationRequiredError <: TimeSeriesException
+    msg::String
+end
+
+"""
+    CatalogTooNewError
+
+The store's SQLite catalog was written by a newer infrastore than this one and
+is refused in both directions.
+
+The mirror of [`CatalogMigrationRequiredError`](@ref), with the other remedy:
+upgrade the software, not the store.
+"""
+struct CatalogTooNewError <: TimeSeriesException
+    msg::String
+end
+
 struct GenericError <: TimeSeriesException
     msg::String
     code::Int32
@@ -552,6 +582,10 @@ function _check(code::Int32)
         throw(MismatchedArtifactError(msg))
     elseif code == INFRASTORE_ERR_OWNER_MISMATCH
         throw(OwnerMismatchError(msg))
+    elseif code == INFRASTORE_ERR_CATALOG_MIGRATION_REQUIRED
+        throw(CatalogMigrationRequiredError(msg))
+    elseif code == INFRASTORE_ERR_CATALOG_TOO_NEW
+        throw(CatalogTooNewError(msg))
     else
         throw(GenericError(msg, code))
     end

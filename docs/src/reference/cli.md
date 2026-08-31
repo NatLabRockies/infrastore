@@ -278,7 +278,8 @@ in-terminal check, `get --plot` draws a sparkline with no file involved.
 | Command       | Purpose                                                                       |
 | ------------- | ----------------------------------------------------------------------------- |
 | `stats`       | Association, owner, and distinct-array counts.                                |
-| `store-info`  | HDF5 + SQLite paths and sizes, on-disk format version, compression.           |
+| `store-info`  | HDF5 + SQLite paths and sizes, on-disk format version, catalog revision.      |
+| `upgrade`     | Bring a store written by an older build up to this one's catalog revision.    |
 | `arrays`      | Distinct stored arrays: content hash, HDF5 location, series sharing each.     |
 | `summary`     | Grouped static and/or forecast summaries (`--static-only`/`--forecast-only`). |
 | `resolutions` | List distinct resolutions and forecast intervals.                             |
@@ -287,11 +288,18 @@ in-terminal check, `get --plot` draws a sparkline with no file involved.
 ```sh
 infrastore --store demo.h5 stats
 infrastore --store demo.h5 store-info
+infrastore --store demo.h5 upgrade
 infrastore --store demo.h5 arrays --data-hash 2018057b
 infrastore --store demo.h5 summary --static-only
 infrastore --store demo.h5 resolutions
 infrastore --store demo.h5 params --resolution PT1H --interval PT1H
 ```
+
+`upgrade` is the writable open that runs the catalog migration ladder. It is needed only for a store
+written by an older infrastore: such a store reports `the store's catalog is at revision N …` on
+every read, because every read command opens it **read-only** and therefore cannot upgrade it.
+`upgrade` does nothing else, and is a no-op on a store that is already current. Run it once against
+any artifact the read-only gRPC server is about to serve.
 
 ### Associations
 
@@ -401,6 +409,7 @@ infrastore --store <PATH> persist --dest <PATH.h5> [--force] [--dry-run]
 infrastore --store <PATH> compact [--force]
 infrastore --store <PATH> stats
 infrastore --store <PATH> store-info
+infrastore --store <PATH> upgrade
 infrastore --store <PATH> arrays [SELECTOR...] [--data-hash <HEX>]
 infrastore --store <PATH> attributes [--component-id <I>] [--attribute-id <I>] [--component-type <T>] [--attribute-type <T>] [--summary]
 infrastore --store <PATH> links [--parent-id <I>] [--child-id <I>] [--parent-type <T>] [--child-type <T>]

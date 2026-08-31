@@ -60,7 +60,7 @@ pub use types::{
         SingleTimeSeries, TimeSeriesData, TimeSeriesType,
     },
 };
-pub use version::DATA_FORMAT_VERSION;
+pub use version::{Compat, DATA_FORMAT_VERSION, MIN_UPGRADABLE_VERSION, compatibility};
 
 /// Create a new store.
 ///

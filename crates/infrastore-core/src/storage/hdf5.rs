@@ -47,7 +47,7 @@ use crate::error::{Result, TimeSeriesError};
 use crate::hash::{array_hash, hash_hex};
 use crate::storage::{ArrayLayout, Compression};
 use crate::types::array::{Dtype, TypedArray};
-use crate::version::DATA_FORMAT_VERSION;
+use crate::version::{Compat, DATA_FORMAT_VERSION};
 
 use super::common::{
     COMPRESSION_ATTR, HASH_SUFFIX, MAX_CHUNK_BYTES, PackGroup, ROOT_GROUP, SINGLE_GROUP,
@@ -550,6 +550,17 @@ struct Inner {
     /// re-store of a known axis is answered without touching HDF5.
     timestamp_hashes: HashSet<[u8; 32]>,
     compression: Compression,
+    /// The `data_format_version` this file carries, as read at open. Kept
+    /// rather than discarded because an upgradable stamp is left in place until
+    /// the catalog migrates, so the constant is not a safe stand-in for it.
+    /// Updated by `finish_format_upgrade` when the re-stamp lands.
+    format_version: String,
+    /// Set when this file was opened writable at an older but upgradable
+    /// `data_format_version`. The stamp is *not* rewritten at open: the
+    /// catalog half has to migrate first, and only then does
+    /// `Store::open_with_catalog` call `finish_format_upgrade`. See
+    /// [`crate::version`].
+    format_upgrade_pending: bool,
 }
 
 impl Hdf5Backend {
@@ -564,7 +575,11 @@ impl Hdf5Backend {
     /// top of a leftover with the same name.
     pub fn create(path: &Path, compression: Compression) -> Result<Self> {
         let file = file_builder().create_excl(path).map_err(map_h5)?;
-        write_str_attr(&file, "data_format_version", DATA_FORMAT_VERSION)?;
+        write_str_attr(
+            &file,
+            "data_format_version",
+            crate::version::active_bounds().1,
+        )?;
         write_str_attr(&file, COMPRESSION_ATTR, &compression.encode())?;
         write_str_attr(&file, BACKEND_ATTR, BACKEND_NAME)?;
         let ts = file.create_group(ROOT_GROUP).map_err(map_h5)?;
@@ -583,11 +598,15 @@ impl Hdf5Backend {
                 by_hash: HashMap::new(),
                 timestamp_hashes: HashSet::new(),
                 compression,
+                // A file this build just created carries this build's stamp.
+                format_version: crate::version::active_bounds().1.to_string(),
+                format_upgrade_pending: false,
             }),
         })
     }
 
     pub fn open(path: &Path, read_only: bool) -> Result<Self> {
+        let (min_version, current_version) = crate::version::active_bounds();
         let file = if read_only {
             file_builder().open(path).map_err(map_h5)?
         } else {
@@ -595,12 +614,23 @@ impl Hdf5Backend {
         };
         let found =
             read_str_attr(&file, "data_format_version").unwrap_or_else(|| "unspecified".into());
-        if found != DATA_FORMAT_VERSION {
-            return Err(TimeSeriesError::IncompatibleFormat {
-                found,
-                expected: DATA_FORMAT_VERSION,
-            });
-        }
+        // Three tiers, not an equality test -- see [`crate::version`]. An
+        // upgradable stamp is read as-is and left alone here: the catalog is
+        // the half that actually migrates, and re-stamping this file before it
+        // succeeds would produce exactly the store the ladder exists to
+        // prevent -- one claiming the current format over a stale catalog.
+        // `Store::open_with_catalog` calls `finish_format_upgrade` afterwards.
+        let format_upgrade_pending =
+            match crate::version::compatibility_within(&found, min_version, current_version) {
+                Compat::Current => false,
+                Compat::Upgradable => !read_only,
+                Compat::Incompatible => {
+                    return Err(TimeSeriesError::IncompatibleFormat {
+                        found,
+                        expected: DATA_FORMAT_VERSION,
+                    });
+                }
+            };
         let compression = read_str_attr(&file, COMPRESSION_ATTR)
             .map(|s| Compression::decode(&s))
             .unwrap_or_default();
@@ -623,6 +653,8 @@ impl Hdf5Backend {
                 by_hash: HashMap::new(),
                 timestamp_hashes: HashSet::new(),
                 compression,
+                format_version: found,
+                format_upgrade_pending,
             }),
         };
         backend.rebuild_index()?;
@@ -1785,6 +1817,39 @@ impl StorageBackend for Hdf5Backend {
         replace_str_attr(&inner.file, GENERATION_ATTR, generation)
     }
 
+    fn stored_format_version(&self) -> Option<String> {
+        Some(
+            self.inner
+                .lock()
+                .expect("mutex poisoned")
+                .format_version
+                .clone(),
+        )
+    }
+
+    fn pending_format_upgrade(&self) -> bool {
+        self.inner
+            .lock()
+            .expect("mutex poisoned")
+            .format_upgrade_pending
+    }
+
+    fn finish_format_upgrade(&mut self) -> Result<()> {
+        let mut inner = self.inner.lock().expect("mutex poisoned");
+        if !inner.format_upgrade_pending {
+            return Ok(());
+        }
+        if inner.read_only {
+            return Err(TimeSeriesError::ReadOnlyStore);
+        }
+        let current = crate::version::active_bounds().1;
+        replace_str_attr(&inner.file, "data_format_version", current)?;
+        inner.file.flush().map_err(map_h5)?;
+        inner.format_version = current.to_string();
+        inner.format_upgrade_pending = false;
+        Ok(())
+    }
+
     fn compression(&self) -> Compression {
         Hdf5Backend::compression(self)
     }
@@ -1864,6 +1929,109 @@ mod tests {
     /// A distinct irregular pool, keyed by a stand-in timestamp-vector hash.
     fn cohort(tag: u8) -> PackGroup {
         PackGroup::Irregular([tag; 32])
+    }
+
+    /// The deferred re-stamp, which no other test can reach.
+    ///
+    /// `MIN_UPGRADABLE_VERSION == DATA_FORMAT_VERSION`, so nothing on disk
+    /// classifies as `Compat::Upgradable` and this whole path -- the reason the
+    /// catalog is migrated *before* the array file is re-stamped -- has no
+    /// reachable input through the public `open`. `open_within` supplies a
+    /// window wide enough to admit one.
+    ///
+    /// What has to hold: the stamp is read but *left alone* at open, the
+    /// backend says it is pending, and only `finish_format_upgrade` rewrites
+    /// it. An open that re-stamped eagerly would produce the store the ladder
+    /// exists to prevent -- one claiming the current format over a catalog that
+    /// has not migrated.
+    #[test]
+    fn an_upgradable_stamp_is_read_but_not_rewritten_until_the_upgrade_finishes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.h5");
+        {
+            let be = Hdf5Backend::create(&path, Compression::default()).unwrap();
+            let inner = be.inner.lock().unwrap();
+            replace_str_attr(&inner.file, "data_format_version", "1.3.0").unwrap();
+            inner.file.flush().unwrap();
+        }
+
+        // Writable: pending, and the file still says 1.3.0.
+        let mut be =
+            crate::version::test_bounds::with("1.2.0", "1.5.0", || Hdf5Backend::open(&path, false))
+                .unwrap();
+        assert!(be.pending_format_upgrade());
+        assert_eq!(be.stored_format_version().as_deref(), Some("1.3.0"));
+        assert_eq!(stamp_on_disk(&path), "1.3.0");
+
+        // Only now does it move -- and to this build's constant, which is what
+        // `finish_format_upgrade` writes.
+        be.finish_format_upgrade().unwrap();
+        assert!(!be.pending_format_upgrade());
+        assert_eq!(stamp_on_disk(&path), DATA_FORMAT_VERSION);
+        assert_eq!(
+            be.stored_format_version().as_deref(),
+            Some(DATA_FORMAT_VERSION)
+        );
+
+        // Idempotent: nothing pending, so a second call is a no-op.
+        be.finish_format_upgrade().unwrap();
+        assert_eq!(stamp_on_disk(&path), DATA_FORMAT_VERSION);
+    }
+
+    /// A read-only open of an upgradable file never re-stamps, so the stamp it
+    /// reports stays the file's own. The catalog half is what reports the
+    /// actionable error; this half just has to not lie about the version.
+    #[test]
+    fn a_read_only_open_of_an_upgradable_file_leaves_the_stamp_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ro.h5");
+        {
+            let be = Hdf5Backend::create(&path, Compression::default()).unwrap();
+            let inner = be.inner.lock().unwrap();
+            replace_str_attr(&inner.file, "data_format_version", "1.3.0").unwrap();
+            inner.file.flush().unwrap();
+        }
+        let mut be =
+            crate::version::test_bounds::with("1.2.0", "1.5.0", || Hdf5Backend::open(&path, true))
+                .unwrap();
+        assert!(
+            !be.pending_format_upgrade(),
+            "a read-only open has nothing pending: it cannot write the stamp"
+        );
+        assert_eq!(be.stored_format_version().as_deref(), Some("1.3.0"));
+        // Calling it anyway is a no-op rather than an error: it short-circuits
+        // on "nothing pending" before it ever consults `read_only`. That makes
+        // the `ReadOnlyStore` arm behind that check unreachable today -- kept as
+        // a backstop for a future that sets the flag some other way, not as
+        // behavior a caller can observe. Either way the stamp is untouched.
+        be.finish_format_upgrade().unwrap();
+        assert_eq!(stamp_on_disk(&path), "1.3.0");
+    }
+
+    /// Outside the window in either direction is still a hard refusal.
+    #[test]
+    fn a_stamp_outside_the_window_is_refused_by_open() {
+        let dir = tempfile::tempdir().unwrap();
+        for (version, min, cur) in [("1.1.0", "1.2.0", "1.5.0"), ("1.9.0", "1.2.0", "1.5.0")] {
+            let path = dir.path().join(format!("v{version}.h5"));
+            {
+                let be = Hdf5Backend::create(&path, Compression::default()).unwrap();
+                let inner = be.inner.lock().unwrap();
+                replace_str_attr(&inner.file, "data_format_version", version).unwrap();
+                inner.file.flush().unwrap();
+            }
+            assert!(matches!(
+                crate::version::test_bounds::with(min, cur, || Hdf5Backend::open(&path, true)),
+                Err(TimeSeriesError::IncompatibleFormat { .. })
+            ));
+        }
+    }
+
+    /// The `data_format_version` attribute the file carries, read without
+    /// going through the backend's own accessor.
+    fn stamp_on_disk(path: &Path) -> String {
+        let file = file_builder().open(path).unwrap();
+        read_str_attr(&file, "data_format_version").unwrap()
     }
 
     #[test]

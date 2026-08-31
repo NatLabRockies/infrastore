@@ -268,6 +268,28 @@ arrays survive the round trip without coercion. One caveat:
   `quantity_kind`, `unit_system`, `component_field`, `time_reference` — is on the response, so a
   read by id returns the same described series a local read does.
 
+## Catalog Revision and Read-Only Opens
+
+The server opens its store **read-only**, which means it cannot upgrade a catalog. A store whose
+catalog is at an older `CATALOG_SCHEMA_REVISION` is refused with `CatalogMigrationRequired`.
+
+That refusal is a **startup failure, not an RPC status**: the store is opened once, by
+`CatalogStoreService::from_path`, before any service exists to answer a request. The process exits
+with the error on stderr and no client ever connects. Look for it in the server's own output, not in
+a response.
+
+**The store must be opened once for writing before the server can serve it.** The CLI command for
+exactly that is `infrastore --store <path> upgrade`, which does nothing but the writable open and is
+a no-op on a store that is already current. Every _read_ command, `store-info` included, opens the
+store read-only and so cannot upgrade it.
+
+`infrastore store-info` reports `catalog_schema_revision` beside `data_format_version` once the
+store is readable, which is how to confirm the upgrade landed.
+
+A catalog written by a _newer_ build is `CatalogTooNew` and is refused outright; there is no
+downgrade. See
+[Upgrade a store in place](../explanation/design-choices.md#upgrade-a-store-in-place-rather-than-bricking-it).
+
 ## Authentication
 
 When the server is configured with `method = "api_key"`, clients must send the key in the

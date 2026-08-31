@@ -3797,3 +3797,116 @@ fn a_strided_composite_read_decodes_the_rows_it_kept() {
     );
     assert!(steps[1].as_array().unwrap().is_empty(), "{out}");
 }
+
+/// `store-info` reports the catalog revision beside the artifact's format
+/// version — the two move independently, and this is where a user looks after a
+/// read-only open reports that a store needs upgrading.
+#[test]
+fn store_info_reports_the_catalog_schema_revision() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("info.h5");
+    run(&store, &["init"]);
+    let info = run(&store, &["-f", "json", "store-info"]);
+    assert!(info.contains("catalog_schema_revision"), "{info}");
+    assert!(info.contains("data_format_version"), "{info}");
+}
+
+/// `upgrade` actually migrates a stale store — the behavior that distinguishes
+/// it from every read command.
+///
+/// The no-op test above cannot show this: a current store opens read-only just
+/// fine and reports revision 2 either way, so it would pass unchanged if this
+/// command quietly used the read-only opener and migrated nothing. This one
+/// backdates the catalog's revision stamp and walks the whole loop a user hits
+/// — a read refuses and names the remedy, `upgrade` applies it, the read works.
+#[test]
+fn upgrade_migrates_a_stale_catalog_and_unblocks_the_read_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("stale.h5");
+    run(&store, &["init"]);
+
+    let sqlite = dir.path().join("stale.h5.sqlite");
+    let revision = || -> i64 {
+        rusqlite::Connection::open(&sqlite)
+            .unwrap()
+            .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
+            .unwrap()
+    };
+    {
+        let conn = rusqlite::Connection::open(&sqlite).unwrap();
+        conn.execute("UPDATE schema_version SET version = 1", [])
+            .unwrap();
+    }
+    assert_eq!(revision(), 1);
+
+    // Every read command opens read-only, so it cannot migrate — it refuses and
+    // says what to do instead of failing somewhere deeper.
+    let err = run_err(&store, &["list"]);
+    assert!(err.contains("revision"), "{err}");
+    assert!(err.contains("open the store once for writing"), "{err}");
+
+    // `upgrade` is that writable open.
+    let out = run(&store, &["-f", "json", "upgrade"]);
+    assert!(out.contains("\"catalog_schema_revision\": 2"), "{out}");
+    assert_eq!(revision(), 2);
+
+    // And the read that just refused now works.
+    run(&store, &["list"]);
+}
+
+/// Both version fields report the *store*, not the build.
+///
+/// `data_format_version` used to be the compile-time constant, which was
+/// indistinguishable from the truth while the version check was strict
+/// equality — an open either matched or failed. It is not indistinguishable any
+/// more: an upgradable stamp is left in place until the catalog migrates, and a
+/// read-only open never re-stamps at all, so the constant and the file can
+/// legitimately disagree. Reporting the constant would have this command answer
+/// a question about the build while appearing to answer one about the store.
+#[test]
+fn store_info_reads_the_format_version_off_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("stamp.h5");
+    run(&store, &["init"]);
+
+    let info = run(&store, &["-f", "json", "store-info"]);
+    let parsed: serde_json::Value = serde_json::from_str(&info).unwrap();
+    // A store this build just created carries this build's stamp, so the value
+    // matches -- but it now arrives from the file rather than from `env!`.
+    assert_eq!(
+        parsed["data_format_version"].as_str().unwrap(),
+        infrastore_core::DATA_FORMAT_VERSION
+    );
+
+    // The same field on `upgrade`, which is the command a stale store is sent
+    // to and therefore the one most likely to be read during a version problem.
+    let up = run(&store, &["-f", "json", "upgrade"]);
+    let parsed: serde_json::Value = serde_json::from_str(&up).unwrap();
+    assert_eq!(
+        parsed["data_format_version"].as_str().unwrap(),
+        infrastore_core::DATA_FORMAT_VERSION
+    );
+}
+
+/// `upgrade` is the writable open that runs the migration ladder, and it is the
+/// only CLI route to one that does nothing else — every read command, including
+/// `store-info`, opens the store read-only and so cannot upgrade it.
+///
+/// On a current store it is a no-op that still reports the revision, which is
+/// what makes it safe to run unconditionally in a deploy script.
+#[test]
+fn upgrade_is_the_writable_open_and_a_no_op_on_a_current_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("up.h5");
+    run(&store, &["init"]);
+    for _ in 0..2 {
+        let out = run(&store, &["-f", "json", "upgrade"]);
+        assert!(out.contains("\"catalog_schema_revision\": 2"), "{out}");
+        assert!(out.contains("data_format_version"), "{out}");
+    }
+    // It must not invent a store where none exists — that is `init`'s job, and
+    // silently creating one would turn a typo'd path into an empty store.
+    let missing = dir.path().join("nope.h5");
+    let err = run_err(&missing, &["upgrade"]);
+    assert!(err.contains("not found"), "{err}");
+}

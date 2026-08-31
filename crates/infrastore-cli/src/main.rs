@@ -68,6 +68,7 @@ const COMMAND_GROUPS: &[(&str, &[&str])] = &[
         &[
             "stats",
             "store-info",
+            "upgrade",
             "arrays",
             "summary",
             "resolutions",
@@ -555,9 +556,16 @@ enum Commands {
     /// (`associations.*`, `owners.*`, `arrays.*`) rather than listed flat.
     #[command(after_help = help::STATS)]
     Stats,
-    /// HDF5 + SQLite paths, on-disk format version, and compression.
+    /// HDF5 + SQLite paths, on-disk format version, catalog revision, and compression.
     #[command(after_help = help::STORE_INFO)]
     StoreInfo,
+    /// Bring a store written by an older build up to this one's catalog revision.
+    ///
+    /// Every read command opens the store read-only and so cannot upgrade it;
+    /// this is the writable open that runs the migration. It is a no-op on a
+    /// store that is already current.
+    #[command(after_help = help::UPGRADE)]
+    Upgrade,
     /// Distinct stored arrays: content hash, HDF5 location, and sharers.
     #[command(after_help = help::ARRAYS)]
     Arrays {
@@ -1073,6 +1081,7 @@ fn run(cli: &Cli) -> Result<(), String> {
         }
         Commands::Stats => commands::admin::stats(&require_store(cli)?, cli.format),
         Commands::StoreInfo => commands::admin::store_info(&require_store(cli)?, cli.format),
+        Commands::Upgrade => commands::admin::upgrade(&require_store(cli)?, cli.format),
         Commands::Arrays {
             selector,
             data_hash,

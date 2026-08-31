@@ -256,6 +256,18 @@ Examples:
   infrastore --store demo.h5 store-info
   infrastore --store demo.h5 -f json store-info";
 
+pub const UPGRADE: &str = "\
+Examples:
+  infrastore --store demo.h5 upgrade
+  infrastore --store demo.h5 -f json upgrade
+
+Needed only for a store written by an older infrastore. Every read command opens
+the store read-only and so cannot upgrade it: such a store reports \"the store's
+catalog is at revision N ... open the store once for writing\", and this command
+is that open. It changes nothing else, and is a no-op on a store that is already
+current -- safe to run unconditionally, including against any artifact the
+read-only gRPC server is about to serve.";
+
 pub const ARRAYS: &str = "\
 Examples:
   infrastore --store demo.h5 arrays

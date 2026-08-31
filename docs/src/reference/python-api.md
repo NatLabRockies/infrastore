@@ -1009,22 +1009,24 @@ json_str = store.export_time_series_associations_openapi()
 
 All inherit from `TimeSeriesError`:
 
-| Exception                   | Raised when                                           |
-| --------------------------- | ----------------------------------------------------- |
-| `NotFoundError`             | A key or array does not exist                         |
-| `OwnerMismatchError`        | An id-addressed call named an owner the row is not    |
-| `DuplicateTimeSeriesError`  | Adding a series whose key already exists              |
-| `DuplicateAssociationError` | Re-adding an attachment or edge that already exists   |
-| `InvalidParameterError`     | Bad arguments (bad feature type, malformed period, …) |
-| `IntegrityError`            | On-disk inconsistency detected                        |
-| `ReadOnlyStoreError`        | A write on a read-only store                          |
-| `IoError`                   | Filesystem I/O failure                                |
-| `ConnectionError`           | Connection failure (module-scoped, not the builtin)   |
-| `IncompatibleFormatError`   | Store written in an incompatible on-disk format       |
-| `IncompatibleForecastError` | Forecast parameters clash with existing forecasts     |
-| `StorageError`              | SQLite catalog or serialization failure               |
-| `StoreExistsError`          | Creating a store where one already exists             |
-| `MismatchedArtifactError`   | The `.h5` and `.sqlite` halves came from two saves    |
+| Exception                       | Raised when                                             |
+| ------------------------------- | ------------------------------------------------------- |
+| `NotFoundError`                 | A key or array does not exist                           |
+| `OwnerMismatchError`            | An id-addressed call named an owner the row is not      |
+| `DuplicateTimeSeriesError`      | Adding a series whose key already exists                |
+| `DuplicateAssociationError`     | Re-adding an attachment or edge that already exists     |
+| `InvalidParameterError`         | Bad arguments (bad feature type, malformed period, …)   |
+| `IntegrityError`                | On-disk inconsistency detected                          |
+| `ReadOnlyStoreError`            | A write on a read-only store                            |
+| `IoError`                       | Filesystem I/O failure                                  |
+| `ConnectionError`               | Connection failure (module-scoped, not the builtin)     |
+| `IncompatibleFormatError`       | Store written in an incompatible on-disk format         |
+| `IncompatibleForecastError`     | Forecast parameters clash with existing forecasts       |
+| `StorageError`                  | SQLite catalog or serialization failure                 |
+| `StoreExistsError`              | Creating a store where one already exists               |
+| `MismatchedArtifactError`       | The `.h5` and `.sqlite` halves came from two saves      |
+| `CatalogMigrationRequiredError` | Read-only open of a store whose catalog needs upgrading |
+| `CatalogTooNewError`            | The catalog was written by a newer infrastore           |
 
 A malformed ISO 8601 period string raises `InvalidParameterError` (inside the hierarchy), as does a
 naive `datetime`. Only a period argument that is neither a `timedelta` nor a `str` (or a

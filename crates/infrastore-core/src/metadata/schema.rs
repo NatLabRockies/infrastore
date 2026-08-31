@@ -9,9 +9,21 @@
 /// "already exists"; it does not stop SQLite from resolving the statement's
 /// column references, so a statement naming a column that a format bump
 /// introduced (`idx_component_field`, below) fails outright against an older
-/// catalog. That is why `Store::open_with_catalog` checks the HDF5 half's
-/// `data_format_version` *before* opening the catalog writable: the version
-/// mismatch is the error worth reporting, and it must get there first.
+/// catalog. Nor will `CREATE TABLE IF NOT EXISTS` *alter* a table that is
+/// already there, so a new column or a changed CHECK never reaches an existing
+/// store through this DDL at all.
+///
+/// That is what [`crate::metadata::migrate`] is for: a catalog change the DDL
+/// cannot make to an existing table needs a `CATALOG_SCHEMA_REVISION` bump and
+/// an append-only `MIGRATIONS` entry, and the ladder runs *before* this DDL on
+/// every writable open. This DDL is then the additive catch-up pass: new
+/// tables, new indexes -- including the ones a migration's table rebuild
+/// dropped -- and the re-created view.
+///
+/// `Store::open_with_catalog` still evaluates the HDF5 half's
+/// `data_format_version` before opening the catalog: a store too old to
+/// migrate at all should report that, not a raw SQLite error from inside a
+/// later query.
 pub const DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS time_series_associations (
     -- This id is an *external* reference: a consumer stores it in its own
@@ -28,7 +40,21 @@ CREATE TABLE IF NOT EXISTS time_series_associations (
     -- whole catalog ~29% on a 400k-row store. The codes are an on-disk
     -- contract; see `DATA_FORMAT_VERSION`.
     owner_category    INTEGER NOT NULL CHECK(owner_category IN (0,1)),
-    time_series_type  INTEGER NOT NULL CHECK(time_series_type BETWEEN 0 AND 5),
+    -- The enum owns this domain, not SQLite. `TimeSeriesType::from_code` is the
+    -- real gate and runs on every write and every read; a numeric bound here
+    -- only turns appending a type into a table rebuild (which is what catalog
+    -- revision 2 had to do -- see `metadata::migrate`). What remains is a
+    -- type-and-sign guard against a value no writer of ours produced.
+    --
+    -- `typeof` is load-bearing, not belt-and-braces. SQLite orders storage
+    -- classes NULL < INTEGER/REAL < TEXT < BLOB, so a bare `>= 0` accepts
+    -- 'garbage' and X'deadbeef' -- both sort *above* every integer. The old
+    -- `BETWEEN 0 AND 5` refused them only by accident of having an upper
+    -- bound, so dropping that bound would have quietly dropped the type guard
+    -- with it. INTEGER affinity still converts '6' and 6.0 to 6 before this
+    -- runs, so a legitimate value is never caught by it.
+    time_series_type  INTEGER NOT NULL
+                      CHECK(typeof(time_series_type) = 'integer' AND time_series_type >= 0),
     name              TEXT    NOT NULL,
     initial_timestamp TEXT,
     resolution        TEXT,
