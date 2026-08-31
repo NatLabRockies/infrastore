@@ -107,7 +107,8 @@ CREATE TABLE time_series_associations_new (
     owner_id          INTEGER NOT NULL,
     owner_type        TEXT    NOT NULL,
     owner_category    INTEGER NOT NULL CHECK(owner_category IN (0,1)),
-    time_series_type  INTEGER NOT NULL CHECK(time_series_type >= 0),
+    time_series_type  INTEGER NOT NULL
+                      CHECK(typeof(time_series_type) = 'integer' AND time_series_type >= 0),
     name              TEXT    NOT NULL,
     initial_timestamp TEXT,
     resolution        TEXT,
@@ -144,9 +145,17 @@ application_data, data_hash, features_hash";
 /// The revision-1 shape wrote `CHECK(time_series_type BETWEEN 0 AND 5)`, which
 /// made appending a seventh type a table rebuild. `TimeSeriesType::from_code`
 /// is the real gate on that domain and runs on every write and every read, so
-/// the numeric bound bought nothing SQLite had to enforce. It is replaced by a
-/// non-negativity check, which still refuses a garbage value while leaving
-/// every future type migration-free.
+/// the *upper* bound bought nothing SQLite had to enforce. It is replaced by a
+/// type-and-sign guard, which leaves every future type migration-free.
+///
+/// The `typeof` half is not decoration. SQLite orders storage classes
+/// NULL < INTEGER/REAL < TEXT < BLOB, so a bare `time_series_type >= 0` accepts
+/// `'garbage'` and `X'deadbeef'`, which sort above every integer; the old
+/// `BETWEEN` refused them only because its upper bound happened to catch
+/// them. Widening without `typeof` would therefore have *weakened* the column,
+/// letting a migrated catalog hold rows that fail `i64` decoding on the normal
+/// read path. INTEGER affinity converts `'6'` and `6.0` to `6` before the check
+/// runs, so nothing legitimate is caught.
 ///
 /// SQLite has no `ALTER TABLE … DROP CONSTRAINT`, so this is the standard
 /// table rebuild. Indexes are *not* re-created here: dropping the table drops
@@ -597,6 +606,62 @@ CREATE TABLE time_series_associations (
             [],
         )
         .expect("revision 2 accepts a code above the old upper bound");
+    }
+
+    /// Widening the bound must not widen the *type* the column accepts.
+    ///
+    /// SQLite compares across storage classes by class first --
+    /// NULL < INTEGER/REAL < TEXT < BLOB -- so `'garbage' >= 0` is true and a
+    /// bare non-negativity check lets text and blobs into an INTEGER column.
+    /// The revision-1 `BETWEEN 0 AND 5` refused them only because its upper
+    /// bound caught them, so removing that bound without adding `typeof` would
+    /// have left a migrated catalog holding rows that fail `i64` decoding on
+    /// every later read.
+    #[test]
+    fn the_rebuilt_check_refuses_text_and_blob_codes() {
+        let conn = revision_1_catalog();
+        apply(&conn).expect("apply");
+        for bad in ["'garbage'", "X'deadbeef'", "''", "'6x'"] {
+            let sql = format!(
+                "INSERT INTO time_series_associations
+                     (owner_id, owner_type, owner_category, time_series_type, name,
+                      element_type, data_hash, features_hash)
+                 VALUES (11, 'Generator', 0, {bad}, 'bad', 'f64', X'07', X'01')"
+            );
+            assert!(
+                conn.execute(&sql, []).is_err(),
+                "revision 2 must refuse a non-integer type code: {bad}"
+            );
+        }
+    }
+
+    /// The other half of the same rule: a value SQLite's INTEGER affinity can
+    /// losslessly convert *is* a legitimate integer and must pass. `typeof`
+    /// runs after affinity, which is why quoting a code -- or padding it with
+    /// whitespace, which SQLite's numeric conversion tolerates -- is not a way
+    /// to trip this check.
+    #[test]
+    fn the_rebuilt_check_accepts_what_affinity_converts() {
+        let conn = revision_1_catalog();
+        apply(&conn).expect("apply");
+        for (i, good) in ["6", "'6'", "6.0", "'6 '"].iter().enumerate() {
+            let sql = format!(
+                "INSERT INTO time_series_associations
+                     (owner_id, owner_type, owner_category, time_series_type, name,
+                      element_type, data_hash, features_hash)
+                 VALUES (12, 'Generator', 0, {good}, 'ok{i}', 'f64', X'08', X'01')"
+            );
+            conn.execute(&sql, [])
+                .unwrap_or_else(|e| panic!("affinity should convert {good}: {e}"));
+        }
+        let kinds: Vec<String> = conn
+            .prepare("SELECT DISTINCT typeof(time_series_type) FROM time_series_associations WHERE owner_id = 12")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(kinds, vec!["integer".to_string()]);
     }
 
     #[test]

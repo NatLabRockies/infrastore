@@ -43,9 +43,18 @@ CREATE TABLE IF NOT EXISTS time_series_associations (
     -- The enum owns this domain, not SQLite. `TimeSeriesType::from_code` is the
     -- real gate and runs on every write and every read; a numeric bound here
     -- only turns appending a type into a table rebuild (which is what catalog
-    -- revision 2 had to do -- see `metadata::migrate`). Kept as a
-    -- non-negativity check so a corrupted or garbage value is still refused.
-    time_series_type  INTEGER NOT NULL CHECK(time_series_type >= 0),
+    -- revision 2 had to do -- see `metadata::migrate`). What remains is a
+    -- type-and-sign guard against a value no writer of ours produced.
+    --
+    -- `typeof` is load-bearing, not belt-and-braces. SQLite orders storage
+    -- classes NULL < INTEGER/REAL < TEXT < BLOB, so a bare `>= 0` accepts
+    -- 'garbage' and X'deadbeef' -- both sort *above* every integer. The old
+    -- `BETWEEN 0 AND 5` refused them only by accident of having an upper
+    -- bound, so dropping that bound would have quietly dropped the type guard
+    -- with it. INTEGER affinity still converts '6' and 6.0 to 6 before this
+    -- runs, so a legitimate value is never caught by it.
+    time_series_type  INTEGER NOT NULL
+                      CHECK(typeof(time_series_type) = 'integer' AND time_series_type >= 0),
     name              TEXT    NOT NULL,
     initial_timestamp TEXT,
     resolution        TEXT,
