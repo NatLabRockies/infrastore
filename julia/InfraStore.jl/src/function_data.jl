@@ -337,9 +337,12 @@ function _decode_element_row(::Type{T}, ::Val{:piecewise_step}, row) where {T}
 end
 
 # A ragged row's leading slot is its used count, stored as a `Float64` because
-# the whole array is one. Rounded rather than truncated: the value came back
-# through the same float that carried it out, and an exact integer below 2^53
-# survives that, but `Int(2.9999999999999996)` would not.
+# the whole array is one. Required to be an *exact* non-negative whole number,
+# which is the rule the core states in `ElementType::validate_ragged_rows`: the
+# value came back through the same float that carried it out, so a count no
+# encoder could have written is a malformed row, not a count to round. `1.6` is
+# not "2 points".
+#
 # `slots_for` is how many of the row's slots a count of `n` actually uses, which
 # differs by kind: `1 + 2n` for a list of points, `2n` for x-coords plus steps
 # (except an empty one, whose single slot is the count itself). Passed in rather
@@ -348,15 +351,16 @@ end
 # enforces in `ElementType::validate_ragged_rows`.
 function _row_count(row, slots_for)
     raw = row[1]
-    # Not every `Float64` is a count: `round(Int, NaN)` and `round(Int, 1e30)`
-    # throw `InexactError`, which is not the error a malformed row should report.
-    isfinite(raw) && abs(raw) < typemax(Int) || throw(
+    # The bound is part of the same test, not decoration: `NaN`, `Inf` and
+    # anything past `typemax(Int)` make the conversion below throw an
+    # `InexactError`, which is not the error a malformed row should report.
+    (isinteger(raw) && abs(raw) < typemax(Int)) || throw(
         InvalidParameterError(
             "ragged element row leading count is $raw, which is not a " *
             "non-negative whole number",
         ),
     )
-    n = round(Int, raw)
+    n = Int(raw)
     # `n` comes out of the row's own data, so it is caller-controlled: bound it
     # by the row length *before* the arithmetic, which would otherwise wrap
     # silently on a count near `typemax(Int)` and make an over-long row look
@@ -426,11 +430,51 @@ function _decode_rows(kind::Symbol, rows, types::NamedTuple, tag::AbstractString
         )
         return [ntuple(j -> rows[i, j], n) for i in axes(rows, 1)]
     end
+    _validate_row_width(kind, size(rows, 2), tag)
     haskey(types, kind) || throw(
         InvalidParameterError("no type given for element_type $tag")
     )
     T = types[kind]
     return [_decode_element_row(T, Val(kind), @view(rows[i, :])) for i in axes(rows, 1)]
+end
+
+# The trailing axis width a kind requires, mirroring the core's
+# `ElementType::validate_element_dims`. The tuple branch above states its own,
+# since its width is in its tag; these four are the kinds whose width is implied
+# by the layout, and without the check a short row throws a `BoundsError` out of
+# the decode and a long one is silently ignored.
+function _validate_row_width(kind::Symbol, width::Integer, tag::AbstractString)
+    fixed = if kind === :linear_function
+        2
+    elseif kind === :quadratic_function
+        3
+    else
+        nothing
+    end
+    if fixed !== nothing
+        width == fixed || throw(
+            InvalidParameterError(
+                "element_type $tag requires per-step element dims [$fixed], got [$width]"
+            ),
+        )
+    elseif kind === :piecewise_linear
+        # `n, x1, y1, ..., xn, yn`, so the width is odd and at least the count.
+        (width >= 1 && isodd(width)) || throw(
+            InvalidParameterError(
+                "element_type $tag cannot have row width $width: a row holds " *
+                "1 + 2*points values, so the width is odd",
+            ),
+        )
+    elseif kind === :piecewise_step
+        # `n, x1..xn, y1..y(n-1)`: 2n, or 1 when every timestep is empty.
+        (width == 1 || (width >= 2 && iseven(width))) || throw(
+            InvalidParameterError(
+                "element_type $tag cannot have row width $width: a row holds " *
+                "2*points values, or 1 when every timestep is empty",
+            ),
+        )
+    end
+    return nothing
 end
 
 # The kind an `element_type` names, or `nothing` for a plain dtype — where the

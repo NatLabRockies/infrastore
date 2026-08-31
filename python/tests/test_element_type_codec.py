@@ -204,3 +204,25 @@ def test_a_zero_arity_tuple_has_no_element_type():
     # an array whose element type cannot be parsed back.
     with pytest.raises(Exception):
         encode_element_values([[]], "tuple(0,f64)")
+
+
+def test_an_empty_tuple_series_encodes_from_its_declared_arity():
+    """A zero-length series is storable, so its encoding must exist.
+
+    A tuple's arity lives in its rows, so an empty list cannot state one — but
+    `element_type` did, and refusing here would leave a valid zero-length
+    `tuple(3,f64)` array with no way back through the documented inverse.
+    """
+    encoded = encode_element_values([], "tuple(3,f64)", [0])
+    assert encoded.shape == (0, 3)
+    assert encoded.dtype == np.float64
+    # And the round trip closes: the array decodes back to the empty list.
+    assert decode_element_values(encoded, "tuple(3,f64)") == []
+
+    # The default leading dims reach the same place.
+    assert encode_element_values([], "tuple(3,f64)").shape == (0, 3)
+    # The fixed-width kinds carry their width in the type, so they already did.
+    assert encode_element_values([], "linear_function").shape == (0, 2)
+    # Zero arity is still not an element type, empty or not.
+    with pytest.raises(Exception):
+        encode_element_values([], "tuple(0,f64)", [0])

@@ -157,13 +157,39 @@ end
     @test_throws InfraStore.InvalidParameterError decode_element_values(
         reshape(Float64[5.0, 1.0, 2.0, 3.0, 4.0, 5.0], 1, 6), "piecewise_step"
     )
-    # A leading slot that is not a count at all. `round(Int, NaN)` throws an
-    # `InexactError`, which is not what a malformed row should report.
-    for count in (NaN, Inf, -1.0, 1e30)
+    # A leading slot that is not a count at all. `Int(NaN)` throws an
+    # `InexactError`, which is not what a malformed row should report. A
+    # *fractional* count is the same kind of row: `1.6` is not "2 points", and
+    # rounding it would decode a malformed array into plausible-looking values
+    # rather than reporting it — the core refuses it in `validate_ragged_rows`.
+    for count in (NaN, Inf, -1.0, 1e30, 1.6, 0.4)
         @test_throws InfraStore.InvalidParameterError decode_element_values(
-            reshape(Float64[count, 1.0, 2.0], 1, 3), "piecewise_linear"
+            reshape(Float64[count, 1.0, 2.0, 3.0, 4.0], 1, 5), "piecewise_linear"
         )
     end
+    # The element axis itself has a width per kind, which the core states in
+    # `validate_element_dims`. Unchecked, a short row threw a `BoundsError` out
+    # of the decode and a long one was silently ignored.
+    for (tag, width) in (
+        ("linear_function", 1),
+        ("linear_function", 3),
+        ("quadratic_function", 2),
+        ("quadratic_function", 4),
+        # `n, x1, y1, ..., xn, yn` is odd; `n, x1..xn, y1..y(n-1)` is 2n or 1.
+        ("piecewise_linear", 4),
+        ("piecewise_step", 3),
+    )
+        @test_throws InfraStore.InvalidParameterError decode_element_values(
+            zeros(Float64, 1, width), tag
+        )
+    end
+    # The widths each kind does allow still decode, empty rows included.
+    @test decode_element_values([1.0 2.0], "linear_function") ==
+        [InfraStore.LinearFunction(1.0, 2.0)]
+    @test decode_element_values(zeros(Float64, 1, 1), "piecewise_linear") ==
+        [InfraStore.PiecewiseLinear([])]
+    @test decode_element_values(zeros(Float64, 1, 1), "piecewise_step") ==
+        [InfraStore.PiecewiseStep([], [])]
     # A tuple arity the array cannot hold.
     @test_throws InfraStore.InvalidParameterError decode_element_values(
         bad, "tuple(7,f64)"

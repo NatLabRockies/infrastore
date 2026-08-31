@@ -4074,7 +4074,23 @@ fn encode_element_values<'py>(
     let element_type = parse_element_type(element_type)?;
     let decoded = py_to_decoded(values, element_type)?;
     let dims = leading_dims.unwrap_or_else(|| vec![decoded.len()]);
-    let array = core_lib::encode(&decoded, &dims).map_err(map_err)?;
+    let array = match (&decoded, element_type) {
+        // A tuple's arity lives in its rows, so the generic encoder cannot infer
+        // one from an empty list and refuses it. Here the arity is not missing —
+        // `element_type` declared it — and a zero-length series is storable, so
+        // the empty packing is built from the declaration rather than turned
+        // into an error the documented inverse should not have. Every other kind
+        // carries its width in its type, so this is the only case.
+        (core_lib::DecodedValues::Tuple(rows), core_lib::ElementType::Tuple { arity, .. })
+            if rows.is_empty() =>
+        {
+            let mut shape = dims.clone();
+            shape.push(arity);
+            core_lib::TypedArray::new(core_lib::Dtype::F64, shape, Vec::new())
+                .map_err(InvalidParameterError::new_err)?
+        }
+        _ => core_lib::encode(&decoded, &dims).map_err(map_err)?,
+    };
     // The values decide the packing, but `element_type` is what the row will be
     // stored under, and the two can disagree: `tuple(3,f64)` given two-value rows
     // packs to width 2, and `tuple(3,i32)` packs f64 either way. Checking the
