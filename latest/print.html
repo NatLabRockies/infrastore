@@ -1143,6 +1143,21 @@ past its end, is an error rather than the smaller answer a range would return. A
 "whatever lies between these bounds" — which is what an export wants, knowing the bounds and not the
 step count — while a window says "these exact steps", and a caller that asked for 24 and silently
 received 3 has a bug the store can see and it cannot.</p>
+<h3 id="the-owner-guard"><a class="header" href="#the-owner-guard">The owner guard</a></h3>
+<p><code>read_by_id</code> and <code>remove_by_ids</code> each take an optional <strong>expected owner</strong> — <code>read_by_id_for_owner</code> /
+<code>remove_by_ids_for_owner</code> in the Rust core, an <code>owner=(id, category)</code> keyword in Julia, keyword-only
+<code>owner_id</code> / <code>owner_category</code> in Python, <code>has_owner</code> beside the two across the C ABI. The row is
+held to that owner, and one belonging to anyone else is <code>OwnerMismatch</code> rather than a read or a
+delete.</p>
+<p>It exists because the two halves cannot be checked separately. An id is the whole address and it
+survives <code>replace_owner</code>, so a consumer whose model says "this component's series" — and which
+therefore wants to confirm the owner before acting — has a window between the confirming call and
+the acting one. A reassignment landing in that window makes the removal retire the <em>new</em> owner's
+series, which is exactly what checking the owner was meant to prevent. Passing the owner into the
+call closes the window: the check and the act are one transaction. On the read side there is no
+window either way, but the guard is still the cheaper spelling — the owner comes off the same row
+the values are materialized from, so it costs nothing, where a separate check is a second round
+trip.</p>
 <h2 id="optional-descriptors"><a class="header" href="#optional-descriptors">Optional Descriptors</a></h2>
 <p>Each association can also carry:</p>
 <ul>
@@ -3299,7 +3314,7 @@ find a forecast the same way whether it was added densely or derived — and eit
 <code>Deterministic</code>, since a DST has no materialized struct. Each row still reports the concrete form it
 is, so <code>transform_single_time_series!</code> needs no separate enumeration path:</p>
 <pre><code class="language-julia">for row in list_metadata(store; owner_id = 42, time_series_type = Deterministic)
-    row.time_series_type   # Deterministic or DeterministicSingleTimeSeries
+    row.time_series_type &lt;: DeterministicSingleTimeSeries   # derived, or densely stored?
     series = read_by_id(store, row.id)   # a Deterministic either way
 end
 </code></pre>
@@ -3318,6 +3333,21 @@ copy_time_series!(store, src, 43, "Generator")
 <pre><code class="language-julia">list_metadata(store; time_series_type = Deterministic)
 get_resolutions(store; time_series_type = SingleTimeSeries)
 </code></pre>
+<p>A metadata row's <code>time_series_type</code> is the <strong>full</strong> type — <code>SingleTimeSeries{Float64,1}</code>,
+<code>Deterministic{Float32,3}</code> — so a row names what a read of it hands back rather than only which of
+the six kinds it is, and a consumer holding InfrastructureSystems.jl-style parameterized types gets
+them back intact:</p>
+<pre><code class="language-julia">md = get_metadata_by_id(store, id)
+md.time_series_type == typeof(read_by_id(store, id))   # every stored type but DST
+md.time_series_type &lt;: SingleTimeSeries                # ask for the kind with &lt;:, not ==
+</code></pre>
+<p>A derived <code>DeterministicSingleTimeSeries</code> is the exception: its row keeps the DST tag while a read
+of it hands back a <code>Deterministic</code> with the same <code>{T,N}</code>. Dispatch on the read's type when the two
+have to agree, and on the row's when you mean "was this derived?".</p>
+<p>That type passes straight back into any filter, <code>has_time_series</code>, or reader. The parameters are
+ignored there — a series is addressed by identity, which carries no element type — so they never
+narrow a match; they are accepted so a row you just read round-trips without being taken apart
+first.</p>
 <p>The low-level <code>get_metadata_by_id</code> + <code>get_array_by_hash</code> path is still available for raw access. See
 the <a href="guides/../reference/julia-api.html#forecasts">Julia API reference</a>.</p>
 <h2 id="per-timestamp-reads-simulation-loop-1"><a class="header" href="#per-timestamp-reads-simulation-loop-1">Per-Timestamp Reads (Simulation Loop)</a></h2>
@@ -5059,13 +5089,40 @@ records what its bytes mean.</p>
 <h2 id="codecs"><a class="header" href="#codecs">Codecs</a></h2>
 <p>Each binding ships a reference codec between the stored bytes and per-timestep values:</p>
 <ul>
-<li><strong>Rust</strong> — <code>infrastore_core::{decode, encode}</code> over <code>TypedArray</code> + <code>ElementType</code>, used by the CLI
-for human-readable dumps.</li>
-<li><strong>Python</strong> — <code>infrastore.decode_element_values(array, element_type, leading_dims)</code>.</li>
+<li><strong>Rust</strong> — <code>infrastore_core::{decode, encode}</code> over <code>TypedArray</code> + <code>ElementType</code>. Prefer the
+paired forms: every value type has a <code>from_values</code> constructor that encodes the values <em>and</em>
+declares the element type they imply, and <code>TimeSeriesData::decoded_values</code> reads them back. An
+<code>element_type</code> and the array it describes are two things a caller can get out of step — the store
+rejects the mismatch on write, but deriving both from one set of values means there is none to
+reject.</li>
+<li><strong>Python</strong> — <code>infrastore.decode_element_values(array, element_type, leading_dims)</code> and
+<code>encode_element_values(values, element_type, leading_dims)</code>. A write still passes the encoded
+array and declares <code>element_type=</code>; the encoder is what builds it.</li>
 <li><strong>TypeScript</strong> — <code>@infrastore/codec</code>, which decodes a gRPC response's <code>value_bytes</code> + <code>shape</code> +
 <code>element_type</code> directly into plottable values.</li>
-<li><strong>Julia</strong> — InfrastructureSystems.jl decodes straight to its own <code>FunctionData</code> types.</li>
+<li><strong>Julia</strong> — <code>InfraStore.encode_element_values</code> / <code>decode_element_values</code>, over the value types
+<code>LinearFunction</code>, <code>QuadraticFunction</code>, <code>PiecewiseLinear</code> and <code>PiecewiseStep</code>. Decode takes a
+<code>types</code> keyword, so a consumer with its own domain types — InfrastructureSystems.jl's
+<code>FunctionData</code> — decodes straight into them and pays no conversion; encode is three small generic
+functions it extends instead. The names follow the wire vocabulary (<code>PiecewiseLinear</code>, not
+<code>PiecewiseLinearData</code>) so that <code>using InfraStore, InfrastructureSystems</code> is not an ambiguity
+error.</li>
 </ul>
+<p>The CLI decodes composite rows for <code>get -f json</code>, under an <code>element_values</code> key alongside the raw
+<code>values</code>. Its <strong>CSV</strong> output stays packed on purpose: that form is what <code>add</code> reads back, so it has
+to stay the store's own layout rather than a rendering of it.</p>
+<h2 id="extending-the-codec"><a class="header" href="#extending-the-codec">Extending the codec</a></h2>
+<p>A consumer with its own domain types does not have to convert at the boundary. In Julia the two
+directions extend differently, because they start from different things:</p>
+<ul>
+<li><strong>Decoding</strong> starts from an <code>element_type</code> string, so the type to build is chosen by name:
+<code>decode_element_values(...; types = ...)</code>, and <code>read_by_id(store, id; types = ...)</code>.</li>
+<li><strong>Encoding</strong> starts from a value, so it is open dispatch: add <code>element_type_tag</code>,
+<code>element_row_width</code> and <code>write_element_row!</code> methods for your type and it packs directly.</li>
+</ul>
+<p><code>is_element_values</code> is the predicate the write path uses to tell "domain values to pack" from
+"numbers to store as they are", and it answers by asking whether those three methods exist — so
+opting a type in is exactly defining them, with nothing to register.</p>
 <p><code>conformance/element_type_vectors.json</code> at the repo root pins encoded bytes against expected decoded
 values for every element type, static and forecast. It is generated from <code>infrastore-core</code>'s
 <code>codec::conformance</code> vectors and read by every binding's codec tests, so all four implementations
@@ -5073,7 +5130,11 @@ are held to one definition of the encodings rather than to each other. Regenerat
 <pre><code class="language-bash">UPDATE_CONFORMANCE_VECTORS=1 cargo test -p infrastore-core conformance
 </code></pre>
 <p>A binding may reject what it cannot represent — the grammar allows <code>tuple(4,i32)</code>, which the Julia
-binding does not map — but the store accepts the full grammar.</p>
+binding does not map — but the store accepts the full grammar. A binding's <em>codec</em> is the other way
+round: it has to represent everything the store accepts, which is why the Julia value types take the
+zero- and one-point piecewise curves that a domain type like InfrastructureSystems.jl's
+<code>PiecewiseLinearData</code> rejects. A curve too short to interpolate is still a row a read has to hand
+back.</p>
 <p>Because consumers go through the codecs, a future storage optimization (a true ragged layout with an
 offsets array instead of zero padding) can land behind this boundary without touching them.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="rust-api"><a class="header" href="#rust-api">Rust API</a></h1>
@@ -6552,7 +6613,7 @@ pub fn hash_hex(hash: &amp;[u8; 32]) -&gt; String;
     Deterministic, Probabilistic, Scenarios,
     TimeSeriesType, OwnerCategory,
     SupplementalAttributeAssociation, ParentChildAssociation,
-    TimeSeriesError, NotFoundError, DuplicateTimeSeriesError,
+    TimeSeriesError, NotFoundError, OwnerMismatchError, DuplicateTimeSeriesError,
     DuplicateAssociationError, InvalidParameterError, IntegrityError, ReadOnlyStoreError,
 )
 </code></pre>
@@ -6769,6 +6830,8 @@ def read_by_id(
     start_time: datetime | None = None,
     len: int | None = None,
     count: int | None = None,
+    owner_id: int | None = None,
+    owner_category: OwnerCategory | None = None,
 ) -&gt; SingleTimeSeries | NonSequentialTimeSeries | Deterministic | Probabilistic | Scenarios: ...
 # The single-id read, which also takes the slice -- in one call, because the
 # primary-key lookup already returns the row the window resolves against. `len`
@@ -6776,10 +6839,18 @@ def read_by_id(
 # passing the one that does not apply raises InvalidParameterError, as does a
 # `start_time` off the series' grid or an extent past its end. A window is
 # checked where read_by_ids_range clips. No keywords reads the whole series.
+# `owner_id` + `owner_category` is the owner guard -- see below.
 
-def remove_by_ids(self, ids: list[int]) -&gt; int: ...
+def remove_by_ids(
+    self,
+    ids: list[int],
+    *,
+    owner_id: int | None = None,
+    owner_category: OwnerCategory | None = None,
+) -&gt; int: ...
 # One all-or-nothing transaction: NotFoundError if any id names no row, and
-# nothing removed. A repeated id is removed, and counted, once.
+# nothing removed. A repeated id is removed, and counted, once. `owner_id` +
+# `owner_category` is the owner guard -- see below.
 def remove_by_filter(self, *, ...) -&gt; int: ...
 # Same keyword-only filter arguments as list_metadata; one all-or-nothing
 # transaction; returns the count removed (0 when nothing matched).
@@ -6895,25 +6966,53 @@ on the read paths, and so on. Positional use raises <code>TypeError</code>. The 
 </blockquote>
 <h4 id="return-shapes"><a class="header" href="#return-shapes">Return shapes</a></h4>
 <ul>
-<li><strong><code>add_time_series</code></strong> accepts a <code>SingleTimeSeries</code>, a <code>NonSequentialTimeSeries</code>, or a dense
+<li>
+<p><strong><code>add_time_series</code></strong> accepts a <code>SingleTimeSeries</code>, a <code>NonSequentialTimeSeries</code>, or a dense
 forecast object (<code>Deterministic</code> / <code>Probabilistic</code> / <code>Scenarios</code>) — see <a href="reference/python-api.html#forecasts">Forecasts</a>.
 <strong><code>transform_single_time_series</code></strong> derives a <code>DeterministicSingleTimeSeries</code> from every stored
 <code>SingleTimeSeries</code> (or the subset its <code>owner_category</code> / <code>resolution</code> arguments select) and
 returns the count transformed. <strong><code>read_by_id</code></strong> returns whichever matches the stored type — a read
 names only an id, so the row's own <code>time_series_type</code> decides, with no requested type to disagree
-with it.</li>
-<li><strong><code>read_by_ids</code></strong> returns one typed object per id, in the order the ids are given, repeats
+with it.</p>
+</li>
+<li>
+<p><strong><code>read_by_ids</code></strong> returns one typed object per id, in the order the ids are given, repeats
 included (an empty id list returns an empty list). It is the bulk counterpart to <code>read_by_id</code>:
 packed <code>SingleTimeSeries</code> are read in one decompress-once pass per dataset instead of one read
 each. An id naming no row raises <code>NotFoundError</code> and fails the whole call, unlike
-<code>association_exists</code>, which asks the question rather than committing to a read.</li>
-<li><strong><code>read_by_ids_range</code></strong> is the bounds read: it <em>clips</em> every series to what falls between the two
+<code>association_exists</code>, which asks the question rather than committing to a read.</p>
+</li>
+<li>
+<p><strong><code>read_by_ids_range</code></strong> is the bounds read: it <em>clips</em> every series to what falls between the two
 instants, where <code>read_by_id</code>'s window is <em>checked</em>. An export names bounds and does not know how
-many steps each series has inside them.</li>
-<li><strong><code>remove_by_ids</code></strong> is the removal direction of the same reference: one all-or-nothing
+many steps each series has inside them.</p>
+</li>
+<li>
+<p><strong><code>remove_by_ids</code></strong> is the removal direction of the same reference: one all-or-nothing
 transaction, the count removed, and <code>NotFoundError</code> if any id names no row — in which case nothing
-is removed. A repeated id is removed, and counted, once.</li>
-<li><strong><code>list_metadata</code></strong> returns a list of dicts (the same shape <code>get_metadata_by_id</code> returns for one
+is removed. A repeated id is removed, and counted, once.</p>
+</li>
+<li>
+<p><strong>The owner guard.</strong> Both id-addressed calls take an optional keyword-only <code>owner_id</code> +
+<code>owner_category</code> — both together, or neither, since a component and a supplemental attribute can
+carry the same integer id and half an owner would check less than the caller asked for:</p>
+<pre><code class="language-python">store.read_by_id(id, owner_id=7, owner_category=OwnerCategory.Component)
+store.remove_by_ids(ids, owner_id=7, owner_category=OwnerCategory.Component)
+</code></pre>
+<p>The addressed row is held to that owner and one belonging to anyone else raises
+<code>OwnerMismatchError</code> — distinct from <code>NotFoundError</code>, because the row is there and it is the
+caller's belief about who owns it that is stale. For the removal the check and the delete are one
+transaction, so a refused batch removes nothing.</p>
+<p>A caller whose model says "this component's series" must pass the owner rather than confirm it in
+a call of its own. An id is the whole address and it survives <code>replace_owner</code>, so a
+<code>get_metadata_by_id</code> that confirms the owner and a <code>remove_by_ids</code> that then deletes are two calls
+with a window between them — and a reassignment landing in that window makes the removal retire
+the <em>new</em> owner's series, the very thing the check was for. On the read side there is no window
+either way, but the guard is still the cheaper spelling: the owner comes off the same row the
+values are materialized from, where a separate check is a second round trip.</p>
+</li>
+<li>
+<p><strong><code>list_metadata</code></strong> returns a list of dicts (the same shape <code>get_metadata_by_id</code> returns for one
 row), each with the keys: <code>owner_id</code>, <code>owner_type</code>, <code>owner_category</code>, <code>time_series_type</code>, <code>name</code>,
 <code>data_hash</code> (hex string), <code>initial_timestamp</code> (RFC 3339 string, or <code>None</code> for non-sequential
 series), <code>length</code>, <code>resolution</code> (ISO 8601 duration string, e.g. <code>PT1H</code>, or <code>None</code>), <code>timestamps</code>,
@@ -6924,41 +7023,60 @@ strings for non-sequential series and <code>None</code> otherwise; <code>horizon
 for forecasts and <code>percentiles</code> for <code>Probabilistic</code> only. <code>timestamps</code> is always <code>None</code> on a
 listing row — an irregular series' time axis is the one part of a row that costs a read per row,
 so a listing omits it and <code>read_by_id</code> returns the series with its axis. The <code>features</code> filter is
-a <strong>subset</strong> match — rows must contain at least the given pairs.</li>
-<li>Every row also carries <code>data_hash</code>, so grouping a listing by that field finds the series that
+a <strong>subset</strong> match — rows must contain at least the given pairs.</p>
+</li>
+<li>
+<p>Every row also carries <code>data_hash</code>, so grouping a listing by that field finds the series that
 share one stored array (a deduplicated array, or a <code>SingleTimeSeries</code> together with a
 <code>DeterministicSingleTimeSeries</code> derived from it). That replaced a separate array-group listing,
-which was this same query projected differently.</li>
-<li><strong><code>list_metadata_by_ids</code></strong> is the same listing addressed by id, for a caller hydrating a model
-full of recorded references: one catalog query for the whole set rather than one call each.</li>
-<li><strong><code>get_time_series_counts</code></strong> returns
+which was this same query projected differently.</p>
+</li>
+<li>
+<p><strong><code>list_metadata_by_ids</code></strong> is the same listing addressed by id, for a caller hydrating a model
+full of recorded references: one catalog query for the whole set rather than one call each.</p>
+</li>
+<li>
+<p><strong><code>get_time_series_counts</code></strong> returns
 <code>{"components_with_time_series": int, "static_time_series": int, "forecasts": int}</code>;
 <strong><code>time_series_counts_detailed</code></strong> adds <code>supplemental_attributes_with_time_series</code> and spells the
-other two <code>static_time_series_count</code> / <code>forecast_count</code>.</li>
-<li><strong><code>static_summary</code></strong> returns one dict per distinct
+other two <code>static_time_series_count</code> / <code>forecast_count</code>.</p>
+</li>
+<li>
+<p><strong><code>static_summary</code></strong> returns one dict per distinct
 <code>(owner_type, owner_category, time_series_type, name, initial_timestamp, resolution, time_step_count)</code>
 with its <code>count</code>; <strong><code>forecast_summary</code></strong> does the same for forecasts, adding <code>horizon</code>,
-<code>interval</code>, and <code>window_count</code>.</li>
-<li><strong><code>get_forecast_parameters</code></strong> returns
+<code>interval</code>, and <code>window_count</code>.</p>
+</li>
+<li>
+<p><strong><code>get_forecast_parameters</code></strong> returns
 <code>{"horizon": str, "interval": str, "count": int, "resolution": str, "initial_timestamp": str}</code>,
 where <code>horizon</code>, <code>interval</code>, and <code>resolution</code> are ISO 8601 duration strings (e.g. <code>"PT1H"</code>) and
 <code>initial_timestamp</code> is an RFC 3339 string. Every value is <code>None</code> when the store holds no
 forecasts. The keyword-only <code>resolution</code> / <code>interval</code> arguments scope the query to forecasts
-matching that grid.</li>
-<li><strong><code>get_compression</code></strong> returns <code>{"compression": "deflate" | "none", "level": int, "shuffle": bool}</code>
-— the policy the store was created with (restored from the file on open; <code>"none"</code> for in-memory).</li>
-<li><strong><code>compact</code></strong> returns
+matching that grid.</p>
+</li>
+<li>
+<p><strong><code>get_compression</code></strong> returns <code>{"compression": "deflate" | "none", "level": int, "shuffle": bool}</code>
+— the policy the store was created with (restored from the file on open; <code>"none"</code> for in-memory).</p>
+</li>
+<li>
+<p><strong><code>compact</code></strong> returns
 <code>{"slots_reclaimed": int, "datasets_dropped": int, "feature_sets_reclaimed": int, "timestamp_sets_reclaimed": int, "bytes_reclaimed": int}</code>.
 <code>feature_sets_reclaimed</code> counts content-addressed feature rows that no association referenced any
 more; see the <a href="reference/file-format.html#feature_sets">file format</a>. On an on-disk store the call rewrites
 the <code>.h5</code> file from the live set and replaces it, which is what makes <code>bytes_reclaimed</code> nonzero —
-nothing else may have the store open while it runs.</li>
-<li><strong><code>verify_integrity</code></strong> returns <code>{"ok": bool, "errors": list[str]}</code>; <code>ok</code> is <code>True</code> when the error
+nothing else may have the store open while it runs.</p>
+</li>
+<li>
+<p><strong><code>verify_integrity</code></strong> returns <code>{"ok": bool, "errors": list[str]}</code>; <code>ok</code> is <code>True</code> when the error
 list is empty. It checks stored arrays against their recorded hashes and does not inspect the
 SQLite catalog, so <code>ok</code> is not a statement about the store as a whole — see
-<a href="reference/../explanation/content-addressing.html#what-it-does-not-cover">content addressing</a>.</li>
-<li><strong><code>read_by_ids_range</code></strong> with <code>time_range=(start, end)</code> slices on the time axis; <code>end</code> is
-exclusive.</li>
+<a href="reference/../explanation/content-addressing.html#what-it-does-not-cover">content addressing</a>.</p>
+</li>
+<li>
+<p><strong><code>read_by_ids_range</code></strong> with <code>time_range=(start, end)</code> slices on the time axis; <code>end</code> is
+exclusive.</p>
+</li>
 </ul>
 <h2 id="singletimeseries-2"><a class="header" href="#singletimeseries-2"><code>SingleTimeSeries</code></a></h2>
 <pre><code class="language-python">SingleTimeSeries(
@@ -7402,6 +7520,7 @@ json_str = store.export_time_series_associations_openapi()
 <p>All inherit from <code>TimeSeriesError</code>:</p>
 <div class="table-wrapper"><table><thead><tr><th>Exception</th><th>Raised when</th></tr></thead><tbody>
 <tr><td><code>NotFoundError</code></td><td>A key or array does not exist</td></tr>
+<tr><td><code>OwnerMismatchError</code></td><td>An id-addressed call named an owner the row is not</td></tr>
 <tr><td><code>DuplicateTimeSeriesError</code></td><td>Adding a series whose key already exists</td></tr>
 <tr><td><code>DuplicateAssociationError</code></td><td>Re-adding an attachment or edge that already exists</td></tr>
 <tr><td><code>InvalidParameterError</code></td><td>Bad arguments (bad feature type, malformed period, …)</td></tr>
@@ -7638,8 +7757,10 @@ Scenarios(initial_timestamp, resolution, horizon, interval, count, data, name; a
 # transform_single_time_series! and read back as a Deterministic. You normally
 # do not request it: a Deterministic request matches it too. It surfaces as a
 # key's / row's time_series_type, so which forecasts are synthetic stays
-# inspectable, and passing it narrows a query to the derived ones.
-abstract type DeterministicSingleTimeSeries end
+# inspectable, and passing it narrows a query to the derived ones. {T,N} exists
+# only so a row's time_series_type is parameterized for every stored type; it
+# describes the Deterministic the row reads back as. Write it bare as a request.
+abstract type DeterministicSingleTimeSeries{T,N} end
 
 mutable struct Store
     handle :: Ptr{Cvoid}
@@ -7660,6 +7781,65 @@ bytes on the way down. An <code>element_type=</code> keyword declares what the e
 not plain numbers (<code>"tuple(3,f64)"</code>, <code>"piecewise_linear"</code>, … — see
 <a href="reference/./element-types.html">Element types</a>); it defaults to the object's own <code>element_type</code>, which is
 <code>nothing</code> for plain scalars.</p>
+<h2 id="element-values"><a class="header" href="#element-values">Element values</a></h2>
+<p>A composite <code>element_type</code> describes a layout, not a number: <code>"piecewise_linear"</code> is a curve per
+timestep, packed across the array's trailing axis. <strong>The write and read paths do that packing for
+you</strong> — hand a series its values and get the same values back:</p>
+<pre><code class="language-julia">curves = [PiecewiseLinear([(x = 0.0, y = 1.0), (x = 1.0, y = 3.0)]),
+          PiecewiseLinear([(x = 0.0, y = 2.0)])]
+
+ts = SingleTimeSeries(t0, Hour(1), curves, "cost")   # element_type: "piecewise_linear"
+id = add_time_series!(store, 1, "Generator", Component, ts)
+
+read_by_id(store, id).data == curves                 # true
+get_metadata_by_id(store, id).time_series_type       # SingleTimeSeries{PiecewiseLinear, 1}
+</code></pre>
+<p>The constructor names the <code>element_type</code> from the values, so <code>element_type=</code> is only for the numeric
+case where the numbers alone cannot say what they mean; declaring one that contradicts the values is
+an error rather than an override.</p>
+<p><code>raw = true</code> on a read hands back the packing instead — one axis more, held as the physical dtype —
+for a caller that wants the bytes as stored:</p>
+<pre><code class="language-julia">read_by_id(store, id; raw = true).data               # 2×5 Matrix{Float64}
+</code></pre>
+<p>The <strong>readers are deliberately not decoded</strong>. <code>StaticReader</code> and <code>ForecastReader</code> are the
+per-timestamp simulation path, and <code>StaticGroup.dtype</code> is physical by definition; they hand back the
+packed numbers, which <code>decode_element_values</code> turns into values if you want them.</p>
+<p>The two codec functions are public in their own right, and neither takes a <code>Store</code> — they work on
+any array you already have:</p>
+<pre><code class="language-julia">array, element_type = encode_element_values(curves)      # (2, 5), "piecewise_linear"
+values = decode_element_values(array, element_type)
+</code></pre>
+<p><code>decode_element_values</code> returns the array's shape <strong>without</strong> its trailing element axis — a vector
+for a static series, an <code>(H, count)</code> matrix for a <code>Deterministic</code>, an <code>(P, H, count)</code> array for a
+<code>Probabilistic</code> or <code>Scenarios</code> — so a forecast comes back windowed rather than flattened. A scalar
+<code>element_type</code> is returned unchanged, because there the stored numbers already are the values;
+<code>is_composite_element_type</code> tells the cases apart, and an unrecognized spelling reads back as raw
+numbers rather than throwing.</p>
+<div class="table-wrapper"><table><thead><tr><th>Value type</th><th><code>element_type</code></th><th>Constructor</th></tr></thead><tbody>
+<tr><td><code>LinearFunction</code></td><td><code>linear_function</code></td><td><code>(proportional, constant)</code></td></tr>
+<tr><td><code>QuadraticFunction</code></td><td><code>quadratic_function</code></td><td><code>(quadratic, proportional, constant)</code></td></tr>
+<tr><td><code>PiecewiseLinear</code></td><td><code>piecewise_linear</code></td><td><code>(points)</code>, a vector of <code>XYCoords</code></td></tr>
+<tr><td><code>PiecewiseStep</code></td><td><code>piecewise_step</code></td><td><code>(x_coords, y_values)</code></td></tr>
+<tr><td><code>NTuple{N,Float64}</code></td><td><code>tuple(N,f64)</code></td><td>—</td></tr>
+</tbody></table>
+</div>
+<p>These types are <strong>permissive on purpose</strong>: they accept everything the store accepts, including the
+zero- and one-point piecewise curves that a domain type such as InfrastructureSystems.jl's
+<code>PiecewiseLinearData</code> rejects. A codec that could not represent a stored row could not read a store
+back. They are named for the wire vocabulary for a second reason: so that
+<code>using InfraStore, InfrastructureSystems</code> is not an ambiguity error.</p>
+<p>A consumer with its own domain types never materializes them. Decode takes a <code>types</code> keyword whose
+entries have exactly the constructor signatures in the table above:</p>
+<pre><code class="language-julia">decode_element_values(array, "piecewise_linear";
+    types = merge(DEFAULT_ELEMENT_TYPES, (piecewise_linear = MyCurve,)))
+</code></pre>
+<p>and encode is open dispatch — add methods to <code>element_type_tag</code>, <code>element_row_width</code> and
+<code>write_element_row!</code> for your own type and it encodes without a conversion step.</p>
+<p>The encodings themselves are the store's, specified in <a href="reference/./element-types.html">Element types</a> and
+pinned across every binding by <code>conformance/element_type_vectors.json</code>, which this package's tests
+read. One consequence worth knowing: the ragged kinds are padded to the widest entry <strong>in the series
+being written</strong>, so equal curves in differently-shaped series encode to different bytes and do not
+share a stored array.</p>
 <h2 id="result-types"><a class="header" href="#result-types">Result Types</a></h2>
 <p>The catalog, metadata, and summary queries return <strong>structs</strong>, not <code>NamedTuple</code>s or <code>Dict</code>s. Each is
 immutable, compares and hashes by value (so results can go straight into a <code>Set</code> or <code>Dict</code>), and
@@ -7670,18 +7850,51 @@ series type are <code>nothing</code>.</p>
 group's <code>dtype</code> field holds the <strong>Julia element type</strong> (<code>Float64</code>, <code>Bool</code>, …). Metadata instead
 carries the store's canonical <code>element_type</code> <strong>string</strong>, which names both the meaning and (through
 it) the dtype. An <code>owner_category</code> field is an <code>OwnerCategory</code>, never a string.</p>
-<p>A requested type is always the bare one — <code>SingleTimeSeries</code>, never <code>SingleTimeSeries{Float64}</code>. A
-series is addressed by its identity (owner, category, type, name, resolution, interval, features),
-which carries no element type, so parameters on a <em>request</em> would have nothing to select on; passing
-them raises <code>InvalidParameterError</code> rather than being quietly ignored. The element type comes back
-on the result instead, in its own <code>{T,N}</code> and in a reader group's <code>dtype</code>.</p>
+<p><code>TimeSeriesMetadata.time_series_type</code> is the <strong>full</strong> type, parameterized <code>{T,N}</code> like the value
+structs — <code>SingleTimeSeries{Float64,1}</code>, <code>Deterministic{Float32,3}</code> — so a row names what a read of
+it hands back, not merely which of the six kinds it is:</p>
+<pre><code class="language-julia">md = get_metadata_by_id(store, id)
+md.time_series_type == typeof(read_by_id(store, id))   # every stored type but DST
+</code></pre>
+<p>The one exception is a derived <code>DeterministicSingleTimeSeries</code>: its row keeps the DST tag, since
+that is where the derivation stays visible, while a read of it hands back the <code>Deterministic</code> it
+becomes. The <code>{T,N}</code> agree; the outer types do not, and they are unrelated, so neither <code>==</code> nor <code>&lt;:</code>
+holds between them. Dispatch on the read's type when the two have to agree, and on the row's when
+you mean "was this derived?".</p>
+<p>Both parameters come off the row itself. For a plain numeric series <code>T</code> is the dtype and <code>N</code> is one
+more than the rank of <code>element_shape</code>. For a <strong>composite</strong> <code>element_type</code> — one a read decodes — <code>T</code>
+is the domain type and <code>N</code> is one <em>lower</em>, because the axis the values were packed across is the one
+decoding consumes:</p>
+<div class="table-wrapper"><table><thead><tr><th><code>element_type</code></th><th><code>element_shape</code></th><th><code>time_series_type</code></th><th>with <code>raw = true</code></th></tr></thead><tbody>
+<tr><td><code>f64</code></td><td><code>()</code></td><td><code>SingleTimeSeries{Float64,1}</code></td><td>same</td></tr>
+<tr><td><code>piecewise_linear</code></td><td><code>(7,)</code></td><td><code>SingleTimeSeries{PiecewiseLinear,1}</code></td><td><code>SingleTimeSeries{Float64,2}</code></td></tr>
+<tr><td><code>tuple(3,f64)</code></td><td><code>(3,)</code></td><td><code>SingleTimeSeries{NTuple{3,Float64},1}</code></td><td><code>SingleTimeSeries{Float64,2}</code></td></tr>
+</tbody></table>
+</div>
+<p>A <code>DeterministicSingleTimeSeries</code> is parameterized by the <code>Deterministic</code> it reads back as, not by
+the <code>SingleTimeSeries</code> whose array it shares — the parameters follow the read, the outer type does
+not. An <code>element_type</code> written by a newer core than the wrapper knows leaves the row describing the
+stored numbers, which is what a read of it hands back.</p>
+<p>Test it with <code>&lt;:</code>, not <code>==</code>, when you mean "which kind is this row":</p>
+<pre><code class="language-julia">md.time_series_type &lt;: SingleTimeSeries        # kind
+md.time_series_type == SingleTimeSeries        # false — it is SingleTimeSeries{Float64,1}
+</code></pre>
+<p>A <strong>request</strong> — a <code>time_series_type=</code> filter, <code>has_time_series</code>, a reader — takes either spelling.
+Parameters on a request are <strong>ignored</strong>, never matched: a series is addressed by its identity
+(owner, category, type, name, resolution, interval, features), which carries no element type, so
+<code>{T,N}</code> has nothing to select on. They are accepted so that a row's <code>time_series_type</code> round-trips
+straight back into any of those calls;
+<code>list_metadata(store; time_series_type = SingleTimeSeries{Int32,1})</code> still matches every stored
+<code>SingleTimeSeries</code>. A type that is no kind of time series raises <code>InvalidParameterError</code>.</p>
+<p><code>TimeSeriesTypeCount</code>, <code>StaticSummaryRow</code>, and <code>ForecastSummaryRow</code> group by stored type alone — the
+grouping carries no dtype — so their <code>time_series_type</code> is always the bare one.</p>
 <p>Every write returns the catalog row's <code>id</code> as a plain <code>Int64</code> — assigned, never reissued, and what
 every read, removal, rename and copy takes.</p>
 <pre><code class="language-julia">struct TimeSeriesMetadata                    # get_metadata_by_id / list_metadata
     owner_id          :: Int64
     owner_type        :: String
     owner_category    :: OwnerCategory
-    time_series_type  :: Type
+    time_series_type  :: Type                # parameterized, e.g. SingleTimeSeries{Float64,1}
     name              :: String
     data_hash         :: Vector{UInt8}       # 32-byte content hash
     initial_timestamp :: Union{Nothing,DateTime}
@@ -7752,7 +7965,8 @@ that the timestamps are wall clocks. Three- and four-argument constructors (<cod
 ) -&gt; Int64   # the catalog row's id -- what every read, removal and rename takes
 
 read_by_id(store::Store, id::Integer;
-          start_time=nothing, len=nothing, count=nothing) -&gt; SingleTimeSeries | ...
+          start_time=nothing, len=nothing, count=nothing,
+          owner=nothing) -&gt; SingleTimeSeries | ...
 read_by_ids(store::Store, ids::AbstractVector{&lt;:Integer};
            time_range=nothing) -&gt; Vector
 </code></pre>
@@ -7770,6 +7984,8 @@ carry the <code>id</code> every read takes. That split — identify, then act �
 records ids in its own model does the first half once.</p>
 <p>To read every series' value at one timestamp in a loop (the simulation pattern), use a
 <a href="reference/julia-api.html#staticreader"><code>StaticReader</code></a> rather than calling <code>read_by_id</code> per series.</p>
+<p><code>owner = (owner_id, category)</code> holds the row to that owner, throwing <code>OwnerMismatchError</code> when it
+belongs to another — see <a href="reference/julia-api.html#the-owner-guard">the owner guard</a>.</p>
 <h3 id="bulk-reads"><a class="header" href="#bulk-reads">Bulk reads</a></h3>
 <pre><code class="language-julia">read_by_ids(store::Store, ids::AbstractVector{&lt;:Integer};
           time_range::Union{Nothing,Tuple{Any,Any}}=nothing) -&gt; Vector
@@ -7855,7 +8071,7 @@ reports the concrete form it is; <code>interval</code> disambiguates forecasts t
 series. Every <code>data_hash</code> in this API is these same 32 bytes, so any metadata record feeds it
 directly; <code>bytes2hex</code> gives the display form.</p>
 <h3 id="removal"><a class="header" href="#removal">Removal</a></h3>
-<pre><code class="language-julia">remove_by_ids!(store, ids::AbstractVector{&lt;:Integer}) -&gt; Int
+<pre><code class="language-julia">remove_by_ids!(store, ids::AbstractVector{&lt;:Integer}; owner=nothing) -&gt; Int
 remove_by_filter!(store; owner_id=nothing, name=nothing, ...) -&gt; Int
 </code></pre>
 <p><code>remove_by_ids!</code> removes every id in one all-or-nothing transaction and returns the count: an id
@@ -7866,11 +8082,28 @@ once. An empty id vector returns <code>0</code> without touching the store.</p>
 when it is the last backing series (the DST is a view of that array), raising
 <code>InvalidParameterError</code> — remove the derived forecast first, or use an owner-scoped <code>clear!</code>, which
 is exempt.</p>
+<h4 id="the-owner-guard-1"><a class="header" href="#the-owner-guard-1">The owner guard</a></h4>
+<pre><code class="language-julia">remove_by_ids!(store, ids; owner = (7, Component))       # only rows owned by component 7
+read_by_id(store, id; owner = (7, Component))            # only if component 7 owns it
+</code></pre>
+<p>Both id-addressed calls take an optional <code>owner = (owner_id, category)</code>. The addressed row is held
+to that owner and one belonging to anyone else throws <code>OwnerMismatchError</code>; for the removal the
+check and the delete are one transaction, so a refused batch removes nothing.</p>
+<p>A caller whose model says "this component's series" must pass the owner rather than confirm it in a
+call of its own. An id is the whole address and it survives <code>replace_owner!</code>, so a
+<code>get_metadata_by_id</code> that confirms the owner and a <code>remove_by_ids!</code> that then deletes are two calls
+with a window between them — and a reassignment landing in that window makes the removal retire the
+<em>new</em> owner's series, the very thing the check was for. The category is half the owner: a component
+and a supplemental attribute can carry the same integer id.</p>
+<p>On the read side there is no window either way, but the guard is still the cheaper spelling: the
+owner comes off the same row the values are materialized from, so it costs nothing, where a separate
+check is a second round trip.</p>
 <p><code>remove_by_filter!</code> is the one removal that does not take ids, because enumerating them first is the
 wrong shape for "remove everything matching": it takes the same filter as <code>list_metadata</code>, resolves
 it to ids internally, and removes those in one transaction.</p>
 <p>Reading a <code>DeterministicSingleTimeSeries</code> returns a <code>Deterministic</code>, since the type has no
-materialized form. Its row still reports <code>DeterministicSingleTimeSeries</code> as its <code>time_series_type</code>.</p>
+materialized form. Its row still reports <code>DeterministicSingleTimeSeries</code> as its <code>time_series_type</code>,
+parameterized by that <code>Deterministic</code>.</p>
 <h2 id="forecasts-7"><a class="header" href="#forecasts-7">Forecasts</a></h2>
 <p>Dense forecasts are constructed as <code>Deterministic</code>, <code>Probabilistic</code>, or <code>Scenarios</code> structs (see
 <a href="reference/julia-api.html#types">Types</a>) and added through the generic <code>add_time_series!</code>. Each struct wraps a native
@@ -7976,7 +8209,7 @@ fc = read_by_id(store, id)                             # a Deterministic
 <p>Where the distinction matters — auditing which forecasts are synthetic rather than reading values —
 it is in the catalog, not in the read:</p>
 <pre><code class="language-julia">get_metadata_by_id(store, id).time_series_type
-# DeterministicSingleTimeSeries
+# DeterministicSingleTimeSeries{Float64,2}     -- test kinds with &lt;:, not ==
 </code></pre>
 <p>Filtering with <code>time_series_type=Deterministic</code> spans both: it matches a directly-stored
 <code>Deterministic</code> <em>and</em> a DST derived by <code>transform_single_time_series!</code>. Narrow to
@@ -8347,6 +8580,7 @@ the add boundary (<code>InvalidParameterError</code>), loudly and without writin
 <tr><td><code>IOError</code></td><td><code>INFRASTORE_ERR_IO</code></td></tr>
 <tr><td><code>StoreExistsError</code></td><td><code>INFRASTORE_ERR_STORE_EXISTS</code></td></tr>
 <tr><td><code>MismatchedArtifactError</code></td><td><code>INFRASTORE_ERR_MISMATCHED_ARTIFACT</code></td></tr>
+<tr><td><code>OwnerMismatchError</code></td><td><code>INFRASTORE_ERR_OWNER_MISMATCH</code></td></tr>
 <tr><td><code>GenericError</code></td><td>Any other non-zero code (carries the numeric <code>code</code>)</td></tr>
 </tbody></table>
 </div>
@@ -8547,6 +8781,7 @@ output they are owned <code>char *</code> strings — free each with <code>infra
 <tr><td><code>INFRASTORE_ERR_DUPLICATE_ASSOCIATION</code></td><td>10</td><td>An attachment or parent/child edge with the same identity already exists. Distinct from <code>INFRASTORE_ERR_DUPLICATE</code>, which is about time-series identity.</td></tr>
 <tr><td><code>INFRASTORE_ERR_STORE_EXISTS</code></td><td>11</td><td>A store already exists where one was about to be created. Creating there would discard its arrays while keeping its catalog. Use <code>infrastore_store_create_replacing</code> to discard it on purpose.</td></tr>
 <tr><td><code>INFRASTORE_ERR_MISMATCHED_ARTIFACT</code></td><td>12</td><td>The HDF5 file and its <code>.sqlite</code> catalog do not carry the same generation stamp: they are halves of two different saves.</td></tr>
+<tr><td><code>INFRASTORE_ERR_OWNER_MISMATCH</code></td><td>14</td><td>An id-addressed call carrying an expected owner named a row that belongs to a different one. Distinct from <code>INFRASTORE_ERR_NOT_FOUND</code>: the row is there, and it is the caller's belief about who owns it that is stale.</td></tr>
 <tr><td><code>INFRASTORE_ERR_INTERNAL</code></td><td>99</td><td>Unexpected internal error</td></tr>
 </tbody></table>
 </div>
@@ -8608,9 +8843,14 @@ serves the single and bulk reads alike; see <a href="reference/c-abi.html#bulk-r
 
 /* All-or-nothing removal by catalog association id: an id naming no row returns
    INFRASTORE_ERR_NOT_FOUND and removes nothing. A repeated id is removed, and
-   counted, once. `ids` may be null only when `n` is 0. */
+   counted, once. `ids` may be null only when `n` is 0.
+   Set has_owner to hold every id to (owner_id, owner_category): the owner is read
+   and the row deleted by the same transaction, and a row belonging to anyone else
+   is INFRASTORE_ERR_OWNER_MISMATCH with the whole batch rolled back. */
 int32_t infrastore_store_remove_by_ids(struct InfraStore *handle, const int64_t *ids,
-                             uint64_t n, uint64_t *out_removed);
+                             uint64_t n,
+                             bool has_owner, int64_t owner_id, int32_t owner_category,
+                             uint64_t *out_removed);
 
 /* Whether an association is filed under `id` -- a primary-key probe that fetches
    no row, so a consumer can validate every reference in its own model on load
@@ -9025,6 +9265,14 @@ back as an owned C string, freed with <code>infrastore_string_free</code> — th
 <p><code>infrastore_store_remove_by_ids</code> is the removal direction of the same reference, listed with the
 other removals above: one all-or-nothing transaction, the count through <code>out_removed</code>, and
 <code>INFRASTORE_ERR_NOT_FOUND</code> if any id names no row.</p>
+<p>Both id-addressed calls carry an optional <strong>owner guard</strong> — <code>has_owner</code> beside <code>owner_id</code> and
+<code>owner_category</code>, ignored when the flag is false — that holds the addressed row to one owner and
+returns <code>INFRASTORE_ERR_OWNER_MISMATCH</code> when it belongs to another. A consumer that addresses a
+series by id but means "this owner's series" has to use it rather than confirming the owner in a
+call of its own: an id survives a reassignment, so a separate check has a window after it in which
+the row can move, and a removal issued after that window retires the new owner's series. The guard
+puts the check and the act in one transaction, and costs the read nothing at all — the owner comes
+off the same row the values are materialized from.</p>
 <p><code>infrastore_store_read_by_id</code> also takes a window. Each optional argument is a <code>*_present</code> flag
 beside its value; with none present it reads the whole series. <code>start_ms</code> is Unix milliseconds,
 spelled zoned or zoneless by <code>start_zoneless</code> like every other bound; <code>len</code> counts timesteps (the
@@ -9038,6 +9286,7 @@ int32_t infrastore_store_read_by_id(const struct InfraStore *handle, int64_t id,
                              bool start_present, bool start_zoneless, int64_t start_ms,
                              bool len_present, uint64_t len,
                              bool count_present, uint64_t count,
+                             bool has_owner, int64_t owner_id, int32_t owner_category,
                              struct InfraStoreBulkRead **out_result);
 int32_t infrastore_bulk_result_item_name(const struct InfraStoreBulkRead *result,
                                  uint64_t index, char **out_name);

@@ -250,6 +250,7 @@ output they are owned <code>char *</code> strings — free each with <code>infra
 <tr><td><code>INFRASTORE_ERR_DUPLICATE_ASSOCIATION</code></td><td>10</td><td>An attachment or parent/child edge with the same identity already exists. Distinct from <code>INFRASTORE_ERR_DUPLICATE</code>, which is about time-series identity.</td></tr>
 <tr><td><code>INFRASTORE_ERR_STORE_EXISTS</code></td><td>11</td><td>A store already exists where one was about to be created. Creating there would discard its arrays while keeping its catalog. Use <code>infrastore_store_create_replacing</code> to discard it on purpose.</td></tr>
 <tr><td><code>INFRASTORE_ERR_MISMATCHED_ARTIFACT</code></td><td>12</td><td>The HDF5 file and its <code>.sqlite</code> catalog do not carry the same generation stamp: they are halves of two different saves.</td></tr>
+<tr><td><code>INFRASTORE_ERR_OWNER_MISMATCH</code></td><td>14</td><td>An id-addressed call carrying an expected owner named a row that belongs to a different one. Distinct from <code>INFRASTORE_ERR_NOT_FOUND</code>: the row is there, and it is the caller's belief about who owns it that is stale.</td></tr>
 <tr><td><code>INFRASTORE_ERR_INTERNAL</code></td><td>99</td><td>Unexpected internal error</td></tr>
 </tbody></table>
 </div>
@@ -311,9 +312,14 @@ serves the single and bulk reads alike; see <a href="#bulk-reads">Bulk Reads</a>
 
 /* All-or-nothing removal by catalog association id: an id naming no row returns
    INFRASTORE_ERR_NOT_FOUND and removes nothing. A repeated id is removed, and
-   counted, once. `ids` may be null only when `n` is 0. */
+   counted, once. `ids` may be null only when `n` is 0.
+   Set has_owner to hold every id to (owner_id, owner_category): the owner is read
+   and the row deleted by the same transaction, and a row belonging to anyone else
+   is INFRASTORE_ERR_OWNER_MISMATCH with the whole batch rolled back. */
 int32_t infrastore_store_remove_by_ids(struct InfraStore *handle, const int64_t *ids,
-                             uint64_t n, uint64_t *out_removed);
+                             uint64_t n,
+                             bool has_owner, int64_t owner_id, int32_t owner_category,
+                             uint64_t *out_removed);
 
 /* Whether an association is filed under `id` -- a primary-key probe that fetches
    no row, so a consumer can validate every reference in its own model on load
@@ -728,6 +734,14 @@ back as an owned C string, freed with <code>infrastore_string_free</code> — th
 <p><code>infrastore_store_remove_by_ids</code> is the removal direction of the same reference, listed with the
 other removals above: one all-or-nothing transaction, the count through <code>out_removed</code>, and
 <code>INFRASTORE_ERR_NOT_FOUND</code> if any id names no row.</p>
+<p>Both id-addressed calls carry an optional <strong>owner guard</strong> — <code>has_owner</code> beside <code>owner_id</code> and
+<code>owner_category</code>, ignored when the flag is false — that holds the addressed row to one owner and
+returns <code>INFRASTORE_ERR_OWNER_MISMATCH</code> when it belongs to another. A consumer that addresses a
+series by id but means "this owner's series" has to use it rather than confirming the owner in a
+call of its own: an id survives a reassignment, so a separate check has a window after it in which
+the row can move, and a removal issued after that window retires the new owner's series. The guard
+puts the check and the act in one transaction, and costs the read nothing at all — the owner comes
+off the same row the values are materialized from.</p>
 <p><code>infrastore_store_read_by_id</code> also takes a window. Each optional argument is a <code>*_present</code> flag
 beside its value; with none present it reads the whole series. <code>start_ms</code> is Unix milliseconds,
 spelled zoned or zoneless by <code>start_zoneless</code> like every other bound; <code>len</code> counts timesteps (the
@@ -741,6 +755,7 @@ int32_t infrastore_store_read_by_id(const struct InfraStore *handle, int64_t id,
                              bool start_present, bool start_zoneless, int64_t start_ms,
                              bool len_present, uint64_t len,
                              bool count_present, uint64_t count,
+                             bool has_owner, int64_t owner_id, int32_t owner_category,
                              struct InfraStoreBulkRead **out_result);
 int32_t infrastore_bulk_result_item_name(const struct InfraStoreBulkRead *result,
                                  uint64_t index, char **out_name);

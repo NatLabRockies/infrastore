@@ -490,6 +490,21 @@ past its end, is an error rather than the smaller answer a range would return. A
 "whatever lies between these bounds" — which is what an export wants, knowing the bounds and not the
 step count — while a window says "these exact steps", and a caller that asked for 24 and silently
 received 3 has a bug the store can see and it cannot.</p>
+<h3 id="the-owner-guard"><a class="header" href="#the-owner-guard">The owner guard</a></h3>
+<p><code>read_by_id</code> and <code>remove_by_ids</code> each take an optional <strong>expected owner</strong> — <code>read_by_id_for_owner</code> /
+<code>remove_by_ids_for_owner</code> in the Rust core, an <code>owner=(id, category)</code> keyword in Julia, keyword-only
+<code>owner_id</code> / <code>owner_category</code> in Python, <code>has_owner</code> beside the two across the C ABI. The row is
+held to that owner, and one belonging to anyone else is <code>OwnerMismatch</code> rather than a read or a
+delete.</p>
+<p>It exists because the two halves cannot be checked separately. An id is the whole address and it
+survives <code>replace_owner</code>, so a consumer whose model says "this component's series" — and which
+therefore wants to confirm the owner before acting — has a window between the confirming call and
+the acting one. A reassignment landing in that window makes the removal retire the <em>new</em> owner's
+series, which is exactly what checking the owner was meant to prevent. Passing the owner into the
+call closes the window: the check and the act are one transaction. On the read side there is no
+window either way, but the guard is still the cheaper spelling — the owner comes off the same row
+the values are materialized from, so it costs nothing, where a separate check is a second round
+trip.</p>
 <h2 id="optional-descriptors"><a class="header" href="#optional-descriptors">Optional Descriptors</a></h2>
 <p>Each association can also carry:</p>
 <ul>

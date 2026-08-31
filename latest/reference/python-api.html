@@ -192,7 +192,7 @@
     Deterministic, Probabilistic, Scenarios,
     TimeSeriesType, OwnerCategory,
     SupplementalAttributeAssociation, ParentChildAssociation,
-    TimeSeriesError, NotFoundError, DuplicateTimeSeriesError,
+    TimeSeriesError, NotFoundError, OwnerMismatchError, DuplicateTimeSeriesError,
     DuplicateAssociationError, InvalidParameterError, IntegrityError, ReadOnlyStoreError,
 )
 </code></pre>
@@ -409,6 +409,8 @@ def read_by_id(
     start_time: datetime | None = None,
     len: int | None = None,
     count: int | None = None,
+    owner_id: int | None = None,
+    owner_category: OwnerCategory | None = None,
 ) -&gt; SingleTimeSeries | NonSequentialTimeSeries | Deterministic | Probabilistic | Scenarios: ...
 # The single-id read, which also takes the slice -- in one call, because the
 # primary-key lookup already returns the row the window resolves against. `len`
@@ -416,10 +418,18 @@ def read_by_id(
 # passing the one that does not apply raises InvalidParameterError, as does a
 # `start_time` off the series' grid or an extent past its end. A window is
 # checked where read_by_ids_range clips. No keywords reads the whole series.
+# `owner_id` + `owner_category` is the owner guard -- see below.
 
-def remove_by_ids(self, ids: list[int]) -&gt; int: ...
+def remove_by_ids(
+    self,
+    ids: list[int],
+    *,
+    owner_id: int | None = None,
+    owner_category: OwnerCategory | None = None,
+) -&gt; int: ...
 # One all-or-nothing transaction: NotFoundError if any id names no row, and
-# nothing removed. A repeated id is removed, and counted, once.
+# nothing removed. A repeated id is removed, and counted, once. `owner_id` +
+# `owner_category` is the owner guard -- see below.
 def remove_by_filter(self, *, ...) -&gt; int: ...
 # Same keyword-only filter arguments as list_metadata; one all-or-nothing
 # transaction; returns the count removed (0 when nothing matched).
@@ -535,25 +545,53 @@ on the read paths, and so on. Positional use raises <code>TypeError</code>. The 
 </blockquote>
 <h4 id="return-shapes"><a class="header" href="#return-shapes">Return shapes</a></h4>
 <ul>
-<li><strong><code>add_time_series</code></strong> accepts a <code>SingleTimeSeries</code>, a <code>NonSequentialTimeSeries</code>, or a dense
+<li>
+<p><strong><code>add_time_series</code></strong> accepts a <code>SingleTimeSeries</code>, a <code>NonSequentialTimeSeries</code>, or a dense
 forecast object (<code>Deterministic</code> / <code>Probabilistic</code> / <code>Scenarios</code>) — see <a href="#forecasts">Forecasts</a>.
 <strong><code>transform_single_time_series</code></strong> derives a <code>DeterministicSingleTimeSeries</code> from every stored
 <code>SingleTimeSeries</code> (or the subset its <code>owner_category</code> / <code>resolution</code> arguments select) and
 returns the count transformed. <strong><code>read_by_id</code></strong> returns whichever matches the stored type — a read
 names only an id, so the row's own <code>time_series_type</code> decides, with no requested type to disagree
-with it.</li>
-<li><strong><code>read_by_ids</code></strong> returns one typed object per id, in the order the ids are given, repeats
+with it.</p>
+</li>
+<li>
+<p><strong><code>read_by_ids</code></strong> returns one typed object per id, in the order the ids are given, repeats
 included (an empty id list returns an empty list). It is the bulk counterpart to <code>read_by_id</code>:
 packed <code>SingleTimeSeries</code> are read in one decompress-once pass per dataset instead of one read
 each. An id naming no row raises <code>NotFoundError</code> and fails the whole call, unlike
-<code>association_exists</code>, which asks the question rather than committing to a read.</li>
-<li><strong><code>read_by_ids_range</code></strong> is the bounds read: it <em>clips</em> every series to what falls between the two
+<code>association_exists</code>, which asks the question rather than committing to a read.</p>
+</li>
+<li>
+<p><strong><code>read_by_ids_range</code></strong> is the bounds read: it <em>clips</em> every series to what falls between the two
 instants, where <code>read_by_id</code>'s window is <em>checked</em>. An export names bounds and does not know how
-many steps each series has inside them.</li>
-<li><strong><code>remove_by_ids</code></strong> is the removal direction of the same reference: one all-or-nothing
+many steps each series has inside them.</p>
+</li>
+<li>
+<p><strong><code>remove_by_ids</code></strong> is the removal direction of the same reference: one all-or-nothing
 transaction, the count removed, and <code>NotFoundError</code> if any id names no row — in which case nothing
-is removed. A repeated id is removed, and counted, once.</li>
-<li><strong><code>list_metadata</code></strong> returns a list of dicts (the same shape <code>get_metadata_by_id</code> returns for one
+is removed. A repeated id is removed, and counted, once.</p>
+</li>
+<li>
+<p><strong>The owner guard.</strong> Both id-addressed calls take an optional keyword-only <code>owner_id</code> +
+<code>owner_category</code> — both together, or neither, since a component and a supplemental attribute can
+carry the same integer id and half an owner would check less than the caller asked for:</p>
+<pre><code class="language-python">store.read_by_id(id, owner_id=7, owner_category=OwnerCategory.Component)
+store.remove_by_ids(ids, owner_id=7, owner_category=OwnerCategory.Component)
+</code></pre>
+<p>The addressed row is held to that owner and one belonging to anyone else raises
+<code>OwnerMismatchError</code> — distinct from <code>NotFoundError</code>, because the row is there and it is the
+caller's belief about who owns it that is stale. For the removal the check and the delete are one
+transaction, so a refused batch removes nothing.</p>
+<p>A caller whose model says "this component's series" must pass the owner rather than confirm it in
+a call of its own. An id is the whole address and it survives <code>replace_owner</code>, so a
+<code>get_metadata_by_id</code> that confirms the owner and a <code>remove_by_ids</code> that then deletes are two calls
+with a window between them — and a reassignment landing in that window makes the removal retire
+the <em>new</em> owner's series, the very thing the check was for. On the read side there is no window
+either way, but the guard is still the cheaper spelling: the owner comes off the same row the
+values are materialized from, where a separate check is a second round trip.</p>
+</li>
+<li>
+<p><strong><code>list_metadata</code></strong> returns a list of dicts (the same shape <code>get_metadata_by_id</code> returns for one
 row), each with the keys: <code>owner_id</code>, <code>owner_type</code>, <code>owner_category</code>, <code>time_series_type</code>, <code>name</code>,
 <code>data_hash</code> (hex string), <code>initial_timestamp</code> (RFC 3339 string, or <code>None</code> for non-sequential
 series), <code>length</code>, <code>resolution</code> (ISO 8601 duration string, e.g. <code>PT1H</code>, or <code>None</code>), <code>timestamps</code>,
@@ -564,41 +602,60 @@ strings for non-sequential series and <code>None</code> otherwise; <code>horizon
 for forecasts and <code>percentiles</code> for <code>Probabilistic</code> only. <code>timestamps</code> is always <code>None</code> on a
 listing row — an irregular series' time axis is the one part of a row that costs a read per row,
 so a listing omits it and <code>read_by_id</code> returns the series with its axis. The <code>features</code> filter is
-a <strong>subset</strong> match — rows must contain at least the given pairs.</li>
-<li>Every row also carries <code>data_hash</code>, so grouping a listing by that field finds the series that
+a <strong>subset</strong> match — rows must contain at least the given pairs.</p>
+</li>
+<li>
+<p>Every row also carries <code>data_hash</code>, so grouping a listing by that field finds the series that
 share one stored array (a deduplicated array, or a <code>SingleTimeSeries</code> together with a
 <code>DeterministicSingleTimeSeries</code> derived from it). That replaced a separate array-group listing,
-which was this same query projected differently.</li>
-<li><strong><code>list_metadata_by_ids</code></strong> is the same listing addressed by id, for a caller hydrating a model
-full of recorded references: one catalog query for the whole set rather than one call each.</li>
-<li><strong><code>get_time_series_counts</code></strong> returns
+which was this same query projected differently.</p>
+</li>
+<li>
+<p><strong><code>list_metadata_by_ids</code></strong> is the same listing addressed by id, for a caller hydrating a model
+full of recorded references: one catalog query for the whole set rather than one call each.</p>
+</li>
+<li>
+<p><strong><code>get_time_series_counts</code></strong> returns
 <code>{"components_with_time_series": int, "static_time_series": int, "forecasts": int}</code>;
 <strong><code>time_series_counts_detailed</code></strong> adds <code>supplemental_attributes_with_time_series</code> and spells the
-other two <code>static_time_series_count</code> / <code>forecast_count</code>.</li>
-<li><strong><code>static_summary</code></strong> returns one dict per distinct
+other two <code>static_time_series_count</code> / <code>forecast_count</code>.</p>
+</li>
+<li>
+<p><strong><code>static_summary</code></strong> returns one dict per distinct
 <code>(owner_type, owner_category, time_series_type, name, initial_timestamp, resolution, time_step_count)</code>
 with its <code>count</code>; <strong><code>forecast_summary</code></strong> does the same for forecasts, adding <code>horizon</code>,
-<code>interval</code>, and <code>window_count</code>.</li>
-<li><strong><code>get_forecast_parameters</code></strong> returns
+<code>interval</code>, and <code>window_count</code>.</p>
+</li>
+<li>
+<p><strong><code>get_forecast_parameters</code></strong> returns
 <code>{"horizon": str, "interval": str, "count": int, "resolution": str, "initial_timestamp": str}</code>,
 where <code>horizon</code>, <code>interval</code>, and <code>resolution</code> are ISO 8601 duration strings (e.g. <code>"PT1H"</code>) and
 <code>initial_timestamp</code> is an RFC 3339 string. Every value is <code>None</code> when the store holds no
 forecasts. The keyword-only <code>resolution</code> / <code>interval</code> arguments scope the query to forecasts
-matching that grid.</li>
-<li><strong><code>get_compression</code></strong> returns <code>{"compression": "deflate" | "none", "level": int, "shuffle": bool}</code>
-— the policy the store was created with (restored from the file on open; <code>"none"</code> for in-memory).</li>
-<li><strong><code>compact</code></strong> returns
+matching that grid.</p>
+</li>
+<li>
+<p><strong><code>get_compression</code></strong> returns <code>{"compression": "deflate" | "none", "level": int, "shuffle": bool}</code>
+— the policy the store was created with (restored from the file on open; <code>"none"</code> for in-memory).</p>
+</li>
+<li>
+<p><strong><code>compact</code></strong> returns
 <code>{"slots_reclaimed": int, "datasets_dropped": int, "feature_sets_reclaimed": int, "timestamp_sets_reclaimed": int, "bytes_reclaimed": int}</code>.
 <code>feature_sets_reclaimed</code> counts content-addressed feature rows that no association referenced any
 more; see the <a href="file-format.html#feature_sets">file format</a>. On an on-disk store the call rewrites
 the <code>.h5</code> file from the live set and replaces it, which is what makes <code>bytes_reclaimed</code> nonzero —
-nothing else may have the store open while it runs.</li>
-<li><strong><code>verify_integrity</code></strong> returns <code>{"ok": bool, "errors": list[str]}</code>; <code>ok</code> is <code>True</code> when the error
+nothing else may have the store open while it runs.</p>
+</li>
+<li>
+<p><strong><code>verify_integrity</code></strong> returns <code>{"ok": bool, "errors": list[str]}</code>; <code>ok</code> is <code>True</code> when the error
 list is empty. It checks stored arrays against their recorded hashes and does not inspect the
 SQLite catalog, so <code>ok</code> is not a statement about the store as a whole — see
-<a href="../explanation/content-addressing.html#what-it-does-not-cover">content addressing</a>.</li>
-<li><strong><code>read_by_ids_range</code></strong> with <code>time_range=(start, end)</code> slices on the time axis; <code>end</code> is
-exclusive.</li>
+<a href="../explanation/content-addressing.html#what-it-does-not-cover">content addressing</a>.</p>
+</li>
+<li>
+<p><strong><code>read_by_ids_range</code></strong> with <code>time_range=(start, end)</code> slices on the time axis; <code>end</code> is
+exclusive.</p>
+</li>
 </ul>
 <h2 id="singletimeseries"><a class="header" href="#singletimeseries"><code>SingleTimeSeries</code></a></h2>
 <pre><code class="language-python">SingleTimeSeries(
@@ -1042,6 +1099,7 @@ json_str = store.export_time_series_associations_openapi()
 <p>All inherit from <code>TimeSeriesError</code>:</p>
 <div class="table-wrapper"><table><thead><tr><th>Exception</th><th>Raised when</th></tr></thead><tbody>
 <tr><td><code>NotFoundError</code></td><td>A key or array does not exist</td></tr>
+<tr><td><code>OwnerMismatchError</code></td><td>An id-addressed call named an owner the row is not</td></tr>
 <tr><td><code>DuplicateTimeSeriesError</code></td><td>Adding a series whose key already exists</td></tr>
 <tr><td><code>DuplicateAssociationError</code></td><td>Re-adding an attachment or edge that already exists</td></tr>
 <tr><td><code>InvalidParameterError</code></td><td>Bad arguments (bad feature type, malformed period, …)</td></tr>
