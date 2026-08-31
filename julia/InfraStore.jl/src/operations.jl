@@ -663,6 +663,63 @@ function _bulk_non_sequential(
     end
 end
 
+"""
+    index_in_force_at(ts::PersistentTimeSeries, at) -> Int
+
+The 1-based index into `ts.timestamps` / `ts.data` of the breakpoint **in force
+at** `at` -- the greatest breakpoint `<= at`, whose value the step function
+holds there.
+
+This is the type's defining semantic. A caller that needs the value rather than
+the row takes `ts.data[i, ..]` (or `ts.data[i]` for a scalar series) with the
+index this returns, and gets the same answer the columnar readers and every
+other binding give.
+
+`at` may be a `DateTime` (a wall clock) or, with `TimeZones` loaded, a
+`ZonedDateTime`; both are normalized the way the constructor normalizes the
+breakpoint vector. Spell the query the way the series is spelled -- comparing a
+wall clock against breakpoints that name instants is a well-defined answer to
+the wrong question.
+
+Throws [`InvalidParameterError`](@ref) when `at` is strictly before the first
+breakpoint, where a step function is undefined; it is never clamped. Past the
+last breakpoint the value is held forward, so a later `at` yields the last
+index.
+
+```julia
+ts = PersistentTimeSeries(
+    [DateTime(2024, 1, 1), DateTime(2024, 4, 1), DateTime(2024, 7, 1)],
+    [3.5, 4.25, 5.0],
+    "gas_price",
+)
+index_in_force_at(ts, DateTime(2024, 5, 15))  # 2 -- April's value still holds
+ts.data[index_in_force_at(ts, DateTime(2030, 1, 1))]  # 5.0 -- held forward
+```
+"""
+function index_in_force_at(ts::PersistentTimeSeries, at)
+    instant = _utc_datetime(at)
+    # `searchsortedlast` is the greatest index whose element is `<= instant`,
+    # and 0 when every breakpoint is later -- exactly the core's
+    # `partition_point(b -> b <= at) - 1`, in the vocabulary Julia already has.
+    i = searchsortedlast(ts.timestamps, instant)
+    if i == 0
+        isempty(ts.timestamps) && throw(
+            InvalidParameterError(
+                "PersistentTimeSeries \"$(ts.name)\" has no breakpoints, so it has no " *
+                "value at $instant",
+            ),
+        )
+        throw(
+            InvalidParameterError(
+                "PersistentTimeSeries \"$(ts.name)\" has no value at $instant: it is " *
+                "before the first breakpoint $(first(ts.timestamps)), where a step " *
+                "function is undefined",
+            ),
+        )
+    end
+    return i
+end
+
 # Reconstruct one PersistentTimeSeries from a bulk-read result slot. Identical
 # to `_bulk_non_sequential` above -- the two types have the same payload (carrying
 # `application_data` / `element_type` / `units`, as `_bulk_single` does), and the

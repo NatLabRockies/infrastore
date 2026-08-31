@@ -544,6 +544,25 @@ A zero-width range (`end == start`) is the exception, and selects nothing — as
 other type, since `[t, t)` holds no instant for a value to be in force at. That applies before the
 first breakpoint too, where a non-empty window raises.
 
+```python
+index_in_force_at(at: datetime) -> int
+```
+
+The 0-based index into `timestamps` / `data` of the breakpoint in force at `at` — the greatest one
+`<= at`, whose value the step function holds there. This is the lookup that defines the type, and
+the store owns it: a caller holding a curve it read back asks here rather than re-deriving hold-last
+and leaving two implementations free to drift.
+
+`at` must be spelled the way the series is — a naive `datetime` against a zoneless series, an aware
+one against a series that names instants — and a mismatch raises `InvalidParameterError`, the same
+rule a `time_range` bound obeys. So does an `at` strictly before the first breakpoint; past the last
+one the value is held forward, so a later `at` resolves to the final index.
+
+```python
+curve = store.read_by_id(id)
+curve.data[curve.index_in_force_at(some_instant)]
+```
+
 Policy about how a step function collapses for a downstream solver belongs to the application and
 travels in `application_data`; the store never interprets it. See the
 [data model](../explanation/data-model.md#persistenttimeseries).

@@ -197,6 +197,8 @@ those instants means.
 int32_t infrastore_store_add_persistent(struct InfraStore *handle, /* ...as add_non_sequential... */);
 int32_t infrastore_batch_add_persistent(struct InfraStoreBatch *batch, /* ...sans handle/out_id... */);
 int32_t infrastore_bulk_result_get_persistent(const struct InfraStoreBulkReadHandle *result, uint64_t index, /* ...as _non_sequential... */);
+int32_t infrastore_bulk_result_persistent_index_in_force_at(const struct InfraStoreBulkReadHandle *result,
+                                                            uint64_t index, int64_t at_unix_ms, uint64_t *out_row);
 ```
 
 It is read like every other type — by id, through `infrastore_store_read_by_id` /
@@ -208,6 +210,14 @@ the last one forever. There is **no value before the first breakpoint**: a range
 precedes it is refused with `INFRASTORE_ERR_INVALID_PARAMETER` rather than clamped, and a range that
 starts mid-step begins at the breakpoint _in force_ there, so the returned slice always defines a
 value at the caller's start.
+
+`infrastore_bulk_result_persistent_index_in_force_at` is that rule as a call: it writes the 0-based
+row of the breakpoint in force at `at_unix_ms`, indexing the same `out_data` the accessor above
+produced. A caller could bisect `out_timestamps` and reach the same answer, but that is a second
+implementation of hold-last free to drift from this one. An `at_unix_ms` before the first breakpoint
+returns `INFRASTORE_ERR_INVALID_PARAMETER`; past the last one it returns the final row. The query is
+compared against the breakpoints as stored and does not consult `time_reference`, so spell it the
+way the series is spelled.
 
 The ABI discriminant is `6`, kept numerically equal to the storage code. See the
 [data model](../explanation/data-model.md#persistenttimeseries).

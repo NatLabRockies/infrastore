@@ -157,6 +157,15 @@ end
 PersistentTimeSeries(timestamps, data, name; application_data=nothing, element_type=nothing, units=nothing,
     quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=<inferred>)
 
+# The lookup that defines the type: the 1-based index of the breakpoint in force
+# at `at` -- the greatest one <= at, whose value the step function holds there.
+# `at` may be a DateTime or, with TimeZones loaded, a ZonedDateTime.
+# Throws InvalidParameterError before the first breakpoint; never clamps. Past
+# the last breakpoint the value is held forward, so a later `at` gives the last
+# index.
+index_in_force_at(ts::PersistentTimeSeries, at) -> Int
+# curve = read_by_id(store, id); curve.data[index_in_force_at(curve, instant)]
+
 struct Deterministic{T,N}
     initial_timestamp :: DateTime
     resolution        :: Period
