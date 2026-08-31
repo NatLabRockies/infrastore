@@ -3797,3 +3797,39 @@ fn a_strided_composite_read_decodes_the_rows_it_kept() {
     );
     assert!(steps[1].as_array().unwrap().is_empty(), "{out}");
 }
+
+/// `store-info` reports the catalog revision beside the artifact's format
+/// version — the two move independently, and this is where a user looks after a
+/// read-only open reports that a store needs upgrading.
+#[test]
+fn store_info_reports_the_catalog_schema_revision() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("info.h5");
+    run(&store, &["init"]);
+    let info = run(&store, &["-f", "json", "store-info"]);
+    assert!(info.contains("catalog_schema_revision"), "{info}");
+    assert!(info.contains("data_format_version"), "{info}");
+}
+
+/// `upgrade` is the writable open that runs the migration ladder, and it is the
+/// only CLI route to one that does nothing else — every read command, including
+/// `store-info`, opens the store read-only and so cannot upgrade it.
+///
+/// On a current store it is a no-op that still reports the revision, which is
+/// what makes it safe to run unconditionally in a deploy script.
+#[test]
+fn upgrade_is_the_writable_open_and_a_no_op_on_a_current_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("up.h5");
+    run(&store, &["init"]);
+    for _ in 0..2 {
+        let out = run(&store, &["-f", "json", "upgrade"]);
+        assert!(out.contains("\"catalog_schema_revision\": 2"), "{out}");
+        assert!(out.contains("data_format_version"), "{out}");
+    }
+    // It must not invent a store where none exists — that is `init`'s job, and
+    // silently creating one would turn a typo'd path into an empty store.
+    let missing = dir.path().join("nope.h5");
+    let err = run_err(&missing, &["upgrade"]);
+    assert!(err.contains("not found"), "{err}");
+}

@@ -1144,8 +1144,10 @@ impl Store {
                 // through committed WAL content, the same way `persist_to`'s
                 // catalog half does, and writes one self-contained file that
                 // needs no sidecar of its own. The source is opened read-only,
-                // so this still never writes to it.
-                MetadataStore::open_path(&src_sqlite, true)?.backup_to(&dest_sqlite)?;
+                // so this still never writes to it — and it is opened *without*
+                // the schema-revision check, because a stale catalog is a
+                // reason to take a writable copy, not a reason to refuse one.
+                MetadataStore::copy_file_to(&src_sqlite, &dest_sqlite)?;
             }
             Ok(())
         })();
@@ -1190,26 +1192,48 @@ impl Store {
     /// onto a destination that predates stamping.
     pub fn open_with_catalog(path: &Path, read_only: bool, catalog: CatalogMode) -> Result<Self> {
         let sqlite_path = catalog_sqlite_path(path);
-        // The HDF5 half opens FIRST, and the order is load-bearing: `open_backend`
-        // is where `data_format_version` is checked, and opening the catalog
-        // writable runs `schema::DDL`, which can only be applied to a catalog of
-        // the current format. The DDL is idempotent but not version-agnostic —
-        // `idx_component_field` names a column added in 0.16.0, so applying it to
-        // an older catalog fails with a raw `no such column`, pre-empting the
-        // `IncompatibleFormat` the version stamp exists to produce. Checking the
-        // version before touching the catalog keeps that error the one a caller
-        // sees, and as a bonus stops a bad path from leaving a freshly created
-        // empty `.sqlite` behind.
+        // Three steps, in this order, and each one is load-bearing.
+        //
+        // 1. Open the HDF5 half. This is where `data_format_version` is
+        //    evaluated (see [`crate::version`]), and it has to come first: a
+        //    store too old to migrate at all should report `IncompatibleFormat`
+        //    rather than a raw SQLite error from inside a later query, and a
+        //    bad path should not leave a freshly created empty `.sqlite`
+        //    behind. An *upgradable* stamp is noted, not yet rewritten.
+        // 2. Open the catalog, which is where the migration ladder runs
+        //    (`crate::metadata::migrate`).
+        // 3. Only if (2) succeeded, and only for a writable open, re-stamp the
+        //    HDF5 half to the current version.
+        //
+        // Catalog-first is the safe order because the two stamps cannot be
+        // written atomically together. If step 3 fails, the catalog is at the
+        // current revision while the array file still claims the older
+        // version; an older build then opens the store and simply never writes
+        // a row of a type it does not know, which is harmless. The reverse
+        // order would leave a store *claiming* the new format over an
+        // un-migrated catalog — the exact failure the ladder exists to
+        // eliminate.
         //
         // A read-only store opens both halves read-only: the HDF5 side needs
         // no write permission (works on read-only media, shared HDF5 lock) and
         // its write paths error with `ReadOnlyStore` as a backstop behind the
-        // `Store::add_*` / `remove_*` guards.
-        let backend = open_backend(path, read_only)?;
+        // `Store::add_*` / `remove_*` guards. Such an open never re-stamps
+        // anything; a stale catalog reports `CatalogMigrationRequired` from
+        // step 2, which is the error that tells the caller what to do.
+        let mut backend = open_backend(path, read_only)?;
         let metadata = match catalog {
             CatalogMode::Attached => MetadataStore::open_path(&sqlite_path, read_only)?,
             CatalogMode::InMemory => MetadataStore::open_path_into_memory(&sqlite_path, read_only)?,
         };
+        if backend.pending_format_upgrade() {
+            // `CatalogMode::InMemory` migrated a *copy*: the catalog on disk is
+            // untouched until `persist_to`, so re-stamping the array file here
+            // would break the pair the next open sees. Only an attached
+            // catalog has actually been upgraded in place.
+            if catalog == CatalogMode::Attached {
+                backend.finish_format_upgrade()?;
+            }
+        }
         // Stamps that disagree mean these files came from different saves — most
         // likely a `persist_to` interrupted between its two renames. Comparing
         // the `Option`s directly makes a lone stamp a mismatch too, which is the
@@ -1242,6 +1266,17 @@ impl Store {
     /// Where this store's catalog lives. See [`CatalogMode`].
     pub fn catalog_mode(&self) -> CatalogMode {
         self.catalog
+    }
+
+    /// The catalog's schema revision, the SQLite half's counterpart to
+    /// [`crate::DATA_FORMAT_VERSION`].
+    ///
+    /// A writable open brings this to
+    /// [`CATALOG_SCHEMA_REVISION`](crate::metadata::migrate::CATALOG_SCHEMA_REVISION)
+    /// before returning, so on a store opened for writing this always reports
+    /// the current revision. See [`crate::metadata::migrate`].
+    pub fn catalog_schema_revision(&self) -> Result<i64> {
+        self.metadata.schema_revision()
     }
 
     /// The SQLite savepoint scoping transaction nesting level `depth`.

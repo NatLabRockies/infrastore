@@ -82,6 +82,29 @@ pub enum TimeSeriesError {
         expected: &'static str,
     },
 
+    /// The catalog beside this store is at an older revision than this build
+    /// writes, and the connection is read-only so it cannot be upgraded.
+    ///
+    /// Unlike [`Self::IncompatibleFormat`] this is not a dead end: opening the
+    /// store once for *writing* runs the migration ladder in
+    /// [`crate::metadata::migrate`] and brings it up to date in place.
+    #[error(
+        "the store's catalog is at revision {found}, but this build writes revision \
+         {expected}; open the store once for writing (for example with the \
+         `infrastore` CLI) to upgrade it in place, then retry this read-only open"
+    )]
+    CatalogMigrationRequired { found: i64, expected: i64 },
+
+    /// The catalog was written by a newer build than this one. There is no
+    /// downgrade path, and this build must not touch it: its DDL and its
+    /// migration ladder both describe an older shape.
+    #[error(
+        "the store's catalog is at revision {found}, which is newer than the \
+         revision {expected} this build understands; it was written by a newer \
+         infrastore and must not be opened by this one"
+    )]
+    CatalogTooNew { found: i64, expected: i64 },
+
     #[error(
         "the HDF5 file and its catalog do not carry the same generation stamp \
          (HDF5: {h5}, catalog: {sqlite}); they are halves of two different saves, \

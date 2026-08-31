@@ -3,6 +3,7 @@
 //! Stores [`TimeSeriesMetadata`] records and the (owner_id, type, name,
 //! resolution, features) uniqueness invariant.
 
+pub mod migrate;
 pub mod schema;
 
 use std::cell::RefCell;
@@ -845,6 +846,27 @@ impl MetadataStore {
         Ok(())
     }
 
+    /// Copy the catalog file at `src` to `dest` without interpreting its
+    /// schema — [`crate::Store::open_copy`]'s catalog half.
+    ///
+    /// Deliberately not `open_path(src, true)?.backup_to(dest)`. A read-only
+    /// open runs [`migrate::check_read_only`], which refuses any catalog this
+    /// build would migrate; refusing to *copy* such a catalog is backwards,
+    /// because taking a writable copy is exactly how a caller migrates one
+    /// without touching the original. `VACUUM INTO` reads pages and never the
+    /// schema, so there is nothing here a revision could invalidate.
+    ///
+    /// Like [`Self::backup_to`], this reads through committed WAL content, so
+    /// the copy needs no sidecar of its own, and `dest` must not already exist.
+    pub fn copy_file_to(src: &Path, dest: &Path) -> Result<()> {
+        let conn = open_read_only(src)?;
+        // The one pragma from `init` that still applies: another handle to the
+        // same artifact may hold a lock, and waiting beats a bare SQLITE_BUSY.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        conn.execute("VACUUM INTO ?1", params![dest.to_string_lossy()])?;
+        Ok(())
+    }
+
     pub fn open_path(path: &Path, read_only: bool) -> Result<Self> {
         let conn = if read_only {
             open_read_only(path)?
@@ -943,19 +965,25 @@ impl MetadataStore {
         // cache holds 16, which a mixed workload can thrash past, silently
         // re-parsing on every call. Room for the realistic shapes is cheap.
         conn.set_prepared_statement_cache_capacity(64);
-        // Try to apply schema; on a read-only connection this no-ops because
-        // CREATE TABLE IF NOT EXISTS against an empty read-only DB would error,
-        // so we only run it when writes are possible.
-        if !conn.is_readonly(rusqlite::DatabaseName::Main)? {
-            conn.execute_batch(schema::DDL)?;
-            // Insert the initial schema version row if absent.
-            conn.execute(
-                "INSERT INTO schema_version (version)
-                 SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM schema_version)",
-                [],
-            )?;
+        // Bring the catalog to the current shape. A writable connection climbs
+        // the migration ladder and then re-applies the (idempotent) DDL; see
+        // `migrate::apply` for why that order matters. A read-only connection
+        // can do neither — `CREATE TABLE IF NOT EXISTS` against a read-only
+        // database errors even when it would be a no-op — so it only reports
+        // whether what it is about to read is a shape this build understands.
+        if conn.is_readonly(rusqlite::DatabaseName::Main)? {
+            migrate::check_read_only(conn)?;
+        } else {
+            migrate::apply(conn)?;
         }
         Ok(())
+    }
+
+    /// The catalog's schema revision — see
+    /// [`migrate::CATALOG_SCHEMA_REVISION`]. A catalog predating the stamp
+    /// reads as revision 1, the shape any pre-ladder build stamped.
+    pub fn schema_revision(&self) -> Result<i64> {
+        migrate::read_revision(&self.conn)
     }
 
     /// This catalog's generation stamp — see the `catalog_identity` DDL.

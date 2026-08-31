@@ -46,6 +46,8 @@ create_exception!(infrastore, IncompatibleForecastError, TimeSeriesError);
 create_exception!(infrastore, StorageError, TimeSeriesError);
 create_exception!(infrastore, StoreExistsError, TimeSeriesError);
 create_exception!(infrastore, MismatchedArtifactError, TimeSeriesError);
+create_exception!(infrastore, CatalogMigrationRequiredError, TimeSeriesError);
+create_exception!(infrastore, CatalogTooNewError, TimeSeriesError);
 
 fn map_err(e: core_lib::TimeSeriesError) -> PyErr {
     use core_lib::TimeSeriesError as E;
@@ -69,6 +71,10 @@ fn map_err(e: core_lib::TimeSeriesError) -> PyErr {
         ref e @ E::IncompatibleFormat { .. } => IncompatibleFormatError::new_err(e.to_string()),
         ref e @ E::StoreExists { .. } => StoreExistsError::new_err(e.to_string()),
         ref e @ E::MismatchedArtifact { .. } => MismatchedArtifactError::new_err(e.to_string()),
+        ref e @ E::CatalogMigrationRequired { .. } => {
+            CatalogMigrationRequiredError::new_err(e.to_string())
+        }
+        ref e @ E::CatalogTooNew { .. } => CatalogTooNewError::new_err(e.to_string()),
         E::Io(e) => IoError::new_err(e.to_string()),
         E::Sqlite(e) => StorageError::new_err(format!("sqlite: {e}")),
         E::Serde(e) => StorageError::new_err(format!("serde: {e}")),
@@ -4280,6 +4286,11 @@ fn infrastore(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         "MismatchedArtifactError",
         py.get_type::<MismatchedArtifactError>(),
     )?;
+    m.add(
+        "CatalogMigrationRequiredError",
+        py.get_type::<CatalogMigrationRequiredError>(),
+    )?;
+    m.add("CatalogTooNewError", py.get_type::<CatalogTooNewError>())?;
 
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_function(wrap_pyfunction!(init_tracing, m)?)?;

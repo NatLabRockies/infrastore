@@ -496,6 +496,29 @@ pub(crate) trait StorageBackend: Send + Sync {
         Ok(())
     }
 
+    /// Whether this backend was opened writable at an older but upgradable
+    /// [`DATA_FORMAT_VERSION`](crate::DATA_FORMAT_VERSION), and is therefore
+    /// waiting to be re-stamped once the catalog half has migrated.
+    ///
+    /// Always `false` for a backend with no version stamp to carry.
+    fn pending_format_upgrade(&self) -> bool {
+        false
+    }
+
+    /// Re-stamp this backend's `data_format_version` to the current
+    /// [`DATA_FORMAT_VERSION`](crate::DATA_FORMAT_VERSION) and clear
+    /// [`Self::pending_format_upgrade`].
+    ///
+    /// Called by `Store::open_with_catalog` **after** the catalog migration
+    /// succeeds, never before: the two halves are stamped separately and
+    /// cannot be swapped atomically, so the safe order leaves a migrated
+    /// catalog under an older array-file stamp (an older build then simply
+    /// never writes a row it does not understand) rather than the reverse.
+    /// No-op for a backend with nothing to stamp.
+    fn finish_format_upgrade(&mut self) -> Result<()> {
+        Ok(())
+    }
+
     /// The compression policy applied to newly written arrays. In-memory
     /// backends report [`Compression::None`] since they never compress; the
     /// on-disk backend reports the policy it was created or reopened with.

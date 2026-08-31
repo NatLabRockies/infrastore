@@ -367,8 +367,18 @@ cargo run -p infrastore-server -- --config my_server.toml
   why the rule does not bump `DATA_FORMAT_VERSION`. Query bounds (`time_range`, a reader's `when`)
   are deliberately unconstrained.
 - `DATA_FORMAT_VERSION` in `crates/infrastore-core/src/version.rs` is the on-disk compatibility
-  contract. Any incompatible HDF5 layout, SQLite schema, dtype encoding, or hashing change must bump
-  it and update format documentation and compatibility tests.
+  contract, checked in **three tiers** (`Current` / `Upgradable` / `Incompatible`), not by equality.
+  Any incompatible HDF5 layout, dtype encoding, timestamp encoding, or hashing change must bump it,
+  raise `MIN_UPGRADABLE_VERSION` to match, and update format documentation and compatibility tests.
+- **`CATALOG_SCHEMA_REVISION` (`crates/infrastore-core/src/metadata/migrate.rs`) is the SQLite
+  half's own contract. Any catalog change the idempotent DDL cannot make to an existing table — a
+  new column, a changed CHECK, a rebuilt table, a backfill — now requires a
+  `CATALOG_SCHEMA_REVISION` bump plus an append-only `MIGRATIONS` entry, not a re-created store.**
+  Never edit a landed migration; add a new one, and give it a frozen snapshot of the shape it
+  produces rather than deriving it from the live DDL. A writable open climbs the ladder before
+  re-applying the DDL and then re-stamps the HDF5 half; a read-only open of a stale catalog reports
+  `CatalogMigrationRequired` (the actionable error: open it once for writing), and a catalog from a
+  newer build is `CatalogTooNew`. A purely additive new _table_ or _index_ still needs neither bump.
 - Packed arrays use datasets named `sts_{dtype}_{shape}_{length}_{resolution}` for regular series
   and `nsts_{dtype}_{shape}_{length}_{timestamps_hash}` for the irregular ones sharing a time axis,
   each with a companion `<dataset>_h` hash dataset. Standalone arrays use `arr_{hex_hash}`. A

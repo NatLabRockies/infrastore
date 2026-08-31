@@ -119,6 +119,23 @@
  */
 #define INFRASTORE_ERR_OWNER_MISMATCH 14
 
+/**
+ * The catalog is at an older schema revision than this build and the store was
+ * opened read-only, so nothing could migrate it.
+ *
+ * Actionable, which is why it is its own code: open the store once for writing
+ * (or run `infrastore upgrade`) and the ladder runs.
+ */
+#define INFRASTORE_ERR_CATALOG_MIGRATION_REQUIRED 15
+
+/**
+ * The catalog is at a newer schema revision than this build understands.
+ *
+ * The mirror of `INFRASTORE_ERR_CATALOG_MIGRATION_REQUIRED`, and the remedy is
+ * the other one: upgrade the software, not the store.
+ */
+#define INFRASTORE_ERR_CATALOG_TOO_NEW 16
+
 #define INFRASTORE_ERR_INTERNAL 99
 
 /**

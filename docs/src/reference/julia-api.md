@@ -1233,20 +1233,22 @@ the add boundary (`InvalidParameterError`), loudly and without writing anything.
 
 All subtype `TimeSeriesException`:
 
-| Type                        | Mapped from FFI code                                                                               |
-| --------------------------- | -------------------------------------------------------------------------------------------------- |
-| `NotFoundError`             | `INFRASTORE_ERR_NOT_FOUND`                                                                         |
-| `DuplicateTimeSeriesError`  | `INFRASTORE_ERR_DUPLICATE`                                                                         |
-| `DuplicateAssociationError` | `INFRASTORE_ERR_DUPLICATE_ASSOCIATION`                                                             |
-| `InvalidParameterError`     | `INFRASTORE_ERR_INVALID_PARAMETER` / `INFRASTORE_ERR_INVALID_UTF8` / `INFRASTORE_ERR_NULL_POINTER` |
-| `IntegrityError`            | `INFRASTORE_ERR_INTEGRITY`                                                                         |
-| `ReadOnlyStoreError`        | `INFRASTORE_ERR_READ_ONLY`                                                                         |
-| `IncompatibleFormatError`   | `INFRASTORE_ERR_INCOMPATIBLE_FORMAT`                                                               |
-| `IOError`                   | `INFRASTORE_ERR_IO`                                                                                |
-| `StoreExistsError`          | `INFRASTORE_ERR_STORE_EXISTS`                                                                      |
-| `MismatchedArtifactError`   | `INFRASTORE_ERR_MISMATCHED_ARTIFACT`                                                               |
-| `OwnerMismatchError`        | `INFRASTORE_ERR_OWNER_MISMATCH`                                                                    |
-| `GenericError`              | Any other non-zero code (carries the numeric `code`)                                               |
+| Type                            | Mapped from FFI code                                                                               |
+| ------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `NotFoundError`                 | `INFRASTORE_ERR_NOT_FOUND`                                                                         |
+| `DuplicateTimeSeriesError`      | `INFRASTORE_ERR_DUPLICATE`                                                                         |
+| `DuplicateAssociationError`     | `INFRASTORE_ERR_DUPLICATE_ASSOCIATION`                                                             |
+| `InvalidParameterError`         | `INFRASTORE_ERR_INVALID_PARAMETER` / `INFRASTORE_ERR_INVALID_UTF8` / `INFRASTORE_ERR_NULL_POINTER` |
+| `IntegrityError`                | `INFRASTORE_ERR_INTEGRITY`                                                                         |
+| `ReadOnlyStoreError`            | `INFRASTORE_ERR_READ_ONLY`                                                                         |
+| `IncompatibleFormatError`       | `INFRASTORE_ERR_INCOMPATIBLE_FORMAT`                                                               |
+| `IOError`                       | `INFRASTORE_ERR_IO`                                                                                |
+| `StoreExistsError`              | `INFRASTORE_ERR_STORE_EXISTS`                                                                      |
+| `MismatchedArtifactError`       | `INFRASTORE_ERR_MISMATCHED_ARTIFACT`                                                               |
+| `OwnerMismatchError`            | `INFRASTORE_ERR_OWNER_MISMATCH`                                                                    |
+| `CatalogMigrationRequiredError` | `INFRASTORE_ERR_CATALOG_MIGRATION_REQUIRED`                                                        |
+| `CatalogTooNewError`            | `INFRASTORE_ERR_CATALOG_TOO_NEW`                                                                   |
+| `GenericError`                  | Any other non-zero code (carries the numeric `code`)                                               |
 
 The message text comes from the FFI layer's thread-local error buffer.
 

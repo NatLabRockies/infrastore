@@ -47,7 +47,7 @@ use crate::error::{Result, TimeSeriesError};
 use crate::hash::{array_hash, hash_hex};
 use crate::storage::{ArrayLayout, Compression};
 use crate::types::array::{Dtype, TypedArray};
-use crate::version::DATA_FORMAT_VERSION;
+use crate::version::{Compat, DATA_FORMAT_VERSION, compatibility};
 
 use super::common::{
     COMPRESSION_ATTR, HASH_SUFFIX, MAX_CHUNK_BYTES, PackGroup, ROOT_GROUP, SINGLE_GROUP,
@@ -550,6 +550,12 @@ struct Inner {
     /// re-store of a known axis is answered without touching HDF5.
     timestamp_hashes: HashSet<[u8; 32]>,
     compression: Compression,
+    /// Set when this file was opened writable at an older but upgradable
+    /// `data_format_version`. The stamp is *not* rewritten at open: the
+    /// catalog half has to migrate first, and only then does
+    /// `Store::open_with_catalog` call `finish_format_upgrade`. See
+    /// [`crate::version`].
+    format_upgrade_pending: bool,
 }
 
 impl Hdf5Backend {
@@ -583,6 +589,7 @@ impl Hdf5Backend {
                 by_hash: HashMap::new(),
                 timestamp_hashes: HashSet::new(),
                 compression,
+                format_upgrade_pending: false,
             }),
         })
     }
@@ -595,12 +602,22 @@ impl Hdf5Backend {
         };
         let found =
             read_str_attr(&file, "data_format_version").unwrap_or_else(|| "unspecified".into());
-        if found != DATA_FORMAT_VERSION {
-            return Err(TimeSeriesError::IncompatibleFormat {
-                found,
-                expected: DATA_FORMAT_VERSION,
-            });
-        }
+        // Three tiers, not an equality test -- see [`crate::version`]. An
+        // upgradable stamp is read as-is and left alone here: the catalog is
+        // the half that actually migrates, and re-stamping this file before it
+        // succeeds would produce exactly the store the ladder exists to
+        // prevent -- one claiming the current format over a stale catalog.
+        // `Store::open_with_catalog` calls `finish_format_upgrade` afterwards.
+        let format_upgrade_pending = match compatibility(&found) {
+            Compat::Current => false,
+            Compat::Upgradable => !read_only,
+            Compat::Incompatible => {
+                return Err(TimeSeriesError::IncompatibleFormat {
+                    found,
+                    expected: DATA_FORMAT_VERSION,
+                });
+            }
+        };
         let compression = read_str_attr(&file, COMPRESSION_ATTR)
             .map(|s| Compression::decode(&s))
             .unwrap_or_default();
@@ -623,6 +640,7 @@ impl Hdf5Backend {
                 by_hash: HashMap::new(),
                 timestamp_hashes: HashSet::new(),
                 compression,
+                format_upgrade_pending,
             }),
         };
         backend.rebuild_index()?;
@@ -1783,6 +1801,27 @@ impl StorageBackend for Hdf5Backend {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
         replace_str_attr(&inner.file, GENERATION_ATTR, generation)
+    }
+
+    fn pending_format_upgrade(&self) -> bool {
+        self.inner
+            .lock()
+            .expect("mutex poisoned")
+            .format_upgrade_pending
+    }
+
+    fn finish_format_upgrade(&mut self) -> Result<()> {
+        let mut inner = self.inner.lock().expect("mutex poisoned");
+        if !inner.format_upgrade_pending {
+            return Ok(());
+        }
+        if inner.read_only {
+            return Err(TimeSeriesError::ReadOnlyStore);
+        }
+        replace_str_attr(&inner.file, "data_format_version", DATA_FORMAT_VERSION)?;
+        inner.file.flush().map_err(map_h5)?;
+        inner.format_upgrade_pending = false;
+        Ok(())
     }
 
     fn compression(&self) -> Compression {
