@@ -147,6 +147,23 @@ end
     @test_throws InfraStore.InvalidParameterError decode_element_values(
         bad, "piecewise_linear"
     )
+    # A count that fits the row only under a *narrower* rule than its kind uses:
+    # 4 points need `1 + 2*4 = 9` slots and 5 steps need `2*5 = 10`, so both of
+    # these rows are short. The guard has to know which kind it is guarding, or
+    # the decode walks off the end of the row with a `BoundsError` instead.
+    @test_throws InfraStore.InvalidParameterError decode_element_values(
+        reshape(Float64[4.0, 1.0, 2.0, 3.0, 4.0], 1, 5), "piecewise_linear"
+    )
+    @test_throws InfraStore.InvalidParameterError decode_element_values(
+        reshape(Float64[5.0, 1.0, 2.0, 3.0, 4.0, 5.0], 1, 6), "piecewise_step"
+    )
+    # A leading slot that is not a count at all. `round(Int, NaN)` throws an
+    # `InexactError`, which is not what a malformed row should report.
+    for count in (NaN, Inf, -1.0, 1e30)
+        @test_throws InfraStore.InvalidParameterError decode_element_values(
+            reshape(Float64[count, 1.0, 2.0], 1, 3), "piecewise_linear"
+        )
+    end
     # A tuple arity the array cannot hold.
     @test_throws InfraStore.InvalidParameterError decode_element_values(
         bad, "tuple(7,f64)"
@@ -231,6 +248,12 @@ end
     @test_throws InfraStore.InvalidParameterError SingleTimeSeries(
         t0, res, [InfraStore.LinearFunction(1.0, 2.0)], "bad"; element_type="f64"
     )
+    # And the same through the other door: a write is where the declaration
+    # would otherwise be dropped without a word, since the values name the tag.
+    lin = SingleTimeSeries(t0, res, [InfraStore.LinearFunction(1.0, 2.0)], "lin2")
+    @test_throws InfraStore.InvalidParameterError add_time_series!(
+        store, 3, "Generator", Component, lin; element_type="tuple(2,f64)"
+    )
     close!(store)
 end
 
@@ -282,4 +305,40 @@ end
     @test_throws InfraStore.InvalidParameterError decode_element_values(
         zeros(Float64, 2, 0), "tuple(0,f64)"
     )
+end
+
+# Two stand-ins for a consumer extending the codec, at top level because a method
+# defined inside a `@testset` is not visible to code the same block calls.
+struct HalfExtended
+    v::Float64
+end
+InfraStore.element_type_tag(::AbstractVector{HalfExtended}) = "linear_function"
+
+struct FullyExtended
+    v::Float64
+end
+InfraStore.element_type_tag(::AbstractVector{FullyExtended}) = "linear_function"
+InfraStore.element_row_width(::AbstractVector{FullyExtended}) = 2
+function InfraStore.write_element_row!(row, v::FullyExtended)
+    row[1] = v.v
+    row[2] = 0.0
+    return nothing
+end
+
+@testset "the encodable predicate checks the whole extension contract" begin
+    # `is_element_values` is what the write path asks before it commits to
+    # encoding, so a type carrying only part of the extension must answer `false`
+    # here rather than fail later inside `encode_element_values` with a
+    # `MethodError` naming an internal function.
+    @test !InfraStore.is_element_values([HalfExtended(1.0)])
+    @test_throws InfraStore.InvalidParameterError encode_element_values(
+        [HalfExtended(1.0)]
+    )
+
+    # The complete contract opts a consumer's type in, which is what makes the
+    # check above a contract test rather than a rejection of unknown types.
+    @test InfraStore.is_element_values([FullyExtended(1.0)])
+    array, tag = encode_element_values([FullyExtended(1.0)])
+    @test tag == "linear_function"
+    @test array == reshape(Float64[1.0, 0.0], 1, 2)
 end

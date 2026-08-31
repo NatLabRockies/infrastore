@@ -227,8 +227,20 @@ True exactly when a value type has the three methods above — which is how a
 consumer opts its own domain types in without this package knowing them. It is
 deliberately *not* a check against [`FunctionData`](@ref): that union names what
 this package defines, and a consumer's types are not in it.
+
+All three are checked, not just the tag: this predicate is what the write path
+asks before it commits to encoding, so a half-extended type answering `true`
+here would be accepted by a constructor and then fail inside
+[`encode_element_values`](@ref) with a `MethodError` naming an internal function.
+The `write_element_row!` check goes through the element type because the row it
+takes does not exist yet; declaring that argument more narrowly than
+`AbstractVector{Float64}` opts a type back out.
 """
-is_element_values(values::AbstractVector) = applicable(element_type_tag, values)
+function is_element_values(values::AbstractVector)
+    return applicable(element_type_tag, values) &&
+           applicable(element_row_width, values) &&
+           hasmethod(write_element_row!, Tuple{AbstractVector{Float64}, eltype(values)})
+end
 is_element_values(values::AbstractArray) = is_element_values(vec(values))
 
 """
@@ -315,12 +327,12 @@ function _decode_element_row(::Type{T}, ::Val{:quadratic_function}, row) where {
 end
 
 function _decode_element_row(::Type{T}, ::Val{:piecewise_linear}, row) where {T}
-    n = _row_count(row)
+    n = _row_count(row, n -> 1 + 2n)
     return T(XYCoords[(x=row[2k], y=row[2k + 1]) for k in 1:n])
 end
 
 function _decode_element_row(::Type{T}, ::Val{:piecewise_step}, row) where {T}
-    n = _row_count(row)
+    n = _row_count(row, n -> n == 0 ? 1 : 2n)
     return T(Float64[row[1 + j] for j in 1:n], Float64[row[1 + n + j] for j in 1:(n - 1)])
 end
 
@@ -328,9 +340,28 @@ end
 # the whole array is one. Rounded rather than truncated: the value came back
 # through the same float that carried it out, and an exact integer below 2^53
 # survives that, but `Int(2.9999999999999996)` would not.
-function _row_count(row)
-    n = round(Int, row[1])
-    (n >= 0 && 1 + n <= length(row)) || throw(
+# `slots_for` is how many of the row's slots a count of `n` actually uses, which
+# differs by kind: `1 + 2n` for a list of points, `2n` for x-coords plus steps
+# (except an empty one, whose single slot is the count itself). Passed in rather
+# than assumed, because the weaker `1 + n` this once checked lets an under-wide
+# row through the guard and into an unchecked index — the same rule the core
+# enforces in `ElementType::validate_ragged_rows`.
+function _row_count(row, slots_for)
+    raw = row[1]
+    # Not every `Float64` is a count: `round(Int, NaN)` and `round(Int, 1e30)`
+    # throw `InexactError`, which is not the error a malformed row should report.
+    isfinite(raw) && abs(raw) < typemax(Int) || throw(
+        InvalidParameterError(
+            "ragged element row leading count is $raw, which is not a " *
+            "non-negative whole number",
+        ),
+    )
+    n = round(Int, raw)
+    # `n` comes out of the row's own data, so it is caller-controlled: bound it
+    # by the row length *before* the arithmetic, which would otherwise wrap
+    # silently on a count near `typemax(Int)` and make an over-long row look
+    # short enough.
+    (0 <= n <= length(row) && slots_for(n) <= length(row)) || throw(
         InvalidParameterError(
             "ragged element row declares $n entries, which does not fit its " *
             "$(length(row)) slots",

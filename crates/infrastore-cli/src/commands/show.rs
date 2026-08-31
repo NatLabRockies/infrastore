@@ -695,14 +695,18 @@ fn render_forecast(
                 }
                 obj.insert("columns".into(), json!(headers));
                 obj.insert("rows".into(), json!(shown));
-            } else if let Some(decoded) = decoded_element_values(meta, arr) {
-                // A composite element type is a layout, not a number: JSON is
-                // where a consumer wants the curves rather than the padded slots
-                // they are packed into. The CSV form below stays raw on purpose —
-                // it is the shape `add` reads back.
-                obj.insert("element_values".into(), decoded);
             } else {
                 obj.insert("values".into(), json!(csv_io::array_to_json_values(arr)));
+                // A composite element type is a layout, not a number: alongside
+                // the packed slots, JSON hands a consumer the curves themselves.
+                // Added to `values` rather than replacing it, as on the
+                // sequential path — a consumer reading `values` must not lose
+                // the field the day its series gains an element type. The CSV
+                // form below stays raw on purpose — it is the shape `add` reads
+                // back.
+                if let Some(decoded) = decoded_element_values(meta, arr) {
+                    obj.insert("element_values".into(), decoded);
+                }
             }
             output::print_value(f, &Value::Object(obj))?;
         }
@@ -744,24 +748,46 @@ fn decoded_element_values(meta: &TimeSeriesMetadata, arr: &TypedArray) -> Option
     }
 }
 
-/// The same, narrowed to the rows a `--window` / `--stride` selection kept.
+/// The same, narrowed to the rows a `--limit` / `--stride` selection kept.
 ///
 /// The timestamps and values beside it describe only the selection, so decoding
 /// the whole array would pair strided rows with an unstrided list of timesteps —
-/// the same field naming two different row sets. Selecting after the decode
-/// keeps the one decode path: the layouts are per-row, so picking rows out of the
-/// decoded list is the same as decoding the rows that were picked.
+/// the same field naming two different row sets.
+///
+/// Narrowed *before* decoding, which is the same rule the caller follows for the
+/// raw values: fifty rows of a year of five-minute curves must not cost 105,120
+/// decoded timesteps. Sound because a composite row is self-contained — a ragged
+/// row carries its own point count, and the padding width belongs to the array,
+/// which the slice keeps — so decoding a subset gives exactly the subset of the
+/// full decode.
 fn selected_element_values(
     meta: &TimeSeriesMetadata,
     arr: &TypedArray,
     rows: impl Iterator<Item = usize>,
 ) -> Option<Value> {
-    let all = decoded_element_values(meta, arr)?;
-    let timesteps = all.get("timesteps")?.as_array()?;
-    let picked: Vec<Value> = rows.filter_map(|i| timesteps.get(i).cloned()).collect();
-    let mut out = all.clone();
-    *out.get_mut("timesteps")? = Value::Array(picked);
-    Some(out)
+    // A composite element type occupies exactly one trailing axis, so a static
+    // series' array is 2-D. Anything else falls back to decoding whole: the row
+    // arithmetic below would be describing an array of a shape it does not have.
+    if meta.time_series_type.leading_dims() != 1 || arr.shape.len() != 2 {
+        let all = decoded_element_values(meta, arr)?;
+        let timesteps = all.get("timesteps")?.as_array()?;
+        let picked: Vec<Value> = rows.filter_map(|i| timesteps.get(i).cloned()).collect();
+        let mut out = all;
+        *out.get_mut("timesteps")? = Value::Array(picked);
+        return Some(out);
+    }
+    let width = arr.shape[1];
+    let stride = width * arr.dtype.size();
+    let mut bytes = Vec::new();
+    let mut kept = 0;
+    for i in rows {
+        if let Some(chunk) = arr.bytes.get(i * stride..(i + 1) * stride) {
+            bytes.extend_from_slice(chunk);
+            kept += 1;
+        }
+    }
+    let narrowed = TypedArray::new(arr.dtype, vec![kept, width], bytes).ok()?;
+    decoded_element_values(meta, &narrowed)
 }
 
 /// `get --plot`: one sparkline per element of the series.

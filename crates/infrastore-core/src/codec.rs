@@ -203,7 +203,8 @@ pub fn encode(values: &DecodedValues, leading_dims: &[usize]) -> Result<TypedArr
             // it would write a row that cannot be read back.
             if width == 0 {
                 return Err(TimeSeriesError::InvalidParameter(
-                    "an empty tuple carries no arity, and tuple(0,…) is not a valid                      element type: build the TypedArray directly and declare the arity"
+                    "an empty tuple carries no arity, and tuple(0,…) is not a valid \
+                     element type: build the TypedArray directly and declare the arity"
                         .into(),
                 ));
             }

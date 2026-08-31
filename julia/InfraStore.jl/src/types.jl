@@ -84,6 +84,10 @@ end
 # packing.
 function _wire_array(element_type, data::AbstractArray)
     if is_element_values(data)
+        # Checked, not ignored: a write is the other door into the same rule the
+        # constructors enforce, so `element_type=` contradicting the values has
+        # to be an error here too rather than a declaration silently dropped.
+        _declared_element_type(element_type, data)
         array, tag = encode_element_values(data)
         return (tag, UInt64[size(array)...], _row_major_bytes(array))
     end

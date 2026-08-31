@@ -34,7 +34,24 @@ fn run_err(store: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stderr).expect("utf8 stderr")
 }
 
+/// Serializes subprocess spawns against the tests that open a store *in this
+/// process*.
+///
+/// HDF5 opens its files without `O_CLOEXEC`, so a child forked while a store is
+/// open here inherits the descriptor — and with it the advisory lock, which
+/// lives on the open file description and survives `exec`. The unrelated child
+/// then holds that store locked until it exits, and an `infrastore` invocation
+/// in between cannot open it at all. `cli_errors.rs` carries the same gate and
+/// the longer account of the CI failure that produced it.
+///
+/// Every spawn takes the read guard; a test holding a store takes the write
+/// guard for exactly as long as its handle lives.
+static SPAWN_GATE: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
 fn raw(store: &Path, args: &[&str]) -> std::process::Output {
+    // Recovering a poisoned lock rather than propagating it: one test panicking
+    // under the guard should not bury every other test in poison panics.
+    let _gate = SPAWN_GATE.read().unwrap_or_else(|e| e.into_inner());
     Command::new(env!("CARGO_BIN_EXE_infrastore"))
         .arg("--store")
         .arg(store)
@@ -3662,4 +3679,121 @@ fn diff_ignores_catalog_ids() {
 
     let same = run(&left, &["diff", "--against", right.to_str().unwrap()]);
     assert!(same.contains("0 added, 0 removed, 0 changed"), "{same}");
+}
+
+// --- composite element types in the JSON views ------------------------------
+//
+// The CLI cannot yet *write* a composite element type — `add` reads numbers —
+// so these seed the store through the core and drive the read commands, which
+// is the surface under test.
+
+/// Four piecewise-linear curves, ragged on purpose: the widest has two points,
+/// so every row is padded to five slots and the decoded view is the only place
+/// the original curves are visible.
+fn curves() -> infrastore_core::DecodedValues {
+    use infrastore_core::XyPoint;
+    infrastore_core::DecodedValues::PiecewiseLinear(vec![
+        vec![XyPoint { x: 0.0, y: 1.0 }, XyPoint { x: 1.0, y: 3.0 }],
+        vec![XyPoint { x: 0.0, y: 2.0 }],
+        vec![],
+        vec![XyPoint { x: 2.0, y: 9.5 }],
+    ])
+}
+
+/// A static series and a `Deterministic` over the same four curves.
+fn seed_curves(store: &Path) {
+    use chrono::{Duration, TimeZone, Utc};
+    use infrastore_core::{
+        Deterministic, Features, OwnerCategory, Period, SingleTimeSeries, TimeSeriesData,
+    };
+
+    let t0 = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let hour = Period::Fixed(Duration::hours(1));
+    // Held for the whole lifetime of the handle, not just the open: see
+    // SPAWN_GATE. A sibling test's fork inside this window would inherit the
+    // store's lock and keep it after this function returns.
+    let _gate = SPAWN_GATE.write().unwrap_or_else(|e| e.into_inner());
+    let mut s = infrastore_core::create_store(Some(store), false).unwrap();
+    let mut add = |data| {
+        s.add_time_series(
+            42,
+            "Generator",
+            OwnerCategory::Component,
+            data,
+            Features::new(),
+        )
+        .unwrap();
+    };
+    add(TimeSeriesData::SingleTimeSeries(
+        SingleTimeSeries::from_values(t0, hour, &curves(), "cost").unwrap(),
+    ));
+    // [horizon = 2, count = 2] over the same four curves.
+    add(TimeSeriesData::Deterministic(
+        Deterministic::from_values(
+            t0,
+            hour,
+            Period::Fixed(Duration::hours(2)),
+            hour,
+            2,
+            &curves(),
+            "cost_fc",
+        )
+        .unwrap(),
+    ));
+    // Explicit, and before the gate is released: every assertion below is a
+    // child process reading this file, and libhdf5 holds an exclusive lock on
+    // one it has open for writing.
+    drop(s);
+}
+
+#[test]
+fn composite_json_carries_the_decoded_curves_beside_the_raw_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("curves.h5");
+    seed_curves(&store);
+
+    for name in ["cost", "cost_fc"] {
+        let out: serde_json::Value =
+            serde_json::from_str(&run(&store, &["-f", "json", "get", "--name", name])).unwrap();
+        // Both keys, on both paths: `element_values` is what a caller wants,
+        // but `values` is the field that was there first and scripts read it.
+        assert_eq!(
+            out["values"].as_array().map(Vec::len),
+            Some(20),
+            "{name} lost its raw values: {out}"
+        );
+        assert_eq!(out["element_values"]["kind"], "piecewise_linear", "{out}");
+        let steps = out["element_values"]["timesteps"].as_array().unwrap();
+        assert_eq!(steps.len(), 4, "{name}: {out}");
+        assert_eq!(
+            steps[0][1],
+            serde_json::json!({"x": 1.0, "y": 3.0}),
+            "{out}"
+        );
+        assert!(steps[2].as_array().unwrap().is_empty(), "{out}");
+    }
+}
+
+#[test]
+fn a_strided_composite_read_decodes_the_rows_it_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("curves.h5");
+    seed_curves(&store);
+
+    let out: serde_json::Value = serde_json::from_str(&run(
+        &store,
+        &["-f", "json", "get", "--name", "cost", "--stride", "2"],
+    ))
+    .unwrap();
+    let steps = out["element_values"]["timesteps"].as_array().unwrap();
+    // The decoded curves name the same rows as `timestamps` and `values`, not
+    // the whole stored array.
+    assert_eq!(steps.len(), 2, "{out}");
+    assert_eq!(out["timestamps"].as_array().unwrap().len(), 2, "{out}");
+    assert_eq!(
+        steps[0][0],
+        serde_json::json!({"x": 0.0, "y": 1.0}),
+        "{out}"
+    );
+    assert!(steps[1].as_array().unwrap().is_empty(), "{out}");
 }
