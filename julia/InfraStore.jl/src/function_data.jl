@@ -460,7 +460,20 @@ function _decode_rows(kind::Symbol, rows, types::NamedTuple, tag::AbstractString
         InvalidParameterError("no type given for element_type $tag")
     )
     T = types[kind]
-    return T[_decode_element_row(T, Val(kind), @view(rows[i, :])) for i in axes(rows, 1)]
+    return _decode_rows_typed(T, Val(kind), rows)
+end
+
+# The row loop, behind a function barrier.
+#
+# Decode starts from a tag string, so both the kind and the type to build are
+# runtime values: `kind` is a `Symbol` and `T` comes out of a `NamedTuple`
+# indexed by it, which infers as `Any`. Written inline, that made
+# `_decode_element_row` a dynamic dispatch on *every row* — the cost paid once
+# per value in a reader sweep, where a group is decoded a column at a time.
+# Taking both as arguments moves the dispatch to this call, once per decode, and
+# lets the loop inside specialize on the concrete type and kind.
+function _decode_rows_typed(::Type{T}, kind::Val, rows) where {T}
+    return T[_decode_element_row(T, kind, @view(rows[i, :])) for i in axes(rows, 1)]
 end
 
 # The trailing axis width a kind requires, mirroring the core's
