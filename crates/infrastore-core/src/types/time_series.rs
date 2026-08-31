@@ -267,6 +267,12 @@ impl SingleTimeSeries {
     /// [`TypedArray`] and call [`Self::new`] instead), tuple rows of differing
     /// arity, or a step function whose `x` and `y` lengths disagree.
     ///
+    /// A tuple series with *no* rows is the one storable series these
+    /// constructors cannot name, because a tuple's arity lives in its rows.
+    /// Encode that one with [`encode_as`](crate::encode_as), which takes the
+    /// arity from a declared element type, and pair the two through
+    /// [`Self::new`] and [`Self::with_element_type`].
+    ///
     /// One entry per timestep, so `length` is `values.len()`.
     ///
     /// ```
@@ -437,6 +443,12 @@ impl NonSequentialTimeSeries {
     /// [`DecodedValues::Raw`], which carries no values of its own (build the
     /// [`TypedArray`] and call [`Self::new`] instead), tuple rows of differing
     /// arity, or a step function whose `x` and `y` lengths disagree.
+    ///
+    /// A tuple series with *no* rows is the one storable series these
+    /// constructors cannot name, because a tuple's arity lives in its rows.
+    /// Encode that one with [`encode_as`](crate::encode_as), which takes the
+    /// arity from a declared element type, and pair the two through
+    /// [`Self::new`] and [`Self::with_element_type`].
     /// It also returns `Err` when the timestamp count does not match the number
     /// of timesteps, or the timestamps are not strictly increasing — the same
     /// checks [`Self::new`] makes.
@@ -684,6 +696,12 @@ impl Deterministic {
     /// [`TypedArray`] and call [`Self::new`] instead), tuple rows of differing
     /// arity, or a step function whose `x` and `y` lengths disagree.
     ///
+    /// A tuple series with *no* rows is the one storable series these
+    /// constructors cannot name, because a tuple's arity lives in its rows.
+    /// Encode that one with [`encode_as`](crate::encode_as), which takes the
+    /// arity from a declared element type, and pair the two through
+    /// [`Self::new`] and [`Self::with_element_type`].
+    ///
     /// One entry per timestep in row-major order over the leading axes, so
     /// entry `i * count + j` is window `j`'s step `i`, and there must be
     /// exactly `H * count` of them.
@@ -898,6 +916,12 @@ impl Probabilistic {
     /// [`DecodedValues::Raw`], which carries no values of its own (build the
     /// [`TypedArray`] and call [`Self::new`] instead), tuple rows of differing
     /// arity, or a step function whose `x` and `y` lengths disagree.
+    ///
+    /// A tuple series with *no* rows is the one storable series these
+    /// constructors cannot name, because a tuple's arity lives in its rows.
+    /// Encode that one with [`encode_as`](crate::encode_as), which takes the
+    /// arity from a declared element type, and pair the two through
+    /// [`Self::new`] and [`Self::with_element_type`].
     ///
     /// One entry per timestep in row-major order over `[num_percentiles, H,
     /// count]`, so there must be exactly `percentiles.len() * H * count` of
@@ -1119,6 +1143,12 @@ impl Scenarios {
     /// [`DecodedValues::Raw`], which carries no values of its own (build the
     /// [`TypedArray`] and call [`Self::new`] instead), tuple rows of differing
     /// arity, or a step function whose `x` and `y` lengths disagree.
+    ///
+    /// A tuple series with *no* rows is the one storable series these
+    /// constructors cannot name, because a tuple's arity lives in its rows.
+    /// Encode that one with [`encode_as`](crate::encode_as), which takes the
+    /// arity from a declared element type, and pair the two through
+    /// [`Self::new`] and [`Self::with_element_type`].
     ///
     /// One entry per timestep in row-major order over `[scenario_count, H,
     /// count]`, so there must be exactly `scenario_count * H * count` of them.

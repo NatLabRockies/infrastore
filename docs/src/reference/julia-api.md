@@ -338,8 +338,14 @@ it hands back, not merely which of the six kinds it is:
 
 ```julia
 md = get_metadata_by_id(store, id)
-md.time_series_type == typeof(read_by_id(store, id))   # true for every stored type
+md.time_series_type == typeof(read_by_id(store, id))   # every stored type but DST
 ```
+
+The one exception is a derived `DeterministicSingleTimeSeries`: its row keeps the DST tag, since
+that is where the derivation stays visible, while a read of it hands back the `Deterministic` it
+becomes. The `{T,N}` agree; the outer types do not, and they are unrelated, so neither `==` nor `<:`
+holds between them. Dispatch on the read's type when the two have to agree, and on the row's when
+you mean "was this derived?".
 
 Both parameters come off the row itself. For a plain numeric series `T` is the dtype and `N` is one
 more than the rank of `element_shape`. For a **composite** `element_type` — one a read decodes — `T`
@@ -353,8 +359,9 @@ decoding consumes:
 | `tuple(3,f64)`     | `(3,)`          | `SingleTimeSeries{NTuple{3,Float64},1}` | `SingleTimeSeries{Float64,2}` |
 
 A `DeterministicSingleTimeSeries` is parameterized by the `Deterministic` it reads back as, not by
-the `SingleTimeSeries` whose array it shares. An `element_type` written by a newer core than the
-wrapper knows leaves the row describing the stored numbers, which is what a read of it hands back.
+the `SingleTimeSeries` whose array it shares — the parameters follow the read, the outer type does
+not. An `element_type` written by a newer core than the wrapper knows leaves the row describing the
+stored numbers, which is what a read of it hands back.
 
 Test it with `<:`, not `==`, when you mean "which kind is this row":
 

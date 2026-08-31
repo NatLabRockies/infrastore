@@ -136,35 +136,36 @@ hands back the packing instead. A composite row's `time_series_type` names the d
 is one rank lower than the stored array. The **readers stay raw**: `StaticReader`/`ForecastReader`
 are the per-timestamp path and `StaticGroup.dtype` is physical. A `TimeSeriesMetadata`'s
 `time_series_type` is the _full_ Julia type, parameterized `{T,N}` off the row's own
-`element_type`/`element_shape`, so it equals `typeof(read_by_id(...))` for every stored type (ask
-which kind a row is with `<:`, not `==`); the counts and summaries group by stored type alone and
-stay bare. Every type-taking call — a `time_series_type=` filter, `has_time_series`, both readers —
-accepts either spelling and _ignores_ the parameters, since identity carries no element type, so a
-row round-trips back into them. A stored `DeterministicSingleTimeSeries` always reads back as a
-`Deterministic` (storage-level view, by design); the DST tag remains visible in catalog surfaces
-(metadata rows, counts). The CLI additionally has `export` (bulk read-direction inverse of `add`;
-its timestamped CSV is re-readable by `add`, which detects the layout from the header), `arrays` /
-`store-info` and the `data_hash` + resolved HDF5 dataset/column on `list`/`info`, `--name-glob`
-selectors, `--dry-run` on destructive commands, store-creation `--compression` flags, shell
-`completions`, and a `INFRASTORE_STORE` env fallback. It also carries a **wide-CSV ingest**
-(`"layout": "wide"` plus an `owner_map`/`owner_id_from` column→owner mapping) and its inverse
-`grid`, which drives the core's `StaticReader`; discovery commands (`names`, `owner-types`,
-`owners`, `exists`); charting (`get
---plot` sparklines and
-`plot --kind line|duration|heatmap|fan|overlay`, rendered by the hand-written `src/chart/` SVG
-backend — deliberately no charting dependency, because `deny.toml` makes one a policy decision);
-`diff` and `merge` between two stores; `init` and `--catalog attached|in-memory`; and an inline flag
-form of `add` alongside `--descriptor -` (stdin), `--dry-run`, `--replace`, and `--batch-size`. A
-`--endpoint` mode pointing the read commands at the gRPC server is still the one documented gap;
-`src/store_access.rs` is the seam reserved for it. The SQLite catalog carries a
-`time_series_readable` view that hex-encodes both hashes for hand inspection. The read-only gRPC
-server carries the full read surface too, id-addressed like the rest: `ListMetadata` /
-`ListMetadataByIds` (rows each carrying their id), `GetMetadataById`, `AssociationExists`,
-`HasAnyTimeSeries`, `ReadById` / `ReadByIds`, detailed/per-type counts, `ListOwnerIds`,
-`GetIntervals`, static/forecast summaries, and `CheckStaticConsistency`. Every RPC is named for the
-`Store` method it exposes, with `<Rpc>Req` / `<Rpc>Resp` messages. Auth is `none` (default) or
-`api_key` via the `x-api-key` header. See `README.md` and `docs/src/explanation/data-model.md` for
-the authoritative feature matrix.
+`element_type`/`element_shape`, so it equals `typeof(read_by_id(...))` for every stored type but the
+derived one — a `DeterministicSingleTimeSeries` row keeps its own tag while a read hands back the
+`Deterministic` it becomes, parameterized alike (ask which kind a row is with `<:`, not `==`); the
+counts and summaries group by stored type alone and stay bare. Every type-taking call — a
+`time_series_type=` filter, `has_time_series`, both readers — accepts either spelling and _ignores_
+the parameters, since identity carries no element type, so a row round-trips back into them. A
+stored `DeterministicSingleTimeSeries` always reads back as a `Deterministic` (storage-level view,
+by design); the DST tag remains visible in catalog surfaces (metadata rows, counts). The CLI
+additionally has `export` (bulk read-direction inverse of `add`; its timestamped CSV is re-readable
+by `add`, which detects the layout from the header), `arrays` / `store-info` and the `data_hash` +
+resolved HDF5 dataset/column on `list`/`info`, `--name-glob` selectors, `--dry-run` on destructive
+commands, store-creation `--compression` flags, shell `completions`, and a `INFRASTORE_STORE` env
+fallback. It also carries a **wide-CSV ingest** (`"layout": "wide"` plus an
+`owner_map`/`owner_id_from` column→owner mapping) and its inverse `grid`, which drives the core's
+`StaticReader`; discovery commands (`names`, `owner-types`, `owners`, `exists`); charting
+(`get
+--plot` sparklines and `plot --kind line|duration|heatmap|fan|overlay`, rendered by the
+hand-written `src/chart/` SVG backend — deliberately no charting dependency, because `deny.toml`
+makes one a policy decision); `diff` and `merge` between two stores; `init` and
+`--catalog attached|in-memory`; and an inline flag form of `add` alongside `--descriptor -` (stdin),
+`--dry-run`, `--replace`, and `--batch-size`. A `--endpoint` mode pointing the read commands at the
+gRPC server is still the one documented gap; `src/store_access.rs` is the seam reserved for it. The
+SQLite catalog carries a `time_series_readable` view that hex-encodes both hashes for hand
+inspection. The read-only gRPC server carries the full read surface too, id-addressed like the rest:
+`ListMetadata` / `ListMetadataByIds` (rows each carrying their id), `GetMetadataById`,
+`AssociationExists`, `HasAnyTimeSeries`, `ReadById` / `ReadByIds`, detailed/per-type counts,
+`ListOwnerIds`, `GetIntervals`, static/forecast summaries, and `CheckStaticConsistency`. Every RPC
+is named for the `Store` method it exposes, with `<Rpc>Req` / `<Rpc>Resp` messages. Auth is `none`
+(default) or `api_key` via the `x-api-key` header. See `README.md` and
+`docs/src/explanation/data-model.md` for the authoritative feature matrix.
 
 ## Code Quality Requirements
 

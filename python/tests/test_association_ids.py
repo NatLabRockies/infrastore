@@ -17,6 +17,7 @@ from infrastore import (
     InvalidParameterError,
     NotFoundError,
     OwnerCategory,
+    OwnerMismatchError,
     SingleTimeSeries,
     Store,
     SupplementalAttributeAssociation,
@@ -297,3 +298,105 @@ def test_ids_survive_a_persist_and_reopen(tmp_path):
     reopened = Store.open(str(path), read_only=True)
     for name, id_ in expected.items():
         assert reopened.get_metadata_by_id(id_)["name"] == name
+
+
+class TestOwnerGuardedIdAddressing:
+    """``owner_id`` / ``owner_category`` on the id-addressed read and removal.
+
+    For the caller whose model addresses a series by id but reasons about it as
+    one component's — "retire this component's series" — where the id alone is
+    the wrong request. The check cannot be assembled out of the unguarded parts:
+    an id survives ``replace_owner``, so a ``get_metadata_by_id`` that confirms
+    the owner and a ``remove_by_ids`` that then deletes leave a window in which
+    the row moves and the removal retires the *new* owner's series.
+    """
+
+    def test_read_serves_the_owner_that_holds_the_row(self):
+        store = Store.create(in_memory=True)
+        id_ = _add(store, "load")
+        data = store.read_by_id(
+            id_, owner_id=1, owner_category=OwnerCategory.Component
+        )
+        assert list(data.data) == [0.0, 1.0, 2.0, 3.0]
+
+    def test_read_refuses_every_other_owner(self):
+        store = Store.create(in_memory=True)
+        id_ = _add(store, "load")
+        with pytest.raises(OwnerMismatchError):
+            store.read_by_id(id_, owner_id=2, owner_category=OwnerCategory.Component)
+        # The category is half the owner: the same integer in the other category
+        # is a different owner, since a component and a supplemental attribute
+        # can share an id.
+        with pytest.raises(OwnerMismatchError):
+            store.read_by_id(
+                id_, owner_id=1, owner_category=OwnerCategory.SupplementalAttribute
+            )
+
+    def test_a_dangling_id_is_not_found_rather_than_mismatched(self):
+        """Nothing owns it, so there is no belief about ownership to be stale."""
+        store = Store.create(in_memory=True)
+        with pytest.raises(NotFoundError):
+            store.read_by_id(9999, owner_id=1, owner_category=OwnerCategory.Component)
+
+    def test_a_guarded_removal_naming_the_wrong_owner_deletes_nothing(self):
+        store = Store.create(in_memory=True)
+        id_ = _add(store, "load")
+        with pytest.raises(OwnerMismatchError):
+            store.remove_by_ids(
+                [id_], owner_id=2, owner_category=OwnerCategory.Component
+            )
+        assert store.association_exists(id_)
+
+    def test_the_guard_closes_the_reassignment_race(self):
+        store = Store.create(in_memory=True)
+        id_ = _add(store, "load")
+        store.replace_owner(1, 3, OwnerCategory.Component)
+
+        # An unguarded removal here would retire the *new* owner's series.
+        with pytest.raises(OwnerMismatchError):
+            store.remove_by_ids(
+                [id_], owner_id=1, owner_category=OwnerCategory.Component
+            )
+        assert store.association_exists(id_)
+
+        assert (
+            store.remove_by_ids(
+                [id_], owner_id=3, owner_category=OwnerCategory.Component
+            )
+            == 1
+        )
+        assert not store.association_exists(id_)
+
+    def test_a_mismatch_late_in_a_batch_rolls_the_whole_batch_back(self):
+        store = Store.create(in_memory=True)
+        mine = _add(store, "mine", owner=1)
+        theirs = _add(store, "theirs", owner=2)
+        with pytest.raises(OwnerMismatchError):
+            store.remove_by_ids(
+                [mine, theirs], owner_id=1, owner_category=OwnerCategory.Component
+            )
+        assert store.association_exists(mine)
+        assert store.association_exists(theirs)
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"owner_id": 1},
+            {"owner_category": OwnerCategory.Component},
+        ],
+    )
+    def test_half_an_owner_is_refused_rather_than_ignored(self, kwargs):
+        """Silently checking less than the caller asked for is the one answer a
+        guard must not give."""
+        store = Store.create(in_memory=True)
+        id_ = _add(store, "load")
+        with pytest.raises(InvalidParameterError):
+            store.read_by_id(id_, **kwargs)
+        with pytest.raises(InvalidParameterError):
+            store.remove_by_ids([id_], **kwargs)
+
+    def test_the_unguarded_forms_are_unchanged(self):
+        store = Store.create(in_memory=True)
+        id_ = _add(store, "load")
+        assert list(store.read_by_id(id_).data) == [0.0, 1.0, 2.0, 3.0]
+        assert store.remove_by_ids([id_]) == 1

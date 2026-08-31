@@ -30,17 +30,20 @@ anything but a `Probabilistic`).
   association's identity and its owner. `time_series_type` is the *full* Julia
   type, parameterized `{T,N}` like the value structs, so it names what a read of
   this row hands back: `md.time_series_type == typeof(read_by_id(store, md.id))`
-  for every stored type, a `DeterministicSingleTimeSeries` (parameterized by the
-  `Deterministic` it becomes) included. For a plain numeric series `T`
-  is the dtype and `N` is one more than the rank of `element_shape`. For a
-  composite `element_type` — one a read decodes — `T` is the *domain* type
-  (`PiecewiseLinear`, `NTuple{3, Float64}`, …) and `N` is one lower, because the
-  axis the values were packed across is the one decoding consumes; `raw = true`
-  on the read hands back that packing instead. Test *which kind* a row is with
-  `<:`, not `==`. It passes
-  straight back into any `time_series_type=` filter, `has_time_series` or reader,
-  which ignore the parameters: identity carries no element type, so `{T,N}` has
-  nothing to select on.
+  for every stored type but the derived one. A `DeterministicSingleTimeSeries`
+  row keeps its own tag — that is where the derivation stays visible — while a
+  read of it hands back the `Deterministic` it becomes, parameterized by the
+  same `{T,N}`; the two outer types are unrelated, so neither `==` nor `<:`
+  holds between them, and a consumer that needs the read's type must ask the
+  read. For a plain numeric series `T` is the dtype and `N` is one more than the
+  rank of `element_shape`. For a composite `element_type` — one a read decodes —
+  `T` is the *domain* type (`PiecewiseLinear`, `NTuple{3, Float64}`, …) and `N`
+  is one lower, because the axis the values were packed across is the one
+  decoding consumes; `raw = true` on the read hands back that packing instead.
+  Test *which kind* a row is with `<:`, not `==`. It passes straight back into
+  any `time_series_type=` filter, `has_time_series` or reader, which ignore the
+  parameters: identity carries no element type, so `{T,N}` has nothing to select
+  on.
 - `data_hash` — the 32-byte content hash, ready for [`get_array_by_hash`](@ref)
   and [`count_array_references`](@ref); `bytes2hex` it for the display form.
 - `initial_timestamp`, `resolution`, `length` — the static time grid.

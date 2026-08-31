@@ -93,6 +93,26 @@ struct PiecewiseStep
     end
 end
 
+# Structural equality on all four value types. Julia's default `==` on a struct
+# is `===`, which on these is the inverse of IEEE on both counts — it separates
+# `0.0` from `-0.0` and equates `NaN` with itself — so a decoded value compared
+# against one a consumer built would differ on a signed zero. Field-wise `==`
+# gives the four types one rule.
+function Base.:(==)(a::LinearFunction, b::LinearFunction)
+    return a.proportional == b.proportional && a.constant == b.constant
+end
+function Base.hash(v::LinearFunction, h::UInt)
+    return hash(v.constant, hash(v.proportional, hash(LinearFunction, h)))
+end
+function Base.:(==)(a::QuadraticFunction, b::QuadraticFunction)
+    return a.quadratic == b.quadratic && a.proportional == b.proportional &&
+           a.constant == b.constant
+end
+function Base.hash(v::QuadraticFunction, h::UInt)
+    return hash(
+        v.constant, hash(v.proportional, hash(v.quadratic, hash(QuadraticFunction, h)))
+    )
+end
 Base.:(==)(a::PiecewiseLinear, b::PiecewiseLinear) = a.points == b.points
 Base.hash(v::PiecewiseLinear, h::UInt) = hash(v.points, hash(PiecewiseLinear, h))
 Base.:(==)(a::PiecewiseStep, b::PiecewiseStep) = a.x == b.x && a.y == b.y
@@ -428,14 +448,19 @@ function _decode_rows(kind::Symbol, rows, types::NamedTuple, tag::AbstractString
                 "$(size(rows, 2))",
             ),
         )
-        return [ntuple(j -> rows[i, j], n) for i in axes(rows, 1)]
+        # The eltype is declared rather than inferred: a comprehension over an
+        # empty axis produces no values to infer from, so a zero-length series
+        # would decode to a `Vector{Tuple{Vararg{Float64}}}` (or a `Vector{Any}`
+        # below) and no longer round-trip back into a write, which reads the
+        # element type off the values' type.
+        return NTuple{n, Float64}[ntuple(j -> rows[i, j], n) for i in axes(rows, 1)]
     end
     _validate_row_width(kind, size(rows, 2), tag)
     haskey(types, kind) || throw(
         InvalidParameterError("no type given for element_type $tag")
     )
     T = types[kind]
-    return [_decode_element_row(T, Val(kind), @view(rows[i, :])) for i in axes(rows, 1)]
+    return T[_decode_element_row(T, Val(kind), @view(rows[i, :])) for i in axes(rows, 1)]
 end
 
 # The trailing axis width a kind requires, mirroring the core's

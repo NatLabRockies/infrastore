@@ -317,8 +317,77 @@ end
         array, tag = encode_element_values(T[])
         @test tag == ts.element_type
         @test size(array, 1) == 0
-        @test decode_element_values(array, tag) == T[]
+        decoded = decode_element_values(array, tag)
+        @test decoded == T[]
+        # `==` alone would pass on a `Vector{Any}`: the eltype is what a write
+        # reads the element type back off, so an empty decode has to keep it.
+        @test eltype(decoded) === T
     end
+    for T in (NTuple{2, Float64}, NTuple{3, Float64})
+        ts = SingleTimeSeries(t0, Hour(1), T[], "empty")
+        array, tag = encode_element_values(T[])
+        @test tag == ts.element_type
+        @test size(array) == (0, length(T.parameters))
+        decoded = decode_element_values(array, tag)
+        @test decoded == T[]
+        @test eltype(decoded) === T
+    end
+end
+
+@testset "an empty series of domain values round-trips through the store" begin
+    # The read hands back a typed empty vector, so what comes out of one store
+    # goes straight into the next. An untyped `Vector{Any}` reads back fine and
+    # then fails the write, which is the half a `== T[]` assertion cannot see.
+    store = Store(; in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    for (owner, T) in enumerate((
+        InfraStore.LinearFunction,
+        InfraStore.QuadraticFunction,
+        InfraStore.PiecewiseLinear,
+        InfraStore.PiecewiseStep,
+        NTuple{3, Float64},
+    ))
+        id = add_time_series!(
+            store, owner, "Generator", Component,
+            SingleTimeSeries(t0, Hour(1), T[], "empty"),
+        )
+        read = read_by_id(store, id)
+        @test eltype(read.data) === T
+        @test isempty(read.data)
+        @test get_metadata_by_id(store, id).time_series_type == SingleTimeSeries{T, 1}
+        # The whole point: the value that came out is a value that goes back in.
+        again = add_time_series!(
+            store, owner, "Generator", Component,
+            SingleTimeSeries(t0, Hour(1), read.data, "empty_again"),
+        )
+        @test get_metadata_by_id(store, again).element_type ==
+            get_metadata_by_id(store, id).element_type
+    end
+    close!(store)
+end
+
+@testset "the value types compare by their fields, not by identity" begin
+    # Julia's default `==` on a struct is `===`, which on Float64 fields is the
+    # inverse of IEEE in both directions: it separates `0.0` from `-0.0` and
+    # equates `NaN` with itself.
+    @test InfraStore.LinearFunction(0.0, 1.0) == InfraStore.LinearFunction(-0.0, 1.0)
+    @test !(InfraStore.LinearFunction(NaN, 1.0) == InfraStore.LinearFunction(NaN, 1.0))
+    @test InfraStore.QuadraticFunction(0.0, 1.0, 2.0) ==
+        InfraStore.QuadraticFunction(-0.0, 1.0, 2.0)
+    @test !(
+        InfraStore.QuadraticFunction(NaN, 1.0, 2.0) ==
+        InfraStore.QuadraticFunction(NaN, 1.0, 2.0)
+    )
+    # Distinct values must not collide across the two types, and equal values
+    # must hash alike so the types are usable as dictionary keys.
+    @test hash(InfraStore.LinearFunction(1.0, 2.0)) ==
+        hash(InfraStore.LinearFunction(1.0, 2.0))
+    @test hash(InfraStore.QuadraticFunction(1.0, 2.0, 3.0)) ==
+        hash(InfraStore.QuadraticFunction(1.0, 2.0, 3.0))
+    @test hash(InfraStore.LinearFunction(1.0, 2.0)) !=
+        hash(InfraStore.QuadraticFunction(0.0, 1.0, 2.0))
+    d = Dict(InfraStore.LinearFunction(1.0, 2.0) => "a")
+    @test d[InfraStore.LinearFunction(1.0, 2.0)] == "a"
 end
 
 @testset "a zero-arity tuple has no element type" begin

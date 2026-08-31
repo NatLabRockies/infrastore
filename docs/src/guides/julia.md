@@ -313,9 +313,13 @@ them back intact:
 
 ```julia
 md = get_metadata_by_id(store, id)
-md.time_series_type == typeof(read_by_id(store, id))   # true for every stored type
+md.time_series_type == typeof(read_by_id(store, id))   # every stored type but DST
 md.time_series_type <: SingleTimeSeries                # ask for the kind with <:, not ==
 ```
+
+A derived `DeterministicSingleTimeSeries` is the exception: its row keeps the DST tag while a read
+of it hands back a `Deterministic` with the same `{T,N}`. Dispatch on the read's type when the two
+have to agree, and on the row's when you mean "was this derived?".
 
 That type passes straight back into any filter, `has_time_series`, or reader. The parameters are
 ignored there — a series is addressed by identity, which carries no element type — so they never

@@ -373,9 +373,10 @@ received 3 has a bug the store can see and it cannot.
 ### The owner guard
 
 `read_by_id` and `remove_by_ids` each take an optional **expected owner** — `read_by_id_for_owner` /
-`remove_by_ids_for_owner` in the Rust core, an `owner=(id, category)` keyword in Julia, `has_owner`
-beside `owner_id` / `owner_category` across the C ABI. The row is held to that owner, and one
-belonging to anyone else is `OwnerMismatch` rather than a read or a delete.
+`remove_by_ids_for_owner` in the Rust core, an `owner=(id, category)` keyword in Julia, keyword-only
+`owner_id` / `owner_category` in Python, `has_owner` beside the two across the C ABI. The row is
+held to that owner, and one belonging to anyone else is `OwnerMismatch` rather than a read or a
+delete.
 
 It exists because the two halves cannot be checked separately. An id is the whole address and it
 survives `replace_owner`, so a consumer whose model says "this component's series" — and which

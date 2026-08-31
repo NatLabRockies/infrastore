@@ -7,7 +7,8 @@
 //!     Store, SingleTimeSeries, NonSequentialTimeSeries,
 //!     TimeSeriesType, OwnerCategory,
 //!     SupplementalAttributeAssociation, ParentChildAssociation,
-//!     TimeSeriesError, NotFoundError, DuplicateTimeSeriesError, InvalidParameterError,
+//!     TimeSeriesError, NotFoundError, OwnerMismatchError, DuplicateTimeSeriesError,
+//!     InvalidParameterError,
 //!     IntegrityError, ReadOnlyStoreError, IoError, ConnectionError,
 //!     IncompatibleFormatError, IncompatibleForecastError, StorageError,
 //!     DuplicateAssociationError,
@@ -31,6 +32,7 @@ use pyo3::types::{
 
 create_exception!(infrastore, TimeSeriesError, PyException);
 create_exception!(infrastore, NotFoundError, TimeSeriesError);
+create_exception!(infrastore, OwnerMismatchError, TimeSeriesError);
 create_exception!(infrastore, DuplicateTimeSeriesError, TimeSeriesError);
 create_exception!(infrastore, DuplicateAssociationError, TimeSeriesError);
 create_exception!(infrastore, DuplicateAssociationIdError, TimeSeriesError);
@@ -49,6 +51,9 @@ fn map_err(e: core_lib::TimeSeriesError) -> PyErr {
     use core_lib::TimeSeriesError as E;
     match e {
         E::NotFound => NotFoundError::new_err("time series not found"),
+        // Distinct from `NotFoundError`: the row is there, and it is the
+        // caller's belief about who owns it that is stale.
+        ref e @ E::OwnerMismatch { .. } => OwnerMismatchError::new_err(e.to_string()),
         E::DuplicateTimeSeries => {
             DuplicateTimeSeriesError::new_err("a time series with that key already exists")
         }
@@ -2748,7 +2753,17 @@ impl PyStore {
     /// where the `time_range` on `get_time_series` and `bulk_read` hands back
     /// the smaller answer that fits. Raises `NotFoundError` if the id names no
     /// row.
-    #[pyo3(signature = (id, *, start_time=None, len=None, count=None))]
+    ///
+    /// Pass `owner_id` and `owner_category` together to hold the row to that
+    /// owner, and get `OwnerMismatchError` when it belongs to someone else. The
+    /// owner comes off the very row the values are materialized from, so the
+    /// guarded read costs exactly what the unguarded one does — where confirming
+    /// the owner in a call of its own would be a second round trip whose answer
+    /// describes the row as it was rather than the row being read.
+    #[pyo3(signature = (
+        id, *, start_time=None, len=None, count=None, owner_id=None, owner_category=None
+    ))]
+    #[allow(clippy::too_many_arguments)]
     fn read_by_id(
         &self,
         py: Python<'_>,
@@ -2756,6 +2771,8 @@ impl PyStore {
         start_time: Option<PyInstant>,
         len: Option<usize>,
         count: Option<usize>,
+        owner_id: Option<i64>,
+        owner_category: Option<PyOwnerCategory>,
     ) -> PyResult<Py<PyAny>> {
         let window = core_lib::ReadWindow {
             start: start_time.as_ref().map(|s| s.instant),
@@ -2763,10 +2780,13 @@ impl PyStore {
             len,
             count,
         };
-        let data = self
-            .store()?
-            .read_by_id(core_lib::TimeSeriesId(id), window)
-            .map_err(map_err)?;
+        let store = self.store()?;
+        let id = core_lib::TimeSeriesId(id);
+        let data = match owner_guard(owner_id, owner_category, "read_by_id")? {
+            Some(owner) => store.read_by_id_for_owner(id, owner, window),
+            None => store.read_by_id(id, window),
+        }
+        .map_err(map_err)?;
         time_series_data_to_py(py, data)
     }
 
@@ -2780,9 +2800,31 @@ impl PyStore {
     /// rolling the batch back — sift the set with `association_exists` first
     /// when some references are expected to have gone. A repeated id is removed
     /// once.
-    fn remove_by_ids(&mut self, ids: Vec<i64>) -> PyResult<usize> {
+    ///
+    /// Pass `owner_id` and `owner_category` together to remove only rows that
+    /// belong to that owner; a single mismatch raises `OwnerMismatchError` and
+    /// rolls the whole batch back. A caller that reasons about a series as one
+    /// component's — "retire this component's series" — cannot assemble the guard
+    /// out of the unguarded parts: an id survives `replace_owner`, so a
+    /// `get_metadata_by_id` that confirms the owner and a `remove_by_ids` that
+    /// then deletes leave a window in which a reassignment lands and the removal
+    /// retires the *new* owner's series. Here the check and the delete are one
+    /// transaction.
+    #[pyo3(signature = (ids, *, owner_id=None, owner_category=None))]
+    fn remove_by_ids(
+        &mut self,
+        ids: Vec<i64>,
+        owner_id: Option<i64>,
+        owner_category: Option<PyOwnerCategory>,
+    ) -> PyResult<usize> {
+        let owner = owner_guard(owner_id, owner_category, "remove_by_ids")?;
         let ids = to_ids(&ids);
-        self.store_mut()?.remove_by_ids(&ids).map_err(map_err)
+        let store = self.store_mut()?;
+        match owner {
+            Some(owner) => store.remove_by_ids_for_owner(&ids, owner),
+            None => store.remove_by_ids(&ids),
+        }
+        .map_err(map_err)
     }
 
     /// Distinct forecast intervals (ISO-8601 strings), optionally scoped to one
@@ -3851,6 +3893,24 @@ fn to_ids(ids: &[i64]) -> Vec<core_lib::TimeSeriesId> {
     ids.iter().copied().map(core_lib::TimeSeriesId).collect()
 }
 
+/// Read the optional `(owner_id, owner_category)` guard off an id-addressed
+/// call. Both or neither: an owner is the pair, since a component and a
+/// supplemental attribute can share an id, so half of one would be a guard that
+/// silently checks less than the caller asked for.
+fn owner_guard(
+    owner_id: Option<i64>,
+    owner_category: Option<PyOwnerCategory>,
+    method: &str,
+) -> PyResult<Option<(i64, core_lib::OwnerCategory)>> {
+    match (owner_id, owner_category) {
+        (Some(id), Some(cat)) => Ok(Some((id, cat.into()))),
+        (None, None) => Ok(None),
+        _ => Err(InvalidParameterError::new_err(format!(
+            "{method} requires both owner_id and owner_category, or neither"
+        ))),
+    }
+}
+
 fn metadata_to_dict<'py>(
     py: Python<'py>,
     m: &core_lib::TimeSeriesMetadata,
@@ -4074,31 +4134,13 @@ fn encode_element_values<'py>(
     let element_type = parse_element_type(element_type)?;
     let decoded = py_to_decoded(values, element_type)?;
     let dims = leading_dims.unwrap_or_else(|| vec![decoded.len()]);
-    let array = match (&decoded, element_type) {
-        // A tuple's arity lives in its rows, so the generic encoder cannot infer
-        // one from an empty list and refuses it. Here the arity is not missing —
-        // `element_type` declared it — and a zero-length series is storable, so
-        // the empty packing is built from the declaration rather than turned
-        // into an error the documented inverse should not have. Every other kind
-        // carries its width in its type, so this is the only case.
-        (core_lib::DecodedValues::Tuple(rows), core_lib::ElementType::Tuple { arity, .. })
-            if rows.is_empty() =>
-        {
-            let mut shape = dims.clone();
-            shape.push(arity);
-            core_lib::TypedArray::new(core_lib::Dtype::F64, shape, Vec::new())
-                .map_err(InvalidParameterError::new_err)?
-        }
-        _ => core_lib::encode(&decoded, &dims).map_err(map_err)?,
-    };
-    // The values decide the packing, but `element_type` is what the row will be
-    // stored under, and the two can disagree: `tuple(3,f64)` given two-value rows
-    // packs to width 2, and `tuple(3,i32)` packs f64 either way. Checking the
-    // array against the declared type here is what makes the returned array
-    // actually ready for `add_time_series`, as the docstring promises.
-    element_type
-        .validate_array(&array, dims.len())
-        .map_err(map_err)?;
+    // `encode_as` is the core's declared-type encoder: it takes an empty tuple
+    // series' arity from `element_type` (the generic encoder cannot infer one
+    // from no rows, and a zero-length series is storable), and it checks the
+    // packing against the declaration — `tuple(3,f64)` given two-value rows packs
+    // to width 2 — which is what makes the returned array actually ready for
+    // `add_time_series`, as the docstring promises.
+    let array = core_lib::encode_as(&decoded, &dims, element_type).map_err(map_err)?;
     numpy_from_typed(py, &array)
 }
 
@@ -4203,6 +4245,7 @@ fn infrastore(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add("TimeSeriesError", py.get_type::<TimeSeriesError>())?;
     m.add("NotFoundError", py.get_type::<NotFoundError>())?;
+    m.add("OwnerMismatchError", py.get_type::<OwnerMismatchError>())?;
     m.add(
         "DuplicateTimeSeriesError",
         py.get_type::<DuplicateTimeSeriesError>(),

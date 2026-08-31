@@ -9,7 +9,7 @@ from infrastore import (
     Deterministic, Probabilistic, Scenarios,
     TimeSeriesType, OwnerCategory,
     SupplementalAttributeAssociation, ParentChildAssociation,
-    TimeSeriesError, NotFoundError, DuplicateTimeSeriesError,
+    TimeSeriesError, NotFoundError, OwnerMismatchError, DuplicateTimeSeriesError,
     DuplicateAssociationError, InvalidParameterError, IntegrityError, ReadOnlyStoreError,
 )
 ```
@@ -249,6 +249,8 @@ def read_by_id(
     start_time: datetime | None = None,
     len: int | None = None,
     count: int | None = None,
+    owner_id: int | None = None,
+    owner_category: OwnerCategory | None = None,
 ) -> SingleTimeSeries | NonSequentialTimeSeries | Deterministic | Probabilistic | Scenarios: ...
 # The single-id read, which also takes the slice -- in one call, because the
 # primary-key lookup already returns the row the window resolves against. `len`
@@ -256,10 +258,18 @@ def read_by_id(
 # passing the one that does not apply raises InvalidParameterError, as does a
 # `start_time` off the series' grid or an extent past its end. A window is
 # checked where read_by_ids_range clips. No keywords reads the whole series.
+# `owner_id` + `owner_category` is the owner guard -- see below.
 
-def remove_by_ids(self, ids: list[int]) -> int: ...
+def remove_by_ids(
+    self,
+    ids: list[int],
+    *,
+    owner_id: int | None = None,
+    owner_category: OwnerCategory | None = None,
+) -> int: ...
 # One all-or-nothing transaction: NotFoundError if any id names no row, and
-# nothing removed. A repeated id is removed, and counted, once.
+# nothing removed. A repeated id is removed, and counted, once. `owner_id` +
+# `owner_category` is the owner guard -- see below.
 def remove_by_filter(self, *, ...) -> int: ...
 # Same keyword-only filter arguments as list_metadata; one all-or-nothing
 # transaction; returns the count removed (0 when nothing matched).
@@ -395,6 +405,27 @@ with store.transaction():
 - **`remove_by_ids`** is the removal direction of the same reference: one all-or-nothing
   transaction, the count removed, and `NotFoundError` if any id names no row — in which case nothing
   is removed. A repeated id is removed, and counted, once.
+- **The owner guard.** Both id-addressed calls take an optional keyword-only `owner_id` +
+  `owner_category` — both together, or neither, since a component and a supplemental attribute can
+  carry the same integer id and half an owner would check less than the caller asked for:
+
+  ```python
+  store.read_by_id(id, owner_id=7, owner_category=OwnerCategory.Component)
+  store.remove_by_ids(ids, owner_id=7, owner_category=OwnerCategory.Component)
+  ```
+
+  The addressed row is held to that owner and one belonging to anyone else raises
+  `OwnerMismatchError` — distinct from `NotFoundError`, because the row is there and it is the
+  caller's belief about who owns it that is stale. For the removal the check and the delete are one
+  transaction, so a refused batch removes nothing.
+
+  A caller whose model says "this component's series" must pass the owner rather than confirm it in
+  a call of its own. An id is the whole address and it survives `replace_owner`, so a
+  `get_metadata_by_id` that confirms the owner and a `remove_by_ids` that then deletes are two calls
+  with a window between them — and a reassignment landing in that window makes the removal retire
+  the _new_ owner's series, the very thing the check was for. On the read side there is no window
+  either way, but the guard is still the cheaper spelling: the owner comes off the same row the
+  values are materialized from, where a separate check is a second round trip.
 - **`list_metadata`** returns a list of dicts (the same shape `get_metadata_by_id` returns for one
   row), each with the keys: `owner_id`, `owner_type`, `owner_category`, `time_series_type`, `name`,
   `data_hash` (hex string), `initial_timestamp` (RFC 3339 string, or `None` for non-sequential
@@ -981,6 +1012,7 @@ All inherit from `TimeSeriesError`:
 | Exception                   | Raised when                                           |
 | --------------------------- | ----------------------------------------------------- |
 | `NotFoundError`             | A key or array does not exist                         |
+| `OwnerMismatchError`        | An id-addressed call named an owner the row is not    |
 | `DuplicateTimeSeriesError`  | Adding a series whose key already exists              |
 | `DuplicateAssociationError` | Re-adding an attachment or edge that already exists   |
 | `InvalidParameterError`     | Bad arguments (bad feature type, malformed period, …) |
