@@ -17,9 +17,15 @@
 /// * [`Compat::Upgradable`] — the stamp is at least [`MIN_UPGRADABLE_VERSION`]
 ///   and older than this constant. The array layout is compatible, so the file
 ///   is read as-is; a *writable* open runs the catalog migration ladder and
-///   then re-stamps the file to this version. A read-only open of such a store
-///   reports [`crate::TimeSeriesError::CatalogMigrationRequired`] from the
-///   catalog side, which is the actionable error: open it once for writing.
+///   then re-stamps the file to this version. A read-only open never re-stamps,
+///   so the file keeps this stamp.
+///
+///   Whether that read-only open *succeeds* is decided by the catalog, not by
+///   this tier: [`crate::TimeSeriesError::CatalogMigrationRequired`] comes from
+///   a stale `CATALOG_SCHEMA_REVISION`, and an upgradable stamp over an
+///   already-current catalog opens fine. That combination is not hypothetical —
+///   it is exactly what an interrupted writable open leaves behind, and the
+///   ordering below is chosen to make it the harmless outcome.
 /// * [`Compat::Incompatible`] — anything older than
 ///   [`MIN_UPGRADABLE_VERSION`], anything newer than this constant, and
 ///   anything unparseable (including the `"unspecified"` a file with no stamp

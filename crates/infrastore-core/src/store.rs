@@ -1221,6 +1221,26 @@ impl Store {
         // anything; a stale catalog reports `CatalogMigrationRequired` from
         // step 2, which is the error that tells the caller what to do.
         let mut backend = open_backend(path, read_only)?;
+
+        // Whether these two files are halves of the same save is settled
+        // *before* either of them is written to. Opening the catalog runs the
+        // ladder, and a rebuild plus a re-stamp is a lot to do to an artifact
+        // that is then refused -- it mutates two of a user's files in order to
+        // report that they never belonged together. `read_generation_at` reads
+        // the stamp off a raw read-only connection, running no DDL.
+        //
+        // Only when the catalog file is actually there. A *missing* half is not
+        // a stamp disagreement, and reporting "catalog: none" would bury the
+        // one fact that helps -- which file is not where it should be. That
+        // case belongs to the open below, which names it. The post-open check
+        // still catches a catalog that opened but carries no stamp.
+        if sqlite_path.exists() {
+            check_generation_pair(
+                backend.generation(),
+                MetadataStore::read_generation_at(&sqlite_path)?,
+            )?;
+        }
+
         let metadata = match catalog {
             CatalogMode::Attached => MetadataStore::open_path(&sqlite_path, read_only)?,
             CatalogMode::InMemory => MetadataStore::open_path_into_memory(&sqlite_path, read_only)?,
@@ -1234,21 +1254,13 @@ impl Store {
                 backend.finish_format_upgrade()?;
             }
         }
-        // Stamps that disagree mean these files came from different saves — most
-        // likely a `persist_to` interrupted between its two renames. Comparing
-        // the `Option`s directly makes a lone stamp a mismatch too, which is the
-        // point: every path that writes a stamp writes both halves together
-        // (`Store::create`, `persist_to`, and `compact`, which carries the
-        // existing one across), so exactly one stamped half is a half swapped
-        // out on its own. Only *both* unstamped is legitimate — an artifact that
-        // predates stamping — and that compares equal.
-        let (h5, sqlite) = (backend.generation(), metadata.generation()?);
-        if h5 != sqlite {
-            return Err(TimeSeriesError::MismatchedArtifact {
-                h5: h5.unwrap_or_else(|| UNSTAMPED.into()),
-                sqlite: sqlite.unwrap_or_else(|| UNSTAMPED.into()),
-            });
-        }
+        // Re-checked against the opened catalog, which is the connection the
+        // rest of the session actually uses. The preflight above reads a
+        // separate handle, so this closes the gap between the two -- and it is
+        // the check that has always been here. A migration cannot change the
+        // generation (migrating is not a save), so on any ordinary path the two
+        // agree and this is free.
+        check_generation_pair(backend.generation(), metadata.generation()?)?;
         Ok(Self {
             backend,
             metadata,
@@ -4694,6 +4706,26 @@ struct RequestParts {
 /// [`WindowRead::Dense`](crate::reader) slicing (`Deterministic` → axis 1,
 /// `Probabilistic` / `Scenarios` → axis 2), so writes and reads agree on which
 /// axis the windows lie along.
+/// Refuse a pair of halves whose generation stamps disagree.
+///
+/// Stamps that disagree mean these files came from different saves — most
+/// likely a `persist_to` interrupted between its two renames. Comparing the
+/// `Option`s directly makes a lone stamp a mismatch too, which is the point:
+/// every path that writes a stamp writes both halves together
+/// (`Store::create`, `persist_to`, and `compact`, which carries the existing
+/// one across), so exactly one stamped half is a half swapped out on its own.
+/// Only *both* unstamped is legitimate — an artifact that predates stamping —
+/// and that compares equal.
+fn check_generation_pair(h5: Option<String>, sqlite: Option<String>) -> Result<()> {
+    if h5 != sqlite {
+        return Err(TimeSeriesError::MismatchedArtifact {
+            h5: h5.unwrap_or_else(|| UNSTAMPED.into()),
+            sqlite: sqlite.unwrap_or_else(|| UNSTAMPED.into()),
+        });
+    }
+    Ok(())
+}
+
 fn array_layout_for(ts_type: TimeSeriesType) -> ArrayLayout {
     match ts_type {
         TimeSeriesType::SingleTimeSeries | TimeSeriesType::DeterministicSingleTimeSeries => {

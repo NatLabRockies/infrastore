@@ -3811,6 +3811,49 @@ fn store_info_reports_the_catalog_schema_revision() {
     assert!(info.contains("data_format_version"), "{info}");
 }
 
+/// `upgrade` actually migrates a stale store — the behavior that distinguishes
+/// it from every read command.
+///
+/// The no-op test above cannot show this: a current store opens read-only just
+/// fine and reports revision 2 either way, so it would pass unchanged if this
+/// command quietly used the read-only opener and migrated nothing. This one
+/// backdates the catalog's revision stamp and walks the whole loop a user hits
+/// — a read refuses and names the remedy, `upgrade` applies it, the read works.
+#[test]
+fn upgrade_migrates_a_stale_catalog_and_unblocks_the_read_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("stale.h5");
+    run(&store, &["init"]);
+
+    let sqlite = dir.path().join("stale.h5.sqlite");
+    let revision = || -> i64 {
+        rusqlite::Connection::open(&sqlite)
+            .unwrap()
+            .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
+            .unwrap()
+    };
+    {
+        let conn = rusqlite::Connection::open(&sqlite).unwrap();
+        conn.execute("UPDATE schema_version SET version = 1", [])
+            .unwrap();
+    }
+    assert_eq!(revision(), 1);
+
+    // Every read command opens read-only, so it cannot migrate — it refuses and
+    // says what to do instead of failing somewhere deeper.
+    let err = run_err(&store, &["list"]);
+    assert!(err.contains("revision"), "{err}");
+    assert!(err.contains("open the store once for writing"), "{err}");
+
+    // `upgrade` is that writable open.
+    let out = run(&store, &["-f", "json", "upgrade"]);
+    assert!(out.contains("\"catalog_schema_revision\": 2"), "{out}");
+    assert_eq!(revision(), 2);
+
+    // And the read that just refused now works.
+    run(&store, &["list"]);
+}
+
 /// Both version fields report the *store*, not the build.
 ///
 /// `data_format_version` used to be the compile-time constant, which was

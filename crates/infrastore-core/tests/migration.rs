@@ -387,6 +387,42 @@ fn a_store_older_than_the_upgrade_floor_is_still_rejected_outright() {
     }
 }
 
+/// A mismatched pair is refused **before** either half is written to.
+///
+/// Opening the catalog runs the ladder and a successful one re-stamps the HDF5
+/// half, so checking the generation stamps afterwards means mutating two of a
+/// user's files in order to tell them the files never belonged together. The
+/// stale catalog here would migrate happily if it were ever opened as a
+/// catalog; the point of the test is that it is not.
+#[test]
+fn a_mismatched_pair_is_refused_before_anything_migrates() {
+    let (_dir, path) = stale_store();
+    assert_eq!(revision_on_disk(&path), 1);
+
+    // Give the catalog half a generation stamp the array half does not share,
+    // which is what an interrupted `persist_to` or a hand-swapped file looks
+    // like from the outside.
+    {
+        let conn = rusqlite::Connection::open(sqlite_path_of(&path)).unwrap();
+        conn.execute(
+            "UPDATE catalog_identity SET generation = 'not-the-h5s-generation'",
+            [],
+        )
+        .unwrap();
+    }
+
+    match open_store(path.as_path(), false) {
+        Err(TimeSeriesError::MismatchedArtifact { .. }) => {}
+        Err(other) => panic!("expected MismatchedArtifact, got {other:?}"),
+        Ok(_) => panic!("a mismatched pair must not open"),
+    }
+
+    // The catalog is still at revision 1: the ladder never ran. Before the
+    // preflight this assertion read 2, because the rejected artifact had
+    // already been rebuilt.
+    assert_eq!(revision_on_disk(&path), 1);
+}
+
 /// Relaxing the CHECK makes a type code the view does not name *reachable* for
 /// the first time. The view has to render such a row rather than fail on it —
 /// otherwise the next type to land breaks hand inspection of every store that

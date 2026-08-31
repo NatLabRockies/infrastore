@@ -270,9 +270,13 @@ arrays survive the round trip without coercion. One caveat:
 
 ## Catalog Revision and Read-Only Opens
 
-The server opens its store **read-only**, which means it cannot upgrade a catalog. A store written
-by an older build — one whose catalog is at an older `CATALOG_SCHEMA_REVISION` — is refused on open
-with `CatalogMigrationRequired`, surfaced as a gRPC status whose message names the remedy.
+The server opens its store **read-only**, which means it cannot upgrade a catalog. A store whose
+catalog is at an older `CATALOG_SCHEMA_REVISION` is refused with `CatalogMigrationRequired`.
+
+That refusal is a **startup failure, not an RPC status**: the store is opened once, by
+`CatalogStoreService::from_path`, before any service exists to answer a request. The process exits
+with the error on stderr and no client ever connects. Look for it in the server's own output, not in
+a response.
 
 **The store must be opened once for writing before the server can serve it.** The CLI command for
 exactly that is `infrastore --store <path> upgrade`, which does nothing but the writable open and is

@@ -57,8 +57,15 @@ Opening a store sorts its recorded version into one of three tiers, not two:
 - **Current** — the stamp equals this build's `DATA_FORMAT_VERSION`. Opened as-is.
 - **Upgradable** — the stamp is at least `MIN_UPGRADABLE_VERSION` and older. The array layout is
   compatible, so the file is read as it stands; a **writable** open runs the catalog migration
-  ladder and then re-stamps the file. A **read-only** open cannot change anything and reports
-  `CatalogMigrationRequired`, which names the remedy: open the store once for writing.
+  ladder and then re-stamps the file. A **read-only** open changes nothing and leaves the stamp
+  alone.
+
+  Whether a read-only open _succeeds_ is decided by the catalog half, not by this tier.
+  `CatalogMigrationRequired` comes from a stale `CATALOG_SCHEMA_REVISION`; an upgradable stamp
+  sitting over an already-current catalog opens fine. That is not a hypothetical combination — it is
+  what an interrupted writable open leaves behind, and the
+  [step ordering](../explanation/design-choices.md#the-ordering-that-makes-it-safe) is chosen to
+  make it the harmless outcome.
 - **Incompatible** — older than `MIN_UPGRADABLE_VERSION`, newer than this build, or unparseable
   (including an unstamped file). Fails with `IncompatibleFormat`, naming both versions. There is no
   upgrade path: regenerate the store with the matching build.

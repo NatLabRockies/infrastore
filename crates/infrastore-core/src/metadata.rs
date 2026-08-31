@@ -867,6 +867,42 @@ impl MetadataStore {
         Ok(())
     }
 
+    /// The generation stamp in the catalog file at `path`, read **without**
+    /// opening it as a catalog — no `init`, no DDL, no migration ladder.
+    ///
+    /// [`crate::Store::open_with_catalog`]'s preflight. The stamp says whether
+    /// these two files are halves of the same save, and that question has to be
+    /// answered *before* anything writes to either of them: migrating the
+    /// catalog of an artifact that is about to be rejected mutates a user's
+    /// file to report a failure.
+    ///
+    /// `None` for a catalog with no `catalog_identity` table — one predating the
+    /// stamp, which compares equal to an unstamped HDF5 half and is the
+    /// legitimate pre-stamp artifact.
+    ///
+    /// A path with no catalog file also reads as `None`, but callers should not
+    /// lean on that to detect one: a missing half is a different failure from a
+    /// stamp disagreement and deserves its own diagnostic.
+    /// [`crate::Store::open_with_catalog`] checks for the file before calling
+    /// this, so the better error still gets there first.
+    ///
+    /// Errors only if the file is there and cannot be read. A damaged catalog
+    /// is not silently treated as unstamped.
+    pub fn read_generation_at(path: &Path) -> Result<Option<String>> {
+        if !path.exists() {
+            return Ok(None);
+        }
+        let conn = open_read_only(path)?;
+        if !table_exists(&conn, "catalog_identity")? {
+            return Ok(None);
+        }
+        Ok(conn
+            .query_row("SELECT generation FROM catalog_identity LIMIT 1", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .optional()?)
+    }
+
     pub fn open_path(path: &Path, read_only: bool) -> Result<Self> {
         let conn = if read_only {
             open_read_only(path)?
