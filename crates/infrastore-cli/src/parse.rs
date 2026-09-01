@@ -352,6 +352,38 @@ pub fn parse_time_range(spec: Option<&str>) -> Result<Option<TimeRange>, String>
     )))
 }
 
+/// Parse the repeated `--at` instants of a projection read, with the one
+/// spelling they carry.
+///
+/// A vector is one request, so its instants have to agree on a spelling — the
+/// same rule [`parse_time_range`] applies to the two ends of a range, reported
+/// in the same words. An empty list names no bound and so has no spelling.
+pub fn parse_instants(specs: &[String]) -> Result<(Vec<DateTime<Utc>>, bool), String> {
+    let mut instants = Vec::with_capacity(specs.len());
+    let mut zoneless: Option<bool> = None;
+    for spec in specs {
+        let (instant, reference) = parse_timestamp_with_reference(spec)?;
+        match zoneless {
+            None => zoneless = Some(reference.is_zoneless()),
+            Some(first) if first != reference.is_zoneless() => {
+                return Err(format!(
+                    "the --at timestamps are spelled differently: '{spec}' is a {}, but an \
+                     earlier one is not. One read is one request; spell them all the way the \
+                     series is.",
+                    if reference.is_zoneless() {
+                        "bare wall clock"
+                    } else {
+                        "instant"
+                    }
+                ));
+            }
+            Some(_) => {}
+        }
+        instants.push(instant);
+    }
+    Ok((instants, zoneless.unwrap_or(false)))
+}
+
 /// Parse an owner category. `Component` / `SupplementalAttribute` are the
 /// canonical spellings — what the CLI prints, and what `template` now writes —
 /// but matching is case-insensitive and ignores underscores, so the

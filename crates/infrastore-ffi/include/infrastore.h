@@ -1357,6 +1357,57 @@ int32_t infrastore_bulk_result_get_single(const struct InfraStoreBulkReadHandle 
                                           char **out_component_field);
 
 /**
+ * Evaluate the `PersistentTimeSeries` filed under `id` at each instant in
+ * `at_unix_ms`, in the order given, and hand back the gathered values.
+ *
+ * The projection read: the step function's own hold-last lookup applied once
+ * per instant, so a caller asking "what were these values on each of my
+ * simulation timestamps" gets the answer from the store that owns the rule
+ * rather than re-deriving it beside a copy of the breakpoints. It makes no
+ * policy choice — the caller names the instants, and each one resolves by the
+ * documented rule or the call fails.
+ *
+ * A **gather, not a slice**: `at_unix_ms` may be unsorted and may repeat, each
+ * instant resolves independently, and the caller's order is the output order.
+ * `at_len` of 0 yields an empty array of the right element shape rather than an
+ * error.
+ *
+ * `out_shape` is `[at_len, *E]` where `*E` is the series' per-step element
+ * shape, and `out_dtype` and the row layout are the series' own — so the bytes
+ * decode exactly as those from `infrastore_bulk_result_get_persistent` do,
+ * composite `element_type` included.
+ *
+ * `zoneless` says how the caller spelled the instants, exactly as on
+ * `infrastore_store_read_by_ids_range`: they are query bounds, and one spelled
+ * the other way than the series is is refused rather than reinterpreted.
+ * `at_len` of 0 names no bound and so is not checked.
+ *
+ * Returns `INFRASTORE_ERR_NOT_FOUND` if `id` names no row, and
+ * `INFRASTORE_ERR_INVALID_PARAMETER` if it names any other stored type (a
+ * projection over a `SingleTimeSeries` would need a resampling policy, which is
+ * the caller's choice to make) or if any instant precedes the first breakpoint.
+ * Nothing is written unless the call returns `INFRASTORE_OK`.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle. `at_unix_ms` must point to `at_len`
+ * readable `i64`s (it may be null only when `at_len` is 0). Every out pointer
+ * must be valid for writing its indicated value. On `INFRASTORE_OK` the caller
+ * owns `*out_shape` and `*out_data`, which must be released exactly once with
+ * `infrastore_buffer_free_i64` and `infrastore_buffer_free_u8` respectively.
+ */
+int32_t infrastore_store_read_projected(const struct InfraStore *handle,
+                                        int64_t id,
+                                        const int64_t *at_unix_ms,
+                                        uint64_t at_len,
+                                        bool zoneless,
+                                        int32_t *out_dtype,
+                                        int64_t **out_shape,
+                                        uint64_t *out_shape_len,
+                                        uint8_t **out_data,
+                                        uint64_t *out_data_byte_len);
+
+/**
  * Read many series named by their catalog association `id`, in the order the
  * ids are given. The id-addressed counterpart of `infrastore_store_bulk_read`:
  * results come back in the same `InfraStoreBulkReadHandle`, so a caller reads

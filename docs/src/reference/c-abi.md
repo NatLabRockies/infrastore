@@ -210,6 +210,23 @@ precedes it is refused with `INFRASTORE_ERR_INVALID_PARAMETER` rather than clamp
 starts mid-step begins at the breakpoint _in force_ there, so the returned slice always defines a
 value at the caller's start.
 
+`infrastore_store_read_projected` is the whole-vector form — the step function evaluated at each
+instant the caller names, gathered in that order:
+
+```c
+int32_t infrastore_store_read_projected(const struct InfraStore *handle, int64_t id, const int64_t *at_unix_ms, uint64_t at_len, bool zoneless, int32_t *out_dtype, int64_t **out_shape, uint64_t *out_shape_len, uint8_t **out_data, uint64_t *out_data_byte_len);
+```
+
+`out_shape` is `[at_len, *E]` and the bytes are laid out exactly as
+`infrastore_bulk_result_get_persistent`'s are, so the same decoding reads both. A **gather, not a
+slice**: `at_unix_ms` may be unsorted and may repeat, and its order is the output order; `at_len` of
+0 yields an empty array rather than an error. `zoneless` says how the caller spelled the instants —
+they are query bounds, and one spelled the other way than the series is is refused rather than
+reinterpreted. `INFRASTORE_ERR_INVALID_PARAMETER` for any other stored type (a projection over a
+`SingleTimeSeries` would need a resampling policy, which is the caller's choice to make) and for an
+instant before the first breakpoint; `INFRASTORE_ERR_NOT_FOUND` for a stale id. The caller owns
+`*out_shape` and `*out_data`.
+
 `infrastore_bulk_result_persistent_index_in_force_at` answers that lookup without the caller
 re-implementing it: it writes the 0-based row in force at `at_unix_ms` — the greatest breakpoint
 `<= at_unix_ms` — into `out_row`, indexing both `out_timestamps` and the value rows. It sits on the

@@ -201,6 +201,30 @@ the two reach different formats:
 So `-f csv get --limit 3` still writes every row; thin a pipe with `--stride`, or slice it with
 `--time-range`. The table's own default cap is 50 rows, lifted by `--full`.
 
+#### `get --at`: evaluating a step function
+
+A `PersistentTimeSeries` prints as its breakpoints and their values, because those rows are the
+complete description of the series. `--at` asks the other question — what is the value _in force_ at
+an instant — and it is repeatable:
+
+```sh
+infrastore --store demo.h5 get --name fuel_cost --type PersistentTimeSeries \
+    --at 2024-03-15T00:00:00Z --at 2024-08-01T00:00:00Z
+```
+
+Each `--at` resolves to the greatest breakpoint `<= it`, held forward past the last one forever. The
+timestamp column is what you asked for rather than breakpoints, and it is a **gather, not a slice**:
+repeat an instant and it appears twice, in the order you gave. An instant before the first
+breakpoint is an error, not a clamp — a step function has no value there — and one bad instant fails
+the whole call rather than shortening the answer.
+
+It applies to `PersistentTimeSeries` alone. Every other type would need a resampling policy —
+interpolate? forward-fill? — which is your choice to make and not the store's, so `--at` on one
+names the type and refuses. `--at` and `--time-range` ask different questions (evaluate at instants
+versus slice stored breakpoints), so combining them is refused rather than silently answering one;
+`--plot` renders a stored series, so it is refused too. All the `--at` instants must be spelled
+alike, the way the series is.
+
 ### Write data
 
 | Command         | Purpose                                                                         |
@@ -389,7 +413,7 @@ infrastore --store <PATH> add --descriptor <FILE.json|-> [--csv <FILE.csv>] [--d
 infrastore --store <PATH> add --csv <FILE.csv> --owner-id <I> --owner-type <T> --name <N> --type <T> --element-type <E> [DESCRIPTOR FIELDS...]
 infrastore --store <PATH> merge --from <PATH.h5> [SELECTOR...] [--replace] [--dry-run]
 infrastore --store <PATH> list    [SELECTOR...] [--limit N] [--wide]
-infrastore --store <PATH> get     [SELECTOR...] [--time-range START..END] [--limit N | --full] [--tail] [--stride N] [--plot [--plot-width COLS]] [--window N | --issue-time <TS>]
+infrastore --store <PATH> get     [SELECTOR...] [--time-range START..END | --at <TS> ...] [--limit N | --full] [--tail] [--stride N] [--plot [--plot-width COLS]] [--window N | --issue-time <TS>]
 infrastore --store <PATH> grid    [SELECTOR...] [--time-range START..END] [--limit N | --full] [--label <auto|owner|full>]
 infrastore --store <PATH> plot    [SELECTOR...] [--out <FILE.svg|FILE.html|->] [--kind <line|duration|heatmap|fan|overlay>] [--time-range START..END] [--title <T>] [--width W] [--height H] [--window N] [--limit N]
 infrastore --store <PATH> info    [SELECTOR...] [--no-stats]

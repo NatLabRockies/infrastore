@@ -4032,6 +4032,109 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_single(
     INFRASTORE_OK
 }
 
+/// Evaluate the `PersistentTimeSeries` filed under `id` at each instant in
+/// `at_unix_ms`, in the order given, and hand back the gathered values.
+///
+/// The projection read: the step function's own hold-last lookup applied once
+/// per instant, so a caller asking "what were these values on each of my
+/// simulation timestamps" gets the answer from the store that owns the rule
+/// rather than re-deriving it beside a copy of the breakpoints. It makes no
+/// policy choice — the caller names the instants, and each one resolves by the
+/// documented rule or the call fails.
+///
+/// A **gather, not a slice**: `at_unix_ms` may be unsorted and may repeat, each
+/// instant resolves independently, and the caller's order is the output order.
+/// `at_len` of 0 yields an empty array of the right element shape rather than an
+/// error.
+///
+/// `out_shape` is `[at_len, *E]` where `*E` is the series' per-step element
+/// shape, and `out_dtype` and the row layout are the series' own — so the bytes
+/// decode exactly as those from `infrastore_bulk_result_get_persistent` do,
+/// composite `element_type` included.
+///
+/// `zoneless` says how the caller spelled the instants, exactly as on
+/// `infrastore_store_read_by_ids_range`: they are query bounds, and one spelled
+/// the other way than the series is is refused rather than reinterpreted.
+/// `at_len` of 0 names no bound and so is not checked.
+///
+/// Returns `INFRASTORE_ERR_NOT_FOUND` if `id` names no row, and
+/// `INFRASTORE_ERR_INVALID_PARAMETER` if it names any other stored type (a
+/// projection over a `SingleTimeSeries` would need a resampling policy, which is
+/// the caller's choice to make) or if any instant precedes the first breakpoint.
+/// Nothing is written unless the call returns `INFRASTORE_OK`.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle. `at_unix_ms` must point to `at_len`
+/// readable `i64`s (it may be null only when `at_len` is 0). Every out pointer
+/// must be valid for writing its indicated value. On `INFRASTORE_OK` the caller
+/// owns `*out_shape` and `*out_data`, which must be released exactly once with
+/// `infrastore_buffer_free_i64` and `infrastore_buffer_free_u8` respectively.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn infrastore_store_read_projected(
+    handle: *const InfraStoreHandle,
+    id: i64,
+    at_unix_ms: *const i64,
+    at_len: u64,
+    zoneless: bool,
+    out_dtype: *mut i32,
+    out_shape: *mut *mut i64,
+    out_shape_len: *mut u64,
+    out_data: *mut *mut u8,
+    out_data_byte_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = deref_handle!(ref handle);
+    if out_dtype.is_null()
+        || out_shape.is_null()
+        || out_shape_len.is_null()
+        || out_data.is_null()
+        || out_data_byte_len.is_null()
+    {
+        set_error("an out pointer is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let count = at_len as usize;
+    if count != 0 && at_unix_ms.is_null() {
+        set_error("at_unix_ms pointer is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let raw = if count == 0 {
+        &[][..]
+    } else {
+        unsafe { slice::from_raw_parts(at_unix_ms, count) }
+    };
+    let mut at = Vec::with_capacity(count);
+    for &ms in raw {
+        match unix_ms_to_datetime(ms) {
+            Some(t) => at.push(t),
+            None => {
+                set_error(format!("timestamp {ms} ms is out of range"));
+                return INFRASTORE_ERR_INVALID_PARAMETER;
+            }
+        }
+    }
+    let projected = match store.inner.read_projected(
+        core_lib::TimeSeriesId(id),
+        core_lib::Instants::spelled(&at, zoneless),
+    ) {
+        Ok(a) => a,
+        Err(e) => return map_core_error(e),
+    };
+    let shape: Vec<i64> = projected.shape.iter().map(|&d| d as i64).collect();
+    let (shape_ptr, shape_len) = vec_into_raw(shape);
+    let (data_ptr, data_byte_len) = vec_into_raw(projected.bytes);
+    unsafe {
+        *out_dtype = projected.dtype.code();
+        *out_shape = shape_ptr;
+        *out_shape_len = shape_len;
+        *out_data = data_ptr;
+        *out_data_byte_len = data_byte_len;
+    }
+    INFRASTORE_OK
+}
+
 /// Read many series named by their catalog association `id`, in the order the
 /// ids are given. The id-addressed counterpart of `infrastore_store_bulk_read`:
 /// results come back in the same `InfraStoreBulkReadHandle`, so a caller reads
@@ -8764,6 +8867,161 @@ mod abi_tests {
             infrastore_bulk_result_free(result);
             infrastore_store_free(store);
         }
+    }
+
+    /// The projection read hands a C caller the gathered values, in the order
+    /// the instants were given, with the series' own dtype and element shape.
+    #[test]
+    fn store_read_projected_gathers_the_values_in_force() {
+        let store = abi_create_in_memory();
+        let owner_type = CString::new("Gen").unwrap();
+        let name = CString::new("curve").unwrap();
+        let et = CString::new("f64").unwrap();
+        let breakpoints: Vec<i64> = vec![0, 3_600_000, 10_800_000];
+        let bytes = to_le(&[10.0, 20.0, 30.0]);
+        let dims = [3u64];
+        let mut id = 0i64;
+        assert_eq!(
+            unsafe {
+                infrastore_store_add_persistent(
+                    store,
+                    7,
+                    owner_type.as_ptr(),
+                    0,
+                    name.as_ptr(),
+                    breakpoints.as_ptr(),
+                    breakpoints.len() as u64,
+                    et.as_ptr(),
+                    1,
+                    dims.as_ptr(),
+                    bytes.as_ptr(),
+                    bytes.len() as u64,
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    &mut id,
+                )
+            },
+            INFRASTORE_OK,
+            "add failed: {}",
+            last_error()
+        );
+
+        // Unsorted, with a repeat: a gather preserves the caller's order.
+        let at: Vec<i64> = vec![7_200_000, 0, 7_200_000, 86_400_000];
+        let mut dtype = -1i32;
+        let mut shape_ptr: *mut i64 = ptr::null_mut();
+        let mut shape_len = 0u64;
+        let mut data_ptr: *mut u8 = ptr::null_mut();
+        let mut data_len = 0u64;
+        assert_eq!(
+            unsafe {
+                infrastore_store_read_projected(
+                    store,
+                    id,
+                    at.as_ptr(),
+                    at.len() as u64,
+                    false,
+                    &mut dtype,
+                    &mut shape_ptr,
+                    &mut shape_len,
+                    &mut data_ptr,
+                    &mut data_len,
+                )
+            },
+            INFRASTORE_OK,
+            "read_projected failed: {}",
+            last_error()
+        );
+        assert_eq!(dtype, core_lib::Dtype::F64.code());
+        let shape = unsafe { slice::from_raw_parts(shape_ptr, shape_len as usize) };
+        assert_eq!(shape, &[4]);
+        let raw = unsafe { slice::from_raw_parts(data_ptr, data_len as usize) };
+        let values: Vec<f64> = raw
+            .chunks_exact(8)
+            .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(values, vec![20.0, 10.0, 20.0, 30.0]);
+        unsafe {
+            infrastore_buffer_free_i64(shape_ptr, shape_len);
+            infrastore_buffer_free_u8(data_ptr, data_len);
+        }
+
+        // No instants is an empty answer, not an error.
+        let mut shape_ptr2: *mut i64 = ptr::null_mut();
+        let mut shape_len2 = 0u64;
+        let mut data_ptr2: *mut u8 = ptr::null_mut();
+        let mut data_len2 = 0u64;
+        assert_eq!(
+            unsafe {
+                infrastore_store_read_projected(
+                    store,
+                    id,
+                    ptr::null(),
+                    0,
+                    false,
+                    &mut dtype,
+                    &mut shape_ptr2,
+                    &mut shape_len2,
+                    &mut data_ptr2,
+                    &mut data_len2,
+                )
+            },
+            INFRASTORE_OK
+        );
+        assert_eq!(data_len2, 0);
+        assert_eq!(
+            unsafe { slice::from_raw_parts(shape_ptr2, shape_len2 as usize) },
+            &[0]
+        );
+        unsafe {
+            infrastore_buffer_free_i64(shape_ptr2, shape_len2);
+            infrastore_buffer_free_u8(data_ptr2, data_len2);
+        }
+
+        // An instant before the first breakpoint fails the whole call.
+        let bad: Vec<i64> = vec![0, -1];
+        assert_eq!(
+            unsafe {
+                infrastore_store_read_projected(
+                    store,
+                    id,
+                    bad.as_ptr(),
+                    bad.len() as u64,
+                    false,
+                    &mut dtype,
+                    &mut shape_ptr,
+                    &mut shape_len,
+                    &mut data_ptr,
+                    &mut data_len,
+                )
+            },
+            INFRASTORE_ERR_INVALID_PARAMETER
+        );
+        // And so does an id naming no row.
+        assert_eq!(
+            unsafe {
+                infrastore_store_read_projected(
+                    store,
+                    9999,
+                    at.as_ptr(),
+                    at.len() as u64,
+                    false,
+                    &mut dtype,
+                    &mut shape_ptr,
+                    &mut shape_len,
+                    &mut data_ptr,
+                    &mut data_len,
+                )
+            },
+            INFRASTORE_ERR_NOT_FOUND
+        );
+
+        unsafe { infrastore_store_free(store) };
     }
 
     /// The lookup is keyed on the stored type: asking a `NonSequentialTimeSeries`

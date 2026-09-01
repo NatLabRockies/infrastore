@@ -245,6 +245,74 @@ end
     close!(store)
 end
 
+@testset "persistent read_projected" begin
+    store = Store(in_memory=true)
+    breakpoints = [DateTime(2024, m, 1) for m in (1, 4, 7, 10)]
+    series = PersistentTimeSeries(breakpoints, Float64[10, 40, 70, 100], "gas_price")
+    id = add_time_series!(store, 7, "ThermalStandard", Component, series)
+
+    # A gather, not a slice: unsorted, with a repeat, and the caller's order is
+    # the output order.
+    at = [DateTime(2024, 9, 1), DateTime(2024, 1, 1), DateTime(2024, 9, 1),
+        DateTime(2024, 5, 1)]
+    @test read_projected(store, id, at) == Float64[70, 10, 70, 40]
+
+    # Every month of the year, against hold-last computed here.
+    months = [DateTime(2024, m, 1) for m in 1:12]
+    @test read_projected(store, id, months) ==
+        Float64[10, 10, 10, 40, 40, 40, 70, 70, 70, 100, 100, 100]
+
+    # Past the last breakpoint the final value is held forward forever.
+    @test read_projected(store, id, [DateTime(2031, 5, 4)]) == Float64[100]
+    # No instants is an empty answer rather than an error.
+    @test isempty(read_projected(store, id, DateTime[]))
+    # Before the first breakpoint the step function is undefined, and one bad
+    # instant fails the whole call rather than returning a partial answer.
+    @test_throws InfraStore.InvalidParameterError read_projected(
+        store, id, [DateTime(2024, 5, 1), DateTime(2023, 12, 31)]
+    )
+    # A stale id is a failure, as it is for every other read.
+    @test_throws InfraStore.NotFoundError read_projected(store, 9999, months)
+
+    # Only a step function has a value at an arbitrary instant; every other type
+    # would need a resampling policy, which is the caller's choice to make.
+    nsts_id = add_time_series!(
+        store, 8, "ThermalStandard", Component,
+        NonSequentialTimeSeries(breakpoints, Float64[10, 40, 70, 100], "irregular"),
+    )
+    @test_throws InfraStore.InvalidParameterError read_projected(store, nsts_id, months)
+
+    close!(store)
+end
+
+@testset "a projected composite row decodes as its element type" begin
+    # A step function over cost curves: the projection copies rows whole, so a
+    # read hands back curves rather than the packing they are stored as.
+    store = Store(in_memory=true)
+    curves = [
+        [(x=10.0, y=100.0), (x=20.0, y=210.0)],
+        [(x=12.0, y=130.0), (x=22.0, y=250.0)],
+    ]
+    values = [PiecewiseLinear(c) for c in curves]
+    series = PersistentTimeSeries(
+        [DateTime(2024, 1, 1), DateTime(2024, 7, 1)], values, "fuel_cost_curve";
+        # The non-curve fields are per-series constants, not part of the value at
+        # an instant, so they ride in application_data.
+        application_data="{\"volume_hours\":24,\"cost_curve_type\":\"piecewise\"}",
+    )
+    id = add_time_series!(store, 1, "ThermalStandard", Component, series)
+
+    at = [DateTime(2024, 3, 1), DateTime(2024, 9, 1), DateTime(2024, 1, 1)]
+    projected = read_projected(store, id, at)
+    @test projected == [values[1], values[2], values[1]]
+    # `raw=true` hands back the packing instead, one row per instant.
+    packed = read_projected(store, id, at; raw=true)
+    @test size(packed, 1) == 3
+    @test packed[1, :] == packed[3, :]
+
+    close!(store)
+end
+
 @testset "StaticReader over persistent columns on different breakpoints" begin
     store = Store(in_memory=true)
     months(ms) = [DateTime(2024, m, 1) for m in ms]

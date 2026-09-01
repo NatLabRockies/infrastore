@@ -3900,6 +3900,83 @@ fn a_persistent_time_series_round_trips_through_add_get_and_export() {
     );
 }
 
+/// `get --at` evaluates the step function at instants the caller names.
+///
+/// The one question `get` could not answer about this type: its rows are the
+/// whole series, but a caller reading a monthly curve at its own simulation
+/// timestamps wants the value *in force* at each.
+#[test]
+fn get_at_evaluates_a_step_function_at_named_instants() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("steps.h5");
+    write(
+        dir.path(),
+        "gas.csv",
+        "timestamp,value\n\
+         2024-01-01T00:00:00Z,3.5\n\
+         2024-04-01T00:00:00Z,4.25\n\
+         2024-07-01T00:00:00Z,5.0\n",
+    );
+    let descriptor = write(
+        dir.path(),
+        "gas.json",
+        r#"{"owner_id": 7, "owner_type": "ThermalStandard", "name": "gas_price",
+            "type": "PersistentTimeSeries", "element_type": "f64",
+            "csv": "gas.csv"}"#,
+    );
+    run(
+        &store,
+        &["add", "--descriptor", descriptor.to_str().unwrap()],
+    );
+
+    // Mid-step, exactly on a breakpoint, and past the last one -- held forward.
+    let got = run(
+        &store,
+        &[
+            "-f",
+            "csv",
+            "get",
+            "--name",
+            "gas_price",
+            "--at",
+            "2024-02-15T00:00:00Z",
+            "--at",
+            "2024-04-01T00:00:00Z",
+            "--at",
+            "2025-12-31T00:00:00Z",
+        ],
+    );
+    let rows = data_lines(&got);
+    assert_eq!(rows.len(), 3, "{got}");
+    assert!(rows[0].starts_with("2024-02-15T00:00:00"), "{got}");
+    assert!(rows[0].contains("3.5"), "{got}");
+    assert!(rows[1].contains("4.25"), "{got}");
+    assert!(rows[2].contains('5'), "{got}");
+
+    // A gather, not a slice: the caller's order is the output order, repeats
+    // included. The timestamp column is what was asked for, not breakpoints.
+    let gathered = run(
+        &store,
+        &[
+            "-f",
+            "csv",
+            "get",
+            "--name",
+            "gas_price",
+            "--at",
+            "2024-08-01T00:00:00Z",
+            "--at",
+            "2024-02-01T00:00:00Z",
+            "--at",
+            "2024-08-01T00:00:00Z",
+        ],
+    );
+    let rows = data_lines(&gathered);
+    assert_eq!(rows.len(), 3, "{gathered}");
+    assert!(rows[0].contains('5') && rows[2].contains('5'), "{gathered}");
+    assert!(rows[1].contains("3.5"), "{gathered}");
+}
+
 /// `template` hands back a descriptor for the new type, and it is one `add`
 /// actually accepts.
 #[test]

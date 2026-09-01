@@ -80,7 +80,12 @@ Examples:
   infrastore --store demo.h5 get --name load --stride 24 --full
   infrastore --store demo.h5 get --name load_forecast --type Deterministic --window 0
   infrastore --store demo.h5 -f csv get --name load \\
-      --time-range 2024-01-01T00:00:00Z..2024-01-01T06:00:00Z";
+      --time-range 2024-01-01T00:00:00Z..2024-01-01T06:00:00Z
+  infrastore --store demo.h5 get --name fuel_cost --type PersistentTimeSeries \\
+      --at 2024-03-15T00:00:00Z --at 2024-08-01T00:00:00Z
+
+--at evaluates a step function at the instants you name, holding each
+breakpoint's value forward. Repeat it; the order you give is the order out.";
 
 pub const GRID: &str = "\
 Examples:

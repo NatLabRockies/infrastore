@@ -497,6 +497,23 @@ breakpoint, where a non-empty window errors. Every read populates the returned s
 `application_data` field from the stored association, so a binding's reconstruction tag comes back
 with the data — no separate `get_metadata_by_id` call is needed.
 
+`read_projected` is the store-side form of the same rule over a whole vector of instants:
+
+```julia
+read_projected(store, id, at; raw=false, types=DEFAULT_ELEMENT_TYPES) -> Array
+```
+
+The value in force at each instant in `at`, gathered in that order, shaped
+`(length(at),
+element_dims...)`. A **gather, not a slice**: `at` may be unsorted and may repeat, and
+its order is the output order; an empty `at` returns an empty array rather than throwing. A
+composite `element_type` is decoded into values the way [`read_by_id`](#reading) decodes one — a
+projection copies rows whole, so a step function over cost curves comes back as curves, and
+`raw=true` hands back the packing. Throws `InvalidParameterError` for any other stored type
+(projecting a `SingleTimeSeries` would need a resampling policy, which is the caller's choice) and
+for an instant before the first breakpoint; the instants are query bounds and must be spelled the
+way the series is.
+
 The step function's lookup is callable on the struct, so a consumer never re-implements hold-last:
 
 ```julia

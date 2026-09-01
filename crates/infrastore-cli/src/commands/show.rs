@@ -286,6 +286,9 @@ impl Selection {
 /// Everything `get` was asked for beyond the selector.
 pub struct GetOptions<'a> {
     pub time_range: Option<&'a str>,
+    /// Instants to evaluate a `PersistentTimeSeries` at, from repeated `--at`.
+    /// Empty means an ordinary read of the stored rows.
+    pub at: &'a [String],
     pub rows: RowWindow,
     /// Draw a terminal sparkline instead of the value rows.
     pub plot: bool,
@@ -293,6 +296,50 @@ pub struct GetOptions<'a> {
     /// Restrict a forecast to one window, by index or by issue time.
     pub window: Option<usize>,
     pub issue_time: Option<&'a str>,
+}
+
+/// `get --at`: evaluate a step function at the instants the caller named.
+///
+/// The one thing `get` could not answer about a `PersistentTimeSeries`. Its rows
+/// are the complete description of the series, so printing them is right by
+/// default — but a caller reading a monthly price curve at its own simulation
+/// timestamps wants the value *in force* at each, and expanding the rows needs a
+/// target grid only the caller has. `--at` is that grid, named one instant at a
+/// time.
+///
+/// The rendered timestamp column is the instants asked for, not breakpoints, so
+/// a repeat renders twice and the caller's order is preserved — this is a
+/// gather, not a slice, and the output says so.
+fn get_projected(
+    store: &infrastore_core::Store,
+    meta: &TimeSeriesMetadata,
+    key: infrastore_core::TimeSeriesId,
+    opts: &GetOptions<'_>,
+    format: Format,
+) -> Result<(), String> {
+    if opts.time_range.is_some() {
+        return Err(
+            "--at and --time-range ask different questions: a range slices the stored \
+                    breakpoints, while --at evaluates the step function at instants you name. \
+                    Use one or the other."
+                .to_string(),
+        );
+    }
+    if opts.plot {
+        return Err(
+            "--plot renders a stored series; --at asks for its value at instants you name. \
+             Use --at with a table or -f csv/json."
+                .to_string(),
+        );
+    }
+    reject_forecast_flags(opts, meta)?;
+    let (instants, zoneless) = parse::parse_instants(opts.at)?;
+    let projected = store
+        .read_projected(key, infrastore_core::Instants::spelled(&instants, zoneless))
+        .map_err(|e| e.to_string())?;
+    // Spelled the way the series is, like every other timestamp this prints.
+    let ts = fields::render_timestamps(&instants, meta.time_reference.as_ref());
+    render_sequential(meta, &ts, &projected, format, opts.rows)
 }
 
 /// `get`: read a single series and render its values.
@@ -304,6 +351,9 @@ pub fn get(
 ) -> Result<(), String> {
     let store = store_access::open_readonly(store_path)?;
     let (meta, key) = selector.resolve(&store)?;
+    if !opts.at.is_empty() {
+        return get_projected(&store, &meta, key, opts, format);
+    }
     let range = parse::parse_time_range(opts.time_range)?;
     let data = match range {
         Some(r) => store.read_by_ids_range(&[key], r).map(|mut v| v.remove(0)),

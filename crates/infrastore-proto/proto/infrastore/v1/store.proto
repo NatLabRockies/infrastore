@@ -17,6 +17,9 @@ service CatalogStore {
   // Act: every read takes the id an identify call handed back.
   rpc ReadById               (ReadByIdReq)               returns (ReadByIdResp);
   rpc ReadByIds              (ReadByIdsReq)              returns (ReadByIdsResp);
+  // Evaluate a PersistentTimeSeries at instants the client names. A read, so it
+  // belongs on a read-only service.
+  rpc ReadProjected          (ReadProjectedReq)          returns (ReadProjectedResp);
 
   // Aggregates and maintenance.
   rpc GetResolutions         (GetResolutionsReq)         returns (GetResolutionsResp);
@@ -323,6 +326,35 @@ message ReadByIdsReq {
 }
 message ReadByIdsResp {
   repeated ReadByIdResp items = 1;   // aligned with the request ids
+}
+
+// ---- ReadProjected ----
+//
+// The step-function evaluation, for a PersistentTimeSeries only: the value in
+// force at each named instant, gathered in the order asked for. Every other
+// stored type is refused, because projecting one would need a resampling policy
+// that is the client's choice to make, where hold-last needs no choice at all.
+message ReadProjectedReq {
+  // The catalog association id, from a ListMetadata row.
+  int64           id              = 1;
+  // The instants to evaluate at. A gather, not a slice: they may be unsorted and
+  // may repeat, and this order is the response order. Empty yields an empty
+  // array rather than an error.
+  repeated string at_rfc3339      = 2;
+  // See ReadByIdReq.bounds_zoneless. These instants are query bounds like any
+  // other and must be spelled the way the series is; an empty list names no
+  // bound and so is not checked.
+  optional bool   bounds_zoneless = 3;
+}
+message ReadProjectedResp {
+  // [len(at_rfc3339), *element_shape] — the series' own per-step shape, so a
+  // row is laid out exactly as one of ReadByIdResp.value_bytes is.
+  repeated uint64 shape        = 1;
+  bytes           value_bytes  = 2;   // raw little-endian, row-major
+  // Canonical ElementType string, carried for the same reason ReadByIdResp
+  // carries it: decoding stays client-side, and a projection leaves the element
+  // type alone, so the same codec reads this response and that one.
+  string          element_type = 3;
 }
 
 // GetDetailedCounts.

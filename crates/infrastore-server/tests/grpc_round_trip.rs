@@ -343,6 +343,33 @@ async fn persistent_round_trip_over_grpc() {
     let sliced = sliced.as_persistent().unwrap();
     assert_eq!(sliced.timestamps, vec![month(4), month(7)]);
     assert_eq!(sliced.data.to_f64_vec().unwrap(), vec![40.0, 70.0]);
+
+    // And the projection read: the value in force at each instant the caller
+    // names, gathered in that order. Unsorted, with a repeat -- a gather, not a
+    // slice -- and one instant past the last breakpoint, held forward.
+    let at = vec![month(9), month(2), month(9), month(12)];
+    let projected = client.read_projected(id, &at, false).await.unwrap();
+    assert_eq!(projected.shape, vec![4]);
+    assert_eq!(
+        projected.to_f64_vec().unwrap(),
+        vec![70.0, 10.0, 70.0, 100.0]
+    );
+
+    // No instants is an empty answer rather than an error.
+    let empty = client.read_projected(id, &[], false).await.unwrap();
+    assert_eq!(empty.shape, vec![0]);
+    assert!(empty.bytes.is_empty());
+
+    // Before the first breakpoint a step function is undefined, and one bad
+    // instant fails the whole call rather than shortening the answer.
+    let err = client
+        .read_projected(id, &[month(2), month(1) - Duration::milliseconds(1)], false)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("before the first breakpoint"),
+        "the server's reason should reach the client: {err}"
+    );
 }
 
 #[tokio::test]
