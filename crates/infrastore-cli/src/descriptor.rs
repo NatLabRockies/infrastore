@@ -9,8 +9,8 @@ use std::path::Path;
 
 use infrastore_core::{
     AddRequest, Descriptors, Deterministic, ElementType, Features, NonSequentialTimeSeries,
-    Probabilistic, Scenarios, SingleTimeSeries, TimeReference, TimeSeriesData, TimeSeriesType,
-    UnitSystem,
+    PersistentTimeSeries, Probabilistic, Scenarios, SingleTimeSeries, TimeReference,
+    TimeSeriesData, TimeSeriesType, UnitSystem,
 };
 use serde::Deserialize;
 
@@ -195,6 +195,20 @@ impl CsvLayout {
     }
 }
 
+/// The two static types that carry their instants explicitly rather than on a
+/// grid: `NonSequentialTimeSeries` and `PersistentTimeSeries`.
+///
+/// The CLI treats them identically on the ingest side — same CSV shape, same
+/// timestamp column, same spelling inference — because the difference between
+/// them is what a *read* between those instants means, which no ingest path
+/// sees.
+fn is_irregular_static(ts_type: TimeSeriesType) -> bool {
+    matches!(
+        ts_type,
+        TimeSeriesType::NonSequentialTimeSeries | TimeSeriesType::PersistentTimeSeries
+    )
+}
+
 /// Which physical layout a companion CSV is in, read off its header row.
 ///
 /// `export` writes timestamps for every type, so detecting the layout from the
@@ -209,7 +223,11 @@ fn csv_layout(header: &[String], ts_type: TimeSeriesType) -> CsvLayout {
     let first_is = |name: &str| col(0).as_deref() == Some(name);
 
     match ts_type {
-        TimeSeriesType::NonSequentialTimeSeries => CsvLayout::Timestamped,
+        // Both irregular static types carry their instants explicitly, so both
+        // read a `timestamp,value...` CSV.
+        TimeSeriesType::NonSequentialTimeSeries | TimeSeriesType::PersistentTimeSeries => {
+            CsvLayout::Timestamped
+        }
         TimeSeriesType::SingleTimeSeries => {
             if first_is("timestamp") {
                 CsvLayout::Timestamped
@@ -426,7 +444,7 @@ impl Descriptor {
         ts_type: TimeSeriesType,
         csv: &'a CsvData,
     ) -> Option<&'a str> {
-        if ts_type == TimeSeriesType::NonSequentialTimeSeries {
+        if is_irregular_static(ts_type) {
             return csv.first_timestamp();
         }
         self.initial_timestamp.as_deref()
@@ -452,7 +470,7 @@ impl Descriptor {
     /// so an agreeing file pays one parse per row and a disagreeing one stops
     /// early.
     fn warn_on_mixed_spellings(&self, ts_type: TimeSeriesType, csv: &CsvData) {
-        if self.time_reference.is_some() || ts_type != TimeSeriesType::NonSequentialTimeSeries {
+        if self.time_reference.is_some() || !is_irregular_static(ts_type) {
             return;
         }
         let timestamps = csv.timestamps();
@@ -643,11 +661,14 @@ impl Descriptor {
         let ts_type = parse::parse_ts_type(&self.ts_type)?;
         if !matches!(
             ts_type,
-            TimeSeriesType::SingleTimeSeries | TimeSeriesType::NonSequentialTimeSeries
+            TimeSeriesType::SingleTimeSeries
+                | TimeSeriesType::NonSequentialTimeSeries
+                | TimeSeriesType::PersistentTimeSeries
         ) {
             return Err(format!(
-                "\"layout\": \"wide\" holds one scalar series per column, so it covers \
-                 SingleTimeSeries and NonSequentialTimeSeries only; '{}' is {}",
+                "\"layout\": \"wide\" holds one scalar series per column, so it covers the \
+                 static types (SingleTimeSeries, NonSequentialTimeSeries, \
+                 PersistentTimeSeries) only; '{}' is {}",
                 self.name,
                 ts_type.as_str()
             ));
@@ -681,11 +702,12 @@ impl Descriptor {
         let has_timestamps = header
             .first()
             .is_some_and(|c| c.trim().eq_ignore_ascii_case("timestamp"));
-        if ts_type == TimeSeriesType::NonSequentialTimeSeries && !has_timestamps {
+        if is_irregular_static(ts_type) && !has_timestamps {
             return Err(format!(
-                "{}: a wide NonSequentialTimeSeries CSV must start with a `timestamp` \
-                 column (its timestamps are explicit, not a grid)",
-                csv_path.display()
+                "{}: a wide {} CSV must start with a `timestamp` column (its timestamps \
+                 are explicit, not a grid)",
+                csv_path.display(),
+                ts_type.as_str()
             ));
         }
         let leading = usize::from(has_timestamps);
@@ -714,7 +736,7 @@ impl Descriptor {
                 csv.row_width
             ));
         }
-        let timestamps = if has_timestamps && ts_type == TimeSeriesType::NonSequentialTimeSeries {
+        let timestamps = if has_timestamps && is_irregular_static(ts_type) {
             Some(
                 csv.timestamps()
                     .iter()
@@ -746,6 +768,12 @@ impl Descriptor {
             let arr = csv_io::build_typed_array(dtype, vec![csv.rows], &cells)
                 .map_err(|e| format!("column '{}': {e}", columns[j]))?;
             let mut data = match &timestamps {
+                Some(ts) if ts_type == TimeSeriesType::PersistentTimeSeries => {
+                    TimeSeriesData::PersistentTimeSeries(
+                        PersistentTimeSeries::new(ts.clone(), arr, &self.name)
+                            .map_err(|e| format!("column '{}': {e}", columns[j]))?,
+                    )
+                }
                 Some(ts) => TimeSeriesData::NonSequentialTimeSeries(
                     NonSequentialTimeSeries::new(ts.clone(), arr, &self.name)
                         .map_err(|e| format!("column '{}': {e}", columns[j]))?,
@@ -918,6 +946,21 @@ impl Descriptor {
                 let arr = csv_io::build_typed_array(dtype, shape, &csv.values)?;
                 let ns = NonSequentialTimeSeries::new(timestamps, arr, &self.name)?;
                 Ok(TimeSeriesData::NonSequentialTimeSeries(ns))
+            }
+            TimeSeriesType::PersistentTimeSeries => {
+                // Byte-for-byte the NonSequentialTimeSeries arm above: the CSV
+                // says the same thing either way, and the two types differ only
+                // in what a read between those instants means.
+                let timestamps = csv
+                    .timestamps()
+                    .iter()
+                    .map(|s| parse::parse_timestamp(s))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let length = timestamps.len();
+                let shape = with_elem(vec![length], elem);
+                let arr = csv_io::build_typed_array(dtype, shape, &csv.values)?;
+                let p = PersistentTimeSeries::new(timestamps, arr, &self.name)?;
+                Ok(TimeSeriesData::PersistentTimeSeries(p))
             }
             TimeSeriesType::Deterministic => {
                 let (initial, resolution) = self.regular_params()?;

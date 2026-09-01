@@ -160,6 +160,214 @@ end
     @test length(list_metadata(store; owner_id=7, features=nothing)) == 1
 end
 
+@testset "persistent round-trip and step semantics" begin
+    store = Store(in_memory=true)
+    breakpoints = [DateTime(2024, 1, 1), DateTime(2024, 4, 1), DateTime(2024, 7, 1)]
+    series = PersistentTimeSeries(
+        breakpoints,
+        [3.5, 4.25, 5.0],
+        "gas_price";
+        units="USD/MMBtu",
+        component_field="fuel_cost",
+        application_data="{\"as_time_series\":false}",
+    )
+    id = add_time_series!(store, 7, "ThermalStandard", Component, series)
+    got = read_by_id(store, id)
+    @test got isa PersistentTimeSeries
+    @test got.timestamps == breakpoints
+    @test got.data == [3.5, 4.25, 5.0]
+    @test got.name == "gas_price"
+    @test got.units == "USD/MMBtu"
+    @test got.component_field == "fuel_cost"
+    @test got.application_data == "{\"as_time_series\":false}"
+    # A persistent series is static, so it counts as one.
+    @test get_counts(store).static_time_series == 1
+
+    # The catalog row reports the new type, and resolving it by attributes is
+    # how a caller gets from a name to the id that addresses it.
+    @test get_metadata_by_id(store, id).time_series_type <: PersistentTimeSeries
+    @test resolve_id(PersistentTimeSeries, store, 7, Component, "gas_price") == id
+
+    # A range whose start is not a breakpoint still yields the value in force
+    # there: the slice begins one breakpoint earlier than the window does. This
+    # is the case where a NonSequentialTimeSeries would start at July instead.
+    sliced = only(
+        read_by_ids(
+            store, [id]; time_range=(DateTime(2024, 4, 10), DateTime(2024, 9, 1))
+        ),
+    )
+    @test sliced.timestamps == [DateTime(2024, 4, 1), DateTime(2024, 7, 1)]
+    @test sliced.data == [4.25, 5.0]
+
+    # Before the first breakpoint a step function is undefined, and the store
+    # says so rather than clamping.
+    @test_throws InfraStore.InvalidParameterError read_by_ids(
+        store, [id]; time_range=(DateTime(2023, 12, 1), DateTime(2024, 6, 1))
+    )
+
+    # A bulk read reconstructs the right type too.
+    round_tripped = read_by_ids(store, [id])
+    @test length(round_tripped) == 1
+    @test round_tripped[1] isa PersistentTimeSeries
+    @test round_tripped[1].data == [3.5, 4.25, 5.0]
+end
+
+@testset "persistent index_in_force_at" begin
+    breakpoints = [DateTime(2024, m, 1) for m in (1, 4, 7, 10)]
+    series = PersistentTimeSeries(breakpoints, Float64[10, 40, 70, 100], "gas_price")
+
+    # 1-based, like every other Julia index. The other bindings report the same
+    # breakpoint 0-based.
+    @test index_in_force_at(series, DateTime(2024, 1, 1)) == 1
+    @test index_in_force_at(series, DateTime(2024, 7, 1)) == 3
+    # Between two breakpoints the earlier one is still in force: the boundary
+    # is `<=`, so a read exactly at a breakpoint gets that breakpoint's value
+    # and the millisecond before it gets the previous one.
+    @test index_in_force_at(series, DateTime(2024, 3, 31, 23, 59, 59, 999)) == 1
+    @test index_in_force_at(series, DateTime(2024, 6, 1)) == 2
+    # Past the last breakpoint the final value is held forward forever.
+    @test index_in_force_at(series, DateTime(2031, 5, 4)) == 4
+    # Before the first there is no value at all, and that is an error rather
+    # than a clamp to the first row.
+    @test_throws InfraStore.InvalidParameterError index_in_force_at(
+        series, DateTime(2023, 12, 31)
+    )
+    # The index addresses the value array, which is what a caller wants it for.
+    @test series.data[index_in_force_at(series, DateTime(2024, 6, 1))] == 40.0
+
+    # It answers the same on a series read back out of a store: the lookup is a
+    # property of the breakpoints, not of how the object was built.
+    store = Store(in_memory=true)
+    id = add_time_series!(store, 7, "ThermalStandard", Component, series)
+    back = read_by_id(store, id)
+    @test [index_in_force_at(back, DateTime(2024, m, 1)) for m in 1:12] ==
+        [1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4]
+    close!(store)
+end
+
+@testset "persistent read_projected" begin
+    store = Store(in_memory=true)
+    breakpoints = [DateTime(2024, m, 1) for m in (1, 4, 7, 10)]
+    series = PersistentTimeSeries(breakpoints, Float64[10, 40, 70, 100], "gas_price")
+    id = add_time_series!(store, 7, "ThermalStandard", Component, series)
+
+    # A gather, not a slice: unsorted, with a repeat, and the caller's order is
+    # the output order.
+    at = [DateTime(2024, 9, 1), DateTime(2024, 1, 1), DateTime(2024, 9, 1),
+        DateTime(2024, 5, 1)]
+    @test read_projected(store, id, at) == Float64[70, 10, 70, 40]
+
+    # Every month of the year, against hold-last computed here.
+    months = [DateTime(2024, m, 1) for m in 1:12]
+    @test read_projected(store, id, months) ==
+        Float64[10, 10, 10, 40, 40, 40, 70, 70, 70, 100, 100, 100]
+
+    # Past the last breakpoint the final value is held forward forever.
+    @test read_projected(store, id, [DateTime(2031, 5, 4)]) == Float64[100]
+    # No instants is an empty answer rather than an error.
+    @test isempty(read_projected(store, id, DateTime[]))
+    # Before the first breakpoint the step function is undefined, and one bad
+    # instant fails the whole call rather than returning a partial answer.
+    @test_throws InfraStore.InvalidParameterError read_projected(
+        store, id, [DateTime(2024, 5, 1), DateTime(2023, 12, 31)]
+    )
+    # A stale id is a failure, as it is for every other read.
+    @test_throws InfraStore.NotFoundError read_projected(store, 9999, months)
+
+    # Only a step function has a value at an arbitrary instant; every other type
+    # would need a resampling policy, which is the caller's choice to make.
+    nsts_id = add_time_series!(
+        store, 8, "ThermalStandard", Component,
+        NonSequentialTimeSeries(breakpoints, Float64[10, 40, 70, 100], "irregular"),
+    )
+    @test_throws InfraStore.InvalidParameterError read_projected(store, nsts_id, months)
+
+    close!(store)
+end
+
+@testset "a projected composite row decodes as its element type" begin
+    # A step function over cost curves: the projection copies rows whole, so a
+    # read hands back curves rather than the packing they are stored as.
+    store = Store(in_memory=true)
+    curves = [
+        [(x=10.0, y=100.0), (x=20.0, y=210.0)],
+        [(x=12.0, y=130.0), (x=22.0, y=250.0)],
+    ]
+    values = [PiecewiseLinear(c) for c in curves]
+    series = PersistentTimeSeries(
+        [DateTime(2024, 1, 1), DateTime(2024, 7, 1)], values, "fuel_cost_curve";
+        # The non-curve fields are per-series constants, not part of the value at
+        # an instant, so they ride in application_data.
+        application_data="{\"volume_hours\":24,\"cost_curve_type\":\"piecewise\"}",
+    )
+    id = add_time_series!(store, 1, "ThermalStandard", Component, series)
+
+    at = [DateTime(2024, 3, 1), DateTime(2024, 9, 1), DateTime(2024, 1, 1)]
+    projected = read_projected(store, id, at)
+    @test projected == [values[1], values[2], values[1]]
+    # `raw=true` hands back the packing instead, one row per instant.
+    packed = read_projected(store, id, at; raw=true)
+    @test size(packed, 1) == 3
+    @test packed[1, :] == packed[3, :]
+
+    close!(store)
+end
+
+@testset "StaticReader over persistent columns on different breakpoints" begin
+    store = Store(in_memory=true)
+    months(ms) = [DateTime(2024, m, 1) for m in ms]
+    quarterly = [1, 4, 7, 10]
+    semi = [1, 6]
+    add_time_series!(
+        store,
+        1,
+        "Gen",
+        Component,
+        PersistentTimeSeries(months(quarterly), Float64[10, 40, 70, 100], "price"),
+    )
+    add_time_series!(
+        store,
+        2,
+        "Gen",
+        Component,
+        PersistentTimeSeries(months(semi), Float64[1, 6], "price"),
+    )
+
+    r = build_static_reader(store; time_series_type=PersistentTimeSeries)
+    grid = static_grid(r)
+    # No constant step, and the axis is the union of both columns' breakpoints.
+    @test grid.resolution === nothing
+    @test static_timestamps(r) == months([1, 4, 6, 7, 10])
+    @test grid.length == 5
+
+    hold_last(bps, values, at) = values[findlast(<=(at), bps)]
+    for t in static_timestamps(r)
+        static_read!(r, t)
+        @test static_values(r, 1) == [
+            hold_last(months(quarterly), Float64[10, 40, 70, 100], t),
+            hold_last(months(semi), Float64[1, 6], t),
+        ]
+    end
+
+    # A resolution filter makes no sense for a step function either.
+    @test_throws InfraStore.InvalidParameterError build_static_reader(
+        store; time_series_type=PersistentTimeSeries, resolution=Hour(1)
+    )
+
+    # A column that starts later than the union's first instant makes that
+    # instant unreadable, and the error names the column.
+    add_time_series!(
+        store,
+        3,
+        "Gen",
+        Component,
+        PersistentTimeSeries(months([9]), Float64[999], "late"),
+    )
+    r2 = build_static_reader(store; time_series_type=PersistentTimeSeries)
+    @test_throws InfraStore.InvalidParameterError static_read!(r2, DateTime(2024, 1, 1))
+    static_read!(r2, DateTime(2024, 9, 1))
+end
+
 @testset "non-sequential N-D + application_data round-trip" begin
     store = Store(in_memory=true)
     timestamps = [DateTime(2024, 1, 1), DateTime(2024, 1, 1, 4), DateTime(2024, 1, 3)]

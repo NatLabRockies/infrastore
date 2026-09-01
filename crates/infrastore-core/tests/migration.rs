@@ -119,12 +119,13 @@ fn stale_store() -> (tempfile::TempDir, std::path::PathBuf) {
         store.flush().unwrap();
     }
 
-    // Note this backdates only the *catalog*. `MIN_UPGRADABLE_VERSION` equals
-    // `DATA_FORMAT_VERSION` today, so writing it leaves the HDF5 half at
-    // `Compat::Current` and nothing here exercises the deferred re-stamp --
-    // that path has no reachable input until the two constants separate, and
-    // is covered against an explicit window in `storage::hdf5`'s own tests.
-    // What this fixture *is* stale in is the half that matters for the ladder.
+    // This backdates *both* halves, which it could not do before 0.20.0: the
+    // two version constants have separated, so `MIN_UPGRADABLE_VERSION` now
+    // stamps the HDF5 half `Compat::Upgradable` rather than `Compat::Current`.
+    // A writable open therefore has two things to do here -- climb the catalog
+    // ladder and re-stamp the array half -- and the deferred re-stamp finally
+    // has a reachable input instead of only the explicit-window coverage in
+    // `storage::hdf5`'s own tests.
     set_format_attr(&path, infrastore_core::MIN_UPGRADABLE_VERSION);
     {
         let conn = rusqlite::Connection::open(sqlite_path_of(&path)).unwrap();
@@ -199,7 +200,7 @@ fn a_revision_1_catalog_upgrades_in_place_on_a_writable_open() {
     let before = generation_stamps(&path);
     let format_before = format_version_on_disk(&path);
 
-    let store = open_store(path.as_path(), false).unwrap();
+    let mut store = open_store(path.as_path(), false).unwrap();
     assert_eq!(store.catalog_schema_revision().unwrap(), 2);
 
     // Both pre-existing series survived, byte for byte.
@@ -234,31 +235,44 @@ fn a_revision_1_catalog_upgrades_in_place_on_a_writable_open() {
         irregular().timestamps
     );
 
+    // A code-6 row is now insertable: the CHECK the rebuild removed was the
+    // one thing standing between this store and the new type.
+    store
+        .add_time_series(
+            3,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::PersistentTimeSeries(persistent()),
+            Features::new(),
+        )
+        .unwrap();
     drop(store);
 
-    // The catalog moved. The array half did not need to: its stamp was already
-    // current, so there was no upgrade to defer. Asserting it against
-    // `DATA_FORMAT_VERSION` here would be a tautology while the two version
-    // constants are equal -- assert it is *unchanged*, which is the claim this
-    // fixture can actually make.
-    assert_eq!(format_version_on_disk(&path), format_before);
+    // Both halves moved. The catalog climbed the ladder, and the array half was
+    // re-stamped from the upgradable floor to the current version on the same
+    // writable open -- which is the whole point of the 0.20.0 bump: a store
+    // that now holds a code-6 row no longer claims a stamp a 0.19.0 reader
+    // would accept.
+    assert_eq!(format_before, infrastore_core::MIN_UPGRADABLE_VERSION);
+    assert_eq!(
+        format_version_on_disk(&path),
+        infrastore_core::DATA_FORMAT_VERSION
+    );
     assert_eq!(revision_on_disk(&path), 2);
     // Migration is not a save: the paired generation stamps are untouched.
     assert_eq!(generation_stamps(&path), before);
+}
 
-    // And the CHECK the rebuild removed is really gone. Raw SQL rather than
-    // `add_time_series`: no type claims a code above 5 yet, and the point of
-    // revision 2 is precisely that the catalog stops being what stands in the
-    // way of one.
-    let conn = rusqlite::Connection::open(sqlite_path_of(&path)).unwrap();
-    conn.execute(
-        "INSERT INTO time_series_associations
-             (owner_id, owner_type, owner_category, time_series_type, name,
-              element_type, data_hash, features_hash)
-         VALUES (3, 'Generator', 0, 6, 'gas_price', 'f64', X'02', X'01')",
-        [],
+fn persistent() -> infrastore_core::PersistentTimeSeries {
+    let timestamps: Vec<_> = (0..3)
+        .map(|m| Utc.with_ymd_and_hms(2024, 1 + m, 1, 0, 0, 0).unwrap())
+        .collect();
+    infrastore_core::PersistentTimeSeries::new(
+        timestamps,
+        TypedArray::from_f64(vec![3], &[3.5, 4.25, 5.0]),
+        "gas_price",
     )
-    .expect("the migrated catalog accepts a code above the old upper bound");
+    .unwrap()
 }
 
 #[test]
@@ -471,4 +485,35 @@ fn the_readable_view_renders_a_code_it_does_not_name() {
             "unknown(99)".to_string(),
         ]
     );
+}
+
+/// The other half: a code the view *does* name renders as its type name. Added
+/// with `PersistentTimeSeries`, the first type to reach the catalog through the
+/// widened CHECK rather than through a format bump.
+#[test]
+fn the_readable_view_names_the_new_type() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.h5");
+    {
+        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        store
+            .add_time_series(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::PersistentTimeSeries(persistent()),
+                Features::new(),
+            )
+            .unwrap();
+        store.flush().unwrap();
+    }
+    let conn = rusqlite::Connection::open(sqlite_path_of(&path)).unwrap();
+    let rendered: String = conn
+        .query_row(
+            "SELECT time_series_type FROM time_series_readable",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(rendered, TimeSeriesType::PersistentTimeSeries.as_str());
 }

@@ -22,6 +22,7 @@ too, reads included: no message or RPC covers `supplemental_attribute_associatio
 | `HasAnyTimeSeries`       | `HasAnyTimeSeriesReq`       | `HasAnyTimeSeriesResp`       | Attribute-addressed existence probe    |
 | `ReadById`               | `ReadByIdReq`               | `ReadByIdResp`               | One series' values (opt. range)        |
 | `ReadByIds`              | `ReadByIdsReq`              | `ReadByIdsResp`              | Many series at once (opt. range)       |
+| `ReadProjected`          | `ReadProjectedReq`          | `ReadProjectedResp`          | A step function at instants you name   |
 | `GetResolutions`         | `GetResolutionsReq`         | `GetResolutionsResp`         | Distinct resolutions present           |
 | `GetIntervals`           | `GetIntervalsReq`           | `GetIntervalsResp`           | Distinct forecast intervals            |
 | `GetCounts`              | `GetCountsReq`              | `GetCountsResp`              | Aggregate counts                       |
@@ -60,6 +61,7 @@ enum TimeSeriesType {
   DETERMINISTIC_SINGLE_TIME_SERIES = 3;
   PROBABILISTIC                    = 4;
   SCENARIOS                        = 5;
+  PERSISTENT_TIME_SERIES           = 6;
 }
 
 enum OwnerCategory { COMPONENT = 0; SUPPLEMENTAL_ATTRIBUTE = 1; }
@@ -151,7 +153,7 @@ message ReadByIdResp {
   repeated uint64 shape                     = 4;   // array dimensions (multi-dim supported)
   reserved 5;                                      // was: repeated double values
   TimeSeriesType  time_series_type          = 6;
-  repeated string timestamps_rfc3339        = 7;   // set for NonSequentialTimeSeries
+  repeated string timestamps_rfc3339        = 7;   // set for NonSequentialTimeSeries and PersistentTimeSeries
   string          element_type              = 16;  // canonical element-type string
   // (8 is reserved: the former int32 dtype code)
   bytes           value_bytes               = 9;   // raw little-endian, row-major
@@ -267,6 +269,26 @@ arrays survive the round trip without coercion. One caveat:
   fetched directly by id come back without it. Every other descriptor — `name`, `units`,
   `quantity_kind`, `unit_system`, `component_field`, `time_reference` — is on the response, so a
   read by id returns the same described series a local read does.
+
+## Projecting a Step Function
+
+`ReadProjected` evaluates a `PersistentTimeSeries` at instants the client names, returning the value
+in force at each rather than the stored breakpoints. It is a read, so it belongs on a read-only
+service.
+
+`ReadProjectedReq` takes the association `id`, the instants as `at_rfc3339`, and the same
+`bounds_zoneless` flag the ranged reads take — they are query bounds and must be spelled the way the
+series is, except that an empty list names no bound and is not checked. `ReadProjectedResp` carries
+`shape` (`[len(at_rfc3339), *element_shape]`), the raw little-endian `value_bytes`, and the
+`element_type`, so the same client-side codec that decodes `ReadByIdResp` decodes this — a
+projection leaves the element type alone.
+
+A **gather, not a slice**: the instants may be unsorted and may repeat, and the request order is the
+response order. `INVALID_ARGUMENT` for a row of any other stored type — projecting one would need a
+resampling policy that is the client's choice to make, where hold-last needs no choice — and for an
+instant before the first breakpoint, where a step function is undefined. The instant count is
+bounded by the same `max_read_ids` ceiling `ReadByIds` applies to its ids, and exceeding it is
+`RESOURCE_EXHAUSTED`.
 
 ## Catalog Revision and Read-Only Opens
 

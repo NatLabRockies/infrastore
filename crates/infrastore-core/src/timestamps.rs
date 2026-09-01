@@ -102,6 +102,28 @@ pub(crate) fn to_millis(timestamps: &[DateTime<Utc>]) -> Vec<i64> {
     timestamps.iter().map(|t| t.timestamp_millis()).collect()
 }
 
+/// The index of the breakpoint **in force at** `at` in a strictly increasing
+/// `breakpoints` vector: the greatest breakpoint `<= at`.
+///
+/// `None` when `at` is strictly before the first breakpoint — where a step
+/// function is undefined — and for an empty vector. The caller turns that into
+/// an error naming the series, which is why this returns `Option` rather than
+/// a message it has no context for.
+///
+/// The single definition of the `PersistentTimeSeries` lookup. It lives here
+/// rather than on the type because the columnar reader resolves the same
+/// question against an *interned* breakpoint vector with no series struct in
+/// hand — see [`crate::reader::StaticReader`]; two implementations of a
+/// hold-last rule would be two chances to get the boundary wrong.
+///
+/// The boundary is `<=`, not `<`: a read exactly at a breakpoint gets that
+/// breakpoint's own value, which is what "right-continuous" means and what
+/// makes a persistent read agree with a `NonSequentialTimeSeries` read at every
+/// instant both types define.
+pub(crate) fn index_in_force_at(breakpoints: &[DateTime<Utc>], at: DateTime<Utc>) -> Option<usize> {
+    breakpoints.partition_point(|b| *b <= at).checked_sub(1)
+}
+
 /// Rebuild a timestamp vector from its stored milliseconds.
 ///
 /// A value chrono cannot represent is an [`TimeSeriesError::IntegrityError`]:

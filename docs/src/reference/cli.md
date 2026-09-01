@@ -201,6 +201,30 @@ the two reach different formats:
 So `-f csv get --limit 3` still writes every row; thin a pipe with `--stride`, or slice it with
 `--time-range`. The table's own default cap is 50 rows, lifted by `--full`.
 
+#### `get --at`: evaluating a step function
+
+A `PersistentTimeSeries` prints as its breakpoints and their values, because those rows are the
+complete description of the series. `--at` asks the other question — what is the value _in force_ at
+an instant — and it is repeatable:
+
+```sh
+infrastore --store demo.h5 get --name fuel_cost --type PersistentTimeSeries \
+    --at 2024-03-15T00:00:00Z --at 2024-08-01T00:00:00Z
+```
+
+Each `--at` resolves to the greatest breakpoint `<= it`, held forward past the last one forever. The
+timestamp column is what you asked for rather than breakpoints, and it is a **gather, not a slice**:
+repeat an instant and it appears twice, in the order you gave. An instant before the first
+breakpoint is an error, not a clamp — a step function has no value there — and one bad instant fails
+the whole call rather than shortening the answer.
+
+It applies to `PersistentTimeSeries` alone. Every other type would need a resampling policy —
+interpolate? forward-fill? — which is your choice to make and not the store's, so `--at` on one
+names the type and refuses. `--at` and `--time-range` ask different questions (evaluate at instants
+versus slice stored breakpoints), so combining them is refused rather than silently answering one;
+`--plot` renders a stored series, so it is refused too. All the `--at` instants must be spelled
+alike, the way the series is.
+
 ### Write data
 
 | Command         | Purpose                                                                         |
@@ -389,7 +413,7 @@ infrastore --store <PATH> add --descriptor <FILE.json|-> [--csv <FILE.csv>] [--d
 infrastore --store <PATH> add --csv <FILE.csv> --owner-id <I> --owner-type <T> --name <N> --type <T> --element-type <E> [DESCRIPTOR FIELDS...]
 infrastore --store <PATH> merge --from <PATH.h5> [SELECTOR...] [--replace] [--dry-run]
 infrastore --store <PATH> list    [SELECTOR...] [--limit N] [--wide]
-infrastore --store <PATH> get     [SELECTOR...] [--time-range START..END] [--limit N | --full] [--tail] [--stride N] [--plot [--plot-width COLS]] [--window N | --issue-time <TS>]
+infrastore --store <PATH> get     [SELECTOR...] [--time-range START..END | --at <TS> ...] [--limit N | --full] [--tail] [--stride N] [--plot [--plot-width COLS]] [--window N | --issue-time <TS>]
 infrastore --store <PATH> grid    [SELECTOR...] [--time-range START..END] [--limit N | --full] [--label <auto|owner|full>]
 infrastore --store <PATH> plot    [SELECTOR...] [--out <FILE.svg|FILE.html|->] [--kind <line|duration|heatmap|fan|overlay>] [--time-range START..END] [--title <T>] [--width W] [--height H] [--window N] [--limit N]
 infrastore --store <PATH> info    [SELECTOR...] [--no-stats]
@@ -424,7 +448,7 @@ infrastore --store <PATH> verify
 infrastore --store <PATH> check-consistency [--resolution <DUR>]
 infrastore --store <PATH> resolutions
 infrastore --store <PATH> params [--resolution <DUR>] [--interval <DUR>]
-infrastore template <SingleTimeSeries|NonSequentialTimeSeries|Deterministic|Probabilistic|Scenarios>
+infrastore template <SingleTimeSeries|NonSequentialTimeSeries|PersistentTimeSeries|Deterministic|Probabilistic|Scenarios>
 ```
 
 `--csv` overrides the `csv` path inside the descriptor, and only works when the descriptor is a
@@ -547,13 +571,14 @@ attribute may share a numeric `owner_id`; add `--owner-category` to disambiguate
 
 ### Type Spellings
 
-`--type` (and the descriptor's `type` key) accepts six concrete types. Matching is case-insensitive
-and ignores underscores, so each has a short form and a full form:
+`--type` (and the descriptor's `type` key) accepts seven concrete types. Matching is
+case-insensitive and ignores underscores, so each has a short form and a full form:
 
 | Type                            | Accepted spellings                                      |
 | ------------------------------- | ------------------------------------------------------- |
 | `SingleTimeSeries`              | `single`, `SingleTimeSeries`                            |
 | `NonSequentialTimeSeries`       | `non_sequential`, `NonSequentialTimeSeries`             |
+| `PersistentTimeSeries`          | `persistent`, `PersistentTimeSeries`                    |
 | `Deterministic`                 | `deterministic`                                         |
 | `DeterministicSingleTimeSeries` | `deterministic_single`, `DeterministicSingleTimeSeries` |
 | `Probabilistic`                 | `probabilistic`                                         |
@@ -696,12 +721,13 @@ that names the unmapped columns — a 500-column load that stopped at "some colu
 leave you diffing two files by hand. Exactly one of `owner_map` and `owner_id_from` may be set, and
 either one in a `long` descriptor is an error.
 
-A leading `timestamp` column is **required** for a wide `NonSequentialTimeSeries` (whose timestamps
-are explicit rather than a grid). For a wide `SingleTimeSeries` it is optional, and when present it
-is checked, not ignored — see [Reading back](#reading-back-and-re-adding). The wide layout covers
-the two static types and scalar elements only: a forecast's value block is already three axes deep
-before any per-column split, and a multidimensional element would need a second header row to say
-which column belongs to which `(owner, element)` pair. Both are rejected rather than guessed at.
+A leading `timestamp` column is **required** for a wide `NonSequentialTimeSeries` or
+`PersistentTimeSeries` (whose instants are explicit rather than a grid). For a wide
+`SingleTimeSeries` it is optional, and when present it is checked, not ignored — see
+[Reading back](#reading-back-and-re-adding). The wide layout covers the three static types and
+scalar elements only: a forecast's value block is already three axes deep before any per-column
+split, and a multidimensional element would need a second header row to say which column belongs to
+which `(owner, element)` pair. Both are rejected rather than guessed at.
 
 `infrastore grid` writes this same shape back out — see below.
 
@@ -714,6 +740,7 @@ which column belongs to which `(owner, element)` pair. Both are rejected rather 
 | ------------------------- | --------------------------------- | ---------------------------------------------------------------------- |
 | `SingleTimeSeries`        | `[length, *element_shape]`        | One value column (or `prod(element_shape)` columns), one row per step. |
 | `NonSequentialTimeSeries` | `[length, *element_shape]`        | First column is the timestamp, then value columns.                     |
+| `PersistentTimeSeries`    | `[length, *element_shape]`        | Same shape: first column is the breakpoint, then value columns.        |
 | `Deterministic`           | `[H, count, *E]`                  | Flat row-major values; `H = horizon / resolution`.                     |
 | `Probabilistic`           | `[num_percentiles, H, count, *E]` | Flat row-major values.                                                 |
 | `Scenarios`               | `[scenario_count, H, count, *E]`  | Flat row-major values.                                                 |
@@ -738,20 +765,21 @@ Every CSV `infrastore` writes carries timestamps, because they are the useful pa
 because a piped file otherwise loses the time axis entirely — `initial_timestamp` and `resolution`
 live in the catalog, not in the file.
 
-| Type                                          | `get -f csv` / `export -f csv` header                               |
-| --------------------------------------------- | ------------------------------------------------------------------- |
-| `SingleTimeSeries`, `NonSequentialTimeSeries` | `timestamp,value...`                                                |
-| `Deterministic`                               | `issue_time,target_time,value...`                                   |
-| `Probabilistic`                               | `issue_time,target_time,value[p10],...` (one column per percentile) |
-| `Scenarios`                                   | `issue_time,target_time,value[s0],...` (one column per scenario)    |
+| Type                                                                  | `get -f csv` / `export -f csv` header                               |
+| --------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| `SingleTimeSeries`, `NonSequentialTimeSeries`, `PersistentTimeSeries` | `timestamp,value...`                                                |
+| `Deterministic`                                                       | `issue_time,target_time,value...`                                   |
+| `Probabilistic`                                                       | `issue_time,target_time,value[p10],...` (one column per percentile) |
+| `Scenarios`                                                           | `issue_time,target_time,value[s0],...` (one column per scenario)    |
 
 `add` reads both layouts. It picks between them from the header row, so a file written by `export`
 can be handed straight back to `add` with no column surgery:
 
-- a first column named `timestamp` is read as the time axis. For a `NonSequentialTimeSeries` it _is_
-  the data; for a `SingleTimeSeries` it is **validated** against the descriptor's
-  `initial_timestamp` + `resolution` grid, row count included, so a file sliced out of an export and
-  re-added under the original descriptor fails loudly rather than landing on the wrong instants;
+- a first column named `timestamp` is read as the time axis. For a `NonSequentialTimeSeries` or a
+  `PersistentTimeSeries` it _is_ the data; for a `SingleTimeSeries` it is **validated** against the
+  descriptor's `initial_timestamp` + `resolution` grid, row count included, so a file sliced out of
+  an export and re-added under the original descriptor fails loudly rather than landing on the wrong
+  instants;
 - leading `issue_time` + `target_time` columns mark the timestamped forecast layout, whose rows run
   window-major with the percentiles/scenarios spread across columns — `add` transposes them back
   into the stored `[series, horizon, count, element]` order;
@@ -777,6 +805,13 @@ A reader spans exactly **one timeline**, which is what makes the columns line up
 a presence mask. For `SingleTimeSeries` that means one resolution, so `--resolution` is required;
 for `NonSequentialTimeSeries` it means one shared timestamp vector, and a selection spanning two is
 an error naming how many were found rather than a padded result.
+
+`PersistentTimeSeries` is the exception, and it is the core's rather than the CLI's: a step function
+has a value at every instant from its first breakpoint onward, so its columns may hold **different**
+breakpoint vectors. The rows are then the union of every column's breakpoints — every instant at
+which some column changes — and each column shows the value in force there rather than a blank. A
+selection whose earliest row precedes some column's first breakpoint is an error naming that column,
+since a step function has no value before its first breakpoint.
 
 Columns are named by `--label`:
 

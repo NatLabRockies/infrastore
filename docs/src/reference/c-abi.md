@@ -185,6 +185,59 @@ int32_t infrastore_store_add_non_sequential(struct InfraStore *handle,
                                     int64_t *out_id);                 /* optional (NULL skips) */
 ```
 
+## PersistentTimeSeries
+
+`infrastore_store_add_persistent` takes **exactly** the argument list of
+`infrastore_store_add_non_sequential` above — the same `int64_t` Unix-millisecond vector, the same
+owned buffers, the same ownership and free rules, the same optional `out_id`. The two types carry
+the same payload; `timestamps` is the breakpoint vector, and what differs is what a read _between_
+those instants means.
+
+```c
+int32_t infrastore_store_add_persistent(struct InfraStore *handle, /* ...as add_non_sequential... */);
+int32_t infrastore_batch_add_persistent(struct InfraStoreBatch *batch, /* ...sans handle/out_id... */);
+int32_t infrastore_bulk_result_get_persistent(const struct InfraStoreBulkReadHandle *result, uint64_t index, /* ...as _non_sequential... */);
+int32_t infrastore_bulk_result_persistent_index_in_force_at(const struct InfraStoreBulkReadHandle *result, uint64_t index, int64_t at_unix_ms, uint64_t *out_row);
+```
+
+It is read like every other type — by id, through `infrastore_store_read_by_id` /
+`infrastore_store_read_by_ids`, then `infrastore_bulk_result_get_persistent` on the slot whose
+`infrastore_bulk_result_item_type` is `6`.
+
+The value at `out_timestamps[i]` is in force from that instant until the next breakpoint, and past
+the last one forever. There is **no value before the first breakpoint**: a range read whose start
+precedes it is refused with `INFRASTORE_ERR_INVALID_PARAMETER` rather than clamped, and a range that
+starts mid-step begins at the breakpoint _in force_ there, so the returned slice always defines a
+value at the caller's start.
+
+`infrastore_store_read_projected` is the whole-vector form — the step function evaluated at each
+instant the caller names, gathered in that order:
+
+```c
+int32_t infrastore_store_read_projected(const struct InfraStore *handle, int64_t id, const int64_t *at_unix_ms, uint64_t at_len, bool zoneless, int32_t *out_dtype, int64_t **out_shape, uint64_t *out_shape_len, uint8_t **out_data, uint64_t *out_data_byte_len);
+```
+
+`out_shape` is `[at_len, *E]` and the bytes are laid out exactly as
+`infrastore_bulk_result_get_persistent`'s are, so the same decoding reads both. A **gather, not a
+slice**: `at_unix_ms` may be unsorted and may repeat, and its order is the output order; `at_len` of
+0 yields an empty array rather than an error. `zoneless` says how the caller spelled the instants —
+they are query bounds, and one spelled the other way than the series is is refused rather than
+reinterpreted. `INFRASTORE_ERR_INVALID_PARAMETER` for any other stored type (a projection over a
+`SingleTimeSeries` would need a resampling policy, which is the caller's choice to make) and for an
+instant before the first breakpoint; `INFRASTORE_ERR_NOT_FOUND` for a stale id. The caller owns
+`*out_shape` and `*out_data`.
+
+`infrastore_bulk_result_persistent_index_in_force_at` answers that lookup without the caller
+re-implementing it: it writes the 0-based row in force at `at_unix_ms` — the greatest breakpoint
+`<= at_unix_ms` — into `out_row`, indexing both `out_timestamps` and the value rows. It sits on the
+result slot rather than taking a breakpoint vector because a C caller holds a handle, not a struct.
+Before the first breakpoint, on an empty series, on a slot that is not a `PersistentTimeSeries`, or
+on an out-of-range index it returns `INFRASTORE_ERR_INVALID_PARAMETER` and writes nothing — row `0`
+is an answer, never a fallback. It hands out no buffer, so there is nothing to free.
+
+The ABI discriminant is `6`, kept numerically equal to the storage code. See the
+[data model](../explanation/data-model.md#persistenttimeseries).
+
 ## Attribute-Based Existence
 
 An existence probe stays attribute-addressed: it is answered off the catalog indexes without
@@ -265,10 +318,11 @@ a caller that wants exactly one row poses the filter and checks that it got one.
 
 The forecast types are created and read through the C ABI. `ts_type` is the `TimeSeriesType`
 discriminant — `0 = SingleTimeSeries`, `1 = NonSequentialTimeSeries`, `2 = Deterministic`,
-`3 = DeterministicSingleTimeSeries`, `4 = Probabilistic`, `5 = Scenarios`. As a filter it is read
-per [Type filters](#type-filters) below. Forecast values are dtype-generic raw little-endian byte
-buffers with explicit dimensions — the same `element_type`, `ndims`, `dims_ptr`, `data_ptr`,
-`data_byte_len` convention as the static add functions (see the
+`3 = DeterministicSingleTimeSeries`, `4 = Probabilistic`, `5 = Scenarios`,
+`6 = PersistentTimeSeries`. The ABI keeps its own mapping, deliberately identical to the storage
+codes. As a filter it is read per [Type filters](#type-filters) below. Forecast values are
+dtype-generic raw little-endian byte buffers with explicit dimensions — the same `element_type`,
+`ndims`, `dims_ptr`, `data_ptr`, `data_byte_len` convention as the static add functions (see the
 [data model](../explanation/data-model.md#forecasts) for the conventional shapes); the store records
 the windowing parameters in metadata and does not interpret the layout. A
 `DeterministicSingleTimeSeries` (`3`) is read like any other forecast but cannot be written through
@@ -478,14 +532,20 @@ int32_t infrastore_static_reader_group_values(const struct InfraStoreStaticReade
 void infrastore_static_reader_free(struct InfraStoreStaticReaderHandle *reader);
 ```
 
-`time_series_type` picks the two shapes a reader can take. For `SingleTimeSeries` (`0`),
+`time_series_type` picks the three shapes a reader can take. For `SingleTimeSeries` (`0`),
 `resolution` must be a non-empty ISO-8601 period — one resolution per reader — and all matched
 series must share one grid (`initial_timestamp` + `length`). For `NonSequentialTimeSeries` (`1`),
 `resolution` must be **null** (an irregular series has none) and all matched series must instead
 share one timestamp vector; `infrastore_static_reader_grid` then reports `*out_resolution` as null,
-and `infrastore_static_reader_timestamps` is how the timeline is read. Any other discriminant is
-rejected. Either way the build validates the uniformity and errors on divergence, so every column
-has a value at every valid timestamp (no presence mask).
+and `infrastore_static_reader_timestamps` is how the timeline is read. For `PersistentTimeSeries`
+(`6`), `resolution` must likewise be null — but this is the one case whose columns need **not**
+share a timeline: a step function has a value at every instant from its first breakpoint on, so each
+column resolves hold-last on breakpoints of its own, and the reader's timeline is the union of them
+all. Reading at an instant before some column's first breakpoint is an error naming that column. Any
+other discriminant is rejected.
+
+Uniformity — where it is required — is validated at build and errors on divergence, so in every case
+each column has a value at every valid timestamp (no presence mask).
 
 `infrastore_static_reader_time_reference` reports the one spelling the axis carries — `"utc"`,
 `"zoneless"`, a fixed offset such as `"-07:00"`, or an IANA zone name — as an owned string the
@@ -567,6 +627,7 @@ void            infrastore_batch_free(struct InfraStoreBatch *batch);
 
 int32_t infrastore_batch_add_single(struct InfraStoreBatch *batch, /* infrastore_store_add_single args sans handle/out_id */ ...);
 int32_t infrastore_batch_add_non_sequential(struct InfraStoreBatch *batch, ...);
+int32_t infrastore_batch_add_persistent(struct InfraStoreBatch *batch, ...);
 int32_t infrastore_batch_add_forecast(struct InfraStoreBatch *batch, ...);       /* 2=Deterministic, 5=Scenarios */
 int32_t infrastore_batch_add_probabilistic(struct InfraStoreBatch *batch, ...);
 
@@ -1017,10 +1078,10 @@ fields with that same content hash, hex-encoded, on export. The time-series impo
 only: infrastore never modifies the data to make an incoming document agree with what it already
 holds, so a row naming an array this store does not hold is refused
 (`INFRASTORE_ERR_INVALID_PARAMETER`) rather than written as a dangling reference, and a
-`NonSequentialTimeSeries` row is refused outright because the wire form carries no
-`timestamps_hash`, so the document does not say which stored time axis the row sits on. A geometry
-disagreement between an added series and its own association row is likewise rejected at the add
-boundary, loudly and without writing anything.
+`NonSequentialTimeSeries` or `PersistentTimeSeries` row is refused outright because the wire form
+carries no `timestamps_hash`, so the document does not say which stored time axis the row sits on. A
+geometry disagreement between an added series and its own association row is likewise rejected at
+the add boundary, loudly and without writing anything.
 
 ## Error Messages
 

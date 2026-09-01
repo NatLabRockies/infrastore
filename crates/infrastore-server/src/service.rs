@@ -397,6 +397,53 @@ impl CatalogStoreSvc for CatalogStoreService {
         }))
     }
 
+    async fn read_projected(
+        &self,
+        request: Request<pb::ReadProjectedReq>,
+    ) -> Result<Response<pb::ReadProjectedResp>, Status> {
+        let req = request.into_inner();
+        // The instant count is the caller's choice of cost, exactly as the id
+        // count is on ReadByIds, so it is bounded before any work starts.
+        if req.at_rfc3339.len() > self.max_read_ids {
+            return Err(Status::resource_exhausted(format!(
+                "ReadProjected requested {} instants, more than this server's limit of {}; \
+                 split the request",
+                req.at_rfc3339.len(),
+                self.max_read_ids
+            )));
+        }
+        let at = req
+            .at_rfc3339
+            .iter()
+            .map(|t| {
+                DateTime::parse_from_rfc3339(t)
+                    .map(|d| d.with_timezone(&Utc))
+                    .map_err(|err| Status::invalid_argument(format!("at_rfc3339 {t:?}: {err}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let id = TimeSeriesId(req.id);
+        let store = self.store.lock().await;
+        let projected = store
+            .read_projected(
+                id,
+                infrastore_core::Instants::spelled(&at, req.bounds_zoneless.unwrap_or(false)),
+            )
+            .map_err(map_err)?;
+        // A projection leaves the element type alone, so the response carries the
+        // row's own -- the same string ReadByIdResp carries, read by the same
+        // client-side codec. It lives on the catalog row, not in the bytes.
+        let element_type = store
+            .get_metadata_by_id(id)
+            .map_err(map_err)?
+            .map(|m| m.element_type.to_string())
+            .unwrap_or_default();
+        Ok(Response::new(pb::ReadProjectedResp {
+            shape: projected.shape.iter().map(|&d| d as u64).collect(),
+            value_bytes: projected.bytes,
+            element_type,
+        }))
+    }
+
     async fn get_detailed_counts(
         &self,
         _request: Request<GetDetailedCountsReq>,

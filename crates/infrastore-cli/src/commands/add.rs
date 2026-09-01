@@ -405,7 +405,9 @@ fn flush(
 fn request_identity(req: &AddRequest) -> infrastore_core::ListFilter {
     let (resolution, interval) = match &req.data {
         TimeSeriesData::SingleTimeSeries(s) => (Some(s.resolution), None),
-        TimeSeriesData::NonSequentialTimeSeries(_) => (None, None),
+        TimeSeriesData::NonSequentialTimeSeries(_) | TimeSeriesData::PersistentTimeSeries(_) => {
+            (None, None)
+        }
         TimeSeriesData::Deterministic(d) => (Some(d.resolution), Some(d.interval)),
         TimeSeriesData::Probabilistic(p) => (Some(p.resolution), Some(p.interval)),
         TimeSeriesData::Scenarios(s) => (Some(s.resolution), Some(s.interval)),
@@ -511,6 +513,7 @@ fn data_array(d: &TimeSeriesData) -> &infrastore_core::TypedArray {
     match d {
         TimeSeriesData::SingleTimeSeries(s) => &s.data,
         TimeSeriesData::NonSequentialTimeSeries(s) => &s.data,
+        TimeSeriesData::PersistentTimeSeries(s) => &s.data,
         TimeSeriesData::Deterministic(d) => &d.data,
         TimeSeriesData::Probabilistic(p) => &p.data,
         TimeSeriesData::Scenarios(s) => &s.data,

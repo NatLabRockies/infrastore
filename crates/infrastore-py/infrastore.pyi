@@ -17,7 +17,12 @@ from numpy.typing import NDArray
 # datetime.timedelta; it is always returned as an ISO-8601 string.
 Period = str | timedelta
 TimeSeriesData = (
-    SingleTimeSeries | NonSequentialTimeSeries | Deterministic | Probabilistic | Scenarios
+    SingleTimeSeries
+    | NonSequentialTimeSeries
+    | PersistentTimeSeries
+    | Deterministic
+    | Probabilistic
+    | Scenarios
 )
 
 __version__: str
@@ -47,8 +52,12 @@ class CatalogTooNewError(TimeSeriesError): ...
 
 @final
 class TimeSeriesType:
+    # Grouped by kind for a reader. `int()` returns the storage code, which is
+    # fixed per variant and does not follow this order: PersistentTimeSeries is
+    # 6, appended after Scenarios so that adding it renumbered nothing.
     SingleTimeSeries: TimeSeriesType
     NonSequentialTimeSeries: TimeSeriesType
+    PersistentTimeSeries: TimeSeriesType
     Deterministic: TimeSeriesType
     DeterministicSingleTimeSeries: TimeSeriesType
     Probabilistic: TimeSeriesType
@@ -109,6 +118,29 @@ class NonSequentialTimeSeries:
     def length(self) -> int: ...
     @property
     def data(self) -> NDArray[Any]: ...
+    def __eq__(self, value: object) -> bool: ...
+    def __len__(self) -> int: ...
+
+@final
+class PersistentTimeSeries:
+    def __init__(
+        self,
+        timestamps: list[datetime],
+        data: NDArray[Any],
+        name: str,
+    ) -> None: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def timestamps(self) -> list[datetime]: ...
+    @property
+    def time_reference(self) -> str | None: ...
+    @property
+    def length(self) -> int: ...
+    @property
+    def data(self) -> NDArray[Any]: ...
+    def index_in_force_at(self, at: datetime) -> int: ...
+    def project_onto(self, at: list[datetime]) -> NDArray[Any]: ...
     def __eq__(self, value: object) -> bool: ...
     def __len__(self) -> int: ...
 
@@ -352,6 +384,10 @@ class Store:
     def read_by_ids_range(
         self, ids: list[int], time_range: tuple[datetime, datetime]
     ) -> list[TimeSeriesData]: ...
+    def read_projected(self, id: int, at: list[datetime]) -> NDArray[Any]: ...
+    def read_projected_by_ids(
+        self, ids: list[int], at: list[datetime]
+    ) -> list[NDArray[Any]]: ...
     def read_by_id(
         self,
         id: int,

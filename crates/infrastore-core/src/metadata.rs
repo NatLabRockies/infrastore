@@ -37,10 +37,11 @@ pub type ReferencedArrays = (Vec<([u8; 32], ElementType)>, Vec<String>);
 /// verification must report that rather than fail.
 pub type ReferencedTimestamps = (HashSet<[u8; 32]>, Vec<String>);
 
-/// A catalog row paired with its `INTEGER PRIMARY KEY` (SQLite rowid). Used
-/// internally by [`Self::list_inner`]; public APIs surface metadata without
-/// the raw storage id.
-pub(crate) type IdentifiedRow = (i64, TimeSeriesMetadata);
+/// A catalog row paired with its `INTEGER PRIMARY KEY` (SQLite rowid) and the
+/// hash of its timestamp vector (`None` for a row that carries none). Used
+/// internally by [`Self::list_inner`]; public APIs surface metadata without the
+/// raw storage id, and only the reader build path wants the hash.
+pub(crate) type IdentifiedRow = (i64, TimeSeriesMetadata, Option<[u8; 32]>);
 
 /// A SQLite value's storage class, for a diagnostic that has to describe a
 /// column holding the wrong kind of thing.
@@ -1496,7 +1497,7 @@ impl MetadataStore {
             .list_inner(filter, Some(vectors))?
             .0
             .into_iter()
-            .map(|(_, m)| m)
+            .map(|(_, m, _)| m)
             .collect())
     }
 
@@ -1519,7 +1520,7 @@ impl MetadataStore {
             .list_inner(filter, None)?
             .0
             .into_iter()
-            .map(|(_, m)| m)
+            .map(|(_, m, _)| m)
             .collect())
     }
 
@@ -1537,7 +1538,56 @@ impl MetadataStore {
         filter: &MetadataFilter,
     ) -> Result<(Vec<TimeSeriesMetadata>, Vec<[u8; 32]>)> {
         let (rows, cohorts) = self.list_inner(filter, None)?;
-        Ok((rows.into_iter().map(|(_, m)| m).collect(), cohorts))
+        Ok((rows.into_iter().map(|(_, m, _)| m).collect(), cohorts))
+    }
+
+    /// Rows tagged with the *interned index* of the timestamp vector each one
+    /// lies on, plus those distinct vectors, decoded once each.
+    ///
+    /// The build path for a per-column-breakpoint [`crate::StaticReader`], which
+    /// neither of the two wrappers above serves. [`Self::list`] hydrates a full
+    /// per-row copy of the vector, which for a cohort of 50k series on one axis
+    /// is gigabytes of identical data; [`Self::list_timeline_cohorts`] skips the
+    /// hydration but returns only the *set* of vectors, with no row-to-vector
+    /// mapping — and a `PersistentTimeSeries` reader needs exactly that
+    /// mapping, because its columns are allowed to sit on different axes.
+    ///
+    /// The index is into the returned vector list, so a reader can carry a
+    /// `usize` per column and hold each axis exactly once. One listing query,
+    /// plus one read of the array file per distinct vector.
+    #[allow(clippy::type_complexity)]
+    pub fn list_timeline_rows(
+        &self,
+        filter: &MetadataFilter,
+        vectors: &dyn StorageBackend,
+    ) -> Result<(Vec<(TimeSeriesMetadata, usize)>, Vec<Vec<DateTime<Utc>>>)> {
+        let (rows, cohorts) = self.list_inner(filter, None)?;
+        // `cohorts` is the distinct hashes in first-seen order, so position is
+        // the interned id.
+        let interned: HashMap<[u8; 32], usize> =
+            cohorts.iter().enumerate().map(|(i, h)| (*h, i)).collect();
+        let mut out = Vec::with_capacity(rows.len());
+        for (_, meta, hash) in rows {
+            // Every row this is called for is an irregular static type, which
+            // by construction carries a vector. A row without one is a damaged
+            // catalog, not an empty timeline.
+            let id = hash
+                .and_then(|h| interned.get(&h).copied())
+                .ok_or_else(|| {
+                    TimeSeriesError::IntegrityError(format!(
+                        "association '{}' (owner {}) is a {} but references no timestamp vector",
+                        meta.name,
+                        meta.owner_id,
+                        meta.time_series_type.as_str()
+                    ))
+                })?;
+            out.push((meta, id));
+        }
+        let decoded = cohorts
+            .iter()
+            .map(|h| self.timestamps_for_hash(h, vectors))
+            .collect::<Result<Vec<_>>>()?;
+        Ok((out, decoded))
     }
 
     /// Shared body of [`Self::list`] and [`Self::list_timeline_cohorts`]. Each
@@ -1683,7 +1733,8 @@ impl MetadataStore {
                 }
             };
             let id = partial.id;
-            out.push((id, partial.into_metadata(features, timestamps)));
+            let hash = partial.timestamps_hash;
+            out.push((id, partial.into_metadata(features, timestamps), hash));
         }
         Ok((out, cohorts))
     }
@@ -2217,16 +2268,22 @@ impl MetadataStore {
     /// `(owner_type, owner_category, type, name, initial_timestamp, resolution,
     /// length)` with the association count. One `GROUP BY` query.
     pub fn static_summary(&self) -> Result<Vec<StaticSummaryRow>> {
-        // The static types are a contiguous code block, so this is one range
-        // scan rather than a name list — see `TimeSeriesType::code_groups`.
-        let (static_lo, static_hi, ..) = TimeSeriesType::code_groups();
+        // An `IN` list rather than a `BETWEEN`: the static codes stopped being
+        // contiguous when `PersistentTimeSeries` was appended as 6 — see
+        // `TimeSeriesType::static_codes`. `idx_ts_type` serves either shape.
+        //
+        // Interpolated rather than bound, unlike the rest of this module. The
+        // values come straight off the enum as `i64`, never from a caller, so
+        // there is no injection surface here; binding a variable-length list
+        // would mean rendering the placeholders anyway.
         let mut stmt = self.conn.prepare(&format!(
             "SELECT owner_type, owner_category, time_series_type, name,
                     initial_timestamp, resolution, length, COUNT(*)
              FROM time_series_associations
-             WHERE time_series_type BETWEEN {static_lo} AND {static_hi}
+             WHERE time_series_type IN ({static_codes})
              GROUP BY owner_type, owner_category, time_series_type, name,
                       initial_timestamp, resolution, length",
+            static_codes = code_list(TimeSeriesType::static_codes()),
         ))?;
         let rows = stmt.query_map([], |r| {
             Ok((
@@ -2262,15 +2319,16 @@ impl MetadataStore {
     /// horizon, interval, window_count)` with the association count. One
     /// `GROUP BY` query.
     pub fn forecast_summary(&self) -> Result<Vec<ForecastSummaryRow>> {
-        // The forecast types are the other contiguous code block.
-        let (.., fc_lo, fc_hi) = TimeSeriesType::code_groups();
+        // The other half of the partition — see `static_summary` above for why
+        // this is an interpolated `IN` list.
         let mut stmt = self.conn.prepare(&format!(
             "SELECT owner_type, owner_category, time_series_type, name,
                     initial_timestamp, resolution, horizon, interval, count, COUNT(*)
              FROM time_series_associations
-             WHERE time_series_type BETWEEN {fc_lo} AND {fc_hi}
+             WHERE time_series_type IN ({forecast_codes})
              GROUP BY owner_type, owner_category, time_series_type, name,
                       initial_timestamp, resolution, horizon, interval, count",
+            forecast_codes = code_list(TimeSeriesType::forecast_codes()),
         ))?;
         let rows = stmt.query_map([], |r| {
             Ok((
@@ -2922,6 +2980,16 @@ fn to_param_refs(params: &[Box<dyn rusqlite::ToSql>]) -> Vec<&dyn rusqlite::ToSq
         .iter()
         .map(|p| p.as_ref() as &dyn rusqlite::ToSql)
         .collect()
+}
+
+/// Render storage codes as a comma-separated SQL `IN` list. The inputs are
+/// `i64`s produced by [`TimeSeriesType`], never caller text.
+fn code_list(codes: &[i64]) -> String {
+    codes
+        .iter()
+        .map(|c| c.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Whether `name` is a table in the main schema. Consulted once per connection

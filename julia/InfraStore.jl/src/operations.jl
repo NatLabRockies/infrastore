@@ -256,7 +256,8 @@ end
 # `DeterministicSingleTimeSeries` is derived in-store via
 # `transform_single_time_series!`, never added directly).
 const _AddableTimeSeries = Union{
-    SingleTimeSeries, NonSequentialTimeSeries, Deterministic, Probabilistic, Scenarios
+    SingleTimeSeries, NonSequentialTimeSeries, PersistentTimeSeries, Deterministic,
+    Probabilistic, Scenarios,
 }
 
 """
@@ -265,12 +266,12 @@ const _AddableTimeSeries = Union{
                      units=ts.units, application_data=ts.application_data) -> Int64
 
 Add a time series (`SingleTimeSeries`, `NonSequentialTimeSeries`,
-`Deterministic`, `Probabilistic`, or `Scenarios`) and return the catalog `id`
-its row was filed under — the handle every read, removal and rename takes, and
-the one a caller records in its own object model. `owner_id` identifies the
-owning component / supplemental attribute (a signed 64-bit integer). The
-association `name` comes from the time series object (`ts.name`), as do its
-`element_type` and `units` labels.
+`PersistentTimeSeries`, `Deterministic`, `Probabilistic`, or `Scenarios`) and
+return the catalog `id` its row was filed under — the handle every read, removal
+and rename takes, and the one a caller records in its own object model.
+`owner_id` identifies the owning component / supplemental attribute (a signed
+64-bit integer). The association `name` comes from the time series object
+(`ts.name`), as do its `element_type` and `units` labels.
 
 A `features` key that shadows a field of a time series or of the identity a row
 is filed under (`name`, `resolution`, `owner_id`, …) is rejected: those names
@@ -662,6 +663,78 @@ function _bulk_non_sequential(
     end
 end
 
+# Reconstruct one PersistentTimeSeries from a bulk-read result slot. Identical
+# to `_bulk_non_sequential` above -- the two types have the same payload (carrying
+# `application_data` / `element_type` / `units`, as `_bulk_single` does), and the
+# same element-type decoding applies.
+function _bulk_persistent(
+    result::Ptr{Cvoid}, idx::Integer, name::AbstractString, raw::Bool,
+    types::NamedTuple,
+)
+    out_ts = Ref{Ptr{Int64}}(C_NULL)
+    out_ts_len = Ref{UInt64}(0)
+    out_dtype = Ref{Int32}(0)
+    out_shape = Ref{Ptr{Int64}}(C_NULL)
+    out_shape_len = Ref{UInt64}(0)
+    out_data = Ref{Ptr{UInt8}}(C_NULL)
+    out_data_len = Ref{UInt64}(0)
+    out_application_data = Ref{Ptr{Cchar}}(C_NULL)
+    out_element_type = Ref{Ptr{Cchar}}(C_NULL)
+    out_units = Ref{Ptr{Cchar}}(C_NULL)
+    out_quantity_kind = Ref{Ptr{Cchar}}(C_NULL)
+    out_unit_system = Ref{Ptr{Cchar}}(C_NULL)
+    out_time_reference = Ref{Ptr{Cchar}}(C_NULL)
+    out_component_field = Ref{Ptr{Cchar}}(C_NULL)
+    _check(
+        @ccall lib_path().infrastore_bulk_result_get_persistent(
+            result::Ptr{Cvoid},
+            UInt64(idx)::UInt64,
+            out_ts::Ref{Ptr{Int64}},
+            out_ts_len::Ref{UInt64},
+            out_dtype::Ref{Int32},
+            out_shape::Ref{Ptr{Int64}},
+            out_shape_len::Ref{UInt64},
+            out_data::Ref{Ptr{UInt8}},
+            out_data_len::Ref{UInt64},
+            out_application_data::Ref{Ptr{Cchar}},
+            out_element_type::Ref{Ptr{Cchar}},
+            out_units::Ref{Ptr{Cchar}},
+            out_quantity_kind::Ref{Ptr{Cchar}},
+            out_unit_system::Ref{Ptr{Cchar}},
+            out_time_reference::Ref{Ptr{Cchar}},
+            out_component_field::Ref{Ptr{Cchar}},
+        )::Int32
+    )
+    try
+        ts_ms = copy(unsafe_wrap(Array, out_ts[], Int(out_ts_len[]); own=false))
+        dims = Int.(unsafe_wrap(Array, out_shape[], Int(out_shape_len[]); own=false))
+        bytes = copy(unsafe_wrap(Array, out_data[], Int(out_data_len[]); own=false))
+        raw_data = _decode_array(bytes, out_dtype[], dims)
+        element_type = _peek_cstr(out_element_type[])
+        return PersistentTimeSeries(
+            _from_unix_ms.(ts_ms), _read_values(raw_data, element_type, raw, types), name;
+            application_data=_peek_cstr(out_application_data[]),
+            element_type=element_type,
+            units=_peek_cstr(out_units[]),
+            quantity_kind=_peek_cstr(out_quantity_kind[]),
+            unit_system=_unit_system(_peek_cstr(out_unit_system[])),
+            time_reference=_time_reference(_peek_cstr(out_time_reference[])),
+            component_field=_peek_cstr(out_component_field[]),
+        )
+    finally
+        _free_i64(out_ts[], out_ts_len[])
+        _free_i64(out_shape[], out_shape_len[])
+        _free_u8(out_data[], out_data_len[])
+        _free_cstr(out_application_data[])
+        _free_cstr(out_element_type[])
+        _free_cstr(out_units[])
+        _free_cstr(out_quantity_kind[])
+        _free_cstr(out_unit_system[])
+        _free_cstr(out_time_reference[])
+        _free_cstr(out_component_field[])
+    end
+end
+
 # Reconstruct one forecast (Deterministic / Probabilistic / Scenarios) from a
 # bulk-read result slot; `type_code` is the ts_type discriminant. As above, the
 # descriptive attributes come back with the data.
@@ -817,6 +890,8 @@ function _decode_bulk_result(
                 _bulk_single(result, i - 1, name, raw, types)
             elseif t == INFRASTORE_TYPE_NON_SEQUENTIAL
                 _bulk_non_sequential(result, i - 1, name, raw, types)
+            elseif t == INFRASTORE_TYPE_PERSISTENT
+                _bulk_persistent(result, i - 1, name, raw, types)
             else
                 _bulk_forecast(result, i - 1, t, name, raw, types)
             end
@@ -887,6 +962,92 @@ function read_by_ids(
         )
     end
     return _decode_bulk_result(out_result[], n, raw, types)
+end
+
+"""
+    read_projected(store, id, at; raw=false, types=DEFAULT_ELEMENT_TYPES)
+
+Evaluate the [`PersistentTimeSeries`](@ref) filed under `id` at each instant in
+`at`, in the order given.
+
+The projection read: the step function's own hold-last lookup applied once per
+instant, so a caller asking "what were these values on each of my simulation
+timestamps" gets the answer from the store that owns the rule instead of
+re-deriving it beside a copy of the breakpoints. It makes no policy choice — the
+caller names the instants, and each one resolves by the documented rule or the
+call throws. Deciding *which* instants to ask for, or how to collapse the answer
+for a solver, stays with the caller.
+
+A **gather, not a slice**: `at` may be unsorted and may repeat, each instant
+resolves independently, and the caller's order is the output order. An empty `at`
+returns an empty array rather than throwing.
+
+Returns an array whose first dimension is `length(at)` and whose trailing
+dimensions are the series' own element shape. A composite `element_type` is
+decoded into values the way [`read_by_id`](@ref) decodes one — the projection
+copies rows whole, so a step function over cost curves comes back as curves;
+`raw=true` hands back the packing instead.
+
+Throws `InvalidParameterError` if `id` names any other stored type: projecting a
+`SingleTimeSeries` or a forecast would need a *resampling policy* — interpolate?
+forward-fill? — and choosing one is the application's business, where hold-last
+needs no choice at all. Also if any instant precedes the first breakpoint, where
+a step function is undefined; every index is resolved before a byte is copied, so
+such a call leaves no partial answer. `NotFoundError` if `id` names no row.
+
+The instants are query bounds and must be spelled the way the series is: all
+`DateTime` for a zoneless one, all `ZonedDateTime` otherwise, and one vector
+carries one spelling.
+
+See also [`index_in_force_at`](@ref) for the single-instant form, and
+[`read_by_id`](@ref).
+"""
+function read_projected(
+    store::Store,
+    id::Integer,
+    at;
+    raw::Bool=false,
+    types::NamedTuple=DEFAULT_ELEMENT_TYPES,
+)
+    # One vector is one request, so its instants have to agree on a spelling --
+    # the same rule a series' own timestamps are held to.
+    zoneless = isempty(at) ? false : is_zoneless(_vector_time_reference(at))
+    ms = Int64[_to_unix_ms(t) for t in at]
+    out_dtype = Ref{Int32}(0)
+    out_shape = Ref{Ptr{Int64}}(C_NULL)
+    out_shape_len = Ref{UInt64}(0)
+    out_data = Ref{Ptr{UInt8}}(C_NULL)
+    out_data_len = Ref{UInt64}(0)
+    GC.@preserve ms begin
+        _check(
+            @ccall lib_path().infrastore_store_read_projected(
+                store::Ptr{Cvoid},
+                Int64(id)::Int64,
+                (isempty(ms) ? C_NULL : pointer(ms))::Ptr{Int64},
+                UInt64(length(ms))::UInt64,
+                zoneless::Bool,
+                out_dtype::Ref{Int32},
+                out_shape::Ref{Ptr{Int64}},
+                out_shape_len::Ref{UInt64},
+                out_data::Ref{Ptr{UInt8}},
+                out_data_len::Ref{UInt64},
+            )::Int32
+        )
+    end
+    values = try
+        dims = Int.(unsafe_wrap(Array, out_shape[], Int(out_shape_len[]); own=false))
+        bytes = copy(unsafe_wrap(Array, out_data[], Int(out_data_len[]); own=false))
+        _decode_array(bytes, out_dtype[], dims)
+    finally
+        _free_i64(out_shape[], out_shape_len[])
+        _free_u8(out_data[], out_data_len[])
+    end
+    raw && return values
+    # The element type lives on the catalog row, not in the bytes -- the same
+    # place a read gets it from, and only fetched when it will be used.
+    row = get_metadata_by_id(store, id)
+    row === nothing && return values
+    return _read_values(values, row.element_type, false, types)
 end
 
 """

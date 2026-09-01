@@ -329,6 +329,9 @@ enum Commands {
         /// Restrict to a half-open time range START..END (RFC3339 or epoch-ms).
         #[arg(long)]
         time_range: Option<String>,
+        /// Evaluate a PersistentTimeSeries at this instant; repeat for more.
+        #[arg(long, value_name = "TIMESTAMP")]
+        at: Vec<String>,
         /// Max rows to show in table output (default 50).
         #[arg(long)]
         limit: Option<usize>,
@@ -783,7 +786,8 @@ enum Commands {
     /// `list` / `info` / `export -f json` output for the series it creates.
     #[command(after_help = help::TEMPLATE)]
     Template {
-        /// SingleTimeSeries|NonSequentialTimeSeries|Deterministic|Probabilistic|Scenarios
+        /// SingleTimeSeries|NonSequentialTimeSeries|PersistentTimeSeries|Deterministic|
+        /// Probabilistic|Scenarios
         #[arg(value_name = "TYPE")]
         ts_type: String,
     },
@@ -902,6 +906,7 @@ fn run(cli: &Cli) -> Result<(), String> {
         Commands::Get {
             selector,
             time_range,
+            at,
             limit,
             full,
             tail,
@@ -915,6 +920,7 @@ fn run(cli: &Cli) -> Result<(), String> {
             selector,
             &commands::show::GetOptions {
                 time_range: time_range.as_deref(),
+                at,
                 rows: commands::show::RowWindow {
                     limit: *limit,
                     full: *full,

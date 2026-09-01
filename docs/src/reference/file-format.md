@@ -21,7 +21,7 @@ carries netcdf-c's `_NCProperties` attribute, and `Store::open` accepts only fil
 The HDF5 root carries four global attributes:
 
 ```text
-data_format_version = "0.19.0"
+data_format_version = "0.20.0"
 compression         = "deflate:3:shuffle"
 storage_backend     = "hdf5"
 catalog_generation  = "9f2c1ab4e70d5836c41b9e2af0d7c358"
@@ -79,6 +79,21 @@ bump plus an append-only migration**, not a re-created store. A catalog written 
 `DATA_FORMAT_VERSION` bump at all** — nothing in the HDF5 file moves, so a `0.19.0` store upgrades
 in place on its first writable open. See
 [Upgrade a store in place](../explanation/design-choices.md#upgrade-a-store-in-place-rather-than-bricking-it).
+
+`PersistentTimeSeries` (storage code 6) is the first _type_ to arrive through that door. The HDF5
+layout is unchanged — a persistent series pools into the same `nsts_…` datasets as a
+`NonSequentialTimeSeries` on the same breakpoints, and its breakpoints are an ordinary timestamp
+vector — and the widened `CHECK` is the whole of what it needed from the catalog, which every
+`0.19.0` store already has. So it needed nothing from a version bump in the **backward** direction,
+and `MIN_UPGRADABLE_VERSION` stays at `0.19.0`: an existing store still upgrades in place.
+
+It got one anyway — `0.20.0` — for the **forward** direction. A new type code is a thing an older
+reader cannot absorb: without the bump, a `0.19.0` build would open a store holding a persistent row
+as `Current` and then fail the first listing with `invalid time_series_type code: 6`, an error
+raised while decoding the row that surfaces as catalog corruption and takes the whole query with it,
+not just the offending row. Refusing the artifact at the door is the honest report. The cost,
+accepted knowingly, is that any store this build opens for writing is re-stamped `0.20.0` and so
+leaves `0.19.0` readers behind whether or not it holds a persistent series.
 
 (`0.19.0` moved a `NonSequentialTimeSeries`'s timestamps out of the SQLite catalog and into the HDF5
 file: the `timestamp_sets` table is gone, and each distinct time axis is now an `i64` dataset of
@@ -175,7 +190,7 @@ time axes in a sibling group of their own:
 
 ```text
 <name>.h5
-├── attribute  data_format_version = "0.19.0"
+├── attribute  data_format_version = "0.20.0"
 ├── attribute  compression         = "deflate:3:shuffle"
 ├── attribute  storage_backend     = "hdf5"
 └── group      time_series/
@@ -204,13 +219,14 @@ hex characters as raw bytes — not an HDF5 string dataset. **An all-zero row ma
 ### Packed mode
 
 Used for every **static** series: `SingleTimeSeries`, the underlying array of a
-`DeterministicSingleTimeSeries`, and `NonSequentialTimeSeries`. Many arrays that share a
-`(dtype, element_shape, length)` **and a time axis** are column-packed into one dataset:
+`DeterministicSingleTimeSeries`, `NonSequentialTimeSeries`, and `PersistentTimeSeries`. Many arrays
+that share a `(dtype, element_shape, length)` **and a time axis** are column-packed into one
+dataset:
 
 | Element    | Meaning                                                                 |
 | ---------- | ----------------------------------------------------------------------- |
 | `sts_`     | Prefix for a packed `SingleTimeSeries` / DST pool                       |
-| `nsts_`    | Prefix for a packed `NonSequentialTimeSeries` cohort                    |
+| `nsts_`    | Prefix for a packed explicit-time-axis cohort (irregular + persistent)  |
 | `{dtype}`  | Element dtype string (`f64`, `i64`, …)                                  |
 | `{shape}`  | Element shape: `s` = scalar, `3` = `[3]`, `3x2` = `[3, 2]`              |
 | `{length}` | Number of timesteps (size of the time axis)                             |
@@ -222,9 +238,12 @@ The trailing element is what pins the **time axis**, which is what makes packing
 the chunking is timestamp-major, so row `t` of a dataset is "every column at the same instant". A
 regular series takes its axis from the resolution; an irregular one carries the axis explicitly, and
 two of them share one exactly when their timestamp vectors are equal — which the store already
-answers by content-addressing those vectors (see [Timestamp vectors](#timestamp-vectors)). The full
-64-char hash is used, not a prefix: the name is parsed back into the pool key when the index is
-rebuilt at open, so a truncated form could let two distinct time axes collide into one pool.
+answers by content-addressing those vectors (see [Timestamp vectors](#timestamp-vectors)). The pool
+key is the time axis and **never the series type**, so a `PersistentTimeSeries` and a
+`NonSequentialTimeSeries` on the same instants share one `nsts_…` dataset, and identical values on
+them share one content-addressed array. The full 64-char hash is used, not a prefix: the name is
+parsed back into the pool key when the index is rebuilt at open, so a truncated form could let two
+distinct time axes collide into one pool.
 
 The dataset shape is `(length, cols, *element_shape)` and chunking is `(1, cols, *element_shape)`,
 so one HDF5 chunk holds a single timestamp across every column — making a read across series by
@@ -247,17 +266,18 @@ within a byte budget (`MAX_CHUNK_BYTES = 1 MiB`); a batch wider than the cap spi
 ### Standalone mode
 
 Used for the dense forecast arrays (**`Deterministic`**, **`Probabilistic`**, **`Scenarios`**), and
-for a **`NonSequentialTimeSeries`** whose time axis nothing else shares. Each array is its own
-typed, multi-dimensional variable named `arr_{hex_hash}` in the `time_series/single` group. There is
-no column packing and no companion hash variable — the variable name carries the hash.
+for a **`NonSequentialTimeSeries`** or **`PersistentTimeSeries`** whose time axis nothing else
+shares. Each array is its own typed, multi-dimensional variable named `arr_{hex_hash}` in the
+`time_series/single` group. There is no column packing and no companion hash variable — the variable
+name carries the hash.
 
-- **A lone `NonSequentialTimeSeries`** is shaped `[length, *element_shape]` and chunked as a single
-  whole-array chunk. Its explicit, strictly-increasing timestamps are not in the array: they are a
-  shared time axis, stored once in the `timestamps` group below. Packing is only a win once a cohort
-  is several columns wide — a packed dataset spreads one array over `length` chunks — so a series
-  alone on its time axis stays standalone. Whether a given array is packed or standalone is a
-  write-time choice with no effect on reads (they resolve by content hash and handle either), and
-  one cohort can hold columns of both.
+- **A lone explicit-time-axis series** (`NonSequentialTimeSeries` or `PersistentTimeSeries`) is
+  shaped `[length, *element_shape]` and chunked as a single whole-array chunk. Its explicit,
+  strictly-increasing timestamps are not in the array: they are a shared time axis, stored once in
+  the `timestamps` group below. Packing is only a win once a cohort is several columns wide — a
+  packed dataset spreads one array over `length` chunks — so a series alone on its time axis stays
+  standalone. Whether a given array is packed or standalone is a write-time choice with no effect on
+  reads (they resolve by content hash and handle either), and one cohort can hold columns of both.
 - **Dense forecasts** are shaped `[H, count, *element_shape]` (`Deterministic`),
   `[num_percentiles, H, count, *element_shape]` (`Probabilistic`), or
   `[num_scenarios, H, count, *element_shape]` (`Scenarios`), where `count` is the number of forecast
@@ -370,13 +390,13 @@ One row per association between an owner and a stored array.
 | `owner_category`    | INTEGER | Code, `CHECK` in (0, 1); part of key — see below                    |
 | `time_series_type`  | INTEGER | Code, `CHECK >= 0`; part of key — see below                         |
 | `name`              | TEXT    | Series name                                                         |
-| `initial_timestamp` | TEXT    | RFC 3339 string; `NULL` for `NonSequentialTimeSeries`               |
-| `resolution`        | TEXT    | ISO-8601 duration (`PT1H`, `P1M`, …); `NULL` for non-sequential     |
+| `initial_timestamp` | TEXT    | RFC 3339 string; `NULL` for the explicit-time-axis types            |
+| `resolution`        | TEXT    | ISO-8601 duration (`PT1H`, `P1M`, …); `NULL` for those types too    |
 | `length`            | INTEGER | Number of timesteps                                                 |
 | `horizon`           | TEXT    | ISO-8601 forecast horizon; `NULL` for non-forecasts                 |
 | `interval`          | TEXT    | ISO-8601 forecast interval; `NULL` for non-forecasts                |
 | `count`             | INTEGER | Forecast window count; `NULL` for non-forecasts                     |
-| `timestamps_hash`   | BLOB    | 32-byte hash of the timestamp vector; see below                     |
+| `timestamps_hash`   | BLOB    | 32-byte hash of the timestamp/breakpoint vector; see below          |
 | `units`             | TEXT    | Free-form units label                                               |
 | `quantity_kind`     | TEXT    | What the values measure (QUDT `QuantityKind` name); `NULL` if unset |
 | `unit_system`       | TEXT    | `natural_units` or `component_base`; `NULL` means _unspecified_     |
@@ -632,6 +652,7 @@ SELECT id, owner_id, owner_type,
                              WHEN 3 THEN 'DeterministicSingleTimeSeries'
                              WHEN 4 THEN 'Probabilistic'
                              WHEN 5 THEN 'Scenarios'
+                             WHEN 6 THEN 'PersistentTimeSeries'
                              ELSE 'unknown(' || time_series_type || ')' END AS time_series_type,
        name,
        initial_timestamp, resolution, length, horizon, interval, count,
@@ -681,6 +702,7 @@ and so lands on an existing store's first writable open without a `data_format_v
 |                         |      |   | `DeterministicSingleTimeSeries` | 3    |
 |                         |      |   | `Probabilistic`                 | 4    |
 |                         |      |   | `Scenarios`                     | 5    |
+|                         |      |   | `PersistentTimeSeries`          | 6    |
 
 Both columns sit in the two wide unique indexes, and `time_series_type` additionally in
 `idx_ts_type` while `owner_category` sits in `idx_owner` and `idx_category_owner`. A 1-byte code

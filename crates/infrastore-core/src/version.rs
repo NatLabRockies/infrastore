@@ -42,7 +42,12 @@
 ///   migration can fix — and raise [`MIN_UPGRADABLE_VERSION`] to the new value
 ///   at the same time, because such a change really does strand older stores.
 ///   Bump it *without* raising `MIN_UPGRADABLE_VERSION` for a change the
-///   catalog migration ladder can apply in place.
+///   catalog migration ladder can apply in place, and for a change an older
+///   reader must not silently accept. A new [`crate::TimeSeriesType`] code is
+///   the type case for the second: nothing on disk moves, so older stores still
+///   upgrade, but a build that has never heard of the code cannot read an
+///   artifact carrying it and must be turned away at the door rather than
+///   discovering it one row at a time.
 /// * [`CATALOG_SCHEMA_REVISION`](crate::metadata::migrate::CATALOG_SCHEMA_REVISION)
 ///   describes the **SQLite catalog** alone. **Any catalog change the
 ///   idempotent DDL cannot make to an existing table — a new column, a changed
@@ -115,7 +120,26 @@
 /// write. Nothing in the HDF5 file changes, so there is nothing to bump: the
 /// table rebuild is entirely on the catalog side, and a 0.19.0 store upgrades
 /// in place on its first writable open.
-pub const DATA_FORMAT_VERSION: &str = "0.19.0";
+///
+/// 0.20.0 added `PersistentTimeSeries` (storage code 6), the first *type* to
+/// arrive through that door. Nothing in the HDF5 file moves — a persistent
+/// series pools into the same `nsts_…` datasets as a `NonSequentialTimeSeries`
+/// on the same breakpoints, and its breakpoints are an ordinary timestamp
+/// vector — and the catalog needs nothing beyond the revision-2 CHECK that
+/// every 0.19.0 store already has. So the bump is not about *this* build
+/// reading an older store, and [`MIN_UPGRADABLE_VERSION`] deliberately stays at
+/// 0.19.0: a 0.19.0 store still upgrades in place.
+///
+/// It is about the other direction. Without a bump, a 0.19.0 build opens a
+/// store holding a persistent row as `Current`, and then fails on the first
+/// listing or read with `invalid time_series_type code: 6` — a
+/// `FromSqlConversionFailure` raised while decoding the row, which surfaces as
+/// catalog corruption and takes down the whole query rather than the one
+/// offending row. A stamp the old build refuses outright is the honest report:
+/// the artifact really is one it cannot read. The cost, accepted knowingly, is
+/// that any store this build opens for writing is re-stamped 0.20.0 and so
+/// leaves 0.19.0 behind whether or not it holds a persistent series.
+pub const DATA_FORMAT_VERSION: &str = "0.20.0";
 
 /// The oldest [`DATA_FORMAT_VERSION`] this build can open and upgrade in place.
 ///
@@ -259,6 +283,17 @@ mod tests {
         assert_eq!(compatibility(MIN_UPGRADABLE_VERSION), expected);
     }
 
+    /// The direction the 0.20.0 bump was for: a 0.19.0 artifact still opens.
+    ///
+    /// The bump exists so an *older* build refuses a store holding a
+    /// `PersistentTimeSeries`, not so this one refuses the format that came
+    /// before it. That asymmetry is exactly `MIN_UPGRADABLE_VERSION` staying
+    /// put, and it is what this asserts.
+    #[test]
+    fn the_previous_format_upgrades_in_place() {
+        assert_eq!(compatibility("0.19.0"), Compat::Upgradable);
+    }
+
     #[test]
     fn older_than_the_floor_and_newer_than_current_are_both_incompatible() {
         assert_eq!(compatibility("0.18.0"), Compat::Incompatible);
@@ -275,12 +310,13 @@ mod tests {
         assert_eq!(compatibility("0.19.0-rc1"), Compat::Incompatible);
     }
 
-    /// The middle tier, which the live constants cannot currently produce.
+    /// The middle tier, exercised against an explicit window.
     ///
-    /// `MIN_UPGRADABLE_VERSION == DATA_FORMAT_VERSION`, so `compatibility` has
-    /// never once returned `Upgradable` in production or in any other test
-    /// here. The rule is exercised against an explicit window instead, so the
-    /// day the two constants separate they separate onto tested behavior.
+    /// The live constants separated at 0.20.0, so `Upgradable` is now reachable
+    /// in production (see [`the_previous_format_upgrades_in_place`]) — but the
+    /// window is one release wide, and the rule is about the shape of the
+    /// interval rather than about today's constants. Keeping the explicit
+    /// window means the boundaries stay tested as the constants move.
     #[test]
     fn the_upgradable_tier_is_the_half_open_window_between_the_bounds() {
         let tier = |v| compatibility_within(v, "1.2.0", "1.5.0");

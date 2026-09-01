@@ -3232,3 +3232,172 @@ fn the_id_selector_is_a_point_lookup_not_a_filter() {
     let err = run_err(&store, &["list", "--id", "1"]);
     assert!(err.contains("cannot select a set"), "{err}");
 }
+
+/// A `PersistentTimeSeries` window that opens before the first breakpoint is
+/// refused rather than clamped: a step function has no value there, and
+/// silently substituting the first one would invent a number the store does not
+/// hold.
+#[test]
+fn a_persistent_read_before_the_first_breakpoint_is_refused_not_clamped() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("steps.h5");
+    write(
+        dir.path(),
+        "gas.csv",
+        "timestamp,value\n2024-04-01T00:00:00Z,4.25\n2024-07-01T00:00:00Z,5.0\n",
+    );
+    let descriptor = write(
+        dir.path(),
+        "gas.json",
+        r#"{"owner_id": 1, "owner_type": "G", "name": "gas_price",
+            "type": "PersistentTimeSeries", "element_type": "f64", "csv": "gas.csv"}"#,
+    );
+    run(
+        &store,
+        &["add", "--descriptor", descriptor.to_str().unwrap()],
+    );
+
+    // Opening inside the first step is fine, and yields the value in force.
+    let inside = run(
+        &store,
+        &[
+            "-f",
+            "csv",
+            "get",
+            "--name",
+            "gas_price",
+            "--time-range",
+            "2024-05-01T00:00:00Z..2024-06-01T00:00:00Z",
+        ],
+    );
+    assert_eq!(data_lines(&inside).len(), 1, "{inside}");
+    assert!(inside.contains("2024-04-01"), "{inside}");
+
+    // Opening before it is not.
+    let err = run_err(
+        &store,
+        &[
+            "get",
+            "--name",
+            "gas_price",
+            "--time-range",
+            "2024-01-01T00:00:00Z..2024-06-01T00:00:00Z",
+        ],
+    );
+    assert!(err.contains("before the first breakpoint"), "{err}");
+    assert!(
+        err.contains("gas_price"),
+        "the error names the series: {err}"
+    );
+}
+
+/// A wide CSV of persistent columns needs its `timestamp` column, exactly as an
+/// irregular one does — the breakpoints are explicit, not a grid.
+#[test]
+fn a_wide_persistent_csv_without_a_timestamp_column_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("wide.h5");
+    write(dir.path(), "w.csv", "gen_001,gen_002\n1,2\n3,4\n");
+    let descriptor = write(
+        dir.path(),
+        "w.json",
+        r#"{"owner_type": "G", "name": "price", "type": "PersistentTimeSeries",
+            "element_type": "f64", "layout": "wide", "owner_id_from": "header",
+            "csv": "w.csv"}"#,
+    );
+    let err = run_err(
+        &store,
+        &["add", "--descriptor", descriptor.to_str().unwrap()],
+    );
+    assert!(err.contains("timestamp"), "{err}");
+    assert!(err.contains("PersistentTimeSeries"), "{err}");
+}
+
+/// `--at` is refused where it would be answering a different question than the
+/// caller asked, and where the type has no value at an arbitrary instant.
+#[test]
+fn get_at_refuses_what_it_cannot_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("steps.h5");
+    write(
+        dir.path(),
+        "gas.csv",
+        "timestamp,value\n2024-04-01T00:00:00Z,4.25\n2024-07-01T00:00:00Z,5.0\n",
+    );
+    let step = write(
+        dir.path(),
+        "gas.json",
+        r#"{"owner_id": 1, "owner_type": "G", "name": "gas_price",
+            "type": "PersistentTimeSeries", "element_type": "f64", "csv": "gas.csv"}"#,
+    );
+    run(&store, &["add", "--descriptor", step.to_str().unwrap()]);
+    let irregular = write(
+        dir.path(),
+        "events.json",
+        r#"{"owner_id": 2, "owner_type": "G", "name": "events",
+            "type": "NonSequentialTimeSeries", "element_type": "f64", "csv": "gas.csv"}"#,
+    );
+    run(
+        &store,
+        &["add", "--descriptor", irregular.to_str().unwrap()],
+    );
+
+    // Before the first breakpoint a step function is undefined, and one bad
+    // instant fails the whole call rather than yielding a shorter answer.
+    let err = run_err(
+        &store,
+        &[
+            "get",
+            "--name",
+            "gas_price",
+            "--at",
+            "2024-05-01T00:00:00Z",
+            "--at",
+            "2024-01-01T00:00:00Z",
+        ],
+    );
+    assert!(err.contains("before the first breakpoint"), "{err}");
+
+    // An irregular series has no value between its timestamps, so there is
+    // nothing to evaluate; the error names the type rather than guessing.
+    let err = run_err(
+        &store,
+        &["get", "--name", "events", "--at", "2024-05-01T00:00:00Z"],
+    );
+    assert!(err.contains("NonSequentialTimeSeries"), "{err}");
+    assert!(err.contains("resampling policy"), "{err}");
+
+    // A range slices stored breakpoints; --at evaluates at named instants. Doing
+    // both in one call would silently answer only one of the two questions.
+    let err = run_err(
+        &store,
+        &[
+            "get",
+            "--name",
+            "gas_price",
+            "--at",
+            "2024-05-01T00:00:00Z",
+            "--time-range",
+            "2024-04-01T00:00:00Z..2024-06-01T00:00:00Z",
+        ],
+    );
+    assert!(err.contains("--at and --time-range"), "{err}");
+
+    // One read is one request, so its instants have to agree on a spelling. It
+    // takes --zoneless to get a bare wall clock past the parser at all, which is
+    // exactly the mode where the two spellings can meet.
+    let err = run_err(
+        &store,
+        &[
+            "--zoneless",
+            "get",
+            "--name",
+            "gas_price",
+            "--at",
+            "2024-05-01T00:00:00Z",
+            "--at",
+            "2024-06-01T00:00:00",
+        ],
+    );
+    assert!(err.contains("spelled differently"), "{err}");
+}

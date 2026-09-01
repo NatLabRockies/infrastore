@@ -3798,6 +3798,270 @@ fn a_strided_composite_read_decodes_the_rows_it_kept() {
     assert!(steps[1].as_array().unwrap().is_empty(), "{out}");
 }
 
+// ---------------------------------------------------------------------------
+// PersistentTimeSeries
+// ---------------------------------------------------------------------------
+
+/// The step-function type end to end through the CLI: ingest from a
+/// `timestamp,value` CSV, read back, export, and re-ingest the export.
+///
+/// The CSV shape is the irregular one — the two types say the same thing on the
+/// ingest side, and differ only in what a read between those instants means —
+/// so this also pins that `export` stays `add`'s inverse for the new type.
+#[test]
+fn a_persistent_time_series_round_trips_through_add_get_and_export() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("steps.h5");
+    write(
+        dir.path(),
+        "gas.csv",
+        "timestamp,value\n\
+         2024-01-01T00:00:00Z,3.5\n\
+         2024-04-01T00:00:00Z,4.25\n\
+         2024-07-01T00:00:00Z,5.0\n",
+    );
+    let descriptor = write(
+        dir.path(),
+        "gas.json",
+        r#"{"owner_id": 7, "owner_type": "ThermalStandard", "name": "gas_price",
+            "type": "PersistentTimeSeries", "element_type": "f64",
+            "units": "USD/MMBtu", "component_field": "fuel_cost",
+            "application_data": "{\"as_time_series\": false}",
+            "csv": "gas.csv"}"#,
+    );
+    run(
+        &store,
+        &["add", "--descriptor", descriptor.to_str().unwrap()],
+    );
+
+    // The catalog reports the new type, and no resolution — a step function has
+    // no constant step.
+    let listed = run(&store, &["-f", "json", "list"]);
+    assert!(listed.contains("PersistentTimeSeries"), "{listed}");
+    assert!(listed.contains("gas_price"), "{listed}");
+
+    // `get` renders the breakpoints and their values, unchanged.
+    let got = run(&store, &["-f", "csv", "get", "--name", "gas_price"]);
+    let rows = data_lines(&got);
+    assert_eq!(rows.len(), 3, "{got}");
+    assert!(rows[0].starts_with("2024-01-01T00:00:00"), "{got}");
+    assert!(rows[2].contains('5'), "{got}");
+
+    // The short `--type` spelling selects it too.
+    let filtered = run(&store, &["-f", "json", "list", "--type", "persistent"]);
+    assert!(filtered.contains("gas_price"), "{filtered}");
+
+    // `export` writes a timestamped CSV that `add` reads back, which is what
+    // makes the two commands inverses for this type as for the others.
+    let exported = dir.path().join("out");
+    fs::create_dir_all(&exported).unwrap();
+    run(
+        &store,
+        &[
+            "-f",
+            "csv",
+            "export",
+            "--name",
+            "gas_price",
+            "--dir",
+            exported.to_str().unwrap(),
+        ],
+    );
+    let written: Vec<_> = fs::read_dir(&exported)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(written.len(), 1, "{written:?}");
+
+    let second = dir.path().join("second.h5");
+    run(&second, &["init"]);
+    // Relative to the descriptor's own directory, and spelled with a forward
+    // slash: an absolute Windows path interpolated into a JSON string literal
+    // is `C:\Users\...`, whose `\U` is not a valid JSON escape.
+    let exported_csv = written[0].file_name().unwrap().to_str().unwrap();
+    let round_trip = write(
+        dir.path(),
+        "round.json",
+        &format!(
+            r#"{{"owner_id": 7, "owner_type": "ThermalStandard", "name": "gas_price",
+                "type": "PersistentTimeSeries", "element_type": "f64",
+                "csv": "out/{exported_csv}"}}"#
+        ),
+    );
+    run(
+        &second,
+        &["add", "--descriptor", round_trip.to_str().unwrap()],
+    );
+    let reread = run(&second, &["-f", "csv", "get", "--name", "gas_price"]);
+    assert_eq!(
+        data_lines(&reread),
+        rows,
+        "the export re-ingests identically"
+    );
+}
+
+/// `get --at` evaluates the step function at instants the caller names.
+///
+/// The one question `get` could not answer about this type: its rows are the
+/// whole series, but a caller reading a monthly curve at its own simulation
+/// timestamps wants the value *in force* at each.
+#[test]
+fn get_at_evaluates_a_step_function_at_named_instants() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("steps.h5");
+    write(
+        dir.path(),
+        "gas.csv",
+        "timestamp,value\n\
+         2024-01-01T00:00:00Z,3.5\n\
+         2024-04-01T00:00:00Z,4.25\n\
+         2024-07-01T00:00:00Z,5.0\n",
+    );
+    let descriptor = write(
+        dir.path(),
+        "gas.json",
+        r#"{"owner_id": 7, "owner_type": "ThermalStandard", "name": "gas_price",
+            "type": "PersistentTimeSeries", "element_type": "f64",
+            "csv": "gas.csv"}"#,
+    );
+    run(
+        &store,
+        &["add", "--descriptor", descriptor.to_str().unwrap()],
+    );
+
+    // Mid-step, exactly on a breakpoint, and past the last one -- held forward.
+    let got = run(
+        &store,
+        &[
+            "-f",
+            "csv",
+            "get",
+            "--name",
+            "gas_price",
+            "--at",
+            "2024-02-15T00:00:00Z",
+            "--at",
+            "2024-04-01T00:00:00Z",
+            "--at",
+            "2025-12-31T00:00:00Z",
+        ],
+    );
+    let rows = data_lines(&got);
+    assert_eq!(rows.len(), 3, "{got}");
+    assert!(rows[0].starts_with("2024-02-15T00:00:00"), "{got}");
+    assert!(rows[0].contains("3.5"), "{got}");
+    assert!(rows[1].contains("4.25"), "{got}");
+    assert!(rows[2].contains('5'), "{got}");
+
+    // A gather, not a slice: the caller's order is the output order, repeats
+    // included. The timestamp column is what was asked for, not breakpoints.
+    let gathered = run(
+        &store,
+        &[
+            "-f",
+            "csv",
+            "get",
+            "--name",
+            "gas_price",
+            "--at",
+            "2024-08-01T00:00:00Z",
+            "--at",
+            "2024-02-01T00:00:00Z",
+            "--at",
+            "2024-08-01T00:00:00Z",
+        ],
+    );
+    let rows = data_lines(&gathered);
+    assert_eq!(rows.len(), 3, "{gathered}");
+    assert!(rows[0].contains('5') && rows[2].contains('5'), "{gathered}");
+    assert!(rows[1].contains("3.5"), "{gathered}");
+}
+
+/// `template` hands back a descriptor for the new type, and it is one `add`
+/// actually accepts.
+#[test]
+fn the_persistent_template_is_a_working_descriptor() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("t.h5");
+    let out = Command::new(env!("CARGO_BIN_EXE_infrastore"))
+        .args(["template", "PersistentTimeSeries"])
+        .stdin(Stdio::null())
+        .output()
+        .expect("failed to spawn infrastore");
+    assert!(out.status.success());
+    let body = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        body.contains("\"type\": \"PersistentTimeSeries\""),
+        "{body}"
+    );
+
+    write(
+        dir.path(),
+        "gas_price.csv",
+        "timestamp,value\n2024-01-01T00:00:00Z,3.5\n2024-06-01T00:00:00Z,4.0\n",
+    );
+    let descriptor = write(dir.path(), "t.json", &body);
+    run(
+        &store,
+        &["add", "--descriptor", descriptor.to_str().unwrap()],
+    );
+    assert!(run(&store, &["-f", "json", "list"]).contains("gas_price"));
+}
+
+/// `grid` over persistent columns that sit on *different* breakpoint vectors.
+///
+/// This is the CLI face of the reader exception: the rows are the union of
+/// every column's breakpoints, and each column shows the value in force there
+/// rather than a blank.
+#[test]
+fn grid_over_persistent_columns_on_different_breakpoints_holds_each_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("grid.h5");
+    // Quarterly and semi-annual curves: their breakpoints do not line up.
+    write(
+        dir.path(),
+        "q.csv",
+        "timestamp,value\n2024-01-01T00:00:00Z,10\n2024-04-01T00:00:00Z,40\n\
+         2024-07-01T00:00:00Z,70\n2024-10-01T00:00:00Z,100\n",
+    );
+    write(
+        dir.path(),
+        "s.csv",
+        "timestamp,value\n2024-01-01T00:00:00Z,1\n2024-06-01T00:00:00Z,6\n",
+    );
+    for (owner, name, csv) in [(1, "q", "q.csv"), (2, "s", "s.csv")] {
+        let descriptor = write(
+            dir.path(),
+            &format!("{name}.json"),
+            &format!(
+                r#"{{"owner_id": {owner}, "owner_type": "G", "name": "price",
+                    "type": "PersistentTimeSeries", "element_type": "f64",
+                    "csv": "{csv}"}}"#
+            ),
+        );
+        run(
+            &store,
+            &["add", "--descriptor", descriptor.to_str().unwrap()],
+        );
+    }
+
+    let grid = run(
+        &store,
+        &["-f", "csv", "grid", "--type", "PersistentTimeSeries"],
+    );
+    let rows = data_lines(&grid);
+    // The union of {Jan, Apr, Jul, Oct} and {Jan, Jun}.
+    assert_eq!(rows.len(), 5, "{grid}");
+    // At June the quarterly column still holds April's value, and the
+    // semi-annual one has just stepped to 6.
+    let june = rows
+        .iter()
+        .find(|r| r.starts_with("2024-06-01"))
+        .unwrap_or_else(|| panic!("no June row in\n{grid}"));
+    assert!(june.contains("40"), "quarterly holds April's value: {june}");
+    assert!(june.contains('6'), "semi-annual has stepped: {june}");
+}
+
 /// `store-info` reports the catalog revision beside the artifact's format
 /// version — the two move independently, and this is where a user looks after a
 /// read-only open reports that a store needs upgrading.
@@ -3909,4 +4173,101 @@ fn upgrade_is_the_writable_open_and_a_no_op_on_a_current_store() {
     let missing = dir.path().join("nope.h5");
     let err = run_err(&missing, &["upgrade"]);
     assert!(err.contains("not found"), "{err}");
+}
+
+/// A step function is drawn as a stair, never as a ramp.
+///
+/// Joining the breakpoints with a straight line would put a value on the chart
+/// at every instant between two of them — the reading `PersistentTimeSeries`
+/// exists to rule out. So every segment of the rendered path is either
+/// horizontal (the value being held) or vertical (the step itself), and there
+/// are twice as many of them as a plain polyline would have drawn.
+#[test]
+fn plot_draws_a_persistent_series_as_a_stair_not_a_ramp() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("steps.h5");
+    write(
+        dir.path(),
+        "gas.csv",
+        "timestamp,value\n\
+         2024-01-01T00:00:00Z,3.5\n\
+         2024-04-01T00:00:00Z,4.25\n\
+         2024-07-01T00:00:00Z,5.0\n",
+    );
+    let descriptor = write(
+        dir.path(),
+        "gas.json",
+        r#"{"owner_id": 7, "owner_type": "ThermalStandard", "name": "gas_price",
+            "type": "PersistentTimeSeries", "element_type": "f64",
+            "units": "USD/MMBtu", "csv": "gas.csv"}"#,
+    );
+    run(
+        &store,
+        &["add", "--descriptor", descriptor.to_str().unwrap()],
+    );
+
+    let out = dir.path().join("steps.svg");
+    run(
+        &store,
+        &[
+            "plot",
+            "--name",
+            "gas_price",
+            "--out",
+            out.to_str().unwrap(),
+        ],
+    );
+    let svg = fs::read_to_string(&out).unwrap();
+    let d = svg
+        .lines()
+        .find(|l| l.contains(r#"class="line"#))
+        .and_then(|l| l.split_once(r#"d=""#))
+        .and_then(|(_, rest)| rest.split_once('"'))
+        .map(|(d, _)| d)
+        .unwrap_or_else(|| panic!("no line path in {svg}"));
+    let points: Vec<(f64, f64)> = d
+        .split_whitespace()
+        .map(|tok| {
+            let (x, y) = tok
+                .trim_start_matches(['M', 'L'])
+                .split_once(',')
+                .unwrap_or_else(|| panic!("unexpected path token {tok:?} in {d:?}"));
+            (x.parse().unwrap(), y.parse().unwrap())
+        })
+        .collect();
+
+    // Three breakpoints, five points: a corner between each pair.
+    assert_eq!(points.len(), 5, "{d}");
+    for pair in points.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        assert!(
+            a.0 == b.0 || a.1 == b.1,
+            "segment {a:?} -> {b:?} is a ramp, not a stair: {d}"
+        );
+    }
+    // ...and it really does move in both axes, so the assertion above is not
+    // passing on a flat line.
+    assert!(points.iter().any(|p| p.1 != points[0].1), "{d}");
+
+    // A `NonSequentialTimeSeries` on the same instants keeps the plain
+    // polyline: three points, and at least one sloped segment.
+    let ns = write(
+        dir.path(),
+        "ns.json",
+        r#"{"owner_id": 8, "owner_type": "ThermalStandard", "name": "sampled",
+            "type": "NonSequentialTimeSeries", "element_type": "f64",
+            "csv": "gas.csv"}"#,
+    );
+    run(&store, &["add", "--descriptor", ns.to_str().unwrap()]);
+    let out = dir.path().join("sampled.svg");
+    run(
+        &store,
+        &["plot", "--name", "sampled", "--out", out.to_str().unwrap()],
+    );
+    let svg = fs::read_to_string(&out).unwrap();
+    let d = svg
+        .lines()
+        .find(|l| l.contains(r#"class="line"#))
+        .expect("a line path");
+    assert_eq!(d.matches('L').count(), 2, "{d}");
 }

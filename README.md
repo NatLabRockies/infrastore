@@ -26,14 +26,21 @@ Under development, unstable API, integrating with parent packages
 - **Typed, N-dimensional values** — `f64`, `f32`, `i64`, `i32`, `u64`, and `bool`, with an optional
   per-timestep element shape (a cost curve's coefficient tuple, say). Dtype, shape, byte order,
   timestamps, features, and hashes survive every binding and round trip.
-- **Six time-series types** — `SingleTimeSeries` and `NonSequentialTimeSeries` read+write;
+- **Seven time-series types** — `SingleTimeSeries`, `NonSequentialTimeSeries`, and
+  `PersistentTimeSeries` (a sparse step function: breakpoints plus hold-last) read+write;
   `Deterministic`, `DeterministicSingleTimeSeries`, `Probabilistic`, and `Scenarios` for forecasts.
+  A step function's lookup is the store's to own, and reachable from every binding:
+  `index_in_force_at` for one instant, and a **projection read** (`project_onto` / `read_projected`,
+  `get --at` in the CLI) for a whole vector of them — so a consumer never re-implements hold-last
+  beside a copy of the breakpoints.
 - **Feature-tagged associations** — each association carries a map of typed features
   (`int`/`float`/`bool`/`str`), so several variants of a series can coexist under one owner.
 - **Columnar simulation readers** — `StaticReader` / `ForecastReader` serve the access pattern that
-  drives a simulation: every series' value at one timestamp. `StaticReader` covers both static
-  types, sweeping a `SingleTimeSeries` grid or a cohort of `NonSequentialTimeSeries` sharing one
-  timestamp vector.
+  drives a simulation: every series' value at one timestamp. `StaticReader` covers all three static
+  types, sweeping a `SingleTimeSeries` grid, a cohort of `NonSequentialTimeSeries` sharing one
+  timestamp vector, or a set of `PersistentTimeSeries` on breakpoints of their own — the last being
+  the one case whose columns need not share a timeline, since a step function has a value at every
+  instant from its first breakpoint on.
 - **Association catalogs** — `supplemental_attribute_associations` (component ↔ supplemental
   attribute) and `parent_child_associations` (directed component ↔ component edges) record
   relationships independently of time series, so consumers need not keep a SQLite database of their
@@ -219,16 +226,16 @@ $IS --store demo.h5 plot --name load --out load.svg          # a self-contained 
 
 The descriptor carries the metadata that does not fit a CSV grid (owner, name, type, dtype,
 resolution, timestamps, units, features); the CSV holds only numbers, plus a mandatory header row,
-except `NonSequentialTimeSeries`, whose first column is the timestamp. Durations are ISO-8601
-(`PT1H`, `P1M`). All six dtypes and all five writable types (`SingleTimeSeries`,
-`NonSequentialTimeSeries`, `Deterministic`, `Probabilistic`, `Scenarios`) are supported — forecast
-arrays are flat row-major values whose count equals the product of the type's shape (see
-`infrastore template <type>`). A descriptor may also set `"layout": "wide"` to load the canonical
-`timestamp,gen_001,gen_002,...` file as one scalar series per column, mapping headers to owner ids
-through a sidecar CSV, an inline object, or the headers themselves; `infrastore grid` writes that
-same shape back out, so the two are an inverse pair. `add` additionally takes the descriptor fields
-as flags for a one-off, reads `--descriptor -` from stdin, and has `--dry-run`, `--replace`,
-`--batch-size`, and `--quiet`.
+except `NonSequentialTimeSeries` and `PersistentTimeSeries`, whose first column is the timestamp.
+Durations are ISO-8601 (`PT1H`, `P1M`). All six dtypes and all six writable types
+(`SingleTimeSeries`, `NonSequentialTimeSeries`, `PersistentTimeSeries`, `Deterministic`,
+`Probabilistic`, `Scenarios`) are supported — forecast arrays are flat row-major values whose count
+equals the product of the type's shape (see `infrastore template <type>`). A descriptor may also set
+`"layout": "wide"` to load the canonical `timestamp,gen_001,gen_002,...` file as one scalar series
+per column, mapping headers to owner ids through a sidecar CSV, an inline object, or the headers
+themselves; `infrastore grid` writes that same shape back out, so the two are an inverse pair. `add`
+additionally takes the descriptor fields as flags for a one-off, reads `--descriptor -` from stdin,
+and has `--dry-run`, `--replace`, `--batch-size`, and `--quiet`.
 
 Beyond add / list / get / grid / info / transform, the CLI covers discovery (`names`, `owner-types`,
 `owners`, `exists` — the last as an exit status), visualization
@@ -260,7 +267,7 @@ entry in `keys`, and clients must send the chosen key in the `x-api-key` header.
 A persisted store is **two files that travel together**: an HDF5 file and a SQLite catalog at
 `<store-path>.sqlite`. Copying, moving, or deleting one without the other corrupts the store.
 
-The HDF5 file carries the attributes `data_format_version = "0.19.0"` and
+The HDF5 file carries the attributes `data_format_version = "0.20.0"` and
 `storage_backend = "hdf5"`; a file without the latter is not opened. Packed datasets are named
 `sts_{dtype}_{shape}_{length}_{resolution}`, chunked `(1, num_arrays)` so per-timestep reads across
 all components are contiguous; a sibling `u8` dataset `<dataset>_h` holds each column's SHA-256 hex

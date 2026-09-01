@@ -40,7 +40,7 @@ pub use metadata::{
 pub use reader::{ForecastEntry, ForecastReader, StaticGroup, StaticReader, WindowSlot};
 pub use storage::{ArrayLocation, CompactionReport, Compression, IntegrityReport};
 pub use store::{
-    AddRequest, BulkAdd, CatalogMode, ForecastParameters, ListFilter, ReadWindow,
+    AddRequest, BulkAdd, CatalogMode, ForecastParameters, Instants, ListFilter, ReadWindow,
     StaticConsistency, Store, TimeSeriesCounts, TimeSeriesCountsDetailed, TransformOutcome,
     TransformPolicy, catalog_sqlite_path,
 };
@@ -56,8 +56,8 @@ pub use types::{
     period::Period,
     time_reference::{TimeRange, TimeReference},
     time_series::{
-        Descriptors, Deterministic, NonSequentialTimeSeries, Probabilistic, Scenarios,
-        SingleTimeSeries, TimeSeriesData, TimeSeriesType,
+        Descriptors, Deterministic, NonSequentialTimeSeries, PersistentTimeSeries, Probabilistic,
+        Scenarios, SingleTimeSeries, TimeSeriesData, TimeSeriesType,
     },
 };
 pub use version::{Compat, DATA_FORMAT_VERSION, MIN_UPGRADABLE_VERSION, compatibility};

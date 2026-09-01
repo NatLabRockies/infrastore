@@ -14,13 +14,13 @@ Exported names (types first, then functions):
 `AddBatch`, `ArrayReferenceCounts`, `CompactionReport`, `Component`, `CompressionSettings`,
 `Deterministic`, `DeterministicSingleTimeSeries`, `FixedOffsetReference`, `ForecastEntry`,
 `ForecastParameters`, `ForecastReader`, `ForecastSummaryRow`, `ForecastTimeline`,
-`NonSequentialTimeSeries`, `OwnerCategory`, `ParentChildAssociation`, `Probabilistic`, `Scenarios`,
-`SingleTimeSeries`, `StaticGrid`, `StaticGroup`, `StaticReader`, `StaticSummaryRow`, `Store`,
-`SupplementalAttribute`, `SupplementalAttributeAssociation`, `SupplementalAttributeSummaryRow`,
-`SupplementalAttributeTypeCount`, `TimeReference`, `TimeSeriesCounts`, `TimeSeriesCountsDetailed`,
-`TimeSeriesMetadata`, `TimeSeriesTypeCount`, `TransformOutcome`, `UTCReference`, `UnitSystem`
-(`NaturalUnits`, `ComponentBase`), `ZoneReference`, `ZonelessReference`,
-`add_parent_child_association!`, `add_parent_child_associations!`,
+`NonSequentialTimeSeries`, `OwnerCategory`, `ParentChildAssociation`, `PersistentTimeSeries`,
+`Probabilistic`, `Scenarios`, `SingleTimeSeries`, `StaticGrid`, `StaticGroup`, `StaticReader`,
+`StaticSummaryRow`, `Store`, `SupplementalAttribute`, `SupplementalAttributeAssociation`,
+`SupplementalAttributeSummaryRow`, `SupplementalAttributeTypeCount`, `TimeReference`,
+`TimeSeriesCounts`, `TimeSeriesCountsDetailed`, `TimeSeriesMetadata`, `TimeSeriesTypeCount`,
+`TransformOutcome`, `UTCReference`, `UnitSystem` (`NaturalUnits`, `ComponentBase`), `ZoneReference`,
+`ZonelessReference`, `add_parent_child_association!`, `add_parent_child_associations!`,
 `add_supplemental_attribute_association!`, `add_supplemental_attribute_associations!`,
 `add_time_series!`, `add_time_series_bulk!`, `association_exists`, `begin_transaction!`,
 `build_forecast_reader`, `build_static_reader`, `catalog_mode`, `check_static_consistency`,
@@ -140,6 +140,21 @@ struct NonSequentialTimeSeries{T,N}
     time_reference    :: Union{Nothing,TimeReference}  # inferred from the timestamp; see below
 end
 NonSequentialTimeSeries(timestamps, data, name; application_data=nothing, element_type=nothing, units=nothing,
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=<inferred>)
+
+struct PersistentTimeSeries{T,N}
+    timestamps   :: Vector{DateTime}     # breakpoints, strictly increasing; one per row of dim 1
+    data         :: Array{T,N}
+    name         :: String
+    application_data  :: Union{Nothing,String}
+    element_type      :: Union{Nothing,String}   # canonical element_type, or nothing for plain scalars
+    units             :: Union{Nothing,String}
+    quantity_kind     :: Union{Nothing,String}
+    unit_system       :: Union{Nothing,UnitSystem}   # nothing = unspecified, not NaturalUnits
+    component_field   :: Union{Nothing,String}
+    time_reference    :: Union{Nothing,TimeReference}  # inferred from the timestamp; see below
+end
+PersistentTimeSeries(timestamps, data, name; application_data=nothing, element_type=nothing, units=nothing,
     quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=<inferred>)
 
 struct Deterministic{T,N}
@@ -443,8 +458,8 @@ values and a row read back has to equal the one that wrote it.
 
 `StaticGrid` is shared by `static_grid` (a reader's timeline) and `check_static_consistency` (one
 per resolution present) — the same concept, so the same type. Its `resolution` is `nothing` only for
-a `NonSequentialTimeSeries` reader, whose timeline is an explicit list of instants rather than a
-grid; enumerate it with `static_timestamps`.
+a `NonSequentialTimeSeries` or `PersistentTimeSeries` reader, whose timeline is an explicit list of
+instants rather than a grid; enumerate it with `static_timestamps`.
 
 `time_reference` is the one spelling the axis carries — a reader spans one timeline, so a cohort
 whose columns agree reports their reference, one whose columns merely agree on naming instants
@@ -459,7 +474,7 @@ that the timestamps are wall clocks. Three- and four-argument constructors (`Sta
 ```julia
 add_time_series!(
     store::Store, owner_id, owner_type, owner_category::OwnerCategory,
-    ts;   # SingleTimeSeries, NonSequentialTimeSeries, or any dense forecast struct
+    ts;   # SingleTimeSeries, NonSequentialTimeSeries, PersistentTimeSeries, or a forecast struct
     features::AbstractDict = Dict(), element_type = ts.element_type, units = ts.units,
     quantity_kind = ts.quantity_kind, unit_system = ts.unit_system,
     component_field = ts.component_field, application_data = ts.application_data,
@@ -473,9 +488,46 @@ read_by_ids(store::Store, ids::AbstractVector{<:Integer};
            time_range=nothing) -> Vector
 ```
 
-A read names only an id, so the row's own stored type decides what comes back. Every read populates
-the returned struct's `application_data` field from the stored association, so a binding's
-reconstruction tag comes back with the data — no separate `get_metadata_by_id` call is needed.
+A read names only an id, so the row's own stored type decides what comes back — including a
+`PersistentTimeSeries`, whose `time_range` slices on the step function's own terms: the result
+begins at the breakpoint _in force at_ `start`, so it always defines a value there, and a `start`
+before the first breakpoint is an error rather than a clamp. A zero-width range (`end == start`) is
+the exception and selects nothing, as it does for every other type — including before the first
+breakpoint, where a non-empty window errors. Every read populates the returned struct's
+`application_data` field from the stored association, so a binding's reconstruction tag comes back
+with the data — no separate `get_metadata_by_id` call is needed.
+
+`read_projected` is the store-side form of the same rule over a whole vector of instants:
+
+```julia
+read_projected(store, id, at; raw=false, types=DEFAULT_ELEMENT_TYPES) -> Array
+```
+
+The value in force at each instant in `at`, gathered in that order, shaped
+`(length(at),
+element_dims...)`. A **gather, not a slice**: `at` may be unsorted and may repeat, and
+its order is the output order; an empty `at` returns an empty array rather than throwing. A
+composite `element_type` is decoded into values the way [`read_by_id`](#reading) decodes one — a
+projection copies rows whole, so a step function over cost curves comes back as curves, and
+`raw=true` hands back the packing. Throws `InvalidParameterError` for any other stored type
+(projecting a `SingleTimeSeries` would need a resampling policy, which is the caller's choice) and
+for an instant before the first breakpoint; the instants are query bounds and must be spelled the
+way the series is.
+
+The step function's lookup is callable on the struct, so a consumer never re-implements hold-last:
+
+```julia
+index_in_force_at(ts::PersistentTimeSeries, at) -> Int
+```
+
+The index of the breakpoint in force at `at` — the greatest one `<= at`. It is **1-based**, like
+every other Julia index, so `ts.data[index_in_force_at(ts, at)]` is the value in force; the other
+bindings report the same breakpoint 0-based. Exactly at a breakpoint the answer is that breakpoint's
+own index, and past the last one it is the last index, forever. Before the first it throws
+`InvalidParameterError` and is never clamped to `1`. `at` is a `DateTime` or — with `using
+TimeZones`
+loaded — a `ZonedDateTime`, and must be spelled the way the breakpoints are; a mismatch raises,
+exactly as a `time_range` bound does.
 
 `owner_id` is an integer identifier (`Int64`) and `owner_category` (`Component` /
 `SupplementalAttribute`) completes the owner identity — the owner is the pair
@@ -505,11 +557,11 @@ read_by_ids(store::Store, ids::AbstractVector{<:Integer};
 
 Reads many whole series in one call, returning one per id **in the order the ids are given**,
 repeats included, each as the struct matching its stored type (`SingleTimeSeries`,
-`NonSequentialTimeSeries`, `Deterministic`, `Probabilistic`, or `Scenarios`) — the result is a
-`Vector{Any}`, so narrow it yourself when every id is one type. Packed `SingleTimeSeries` are read
-and decompressed once per dataset instead of per series, so this is the efficient way to load many
-complete series (exploration, plotting). An empty id vector returns an empty vector without touching
-the store.
+`NonSequentialTimeSeries`, `PersistentTimeSeries`, `Deterministic`, `Probabilistic`, or `Scenarios`)
+— the result is a `Vector{Any}`, so narrow it yourself when every id is one type. Packed
+`SingleTimeSeries` are read and decompressed once per dataset instead of per series, so this is the
+efficient way to load many complete series (exploration, plotting). An empty id vector returns an
+empty vector without touching the store.
 
 An id naming no row throws `NotFoundError` (the whole call fails; the error does not say which id
 dangled — sift them with `association_exists` when that matters).
@@ -842,14 +894,23 @@ All matched series must share one timeline — one grid (`initial_timestamp` + `
 errors on divergence, so there is no presence mask — every column has a value at every valid
 timestamp.
 
+`PersistentTimeSeries` is the exception: its columns may sit on **different** breakpoint vectors,
+because a step function has a value at every instant from its first breakpoint on. The reader's
+timeline is then the union of every column's breakpoints, and each column reports the value in force
+there. Reading before some column's first breakpoint errors, naming that column. There is still no
+presence mask.
+
 `resolution` is required for `SingleTimeSeries` (one resolution per reader) and must be omitted for
-`time_series_type=NonSequentialTimeSeries`, which has none; `static_grid(reader).resolution` is then
-`nothing`. Iterating `static_timestamps` covers either kind, so one loop serves both:
+`time_series_type=NonSequentialTimeSeries` and `time_series_type=PersistentTimeSeries`, which have
+none; `static_grid(reader).resolution` is then `nothing`. Iterating `static_timestamps` covers every
+kind, so one loop serves all three:
 
 ```julia
 reader = build_static_reader(store; resolution = Hour(1))
 # ...or, for irregular series:
 # reader = build_static_reader(store; time_series_type = NonSequentialTimeSeries)
+# ...or, for step functions:
+# reader = build_static_reader(store; time_series_type = PersistentTimeSeries)
 for t in static_timestamps(reader)
     static_read!(reader, t)
     for (gi, g) in enumerate(static_groups(reader))
@@ -1220,10 +1281,10 @@ back), returning the number of rows inserted.
 only**: the document carries locators, never values, so every row must name an array this store
 already holds — the arrays arrive with the artifact. Each row keeps the `association_id` it carries,
 which is the point: an import that assigned fresh ids would leave every reference the document
-records pointing at the wrong series. A row whose array is absent, or a `NonSequentialTimeSeries`
-row (whose `timestamps_hash` is store-internal and so not on the wire, leaving the document with no
-way to say which stored time axis the row sits on), throws `InvalidParameterError` and rolls the
-whole batch back.
+records pointing at the wrong series. A row whose array is absent, or a `NonSequentialTimeSeries` or
+`PersistentTimeSeries` row (whose `timestamps_hash` is store-internal and so not on the wire,
+leaving the document with no way to say which stored time axis the row sits on), throws
+`InvalidParameterError` and rolls the whole batch back.
 
 Infrastore never modifies the data to make an incoming document agree with what it already holds. A
 geometry disagreement between an added series and its own association row is likewise rejected at
@@ -1256,12 +1317,12 @@ The message text comes from the FFI layer's thread-local error buffer.
 
 The package overloads `Base` so the wrapped types behave like native Julia values:
 
-- `show` renders compact one-liners for `Store` and the five value types; every result struct
+- `show` renders compact one-liners for `Store` and the value types; every result struct
   (`TimeSeriesMetadata`, `StaticSummaryRow`, …) gets generated `==`/`hash`/`show`, so results work
   as `Dict`/`Set` members, and `AddBatch` defines `length`.
-- `length`, `eltype`, `getindex`, and `iterate` on `SingleTimeSeries` / `NonSequentialTimeSeries`
-  delegate to the wrapped `data` array (element count, not time steps, for multi-dimensional
-  values). Forecast types define `length` = window count.
+- `length`, `eltype`, `getindex`, and `iterate` on `SingleTimeSeries` / `NonSequentialTimeSeries` /
+  `PersistentTimeSeries` delegate to the wrapped `data` array (element count, not time steps, for
+  multi-dimensional values). Forecast types define `length` = window count.
 - Do-block forms guarantee `close!` even on throw:
 
 ```julia
@@ -1342,6 +1403,7 @@ zoned_timestamp(instant::DateTime, reference::TimeReference) -> ZonedDateTime
 zoned_timestamp(series) -> ZonedDateTime          # SingleTimeSeries / the three forecasts
 zoned_timestamp(metadata::TimeSeriesMetadata) -> ZonedDateTime
 zoned_timestamps(series::NonSequentialTimeSeries) -> Vector{ZonedDateTime}
+zoned_timestamps(series::PersistentTimeSeries)    -> Vector{ZonedDateTime}
 ```
 
 Fuses a read instant back together with the spelling it was written in. Requires `using TimeZones`

@@ -13,9 +13,9 @@ from infrastore import Store, SingleTimeSeries, OwnerCategory, TimeSeriesType
 ```
 
 The module exposes `Store` and `Transaction`; the static series classes `SingleTimeSeries` and
-`NonSequentialTimeSeries`; the forecast classes `Deterministic`, `Probabilistic`, and `Scenarios`;
-the readers `StaticReader` and `ForecastReader`; the association records
-`SupplementalAttributeAssociation` and `ParentChildAssociation`; the `TimeSeriesType` and
+`NonSequentialTimeSeries`, and `PersistentTimeSeries`; the forecast classes `Deterministic`,
+`Probabilistic`, and `Scenarios`; the readers `StaticReader` and `ForecastReader`; the association
+records `SupplementalAttributeAssociation` and `ParentChildAssociation`; the `TimeSeriesType` and
 `OwnerCategory` enums; the `init_tracing` and `decode_element_values` functions; `__version__`; and
 an exception hierarchy rooted at `TimeSeriesError`.
 
@@ -59,7 +59,9 @@ NumPy arrays of `float64`, `float32`, `int64`, `int32`, `int16`, `int8`, `uint64
 multi-dimensional: shape `(length,)` for scalar steps, or `(length, k1, …)` to attach a per-step
 element shape (such as cost-curve coefficients). The required `name` is an association attribute
 carried on the object — the same array can be added under different names. Use
-`NonSequentialTimeSeries(timestamps, data, name)` for explicitly timestamped series.
+`NonSequentialTimeSeries(timestamps, data, name)` for explicitly timestamped series, and
+`PersistentTimeSeries(timestamps, data, name)` for a sparse step function whose value holds forward
+between breakpoints.
 
 ## Add a Series
 
@@ -186,9 +188,9 @@ window = store.read_by_ids_range(ids, (start, end))   # the same clip on every s
 
 Every `datetime` must be timezone-aware (any zone; converted to UTC on the way in, UTC on the way
 out), and a naive one raises `InvalidParameterError`. A **stored** instant — an initial timestamp, a
-`NonSequentialTimeSeries` timestamp — must also be a whole number of milliseconds, so quantize
-`datetime.now(timezone.utc)` before storing it; query bounds such as `time_range` are unconstrained.
-See [Datetimes](../reference/python-api.md#datetimes).
+`NonSequentialTimeSeries` timestamp or `PersistentTimeSeries` breakpoint — must also be a whole
+number of milliseconds, so quantize `datetime.now(timezone.utc)` before storing it; query bounds
+such as `time_range` are unconstrained. See [Datetimes](../reference/python-api.md#datetimes).
 
 ## Per-Timestamp Reads (Simulation Loop)
 

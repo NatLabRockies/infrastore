@@ -1138,12 +1138,48 @@ pub unsafe extern "C" fn infrastore_store_add_single(
     }
 }
 
-// ---- add_non_sequential --------------------------------------------------
+// ---- add_non_sequential / add_persistent ----------------------------------
 
-/// Parse the `infrastore_store_add_non_sequential` / `infrastore_batch_add_non_sequential`
-/// argument list into an [`core_lib::AddRequest`].
+/// The descriptive attributes of a `NonSequentialTimeSeries`, gathered so the
+/// bulk element readers can emit them without knowing which of the two
+/// irregular static types they hold.
+fn descriptors_of_irregular_nsts(s: &core_lib::NonSequentialTimeSeries) -> core_lib::Descriptors {
+    core_lib::Descriptors {
+        element_type: s.element_type,
+        units: s.units.clone(),
+        quantity_kind: s.quantity_kind.clone(),
+        unit_system: s.unit_system,
+        time_reference: s.time_reference.clone(),
+        component_field: s.component_field.clone(),
+        application_data: s.application_data.clone(),
+    }
+}
+
+/// [`descriptors_of_irregular_nsts`] for a `PersistentTimeSeries`.
+fn descriptors_of_irregular_pts(s: &core_lib::PersistentTimeSeries) -> core_lib::Descriptors {
+    core_lib::Descriptors {
+        element_type: s.element_type,
+        units: s.units.clone(),
+        quantity_kind: s.quantity_kind.clone(),
+        unit_system: s.unit_system,
+        time_reference: s.time_reference.clone(),
+        component_field: s.component_field.clone(),
+        application_data: s.application_data.clone(),
+    }
+}
+
+/// Parse the argument list shared by the two irregular static types into an
+/// [`core_lib::AddRequest`].
+///
+/// `NonSequentialTimeSeries` and `PersistentTimeSeries` take byte-for-byte the
+/// same inputs — a strictly increasing `i64` unix-millisecond vector plus one
+/// value per entry — and differ only in what a read of the result *means*. So
+/// `kind` picks the core constructor and nothing else varies. Serves
+/// `infrastore_store_add_non_sequential` / `infrastore_batch_add_non_sequential`
+/// and their `_persistent` twins.
 #[allow(clippy::too_many_arguments)]
-unsafe fn build_non_sequential_request(
+unsafe fn build_irregular_request(
+    kind: core_lib::TimeSeriesType,
     owner_id: i64,
     owner_type: *const c_char,
     owner_category: i32,
@@ -1192,8 +1228,16 @@ unsafe fn build_non_sequential_request(
     let element_type = unsafe { cstr_to_element_type(element_type) }?;
     let array =
         unsafe { build_typed_array(element_type, ndims, dims_ptr, data_ptr, data_byte_len) }?;
-    let series = match core_lib::NonSequentialTimeSeries::new(timestamps, array, name) {
-        Ok(series) => series,
+    let built = match kind {
+        core_lib::TimeSeriesType::PersistentTimeSeries => {
+            core_lib::PersistentTimeSeries::new(timestamps, array, name)
+                .map(core_lib::TimeSeriesData::PersistentTimeSeries)
+        }
+        _ => core_lib::NonSequentialTimeSeries::new(timestamps, array, name)
+            .map(core_lib::TimeSeriesData::NonSequentialTimeSeries),
+    };
+    let mut data = match built {
+        Ok(data) => data,
         Err(error) => {
             set_error(error);
             return Err(INFRASTORE_ERR_INVALID_PARAMETER);
@@ -1206,7 +1250,6 @@ unsafe fn build_non_sequential_request(
     let time_reference = unsafe { cstr_to_optional_time_reference(time_reference) }?;
     let component_field = unsafe { cstr_to_optional_string(component_field) }?;
     let application_data = unsafe { cstr_to_optional_string(application_data) }?;
-    let mut data = core_lib::TimeSeriesData::NonSequentialTimeSeries(series);
     // The descriptors describe the series, so they travel on it rather than
     // on the request.
     data.set_descriptors(core_lib::Descriptors {
@@ -1271,7 +1314,97 @@ pub unsafe extern "C" fn infrastore_store_add_non_sequential(
         }
     };
     let request = match unsafe {
-        build_non_sequential_request(
+        build_irregular_request(
+            core_lib::TimeSeriesType::NonSequentialTimeSeries,
+            owner_id,
+            owner_type,
+            owner_category,
+            name,
+            timestamps_unix_ms,
+            timestamps_len,
+            element_type,
+            ndims,
+            dims_ptr,
+            data_ptr,
+            data_byte_len,
+            application_data,
+            features_json,
+            units,
+            quantity_kind,
+            unit_system,
+            time_reference,
+            component_field,
+        )
+    } {
+        Ok(r) => r,
+        Err(c) => return c,
+    };
+    match store.inner.add_time_series_bulk(vec![request]) {
+        Ok(mut added) => {
+            let id = added.remove(0);
+            if !out_id.is_null() {
+                unsafe { *out_id = id.get() };
+            }
+            INFRASTORE_OK
+        }
+        Err(error) => map_core_error(error),
+    }
+}
+
+/// Add a `PersistentTimeSeries` to the store.
+///
+/// The arguments are exactly those of `infrastore_store_add_non_sequential`,
+/// because the two types carry the same payload: `timestamps_unix_ms` is a
+/// strictly increasing vector of breakpoints and the array holds one value per
+/// breakpoint. What differs is what a *read* of the result means — the value at
+/// breakpoint `i` stays in force until breakpoint `i + 1`, and past the last
+/// one forever, while a `NonSequentialTimeSeries` has no value between its
+/// timestamps at all. There is no value before the first breakpoint, and asking
+/// for one is an error rather than a clamp.
+///
+/// # Safety
+///
+/// `handle` must be a live mutable store handle. `owner_id` is a plain integer. Required string
+/// pointers must reference null-terminated UTF-8 strings; optional string pointers may be null.
+/// `timestamps_unix_ms` must reference `timestamps_len` elements, `dims_ptr` must reference `ndims`
+/// elements when `ndims` is nonzero, and `data_ptr` must reference `data_byte_len` bytes.
+/// `out_id`, when non-null, must be valid for writing one `i64`, and receives the catalog id the
+/// row was filed under.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn infrastore_store_add_persistent(
+    handle: *mut InfraStoreHandle,
+    owner_id: i64,
+    owner_type: *const c_char,
+    owner_category: i32,
+    name: *const c_char,
+    timestamps_unix_ms: *const i64,
+    timestamps_len: u64,
+    element_type: *const c_char,
+    ndims: u64,
+    dims_ptr: *const u64,
+    data_ptr: *const u8,
+    data_byte_len: u64,
+    application_data: *const c_char,
+    features_json: *const c_char,
+    units: *const c_char,
+    quantity_kind: *const c_char,
+    unit_system: *const c_char,
+    time_reference: *const c_char,
+    component_field: *const c_char,
+    out_id: *mut i64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_mut() } {
+        Some(s) => s,
+        None => {
+            set_error("store handle is null");
+            return INFRASTORE_ERR_NULL_POINTER;
+        }
+    };
+    let request = match unsafe {
+        build_irregular_request(
+            core_lib::TimeSeriesType::PersistentTimeSeries,
             owner_id,
             owner_type,
             owner_category,
@@ -2671,6 +2804,7 @@ fn time_series_type_from_int(i: i32) -> Option<core_lib::TimeSeriesType> {
         3 => T::DeterministicSingleTimeSeries,
         4 => T::Probabilistic,
         5 => T::Scenarios,
+        6 => T::PersistentTimeSeries,
         _ => return None,
     })
 }
@@ -2689,8 +2823,9 @@ fn resolve_requested_type_from_int(i: i32) -> Option<core_lib::TimeSeriesType> {
 }
 
 /// Map a forecast read request's `ts_type` code to a [`core_lib::TimeSeriesType`].
-/// The non-forecast types `SingleTimeSeries` (0) and `NonSequentialTimeSeries`
-/// (1) are rejected here so the forecast API reports a clear "invalid
+/// The non-forecast types `SingleTimeSeries` (0), `NonSequentialTimeSeries`
+/// (1) and `PersistentTimeSeries` (6) are rejected here so the forecast API
+/// reports a clear "invalid
 /// time_series_type" error up front rather than failing later in
 /// `emit_forecast_data` after a key is resolved and data is read.
 fn requested_type_from_int(i: i32) -> Option<core_lib::TimeSeriesType> {
@@ -2708,6 +2843,12 @@ fn requested_type_from_int(i: i32) -> Option<core_lib::TimeSeriesType> {
 
 /// Inverse of [`time_series_type_from_int`]: the integer discriminant for a
 /// `TimeSeriesType` (must stay in sync with that mapping).
+///
+/// This mapping is the ABI's own and is *not* read from
+/// `TimeSeriesType::code`; the two are nonetheless kept numerically identical
+/// on purpose. Divergence would be legal — the ABI code never reaches disk —
+/// but it would give one type two numbers for no benefit, and every error
+/// message and doc comment on both sides would have to say which one it meant.
 fn time_series_type_to_int(t: core_lib::TimeSeriesType) -> i32 {
     use core_lib::TimeSeriesType as T;
     match t {
@@ -2717,6 +2858,7 @@ fn time_series_type_to_int(t: core_lib::TimeSeriesType) -> i32 {
         T::DeterministicSingleTimeSeries => 3,
         T::Probabilistic => 4,
         T::Scenarios => 5,
+        T::PersistentTimeSeries => 6,
     }
 }
 
@@ -3318,7 +3460,80 @@ pub unsafe extern "C" fn infrastore_batch_add_non_sequential(
         }
     };
     match unsafe {
-        build_non_sequential_request(
+        build_irregular_request(
+            core_lib::TimeSeriesType::NonSequentialTimeSeries,
+            owner_id,
+            owner_type,
+            owner_category,
+            name,
+            timestamps_unix_ms,
+            timestamps_len,
+            element_type,
+            ndims,
+            dims_ptr,
+            data_ptr,
+            data_byte_len,
+            application_data,
+            features_json,
+            units,
+            quantity_kind,
+            unit_system,
+            time_reference,
+            component_field,
+        )
+    } {
+        Ok(req) => {
+            batch.items.push(req);
+            INFRASTORE_OK
+        }
+        Err(c) => c,
+    }
+}
+
+/// Append a `PersistentTimeSeries` to a batch. Arguments match
+/// `infrastore_store_add_persistent` (minus the store handle and `out_id`).
+///
+/// # Safety
+///
+/// `batch` must be a live batch handle. `owner_id` is a plain integer. Required
+/// string pointers must reference null-terminated UTF-8 strings; optional string
+/// pointers may be null. `timestamps_unix_ms` must reference `timestamps_len`
+/// elements, `dims_ptr` must reference `ndims` elements when `ndims` is nonzero,
+/// and `data_ptr` must reference `data_byte_len` bytes.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn infrastore_batch_add_persistent(
+    batch: *mut InfraStoreBatchHandle,
+    owner_id: i64,
+    owner_type: *const c_char,
+    owner_category: i32,
+    name: *const c_char,
+    timestamps_unix_ms: *const i64,
+    timestamps_len: u64,
+    element_type: *const c_char,
+    ndims: u64,
+    dims_ptr: *const u64,
+    data_ptr: *const u8,
+    data_byte_len: u64,
+    application_data: *const c_char,
+    features_json: *const c_char,
+    units: *const c_char,
+    quantity_kind: *const c_char,
+    unit_system: *const c_char,
+    time_reference: *const c_char,
+    component_field: *const c_char,
+) -> i32 {
+    clear_error();
+    let batch = match unsafe { batch.as_mut() } {
+        Some(b) => b,
+        None => {
+            set_error("batch handle is null");
+            return INFRASTORE_ERR_NULL_POINTER;
+        }
+    };
+    match unsafe {
+        build_irregular_request(
+            core_lib::TimeSeriesType::PersistentTimeSeries,
             owner_id,
             owner_type,
             owner_category,
@@ -3817,6 +4032,109 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_single(
     INFRASTORE_OK
 }
 
+/// Evaluate the `PersistentTimeSeries` filed under `id` at each instant in
+/// `at_unix_ms`, in the order given, and hand back the gathered values.
+///
+/// The projection read: the step function's own hold-last lookup applied once
+/// per instant, so a caller asking "what were these values on each of my
+/// simulation timestamps" gets the answer from the store that owns the rule
+/// rather than re-deriving it beside a copy of the breakpoints. It makes no
+/// policy choice — the caller names the instants, and each one resolves by the
+/// documented rule or the call fails.
+///
+/// A **gather, not a slice**: `at_unix_ms` may be unsorted and may repeat, each
+/// instant resolves independently, and the caller's order is the output order.
+/// `at_len` of 0 yields an empty array of the right element shape rather than an
+/// error.
+///
+/// `out_shape` is `[at_len, *E]` where `*E` is the series' per-step element
+/// shape, and `out_dtype` and the row layout are the series' own — so the bytes
+/// decode exactly as those from `infrastore_bulk_result_get_persistent` do,
+/// composite `element_type` included.
+///
+/// `zoneless` says how the caller spelled the instants, exactly as on
+/// `infrastore_store_read_by_ids_range`: they are query bounds, and one spelled
+/// the other way than the series is is refused rather than reinterpreted.
+/// `at_len` of 0 names no bound and so is not checked.
+///
+/// Returns `INFRASTORE_ERR_NOT_FOUND` if `id` names no row, and
+/// `INFRASTORE_ERR_INVALID_PARAMETER` if it names any other stored type (a
+/// projection over a `SingleTimeSeries` would need a resampling policy, which is
+/// the caller's choice to make) or if any instant precedes the first breakpoint.
+/// Nothing is written unless the call returns `INFRASTORE_OK`.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle. `at_unix_ms` must point to `at_len`
+/// readable `i64`s (it may be null only when `at_len` is 0). Every out pointer
+/// must be valid for writing its indicated value. On `INFRASTORE_OK` the caller
+/// owns `*out_shape` and `*out_data`, which must be released exactly once with
+/// `infrastore_buffer_free_i64` and `infrastore_buffer_free_u8` respectively.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn infrastore_store_read_projected(
+    handle: *const InfraStoreHandle,
+    id: i64,
+    at_unix_ms: *const i64,
+    at_len: u64,
+    zoneless: bool,
+    out_dtype: *mut i32,
+    out_shape: *mut *mut i64,
+    out_shape_len: *mut u64,
+    out_data: *mut *mut u8,
+    out_data_byte_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = deref_handle!(ref handle);
+    if out_dtype.is_null()
+        || out_shape.is_null()
+        || out_shape_len.is_null()
+        || out_data.is_null()
+        || out_data_byte_len.is_null()
+    {
+        set_error("an out pointer is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let count = at_len as usize;
+    if count != 0 && at_unix_ms.is_null() {
+        set_error("at_unix_ms pointer is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let raw = if count == 0 {
+        &[][..]
+    } else {
+        unsafe { slice::from_raw_parts(at_unix_ms, count) }
+    };
+    let mut at = Vec::with_capacity(count);
+    for &ms in raw {
+        match unix_ms_to_datetime(ms) {
+            Some(t) => at.push(t),
+            None => {
+                set_error(format!("timestamp {ms} ms is out of range"));
+                return INFRASTORE_ERR_INVALID_PARAMETER;
+            }
+        }
+    }
+    let projected = match store.inner.read_projected(
+        core_lib::TimeSeriesId(id),
+        core_lib::Instants::spelled(&at, zoneless),
+    ) {
+        Ok(a) => a,
+        Err(e) => return map_core_error(e),
+    };
+    let shape: Vec<i64> = projected.shape.iter().map(|&d| d as i64).collect();
+    let (shape_ptr, shape_len) = vec_into_raw(shape);
+    let (data_ptr, data_byte_len) = vec_into_raw(projected.bytes);
+    unsafe {
+        *out_dtype = projected.dtype.code();
+        *out_shape = shape_ptr;
+        *out_shape_len = shape_len;
+        *out_data = data_ptr;
+        *out_data_byte_len = data_byte_len;
+    }
+    INFRASTORE_OK
+}
+
 /// Read many series named by their catalog association `id`, in the order the
 /// ids are given. The id-addressed counterpart of `infrastore_store_bulk_read`:
 /// results come back in the same `InfraStoreBulkReadHandle`, so a caller reads
@@ -4099,6 +4417,7 @@ pub unsafe extern "C" fn infrastore_bulk_result_item_name(
 
 /// Write the [`time_series_type_to_int`] discriminant of bulk-read item `index` into
 /// `out_type` (`0`=SingleTimeSeries, `1`=NonSequentialTimeSeries,
+/// `6`=PersistentTimeSeries,
 /// `2`=Deterministic, `4`=Probabilistic, `5`=Scenarios — a bulk read never
 /// returns the synthesized `DeterministicSingleTimeSeries`). Lets a caller pick
 /// the right `infrastore_bulk_result_get_*` before reading.
@@ -4172,6 +4491,189 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_non_sequential(
     out_time_reference: *mut *mut c_char,
     out_component_field: *mut *mut c_char,
 ) -> i32 {
+    unsafe {
+        bulk_result_get_irregular(
+            core_lib::TimeSeriesType::NonSequentialTimeSeries,
+            result,
+            index,
+            out_timestamps,
+            out_timestamps_len,
+            out_dtype,
+            out_shape,
+            out_shape_len,
+            out_data,
+            out_data_byte_len,
+            out_application_data,
+            out_element_type,
+            out_units,
+            out_quantity_kind,
+            out_unit_system,
+            out_time_reference,
+            out_component_field,
+        )
+    }
+}
+
+/// Read a `PersistentTimeSeries` element out of a bulk-read result. The
+/// out-params, the ownership rules, and the descriptor handling are exactly
+/// those of [`infrastore_bulk_result_get_non_sequential`]; `out_timestamps` is
+/// the breakpoint vector, with the value at index `i` in force from
+/// `out_timestamps[i]` until the next breakpoint and past the last one forever.
+///
+/// # Safety
+///
+/// `result` must be a live bulk-read handle and `index` less than its length.
+/// Every output pointer must be valid for writing its indicated value. The
+/// returned buffers must each be released with the matching free function, and
+/// each non-null owned string exactly once with `infrastore_string_free`.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn infrastore_bulk_result_get_persistent(
+    result: *const InfraStoreBulkReadHandle,
+    index: u64,
+    out_timestamps: *mut *mut i64,
+    out_timestamps_len: *mut u64,
+    out_dtype: *mut i32,
+    out_shape: *mut *mut i64,
+    out_shape_len: *mut u64,
+    out_data: *mut *mut u8,
+    out_data_byte_len: *mut u64,
+    out_application_data: *mut *mut c_char,
+    out_element_type: *mut *mut c_char,
+    out_units: *mut *mut c_char,
+    out_quantity_kind: *mut *mut c_char,
+    out_unit_system: *mut *mut c_char,
+    out_time_reference: *mut *mut c_char,
+    out_component_field: *mut *mut c_char,
+) -> i32 {
+    unsafe {
+        bulk_result_get_irregular(
+            core_lib::TimeSeriesType::PersistentTimeSeries,
+            result,
+            index,
+            out_timestamps,
+            out_timestamps_len,
+            out_dtype,
+            out_shape,
+            out_shape_len,
+            out_data,
+            out_data_byte_len,
+            out_application_data,
+            out_element_type,
+            out_units,
+            out_quantity_kind,
+            out_unit_system,
+            out_time_reference,
+            out_component_field,
+        )
+    }
+}
+
+/// The 0-based row of bulk-read item `index` — which must be a
+/// `PersistentTimeSeries` — that is **in force at** `at_unix_ms`: the greatest
+/// breakpoint `<= at_unix_ms`, whose value the step function holds there. It
+/// indexes both the timestamp vector and the value rows that
+/// `infrastore_bulk_result_get_persistent` hands back.
+///
+/// This sits on the result slot rather than taking a breakpoint vector because
+/// the caller holds a handle, not a struct — and because the lookup has exactly
+/// one definition in the core. Re-deriving it caller-side is the drift this
+/// exists to prevent.
+///
+/// Returns `INFRASTORE_ERR_INVALID_PARAMETER` if `at_unix_ms` is strictly
+/// before the first breakpoint, where a step function is undefined — it is
+/// never clamped to row 0 — if the series has no breakpoints, if `at_unix_ms`
+/// is outside the representable range, or if item `index` is not a
+/// `PersistentTimeSeries`. At or after the last breakpoint the answer is the
+/// last row, because the final value is held forward forever.
+///
+/// # Safety
+///
+/// `result` must be a live bulk-read handle for the duration of the call,
+/// `index` less than its length, and `out_row` valid for writing one `u64`.
+/// Nothing is written unless the call returns `INFRASTORE_OK`. No buffer is
+/// handed out, so there is nothing to free; on failure the reason is available
+/// from `infrastore_last_error_message`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_bulk_result_persistent_index_in_force_at(
+    result: *const InfraStoreBulkReadHandle,
+    index: u64,
+    at_unix_ms: i64,
+    out_row: *mut u64,
+) -> i32 {
+    clear_error();
+    let result = match unsafe { result.as_ref() } {
+        Some(r) => r,
+        None => {
+            set_error("bulk-read result handle is null");
+            return INFRASTORE_ERR_NULL_POINTER;
+        }
+    };
+    if out_row.is_null() {
+        set_error("out_row pointer is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let series = match result.items.get(index as usize) {
+        Some(core_lib::TimeSeriesData::PersistentTimeSeries(s)) => s,
+        Some(other) => {
+            set_error(format!(
+                "bulk-read item {index} is a {}, not a {}",
+                other.time_series_type().as_str(),
+                core_lib::TimeSeriesType::PersistentTimeSeries.as_str()
+            ));
+            return INFRASTORE_ERR_INVALID_PARAMETER;
+        }
+        None => {
+            set_error("bulk-read index out of bounds");
+            return INFRASTORE_ERR_INVALID_PARAMETER;
+        }
+    };
+    let at = match unix_ms_to_datetime(at_unix_ms) {
+        Some(t) => t,
+        None => {
+            set_error("timestamp out of range");
+            return INFRASTORE_ERR_INVALID_PARAMETER;
+        }
+    };
+    match series.index_in_force_at(at) {
+        Ok(row) => {
+            unsafe { *out_row = row as u64 };
+            INFRASTORE_OK
+        }
+        Err(e) => {
+            set_error(e);
+            INFRASTORE_ERR_INVALID_PARAMETER
+        }
+    }
+}
+
+/// Shared body of the two irregular-static bulk element readers. `want` selects
+/// which stored type is accepted; the payload is identical.
+///
+/// # Safety
+///
+/// See [`infrastore_bulk_result_get_non_sequential`], whose contract this
+/// implements.
+#[allow(clippy::too_many_arguments)]
+unsafe fn bulk_result_get_irregular(
+    want: core_lib::TimeSeriesType,
+    result: *const InfraStoreBulkReadHandle,
+    index: u64,
+    out_timestamps: *mut *mut i64,
+    out_timestamps_len: *mut u64,
+    out_dtype: *mut i32,
+    out_shape: *mut *mut i64,
+    out_shape_len: *mut u64,
+    out_data: *mut *mut u8,
+    out_data_byte_len: *mut u64,
+    out_application_data: *mut *mut c_char,
+    out_element_type: *mut *mut c_char,
+    out_units: *mut *mut c_char,
+    out_quantity_kind: *mut *mut c_char,
+    out_unit_system: *mut *mut c_char,
+    out_time_reference: *mut *mut c_char,
+    out_component_field: *mut *mut c_char,
+) -> i32 {
     clear_error();
     let result = match unsafe { result.as_ref() } {
         Some(r) => r,
@@ -4191,12 +4693,29 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_non_sequential(
         set_error("an out pointer is null");
         return INFRASTORE_ERR_NULL_POINTER;
     }
-    let series = match result.items.get(index as usize) {
-        Some(core_lib::TimeSeriesData::NonSequentialTimeSeries(s)) => s,
+    // Borrowed as a tuple of the fields the two variants share, so the emit
+    // path below is written once.
+    #[allow(clippy::type_complexity)]
+    let (timestamps, array, descriptors): (
+        &[chrono::DateTime<chrono::Utc>],
+        &core_lib::TypedArray,
+        core_lib::Descriptors,
+    ) = match result.items.get(index as usize) {
+        Some(core_lib::TimeSeriesData::NonSequentialTimeSeries(s))
+            if want == core_lib::TimeSeriesType::NonSequentialTimeSeries =>
+        {
+            (&s.timestamps, &s.data, descriptors_of_irregular_nsts(s))
+        }
+        Some(core_lib::TimeSeriesData::PersistentTimeSeries(s))
+            if want == core_lib::TimeSeriesType::PersistentTimeSeries =>
+        {
+            (&s.timestamps, &s.data, descriptors_of_irregular_pts(s))
+        }
         Some(other) => {
             set_error(format!(
-                "bulk-read item {index} is a {}, not a NonSequentialTimeSeries",
-                other.time_series_type().as_str()
+                "bulk-read item {index} is a {}, not a {}",
+                other.time_series_type().as_str(),
+                want.as_str()
             ));
             return INFRASTORE_ERR_INVALID_PARAMETER;
         }
@@ -4209,13 +4728,13 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_non_sequential(
     // failure, so no other handed-out buffer can be orphaned by it.
     let code = unsafe {
         emit_descriptors(
-            series.application_data.as_deref(),
-            series.element_type,
-            series.units.as_deref(),
-            series.quantity_kind.as_deref(),
-            series.unit_system,
-            series.time_reference.as_ref(),
-            series.component_field.as_deref(),
+            descriptors.application_data.as_deref(),
+            descriptors.element_type,
+            descriptors.units.as_deref(),
+            descriptors.quantity_kind.as_deref(),
+            descriptors.unit_system,
+            descriptors.time_reference.as_ref(),
+            descriptors.component_field.as_deref(),
             out_application_data,
             out_element_type,
             out_units,
@@ -4228,16 +4747,12 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_non_sequential(
     if code != INFRASTORE_OK {
         return code;
     }
-    let timestamps: Vec<i64> = series
-        .timestamps
-        .iter()
-        .map(|t| datetime_to_unix_ms(*t))
-        .collect();
+    let timestamps: Vec<i64> = timestamps.iter().map(|t| datetime_to_unix_ms(*t)).collect();
     let (timestamps_ptr, timestamps_len) = vec_into_raw(timestamps);
-    let shape: Vec<i64> = series.data.shape.iter().map(|&d| d as i64).collect();
+    let shape: Vec<i64> = array.shape.iter().map(|&d| d as i64).collect();
     let (shape_ptr, shape_len) = vec_into_raw(shape);
-    let dtype = series.data.dtype.code();
-    let (data_ptr, data_byte_len) = vec_into_raw(series.data.bytes.clone());
+    let dtype = array.dtype.code();
+    let (data_ptr, data_byte_len) = vec_into_raw(array.bytes.clone());
     unsafe {
         *out_timestamps = timestamps_ptr;
         *out_timestamps_len = timestamps_len;
@@ -6730,6 +7245,10 @@ unsafe fn write_i64_slice_out(values: &[i64], buf: *mut i64, cap: u64, out_len: 
 /// * `SingleTimeSeries` (0): `resolution` must be a non-empty ISO-8601 period —
 ///   one resolution per reader — and the matched series must share one grid
 ///   (`initial_timestamp` + `length`).
+/// * `PersistentTimeSeries` (6): `resolution` must be null, for the same
+///   reason -- a step function has no constant step. Unlike the type above, its
+///   columns may sit on *different* breakpoint vectors; the reader's timeline
+///   is their union, and each column resolves hold-last on its own vector.
 /// * `NonSequentialTimeSeries` (1): `resolution` must be null (an irregular
 ///   series has none); the matched series must instead share one timestamp
 ///   vector, which is also what pools their arrays on disk. Read that timeline
@@ -6810,7 +7329,8 @@ pub unsafe extern "C" fn infrastore_store_build_static_reader(
 /// owned ISO-8601 duration string, e.g. `PT1H` / `P1M`), and the number of
 /// timestamps on it.
 ///
-/// `*out_resolution` is **null** for a `NonSequentialTimeSeries` reader: an
+/// `*out_resolution` is **null** for a `NonSequentialTimeSeries` or
+/// `PersistentTimeSeries` reader: an
 /// irregular timeline has no constant step, so read it with
 /// `infrastore_static_reader_timestamps` instead.
 ///
@@ -8225,6 +8745,360 @@ mod abi_tests {
             infrastore_buffer_free_i64(shape_ptr, shape_len);
             infrastore_buffer_free_u8(data_ptr, data_len);
             infrastore_string_free(application_data_out);
+            infrastore_bulk_result_free(result);
+            infrastore_store_free(store);
+        }
+    }
+
+    /// The hold-last lookup reaches a C caller with the same four boundary
+    /// answers the core gives: undefined before the first breakpoint (an error,
+    /// never row 0), the breakpoint's own row exactly at it, the row still in
+    /// force between two, and the last row forever after the last one.
+    #[test]
+    fn persistent_index_in_force_at_covers_the_four_boundary_cases() {
+        let store = abi_create_in_memory();
+        let owner_type = CString::new("Gen").unwrap();
+        let name = CString::new("curve").unwrap();
+        let et = CString::new("f64").unwrap();
+        // Three breakpoints an hour apart, with a two-hour gap before the last.
+        let breakpoints: Vec<i64> = vec![0, 3_600_000, 10_800_000];
+        let bytes = to_le(&[10.0, 20.0, 30.0]);
+        let dims = [3u64];
+        let mut id = 0i64;
+        assert_eq!(
+            unsafe {
+                infrastore_store_add_persistent(
+                    store,
+                    7,
+                    owner_type.as_ptr(),
+                    0,
+                    name.as_ptr(),
+                    breakpoints.as_ptr(),
+                    breakpoints.len() as u64,
+                    et.as_ptr(),
+                    1,
+                    dims.as_ptr(),
+                    bytes.as_ptr(),
+                    bytes.len() as u64,
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    &mut id,
+                )
+            },
+            INFRASTORE_OK,
+            "add failed: {}",
+            last_error()
+        );
+
+        let mut result: *mut InfraStoreBulkReadHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                infrastore_store_read_by_id(
+                    store,
+                    id,
+                    false,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    0,
+                    0,
+                    &mut result,
+                )
+            },
+            INFRASTORE_OK,
+            "read failed: {}",
+            last_error()
+        );
+
+        let row_at = |at: i64| -> Result<u64, i32> {
+            let mut row = u64::MAX;
+            let code = unsafe {
+                infrastore_bulk_result_persistent_index_in_force_at(result, 0, at, &mut row)
+            };
+            if code == INFRASTORE_OK {
+                Ok(row)
+            } else {
+                Err(code)
+            }
+        };
+
+        // Before the first breakpoint the step function is undefined. Not row 0.
+        assert_eq!(row_at(-1), Err(INFRASTORE_ERR_INVALID_PARAMETER));
+        assert!(
+            last_error().contains("before the first breakpoint"),
+            "the error should say why: {}",
+            last_error()
+        );
+        // Exactly at a breakpoint: that breakpoint's own row, because the
+        // boundary is `<=`.
+        assert_eq!(row_at(0), Ok(0));
+        assert_eq!(row_at(3_600_000), Ok(1));
+        // Between two: the earlier one stays in force.
+        assert_eq!(row_at(3_599_999), Ok(0));
+        assert_eq!(row_at(7_200_000), Ok(1));
+        // Past the last: held forward forever.
+        assert_eq!(row_at(10_800_000), Ok(2));
+        assert_eq!(row_at(10_800_000 + 86_400_000), Ok(2));
+
+        // A null out-pointer is refused before anything is read.
+        assert_eq!(
+            unsafe {
+                infrastore_bulk_result_persistent_index_in_force_at(result, 0, 0, ptr::null_mut())
+            },
+            INFRASTORE_ERR_NULL_POINTER
+        );
+        // So is an index past the end.
+        let mut row = 0u64;
+        assert_eq!(
+            unsafe { infrastore_bulk_result_persistent_index_in_force_at(result, 9, 0, &mut row) },
+            INFRASTORE_ERR_INVALID_PARAMETER
+        );
+
+        unsafe {
+            infrastore_bulk_result_free(result);
+            infrastore_store_free(store);
+        }
+    }
+
+    /// The projection read hands a C caller the gathered values, in the order
+    /// the instants were given, with the series' own dtype and element shape.
+    #[test]
+    fn store_read_projected_gathers_the_values_in_force() {
+        let store = abi_create_in_memory();
+        let owner_type = CString::new("Gen").unwrap();
+        let name = CString::new("curve").unwrap();
+        let et = CString::new("f64").unwrap();
+        let breakpoints: Vec<i64> = vec![0, 3_600_000, 10_800_000];
+        let bytes = to_le(&[10.0, 20.0, 30.0]);
+        let dims = [3u64];
+        let mut id = 0i64;
+        assert_eq!(
+            unsafe {
+                infrastore_store_add_persistent(
+                    store,
+                    7,
+                    owner_type.as_ptr(),
+                    0,
+                    name.as_ptr(),
+                    breakpoints.as_ptr(),
+                    breakpoints.len() as u64,
+                    et.as_ptr(),
+                    1,
+                    dims.as_ptr(),
+                    bytes.as_ptr(),
+                    bytes.len() as u64,
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    &mut id,
+                )
+            },
+            INFRASTORE_OK,
+            "add failed: {}",
+            last_error()
+        );
+
+        // Unsorted, with a repeat: a gather preserves the caller's order.
+        let at: Vec<i64> = vec![7_200_000, 0, 7_200_000, 86_400_000];
+        let mut dtype = -1i32;
+        let mut shape_ptr: *mut i64 = ptr::null_mut();
+        let mut shape_len = 0u64;
+        let mut data_ptr: *mut u8 = ptr::null_mut();
+        let mut data_len = 0u64;
+        assert_eq!(
+            unsafe {
+                infrastore_store_read_projected(
+                    store,
+                    id,
+                    at.as_ptr(),
+                    at.len() as u64,
+                    false,
+                    &mut dtype,
+                    &mut shape_ptr,
+                    &mut shape_len,
+                    &mut data_ptr,
+                    &mut data_len,
+                )
+            },
+            INFRASTORE_OK,
+            "read_projected failed: {}",
+            last_error()
+        );
+        assert_eq!(dtype, core_lib::Dtype::F64.code());
+        let shape = unsafe { slice::from_raw_parts(shape_ptr, shape_len as usize) };
+        assert_eq!(shape, &[4]);
+        let raw = unsafe { slice::from_raw_parts(data_ptr, data_len as usize) };
+        let values: Vec<f64> = raw
+            .chunks_exact(8)
+            .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(values, vec![20.0, 10.0, 20.0, 30.0]);
+        unsafe {
+            infrastore_buffer_free_i64(shape_ptr, shape_len);
+            infrastore_buffer_free_u8(data_ptr, data_len);
+        }
+
+        // No instants is an empty answer, not an error.
+        let mut shape_ptr2: *mut i64 = ptr::null_mut();
+        let mut shape_len2 = 0u64;
+        let mut data_ptr2: *mut u8 = ptr::null_mut();
+        let mut data_len2 = 0u64;
+        assert_eq!(
+            unsafe {
+                infrastore_store_read_projected(
+                    store,
+                    id,
+                    ptr::null(),
+                    0,
+                    false,
+                    &mut dtype,
+                    &mut shape_ptr2,
+                    &mut shape_len2,
+                    &mut data_ptr2,
+                    &mut data_len2,
+                )
+            },
+            INFRASTORE_OK
+        );
+        assert_eq!(data_len2, 0);
+        assert_eq!(
+            unsafe { slice::from_raw_parts(shape_ptr2, shape_len2 as usize) },
+            &[0]
+        );
+        unsafe {
+            infrastore_buffer_free_i64(shape_ptr2, shape_len2);
+            infrastore_buffer_free_u8(data_ptr2, data_len2);
+        }
+
+        // An instant before the first breakpoint fails the whole call.
+        let bad: Vec<i64> = vec![0, -1];
+        assert_eq!(
+            unsafe {
+                infrastore_store_read_projected(
+                    store,
+                    id,
+                    bad.as_ptr(),
+                    bad.len() as u64,
+                    false,
+                    &mut dtype,
+                    &mut shape_ptr,
+                    &mut shape_len,
+                    &mut data_ptr,
+                    &mut data_len,
+                )
+            },
+            INFRASTORE_ERR_INVALID_PARAMETER
+        );
+        // And so does an id naming no row.
+        assert_eq!(
+            unsafe {
+                infrastore_store_read_projected(
+                    store,
+                    9999,
+                    at.as_ptr(),
+                    at.len() as u64,
+                    false,
+                    &mut dtype,
+                    &mut shape_ptr,
+                    &mut shape_len,
+                    &mut data_ptr,
+                    &mut data_len,
+                )
+            },
+            INFRASTORE_ERR_NOT_FOUND
+        );
+
+        unsafe { infrastore_store_free(store) };
+    }
+
+    /// The lookup is keyed on the stored type: asking a `NonSequentialTimeSeries`
+    /// slot for a breakpoint in force names both types rather than answering,
+    /// because "no value between the timestamps" is that type's guarantee.
+    #[test]
+    fn persistent_index_in_force_at_refuses_a_non_sequential_slot() {
+        let store = abi_create_in_memory();
+        let owner_type = CString::new("Gen").unwrap();
+        let name = CString::new("irregular").unwrap();
+        let et = CString::new("f64").unwrap();
+        let timestamps: Vec<i64> = vec![0, 3_600_000];
+        let bytes = to_le(&[1.0, 2.0]);
+        let dims = [2u64];
+        let mut id = 0i64;
+        assert_eq!(
+            unsafe {
+                infrastore_store_add_non_sequential(
+                    store,
+                    7,
+                    owner_type.as_ptr(),
+                    0,
+                    name.as_ptr(),
+                    timestamps.as_ptr(),
+                    timestamps.len() as u64,
+                    et.as_ptr(),
+                    1,
+                    dims.as_ptr(),
+                    bytes.as_ptr(),
+                    bytes.len() as u64,
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    &mut id,
+                )
+            },
+            INFRASTORE_OK,
+            "add failed: {}",
+            last_error()
+        );
+        let mut result: *mut InfraStoreBulkReadHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                infrastore_store_read_by_id(
+                    store,
+                    id,
+                    false,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    0,
+                    0,
+                    &mut result,
+                )
+            },
+            INFRASTORE_OK
+        );
+        let mut row = 0u64;
+        assert_eq!(
+            unsafe { infrastore_bulk_result_persistent_index_in_force_at(result, 0, 0, &mut row) },
+            INFRASTORE_ERR_INVALID_PARAMETER
+        );
+        let message = last_error();
+        assert!(
+            message.contains("NonSequentialTimeSeries") && message.contains("PersistentTimeSeries"),
+            "the error should name both types: {message}"
+        );
+
+        unsafe {
             infrastore_bulk_result_free(result);
             infrastore_store_free(store);
         }

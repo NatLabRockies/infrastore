@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use infrastore_core::{
     ForecastSummaryRow, OwnerCategory, Period, Result as CoreResult, StaticConsistency,
     StaticSummaryRow, TimeRange, TimeSeriesCountsDetailed, TimeSeriesData, TimeSeriesError,
-    TimeSeriesId, TimeSeriesMetadata, TimeSeriesType,
+    TimeSeriesId, TimeSeriesMetadata, TimeSeriesType, TypedArray,
 };
 
 /// Parse an ISO-8601 period received over the wire, mapping failures to a
@@ -361,6 +361,50 @@ impl RemoteClient {
             .into_iter()
             .map(|item| read_resp_to_time_series_data(item).map_err(convert_err))
             .collect()
+    }
+
+    /// Evaluate the `PersistentTimeSeries` filed under `id` at each instant in
+    /// `at`, in the order given.
+    ///
+    /// A gather, not a slice: `at` may be unsorted and may repeat, and the
+    /// caller's order is the response order. The returned array is shaped
+    /// `[at.len(), *E]` with the series' element shape, and its `element_type`
+    /// is unchanged by the projection, so the same codec that reads a series'
+    /// `data` reads this.
+    ///
+    /// `InvalidParameter` if `id` names any other stored type, or if any instant
+    /// precedes the first breakpoint.
+    pub async fn read_projected(
+        &self,
+        id: TimeSeriesId,
+        at: &[chrono::DateTime<chrono::Utc>],
+        zoneless: bool,
+    ) -> CoreResult<TypedArray> {
+        let mut inner = self.inner.lock().await;
+        let resp = inner
+            .read_projected(pb::ReadProjectedReq {
+                id: id.get(),
+                at_rfc3339: at.iter().map(|t| t.to_rfc3339()).collect(),
+                bounds_zoneless: Some(zoneless),
+            })
+            .await
+            .map_err(Self::map_status)?
+            .into_inner();
+        let dtype = resp
+            .element_type
+            .parse::<infrastore_core::ElementType>()
+            .map(|e| e.physical_dtype())
+            .map_err(|e| {
+                infrastore_core::TimeSeriesError::IntegrityError(format!(
+                    "server returned an element_type this client cannot read: {e}"
+                ))
+            })?;
+        TypedArray::new(
+            dtype,
+            resp.shape.iter().map(|&d| d as usize).collect(),
+            resp.value_bytes,
+        )
+        .map_err(convert_err)
     }
 
     /// Distinct owners per category and distinct arrays per kind.

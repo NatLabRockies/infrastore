@@ -224,7 +224,8 @@ k·resolution` for `k in 0:length-1`. Returned by [`static_grid`](@ref) for a
 [`StaticReader`], and by [`check_static_consistency`](@ref) once per resolution
 present in the store.
 
-`resolution` is `nothing` only for a `NonSequentialTimeSeries` reader, whose
+`resolution` is `nothing` only for a `NonSequentialTimeSeries` or
+`PersistentTimeSeries` reader, whose
 timeline is an explicit list of instants rather than a grid — enumerate it with
 [`static_timestamps`](@ref).
 

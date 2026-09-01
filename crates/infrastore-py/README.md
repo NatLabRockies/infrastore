@@ -45,7 +45,8 @@ assert np.array_equal(np.asarray(got.data), np.asarray(ts.data))
   across components is written to disk a single time.
 - **Typed, N-dimensional values** — `f64`, `f32`, `i64`, `i32`, `u64`, and `bool`, with an optional
   per-timestep element shape.
-- **Six time-series types** — `SingleTimeSeries` and `NonSequentialTimeSeries` read+write;
+- **Seven time-series types** — `SingleTimeSeries`, `NonSequentialTimeSeries`, and
+  `PersistentTimeSeries` (a sparse step function: breakpoints plus hold-last) read+write;
   `Deterministic`, `DeterministicSingleTimeSeries`, `Probabilistic`, and `Scenarios` for forecasts.
 - **Columnar simulation readers** — `StaticReader` / `ForecastReader` serve every series' value at
   one timestamp.

@@ -210,6 +210,32 @@ end
     )
 end
 
+@testset "a persistent lookup instant is a query bound like any other" begin
+    denver = tz"America/Denver"
+    zoned = PersistentTimeSeries(
+        [ZonedDateTime(DateTime(2024, m, 1), denver) for m in (1, 6)],
+        Float64[10, 60],
+        "zoned",
+    )
+    naive = PersistentTimeSeries(
+        [DateTime(2024, m, 1) for m in (1, 6)], Float64[10, 60], "naive"
+    )
+
+    # An aware instant need not match the series' own zone: both name the same
+    # instant, and the lookup is instant arithmetic.
+    @test index_in_force_at(zoned, ZonedDateTime(DateTime(2024, 8, 1), tz"UTC")) == 2
+
+    # A wall clock against a series that records instants is a category error,
+    # not a rounding one -- the same answer a ranged read gives.
+    @test_throws InfraStore.InvalidParameterError index_in_force_at(
+        zoned, DateTime(2024, 8, 1)
+    )
+    # And the mirror image.
+    @test_throws InfraStore.InvalidParameterError index_in_force_at(
+        naive, ZonedDateTime(DateTime(2024, 8, 1), tz"UTC")
+    )
+end
+
 @testset "a selection cannot span both coherence groups" begin
     store = Store(in_memory=true)
     zoned_key = add_time_series!(
