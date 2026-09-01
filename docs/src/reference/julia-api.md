@@ -497,6 +497,21 @@ breakpoint, where a non-empty window errors. Every read populates the returned s
 `application_data` field from the stored association, so a binding's reconstruction tag comes back
 with the data — no separate `get_metadata_by_id` call is needed.
 
+The step function's lookup is callable on the struct, so a consumer never re-implements hold-last:
+
+```julia
+index_in_force_at(ts::PersistentTimeSeries, at) -> Int
+```
+
+The index of the breakpoint in force at `at` — the greatest one `<= at`. It is **1-based**, like
+every other Julia index, so `ts.data[index_in_force_at(ts, at)]` is the value in force; the other
+bindings report the same breakpoint 0-based. Exactly at a breakpoint the answer is that breakpoint's
+own index, and past the last one it is the last index, forever. Before the first it throws
+`InvalidParameterError` and is never clamped to `1`. `at` is a `DateTime` or — with `using
+TimeZones`
+loaded — a `ZonedDateTime`, and must be spelled the way the breakpoints are; a mismatch raises,
+exactly as a `time_range` bound does.
+
 `owner_id` is an integer identifier (`Int64`) and `owner_category` (`Component` /
 `SupplementalAttribute`) completes the owner identity — the owner is the pair
 `(owner_id, owner_category)`. `features` is serialized to JSON and must contain only JSON-scalar

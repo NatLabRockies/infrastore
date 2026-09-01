@@ -212,6 +212,39 @@ end
     @test round_tripped[1].data == [3.5, 4.25, 5.0]
 end
 
+@testset "persistent index_in_force_at" begin
+    breakpoints = [DateTime(2024, m, 1) for m in (1, 4, 7, 10)]
+    series = PersistentTimeSeries(breakpoints, Float64[10, 40, 70, 100], "gas_price")
+
+    # 1-based, like every other Julia index. The other bindings report the same
+    # breakpoint 0-based.
+    @test index_in_force_at(series, DateTime(2024, 1, 1)) == 1
+    @test index_in_force_at(series, DateTime(2024, 7, 1)) == 3
+    # Between two breakpoints the earlier one is still in force: the boundary
+    # is `<=`, so a read exactly at a breakpoint gets that breakpoint's value
+    # and the millisecond before it gets the previous one.
+    @test index_in_force_at(series, DateTime(2024, 3, 31, 23, 59, 59, 999)) == 1
+    @test index_in_force_at(series, DateTime(2024, 6, 1)) == 2
+    # Past the last breakpoint the final value is held forward forever.
+    @test index_in_force_at(series, DateTime(2031, 5, 4)) == 4
+    # Before the first there is no value at all, and that is an error rather
+    # than a clamp to the first row.
+    @test_throws InfraStore.InvalidParameterError index_in_force_at(
+        series, DateTime(2023, 12, 31)
+    )
+    # The index addresses the value array, which is what a caller wants it for.
+    @test series.data[index_in_force_at(series, DateTime(2024, 6, 1))] == 40.0
+
+    # It answers the same on a series read back out of a store: the lookup is a
+    # property of the breakpoints, not of how the object was built.
+    store = Store(in_memory=true)
+    id = add_time_series!(store, 7, "ThermalStandard", Component, series)
+    back = read_by_id(store, id)
+    @test [index_in_force_at(back, DateTime(2024, m, 1)) for m in 1:12] ==
+        [1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4]
+    close!(store)
+end
+
 @testset "StaticReader over persistent columns on different breakpoints" begin
     store = Store(in_memory=true)
     months(ms) = [DateTime(2024, m, 1) for m in ms]

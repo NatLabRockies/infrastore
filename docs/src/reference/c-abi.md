@@ -197,6 +197,7 @@ those instants means.
 int32_t infrastore_store_add_persistent(struct InfraStore *handle, /* ...as add_non_sequential... */);
 int32_t infrastore_batch_add_persistent(struct InfraStoreBatch *batch, /* ...sans handle/out_id... */);
 int32_t infrastore_bulk_result_get_persistent(const struct InfraStoreBulkReadHandle *result, uint64_t index, /* ...as _non_sequential... */);
+int32_t infrastore_bulk_result_persistent_index_in_force_at(const struct InfraStoreBulkReadHandle *result, uint64_t index, int64_t at_unix_ms, uint64_t *out_row);
 ```
 
 It is read like every other type — by id, through `infrastore_store_read_by_id` /
@@ -208,6 +209,14 @@ the last one forever. There is **no value before the first breakpoint**: a range
 precedes it is refused with `INFRASTORE_ERR_INVALID_PARAMETER` rather than clamped, and a range that
 starts mid-step begins at the breakpoint _in force_ there, so the returned slice always defines a
 value at the caller's start.
+
+`infrastore_bulk_result_persistent_index_in_force_at` answers that lookup without the caller
+re-implementing it: it writes the 0-based row in force at `at_unix_ms` — the greatest breakpoint
+`<= at_unix_ms` — into `out_row`, indexing both `out_timestamps` and the value rows. It sits on the
+result slot rather than taking a breakpoint vector because a C caller holds a handle, not a struct.
+Before the first breakpoint, on an empty series, on a slot that is not a `PersistentTimeSeries`, or
+on an out-of-range index it returns `INFRASTORE_ERR_INVALID_PARAMETER` and writes nothing — row `0`
+is an answer, never a fallback. It hands out no buffer, so there is nothing to free.
 
 The ABI discriminant is `6`, kept numerically equal to the storage code. See the
 [data model](../explanation/data-model.md#persistenttimeseries).

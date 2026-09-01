@@ -544,6 +544,23 @@ A zero-width range (`end == start`) is the exception, and selects nothing — as
 other type, since `[t, t)` holds no instant for a value to be in force at. That applies before the
 first breakpoint too, where a non-empty window raises.
 
+The lookup itself is callable, so a consumer never has to re-implement hold-last:
+
+```python
+index_in_force_at(at: datetime) -> int
+```
+
+The 0-based index into `timestamps` and `data` of the breakpoint in force at `at` — the greatest one
+`<= at`. Exactly at a breakpoint the answer is that breakpoint's own index; past the last one it is
+the last index, forever. Before the first it raises `InvalidParameterError`, and is never clamped to
+`0`. `at` is spelled the way the series' breakpoints are — naive for a zoneless series, aware
+otherwise — and a mismatch is refused rather than reinterpreted, exactly as on a ranged read.
+
+```python
+row = series.index_in_force_at(datetime(2024, 6, 1, tzinfo=timezone.utc))
+value = series.data[row]
+```
+
 Policy about how a step function collapses for a downstream solver belongs to the application and
 travels in `application_data`; the store never interprets it. See the
 [data model](../explanation/data-model.md#persistenttimeseries).

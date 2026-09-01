@@ -234,3 +234,62 @@ def test_a_bulk_read_reconstructs_the_type():
     out = store.read_by_ids(ids)
     assert all(isinstance(s, PersistentTimeSeries) for s in out)
     assert [len(s) for s in out] == [2, 3]
+
+
+def test_index_in_force_at_covers_the_four_boundary_cases():
+    """The hold-last lookup, reachable from the one binding that needs it.
+
+    Before this, a caller could round-trip a curve through the store and still
+    have to re-implement the rule client-side, which is two chances to get the
+    boundary wrong.
+    """
+    series = curve("gas_price", [1, 4, 7, 10])
+
+    # Exactly at a breakpoint: that breakpoint's own row. The boundary is `<=`,
+    # which is what right-continuity means.
+    assert series.index_in_force_at(month(1)) == 0
+    assert series.index_in_force_at(month(7)) == 2
+    # Between two: the earlier one is still in force.
+    assert series.index_in_force_at(month(4) - timedelta(milliseconds=1)) == 0
+    assert series.index_in_force_at(month(6)) == 1
+    # Past the last: held forward forever.
+    assert series.index_in_force_at(month(10)) == 3
+    assert series.index_in_force_at(datetime(2031, 5, 4, tzinfo=timezone.utc)) == 3
+    # Before the first: undefined, and an error rather than a clamp to 0.
+    with pytest.raises(InvalidParameterError, match="before the first breakpoint"):
+        series.index_in_force_at(month(1) - timedelta(milliseconds=1))
+
+    # The index addresses both axes, so it is how a caller gets the value.
+    assert series.data[series.index_in_force_at(month(6))] == 40.0
+
+
+def test_index_in_force_at_survives_a_round_trip():
+    """The lookup answers the same on a series read back out of a store as on
+    the one that went in — it is a property of the breakpoints, not of how the
+    object was built."""
+    store = Store.create(in_memory=True)
+    months = [1, 4, 7, 10]
+    id = add(store, 7, curve("gas_price", months))
+    back = store.read_by_id(id)
+
+    for m in range(1, 13):
+        at = month(m)
+        assert back.data[back.index_in_force_at(at)] == hold_last(months, at)
+
+
+def test_index_in_force_at_refuses_a_query_spelled_the_other_way():
+    """A query bound must be spelled the way the series is. An aware datetime
+    against a zoneless series would otherwise be reinterpreted as UTC and
+    answered, where the same mismatch on a ranged read is refused."""
+    zoneless = PersistentTimeSeries(
+        [datetime(2024, m, 1) for m in (1, 6)], np.array([1.0, 2.0]), "wall_clock"
+    )
+    with pytest.raises(InvalidParameterError, match="zoneless"):
+        zoneless.index_in_force_at(datetime(2024, 3, 1, tzinfo=timezone.utc))
+    # The naive query it was written with still works.
+    assert zoneless.index_in_force_at(datetime(2024, 3, 1)) == 0
+
+    # And the converse: a wall clock cannot query an instant-bearing series.
+    zoned = curve("gas_price", [1, 6])
+    with pytest.raises(InvalidParameterError, match="does not name one"):
+        zoned.index_in_force_at(datetime(2024, 3, 1))

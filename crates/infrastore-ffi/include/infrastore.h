@@ -1563,6 +1563,38 @@ int32_t infrastore_bulk_result_get_persistent(const struct InfraStoreBulkReadHan
                                               char **out_component_field);
 
 /**
+ * The 0-based row of bulk-read item `index` — which must be a
+ * `PersistentTimeSeries` — that is **in force at** `at_unix_ms`: the greatest
+ * breakpoint `<= at_unix_ms`, whose value the step function holds there. It
+ * indexes both the timestamp vector and the value rows that
+ * `infrastore_bulk_result_get_persistent` hands back.
+ *
+ * This sits on the result slot rather than taking a breakpoint vector because
+ * the caller holds a handle, not a struct — and because the lookup has exactly
+ * one definition in the core. Re-deriving it caller-side is the drift this
+ * exists to prevent.
+ *
+ * Returns `INFRASTORE_ERR_INVALID_PARAMETER` if `at_unix_ms` is strictly
+ * before the first breakpoint, where a step function is undefined — it is
+ * never clamped to row 0 — if the series has no breakpoints, if `at_unix_ms`
+ * is outside the representable range, or if item `index` is not a
+ * `PersistentTimeSeries`. At or after the last breakpoint the answer is the
+ * last row, because the final value is held forward forever.
+ *
+ * # Safety
+ *
+ * `result` must be a live bulk-read handle for the duration of the call,
+ * `index` less than its length, and `out_row` valid for writing one `u64`.
+ * Nothing is written unless the call returns `INFRASTORE_OK`. No buffer is
+ * handed out, so there is nothing to free; on failure the reason is available
+ * from `infrastore_last_error_message`.
+ */
+int32_t infrastore_bulk_result_persistent_index_in_force_at(const struct InfraStoreBulkReadHandle *result,
+                                                            uint64_t index,
+                                                            int64_t at_unix_ms,
+                                                            uint64_t *out_row);
+
+/**
  * Read a forecast element (`Deterministic`, `Probabilistic`, or `Scenarios`)
  * out of a read result. The out-params carry the forecast window parameters
  * (`out_scenario_count` is nonzero only for `Scenarios`; `out_percentiles` is

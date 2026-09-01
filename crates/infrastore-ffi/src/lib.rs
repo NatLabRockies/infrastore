@@ -4466,6 +4466,84 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_persistent(
     }
 }
 
+/// The 0-based row of bulk-read item `index` — which must be a
+/// `PersistentTimeSeries` — that is **in force at** `at_unix_ms`: the greatest
+/// breakpoint `<= at_unix_ms`, whose value the step function holds there. It
+/// indexes both the timestamp vector and the value rows that
+/// `infrastore_bulk_result_get_persistent` hands back.
+///
+/// This sits on the result slot rather than taking a breakpoint vector because
+/// the caller holds a handle, not a struct — and because the lookup has exactly
+/// one definition in the core. Re-deriving it caller-side is the drift this
+/// exists to prevent.
+///
+/// Returns `INFRASTORE_ERR_INVALID_PARAMETER` if `at_unix_ms` is strictly
+/// before the first breakpoint, where a step function is undefined — it is
+/// never clamped to row 0 — if the series has no breakpoints, if `at_unix_ms`
+/// is outside the representable range, or if item `index` is not a
+/// `PersistentTimeSeries`. At or after the last breakpoint the answer is the
+/// last row, because the final value is held forward forever.
+///
+/// # Safety
+///
+/// `result` must be a live bulk-read handle for the duration of the call,
+/// `index` less than its length, and `out_row` valid for writing one `u64`.
+/// Nothing is written unless the call returns `INFRASTORE_OK`. No buffer is
+/// handed out, so there is nothing to free; on failure the reason is available
+/// from `infrastore_last_error_message`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_bulk_result_persistent_index_in_force_at(
+    result: *const InfraStoreBulkReadHandle,
+    index: u64,
+    at_unix_ms: i64,
+    out_row: *mut u64,
+) -> i32 {
+    clear_error();
+    let result = match unsafe { result.as_ref() } {
+        Some(r) => r,
+        None => {
+            set_error("bulk-read result handle is null");
+            return INFRASTORE_ERR_NULL_POINTER;
+        }
+    };
+    if out_row.is_null() {
+        set_error("out_row pointer is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let series = match result.items.get(index as usize) {
+        Some(core_lib::TimeSeriesData::PersistentTimeSeries(s)) => s,
+        Some(other) => {
+            set_error(format!(
+                "bulk-read item {index} is a {}, not a {}",
+                other.time_series_type().as_str(),
+                core_lib::TimeSeriesType::PersistentTimeSeries.as_str()
+            ));
+            return INFRASTORE_ERR_INVALID_PARAMETER;
+        }
+        None => {
+            set_error("bulk-read index out of bounds");
+            return INFRASTORE_ERR_INVALID_PARAMETER;
+        }
+    };
+    let at = match unix_ms_to_datetime(at_unix_ms) {
+        Some(t) => t,
+        None => {
+            set_error("timestamp out of range");
+            return INFRASTORE_ERR_INVALID_PARAMETER;
+        }
+    };
+    match series.index_in_force_at(at) {
+        Ok(row) => {
+            unsafe { *out_row = row as u64 };
+            INFRASTORE_OK
+        }
+        Err(e) => {
+            set_error(e);
+            INFRASTORE_ERR_INVALID_PARAMETER
+        }
+    }
+}
+
 /// Shared body of the two irregular-static bulk element readers. `want` selects
 /// which stored type is accepted; the payload is identical.
 ///
@@ -8564,6 +8642,205 @@ mod abi_tests {
             infrastore_buffer_free_i64(shape_ptr, shape_len);
             infrastore_buffer_free_u8(data_ptr, data_len);
             infrastore_string_free(application_data_out);
+            infrastore_bulk_result_free(result);
+            infrastore_store_free(store);
+        }
+    }
+
+    /// The hold-last lookup reaches a C caller with the same four boundary
+    /// answers the core gives: undefined before the first breakpoint (an error,
+    /// never row 0), the breakpoint's own row exactly at it, the row still in
+    /// force between two, and the last row forever after the last one.
+    #[test]
+    fn persistent_index_in_force_at_covers_the_four_boundary_cases() {
+        let store = abi_create_in_memory();
+        let owner_type = CString::new("Gen").unwrap();
+        let name = CString::new("curve").unwrap();
+        let et = CString::new("f64").unwrap();
+        // Three breakpoints an hour apart, with a two-hour gap before the last.
+        let breakpoints: Vec<i64> = vec![0, 3_600_000, 10_800_000];
+        let bytes = to_le(&[10.0, 20.0, 30.0]);
+        let dims = [3u64];
+        let mut id = 0i64;
+        assert_eq!(
+            unsafe {
+                infrastore_store_add_persistent(
+                    store,
+                    7,
+                    owner_type.as_ptr(),
+                    0,
+                    name.as_ptr(),
+                    breakpoints.as_ptr(),
+                    breakpoints.len() as u64,
+                    et.as_ptr(),
+                    1,
+                    dims.as_ptr(),
+                    bytes.as_ptr(),
+                    bytes.len() as u64,
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    &mut id,
+                )
+            },
+            INFRASTORE_OK,
+            "add failed: {}",
+            last_error()
+        );
+
+        let mut result: *mut InfraStoreBulkReadHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                infrastore_store_read_by_id(
+                    store,
+                    id,
+                    false,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    0,
+                    0,
+                    &mut result,
+                )
+            },
+            INFRASTORE_OK,
+            "read failed: {}",
+            last_error()
+        );
+
+        let row_at = |at: i64| -> Result<u64, i32> {
+            let mut row = u64::MAX;
+            let code = unsafe {
+                infrastore_bulk_result_persistent_index_in_force_at(result, 0, at, &mut row)
+            };
+            if code == INFRASTORE_OK {
+                Ok(row)
+            } else {
+                Err(code)
+            }
+        };
+
+        // Before the first breakpoint the step function is undefined. Not row 0.
+        assert_eq!(row_at(-1), Err(INFRASTORE_ERR_INVALID_PARAMETER));
+        assert!(
+            last_error().contains("before the first breakpoint"),
+            "the error should say why: {}",
+            last_error()
+        );
+        // Exactly at a breakpoint: that breakpoint's own row, because the
+        // boundary is `<=`.
+        assert_eq!(row_at(0), Ok(0));
+        assert_eq!(row_at(3_600_000), Ok(1));
+        // Between two: the earlier one stays in force.
+        assert_eq!(row_at(3_599_999), Ok(0));
+        assert_eq!(row_at(7_200_000), Ok(1));
+        // Past the last: held forward forever.
+        assert_eq!(row_at(10_800_000), Ok(2));
+        assert_eq!(row_at(10_800_000 + 86_400_000), Ok(2));
+
+        // A null out-pointer is refused before anything is read.
+        assert_eq!(
+            unsafe {
+                infrastore_bulk_result_persistent_index_in_force_at(result, 0, 0, ptr::null_mut())
+            },
+            INFRASTORE_ERR_NULL_POINTER
+        );
+        // So is an index past the end.
+        let mut row = 0u64;
+        assert_eq!(
+            unsafe { infrastore_bulk_result_persistent_index_in_force_at(result, 9, 0, &mut row) },
+            INFRASTORE_ERR_INVALID_PARAMETER
+        );
+
+        unsafe {
+            infrastore_bulk_result_free(result);
+            infrastore_store_free(store);
+        }
+    }
+
+    /// The lookup is keyed on the stored type: asking a `NonSequentialTimeSeries`
+    /// slot for a breakpoint in force names both types rather than answering,
+    /// because "no value between the timestamps" is that type's guarantee.
+    #[test]
+    fn persistent_index_in_force_at_refuses_a_non_sequential_slot() {
+        let store = abi_create_in_memory();
+        let owner_type = CString::new("Gen").unwrap();
+        let name = CString::new("irregular").unwrap();
+        let et = CString::new("f64").unwrap();
+        let timestamps: Vec<i64> = vec![0, 3_600_000];
+        let bytes = to_le(&[1.0, 2.0]);
+        let dims = [2u64];
+        let mut id = 0i64;
+        assert_eq!(
+            unsafe {
+                infrastore_store_add_non_sequential(
+                    store,
+                    7,
+                    owner_type.as_ptr(),
+                    0,
+                    name.as_ptr(),
+                    timestamps.as_ptr(),
+                    timestamps.len() as u64,
+                    et.as_ptr(),
+                    1,
+                    dims.as_ptr(),
+                    bytes.as_ptr(),
+                    bytes.len() as u64,
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    &mut id,
+                )
+            },
+            INFRASTORE_OK,
+            "add failed: {}",
+            last_error()
+        );
+        let mut result: *mut InfraStoreBulkReadHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                infrastore_store_read_by_id(
+                    store,
+                    id,
+                    false,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    0,
+                    0,
+                    &mut result,
+                )
+            },
+            INFRASTORE_OK
+        );
+        let mut row = 0u64;
+        assert_eq!(
+            unsafe { infrastore_bulk_result_persistent_index_in_force_at(result, 0, 0, &mut row) },
+            INFRASTORE_ERR_INVALID_PARAMETER
+        );
+        let message = last_error();
+        assert!(
+            message.contains("NonSequentialTimeSeries") && message.contains("PersistentTimeSeries"),
+            "the error should name both types: {message}"
+        );
+
+        unsafe {
             infrastore_bulk_result_free(result);
             infrastore_store_free(store);
         }

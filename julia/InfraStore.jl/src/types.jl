@@ -347,6 +347,48 @@ function PersistentTimeSeries(
     )
 end
 
+"""
+    index_in_force_at(ts::PersistentTimeSeries, at) -> Int
+
+The index into `ts.timestamps` and the leading dimension of `ts.data` of the
+breakpoint **in force at** `at` — the greatest breakpoint `<= at`, whose value
+the step function holds there.
+
+**1-based**, like every other Julia index: `ts.data[index_in_force_at(ts, at)]`
+is the value in force. The other bindings report the same row 0-based.
+
+Throws [`InvalidParameterError`](@ref) if `at` is strictly before the first
+breakpoint, where a step function is undefined; it is never clamped to the first
+row. At or after the last breakpoint the answer is the last index, because the
+final value is held forward forever.
+
+`at` is a `DateTime` (a wall clock) or — with `using TimeZones` loaded — a
+`ZonedDateTime`, and must be spelled the way this series' breakpoints are. A
+mismatch is refused rather than silently reinterpreted, exactly as it is on a
+ranged read.
+"""
+function index_in_force_at(ts::PersistentTimeSeries, at)
+    _check_point_spelling(ts.time_reference, at, "this series")
+    # `searchsortedlast` *is* the hold-last rule on a sorted vector: the last
+    # index whose breakpoint is `<= at`, and 0 when `at` precedes them all.
+    # The boundary is `<=`, so a read exactly at a breakpoint gets that
+    # breakpoint's own value.
+    i = searchsortedlast(ts.timestamps, _utc_datetime(at))
+    i == 0 && throw(
+        InvalidParameterError(
+            if isempty(ts.timestamps)
+                "PersistentTimeSeries $(repr(ts.name)) has no breakpoints, so it has " *
+                "no value at $at"
+            else
+                "PersistentTimeSeries $(repr(ts.name)) has no value at $at: it is " *
+                "before the first breakpoint $(first(ts.timestamps)), where a step " *
+                "function is undefined"
+            end,
+        ),
+    )
+    return i
+end
+
 # ---- Forecast types -------------------------------------------------------
 #
 # Dense forecasts mirror the InfrastructureSystems.jl objects. `data` is a Julia

@@ -1336,6 +1336,25 @@ impl PyPersistentTimeSeries {
         numpy_from_typed(py, &self.inner.data)
     }
 
+    /// The 0-based index into `timestamps` and `data` of the breakpoint **in
+    /// force at** `at` — the greatest breakpoint `<= at`, whose value the step
+    /// function holds there.
+    ///
+    /// Raises `InvalidParameterError` if `at` is strictly before the first
+    /// breakpoint, where a step function is undefined; it is never clamped to
+    /// `0`. Past the last breakpoint the answer is the last index, because the
+    /// final value is held forward forever.
+    ///
+    /// `at` is spelled the way this series' breakpoints are — naive for a
+    /// zoneless series, aware otherwise. A mismatch is refused rather than
+    /// silently reinterpreted, exactly as it is on a ranged read.
+    fn index_in_force_at(&self, at: PyInstant) -> PyResult<usize> {
+        check_point_spelling(&at, self.inner.time_reference.as_ref(), "this series")?;
+        self.inner
+            .index_in_force_at(at.instant)
+            .map_err(InvalidParameterError::new_err)
+    }
+
     /// Value equality: all fields including the data array (bitwise).
     fn __eq__(&self, other: &Self) -> bool {
         self.inner == other.inner
