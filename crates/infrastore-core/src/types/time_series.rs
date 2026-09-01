@@ -685,7 +685,9 @@ impl PersistentTimeSeries {
     ///
     /// `Err` if *any* instant precedes the first breakpoint, where the step
     /// function is undefined. Every index is resolved before a single byte is
-    /// copied, so such a call produces no partial output.
+    /// copied, so such a call produces no partial output. `Err` too — rather
+    /// than a panic — if `timestamps` and `data` have been driven out of step
+    /// through the public fields since construction.
     pub fn project_onto(&self, at: &[DateTime<Utc>]) -> Result<TypedArray, String> {
         // Resolve first, gather second: a bad instant has to fail the whole
         // call, and a half-built array handed back with an error would invite
@@ -719,8 +721,25 @@ impl PersistentTimeSeries {
 
         let mut bytes = Vec::with_capacity(total);
         for row in rows {
-            let start = row * row_bytes;
-            bytes.extend_from_slice(&self.data.bytes[start..start + row_bytes]);
+            // Checked rather than indexed. `timestamps` and `data` are public,
+            // so a caller can push a breakpoint without extending the array and
+            // leave `row` pointing past the end. `new` rules that out and the
+            // store re-checks it on the write path, but this method is fallible
+            // and reachable on a value that has been through neither since it
+            // was last touched -- so it reports the mismatch rather than
+            // aborting the process out of an API that promised a `Result`.
+            let slice = row
+                .checked_mul(row_bytes)
+                .and_then(|start| Some(start..start.checked_add(row_bytes)?))
+                .and_then(|range| self.data.bytes.get(range))
+                .ok_or_else(|| {
+                    format!(
+                        "PersistentTimeSeries '{}': breakpoint {row} names no row in an array of                          {} bytes at {row_bytes} bytes per row; `timestamps` and `data` have been                          driven out of step since construction",
+                        self.name,
+                        self.data.bytes.len(),
+                    )
+                })?;
+            bytes.extend_from_slice(slice);
         }
 
         let mut shape = Vec::with_capacity(1 + element_shape.len());
@@ -2068,6 +2087,38 @@ mod tests {
         assert!(p.accepts(p));
         assert!(!p.accepts(TimeSeriesType::NonSequentialTimeSeries));
         assert!(!TimeSeriesType::NonSequentialTimeSeries.accepts(p));
+    }
+
+    /// The public fields make an inconsistent value constructible, and
+    /// `project_onto` is fallible, so it has to *say so* rather than abort.
+    ///
+    /// `new` checks that the breakpoints and the array agree, and the store
+    /// re-checks on write -- but nothing stops a caller pushing a breakpoint
+    /// onto a value in hand and projecting it before it goes anywhere near
+    /// either. The extra breakpoint is in force at the instant asked for, so
+    /// the gather reaches for a row the array does not have.
+    #[test]
+    fn projecting_a_series_whose_fields_disagree_errors_rather_than_panics() {
+        let mut p = PersistentTimeSeries::new(
+            vec![t0(), t0() + Duration::days(31)],
+            TypedArray::from_f64(vec![2], &[3.5, 4.25]),
+            "gas_price",
+        )
+        .unwrap();
+
+        // A third breakpoint with no third value behind it.
+        p.timestamps.push(t0() + Duration::days(60));
+
+        // Everything before the new breakpoint still resolves normally.
+        assert!(p.project_onto(&[t0() + Duration::days(40)]).is_ok());
+
+        let err = p
+            .project_onto(&[t0() + Duration::days(70)])
+            .expect_err("a breakpoint with no row behind it must not gather");
+        assert!(
+            err.contains("out of step"),
+            "the message must name the cause, not just fail: {err}"
+        );
     }
 
     #[test]
