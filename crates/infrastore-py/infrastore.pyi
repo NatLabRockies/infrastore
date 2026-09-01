@@ -52,6 +52,9 @@ class CatalogTooNewError(TimeSeriesError): ...
 
 @final
 class TimeSeriesType:
+    # Grouped by kind for a reader. `int()` returns the storage code, which is
+    # fixed per variant and does not follow this order: PersistentTimeSeries is
+    # 6, appended after Scenarios so that adding it renumbered nothing.
     SingleTimeSeries: TimeSeriesType
     NonSequentialTimeSeries: TimeSeriesType
     PersistentTimeSeries: TimeSeriesType

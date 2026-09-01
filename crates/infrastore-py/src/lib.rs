@@ -452,14 +452,21 @@ fn catalog_name(catalog: core_lib::CatalogMode) -> &'static str {
     from_py_object
 )]
 #[derive(Clone, Copy, PartialEq, Eq)]
+// Declaration order is *public*: `eq_int` exposes each variant's discriminant,
+// and the stub declares `__int__`. So a variant is only ever appended, never
+// inserted -- inserting one silently renumbers every variant after it and
+// changes what `int(TimeSeriesType.Deterministic)` returns between releases.
+// That the resulting order also matches `TimeSeriesType::code` (and so the C
+// ABI and the protobuf enum) is worth keeping, but the stability is the reason.
+// Group the variants for a reader in the stub, not here.
 pub enum PyTimeSeriesType {
     SingleTimeSeries,
     NonSequentialTimeSeries,
-    PersistentTimeSeries,
     Deterministic,
     DeterministicSingleTimeSeries,
     Probabilistic,
     Scenarios,
+    PersistentTimeSeries,
 }
 
 impl From<PyTimeSeriesType> for core_lib::TimeSeriesType {

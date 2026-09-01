@@ -425,3 +425,24 @@ def test_a_projected_curve_decodes_as_its_element_type():
     # is the same values in a different order, not a different encoding.
     stored = store.read_by_id(id)
     assert decode_element_values(stored.data, row["element_type"]) == curves
+
+
+def test_time_series_type_integers_are_append_only():
+    """`TimeSeriesType` exposes `__int__`, so its numbering is public.
+
+    `PersistentTimeSeries` is declared last rather than beside the other static
+    types, because inserting it beside them would have renumbered every
+    forecast variant and changed what `int(TimeSeriesType.Deterministic)`
+    returns between two releases. The values below are also the storage codes
+    the catalog, the C ABI, and the protobuf enum use, which is the alignment
+    that made the accidental renumbering worth catching.
+    """
+    assert [
+        int(TimeSeriesType.SingleTimeSeries),
+        int(TimeSeriesType.NonSequentialTimeSeries),
+        int(TimeSeriesType.Deterministic),
+        int(TimeSeriesType.DeterministicSingleTimeSeries),
+        int(TimeSeriesType.Probabilistic),
+        int(TimeSeriesType.Scenarios),
+        int(TimeSeriesType.PersistentTimeSeries),
+    ] == [0, 1, 2, 3, 4, 5, 6]
