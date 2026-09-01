@@ -192,6 +192,60 @@ impl From<ListFilter> for MetadataFilter {
 /// silently got 3 has a bug the store can see and the caller cannot — which is
 /// why every binding that reads by name has grown its own copy of this
 /// arithmetic, off the row it had to fetch first.
+/// The instants a projection is evaluated at, and how the caller spelled them.
+///
+/// The point-vector counterpart of [`TimeRange`]: a query bound has to be
+/// spelled the way the series is, and a bare `&[DateTime<Utc>]` cannot say
+/// whether its instants were written as wall clocks. Named constructors rather
+/// than a bare `bool` argument, following [`ReadWindow::from`] /
+/// [`ReadWindow::from_zoneless`], so a call site says which it means.
+///
+/// The order is the caller's and is preserved: this is a gather, so repeats and
+/// unsorted input are both fine. See
+/// [`PersistentTimeSeries::project_onto`](crate::PersistentTimeSeries::project_onto).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Instants<'a> {
+    /// The instants to evaluate at, in the order the answer should come back.
+    pub at: &'a [chrono::DateTime<chrono::Utc>],
+    /// Whether they were written without a zone, exactly as on [`TimeRange`].
+    pub zoneless: bool,
+}
+
+impl<'a> Instants<'a> {
+    /// Instants that name themselves — the native Rust spelling, since a
+    /// `DateTime<Utc>` is zoned by construction.
+    pub fn zoned(at: &'a [chrono::DateTime<chrono::Utc>]) -> Self {
+        Self {
+            at,
+            zoneless: false,
+        }
+    }
+
+    /// Wall clocks, for a [`TimeReference::Zoneless`] series. The instants are
+    /// those wall clocks read as if UTC, exactly as the series' own breakpoints
+    /// were.
+    pub fn zoneless(at: &'a [chrono::DateTime<chrono::Utc>]) -> Self {
+        Self { at, zoneless: true }
+    }
+
+    /// A vector whose spelling a binding inferred from its caller, mirroring
+    /// [`TimeRange::spelled`].
+    pub fn spelled(at: &'a [chrono::DateTime<chrono::Utc>], zoneless: bool) -> Self {
+        Self { at, zoneless }
+    }
+
+    /// How many instants were asked for.
+    pub fn len(&self) -> usize {
+        self.at.len()
+    }
+
+    /// Whether none were asked for, which is answered with an empty array
+    /// rather than an error.
+    pub fn is_empty(&self) -> bool {
+        self.at.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ReadWindow {
     /// First timestamp to read; the series' own start when unset. For a
@@ -3154,6 +3208,97 @@ impl Store {
             .iter()
             .map(|m| self.materialize_time_series(m, Some(time_range)))
             .collect()
+    }
+
+    /// Read the `PersistentTimeSeries` filed under `id` and evaluate it at each
+    /// instant in `at`, in the order given.
+    ///
+    /// The projection read: the type's own hold-last lookup applied `at.len()`
+    /// times, so a consumer asking "what were these values on each of my
+    /// simulation timestamps" gets the answer from the store that owns the
+    /// rule, rather than re-deriving it beside a copy of the breakpoints. It
+    /// makes no policy choice — the caller names the instants, and each one
+    /// resolves by the documented rule or the call fails.
+    ///
+    /// The result is shaped `[at.len(), *E]` with the series' dtype and element
+    /// shape, so it decodes exactly as [`PersistentTimeSeries::data`] does.
+    ///
+    /// [`TimeSeriesError::InvalidParameter`] if `id` names any other type. A
+    /// projection over a `SingleTimeSeries` or a forecast would need a
+    /// *resampling policy* — interpolate, forward-fill, something else — and
+    /// choosing one is the application's business. Hold-last needs no such
+    /// choice, which is exactly why this read exists for one type only.
+    ///
+    /// [`TimeSeriesError::NotFound`] if `id` names no row, following
+    /// [`Self::read_by_id`].
+    #[tracing::instrument(skip(self, at), fields(count = at.len()))]
+    pub fn read_projected(&self, id: TimeSeriesId, at: Instants<'_>) -> Result<TypedArray> {
+        let meta = self
+            .metadata
+            .get_by_id(id.get(), &*self.backend)?
+            .ok_or(TimeSeriesError::NotFound)?;
+        self.project_row(&meta, at)
+    }
+
+    /// [`Self::read_projected`] for several series onto one instant vector, in
+    /// the order the ids are given.
+    ///
+    /// One vector for many series, so the selection has to agree on what an
+    /// instant *means*: a set mixing zoneless series with instant-bearing ones
+    /// is refused rather than resolved per series, exactly as
+    /// [`Self::read_by_ids_range`] refuses it for a shared bound.
+    ///
+    /// Each series keeps its own breakpoints — the persistent type is the one
+    /// place a set need not share a timeline — so this is the natural read for a
+    /// cohort of curves that do not line up.
+    #[tracing::instrument(skip(self, ids, at), fields(series = ids.len(), count = at.len()))]
+    pub fn read_projected_by_ids(
+        &self,
+        ids: &[TimeSeriesId],
+        at: Instants<'_>,
+    ) -> Result<Vec<TypedArray>> {
+        let metas = self.rows_for_ids(ids)?;
+        reject_mixed_zoning(&metas, "read_projected_by_ids")?;
+        metas.iter().map(|m| self.project_row(m, at)).collect()
+    }
+
+    /// The shared body of the two projection reads: check the type, check the
+    /// spelling, materialize, gather.
+    ///
+    /// Deliberately thin, and deliberately without a storage fast path. A
+    /// persistent series is *tiny* — the motivating data is a dozen breakpoints
+    /// — so the value here is that the semantics live in one place, not that
+    /// the read is cheap.
+    fn project_row(&self, meta: &TimeSeriesMetadata, at: Instants<'_>) -> Result<TypedArray> {
+        let what = format!("{:?} on owner {}", meta.name, meta.owner_id);
+        if meta.time_series_type != TimeSeriesType::PersistentTimeSeries {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "read_projected: {what} is a {}, not a PersistentTimeSeries. Only a step \
+                 function has a value at an arbitrary instant; every other type would need a \
+                 resampling policy, which is the caller's choice to make and not the store's.",
+                meta.time_series_type.as_str()
+            )));
+        }
+        // The instants are query bounds like any other -- unless there are
+        // none, which names no bound and so has no spelling to disagree about.
+        // An empty request answers with an empty array, never a category error.
+        if !at.is_empty() {
+            crate::types::time_reference::check_bound_spelling(
+                at.zoneless,
+                meta.time_reference.as_ref(),
+                &what,
+            )?;
+        }
+        let TimeSeriesData::PersistentTimeSeries(series) =
+            self.materialize_time_series(meta, None)?
+        else {
+            return Err(TimeSeriesError::IntegrityError(format!(
+                "{what} is filed as a PersistentTimeSeries but did not materialize as one"
+            )));
+        };
+        series
+            .project_onto(at.at)
+            .map_err(TimeSeriesError::InvalidParameter)
     }
 
     /// Read the series filed under `id`, or the slice of it that `window` names.

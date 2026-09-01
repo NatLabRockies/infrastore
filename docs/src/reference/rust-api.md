@@ -136,6 +136,18 @@ impl Store {
         time_range: TimeRange,
     ) -> Result<Vec<TimeSeriesData>>;
 
+    // The projection read: a `PersistentTimeSeries` evaluated at each instant in
+    // `at`, in the order given. `Instants::zoned` / `Instants::zoneless` name the
+    // spelling, which is checked against the series exactly as a `TimeRange`
+    // bound is. `InvalidParameter` for any other stored type.
+    pub fn read_projected(&self, id: TimeSeriesId, at: Instants<'_>) -> Result<TypedArray>;
+
+    pub fn read_projected_by_ids(
+        &self,
+        ids: &[TimeSeriesId],
+        at: Instants<'_>,
+    ) -> Result<Vec<TypedArray>>;
+
     // One series by id, whole or windowed, in a single call: the id is a
     // primary-key lookup and its row carries the grid the window resolves
     // against. `len` counts timesteps (static types), `count` counts windows
@@ -362,6 +374,16 @@ can be moved between threads, but sharing one requires external synchronization 
   _clips_ to what is there — see [Reading a time range](#reading-a-time-range) for what each type
   applies that to. Both bounds must be spelled the way the series are, and a selection spanning both
   coherence groups is refused rather than resolved per series.
+- **`read_projected` / `read_projected_by_ids`** — Evaluate a stored step function at instants the
+  caller names, returning a `TypedArray` shaped `[at.len(), *E]` rather than a series. Only a
+  `PersistentTimeSeries`: every other type would need a _resampling policy_ (interpolate?
+  forward-fill?), and choosing one is the application's business, where hold-last needs no choice at
+  all. The instants are query bounds like any other and must be spelled the way the series is —
+  `Instants::zoned` for a native caller, `Instants::zoneless` for wall clocks — except that an empty
+  vector names no bound and so answers with an empty array. The bulk form refuses a selection
+  spanning both coherence groups, but each series keeps its **own** breakpoints, so a cohort of
+  curves that do not line up is still one call. Deliberately no storage fast path: a persistent
+  series is tiny, and the value here is that the semantics live in one place.
 - **`clear_time_series`** — `Some((id, category))` removes one owner's series (the owner is the
   `(owner_id, owner_category)` pair); `None` removes all. Returns the count removed. Underlying
   arrays are freed only when their last reference is gone.
@@ -939,6 +961,10 @@ impl PersistentTimeSeries {
     /// The index of the breakpoint in force at `at` — the greatest one `<= at`.
     /// `Err` if `at` precedes the first breakpoint.
     pub fn index_in_force_at(&self, at: DateTime<Utc>) -> Result<usize, String>;
+
+    /// Evaluate the step function at each instant in `at`, in the order given.
+    /// `[at.len(), *E]` with the dtype and element shape unchanged.
+    pub fn project_onto(&self, at: &[DateTime<Utc>]) -> Result<TypedArray, String>;
 }
 ```
 
@@ -948,6 +974,17 @@ error. `new` validates exactly what `NonSequentialTimeSeries::new` does. `index_
 single definition of the lookup — nothing else re-derives it. See the
 [data model](../explanation/data-model.md#persistenttimeseries) for the full contract and the
 contrast with `NonSequentialTimeSeries`.
+
+`project_onto` is that lookup applied `at.len()` times and gathered, and it makes **no policy
+choice**: the caller names the instants, and each one resolves by the documented rule or the call
+fails. It is a **gather, not a slice** — `at` may be unsorted and may repeat, and the caller's order
+is the output order. An empty `at` yields an empty array of the right element shape rather than an
+error. A composite `element_type` has its rows copied whole, padding included, so the result decodes
+exactly as `data` does. If _any_ instant precedes the first breakpoint the whole call fails, and
+every index is resolved before a byte is copied, so no partial answer is produced.
+
+Deciding _which_ instants to ask for, or how to collapse the answer for a downstream solver, stays
+with the caller — see [where policy lives](../explanation/data-model.md#persistenttimeseries).
 
 ### `Deterministic`
 

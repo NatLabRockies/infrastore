@@ -9,9 +9,9 @@
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{
-    Features, ListFilter, NonSequentialTimeSeries, OwnerCategory, PersistentTimeSeries, ReadWindow,
-    StaticReader, Store, TimeRange, TimeSeriesData, TimeSeriesId, TimeSeriesType, TypedArray,
-    create_store,
+    ElementType, Features, Instants, ListFilter, NonSequentialTimeSeries, OwnerCategory,
+    PersistentTimeSeries, ReadWindow, StaticReader, Store, TimeRange, TimeSeriesData, TimeSeriesId,
+    TimeSeriesType, TypedArray, create_store,
 };
 
 /// `2024-<month>-01T00:00:00Z`.
@@ -309,6 +309,266 @@ fn a_persistent_and_a_non_sequential_series_share_one_stored_array() {
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].data_hash, rows[1].data_hash);
     assert_eq!(store.num_distinct_arrays().unwrap(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// The projection read
+// ---------------------------------------------------------------------------
+
+/// Hold-last over a month curve, computed without the store. The reader tests
+/// below reuse it; here it is the reference `project_onto` is checked against.
+fn hold_last(months: &[u32], at: DateTime<Utc>) -> f64 {
+    months
+        .iter()
+        .rev()
+        .find(|m| month(**m) <= at)
+        .map(|m| *m as f64 * 10.0)
+        .expect("the sweep never asks before the first breakpoint")
+}
+
+#[test]
+fn project_onto_agrees_with_hold_last_at_every_instant() {
+    let months = [1, 4, 7, 10];
+    let series = curve("gas_price", &months);
+
+    // A swept grid: every breakpoint, every midpoint, and the millisecond on
+    // each side of every breakpoint -- the boundary is where a step function
+    // gets got wrong.
+    let mut at = Vec::new();
+    for day in 1..=365 {
+        at.push(month(1) + Duration::days(day - 1));
+    }
+    for m in months {
+        at.push(month(m));
+        at.push(month(m) + Duration::milliseconds(1));
+        if m > 1 {
+            at.push(month(m) - Duration::milliseconds(1));
+        }
+    }
+    // Far past the last breakpoint: held forward forever, not an error.
+    at.push(month(10) + Duration::days(4000));
+
+    let projected = series.project_onto(&at).unwrap();
+    assert_eq!(projected.shape, vec![at.len()]);
+    assert_eq!(projected.dtype, series.data.dtype);
+    let values = projected.to_vec::<f64>().unwrap();
+    for (i, t) in at.iter().enumerate() {
+        assert_eq!(values[i], hold_last(&months, *t), "at {t}");
+    }
+}
+
+#[test]
+fn project_onto_is_a_gather_not_a_slice() {
+    let series = curve("gas_price", &[1, 4, 7, 10]);
+    // Unsorted, with a repeat. Each instant resolves independently and the
+    // caller's order is the output order -- nothing is sorted or deduplicated.
+    let at = [month(9), month(1), month(9), month(5)];
+    let values = series.project_onto(&at).unwrap().to_vec::<f64>().unwrap();
+    assert_eq!(values, vec![70.0, 10.0, 70.0, 40.0]);
+}
+
+#[test]
+fn projecting_onto_no_instants_yields_an_empty_array() {
+    // Consistent with a zero-width range selecting nothing, and it keeps the
+    // element shape so a caller decodes the result without a special case.
+    let series = curve("gas_price", &[1, 4]);
+    let empty = series.project_onto(&[]).unwrap();
+    assert_eq!(empty.shape, vec![0]);
+    assert_eq!(empty.dtype, series.data.dtype);
+    assert!(empty.bytes.is_empty());
+
+    // The same for a multi-element series: `[0, 2]`, not `[0]`.
+    let curve_2d = PersistentTimeSeries::new(
+        vec![month(1), month(4)],
+        TypedArray::from_f64(vec![2, 2], &[1.0, 2.0, 3.0, 4.0]),
+        "pairs",
+    )
+    .unwrap();
+    assert_eq!(curve_2d.project_onto(&[]).unwrap().shape, vec![0, 2]);
+}
+
+#[test]
+fn one_instant_before_the_first_breakpoint_fails_the_whole_projection() {
+    let series = curve("gas_price", &[1, 4, 7]);
+    // The bad instant is last, after three that resolve fine: the call still
+    // fails outright, and every index is resolved before a byte is copied, so
+    // no partial answer exists to be mistaken for a whole one.
+    let at = [
+        month(2),
+        month(5),
+        month(8),
+        month(1) - Duration::milliseconds(1),
+    ];
+    let err = series.project_onto(&at).unwrap_err();
+    assert!(
+        err.contains("before the first breakpoint"),
+        "the message should say why: {err}"
+    );
+}
+
+#[test]
+fn a_composite_element_row_projects_whole() {
+    // A `PiecewiseLinear` row is `[n, x1, y1, ..., xn, yn]`, zero-padded to a
+    // fixed width. The projection copies rows, so the padding rides along and
+    // the result decodes exactly as `data` does -- which is what a fuel cost
+    // curve stored as a step function needs.
+    let rows = vec![
+        2.0, 10.0, 100.0, 20.0, 210.0, // January: two points
+        2.0, 12.0, 130.0, 22.0, 250.0, // July: two points, different values
+    ];
+    let series = PersistentTimeSeries::new(
+        vec![month(1), month(7)],
+        TypedArray::from_f64(vec![2, 5], &rows),
+        "fuel_cost_curve",
+    )
+    .unwrap()
+    .with_element_type(ElementType::PiecewiseLinear);
+
+    let projected = series
+        .project_onto(&[month(3), month(9), month(1)])
+        .unwrap();
+    assert_eq!(projected.shape, vec![3, 5]);
+    assert_eq!(
+        projected.to_vec::<f64>().unwrap(),
+        vec![
+            2.0, 10.0, 100.0, 20.0, 210.0, // March holds January's row
+            2.0, 12.0, 130.0, 22.0, 250.0, // September holds July's
+            2.0, 10.0, 100.0, 20.0, 210.0, // and January is itself
+        ]
+    );
+    // The element type is unchanged by a projection, so the result is decoded
+    // the same way the stored array is.
+    assert_eq!(series.element_type, ElementType::PiecewiseLinear);
+}
+
+#[test]
+fn read_projected_evaluates_a_stored_curve() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = create_store(Some(dir.path().join("store.h5").as_path()), false).unwrap();
+    let months = [1, 4, 7, 10];
+    let id = add(&mut store, 7, curve("gas_price", &months));
+
+    let at: Vec<_> = (1..=12).map(month).collect();
+    let projected = store.read_projected(id, Instants::zoned(&at)).unwrap();
+    assert_eq!(projected.shape, vec![12]);
+    assert_eq!(
+        projected.to_vec::<f64>().unwrap(),
+        at.iter()
+            .map(|t| hold_last(&months, *t))
+            .collect::<Vec<_>>()
+    );
+
+    // An id naming no row is a stale reference, as it is for every other read.
+    assert!(matches!(
+        store.read_projected(TimeSeriesId(9999), Instants::zoned(&at)),
+        Err(infrastore_core::TimeSeriesError::NotFound)
+    ));
+}
+
+#[test]
+fn read_projected_by_ids_keeps_each_curve_on_its_own_breakpoints() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = create_store(Some(dir.path().join("store.h5").as_path()), false).unwrap();
+    // Deliberately misaligned. A projection is per-series, so a cohort that
+    // shares no timeline is still one call -- the persistent type's whole point.
+    let quarterly = [1, 4, 7, 10];
+    let semi = [1, 6];
+    let ids = vec![
+        add(&mut store, 1, curve("quarterly", &quarterly)),
+        add(&mut store, 2, curve("semi", &semi)),
+    ];
+
+    let at = [month(3), month(8)];
+    let out = store
+        .read_projected_by_ids(&ids, Instants::zoned(&at))
+        .unwrap();
+    assert_eq!(out.len(), 2);
+    assert_eq!(out[0].to_vec::<f64>().unwrap(), vec![10.0, 70.0]);
+    assert_eq!(out[1].to_vec::<f64>().unwrap(), vec![10.0, 60.0]);
+}
+
+#[test]
+fn a_projection_over_any_other_type_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = create_store(Some(dir.path().join("store.h5").as_path()), false).unwrap();
+    // The same breakpoints and values, filed as the type that has no value
+    // between them.
+    let nsts = NonSequentialTimeSeries::new(
+        vec![month(1), month(4)],
+        TypedArray::from_f64(vec![2], &[10.0, 40.0]),
+        "irregular",
+    )
+    .unwrap();
+    let id = store
+        .add_time_series(
+            5,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::NonSequentialTimeSeries(nsts),
+            Features::new(),
+        )
+        .unwrap();
+
+    let err = store
+        .read_projected(id, Instants::zoned(&[month(2)]))
+        .unwrap_err();
+    let message = err.to_string();
+    assert!(
+        message.contains("NonSequentialTimeSeries") && message.contains("resampling policy"),
+        "the error should name the actual type and say why: {message}"
+    );
+}
+
+#[test]
+fn a_projection_bound_must_be_spelled_the_way_the_series_is() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = create_store(Some(dir.path().join("store.h5").as_path()), false).unwrap();
+    let mut zoneless = curve("wall_clock", &[1, 4]);
+    zoneless.time_reference = Some(infrastore_core::TimeReference::Zoneless);
+    let zoneless_id = add(&mut store, 1, zoneless);
+    let mut zoned = curve("instants", &[1, 4]);
+    zoned.time_reference = Some(infrastore_core::TimeReference::Utc);
+    let zoned_id = add(&mut store, 2, zoned);
+
+    let at = [month(2)];
+    // Instants against a zoneless series, and wall clocks against one that
+    // records instants: both are category errors, exactly as on a ranged read.
+    assert!(
+        store
+            .read_projected(zoneless_id, Instants::zoned(&at))
+            .is_err()
+    );
+    assert!(
+        store
+            .read_projected(zoned_id, Instants::zoneless(&at))
+            .is_err()
+    );
+    // Each spelled its own way answers.
+    assert!(
+        store
+            .read_projected(zoneless_id, Instants::zoneless(&at))
+            .is_ok()
+    );
+    assert!(store.read_projected(zoned_id, Instants::zoned(&at)).is_ok());
+
+    // An empty vector names no bound, so there is nothing to spell wrongly:
+    // it answers with an empty array either way rather than a category error.
+    assert_eq!(
+        store
+            .read_projected(zoneless_id, Instants::zoned(&[]))
+            .unwrap()
+            .shape,
+        vec![0]
+    );
+
+    // One vector cannot serve both coherence groups at once.
+    let err = store
+        .read_projected_by_ids(&[zoneless_id, zoned_id], Instants::zoned(&at))
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("mixes zoneless"),
+        "the error should name the mixed selection: {err}"
+    );
 }
 
 // ---------------------------------------------------------------------------

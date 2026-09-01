@@ -239,6 +239,14 @@ def read_by_ids_range(
 # are; a selection spanning both coherence groups is refused. A PersistentTimeSeries
 # clips on its own terms: the result begins at the breakpoint in force at `start`.
 
+def read_projected(self, id: int, at: list[datetime]) -> numpy.ndarray: ...
+def read_projected_by_ids(
+    self, ids: list[int], at: list[datetime]
+) -> list[numpy.ndarray]: ...
+# The projection read, for a PersistentTimeSeries only: the step function evaluated
+# at each instant in `at`, shaped (len(at), *element_shape). A gather, not a slice --
+# `at` may be unsorted and may repeat, and its order is the output order.
+
 def read_by_ids(
     self, ids: list[int]
 ) -> list[SingleTimeSeries | NonSequentialTimeSeries | Deterministic | Probabilistic | Scenarios]: ...
@@ -405,6 +413,16 @@ with store.transaction():
 - **`read_by_ids_range`** is the bounds read: it _clips_ every series to what falls between the two
   instants, where `read_by_id`'s window is _checked_. An export names bounds and does not know how
   many steps each series has inside them.
+- **`read_projected` / `read_projected_by_ids`** evaluate a stored step function at instants you
+  name, returning arrays rather than series objects. `PersistentTimeSeries` only: every other type
+  would need a _resampling policy_ — interpolate? forward-fill? — and choosing one is your
+  application's business, where hold-last needs no choice at all, so any other type raises
+  `InvalidParameterError`. The instants are query bounds and must be spelled the way the series is
+  (all naive for a zoneless one, all aware otherwise; an empty list names no bound and returns an
+  empty array). The bulk form refuses a selection spanning both coherence groups, but each series
+  keeps its **own** breakpoints, so a cohort of curves that do not line up is still one call. The
+  result feeds `decode_element_values` unchanged, which is how a step function over cost curves
+  comes back as curves.
 - **`remove_by_ids`** is the removal direction of the same reference: one all-or-nothing
   transaction, the count removed, and `NotFoundError` if any id names no row — in which case nothing
   is removed. A repeated id is removed, and counted, once.
@@ -560,6 +578,22 @@ otherwise — and a mismatch is refused rather than reinterpreted, exactly as on
 row = series.index_in_force_at(datetime(2024, 6, 1, tzinfo=timezone.utc))
 value = series.data[row]
 ```
+
+And the whole vector at once:
+
+```python
+project_onto(at: list[datetime]) -> numpy.ndarray
+```
+
+Evaluates the step function at each instant in `at`, returning an array shaped
+`(len(at), *element_shape)` with the series' dtype — so `decode_element_values` reads the result
+exactly as it reads `data`. It is a **gather, not a slice**: `at` may be unsorted and may repeat,
+and the caller's order is the output order. An empty `at` returns an empty array rather than
+raising. If _any_ instant precedes the first breakpoint the whole call raises, and every index is
+resolved before a byte is copied, so no partial answer is produced.
+
+`Store.read_projected(id, at)` is the same evaluation against a stored series, and
+`Store.read_projected_by_ids(ids, at)` its bulk form — see [Store](#store).
 
 Policy about how a step function collapses for a downstream solver belongs to the application and
 travels in `application_data`; the store never interprets it. See the

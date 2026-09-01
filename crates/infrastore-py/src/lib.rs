@@ -349,6 +349,20 @@ fn instants_to_utc(v: &[PyInstant]) -> Vec<DateTime<Utc>> {
     v.iter().map(|i| i.instant).collect()
 }
 
+/// The instants a projection is evaluated at, plus the one spelling they carry.
+///
+/// A vector is one request, so its instants have to agree on a spelling — the
+/// same rule [`vector_reference`] applies to a series' own timestamps, reported
+/// in the same words. The core checks that spelling against the series it is
+/// about to read, which is why the flag travels rather than the check.
+fn instants_arg(at: &[PyInstant]) -> PyResult<(Vec<DateTime<Utc>>, bool)> {
+    let reference = vector_reference(at)?;
+    let zoneless = reference
+        .as_ref()
+        .is_some_and(core_lib::TimeReference::is_zoneless);
+    Ok((instants_to_utc(at), zoneless))
+}
+
 /// [`PyInstant`] over the optional `(start, end)` pairs, carrying the spelling
 /// through so the core can apply the bound rule.
 fn range_to_core(r: Option<(PyInstant, PyInstant)>) -> PyResult<Option<core_lib::TimeRange>> {
@@ -1353,6 +1367,37 @@ impl PyPersistentTimeSeries {
         self.inner
             .index_in_force_at(at.instant)
             .map_err(InvalidParameterError::new_err)
+    }
+
+    /// Evaluate the step function at each instant in `at`, in the order given.
+    ///
+    /// Returns an array shaped `(len(at), *element_shape)` with this series'
+    /// dtype, so it decodes exactly as `data` does — including through
+    /// `decode_element_values` for a composite `element_type`.
+    ///
+    /// A **gather, not a slice**: `at` may be unsorted and may repeat, and each
+    /// instant resolves independently, so the caller's order is the output
+    /// order. An empty `at` returns an empty array rather than raising.
+    ///
+    /// Raises `InvalidParameterError` if *any* instant precedes the first
+    /// breakpoint; every index is resolved before a byte is copied, so such a
+    /// call produces no partial answer. `at` is spelled the way the breakpoints
+    /// are, exactly as for `index_in_force_at`.
+    fn project_onto<'py>(
+        &self,
+        py: Python<'py>,
+        at: Vec<PyInstant>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        // One vector, one spelling -- then that spelling against the series.
+        if let Some(first) = at.first() {
+            vector_reference(&at)?;
+            check_point_spelling(first, self.inner.time_reference.as_ref(), "this series")?;
+        }
+        let projected = self
+            .inner
+            .project_onto(&instants_to_utc(&at))
+            .map_err(InvalidParameterError::new_err)?;
+        numpy_from_typed(py, &projected)
     }
 
     /// Value equality: all fields including the data array (bitwise).
@@ -2869,6 +2914,65 @@ impl PyStore {
             .map_err(map_err)?
             .into_iter()
             .map(|d| time_series_data_to_py(py, d))
+            .collect()
+    }
+
+    /// Read the `PersistentTimeSeries` filed under `id` and evaluate it at each
+    /// instant in `at`, in the order given.
+    ///
+    /// The projection read: the step function's own hold-last lookup applied
+    /// once per instant, so a caller asking "what were these values on each of
+    /// my simulation timestamps" gets the answer from the store that owns the
+    /// rule instead of re-deriving it beside a copy of the breakpoints. It makes
+    /// no policy choice — the caller names the instants, and each resolves by
+    /// the documented rule or the call raises.
+    ///
+    /// Returns an array shaped `(len(at), *element_shape)` with the series'
+    /// dtype, which `decode_element_values` reads exactly as it reads `data`.
+    ///
+    /// Raises `InvalidParameterError` if `id` names any other type: projecting a
+    /// `SingleTimeSeries` or a forecast would need a resampling policy, which is
+    /// the application's choice to make. `NotFoundError` if `id` names no row.
+    fn read_projected<'py>(
+        &self,
+        py: Python<'py>,
+        id: i64,
+        at: Vec<PyInstant>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let (instants, zoneless) = instants_arg(&at)?;
+        let projected = self
+            .store()?
+            .read_projected(
+                core_lib::TimeSeriesId(id),
+                core_lib::Instants::spelled(&instants, zoneless),
+            )
+            .map_err(map_err)?;
+        numpy_from_typed(py, &projected)
+    }
+
+    /// `read_projected` for several series onto one instant vector, in the order
+    /// the ids are given.
+    ///
+    /// Each series keeps its own breakpoints — the persistent type is the one
+    /// place a set need not share a timeline — so this is the natural read for a
+    /// cohort of curves that do not line up. A set mixing zoneless with
+    /// instant-bearing series has no single valid spelling for the vector and
+    /// raises `InvalidParameterError` rather than being resolved per series.
+    fn read_projected_by_ids<'py>(
+        &self,
+        py: Python<'py>,
+        ids: Vec<i64>,
+        at: Vec<PyInstant>,
+    ) -> PyResult<Vec<Bound<'py, PyAny>>> {
+        let (instants, zoneless) = instants_arg(&at)?;
+        self.store()?
+            .read_projected_by_ids(
+                &to_ids(&ids),
+                core_lib::Instants::spelled(&instants, zoneless),
+            )
+            .map_err(map_err)?
+            .iter()
+            .map(|a| numpy_from_typed(py, a))
             .collect()
     }
 

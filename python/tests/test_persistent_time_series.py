@@ -11,10 +11,13 @@ import pytest
 from infrastore import (
     InvalidParameterError,
     NonSequentialTimeSeries,
+    NotFoundError,
     OwnerCategory,
     PersistentTimeSeries,
     Store,
     TimeSeriesType,
+    decode_element_values,
+    encode_element_values,
 )
 
 
@@ -293,3 +296,132 @@ def test_index_in_force_at_refuses_a_query_spelled_the_other_way():
     zoned = curve("gas_price", [1, 6])
     with pytest.raises(InvalidParameterError, match="does not name one"):
         zoned.index_in_force_at(datetime(2024, 3, 1))
+
+
+def test_project_onto_agrees_with_hold_last_at_every_instant():
+    """The projection read: the type's own lookup applied once per instant.
+
+    A consumer asking "what were these values on each of my simulation
+    timestamps" gets the answer from the store that owns the rule, instead of
+    re-deriving hold-last beside a copy of the breakpoints.
+    """
+    months = [1, 4, 7, 10]
+    series = curve("gas_price", months)
+
+    # Every breakpoint, the millisecond on each side of one, a mid-step, and an
+    # instant far past the last -- the boundary is where a step function gets
+    # got wrong.
+    at = [month(m) for m in range(1, 13)]
+    at += [month(4) - timedelta(milliseconds=1), month(4) + timedelta(milliseconds=1)]
+    at.append(datetime(2031, 5, 4, tzinfo=timezone.utc))
+
+    projected = series.project_onto(at)
+    assert projected.shape == (len(at),)
+    assert list(projected) == [hold_last(months, t) for t in at]
+
+
+def test_project_onto_is_a_gather_not_a_slice():
+    """Unsorted and repeated instants are fine: each resolves independently and
+    the caller's order is the output order. Nothing is sorted or deduplicated."""
+    series = curve("gas_price", [1, 4, 7, 10])
+    projected = series.project_onto([month(9), month(1), month(9), month(5)])
+    assert list(projected) == [70.0, 10.0, 70.0, 40.0]
+
+
+def test_projecting_onto_no_instants_returns_an_empty_array():
+    series = curve("gas_price", [1, 4])
+    empty = series.project_onto([])
+    assert empty.shape == (0,)
+    assert empty.dtype == np.float64
+
+
+def test_one_instant_before_the_first_breakpoint_fails_the_whole_projection():
+    """The bad instant is last, after three that resolve fine: the call still
+    fails outright rather than returning a partial answer."""
+    series = curve("gas_price", [1, 4, 7])
+    at = [month(2), month(5), month(8), month(1) - timedelta(milliseconds=1)]
+    with pytest.raises(InvalidParameterError, match="before the first breakpoint"):
+        series.project_onto(at)
+
+
+def test_read_projected_evaluates_a_stored_curve():
+    store = Store.create(in_memory=True)
+    months = [1, 4, 7, 10]
+    id = add(store, 7, curve("gas_price", months))
+
+    at = [month(m) for m in range(1, 13)]
+    projected = store.read_projected(id, at)
+    assert list(projected) == [hold_last(months, t) for t in at]
+
+    # An id naming no row is a stale reference, as for every other read.
+    with pytest.raises(NotFoundError):
+        store.read_projected(9999, at)
+
+
+def test_read_projected_by_ids_keeps_each_curve_on_its_own_breakpoints():
+    """The one place a set need not share a timeline, so a cohort of curves that
+    do not line up is still one call."""
+    store = Store.create(in_memory=True)
+    ids = [
+        add(store, 1, curve("quarterly", [1, 4, 7, 10])),
+        add(store, 2, curve("semi", [1, 6])),
+    ]
+    out = store.read_projected_by_ids(ids, [month(3), month(8)])
+    assert [list(a) for a in out] == [[10.0, 70.0], [10.0, 60.0]]
+
+
+def test_a_projection_over_any_other_type_is_refused():
+    """Projecting a SingleTimeSeries would need a resampling policy — the
+    application's choice to make, which is why this read is for one type."""
+    store = Store.create(in_memory=True)
+    id = store.add_time_series(
+        owner_id=1,
+        owner_type="Generator",
+        owner_category=OwnerCategory.Component,
+        time_series=NonSequentialTimeSeries(
+            [month(1), month(4)], np.array([10.0, 40.0]), "irregular"
+        ),
+    )
+    with pytest.raises(InvalidParameterError, match="resampling policy"):
+        store.read_projected(id, [month(2)])
+
+
+def test_a_projected_curve_decodes_as_its_element_type():
+    """What Phase E needs: a step function over cost curves.
+
+    The projection copies rows whole, padding included, and leaves the element
+    type alone — so `decode_element_values` reads the result exactly as it reads
+    `.data`, and a fuel cost curve stored as a step function comes back as
+    curves rather than as a packing.
+    """
+    store = Store.create(in_memory=True)
+    curves = [
+        [{"x": 10.0, "y": 100.0}, {"x": 20.0, "y": 210.0}],  # January
+        [{"x": 12.0, "y": 130.0}, {"x": 22.0, "y": 250.0}],  # July
+    ]
+    array = encode_element_values(curves, "piecewise_linear")
+    id = store.add_time_series(
+        owner_id=1,
+        owner_type="ThermalStandard",
+        owner_category=OwnerCategory.Component,
+        time_series=PersistentTimeSeries([month(1), month(7)], array, "fuel_cost_curve"),
+        element_type="piecewise_linear",
+        # The non-curve fields ride in application_data: they are per-series
+        # constants, not part of the value at an instant.
+        application_data='{"volume_hours": 24, "cost_curve_type": "piecewise"}',
+    )
+    row = store.get_metadata_by_id(id)
+    assert row["element_type"] == "piecewise_linear"
+
+    projected = store.read_projected(id, [month(3), month(9), month(1)])
+    assert projected.shape == (3, 5)
+    assert decode_element_values(projected, row["element_type"]) == [
+        curves[0],  # March holds January's curve
+        curves[1],  # September holds July's
+        curves[0],  # and January is itself
+    ]
+
+    # The stored array decodes the same way, which is the point: a projection
+    # is the same values in a different order, not a different encoding.
+    stored = store.read_by_id(id)
+    assert decode_element_values(stored.data, row["element_type"]) == curves

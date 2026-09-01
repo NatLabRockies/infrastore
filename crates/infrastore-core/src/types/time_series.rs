@@ -665,6 +665,69 @@ impl PersistentTimeSeries {
             }
         })
     }
+
+    /// Evaluate the step function at each instant in `at`, in the order given.
+    ///
+    /// Returns an array shaped `[at.len(), *E]`, where `*E` is this series'
+    /// per-step element shape, with the dtype unchanged — so a caller decodes
+    /// the result exactly as it decodes [`Self::data`], including for a ragged
+    /// composite [`ElementType`] whose rows are copied whole, padding included.
+    ///
+    /// This is [`Self::index_in_force_at`] applied `at.len()` times and
+    /// gathered; it makes no policy choice. Deciding *which* instants to ask
+    /// for, or how to collapse the answer for a downstream solver, belongs to
+    /// the caller — see the type docs on where policy lives.
+    ///
+    /// It is a **gather, not a slice**: `at` may be unsorted and may repeat, and
+    /// each instant resolves independently, so the caller's order is the output
+    /// order. An empty `at` yields an empty array of the right element shape
+    /// rather than an error, matching what a zero-width range read selects.
+    ///
+    /// `Err` if *any* instant precedes the first breakpoint, where the step
+    /// function is undefined. Every index is resolved before a single byte is
+    /// copied, so such a call produces no partial output.
+    pub fn project_onto(&self, at: &[DateTime<Utc>]) -> Result<TypedArray, String> {
+        // Resolve first, gather second: a bad instant has to fail the whole
+        // call, and a half-built array handed back with an error would invite
+        // exactly the partial read this type refuses elsewhere.
+        let rows = at
+            .iter()
+            .map(|&t| self.index_in_force_at(t))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let element_shape = self.data.element_shape();
+        // The empty product is 1, which is what a scalar series wants: one
+        // value per breakpoint.
+        let row_bytes = element_shape
+            .iter()
+            .try_fold(self.data.dtype.size(), |acc, &d| acc.checked_mul(d))
+            .ok_or_else(|| {
+                format!(
+                    "PersistentTimeSeries '{}': one row of element shape {element_shape:?} \
+                     needs more bytes than usize can hold",
+                    self.name
+                )
+            })?;
+        let total = rows.len().checked_mul(row_bytes).ok_or_else(|| {
+            format!(
+                "PersistentTimeSeries '{}': projecting onto {} instants needs more bytes \
+                 than usize can hold",
+                self.name,
+                rows.len()
+            )
+        })?;
+
+        let mut bytes = Vec::with_capacity(total);
+        for row in rows {
+            let start = row * row_bytes;
+            bytes.extend_from_slice(&self.data.bytes[start..start + row_bytes]);
+        }
+
+        let mut shape = Vec::with_capacity(1 + element_shape.len());
+        shape.push(at.len());
+        shape.extend_from_slice(element_shape);
+        TypedArray::new(self.data.dtype, shape, bytes)
+    }
 }
 
 impl PersistentTimeSeries {

@@ -371,20 +371,35 @@ impl TimeRange {
     /// Refuse a bound whose spelling the series cannot answer. `what` names the
     /// series in the message.
     pub fn check_against(&self, reference: Option<&TimeReference>, what: &str) -> Result<()> {
-        match (self.zoneless, TimeReference::accepts_zoned_bound(reference)) {
-            (false, true) | (true, false) => Ok(()),
-            (true, true) => Err(TimeSeriesError::InvalidParameter(format!(
-                "the query bounds carry no zone, but {what} records instants \
-                 (time_reference {}); a wall clock does not name one, and the store \
-                 will not guess a zone for it",
-                describe(reference)
-            ))),
-            (false, false) => Err(TimeSeriesError::InvalidParameter(format!(
-                "the query bounds name an instant, but {what} is zoneless \
-                 (time_reference \"zoneless\"); its timestamps are wall clocks, so there is \
-                 no defined mapping from an instant onto them"
-            ))),
-        }
+        check_bound_spelling(self.zoneless, reference, what)
+    }
+}
+
+/// The bound-spelling rule, stated once.
+///
+/// It depends only on *how* a bound was spelled and never on which instant it
+/// names, so every bound type shares this one copy rather than restating it:
+/// [`TimeRange`] for the ranged reads, and [`crate::Instants`] for the vector a
+/// projection is evaluated at. Two copies would be two chances to disagree
+/// about a category error.
+pub(crate) fn check_bound_spelling(
+    zoneless: bool,
+    reference: Option<&TimeReference>,
+    what: &str,
+) -> Result<()> {
+    match (zoneless, TimeReference::accepts_zoned_bound(reference)) {
+        (false, true) | (true, false) => Ok(()),
+        (true, true) => Err(TimeSeriesError::InvalidParameter(format!(
+            "the query bounds carry no zone, but {what} records instants \
+             (time_reference {}); a wall clock does not name one, and the store \
+             will not guess a zone for it",
+            describe(reference)
+        ))),
+        (false, false) => Err(TimeSeriesError::InvalidParameter(format!(
+            "the query bounds name an instant, but {what} is zoneless \
+             (time_reference \"zoneless\"); its timestamps are wall clocks, so there is \
+             no defined mapping from an instant onto them"
+        ))),
     }
 }
 
