@@ -29,6 +29,10 @@ Under development, unstable API, integrating with parent packages
 - **Seven time-series types** — `SingleTimeSeries`, `NonSequentialTimeSeries`, and
   `PersistentTimeSeries` (a sparse step function: breakpoints plus hold-last) read+write;
   `Deterministic`, `DeterministicSingleTimeSeries`, `Probabilistic`, and `Scenarios` for forecasts.
+  A step function's lookup is the store's to own, and reachable from every binding:
+  `index_in_force_at` for one instant, and a **projection read** (`project_onto` / `read_projected`,
+  `get --at` in the CLI) for a whole vector of them — so a consumer never re-implements hold-last
+  beside a copy of the breakpoints.
 - **Feature-tagged associations** — each association carries a map of typed features
   (`int`/`float`/`bool`/`str`), so several variants of a series can coexist under one owner.
 - **Columnar simulation readers** — `StaticReader` / `ForecastReader` serve the access pattern that

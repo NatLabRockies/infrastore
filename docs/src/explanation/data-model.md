@@ -120,13 +120,30 @@ type. The difference is entirely in **read semantics**:
 | value **after** the last instant   | a hard error              | the last value         |
 | value **before** the first instant | a hard error              | a hard error           |
 
-That is why it is a separate type rather than a read flag. "An irregular timeline has no value
-between its timestamps" is a guarantee `NonSequentialTimeSeries`'s docs and error messages lean on;
-making it conditional would take it away from everyone.
+That difference is why it is a separate **type** rather than a read flag on the irregular one, and
+the load-bearing reason is the [reader](../reference/rust-api.md#readers). A `StaticReader` over
+persistent columns lets each column sit on its **own** breakpoint vector — the one exception to "one
+timeline per reader" — which is sound only because hold-last is total from each column's first
+breakpoint onward. That is behaviour keyed on the type, and a flag on a value cannot carry it: the
+reader has to know before it resolves a single instant. It is also exactly what the motivating data
+needs, since per-fuel monthly curves do not line up with each other.
+
+A second reason, weaker but real: "an irregular timeline has no value between its timestamps" is a
+guarantee `NonSequentialTimeSeries`'s docs and error messages lean on, and making it conditional
+would take it away from everyone. That one is about how the store explains itself; the reader is
+about what it can do.
 
 The motivating data is a monthly fuel or gas price curve: a dozen breakpoints spanning a year, read
 at simulation timestamps that almost never coincide with one. Read as a `NonSequentialTimeSeries`
 that would error at nearly every step.
+
+**Its lookup is the store's to own.** The rule has exactly one definition in the core, and it is
+reachable from every binding — `index_in_force_at` for a single instant, and `project_onto` /
+`read_projected` for a whole vector of them. That matters more than it looks: a consumer that reads
+the breakpoints out and loops has re-implemented hold-last, and two implementations of a boundary
+rule are two chances to disagree about it. The projection makes **no policy choice** — the caller
+names the instants and each resolves by the rule above or the call fails — which is precisely the
+line drawn in the next paragraph.
 
 **A time range slices on the step function's own terms.** The returned series begins at the
 breakpoint _in force at_ `start`, not the first breakpoint at or after it, so the result always
@@ -140,6 +157,44 @@ whether a curve should be expanded to a full series or evaluated once at a midpo
 [`application_data`](#optional-descriptors), the opaque package-owned payload the store never
 interprets. infrastore records breakpoints and values, and nothing else; there are no catalog
 columns for expansion policy and there will not be.
+
+The sharp version of that argument, worth stating because it is the test every request of this shape
+should be put to: **a time series type is distinguished by what value it yields at an instant.**
+`NonSequentialTimeSeries` versus `PersistentTimeSeries` passes it — between breakpoints one errors
+and the other holds last. Policy knobs fail it outright: two persistent series with identical
+breakpoints and values yield identical values at _every_ instant under any setting of such a knob.
+They do not describe the series; they describe what a downstream solver will accept in a given
+field. That is why they are neither types nor catalog columns.
+
+**Project versus expand.** The line between what the store does and what the caller does is whether
+a _choice_ is being made:
+
+| Job         | What it is                                                  | Whose business                                 |
+| ----------- | ----------------------------------------------------------- | ---------------------------------------------- |
+| **Project** | `[value_at(t) for t in instants]`                           | the store's — its own lookup, applied N times  |
+| **Encode**  | collapse to a scalar at a midpoint, pick an output shape, … | the application's — every branch is its choice |
+
+Projecting chooses nothing: the caller supplies the instants, and each resolves by the documented
+rule or the call fails. Picking a representative instant, or deciding an output encoding from
+whether the values vary, chooses something. The first is `read_projected`; the second stays in the
+consumer, forever.
+
+**A step function over non-scalar values goes on the element axis, not into a new type.** The two
+axes are already separate, and the instinct to make a new series type for "a step function whose
+values are cost curves" conflates them:
+
+| Axis             | What it says                                           | Where it lives                                  |
+| ---------------- | ------------------------------------------------------ | ----------------------------------------------- |
+| **series type**  | the time semantics — hold-last versus error-between    | `PersistentTimeSeries`                          |
+| **element type** | the value shape — a scalar, a tuple, a piecewise curve | [`element_type`](../reference/element-types.md) |
+
+So a monthly fuel cost curve is a `PersistentTimeSeries` with `element_type = piecewise_linear`: the
+monthly dates as breakpoints, the curve points as the values, and the non-curve fields that are
+constant across the curve — a volume window, a curve-kind tag — in `application_data`. A projection
+copies rows whole, padding included, and leaves the element type alone, so the result decodes
+exactly as the stored array does and a read hands back curves rather than a packing. What does
+**not** belong in a value is a JSON blob: anything the store cannot describe cannot be deduplicated,
+hashed, or read columnar, and it puts the consumer back in the business of parsing its own storage.
 
 **It is an infrastore-local extension, not a Sienna type.** The vendored
 `conformance/sienna_schemas/TimeSeries/TimeSeriesAssociation.json` is a `oneOf` over a closed set of

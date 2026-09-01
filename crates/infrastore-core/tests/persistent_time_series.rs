@@ -442,6 +442,66 @@ fn a_composite_element_row_projects_whole() {
 }
 
 #[test]
+fn a_composite_curve_round_trips_on_disk_and_projects() {
+    // The storable form of a fuel cost curve: a step function whose *values*
+    // are curves. The two axes stay separate -- `PersistentTimeSeries` is the
+    // time semantics, `PiecewiseLinear` is the value shape -- so this needs no
+    // new series type, and the constants that do not vary per breakpoint ride
+    // in `application_data` rather than in the values.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("curves.h5");
+    let rows = vec![
+        2.0, 10.0, 100.0, 20.0, 210.0, // January
+        2.0, 12.0, 130.0, 22.0, 250.0, // July
+    ];
+    let series = PersistentTimeSeries::new(
+        vec![month(1), month(7)],
+        TypedArray::from_f64(vec![2, 5], &rows),
+        "fuel_cost_curve",
+    )
+    .unwrap()
+    .with_element_type(ElementType::PiecewiseLinear)
+    .with_application_data("{\"volume_hours\":24,\"cost_curve_type\":\"piecewise\"}");
+
+    let id = {
+        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let id = add(&mut store, 3, series.clone());
+        store.persist_catalog().unwrap();
+        id
+    };
+
+    // Reopened from disk: the element type, the shape and the constants all
+    // survive, which is what makes this storable rather than merely writable.
+    let store = Store::open(path.as_path(), true).unwrap();
+    let TimeSeriesData::PersistentTimeSeries(back) =
+        store.read_by_id(id, ReadWindow::full()).unwrap()
+    else {
+        panic!("a persistent row reads back as one");
+    };
+    assert_eq!(back.element_type, ElementType::PiecewiseLinear);
+    assert_eq!(back.data.shape, vec![2, 5]);
+    assert_eq!(back.data.to_vec::<f64>().unwrap(), rows);
+    assert_eq!(
+        back.application_data.as_deref(),
+        Some("{\"volume_hours\":24,\"cost_curve_type\":\"piecewise\"}")
+    );
+
+    // And it projects: rows copied whole, so the result is decoded exactly as
+    // the stored array is.
+    let projected = store
+        .read_projected(id, Instants::zoned(&[month(3), month(9)]))
+        .unwrap();
+    assert_eq!(projected.shape, vec![2, 5]);
+    assert_eq!(
+        projected.to_vec::<f64>().unwrap(),
+        vec![
+            2.0, 10.0, 100.0, 20.0, 210.0, // March holds January's curve
+            2.0, 12.0, 130.0, 22.0, 250.0, // September holds July's
+        ]
+    );
+}
+
+#[test]
 fn read_projected_evaluates_a_stored_curve() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = create_store(Some(dir.path().join("store.h5").as_path()), false).unwrap();

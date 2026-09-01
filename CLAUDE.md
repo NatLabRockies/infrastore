@@ -26,26 +26,40 @@ breakpoint `<= t` — held forward past the last breakpoint and **undefined befo
 is an error rather than a clamp. It is structurally identical to `NonSequentialTimeSeries` and
 shares its storage (`PackGroup` is keyed by the time axis, never by the type, so the two pool into
 one `nsts_…` dataset and dedup arrays against each other); the difference is entirely in read
-semantics, which is why it is a distinct type rather than a read flag — "an irregular timeline has
-no value between its timestamps" is a guarantee `NonSequentialTimeSeries` leans on. A range read
-begins at the breakpoint _in force at_ `start`, so the result always defines a value there.
-Scalar-collapse policy is the application's and rides in `application_data`; there are no catalog
-columns for it. It is an infrastore-local extension, not a Sienna type — its OpenAPI row is the
-`NonSequentialTimeSeries` shape but sits outside the vendored six-type `oneOf`, so nothing under
-`conformance/` mentions it. `Deterministic`, `DeterministicSingleTimeSeries`, `Probabilistic`, and
-`Scenarios` support reading values across the Rust core, C ABI, Python, Julia, and gRPC. Dense
-forecasts (`Deterministic`, `Probabilistic`, `Scenarios`) are written through the generic
-`add_time_series` by passing the matching forecast object across the Rust core, Python, and Julia
-(the C ABI keeps per-type `infrastore_store_add_forecast` / `infrastore_store_add_probabilistic` as
-low-level transport); `DeterministicSingleTimeSeries` is derived from stored `SingleTimeSeries` via
-`transform_single_time_series` rather than added directly. Forecast writes are not exposed over the
-read-only gRPC server. Arrays are dtype-generic (`f64`/`f32`/`i64`/`i32`/`u64`/`bool` in every
-binding, including Python) and may have multidimensional per-timestep values. The columnar
-simulation readers (`StaticReader`/`ForecastReader`) are bound across the Rust core, C ABI, Julia,
-and Python; `StaticReader` covers all three static types, sweeping a `SingleTimeSeries` grid, a
-cohort of `NonSequentialTimeSeries` sharing one timestamp vector, or a set of `PersistentTimeSeries`
-(its `resolution()` is `None` for both irregular kinds). The persistent case is the **one exception
-to "one timeline per reader"**: a step function has a value at every instant from its own first
+semantics, which is why it is a distinct type rather than a read flag. The load-bearing reason is
+the **reader** — a `StaticReader` over persistent columns lets each column sit on its own breakpoint
+vector, which is behavior keyed on the type and which a flag cannot carry; that "an irregular
+timeline has no value between its timestamps" is a guarantee `NonSequentialTimeSeries` leans on is
+the secondary one. A range read begins at the breakpoint _in force at_ `start`, so the result always
+defines a value there. The hold-last lookup has **one** definition in the core and reaches every
+binding: `index_in_force_at` for a single instant, and the **projection read**
+(`PersistentTimeSeries::project_onto`, `Store::read_projected` / `read_projected_by_ids`, `get --at`
+in the CLI, `ReadProjected` over gRPC) for a vector of them. A projection is a gather, not a slice —
+the instants may be unsorted and may repeat, and the caller's order is the output order — and it
+makes no policy choice, which is the line: the caller names the instants, each resolves by the rule
+or the call fails, and choosing a representative instant or an output encoding stays with the
+consumer. Every other stored type is refused, because projecting one would need a resampling policy
+the application owns. A step function over non-scalar values (a monthly fuel cost curve) is
+expressed on the `element_type` axis — `PersistentTimeSeries` with `element_type = PiecewiseLinear`
+— not as a new series type; a projection copies rows whole, so the result decodes exactly as the
+stored array does. Scalar-collapse policy is the application's and rides in `application_data`;
+there are no catalog columns for it. It is an infrastore-local extension, not a Sienna type — its
+OpenAPI row is the `NonSequentialTimeSeries` shape but sits outside the vendored six-type `oneOf`,
+so nothing under `conformance/` mentions it. `Deterministic`, `DeterministicSingleTimeSeries`,
+`Probabilistic`, and `Scenarios` support reading values across the Rust core, C ABI, Python, Julia,
+and gRPC. Dense forecasts (`Deterministic`, `Probabilistic`, `Scenarios`) are written through the
+generic `add_time_series` by passing the matching forecast object across the Rust core, Python, and
+Julia (the C ABI keeps per-type `infrastore_store_add_forecast` /
+`infrastore_store_add_probabilistic` as low-level transport); `DeterministicSingleTimeSeries` is
+derived from stored `SingleTimeSeries` via `transform_single_time_series` rather than added
+directly. Forecast writes are not exposed over the read-only gRPC server. Arrays are dtype-generic
+(`f64`/`f32`/`i64`/`i32`/`u64`/`bool` in every binding, including Python) and may have
+multidimensional per-timestep values. The columnar simulation readers
+(`StaticReader`/`ForecastReader`) are bound across the Rust core, C ABI, Julia, and Python;
+`StaticReader` covers all three static types, sweeping a `SingleTimeSeries` grid, a cohort of
+`NonSequentialTimeSeries` sharing one timestamp vector, or a set of `PersistentTimeSeries` (its
+`resolution()` is `None` for both irregular kinds). The persistent case is the **one exception to
+"one timeline per reader"**: a step function has a value at every instant from its own first
 breakpoint on, so its columns may hold independent breakpoint vectors. Such a reader interns the
 distinct vectors, gives each column the id of the one it resolves against, and takes their sorted
 **union** as its public axis; `index_at` then reports a position on that union and is _not_ a

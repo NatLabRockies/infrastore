@@ -22,7 +22,14 @@ breakpoints plus one value each, holding the last value forward, undefined befor
 breakpoint (an error, not a clamp). It is structurally identical to `NonSequentialTimeSeries` and
 shares its storage — the difference is entirely in read semantics. A `StaticReader` over
 `PersistentTimeSeries` columns is the one exception to "one timeline per reader": its columns may
-sit on independent breakpoint vectors, and the reader's axis is their union. `Deterministic`,
+sit on independent breakpoint vectors, and the reader's axis is their union. The hold-last lookup
+has one definition in the core and reaches every binding — `index_in_force_at` for a single instant,
+and the **projection read** (`PersistentTimeSeries::project_onto`, `Store::read_projected` /
+`read_projected_by_ids`, `get --at` in the CLI, `ReadProjected` over gRPC) for a vector of them. A
+projection is a gather, not a slice: the instants may be unsorted and may repeat, the caller's order
+is the output order, and it makes no policy choice — which instants to ask for, and how to collapse
+the answer for a solver, stay with the caller. It is refused for every other stored type, because
+projecting one would need a resampling policy that is the application's to choose. `Deterministic`,
 `DeterministicSingleTimeSeries`, `Probabilistic`, and `Scenarios` support reading values across the
 Rust core, C ABI, Python, Julia, and gRPC. Dense forecasts (`Deterministic`, `Probabilistic`,
 `Scenarios`) are written through the generic `add_time_series` by passing the matching forecast
