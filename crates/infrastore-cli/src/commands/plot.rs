@@ -145,12 +145,7 @@ fn line(
         .enumerate()
         .map(|(i, c)| svg::Series {
             label: c.label.clone(),
-            points: c
-                .times
-                .iter()
-                .zip(&c.values)
-                .map(|(t, v)| (millis(*t), *v))
-                .collect(),
+            points: c.line_points(),
             slot: i,
             emphasis: false,
         })
@@ -544,6 +539,45 @@ struct Curve {
     resolution: Option<Period>,
     times: Vec<DateTime<Utc>>,
     values: Vec<f64>,
+    /// Whether the samples are a step function -- true only for a
+    /// `PersistentTimeSeries`. See [`Curve::line_points`].
+    ///
+    /// Only `line` consumes it, because only `line` draws anything *between*
+    /// two samples. `duration` sorts the values and `heatmap` places one cell
+    /// per sample; neither interpolates, so neither can misreport the shape.
+    /// (A duration curve over a step function arguably wants time weighting
+    /// rather than one slot per breakpoint, but that is a different chart, not
+    /// a different path through this one.)
+    step: bool,
+}
+
+impl Curve {
+    /// The polyline to draw through this curve's samples.
+    ///
+    /// A step function is emitted as a **stair**: each value is carried at its
+    /// own level to the next breakpoint before the line drops or climbs to the
+    /// new one. Joining the breakpoints directly would draw a ramp between them
+    /// and so put a value on the chart at every instant in between -- which is
+    /// exactly the reading `PersistentTimeSeries` exists to rule out. The
+    /// stair ends at the last breakpoint rather than running to the right edge:
+    /// the value is held forward forever, and the chart should not imply an
+    /// expiry the store does not record.
+    fn line_points(&self) -> Vec<(f64, f64)> {
+        let pairs = self.times.iter().zip(&self.values);
+        if !self.step {
+            return pairs.map(|(t, v)| (millis(*t), *v)).collect();
+        }
+        let mut points = Vec::with_capacity(self.times.len() * 2);
+        for (i, (t, v)) in pairs.enumerate() {
+            points.push((millis(*t), *v));
+            // The corner: hold this level up to the next breakpoint, where the
+            // point pushed on the following turn supplies the vertical.
+            if let Some(next) = self.times.get(i + 1) {
+                points.push((millis(*next), *v));
+            }
+        }
+        points
+    }
 }
 
 /// Every static series the selector matched, decoded and time-stamped.
@@ -607,9 +641,6 @@ fn read_curve(
             (times, &s.data)
         }
         TimeSeriesData::NonSequentialTimeSeries(ns) => (ns.timestamps.clone(), &ns.data),
-        // Drawn as a polyline through its breakpoints, like any other static
-        // series. A true step chart would need its own `--kind`; the points are
-        // where the value actually changes either way.
         TimeSeriesData::PersistentTimeSeries(p) => (p.timestamps.clone(), &p.data),
         other => {
             return Err(format!(
@@ -634,6 +665,7 @@ fn read_curve(
         resolution: meta.resolution,
         times,
         values,
+        step: meta.time_series_type == TimeSeriesType::PersistentTimeSeries,
     })
 }
 

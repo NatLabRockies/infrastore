@@ -4174,3 +4174,100 @@ fn upgrade_is_the_writable_open_and_a_no_op_on_a_current_store() {
     let err = run_err(&missing, &["upgrade"]);
     assert!(err.contains("not found"), "{err}");
 }
+
+/// A step function is drawn as a stair, never as a ramp.
+///
+/// Joining the breakpoints with a straight line would put a value on the chart
+/// at every instant between two of them — the reading `PersistentTimeSeries`
+/// exists to rule out. So every segment of the rendered path is either
+/// horizontal (the value being held) or vertical (the step itself), and there
+/// are twice as many of them as a plain polyline would have drawn.
+#[test]
+fn plot_draws_a_persistent_series_as_a_stair_not_a_ramp() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("steps.h5");
+    write(
+        dir.path(),
+        "gas.csv",
+        "timestamp,value\n\
+         2024-01-01T00:00:00Z,3.5\n\
+         2024-04-01T00:00:00Z,4.25\n\
+         2024-07-01T00:00:00Z,5.0\n",
+    );
+    let descriptor = write(
+        dir.path(),
+        "gas.json",
+        r#"{"owner_id": 7, "owner_type": "ThermalStandard", "name": "gas_price",
+            "type": "PersistentTimeSeries", "element_type": "f64",
+            "units": "USD/MMBtu", "csv": "gas.csv"}"#,
+    );
+    run(
+        &store,
+        &["add", "--descriptor", descriptor.to_str().unwrap()],
+    );
+
+    let out = dir.path().join("steps.svg");
+    run(
+        &store,
+        &[
+            "plot",
+            "--name",
+            "gas_price",
+            "--out",
+            out.to_str().unwrap(),
+        ],
+    );
+    let svg = fs::read_to_string(&out).unwrap();
+    let d = svg
+        .lines()
+        .find(|l| l.contains(r#"class="line"#))
+        .and_then(|l| l.split_once(r#"d=""#))
+        .and_then(|(_, rest)| rest.split_once('"'))
+        .map(|(d, _)| d)
+        .unwrap_or_else(|| panic!("no line path in {svg}"));
+    let points: Vec<(f64, f64)> = d
+        .split_whitespace()
+        .map(|tok| {
+            let (x, y) = tok
+                .trim_start_matches(['M', 'L'])
+                .split_once(',')
+                .unwrap_or_else(|| panic!("unexpected path token {tok:?} in {d:?}"));
+            (x.parse().unwrap(), y.parse().unwrap())
+        })
+        .collect();
+
+    // Three breakpoints, five points: a corner between each pair.
+    assert_eq!(points.len(), 5, "{d}");
+    for pair in points.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        assert!(
+            a.0 == b.0 || a.1 == b.1,
+            "segment {a:?} -> {b:?} is a ramp, not a stair: {d}"
+        );
+    }
+    // ...and it really does move in both axes, so the assertion above is not
+    // passing on a flat line.
+    assert!(points.iter().any(|p| p.1 != points[0].1), "{d}");
+
+    // A `NonSequentialTimeSeries` on the same instants keeps the plain
+    // polyline: three points, and at least one sloped segment.
+    let ns = write(
+        dir.path(),
+        "ns.json",
+        r#"{"owner_id": 8, "owner_type": "ThermalStandard", "name": "sampled",
+            "type": "NonSequentialTimeSeries", "element_type": "f64",
+            "csv": "gas.csv"}"#,
+    );
+    run(&store, &["add", "--descriptor", ns.to_str().unwrap()]);
+    let out = dir.path().join("sampled.svg");
+    run(
+        &store,
+        &["plot", "--name", "sampled", "--out", out.to_str().unwrap()],
+    );
+    let svg = fs::read_to_string(&out).unwrap();
+    let d = svg
+        .lines()
+        .find(|l| l.contains(r#"class="line"#))
+        .expect("a line path");
+    assert_eq!(d.matches('L').count(), 2, "{d}");
+}
