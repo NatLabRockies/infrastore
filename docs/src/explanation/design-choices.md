@@ -162,6 +162,13 @@ This release replaces the wall with a **three-tier compatibility model** plus a 
 `Incompatible` and is refused exactly as before. When a bump genuinely does strand older stores,
 `MIN_UPGRADABLE_VERSION` is raised to match it; when the ladder can absorb it, it is left alone.
 
+The two constants therefore answer opposite questions, and a bump can move only one of them.
+`DATA_FORMAT_VERSION` also moves for something no ladder is involved in: a change an **older** build
+must not silently accept. Adding the `PersistentTimeSeries` storage code in `0.20.0` is the example
+— nothing on disk moved, so the floor stayed at `0.19.0` and existing stores still upgrade, but a
+build that has never heard of code 6 has to be turned away at the door rather than opening the store
+as current and then reporting the unknown code as catalog corruption.
+
 ### A writable open upgrades; a read-only open reports
 
 Opening a store for **writing** runs every migration above the catalog's recorded revision, in

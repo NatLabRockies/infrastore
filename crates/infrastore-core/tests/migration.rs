@@ -119,12 +119,13 @@ fn stale_store() -> (tempfile::TempDir, std::path::PathBuf) {
         store.flush().unwrap();
     }
 
-    // Note this backdates only the *catalog*. `MIN_UPGRADABLE_VERSION` equals
-    // `DATA_FORMAT_VERSION` today, so writing it leaves the HDF5 half at
-    // `Compat::Current` and nothing here exercises the deferred re-stamp --
-    // that path has no reachable input until the two constants separate, and
-    // is covered against an explicit window in `storage::hdf5`'s own tests.
-    // What this fixture *is* stale in is the half that matters for the ladder.
+    // This backdates *both* halves, which it could not do before 0.20.0: the
+    // two version constants have separated, so `MIN_UPGRADABLE_VERSION` now
+    // stamps the HDF5 half `Compat::Upgradable` rather than `Compat::Current`.
+    // A writable open therefore has two things to do here -- climb the catalog
+    // ladder and re-stamp the array half -- and the deferred re-stamp finally
+    // has a reachable input instead of only the explicit-window coverage in
+    // `storage::hdf5`'s own tests.
     set_format_attr(&path, infrastore_core::MIN_UPGRADABLE_VERSION);
     {
         let conn = rusqlite::Connection::open(sqlite_path_of(&path)).unwrap();
@@ -247,12 +248,16 @@ fn a_revision_1_catalog_upgrades_in_place_on_a_writable_open() {
         .unwrap();
     drop(store);
 
-    // The catalog moved. The array half did not need to: its stamp was already
-    // current, so there was no upgrade to defer. Asserting it against
-    // `DATA_FORMAT_VERSION` here would be a tautology while the two version
-    // constants are equal -- assert it is *unchanged*, which is the claim this
-    // fixture can actually make.
-    assert_eq!(format_version_on_disk(&path), format_before);
+    // Both halves moved. The catalog climbed the ladder, and the array half was
+    // re-stamped from the upgradable floor to the current version on the same
+    // writable open -- which is the whole point of the 0.20.0 bump: a store
+    // that now holds a code-6 row no longer claims a stamp a 0.19.0 reader
+    // would accept.
+    assert_eq!(format_before, infrastore_core::MIN_UPGRADABLE_VERSION);
+    assert_eq!(
+        format_version_on_disk(&path),
+        infrastore_core::DATA_FORMAT_VERSION
+    );
     assert_eq!(revision_on_disk(&path), 2);
     // Migration is not a save: the paired generation stamps are untouched.
     assert_eq!(generation_stamps(&path), before);

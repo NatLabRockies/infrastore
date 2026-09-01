@@ -21,7 +21,7 @@ carries netcdf-c's `_NCProperties` attribute, and `Store::open` accepts only fil
 The HDF5 root carries four global attributes:
 
 ```text
-data_format_version = "0.19.0"
+data_format_version = "0.20.0"
 compression         = "deflate:3:shuffle"
 storage_backend     = "hdf5"
 catalog_generation  = "9f2c1ab4e70d5836c41b9e2af0d7c358"
@@ -80,11 +80,20 @@ bump plus an append-only migration**, not a re-created store. A catalog written 
 in place on its first writable open. See
 [Upgrade a store in place](../explanation/design-choices.md#upgrade-a-store-in-place-rather-than-bricking-it).
 
-`PersistentTimeSeries` (storage code 6) is the first _type_ to arrive through that door, and it
-likewise takes no version bump. The HDF5 layout is unchanged — a persistent series pools into the
-same `nsts_…` datasets as a `NonSequentialTimeSeries` on the same breakpoints, and its breakpoints
-are an ordinary timestamp vector — so the widened `CHECK` is the whole of what it needed from the
-catalog, and every `0.19.0` store already has it.
+`PersistentTimeSeries` (storage code 6) is the first _type_ to arrive through that door. The HDF5
+layout is unchanged — a persistent series pools into the same `nsts_…` datasets as a
+`NonSequentialTimeSeries` on the same breakpoints, and its breakpoints are an ordinary timestamp
+vector — and the widened `CHECK` is the whole of what it needed from the catalog, which every
+`0.19.0` store already has. So it needed nothing from a version bump in the **backward** direction,
+and `MIN_UPGRADABLE_VERSION` stays at `0.19.0`: an existing store still upgrades in place.
+
+It got one anyway — `0.20.0` — for the **forward** direction. A new type code is a thing an older
+reader cannot absorb: without the bump, a `0.19.0` build would open a store holding a persistent row
+as `Current` and then fail the first listing with `invalid time_series_type code: 6`, an error
+raised while decoding the row that surfaces as catalog corruption and takes the whole query with it,
+not just the offending row. Refusing the artifact at the door is the honest report. The cost,
+accepted knowingly, is that any store this build opens for writing is re-stamped `0.20.0` and so
+leaves `0.19.0` readers behind whether or not it holds a persistent series.
 
 (`0.19.0` moved a `NonSequentialTimeSeries`'s timestamps out of the SQLite catalog and into the HDF5
 file: the `timestamp_sets` table is gone, and each distinct time axis is now an `i64` dataset of
@@ -181,7 +190,7 @@ time axes in a sibling group of their own:
 
 ```text
 <name>.h5
-├── attribute  data_format_version = "0.19.0"
+├── attribute  data_format_version = "0.20.0"
 ├── attribute  compression         = "deflate:3:shuffle"
 ├── attribute  storage_backend     = "hdf5"
 └── group      time_series/

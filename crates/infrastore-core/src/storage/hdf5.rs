@@ -2059,13 +2059,14 @@ mod tests {
         PackGroup::Irregular([tag; 32])
     }
 
-    /// The deferred re-stamp, which no other test can reach.
+    /// The deferred re-stamp, against a window wider than the live one.
     ///
-    /// `MIN_UPGRADABLE_VERSION == DATA_FORMAT_VERSION`, so nothing on disk
-    /// classifies as `Compat::Upgradable` and this whole path -- the reason the
-    /// catalog is migrated *before* the array file is re-stamped -- has no
-    /// reachable input through the public `open`. `open_within` supplies a
-    /// window wide enough to admit one.
+    /// The live constants separated at 0.20.0, so `Compat::Upgradable` is
+    /// reachable through the public `open` now (a 0.19.0 store) -- but that
+    /// window is one release wide and moves every time either constant does.
+    /// The claim here is about the *ordering* -- the reason the catalog is
+    /// migrated before the array file is re-stamped -- so it is stated against
+    /// the explicit window `open_within` supplies and stays put as they move.
     ///
     /// What has to hold: the stamp is read but *left alone* at open, the
     /// backend says it is pending, and only `finish_format_upgrade` rewrites

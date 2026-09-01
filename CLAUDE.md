@@ -405,6 +405,11 @@ cargo run -p infrastore-server -- --config my_server.toml
   contract, checked in **three tiers** (`Current` / `Upgradable` / `Incompatible`), not by equality.
   Any incompatible HDF5 layout, dtype encoding, timestamp encoding, or hashing change must bump it,
   raise `MIN_UPGRADABLE_VERSION` to match, and update format documentation and compatibility tests.
+  A change an **older** reader must not silently accept — a new `TimeSeriesType` storage code is the
+  type case — bumps `DATA_FORMAT_VERSION` **without** raising the floor: nothing on disk moved, so
+  existing stores still upgrade in place, but an old build is refused at the door instead of opening
+  the artifact as current and then reporting the unknown code as catalog corruption. That is why
+  `PersistentTimeSeries` took the artifact to `0.20.0` with the floor left at `0.19.0`.
 - **`CATALOG_SCHEMA_REVISION` (`crates/infrastore-core/src/metadata/migrate.rs`) is the SQLite
   half's own contract. Any catalog change the idempotent DDL cannot make to an existing table — a
   new column, a changed CHECK, a rebuilt table, a backfill — now requires a
