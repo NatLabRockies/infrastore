@@ -232,7 +232,13 @@ class TestTimeSeriesImport:
             empty.import_time_series_associations_openapi(exported)
         assert empty.list_metadata() == []
 
-    def test_rejects_an_irregular_row(self):
+    def test_an_irregular_row_locates_its_time_axis(self):
+        """An irregular series exports a `timestamps_uri`, and needs it back.
+
+        The axis is the one part of such a row the values cannot imply — two
+        irregular series with identical values on different axes share one
+        content-addressed array — so a row stripped of the locator is refused.
+        """
         store = Store.create(in_memory=True)
         store.add_time_series(
             owner_id=1, owner_type="Generator", owner_category=OwnerCategory.Component,
@@ -240,11 +246,106 @@ class TestTimeSeriesImport:
                 [T0, T0 + 5 * HOUR], np.array([1.0, 2.0], dtype=np.float64), "events"
             ),
         )
-        exported = store.export_time_series_associations_openapi()
-        with pytest.raises(infrastore.InvalidParameterError):
-            store.import_time_series_associations_openapi(exported)
+        rows = json.loads(store.export_time_series_associations_openapi())
+        assert isinstance(rows[0]["timestamps_uri"], str)
+
+        del rows[0]["timestamps_uri"]
+        with pytest.raises(infrastore.InvalidParameterError, match="timestamps_uri"):
+            store.import_time_series_associations_openapi(json.dumps(rows))
 
     def test_rejects_malformed_json(self):
         store = Store.create(in_memory=True)
         with pytest.raises(infrastore.StorageError):
             store.import_time_series_associations_openapi("{not valid json")
+
+
+class TestJsonOnlyRestore:
+    """Reading an artifact back from its arrays plus the document alone.
+
+    A consumer that already ships the association rows in JSON of its own has
+    no reason to carry the `.sqlite` half around. `Store.open_without_catalog`
+    is the way in to such a bundle; the core's `tests/json_only_restore.rs`
+    pins the same round trip, and this checks the binding reaches it.
+    """
+
+    def _bundle(self, tmp_path):
+        path = str(tmp_path / "bundle.h5")
+        store = Store.create(path)
+        store.add_time_series(
+            owner_id=7, owner_type="ThermalStandard",
+            owner_category=OwnerCategory.Component,
+            time_series=SingleTimeSeries(
+                T0, HOUR, np.arange(24, dtype=np.float64), "max_active_power"
+            ),
+            units="MW",
+        )
+        store.add_supplemental_attribute_associations([attached(7, 12)])
+        ts_json = store.export_time_series_associations_openapi()
+        sa_json = store.export_supplemental_attribute_associations_openapi()
+        rows = store.list_metadata()
+        store.close()
+        os.remove(path + ".sqlite")
+        return path, ts_json, sa_json, rows
+
+    def test_the_document_rebuilds_the_catalog(self, tmp_path):
+        path, ts_json, sa_json, before = self._bundle(tmp_path)
+
+        store = Store.open_without_catalog(path)
+        assert store.list_metadata() == []
+        assert store.import_time_series_associations_openapi(ts_json) == 1
+        assert store.import_supplemental_attribute_associations_openapi(sa_json) == 1
+
+        after = store.list_metadata()
+        assert [row["id"] for row in after] == [row["id"] for row in before]
+        assert np.array_equal(
+            store.read_by_id(after[0]["id"]).data,
+            np.arange(24, dtype=np.float64),
+        )
+        store.close()
+
+        # The minted catalog inherited the array file's generation stamp, so the
+        # rebuilt pair opens like any other store.
+        reopened = Store.open(path)
+        assert len(reopened.list_metadata()) == 1
+        reopened.close()
+
+    def test_refuses_to_mint_over_an_existing_catalog(self, tmp_path):
+        path = str(tmp_path / "kept.h5")
+        store = Store.create(path)
+        store.close()
+        with pytest.raises(infrastore.StoreExistsError):
+            Store.open_without_catalog(path)
+
+
+class TestSchemaContract:
+    """The import path holds a document to the vendored SiennaSchemas specs, so
+    a row that drifted is refused in the schema's own terms rather than by
+    whatever the Rust struct happens to notice."""
+
+    def test_rejects_a_row_missing_a_required_field(self):
+        store = Store.create(in_memory=True)
+        store.add_time_series(
+            owner_id=1, owner_type="Generator",
+            owner_category=OwnerCategory.Component,
+            time_series=SingleTimeSeries(
+                T0, HOUR, np.zeros(4, dtype=np.float64), "load"
+            ),
+        )
+        rows = json.loads(store.export_time_series_associations_openapi())
+        del rows[0]["owner_type"]
+        with pytest.raises(infrastore.InvalidParameterError, match="owner_type"):
+            store.import_time_series_associations_openapi(json.dumps(rows))
+
+    def test_rejects_an_unknown_time_series_type(self):
+        store = Store.create(in_memory=True)
+        store.add_time_series(
+            owner_id=1, owner_type="Generator",
+            owner_category=OwnerCategory.Component,
+            time_series=SingleTimeSeries(
+                T0, HOUR, np.zeros(4, dtype=np.float64), "load"
+            ),
+        )
+        rows = json.loads(store.export_time_series_associations_openapi())
+        rows[0]["time_series_type"] = "Sporadic"
+        with pytest.raises(infrastore.InvalidParameterError, match="Sporadic"):
+            store.import_time_series_associations_openapi(json.dumps(rows))

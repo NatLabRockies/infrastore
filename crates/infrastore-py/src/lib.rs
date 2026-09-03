@@ -1917,6 +1917,43 @@ impl PyStore {
         })
     }
 
+    /// Open the array half of an artifact whose catalog is **absent**, minting
+    /// an empty one, and return a writable store holding every array and no
+    /// rows.
+    ///
+    /// The way in to a store shipped as arrays plus an OpenAPI document — a
+    /// `system.json` beside a `time_series.h5`, with no `.sqlite` carried along.
+    /// Replay the document's rows with
+    /// `import_time_series_associations_openapi()` and
+    /// `import_supplemental_attribute_associations_openapi()` and the artifact
+    /// is whole again, association ids included.
+    ///
+    /// `Store.open()` cannot do this: the array file carries a generation stamp
+    /// and a catalog created on the spot does not, so it reports a mismatched
+    /// artifact — the right answer everywhere except here. The catalog minted
+    /// here inherits the array file's own stamp, so every later `open()`
+    /// behaves normally.
+    ///
+    /// Raises `StoreExistsError` when `<path>.sqlite` is already there: minting
+    /// over a real catalog would discard its rows, and a store that has one
+    /// wants `Store.open()`.
+    #[classmethod]
+    #[pyo3(signature = (path, *, catalog="attached"))]
+    fn open_without_catalog(
+        _cls: &Bound<'_, pyo3::types::PyType>,
+        path: PathBuf,
+        catalog: &str,
+    ) -> PyResult<Self> {
+        let catalog = parse_catalog(Some(catalog), false)?;
+        let descr = path.display().to_string();
+        let store = core_lib::open_store_without_catalog(&path, catalog).map_err(map_err)?;
+        Ok(Self {
+            inner: Some(store),
+            read_only: false,
+            descr,
+        })
+    }
+
     #[getter]
     fn read_only(&self) -> bool {
         self.read_only

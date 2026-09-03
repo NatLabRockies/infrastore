@@ -4,7 +4,7 @@
 //! the store's own tables; this module is the only place that knows how a row
 //! of either one maps to and from the wire spelling SiennaSchemas defines
 //! (`TimeSeries/*.json`, `Core/Associations/SupplementalAttributeAssociation.json`,
-//! vendored at `conformance/sienna_schemas/`). Everything else in the crate —
+//! vendored at `crates/infrastore-core/sienna_schemas/`). Everything else in the crate —
 //! the catalog schema, the metadata query, the association tables — is
 //! untouched by this module; it only maps rows [`crate::store::Store`]
 //! already produces into JSON, and JSON back into the calls that already
@@ -29,9 +29,10 @@
 //! a different thing from natural units, so the two must stay distinguishable
 //! through the round trip.
 //!
-//! Two fields reached the schema after the rest, and the vendored copy carries
-//! them from an **un-merged** SiennaSchemas branch — see
-//! `conformance/sienna_schemas/SOURCE.md` for which commit: `time_reference`,
+//! Three fields reached the schema after the rest, and the vendored copy
+//! carries them from an **un-merged** SiennaSchemas branch (`timestamps_uri`,
+//! below, is the third) — see
+//! `crates/infrastore-core/sienna_schemas/SOURCE.md` for which commit: `time_reference`,
 //! the catalog spelling of [`TimeReference`] (`"utc"`, `"zoneless"`, an offset,
 //! or a zone name), and `array_shape`, the stored array's full native shape —
 //! `[length, *element_shape]` in the catalog's own terms, where the schema's
@@ -51,6 +52,18 @@
 //! Carrying it is what makes the round trip *preserve* the references a
 //! document holds rather than merely reproduce its rows. The
 //! supplemental-attribute wire form carries no id.
+//!
+//! A `NonSequentialTimeSeries` carries one field no other type has:
+//! **`timestamps_uri`**, the locator for its explicit time axis, filled from
+//! the axis's own [`crate::hash::timestamps_hash`] exactly as `uri` is filled
+//! from the array's. It is a *locator* rather than the vector because the axis
+//! is shared — a cohort on one axis names it once each, where inlining the
+//! timestamps would repeat the whole vector per row — and it cannot be left out
+//! and inferred, because arrays are content-addressed: two irregular series
+//! with byte-identical values on *different* axes share one stored array, and
+//! only the catalog's `timestamps_hash` tells them apart. The axis ships in the
+//! array file beside the arrays, so [`import_ts_rows`] resolves the locator
+//! against the store and hands the vector to the ordinary insert path.
 //!
 //! On top of the shared fields, each of the six [`TimeSeriesType`] values adds
 //! its own geometry fields — see [`ts_row_to_json`] — and every field that
@@ -85,6 +98,8 @@ use crate::types::id::TimeSeriesId;
 use crate::types::metadata::{FeatureValue, Features, TimeSeriesMetadata, UnitSystem};
 use crate::types::time_reference::TimeReference;
 use crate::types::time_series::TimeSeriesType;
+
+mod schema;
 
 // ============================================================================
 // Time-series associations: export
@@ -309,6 +324,18 @@ fn ts_row_to_json(meta: &TimeSeriesMetadata) -> Value {
             if let Some(l) = meta.length {
                 row.insert("length".into(), Value::from(l as u64));
             }
+            // The axis locator, filled from the axis's own content hash exactly
+            // as `uri` is filled from the array's. Absent only for a row that
+            // reached here without its axis, which `export_ts_rows`'s listing
+            // always supplies.
+            if let Some(timestamps) = &meta.timestamps {
+                row.insert(
+                    "timestamps_uri".into(),
+                    Value::from(crate::hash::hash_hex(&crate::hash::timestamps_hash(
+                        timestamps,
+                    ))),
+                );
+            }
         }
         TimeSeriesType::Deterministic | TimeSeriesType::DeterministicSingleTimeSeries => {
             insert_forecast_fields(&mut row, meta);
@@ -362,6 +389,10 @@ struct RawTsRow {
     name: String,
     features: Map<String, Value>,
     uri: String,
+    /// The axis locator a `NonSequentialTimeSeries` carries; absent on every
+    /// other type, which has no explicit axis.
+    #[serde(default)]
+    timestamps_uri: Option<String>,
     #[serde(default)]
     data_hash: Option<String>,
     element_type: String,
@@ -461,7 +492,46 @@ fn features_from_plain(map: &Map<String, Value>) -> Result<Features> {
     Ok(out)
 }
 
+/// One decoded row, plus the time axis its `timestamps_uri` named.
+///
+/// The axis travels beside the row rather than in it because only the store can
+/// turn a locator into a vector, and [`RawTsRow::into_metadata`] has no store.
+/// `None` for every type but `NonSequentialTimeSeries`, which is the only one
+/// with an explicit axis.
+struct DecodedTsRow {
+    meta: TimeSeriesMetadata,
+    time_axis: Option<[u8; 32]>,
+}
+
 impl RawTsRow {
+    /// The 32-byte hash of the time axis this row names, for the one type that
+    /// has one.
+    ///
+    /// Required there, and required to be a hash: unlike `uri` — which the
+    /// schema leaves as a free-form locator, and whose value this crate can
+    /// fall back to `data_hash` for — there is no second field carrying the
+    /// axis. A locator this store cannot resolve is a row it cannot file.
+    fn resolve_time_axis(&self, ts_type: TimeSeriesType) -> Result<Option<[u8; 32]>> {
+        if ts_type != TimeSeriesType::NonSequentialTimeSeries {
+            return Ok(None);
+        }
+        let Some(locator) = self.timestamps_uri.as_deref() else {
+            return Err(wire_err(format!(
+                "row '{}': a NonSequentialTimeSeries carries its time axis as timestamps_uri, \
+                 and this row has none — without it the document does not say which of the \
+                 store's axes the row sits on",
+                self.name,
+            )));
+        };
+        hash_from_hex(locator).map(Some).ok_or_else(|| {
+            wire_err(format!(
+                "row '{}': timestamps_uri {locator:?} is not a 64-character hex hash, and this \
+                 import resolves time axes by content hash",
+                self.name,
+            ))
+        })
+    }
+
     /// The 32-byte array hash this row names.
     ///
     /// `data_hash` first, `uri` second: the schema treats the former as the
@@ -490,7 +560,7 @@ impl RawTsRow {
         )))
     }
 
-    fn into_metadata(self) -> Result<TimeSeriesMetadata> {
+    fn into_metadata(self) -> Result<DecodedTsRow> {
         let data_hash = self.resolve_hash()?;
         let ts_type = TimeSeriesType::parse(&self.time_series_type).ok_or_else(|| {
             wire_err(format!(
@@ -533,6 +603,7 @@ impl RawTsRow {
             ),
             None => None,
         };
+        let time_axis = self.resolve_time_axis(ts_type)?;
         // The native shape when the document carries it; the schema's own
         // fields otherwise (module docs).
         let (length, element_shape) = match self.array_shape {
@@ -548,47 +619,100 @@ impl RawTsRow {
             // A `Scenarios` row spells its array length `scenario_count`.
             None => (self.length.or(self.scenario_count), self.element_shape),
         };
-        Ok(TimeSeriesMetadata {
-            owner_id: self.owner_id,
-            owner_type: self.owner_type,
-            owner_category,
-            time_series_type: ts_type,
-            name: self.name,
-            data_hash,
-            initial_timestamp,
-            resolution,
-            length,
-            horizon,
-            interval,
-            count: self.count,
-            timestamps: None,
-            features: features_from_plain(&self.features)?,
-            units: self.units,
-            quantity_kind: self.quantity_kind,
-            unit_system,
-            time_reference,
-            component_field: self.component_field,
-            percentiles: self.percentiles,
-            element_type,
-            element_shape,
-            application_data: self.application_data,
-            id: self.association_id.map(TimeSeriesId),
+        Ok(DecodedTsRow {
+            time_axis,
+            meta: TimeSeriesMetadata {
+                owner_id: self.owner_id,
+                owner_type: self.owner_type,
+                owner_category,
+                time_series_type: ts_type,
+                name: self.name,
+                data_hash,
+                initial_timestamp,
+                resolution,
+                length,
+                horizon,
+                interval,
+                count: self.count,
+                timestamps: None,
+                features: features_from_plain(&self.features)?,
+                units: self.units,
+                quantity_kind: self.quantity_kind,
+                unit_system,
+                time_reference,
+                component_field: self.component_field,
+                percentiles: self.percentiles,
+                element_type,
+                element_shape,
+                application_data: self.application_data,
+                id: self.association_id.map(TimeSeriesId),
+            },
         })
     }
 }
 
 /// Parse a JSON array of OpenAPI time-series rows and insert them verbatim.
 ///
+/// Every row is checked against the vendored SiennaSchemas contract
+/// ([`schema::check_time_series_row`]) *before* it is decoded, so a document
+/// that drifted is reported in the schema's own terms — which field, on which
+/// row — rather than as whatever `RawTsRow` happens to notice first. The schema
+/// is also the stronger of the two: it knows the `oneOf` over the six types and
+/// the closed enums, where the struct only knows names and Rust types.
+///
 /// Rows only: the values are not on the wire and are never reconstructed here.
 /// See [`Store::import_association_rows`] for the invariants each row is
 /// checked against before anything is written.
 fn import_ts_rows(store: &mut Store, json: &str) -> Result<usize> {
-    let raw: Vec<RawTsRow> = serde_json::from_str(json)?;
-    let rows: Vec<TimeSeriesMetadata> = raw
-        .into_iter()
-        .map(RawTsRow::into_metadata)
-        .collect::<Result<_>>()?;
+    let decoded = decode_rows(json, schema::check_time_series_row, RawTsRow::into_metadata)?;
+    // The one field the document locates rather than carries. Resolved here
+    // because this is the first point that has both the locator and the store,
+    // and setting `timestamps` is what makes the ordinary insert path hash the
+    // axis into `timestamps_hash` — so an imported irregular row is filed
+    // exactly as an added one is.
+    let mut rows = Vec::with_capacity(decoded.len());
+    for DecodedTsRow {
+        mut meta,
+        time_axis,
+    } in decoded
+    {
+        if let Some(axis) = time_axis {
+            meta.timestamps = Some(store.timestamps_for(&axis).map_err(|_| {
+                wire_err(format!(
+                    "row '{}': timestamps_uri names time axis {}, which this store does not \
+                     hold — the axis arrives with the artifact, like the arrays",
+                    meta.name,
+                    crate::hash::hash_hex(&axis),
+                ))
+            })?);
+        }
+        rows.push(meta);
+    }
     store.import_association_rows(rows)
+}
+
+/// Validate each element of a JSON array against `check`, then decode it with
+/// `convert`.
+///
+/// The two halves stay in this order for every table: the schema is the
+/// published contract and the `Raw*` struct is this crate's reading of it, so a
+/// document is judged against the contract first, and the struct never gets to
+/// reject something the contract allows without saying so.
+fn decode_rows<Raw, Out>(
+    json: &str,
+    check: fn(&Value, usize) -> Result<()>,
+    convert: fn(Raw) -> Result<Out>,
+) -> Result<Vec<Out>>
+where
+    Raw: serde::de::DeserializeOwned,
+{
+    let values: Vec<Value> = serde_json::from_str(json)?;
+    let mut out = Vec::with_capacity(values.len());
+    for (index, value) in values.into_iter().enumerate() {
+        check(&value, index)?;
+        out.push(convert(serde_json::from_value(value)?)?);
+    }
+    Ok(out)
 }
 
 // ============================================================================
@@ -666,9 +790,11 @@ impl From<RawSaRow> for SupplementalAttributeAssociation {
 /// [`TimeSeriesError::DuplicateAssociation`] propagates and rolls the whole
 /// batch back). Returns the number of rows inserted.
 fn import_sa_rows(store: &mut Store, json: &str) -> Result<usize> {
-    let rows: Vec<RawSaRow> = serde_json::from_str(json)?;
-    let associations: Vec<SupplementalAttributeAssociation> =
-        rows.into_iter().map(Into::into).collect();
+    let associations: Vec<SupplementalAttributeAssociation> = decode_rows(
+        json,
+        schema::check_supplemental_attribute_row,
+        |raw: RawSaRow| Ok(raw.into()),
+    )?;
     // The public import surface reports a count, not ids: the wire form carries
     // no id, so the ones assigned here are this store's own and mean nothing to
     // the document that was imported.

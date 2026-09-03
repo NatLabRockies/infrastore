@@ -82,10 +82,29 @@ free to name an id could re-file a retired one. The single exception is the rows
 under the `association_id` the document recorded so its references survive: all-or-none across the
 batch, and only above the catalog's high-water mark. It refuses a row whose array is absent, a
 `DeterministicSingleTimeSeries` whose source `SingleTimeSeries` is neither in the document nor
-already stored, and `NonSequentialTimeSeries` outright (its timestamp vector is not on the wire).
-Neither association catalog's wire form carries an id, so both always assign — their row types carry
-an `id` field that a listing populates and an add ignores — with independent counters, and equality
-on both association types deliberately excludes the id.
+already stored, and an irregular row that does not name its time axis. That last one is why
+`NonSequentialTimeSeries.timestamps_uri` exists: the values cannot imply the axis, because arrays
+are content-addressed, so two irregular series with identical values on different axes share one
+stored array and only the catalog's `timestamps_hash` tells them apart. The wire form therefore
+locates the axis, and the import resolves it against the store (the axis ships in the array file,
+like the arrays). Neither association catalog's wire form carries an id, so both always assign —
+their row types carry an `id` field that a listing populates and an add ignores — with independent
+counters, and equality on both association types deliberately excludes the id.
+
+Both imports **validate every incoming row against the vendored SiennaSchemas specs** before
+decoding it (`crates/infrastore-core/src/openapi/schema.rs`, schemas at
+`crates/infrastore-core/sienna_schemas/`, embedded with `include_str!` so there is no filesystem or
+network access — refresh with `scripts/sync_sienna_schemas.sh`). A time-series row is checked
+against the per-type schema its own `time_series_type` selects, not the `oneOf` wrapper, so an error
+names the offending field instead of only reporting that nothing matched.
+
+Together with **`Store::open_without_catalog`** — which opens the array half of an artifact whose
+`.sqlite` is absent, minting an empty catalog stamped to match the arrays — these make an artifact
+readable back from **arrays plus a document alone**, which is what a consumer shipping its own JSON
+(PowerSystems' `system.json` + `time_series.h5`) wants — all six time-series types included. It
+refuses (`StoreExists`) a catalog that is already there. Exposed across the C ABI, Julia
+(`open_store_without_catalog`), and Python (`Store.open_without_catalog`); see
+`crates/infrastore-core/tests/json_only_restore.rs`.
 
 Metadata getters surface `element_shape` and `features` in every binding. Alongside `units`, a
 series carries two further unit descriptors in every binding: `quantity_kind` (free-form, QUDT

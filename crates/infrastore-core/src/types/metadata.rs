@@ -315,6 +315,11 @@ pub const RESERVED_FEATURE_NAMES: &[&str] = &[
     "time_reference",
     "time_series_type",
     "timestamps",
+    // The wire form's locator for a `NonSequentialTimeSeries`' time axis, and
+    // reserved for exactly the same reason as `uri` below: it names no column,
+    // but a feature carrying this name would be accepted on write and then make
+    // the exported document fail the schema's propertyNames rule.
+    "timestamps_uri",
     "unit_system",
     "units",
     // Names no column and no struct field: it is the wire form's locator for

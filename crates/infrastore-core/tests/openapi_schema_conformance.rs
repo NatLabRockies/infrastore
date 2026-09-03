@@ -1,6 +1,6 @@
 //! Validates the checked-in OpenAPI row fixtures
 //! (`conformance/openapi_row_fixtures/`) against the vendored SiennaSchemas
-//! wire-format specs (`conformance/sienna_schemas/`).
+//! wire-format specs (`crates/infrastore-core/sienna_schemas/`).
 //!
 //! Each time-series fixture is checked against its own per-type schema AND
 //! against `TimeSeries/TimeSeriesAssociation.json`'s `oneOf` wrapper; the
@@ -8,7 +8,7 @@
 //! `Core/Associations/SupplementalAttributeAssociation.json`. A failure here
 //! means either a fixture drifted from the wire contract or the vendored
 //! schemas are stale — refresh with `scripts/sync_sienna_schemas.sh` and see
-//! `conformance/sienna_schemas/SOURCE.md`.
+//! `crates/infrastore-core/sienna_schemas/SOURCE.md`.
 //!
 //! The schemas are draft-07 and their `$ref`s are relative filesystem paths
 //! (`common.json#/definitions/...`, `../Core/common.json#/definitions/...`),
@@ -38,7 +38,7 @@ fn repo_root() -> PathBuf {
 }
 
 fn schemas_dir() -> PathBuf {
-    repo_root().join("conformance/sienna_schemas")
+    repo_root().join("crates/infrastore-core/sienna_schemas")
 }
 
 fn fixtures_dir() -> PathBuf {
@@ -107,7 +107,7 @@ fn read_json(path: &Path) -> Value {
 fn compile(path: &Path) -> Validator {
     let schema = read_json(path);
     jsonschema::options()
-        .with_draft(Draft::Draft7)
+        .with_draft(Draft::Draft202012)
         .with_retriever(VendoredRetriever)
         .with_base_uri(base_uri_for(path))
         .build(&schema)
@@ -213,7 +213,7 @@ fn supplemental_attribute_association_fixture_conforms() {
 fn the_reserved_feature_names_match_the_vendored_schema() {
     let common = read_json(&schemas_dir().join("TimeSeries").join("common.json"));
     let schema_names: Vec<&str> =
-        common["definitions"]["TimeSeriesFeatures"]["propertyNames"]["not"]["enum"]
+        common["$defs"]["TimeSeriesFeatures"]["propertyNames"]["not"]["enum"]
             .as_array()
             .expect("TimeSeriesFeatures.propertyNames.not.enum is an array")
             .iter()

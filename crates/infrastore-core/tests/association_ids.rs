@@ -1483,9 +1483,14 @@ fn an_import_refuses_a_document_that_mixes_supplied_and_missing_ids() {
     let err = target
         .import_time_series_associations_openapi(&mixed)
         .unwrap_err();
+    // The schema gets there first: `association_id` is required on all six
+    // types, so a row without one is not a contract-conforming row at all. The
+    // all-or-none rule inside `import_association_rows` still guards the direct
+    // Rust API, which takes catalog rows rather than a document.
     match err {
         TimeSeriesError::InvalidParameter(msg) => {
-            assert!(msg.contains("1 of 2 rows"), "{msg}");
+            assert!(msg.contains("row 1"), "{msg}");
+            assert!(msg.contains("association_id"), "{msg}");
         }
         other => panic!("expected InvalidParameter, got {other:?}"),
     }
@@ -1677,8 +1682,16 @@ fn an_import_refuses_a_row_whose_array_is_absent() {
 /// content-addressed in the catalog and deliberately absent from the wire form,
 /// so no document holds enough to rebuild the row. Refused with a message that
 /// says so, rather than written with the wrong time axis.
+/// An irregular row takes part in the id round trip like any other type. It used
+/// to be refused outright, because its time axis was not on the wire; the axis is
+/// now located by `timestamps_uri`, so the only thing standing between this
+/// document and this store is that the store has already issued the id.
+///
+/// The locator's own contract — required, and required to resolve — is pinned in
+/// `json_only_restore.rs`, which is where a document meets a store that has *not*
+/// issued its ids.
 #[test]
-fn an_import_refuses_an_irregular_row() {
+fn an_irregular_row_carries_its_axis_and_its_id() {
     let mut store = create_store(None, true).unwrap();
     let timestamps = vec![
         Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
@@ -1690,7 +1703,7 @@ fn an_import_refuses_an_irregular_row() {
         "events",
     )
     .unwrap();
-    store
+    let id = store
         .add(AddRequest::new(
             1,
             "Generator",
@@ -1702,15 +1715,24 @@ fn an_import_refuses_an_irregular_row() {
         .export_time_series_associations_openapi(&ListFilter::default())
         .unwrap();
 
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["association_id"].as_i64(), Some(id.get()));
+    assert!(
+        rows[0]["timestamps_uri"].is_string(),
+        "an irregular row locates its time axis: {}",
+        rows[0]
+    );
+
+    // Replaying it into the store that issued the id is an id collision, not a
+    // type refusal.
     let err = store
         .import_time_series_associations_openapi(&json)
         .unwrap_err();
-    match err {
-        TimeSeriesError::InvalidParameter(msg) => {
-            assert!(msg.contains("timestamps_hash"), "{msg}");
-        }
-        other => panic!("expected InvalidParameter, got {other:?}"),
-    }
+    assert!(
+        matches!(err, TimeSeriesError::DuplicateAssociationId(taken) if taken == id.get()),
+        "expected the id to be taken, got {err:?}",
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -45,6 +45,7 @@ pub fn create_store_replacing(
 ) -> Result<Store>
 pub fn open_store(path: &Path, read_only: bool) -> Result<Store>
 pub fn open_store_copy(src: &Path, dest: &Path, catalog: CatalogMode) -> Result<Store>
+pub fn open_store_without_catalog(path: &Path, catalog: CatalogMode) -> Result<Store>
 ```
 
 - `create_store(None, true)` — in-memory store, no filesystem I/O.
@@ -60,9 +61,13 @@ pub fn open_store_copy(src: &Path, dest: &Path, catalog: CatalogMode) -> Result<
 - `open_store_copy(src, dest, catalog)` — copies both halves to `dest` and opens the copy
   read-write, leaving `src` untouched. The safe way to load a store you intend to change: mutating
   an artifact in place is unrecoverable if interrupted, since HDF5 has no journal.
+- `open_store_without_catalog(path, catalog)` — opens the array half of an artifact whose catalog is
+  **absent** and mints an empty one, returning a writable store that holds every array and no rows.
+  The way in to a store shipped as arrays plus an OpenAPI document; see
+  [restoring a catalog from a document](#restoring-a-catalog-from-a-document).
 
 `Store::create` / `Store::create_with_compression` / `Store::create_replacing` / `Store::open` /
-`Store::open_copy` are the inherent-method equivalents.
+`Store::open_copy` / `Store::open_without_catalog` are the inherent-method equivalents.
 
 ```rust
 pub enum Compression {
@@ -709,6 +714,57 @@ target.add_parent_child_associations(exported)?;
 
 Neither association catalog is exposed over the [gRPC server](./grpc-api.md) or the
 [`infrastore` CLI](./cli.md).
+
+### Restoring a catalog from a document
+
+An artifact is two files, but a consumer that already carries the association rows in JSON of its
+own — PowerSystems ships a `system.json` beside a `time_series.h5` — has no reason to move the
+`.sqlite` half around as well. The arrays are the half that cannot be reconstructed; the catalog can
+be replayed.
+
+```rust
+use infrastore_core::{CatalogMode, ListFilter, Store};
+
+// Writing side: the arrays are already in `bundle.h5`; take the rows as JSON.
+let store = Store::open(path, true)?;
+let ts_rows = store.export_time_series_associations_openapi(&ListFilter::new())?;
+let sa_rows = store.export_supplemental_attribute_associations_openapi()?;
+
+// Reading side: `bundle.h5` arrived with no `bundle.h5.sqlite` beside it.
+let mut restored = Store::open_without_catalog(path, CatalogMode::Attached)?;
+restored.import_time_series_associations_openapi(&ts_rows)?;
+restored.import_supplemental_attribute_associations_openapi(&sa_rows)?;
+```
+
+`Store::open` cannot open that bundle: the array file carries a generation stamp and a catalog
+created on the spot does not, so it reports `MismatchedArtifact` — the right answer everywhere
+except here. `open_without_catalog` mints a catalog carrying the array file's _own_ stamp, so the
+rebuilt pair opens normally ever after. It refuses (`StoreExists`) when a catalog is already there;
+delete it first to rebuild deliberately.
+
+Every row keeps the `association_id` the document recorded, which is the point — an import that
+assigned fresh ids would leave every reference in the document pointing at the wrong series.
+
+**What each row must name.** The array it resolves to, under the geometry that array actually has —
+a document carries locators, never values. And, for a `NonSequentialTimeSeries`, its time axis, as
+`timestamps_uri`. That one is a locator for the same reason the array is: the axis is stored beside
+the arrays and shared across a cohort. It cannot be left out and inferred, because arrays are
+content-addressed — two irregular series with byte-identical values on _different_ axes share one
+stored array, and only the catalog's `timestamps_hash` tells them apart, so an import that guessed
+would hand back another series' timestamps.
+
+Incoming rows are validated against the vendored [SiennaSchemas](#the-wire-contract) specs before
+anything is decoded, so a document that drifted is refused in the schema's own terms.
+
+### The wire contract
+
+The JSON spelling both directions use is SiennaSchemas' own, vendored at
+`crates/infrastore-core/sienna_schemas/` (its `SOURCE.md` records the upstream commit; refresh with
+`scripts/sync_sienna_schemas.sh`). Those files are compiled into the crate and are what the import
+path validates against — no filesystem access, no network. A time-series row is checked against the
+per-type schema its own `time_series_type` selects, which is how the wrapper's `discriminator` says
+to read it and what makes an error name the offending field rather than only reporting that a
+`oneOf` matched nothing.
 
 ## Types
 

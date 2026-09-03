@@ -314,6 +314,10 @@ class Store:
     def open_copy(
         cls, src: str, dest: str, *, catalog: str = "attached"
     ) -> Store: ...
+    @classmethod
+    def open_without_catalog(
+        cls, path: str, *, catalog: str = "attached"
+    ) -> Store: ...
     @property
     def read_only(self) -> bool: ...
     @property

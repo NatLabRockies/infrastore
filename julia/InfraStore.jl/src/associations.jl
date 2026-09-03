@@ -874,6 +874,34 @@ function persist!(store::Store, path::AbstractString)
 end
 
 """
+    persist_arrays!(store, path)
+
+Persist only the **array half** to `path`, leaving no catalog beside it.
+
+The mirror of [`persist_catalog!`](@ref), and the write-side counterpart of
+[`open_store_without_catalog`](@ref): together they let a consumer ship an
+artifact as arrays plus a document of its own, carrying the catalog's rows in
+that document rather than in a `.sqlite` nobody reads. The arrays written are
+the live set the catalog references, not everything the backend holds.
+
+Atomic, unlike [`persist!`](@ref) — one file, one rename. The file still carries
+a fresh generation stamp, which `open_store_without_catalog` copies onto the
+catalog it mints, so the rebuilt pair agrees.
+
+Throws [`StoreExistsError`](@ref) when a `\$path.sqlite` is already beside the
+destination: it is paired with the file this would replace, so publishing new
+arrays under it would leave its rows dangling.
+"""
+function persist_arrays!(store::Store, path::AbstractString)
+    _check(
+        @ccall lib_path().infrastore_store_persist_arrays(
+            store::Ptr{Cvoid}, path::Cstring
+        )::Int32
+    )
+    return nothing
+end
+
+"""
     persist_catalog!(store)
 
 Write an in-memory catalog to the store's own `\$path.sqlite`, pairing it with

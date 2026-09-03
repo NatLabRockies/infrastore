@@ -137,3 +137,12 @@ pub fn open_store_with_catalog(
 ) -> Result<Store> {
     Store::open_with_catalog(path, read_only, catalog)
 }
+
+/// Open the array half of an artifact whose catalog is absent, minting an empty
+/// one, so a document's association rows can be replayed into it.
+///
+/// The way in to a store shipped as arrays plus JSON. See
+/// [`Store::open_without_catalog`].
+pub fn open_store_without_catalog(path: &std::path::Path, catalog: CatalogMode) -> Result<Store> {
+    Store::open_without_catalog(path, catalog)
+}
