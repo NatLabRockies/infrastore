@@ -1374,6 +1374,14 @@ impl Store {
     /// [`TimeSeriesError::InvalidParameter`] if no transaction is open.
     pub fn commit_transaction(&mut self) -> Result<()> {
         let depth = self.txn_depth()? - 1;
+        if depth == 0 {
+            // The outermost release is the durable commit; see
+            // `flush_arrays_before_commit`, which deferred to here. Flushed
+            // before the pending frees are taken out of the transaction below,
+            // so a flush failure leaves the bookkeeping intact for a retry or a
+            // rollback rather than dropping candidates that were never freed.
+            self.backend.flush()?;
+        }
         // Decide what to free *before* releasing, while the transaction's view of
         // the catalog is still the one the commit is about to make permanent.
         let (to_free, axes_to_free) = if depth == 0 {
@@ -1394,11 +1402,6 @@ impl Store {
         } else {
             (Vec::new(), Vec::new())
         };
-        if depth == 0 {
-            // The outermost release is the durable commit; see
-            // `flush_arrays_before_commit`, which deferred to here.
-            self.backend.flush()?;
-        }
         self.metadata
             .execute_txn_stmt(&format!("RELEASE {};", Self::txn_savepoint(depth)))?;
         if depth > 0 {
@@ -2921,10 +2924,14 @@ impl Store {
         let backend = &*self.backend;
         for slot in reader.slots_mut() {
             // A read served from the cached block does no I/O, so it cannot
-            // notice that the forecast was removed since the block was read;
-            // it would hand back a deleted array as `Ok` where the static
+            // notice that the forecast's array was removed since the block was
+            // read; it would hand back a deleted array as `Ok` where the static
             // reader, and this reader on a block boundary, say `NotFound`. An
-            // index probe is what the read skipped, so ask that much.
+            // index probe is what the read skipped, so ask that much. Both
+            // readers are content-addressed by design: a removed *row* whose
+            // array another row still holds keeps reading on every path, cached
+            // or not, static or forecast -- a reader does not re-validate its
+            // entries against the catalog per timestep.
             if slot.serves_from_cache(window) && !backend.contains(slot.hash())? {
                 slot.forget();
                 return Err(TimeSeriesError::NotFound);
@@ -5421,12 +5428,20 @@ fn validate_array_geometry(array: &TypedArray, ts_type: TimeSeriesType) -> Resul
     array
         .check_bytes()
         .map_err(|e| TimeSeriesError::InvalidParameter(format!("{}: {e}", ts_type.as_str())))?;
-    if array.element_shape().contains(&0) {
+    // Only the per-step element dims: the layout axes in front (time; for a
+    // forecast also horizon and count, then a percentile or scenario axis)
+    // may be empty -- an empty series and a zero-window forecast are stored
+    // facts. A shape too short to hold the layout, including the rank-0
+    // scalar that `length()` would read as an empty series, is refused by
+    // [`ElementType::validate_array`] before this runs.
+    let element_dims = array.shape.get(ts_type.leading_dims()..).unwrap_or(&[]);
+    if element_dims.contains(&0) {
         return Err(TimeSeriesError::InvalidParameter(format!(
             "{}: array shape {:?} has a zero-width element dimension; every dimension after \
-             the time axis must be at least 1",
+             the {} layout axes must be at least 1",
             ts_type.as_str(),
-            array.shape
+            array.shape,
+            ts_type.leading_dims()
         )));
     }
     Ok(())

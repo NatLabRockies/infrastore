@@ -343,7 +343,7 @@ pub fn get(
         }
         _ => {
             let grid = ForecastGrid::of(&data)?;
-            let window = resolve_window(&grid, opts)?;
+            let window = resolve_window(&grid, &ForecastGrid::stored(&meta)?, opts)?;
             render_forecast(&meta, &data, &grid, format, opts.rows, window)
         }
     }
@@ -392,6 +392,29 @@ impl ForecastGrid {
         })
     }
 
+    /// The grid the catalog row records: the whole stored forecast, where
+    /// [`Self::of`] is the (possibly sliced) data a read returned.
+    pub fn stored(meta: &TimeSeriesMetadata) -> Result<Self, String> {
+        Ok(Self {
+            initial_timestamp: meta
+                .initial_timestamp
+                .ok_or("forecast metadata is missing initial_timestamp")?,
+            resolution: meta
+                .resolution
+                .ok_or("forecast metadata is missing resolution")?,
+            interval: meta
+                .interval
+                .ok_or("forecast metadata is missing interval")?,
+            count: meta.count.ok_or("forecast metadata is missing count")?,
+        })
+    }
+
+    /// The window issued exactly at `at`, if this grid has one.
+    fn window_at(&self, at: DateTime<Utc>) -> Option<usize> {
+        (0..self.count)
+            .find(|&c| self.interval.add_to(self.initial_timestamp, c as i64) == Some(at))
+    }
+
     /// The issue time of window `c`.
     fn issue_time(&self, c: usize) -> Result<DateTime<Utc>, String> {
         self.interval
@@ -422,23 +445,33 @@ fn reject_forecast_flags(opts: &GetOptions<'_>, meta: &TimeSeriesMetadata) -> Re
 /// `--issue-time` is resolved against `initial_timestamp` and `interval` rather
 /// than searched for: a timestamp that is not exactly a window boundary is a
 /// mistake worth reporting, not one to round away.
-fn resolve_window(grid: &ForecastGrid, opts: &GetOptions<'_>) -> Result<Option<usize>, String> {
+fn resolve_window(
+    grid: &ForecastGrid,
+    stored: &ForecastGrid,
+    opts: &GetOptions<'_>,
+) -> Result<Option<usize>, String> {
     let count = grid.count;
+    // Under `--time-range`, `grid` is the selection and `stored` the whole
+    // forecast. A miss is reported as "outside the selection" only when the
+    // stored forecast has that window; a window it never had is nonexistent
+    // under either grid, and saying otherwise would contradict the exact
+    // boundary rule.
     let sliced = opts.time_range.is_some();
     match (opts.window, opts.issue_time) {
         (Some(_), Some(_)) => Err("--window and --issue-time both name a window; use one".into()),
         (Some(w), None) => {
             if w >= count {
                 let last = count.saturating_sub(1);
-                return Err(if sliced {
+                return Err(if sliced && w < stored.count {
                     format!(
                         "--window {w} is outside the selected --time-range, which holds \
                          {count} windows (0..{last})"
                     )
                 } else {
                     format!(
-                        "--window {w} is out of range: this forecast has {count} windows \
-                         (0..{last})"
+                        "--window {w} is out of range: this forecast has {} windows (0..{})",
+                        stored.count,
+                        stored.count.saturating_sub(1)
                     )
                 });
             }
@@ -446,15 +479,12 @@ fn resolve_window(grid: &ForecastGrid, opts: &GetOptions<'_>) -> Result<Option<u
         }
         (None, Some(spec)) => {
             let wanted = parse::parse_timestamp(spec)?;
-            for c in 0..count {
-                match grid.interval.add_to(grid.initial_timestamp, c as i64) {
-                    Some(t) if t == wanted => return Ok(Some(c)),
-                    _ => continue,
-                }
+            if let Some(c) = grid.window_at(wanted) {
+                return Ok(Some(c));
             }
             let initial = grid.initial_timestamp.to_rfc3339();
             let interval = grid.interval.to_iso8601();
-            Err(if sliced {
+            Err(if sliced && stored.window_at(wanted).is_some() {
                 format!(
                     "the window issued at {} is outside the selected --time-range, which holds \
                      {count} windows starting at {initial} every {interval}",
@@ -462,9 +492,12 @@ fn resolve_window(grid: &ForecastGrid, opts: &GetOptions<'_>) -> Result<Option<u
                 )
             } else {
                 format!(
-                    "no window is issued at {}; this forecast has {count} windows starting at \
-                     {initial} every {interval}",
-                    wanted.to_rfc3339()
+                    "no window is issued at {}; this forecast has {} windows starting at {} \
+                     every {}",
+                    wanted.to_rfc3339(),
+                    stored.count,
+                    stored.initial_timestamp.to_rfc3339(),
+                    stored.interval.to_iso8601()
                 )
             })
         }

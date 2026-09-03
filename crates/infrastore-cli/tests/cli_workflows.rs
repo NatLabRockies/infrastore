@@ -1041,6 +1041,37 @@ fn a_window_under_a_time_range_is_indexed_within_the_selected_windows() {
     );
     assert!(err.contains("outside the selected --time-range"), "{err}");
 
+    // A time no window is issued at is nonexistent under either grid, and an
+    // index past the stored forecast likewise: neither is "outside the
+    // selection", which would promise a window the forecast never had.
+    let err = run_err(
+        &store,
+        &[
+            "get",
+            "--name",
+            "load_det",
+            "--time-range",
+            WINDOWS_FIVE_AND_SIX,
+            "--issue-time",
+            "2024-01-01T05:30:00Z",
+        ],
+    );
+    assert!(err.contains("no window is issued at"), "{err}");
+    assert!(!err.contains("outside"), "{err}");
+    let err = run_err(
+        &store,
+        &[
+            "get",
+            "--name",
+            "load_det",
+            "--time-range",
+            WINDOWS_FIVE_AND_SIX,
+            "--window",
+            "30",
+        ],
+    );
+    assert!(err.contains("this forecast has 24 windows"), "{err}");
+
     // Without a range the whole forecast is addressable, and the old wording
     // still names a window the forecast lacks.
     let err = run_err(&store, &["get", "--name", "load_det", "--window", "24"]);

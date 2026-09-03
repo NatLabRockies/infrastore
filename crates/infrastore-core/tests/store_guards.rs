@@ -155,6 +155,40 @@ fn a_zero_width_element_dimension_is_refused_but_an_empty_time_axis_is_not() {
         assert!(is_invalid(&err), "{backend}: {err}");
         assert!(err.to_string().contains("zero-width"), "{backend}: {err}");
 
+        // A rank-0 array is one scalar with no time axis: `length()` reads it
+        // as empty, so the packed path would write nothing and hash the scalar.
+        // The element-type validator refuses it for lacking the time axis.
+        let scalar = TypedArray {
+            dtype: Dtype::F64,
+            shape: Vec::new(),
+            bytes: 1.0f64.to_le_bytes().to_vec(),
+        };
+        let err = add(
+            store,
+            1,
+            TimeSeriesData::SingleTimeSeries(sts("scalar", scalar)),
+        )
+        .unwrap_err();
+        assert!(is_invalid(&err), "{backend}: {err}");
+        assert!(err.to_string().contains("leading dims"), "{backend}: {err}");
+
+        // A zero-window forecast is a stored fact too: the count axis is a
+        // layout axis, not an element dimension.
+        let none = Deterministic::new(
+            t0(),
+            Duration::hours(1),
+            Duration::hours(2),
+            Duration::hours(1),
+            0,
+            TypedArray::from_f64(vec![2, 0], &[]),
+            "none",
+        )
+        .unwrap();
+        let id = add(store, 3, TimeSeriesData::Deterministic(none))
+            .unwrap_or_else(|e| panic!("{backend}: zero-window forecast: {e}"));
+        let back = store.read_by_id(id, ReadWindow::full()).unwrap();
+        assert_eq!(back.as_deterministic().unwrap().count, 0, "{backend}");
+
         // A series with no steps is a stored fact, not a malformed one.
         let empty = TypedArray::from_f64(vec![0], &[]);
         let id = add(
