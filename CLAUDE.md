@@ -62,11 +62,15 @@ takes ids: `read_by_id(id, ReadWindow)` is the single-id read _and_ the sliced o
 of `start`/`len`/`count` resolved against the row the primary-key lookup already returned, checked
 rather than clamped, so a keyed read costs one call); `read_by_ids(ids, ReadWindow)` is its bulk
 form and `read_by_ids_range(ids, TimeRange)` the bounds form that clips instead of checking (what an
-export wants, since it knows the bounds and not the step count); `remove_by_ids` / `remove_by_ids!`
-is all-or-nothing; `rename_time_series(id, name)` and `copy_time_series(id, …)` take one. Writes
-return ids and nothing else — `TimeSeriesId` / `Vec<TimeSeriesId>` in the Rust core, `int` in Python
-and Julia, an `out_id` across the C ABI — and a caller wanting the rest of the row asks
-`get_metadata_by_id`. Removals are not on the read-only gRPC server.
+export wants, since it knows the bounds and not the step count) — with two type-specific rules: a
+`SingleTimeSeries` `start` inside a step is floored onto the grid, because a value covers its step,
+while a `NonSequentialTimeSeries` selects only timestamps at or after `start`; and a forecast's
+`start` must be a window boundary at or before the last window, since there is no partial window to
+return, so only its `end` clips; `remove_by_ids` / `remove_by_ids!` is all-or-nothing;
+`rename_time_series(id, name)` and `copy_time_series(id, …)` take one. Writes return ids and nothing
+else — `TimeSeriesId` / `Vec<TimeSeriesId>` in the Rust core, `int` in Python and Julia, an `out_id`
+across the C ABI — and a caller wanting the rest of the row asks `get_metadata_by_id`. Removals are
+not on the read-only gRPC server.
 
 The id crosses the gRPC wire and the OpenAPI one — where the schema spells it `association_id`, a
 rename `openapi.rs` applies the same way it maps `unit_system` between the store's snake_case and

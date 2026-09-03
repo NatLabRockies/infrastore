@@ -176,21 +176,36 @@ fn expected_bytes(dtype: Dtype, shape: &[usize]) -> Result<usize, String> {
 impl TypedArray {
     /// Construct, validating that `bytes` matches `dtype` and `shape`.
     pub fn new(dtype: Dtype, shape: Vec<usize>, bytes: Vec<u8>) -> Result<Self, String> {
-        let expected = expected_bytes(dtype, &shape)?;
-        if bytes.len() != expected {
-            return Err(format!(
-                "TypedArray: {} bytes does not match shape {:?} dtype {} ({} expected)",
-                bytes.len(),
-                shape,
-                dtype.as_str(),
-                expected
-            ));
-        }
-        Ok(Self {
+        let array = Self {
             dtype,
             shape,
             bytes,
-        })
+        };
+        array.check_bytes()?;
+        Ok(array)
+    }
+
+    /// Check that `bytes` holds exactly the elements `shape` and `dtype`
+    /// describe.
+    ///
+    /// [`Self::new`] runs this once, but the fields are `pub` and the type
+    /// derives `Deserialize`, so an array can reach a consumer having met
+    /// nothing. The store re-runs it at its write boundary: every backend
+    /// indexes the buffer by a stride derived from the *shape*, so a buffer
+    /// that disagrees with it is either truncated silently (and then hashed
+    /// whole, so the row misdescribes its bytes) or indexed past its end.
+    pub fn check_bytes(&self) -> Result<(), String> {
+        let expected = expected_bytes(self.dtype, &self.shape)?;
+        if self.bytes.len() != expected {
+            return Err(format!(
+                "TypedArray: {} bytes does not match shape {:?} dtype {} ({} expected)",
+                self.bytes.len(),
+                self.shape,
+                self.dtype.as_str(),
+                expected
+            ));
+        }
+        Ok(())
     }
 
     /// Number of time steps (`shape[0]`).

@@ -832,7 +832,9 @@ build_static_reader(store; resolution::Union{Nothing,Period}=nothing,
 static_grid(reader)       -> StaticGrid  # .initial_timestamp, .resolution (or nothing), .length
 static_timestamps(reader) -> Vector{DateTime}  # every instant on the timeline, in order
 static_groups(reader)     -> Vector{StaticGroup}  # each: .dtype, .element_shape, .keys
-static_read!(reader, t::DateTime) -> reader  # fills buffers; errors if t is off the timeline
+static_read!(reader, t) -> reader  # fills buffers; errors if t is off the timeline
+       # t is spelled like the axis: a bare DateTime (a wall clock) for a zoneless one,
+       # a ZonedDateTime (TimeZones loaded) for one recording instants or unspecified
 static_values(reader, group_index::Integer) -> Array
        # (num_columns, element_dims...); column j is static_groups(reader)[group_index].keys[j]
 ```
@@ -879,7 +881,8 @@ forecast_timeline(reader)  -> ForecastTimeline
        # (initial_timestamp::DateTime, resolution::Period, interval::Period, count::Int)
 forecast_entries(reader)   -> Vector{ForecastEntry}  # each: .dtype, .window_shape, .key, .slot
 forecast_num_slots(reader) -> Int                    # physical reads per timestamp (see below)
-forecast_read!(reader, t::DateTime) -> reader        # fills buffers; errors if t is off the timeline
+forecast_read!(reader, t) -> reader                  # fills buffers; errors if t is off the timeline
+       # t is spelled like the axis, as for static_read!: DateTime only for a zoneless one
 forecast_values(reader, entry_index::Integer) -> Array  # window of size .window_shape
 ```
 

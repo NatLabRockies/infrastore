@@ -77,6 +77,31 @@ end
     @test_throws InfraStore.InvalidParameterError static_read!(
         reader, DateTime(2024, 1, 1, 9)
     )
+
+    # An axis that recorded no spelling (`time_reference=nothing`, the shape a
+    # legacy row arrives in) groups with the zoned ones, as in the core: a
+    # ZonedDateTime reads it, and a bare DateTime is refused -- the same verdict
+    # `read_by_id(...; start_time=)` reaches through the core on that series.
+    ukey = add_time_series!(
+        store, 4, "Generator", Component,
+        SingleTimeSeries(
+            DateTime(2024, 1, 1, 7), Hour(1), collect(20.0:23.0), "load";
+            time_reference=nothing,
+        ),
+    )
+    ureader = build_static_reader(store; resolution=Hour(1), owner_id=4)
+    @test static_grid(ureader).time_reference === nothing
+    static_read!(ureader, ZonedDateTime(DateTime(2024, 1, 1, 2), denver))  # = 09:00Z
+    @test static_values(ureader, 1)[1] == 22.0
+    @test_throws InfraStore.InvalidParameterError static_read!(
+        ureader, DateTime(2024, 1, 1, 9)
+    )
+    @test_throws InfraStore.InvalidParameterError read_by_id(
+        store, ukey; start_time=DateTime(2024, 1, 1, 9), len=1
+    )
+    @test read_by_id(
+        store, ukey; start_time=ZonedDateTime(DateTime(2024, 1, 1, 2), denver), len=1
+    ).data == [22.0]
 end
 
 @testset "an irregular vector is ordered by instant, not by wall clock" begin

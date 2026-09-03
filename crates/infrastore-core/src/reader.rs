@@ -191,6 +191,11 @@ impl StaticGroup {
         F: FnOnce(&[[u8; 32]], Dtype, &mut Vec<u8>) -> Result<()>,
     {
         let dtype = self.element_type.physical_dtype();
+        // Cleared before the read, not after: the backend clears and refills the
+        // buffer per placement, so a failure part-way leaves it holding fewer
+        // columns than `ids()`. A caller that ignores the error must see an
+        // empty buffer, not a partial one that still claims to be a row.
+        self.filled = false;
         read(&self.hashes, dtype, &mut self.buf)?;
         self.filled = true;
         Ok(())
@@ -655,6 +660,34 @@ pub struct WindowSlot {
 }
 
 impl WindowSlot {
+    /// The array this slot reads.
+    pub(crate) fn hash(&self) -> &[u8; 32] {
+        &self.hash
+    }
+
+    /// Whether a read of `window` would be answered from the cached block
+    /// without touching the backend -- the case a caller has to probe for
+    /// itself, because a removal since the block was read is invisible to a
+    /// read that does no I/O.
+    pub(crate) fn serves_from_cache(&self, window: usize) -> bool {
+        match self.read {
+            WindowRead::Dense { .. } => {
+                let cols = self.block_cols.max(1);
+                let start = (window / cols) * cols;
+                let end = (start + cols).min(self.count);
+                self.cached.as_ref() == Some(&(start..end))
+            }
+            WindowRead::Derived { .. } => false,
+        }
+    }
+
+    /// Drop the cached block and the last window: the array is gone, so
+    /// neither describes anything the store still holds.
+    pub(crate) fn forget(&mut self) {
+        self.cached = None;
+        self.filled = false;
+    }
+
     /// Physical dtype of the window bytes, derived from [`Self::element_type`].
     pub fn dtype(&self) -> Dtype {
         self.element_type.physical_dtype()
@@ -714,6 +747,10 @@ impl WindowSlot {
         // The slot's element type comes from the catalog; the backend is told
         // the dtype rather than inferring one from what it stored.
         let dtype = self.element_type.physical_dtype();
+        // Cleared before the read: the derived path fails before it touches the
+        // buffer, so without this a failed read left `window()` serving the
+        // previous window as if it were the one asked for.
+        self.filled = false;
         match self.read {
             WindowRead::Dense { count_axis } => {
                 let cols = self.block_cols.max(1);

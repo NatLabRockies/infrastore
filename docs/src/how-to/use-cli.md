@@ -377,6 +377,10 @@ a single window instead of dumping all of them:
 infrastore --store demo.h5 get --name load --type deterministic_single --window 0
 ```
 
+Combined with `--time-range`, both address the windows the range _selected_: `--window 0` is the
+first selected window, and `--issue-time` must name one of them — a window the forecast has but the
+range dropped is reported as outside the selected range, not as missing.
+
 ## 9. Compare and Move Stores
 
 ```sh

@@ -770,9 +770,10 @@ def test_compact(tmp_path):
     leaves the surviving series readable."""
     path = tmp_path / "compact.h5"
     store = Store.create(path=str(path), in_memory=False)
-    keep_values = np.arange(4, dtype=np.float64)
-    keep = _add(store, 1, _sts("keep", keep_values))
-    # Big enough that dropping it moves the file size past HDF5 metadata noise.
+    # Big enough that dropping it moves the file size past HDF5 metadata noise,
+    # and written *before* the survivor so its space is interior to the file:
+    # HDF5 truncates a freed tail on flush, and the point here is the space
+    # only a rewrite returns.
     H, C = 48, 400
     bulk = np.arange(H * C, dtype=np.float64).reshape(H, C)
     drop = _add(
@@ -782,6 +783,8 @@ def test_compact(tmp_path):
             T0, RES_1H, timedelta(hours=H), timedelta(hours=1), C, bulk, "drop"
         ),
     )
+    keep_values = np.arange(4, dtype=np.float64)
+    keep = _add(store, 1, _sts("keep", keep_values))
     store.flush()
 
     store.remove_by_ids([drop])

@@ -301,7 +301,11 @@ static_groups(reader::StaticReader) = reader.groups
 Read the value of every series at `t`, filling the reader's buffers. Throws if
 `t` is off the reader's timeline. Follow with [`static_values`] per group.
 
-`t` is a `DateTime` (read as UTC) or, with TimeZones loaded, a `ZonedDateTime`.
+`t` must be spelled the way the reader's axis was written: a bare `DateTime` is a
+wall clock (zoneless) and reads a zoneless axis; an axis that records instants
+(`utc`, an offset, a zone name, or one whose `time_reference` is unspecified)
+needs a `ZonedDateTime`, with TimeZones loaded. A mismatch throws
+`InvalidParameterError`, as it does on a ranged read.
 """
 # Refuse a point read whose spelling the reader's axis cannot answer.
 #
@@ -311,17 +315,26 @@ Read the value of every series at `t`, filling the reader's buffers. Throws if
 # `DateTime` (a wall clock) could read an instant-bearing axis, and a
 # `ZonedDateTime` a zoneless one, each reinterpreted as UTC and returning a
 # *row* rather than the error the same mismatch earns on a range.
+#
+# An *unset* reference groups with the zoned variants, as it does in the core
+# (`TimeReference::accepts_zoned_bound`): an unspecified spelling is not a
+# floating third case that answers either, so a bare `DateTime` is refused
+# against it exactly as `read_by_id(...; start_time=)` refuses one.
 function _check_point_spelling(axis::Union{Nothing, TimeReference}, t, what::AbstractString)
-    axis === nothing && return nothing
     bound_zoneless = is_zoneless(_time_reference_of(t))
-    axis_zoneless = is_zoneless(axis)
+    axis_zoneless = is_zoneless(axis)  # `is_zoneless(nothing)` is false
     bound_zoneless == axis_zoneless && return nothing
     if bound_zoneless
+        spelled = if axis === nothing
+            "time_reference unspecified"
+        else
+            "time_reference \"$(_time_reference_str(axis))\""
+        end
         throw(
             InvalidParameterError(
                 "the read timestamp carries no zone, but $what records instants " *
-                "(time_reference \"$(_time_reference_str(axis))\"); a wall clock does not " *
-                "name one, and the store will not guess a zone for it",
+                "($spelled); a wall clock does not name one, and the store will not " *
+                "guess a zone for it",
             ),
         )
     end
@@ -608,7 +621,11 @@ end
 Read the forecast window at `t` for every entry, filling the reader's buffers.
 Throws if `t` is off the window timeline. Follow with [`forecast_values`].
 
-`t` is a `DateTime` (read as UTC) or, with TimeZones loaded, a `ZonedDateTime`.
+`t` must be spelled the way the reader's axis was written: a bare `DateTime` is a
+wall clock (zoneless) and reads a zoneless axis; an axis that records instants
+(`utc`, an offset, a zone name, or one whose `time_reference` is unspecified)
+needs a `ZonedDateTime`, with TimeZones loaded. A mismatch throws
+`InvalidParameterError`, as it does on a ranged read.
 """
 function forecast_read!(reader::ForecastReader, t)
     _check_point_spelling(reader.time_reference, t, "this reader's timeline")

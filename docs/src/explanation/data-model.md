@@ -368,7 +368,13 @@ _checked_, where `read_by_ids_range` _clips_: a start off the series' own grid, 
 past its end, is an error rather than the smaller answer a range would return. A range says
 "whatever lies between these bounds" — which is what an export wants, knowing the bounds and not the
 step count — while a window says "these exact steps", and a caller that asked for 24 and silently
-received 3 has a bug the store can see and it cannot.
+received 3 has a bug the store can see and it cannot. What a range clips _to_ is type-specific: a
+regular series' value covers its step, so a `start` inside a step selects that step and the sliced
+`initial_timestamp` can precede `start`; an irregular series' value is an instant, so only
+timestamps at or after `start` are selected; and a forecast window is a whole array with nothing
+partial to return, so a forecast's `start` must be a window boundary at or before the last window
+(an error otherwise) and only its `end` clips. See
+[Reading a time range](../reference/rust-api.md#reading-a-time-range).
 
 ### The owner guard
 

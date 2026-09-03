@@ -326,7 +326,10 @@ enum Commands {
     Get {
         #[command(flatten)]
         selector: SelectorArgs,
-        /// Restrict to a half-open time range START..END (RFC3339 or epoch-ms).
+        /// Restrict to a time range START..END (RFC3339 or epoch-ms; END exclusive). A
+        /// regular series' START inside a step selects that step, an irregular series
+        /// keeps only timestamps at or after START, and a forecast's START must be a
+        /// window boundary (only its END clips).
         #[arg(long)]
         time_range: Option<String>,
         /// Max rows to show in table output (default 50).
@@ -359,7 +362,10 @@ enum Commands {
     Grid {
         #[command(flatten)]
         selector: SelectorArgs,
-        /// Restrict to a half-open time range START..END (RFC3339 or epoch-ms).
+        /// Restrict to a time range START..END (RFC3339 or epoch-ms; END exclusive). A
+        /// regular series' START inside a step selects that step, an irregular series
+        /// keeps only timestamps at or after START, and a forecast's START must be a
+        /// window boundary (only its END clips).
         #[arg(long)]
         time_range: Option<String>,
         /// Max rows to show in table output (default 50).
@@ -383,7 +389,10 @@ enum Commands {
         /// Destination file (.svg or .html); `-` writes to stdout.
         #[arg(long, default_value = "chart.svg")]
         out: PathBuf,
-        /// Restrict to a half-open time range START..END (RFC3339 or epoch-ms).
+        /// Restrict to a time range START..END (RFC3339 or epoch-ms; END exclusive). A
+        /// regular series' START inside a step selects that step, an irregular series
+        /// keeps only timestamps at or after START, and a forecast's START must be a
+        /// window boundary (only its END clips).
         #[arg(long)]
         time_range: Option<String>,
         /// Chart title (defaults to the series name).
@@ -536,7 +545,10 @@ enum Commands {
         /// Directory to write one file per matched series.
         #[arg(long)]
         dir: Option<PathBuf>,
-        /// Restrict to a half-open time range START..END (RFC3339 or epoch-ms).
+        /// Restrict to a time range START..END (RFC3339 or epoch-ms; END exclusive). A
+        /// regular series' START inside a step selects that step, an irregular series
+        /// keeps only timestamps at or after START, and a forecast's START must be a
+        /// window boundary (only its END clips).
         #[arg(long)]
         time_range: Option<String>,
     },
