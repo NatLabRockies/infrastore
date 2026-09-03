@@ -2814,7 +2814,7 @@ unsafe fn write_str_out(s: &str, buf: *mut c_char, cap: u64, out_len: *mut u64) 
         *out_len = bytes.len() as u64;
         if !buf.is_null() && cap > 0 {
             let n = bytes.len().min((cap - 1) as usize);
-            ptr::copy_nonoverlapping(bytes.as_ptr(), buf as *mut u8, n);
+            ptr::copy_nonoverlapping(bytes.as_ptr(), buf.cast::<u8>(), n);
             *buf.add(n) = 0;
         }
     }
@@ -9054,7 +9054,7 @@ mod abi_tests {
         assert!(needed > 0);
 
         // The fetch: the same call with a buffer the probe sized.
-        let mut buf = vec![0i8; needed as usize + 1];
+        let mut buf: Vec<c_char> = vec![0; needed as usize + 1];
         let mut got = 0u64;
         assert_eq!(
             unsafe {
