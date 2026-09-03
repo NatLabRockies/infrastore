@@ -3185,6 +3185,26 @@ impl PyStore {
         self.store_mut()?.persist_to(&path).map_err(map_err)
     }
 
+    /// Write only the **array half** to `path`, leaving no catalog beside it.
+    ///
+    /// The mirror of `persist_catalog()`, which writes only the other half, and
+    /// the write-side counterpart of `Store.open_without_catalog()`: together
+    /// they are how a consumer ships an artifact as arrays plus a document of
+    /// its own, carrying the catalog's rows in that document rather than in a
+    /// `.sqlite` nobody reads. The arrays written are the live set the catalog
+    /// references, not everything the backend holds.
+    ///
+    /// Atomic, unlike `persist_to()` — one file, so one rename. The file still
+    /// carries a fresh generation stamp, which `open_without_catalog()` copies
+    /// onto the catalog it mints, so the rebuilt pair agrees.
+    ///
+    /// Raises `StoreExistsError` when a `<path>.sqlite` is already beside the
+    /// destination: it is paired with the file this would replace, so
+    /// publishing new arrays under it would leave its rows dangling.
+    fn persist_arrays_to(&mut self, path: PathBuf) -> PyResult<()> {
+        self.store_mut()?.persist_arrays_to(&path).map_err(map_err)
+    }
+
     /// Write an in-memory catalog to this store's own `<path>.sqlite`, pairing
     /// it with the HDF5 file already there.
     ///

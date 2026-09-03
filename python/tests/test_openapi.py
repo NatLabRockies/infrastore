@@ -316,6 +316,58 @@ class TestJsonOnlyRestore:
         with pytest.raises(infrastore.StoreExistsError):
             Store.open_without_catalog(path)
 
+    def test_persist_arrays_to_writes_the_bundle_open_without_catalog_reads(
+        self, tmp_path
+    ):
+        """The write side of the pair: `persist_arrays_to()` publishes exactly
+        one file, which `open_without_catalog()` reads back with the document's
+        rows. A consumer ships arrays plus its own JSON and never carries a
+        `.sqlite`."""
+        source = str(tmp_path / "source.h5")
+        bundle = str(tmp_path / "bundle.h5")
+        store = Store.create(source)
+        store.add_time_series(
+            owner_id=7, owner_type="ThermalStandard",
+            owner_category=OwnerCategory.Component,
+            time_series=SingleTimeSeries(
+                T0, HOUR, np.arange(24, dtype=np.float64), "max_active_power"
+            ),
+            units="MW",
+        )
+        store.add_supplemental_attribute_associations([attached(7, 12)])
+        ts_json = store.export_time_series_associations_openapi()
+        sa_json = store.export_supplemental_attribute_associations_openapi()
+        before = store.list_metadata()
+        store.persist_arrays_to(bundle)
+        store.close()
+
+        assert os.path.isfile(bundle)
+        assert not os.path.exists(bundle + ".sqlite"), (
+            "an arrays-only persist writes no catalog"
+        )
+
+        restored = Store.open_without_catalog(bundle)
+        assert restored.import_time_series_associations_openapi(ts_json) == 1
+        assert restored.import_supplemental_attribute_associations_openapi(sa_json) == 1
+        after = restored.list_metadata()
+        assert [row["id"] for row in after] == [row["id"] for row in before]
+        assert np.array_equal(
+            restored.read_by_id(after[0]["id"]).data,
+            np.arange(24, dtype=np.float64),
+        )
+        restored.close()
+
+    def test_persist_arrays_to_refuses_to_orphan_a_catalog(self, tmp_path):
+        """A `.sqlite` beside the destination is paired with the file being
+        replaced, so publishing arrays under it would leave its rows dangling."""
+        occupied = str(tmp_path / "occupied.h5")
+        Store.create(occupied).close()
+
+        store = Store.create(str(tmp_path / "source.h5"))
+        with pytest.raises(infrastore.StoreExistsError):
+            store.persist_arrays_to(occupied)
+        store.close()
+
 
 class TestSchemaContract:
     """The import path holds a document to the vendored SiennaSchemas specs, so
