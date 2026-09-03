@@ -259,7 +259,7 @@ impl RemoteClient {
                 owner_id,
                 owner_category: pb::OwnerCategory::from(owner_category) as i32,
                 name: name.to_string(),
-                time_series_type: time_series_type.map(|t| requested_type_to_pb(t) as i32),
+                time_series_type: time_series_type.map(requested_type_to_pb),
                 resolution: resolution.map(|p| p.to_iso8601()),
                 interval: interval.map(|p| p.to_iso8601()),
                 features: features_to_pb(&features).entries,
