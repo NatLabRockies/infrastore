@@ -195,10 +195,16 @@ def owners_on_disk(path) -> list[int]:
     """The owners the catalog *on disk* lists, straight from the SQLite file."""
     import sqlite3
 
-    with sqlite3.connect(f"{path}.sqlite") as conn:
+    # Closed explicitly: `with` on a connection only scopes a transaction, and
+    # a connection left open holds the file, which on Windows makes the next
+    # `persist_catalog` fail to rename its staged catalog over it.
+    conn = sqlite3.connect(f"{path}.sqlite")
+    try:
         rows = conn.execute(
             "SELECT DISTINCT owner_id FROM time_series_associations ORDER BY owner_id"
         ).fetchall()
+    finally:
+        conn.close()
     return [owner for (owner,) in rows]
 
 
