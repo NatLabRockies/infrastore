@@ -4531,9 +4531,6 @@ impl Store {
     /// publishing new arrays under it produces exactly the dangling-rows
     /// artifact [`TimeSeriesError::StoreExists`] guards against elsewhere.
     pub fn persist_arrays_to(&mut self, path: &Path) -> Result<()> {
-        if self.read_only {
-            return Err(TimeSeriesError::ReadOnlyStore);
-        }
         if self.in_transaction() {
             return Err(TimeSeriesError::InvalidParameter(
                 "cannot persist while a transaction is open; commit or roll back first".into(),

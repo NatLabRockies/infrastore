@@ -525,10 +525,10 @@ fn saving_copies_an_array_file_but_materializes_an_in_memory_one() {
     );
 }
 
-/// `persist_catalog` refuses a read-only store; `persist_to` deliberately does
-/// not. Saving elsewhere writes nothing the caller opened read-only, and it is
-/// the "load someone's artifact, save my own copy" flow. This pins the
-/// asymmetry so neither guard drifts by accident.
+/// `persist_catalog` refuses a read-only store; `persist_to` and
+/// `persist_arrays_to` deliberately do not. Saving elsewhere writes nothing the
+/// caller opened read-only, and it is the "load someone's artifact, save my own
+/// copy" flow. This pins the asymmetry so neither guard drifts by accident.
 #[test]
 fn a_read_only_store_can_still_save_elsewhere() {
     let dir = tempfile::tempdir().unwrap();
@@ -559,6 +559,46 @@ fn a_read_only_store_can_still_save_elsewhere() {
         "a save mints its own stamp, so the copy is not mistaken for the source"
     );
     assert_eq!(read_values(&open_store(&dest, true).unwrap(), 1)[0], 100.0);
+}
+
+/// The arrays-only half of the same asymmetry. `persist_arrays_to` writes the
+/// caller's destination and refuses the store's own file, so like `persist_to`
+/// it needs no write access to the source — it once carried `persist_catalog`'s
+/// read-only guard by mirroring that function's shape rather than its
+/// semantics.
+#[test]
+fn a_read_only_store_can_still_save_its_arrays_elsewhere() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.h5");
+    let bundle = dir.path().join("bundle.h5");
+    {
+        let mut store = create_store(Some(&src), false).unwrap();
+        add(&mut store, 1, 100.0);
+    }
+    let (before_len, before_stamp) = (
+        std::fs::metadata(&src).unwrap().len(),
+        generation_attr(&src),
+    );
+
+    let mut store = open_store(&src, true).unwrap();
+    store.persist_arrays_to(&bundle).unwrap();
+    drop(store);
+
+    assert_eq!(
+        std::fs::metadata(&src).unwrap().len(),
+        before_len,
+        "the source was read-only and must be untouched"
+    );
+    assert_eq!(generation_attr(&src), before_stamp);
+    assert!(
+        !catalog_sqlite_path(&bundle).exists(),
+        "an arrays-only persist writes no catalog"
+    );
+    assert_ne!(
+        generation_attr(&bundle),
+        before_stamp,
+        "a save mints its own stamp, so the copy is not mistaken for the source"
+    );
 }
 
 /// Read-only and in-memory are independent notions of "does not write", and a
