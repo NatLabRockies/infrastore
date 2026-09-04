@@ -506,7 +506,7 @@ fn a_static_read_failing_mid_loop_empties_the_groups_it_already_filled() {
 /// `StaticGroup::fill` clears the group it is filling, but a read is one
 /// operation over every group: a failure part way through left the groups
 /// already filled holding the new timestamp's values while the rest held the
-/// previous read's, all of it still labelled with the previous timestamp. An
+/// previous read's, all of it still labeled with the previous timestamp. An
 /// off-grid timestamp is the sharper form — it fails before any group is
 /// touched, so every group kept the last read intact and a caller that ignored
 /// the error saw a full, plausible, wrong answer.

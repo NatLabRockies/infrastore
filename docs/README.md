@@ -45,10 +45,13 @@ The documentation follows the [Diataxis](https://diataxis.fr/) framework:
 | Category        | Location               | Purpose                                           |
 | --------------- | ---------------------- | ------------------------------------------------- |
 | **Tutorials**   | `src/getting-started/` | Learning-oriented quick starts                    |
-| **How-To**      | `src/how-to/`          | Task-oriented integration recipes                 |
 | **Explanation** | `src/explanation/`     | Understanding-oriented architecture and design    |
-| **Guides**      | `src/guides/`          | Language-specific developer guides                |
+| **Guides**      | `src/guides/`          | Per-language developer guides, install onward     |
 | **Reference**   | `src/reference/`       | Information-oriented API and file-format listings |
+
+`src/guides/embedding.md` is listed as a prefix chapter in `SUMMARY.md`, directly after the
+introduction, rather than inside the guides section: most readers are building a package on top of
+infrastore, and it is the page for them.
 
 ## Editing Documentation
 

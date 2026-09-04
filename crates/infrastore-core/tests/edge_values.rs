@@ -1195,7 +1195,7 @@ fn malformed_inputs_report_errors_rather_than_panicking() {
             if m.contains("carries no arity")),
         "{err}"
     );
-    //    The decode-side guard stays as defence in depth: a zero-width array can
+    //    The decode-side guard stays as defense in depth: a zero-width array can
     //    still be built by hand and paired with the spelling.
     let by_hand = TypedArray::from_f64(vec![0, 0], &[]);
     let et = codec::element_type_of(&DecodedValues::Tuple(vec![vec![]])).unwrap();

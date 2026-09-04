@@ -2921,7 +2921,7 @@ fn assume_timezone_utc_reads_a_zoneless_csv() {
 ///
 /// The offset is now *preserved* rather than consumed: it was in the file, and
 /// the series records it, so the read hands back the same wall clock that went
-/// in instead of relabelling it UTC.
+/// in instead of relabeling it UTC.
 #[test]
 fn assume_timezone_accepts_a_negative_fixed_offset() {
     let dir = tempfile::tempdir().unwrap();
@@ -3051,7 +3051,7 @@ fn a_named_zone_refuses_the_hours_it_cannot_resolve() {
 }
 
 /// `--zoneless` is the other answer for a zoneless column: the timestamps *are*
-/// wall clocks, nothing is converted, and they read back unlabelled.
+/// wall clocks, nothing is converted, and they read back unlabeled.
 #[test]
 fn zoneless_stores_wall_clocks_as_themselves() {
     let dir = tempfile::tempdir().unwrap();

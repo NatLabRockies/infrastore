@@ -354,7 +354,7 @@ pub fn get(
 /// A `--time-range` read hands back only the windows it selected, and the
 /// returned `TimeSeriesData` names them: its `initial_timestamp` is the first
 /// selected window's issue time and its `count` the number selected. The catalog
-/// row still describes the whole stored forecast, so labelling the returned
+/// row still describes the whole stored forecast, so labeling the returned
 /// rows from it would stamp the dropped windows' issue times onto the kept ones.
 /// Every window-aware rendering therefore resolves against this grid and keeps
 /// `meta` for what only the row knows (name, `time_reference`, ...).
@@ -983,7 +983,7 @@ fn value_headers(per_step: usize) -> Vec<String> {
 /// (percentile / scenario) x element entry. Shared by `get -f csv` and
 /// `export`.
 ///
-/// The rows are labelled from `data`'s own grid (see [`ForecastGrid`]), so a
+/// The rows are labeled from `data`'s own grid (see [`ForecastGrid`]), so a
 /// `--time-range` slice is stamped with the issue times of the windows it kept;
 /// `meta` supplies only the `time_reference` the timestamps are spelled in.
 pub fn forecast_csv_rows(
@@ -1178,7 +1178,7 @@ fn append_stats(arr: &TypedArray, rows: &mut Vec<(String, Value)>) {
 }
 
 /// The `p`-th percentile of an ascending slice, by linear interpolation between
-/// neighbours (the "inclusive" definition NumPy and Excel both default to).
+/// neighbors (the "inclusive" definition NumPy and Excel both default to).
 fn percentile(sorted: &[f64], p: f64) -> f64 {
     if sorted.is_empty() {
         return f64::NAN;

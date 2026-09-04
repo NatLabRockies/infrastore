@@ -3,7 +3,7 @@
 The Julia package is **`InfraStore.jl`** (module `InfraStore`); it wraps the [C ABI](./c-abi.md)
 cdylib. The library is resolved from the `INFRASTORE_LIB` environment variable (development builds),
 or else from the `libinfrastore_ffi` artifact that `Pkg` downloads at install time (see
-[Integrate with Julia](../how-to/integrate-julia.md)).
+[Integrate with Julia](../guides/julia.md#install)).
 
 ```julia
 using InfraStore
@@ -661,7 +661,7 @@ Dense forecasts are constructed as `Deterministic`, `Probabilistic`, or `Scenari
 [Types](#types)) and added through the generic `add_time_series!`. Each struct wraps a native
 `AbstractArray` of any supported element type and dimensionality — the binding derives the stored
 dtype and dims and converts to row-major bytes, just like the static `add_time_series!` (see the
-[data model](../explanation/data-model.md#forecasts) for the conventional shapes).
+[data model](../explanation/time-series-types.md#forecasts) for the conventional shapes).
 
 The forecast `name` comes from the struct, e.g.
 `Deterministic(initial, resolution, horizon, interval, count, data, name)`.
@@ -1297,8 +1297,8 @@ end
   spelling — one series records one reference.
 - Milliseconds are lossless in both directions: the store records every instant to the millisecond
   and refuses a finer one on write, so this boundary cannot truncate a series written under that
-  rule. See [timestamp precision](../explanation/data-model.md#timestamp-precision). (An artifact
-  written before the rule may hold finer instants; those still truncate here.)
+  rule. See [timestamp precision](../explanation/time-series-types.md#timestamp-precision). (An
+  artifact written before the rule may hold finer instants; those still truncate here.)
 - `resolution` is passed as a `Period` and converted to an ISO-8601 duration string; reads return
   resolution as a `Period` (`Millisecond` for fixed durations).
 
@@ -1364,8 +1364,8 @@ that records instants, or a `ZonedDateTime` bound against a zoneless one, raises
 `InvalidParameterError` rather than being coerced, and so does a `time_range` whose two ends
 disagree. `list_metadata`, `build_static_reader`, and the other filter-taking functions accept
 `zoneless=true|false` for building a coherent selection. See
-[Time references](../explanation/data-model.md#time-references) for the full rules, including why a
-calendar `Month`/`Year` resolution still steps on the UTC calendar.
+[Time references](../explanation/time-references.md) for the full rules, including why a calendar
+`Month`/`Year` resolution still steps on the UTC calendar.
 
 Because a read always hands back a bare `DateTime`, the obvious round trip does **not** close on a
 series that records instants — the returned timestamp holds the instant, but its Julia type says

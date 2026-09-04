@@ -105,7 +105,7 @@ package-owned payload formerly spelled `ext`.
 
 Every series also carries a **`time_reference`** (`TimeReference`: `Utc` | `FixedOffset(minutes)` |
 `Zone(iana_name)` | `Zoneless`; `None` means unspecified), recording how its timestamps were
-_spelled_ so a read hands back what a write declared instead of relabelling everything UTC. Each
+_spelled_ so a read hands back what a write declared instead of relabeling everything UTC. Each
 binding **infers** it from the input type — Python from `tzinfo` (naive → `Zoneless`, a `key`-
 bearing `ZoneInfo` → `Zone`), Julia from `DateTime` vs `ZonedDateTime` (`FixedTimeZone` vs
 `VariableTimeZone` in `InfraStoreTimeZonesExt`), the CLI from the text plus `--assume-timezone` /
@@ -168,8 +168,9 @@ inspection. The read-only gRPC server carries the full read surface too, id-addr
 `AssociationExists`, `HasAnyTimeSeries`, `ReadById` / `ReadByIds`, detailed/per-type counts,
 `ListOwnerIds`, `GetIntervals`, static/forecast summaries, and `CheckStaticConsistency`. Every RPC
 is named for the `Store` method it exposes, with `<Rpc>Req` / `<Rpc>Resp` messages. Auth is `none`
-(default) or `api_key` via the `x-api-key` header. See `README.md` and
-`docs/src/explanation/data-model.md` for the authoritative feature matrix.
+(default) or `api_key` via the `x-api-key` header. See `README.md`,
+`docs/src/explanation/time-series-types.md` (the six types and their write paths), and
+`docs/src/explanation/bindings.md` (per-binding coverage) for the authoritative feature matrix.
 
 ## Code Quality Requirements
 

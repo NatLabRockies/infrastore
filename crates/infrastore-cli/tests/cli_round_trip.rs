@@ -787,7 +787,7 @@ fn component_field_round_trips_through_descriptor_and_export() {
 }
 
 /// `--component-field` narrows `list` and the destructive commands, and is
-/// rejected by `owners`, which cannot honour it.
+/// rejected by `owners`, which cannot honor it.
 #[test]
 fn component_field_selector() {
     let dir = tempfile::tempdir().unwrap();
@@ -884,7 +884,7 @@ fn a_descriptors_own_offset_survives_export_and_grid() {
     );
 
     // The offset was in the descriptor; the store now has somewhere to put it,
-    // so it comes back rather than being consumed into a UTC relabelling.
+    // so it comes back rather than being consumed into a UTC relabeling.
     let listed = run(&store, &["list", "-f", "json"]);
     assert!(
         listed.contains("\"time_reference\": \"-07:00\""),

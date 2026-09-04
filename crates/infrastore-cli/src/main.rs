@@ -221,7 +221,7 @@ struct Cli {
     ///
     /// The alternative to --assume-timezone, for data that has no time zone and
     /// wants none — modeled profiles on 24-hour days, say. Nothing is converted:
-    /// the fields are stored as written and read back unlabelled, and the series
+    /// the fields are stored as written and read back unlabeled, and the series
     /// records `time_reference = zoneless`.
     ///
     /// The store then refuses to answer an instant-bearing query bound against
@@ -1385,7 +1385,7 @@ mod tests {
             .collect()
     }
 
-    /// Every examples block, labelled by the command it belongs to. The root
+    /// Every examples block, labeled by the command it belongs to. The root
     /// help is in here too: it is the first thing a new user sees, and the
     /// grouped listing above it names commands without showing one complete
     /// invocation.
@@ -1483,9 +1483,10 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../../docs/src/reference/cli.md"
         ),
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/src/guides/cli.md"),
         concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../docs/src/how-to/use-cli.md"
+            "/../../docs/src/getting-started/quick-start-cli.md"
         ),
     ];
 

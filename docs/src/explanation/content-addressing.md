@@ -7,7 +7,8 @@ the mechanism that lets many [series](./data-model.md#identity) share one underl
 ## The Array Hash
 
 `array_hash` produces a deterministic 32-byte digest from a
-[`TypedArray`](./data-model.md#typed-n-dimensional-arrays). The hashed byte stream is, in order:
+[`TypedArray`](./time-series-types.md#typed-n-dimensional-arrays). The hashed byte stream is, in
+order:
 
 1. A **dtype tag**: the dtype name (`f64`, `f32`, `i64`, `i32`, `i16`, `i8`, `u64`, `u32`, `u16`,
    `u8`, `bool`) followed by a NUL byte.
@@ -171,9 +172,9 @@ shared = filter(((_, rows),) -> length(rows) > 1, groups)   # arrays referenced 
 ```
 
 This read-side view is what lets a downstream caller collapse work across owners that share data.
-The [`ForecastReader`](../reference/julia-api.md#forecastreader) builds on the same grouping
-internally: forecasts that share an array (and read plan) are read from disk **once per timestamp**
-no matter how many components reference them — see
+The [`ForecastReader`](./readers.md) builds on the same grouping internally: forecasts that share an
+array (and read plan) are read from disk **once per timestamp** no matter how many components
+reference them — see
 [Window-read deduplication](../reference/julia-api.md#window-read-deduplication). (This is exactly
 how InfrastructureSystems.jl backs its own `get_shared_time_series` and forecast reader.)
 

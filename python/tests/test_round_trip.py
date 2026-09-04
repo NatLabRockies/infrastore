@@ -242,13 +242,13 @@ def test_numpy_array_received_as_ndarray():
 @pytest.mark.parametrize(
     "descr", ["<f8", ">f8", ">f4", ">i8", ">i4", ">i2", ">u8", ">u2"]
 )
-def test_byte_order_is_normalised_not_reinterpreted(descr):
+def test_byte_order_is_normalized_not_reinterpreted(descr):
     """A big-endian array stores its values, not its bytes.
 
     `.dtype.name` drops byte order (`np.dtype('>f8').name == 'float64'`) while
     `.tobytes()` keeps it, so a big-endian array used to be written under a
     little-endian label and read back byte-reversed -- silently, since every
-    reversed value is still a legal number. The binding normalises to the
+    reversed value is still a legal number. The binding normalizes to the
     store's documented little-endian layout instead.
     """
     store = Store.create(in_memory=True)
@@ -265,7 +265,7 @@ def test_byte_order_is_normalised_not_reinterpreted(descr):
 
 
 def test_single_byte_dtypes_are_unaffected_by_byte_order():
-    """`bool`/`int8`/`uint8` have no byte order to normalise ('|' in numpy)."""
+    """`bool`/`int8`/`uint8` have no byte order to normalize ('|' in numpy)."""
     store = Store.create(in_memory=True)
     initial = datetime(2024, 1, 1, tzinfo=timezone.utc)
     for owner, values in enumerate(
@@ -285,7 +285,7 @@ def test_single_byte_dtypes_are_unaffected_by_byte_order():
 
 
 def test_non_contiguous_big_endian_array_round_trips():
-    """The two representational normalisations compose: order and byte order."""
+    """The two representational normalizations compose: order and byte order."""
     store = Store.create(in_memory=True)
     initial = datetime(2024, 1, 1, tzinfo=timezone.utc)
     # A strided view of a big-endian array: neither C-contiguous nor LE.
@@ -672,7 +672,7 @@ def test_a_catalog_row_reports_its_owner_category():
 
 # ---- timezone handling -----------------------------------------------------
 #
-# The store records instants. Anything that names one is accepted and normalised
+# The store records instants. Anything that names one is accepted and normalized
 # to UTC; anything that does not is refused inside this package's exception
 # hierarchy. Before this, only `datetime.timezone.utc` itself was accepted --
 # `ZoneInfo("UTC")` is a different object, and a named zone is not a fixed
@@ -699,7 +699,7 @@ def test_aware_datetimes_in_any_zone_name_the_same_instant():
     for when in equivalents:
         store = Store.create(in_memory=True)
         ts = SingleTimeSeries(when, timedelta(hours=1), data, "load")
-        # The constructor normalises: the series reports the same UTC instant
+        # The constructor normalizes: the series reports the same UTC instant
         # whichever zone it was handed.
         assert ts.initial_timestamp == utc, when.tzinfo
         key = store.add_time_series(1, "Generator", OwnerCategory.Component, ts)

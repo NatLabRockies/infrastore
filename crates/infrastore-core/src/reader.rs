@@ -269,7 +269,7 @@ impl StaticReader {
     /// groups already filled holding the **new** timestamp's values while the
     /// rest held the **previous** read's, and the recorded read timestamp still
     /// named the previous one — so a caller that ignored the error read two
-    /// different instants side by side, both labelled as the earlier one.
+    /// different instants side by side, both labeled as the earlier one.
     /// Resolving the timestamp can fail before any group is touched at all,
     /// which is the same hazard with none of them updated.
     ///
@@ -1644,7 +1644,7 @@ mod tests {
         let mut reader = store.build_static_reader(irregular_filter()).unwrap();
 
         // Between two stored instants: an irregular series has no value there,
-        // so this is a hard error rather than a nearest-neighbour read.
+        // so this is a hard error rather than a nearest-neighbor read.
         let err = store
             .static_read(&mut reader, stamps[0] + Duration::minutes(1))
             .unwrap_err();

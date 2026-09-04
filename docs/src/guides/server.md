@@ -41,6 +41,20 @@ files.
 On startup the server validates the auth section, opens the first `[data].files` entry read-only,
 and serves the `CatalogStore` service on `host:port`. Set `RUST_LOG=debug` for verbose logs.
 
+v0 serves the **first** `[data].files` entry; multi-file serving is reserved for later.
+
+### Check that it is up
+
+With [`grpcurl`](https://github.com/fullstorydev/grpcurl) and the proto file:
+
+```sh
+grpcurl -plaintext -proto proto/infrastore/v1/store.proto \
+  127.0.0.1:50051 infrastore.v1.CatalogStore/GetCounts
+```
+
+Add `-H 'x-api-key: replace-me-with-a-secret'` when authentication is enabled. The equivalent from
+Rust is `RemoteClient::connect(...).get_counts()` — see [The Rust Client](#the-rust-client) below.
+
 ## The Rust Client
 
 `RemoteClient` mirrors the read methods of `Store` and returns the same core types. gRPC status

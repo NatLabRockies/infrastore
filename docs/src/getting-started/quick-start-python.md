@@ -2,8 +2,7 @@
 
 This walkthrough creates an in-memory store, adds a `SingleTimeSeries`, and reads it back — the
 shortest path to a working round-trip. It assumes the `infrastore` wheel is installed in the active
-environment; if `import infrastore` fails, see
-[Integrate with Python](../how-to/integrate-python.md).
+environment; if `import infrastore` fails, see [Integrate with Python](../guides/python.md#install).
 
 ## A Minimal Round-Trip
 

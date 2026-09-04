@@ -12,7 +12,7 @@
 //! but a single handle must never be in two calls at once. `Store` is `Send` and
 //! not `Sync`: its catalog is a `rusqlite::Connection`, which is unsound to
 //! share across threads even for reading, so a concurrent pair of *reads*
-//! through one handle is undefined behaviour and not merely a lost update. The
+//! through one handle is undefined behavior and not merely a lost update. The
 //! per-function `# Safety` sections say "must not be used concurrently"; this is
 //! what that means, and why none of them carves out an exception for readers.
 //!
@@ -226,7 +226,7 @@ macro_rules! deref_handle {
 /// The subscriber is initialized at most once per process. Subsequent calls
 /// are no-ops. Returns `INFRASTORE_OK` on success, `INFRASTORE_ERR_INVALID_UTF8` if `filter`
 /// is not valid UTF-8, or `INFRASTORE_ERR_INVALID_PARAMETER` if `filter` contains an
-/// invalid directive (e.g. an unrecognised level name).
+/// invalid directive (e.g. an unrecognized level name).
 ///
 /// # Safety
 ///
@@ -3821,7 +3821,7 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_single(
 /// ids are given. The id-addressed counterpart of `infrastore_store_bulk_read`:
 /// results come back in the same `InfraStoreBulkReadHandle`, so a caller reads
 /// them out with the same `infrastore_bulk_result_*` accessors, and repeats in
-/// `ids` are honoured in place.
+/// `ids` are honored in place.
 ///
 /// The read direction of the id every write hands back through its `out_id`: a
 /// caller that recorded ids in its own model resolves them here instead of

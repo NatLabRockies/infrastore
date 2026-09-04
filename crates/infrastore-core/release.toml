@@ -30,6 +30,6 @@ search = 'VERSION=v\d+\.\d+\.\d+'
 replace = 'VERSION=v{{version}}'
 
 [[pre-release-replacements]]
-file = "../../docs/src/how-to/use-cli.md"
+file = "../../docs/src/guides/cli.md"
 search = 'VERSION=v\d+\.\d+\.\d+'
 replace = 'VERSION=v{{version}}'

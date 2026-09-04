@@ -32,8 +32,8 @@ The `[workspace.dependencies]` pins are easy to miss and fail late: `cargo publi
 names the old one. cargo-release moves `Cargo.lock` in the same commit.
 
 Two more version strings ride along, neither load-bearing: the `VERSION=v0.8.0` download example in
-`docs/src/getting-started/installation.md` and in `docs/src/how-to/use-cli.md`, so a version's
-published docs point at that version's own binaries.
+`docs/src/getting-started/installation.md` and in `docs/src/guides/cli.md`, so a version's published
+docs point at that version's own binaries.
 
 Two workflows guard this. `crates-release` refuses to publish if the tag does not match the
 workspace version, and `python-wheels` opens with a `versions agree` job that parses all four files
@@ -44,7 +44,7 @@ That job exists because v0.5.0 was tagged with `pyproject.toml` still at `0.4.0`
 `0.4.0` artifacts and passed; only the upload caught it, with `400 File already exists`, because
 `0.4.0` was long since on PyPI. A PyPI filename can never be reused, so that tag was unpublishable
 and the release had to move to `0.5.1`. The guard runs before the wheel matrix, so the same mistake
-now costs seconds instead of a burnt version number.
+now costs seconds instead of a burned version number.
 
 ## HDF5 linkage
 

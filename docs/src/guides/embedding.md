@@ -73,7 +73,7 @@ infers it from the input type, so nothing takes a new argument; a native Rust ca
 having no naive datetime type to infer from. It changes nothing about the stored instants, the grid,
 or either content hash — but the store does hold a series to its claim: a query bound must be
 spelled the way the series is, and a zoneless series cannot share one reader axis or one ranged bulk
-read with instant-bearing ones. See [Time references](../explanation/data-model.md#time-references).
+read with instant-bearing ones. See [Time references](../explanation/time-references.md).
 
 **`application_data` is yours.** It is an opaque payload stored and returned verbatim, so a parent
 package can carry whatever it needs per association (a serialized type tag, a provenance record)
@@ -239,7 +239,9 @@ per-component work dedup the same way. The inverse access — one component's fu
 slow direction, and `read_by_ids` over many ids is the right call when you need it, not a loop of
 `read_by_id`. See the per-language sections:
 [Python](./python.md#per-timestamp-reads-simulation-loop),
-[Julia](./julia.md#per-timestamp-reads-simulation-loop), [Rust](./rust.md).
+[Julia](./julia.md#per-timestamp-reads-simulation-loop),
+[Rust](./rust.md#per-timestamp-reads-simulation-loop). The concepts are in
+[Readers](../explanation/readers.md).
 
 ## Time
 
@@ -248,12 +250,13 @@ slow direction, and `read_by_ids` over many ids is the right call when you need 
   milliseconds while Python's `datetime` is microsecond. Quantize `now()` before storing it. Query
   bounds are unconstrained.
 - **Python** requires timezone-aware `datetime`s everywhere and returns UTC; a naive value raises.
-- **Julia** treats a bare `DateTime` as UTC and returns `DateTime`; with `using TimeZones` a
-  `ZonedDateTime` is accepted anywhere a timestamp goes and converted to the instant it names. Reads
-  still return `DateTime`, because InfrastructureSystems.jl destructures them.
+- **Julia** reads a bare `DateTime` as a wall clock, recording `ZonelessReference()`; with
+  `using TimeZones` a `ZonedDateTime` is accepted anywhere a timestamp goes and converted to the
+  instant it names. Reads still return a bare `DateTime` holding the instant, because
+  InfrastructureSystems.jl destructures them.
 
 A parent package that has a notion of local time therefore converts at its own boundary and stores
-instants. See [Timestamp precision](../explanation/data-model.md#timestamp-precision).
+instants. See [Timestamp precision](../explanation/time-series-types.md#timestamp-precision).
 
 ## Associations Beyond Time Series
 
@@ -271,7 +274,7 @@ filters take concrete type names, exactly like `owner_type` above. See
 **Pin a minor range.** The on-disk format is governed by `DATA_FORMAT_VERSION`; opening an artifact
 written by an incompatible version raises `IncompatibleFormat` rather than misreading it. The
 bindings track the workspace version, so a parent package depends on a compatible range
-(`infrastore>=0.8,<0.9` in `pyproject.toml`; a `[compat]` entry in `Project.toml`) and bumps it
+(`infrastore>=0.11,<0.12` in `pyproject.toml`; a `[compat]` entry in `Project.toml`) and bumps it
 deliberately. Do not cite core source line numbers in your own docs — they move.
 
 **Map the error taxonomy, do not flatten it.** Every binding exposes the core's `TimeSeriesError`
@@ -291,8 +294,7 @@ variants as distinct types (`NotFound`, `DuplicateTimeSeries`, `DuplicateAssocia
 - The `infrastore` CLI reads any artifact your package writes. `infrastore list` and
   `infrastore info` are the fastest way to see what a consumer actually stored, and
   `infrastore diff --against` compares two artifacts by hash without reading arrays — a usable CI
-  gate for "the rewrite produced the same store". See
-  [Use the `infrastore` CLI](../how-to/use-cli.md).
+  gate for "the rewrite produced the same store". See [Use the `infrastore` CLI](../guides/cli.md).
 - To test unreleased core changes from a consumer checkout, install the binding into the consumer's
   environment (`maturin develop --manifest-path crates/infrastore-py/Cargo.toml` with the consumer's
   venv active; `Pkg.develop(path=...)` plus `INFRASTORE_LIB` for Julia).

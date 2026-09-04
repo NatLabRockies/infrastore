@@ -2,7 +2,7 @@
 
 This walkthrough creates an in-memory store, adds a `SingleTimeSeries`, and reads it back — the
 shortest path to a working round-trip. It assumes `InfraStore.jl` can find the native library; if
-the first store call errors, see [Integrate with Julia](../how-to/integrate-julia.md).
+the first store call errors, see [Integrate with Julia](../guides/julia.md#install).
 
 ## A Minimal Round-Trip
 

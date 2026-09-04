@@ -1,25 +1,67 @@
 # Julia Developer Guide
 
 This guide covers building on `InfraStore.jl`, the Julia package that wraps the
-[C ABI](../reference/c-abi.md). For exact signatures see the
-[Julia API reference](../reference/julia-api.md); to set up the package and the native library, see
-[Integrate with Julia](../how-to/integrate-julia.md).
+[C ABI](../reference/c-abi.md), from installing it to the calls a consumer package makes. For exact
+signatures see the [Julia API reference](../reference/julia-api.md).
 
-## Load the Package
+## Install
 
-`Pkg.add("InfraStore")` installs the package and downloads the prebuilt native library as an
-artifact, so in a consumer package nothing else is needed:
+Julia 1.10 or newer. `InfraStore.jl` is registered in General, and the native library comes with it:
 
 ```julia
-using Dates, InfraStore
+using Pkg
+Pkg.add("InfraStore")
 ```
 
-Developing against a checkout, `INFRASTORE_LIB` points the package at a local build instead and
-takes precedence over the artifact; set it before the first store call:
+`Pkg` downloads the `libinfrastore_ffi` artifact for your platform from the matching GitHub Release
+(`Artifacts.toml` in the package pins its URL and hash). The library is linked statically against
+HDF5 and zlib, so there is no `HDF5_jll` and no system HDF5 involved, and the HDF5 version behind
+the on-disk format is the one infrastore pinned. Artifacts exist for Linux x86_64 and aarch64
+(glibc), macOS x86_64 and Apple Silicon, and Windows x86_64; on any other platform, build the
+library yourself and use the override below.
+
+That is the whole recipe for a consumer package.
+
+### From a checkout
+
+`InfraStore.jl` resolves the cdylib at first use, in this order:
+
+1. The `INFRASTORE_LIB` environment variable — the development override.
+2. The `libinfrastore_ffi` artifact `Pkg` downloaded at install time.
+
+So developing against a working tree means building the library and exporting the variable. This
+needs the [build tools](../getting-started/installation.md#build-prerequisites) (`cmake`, a C
+compiler, `protobuf`), but **no system HDF5**:
 
 ```sh
 cargo build -p infrastore-ffi --release
 export INFRASTORE_LIB=$PWD/target/release/libinfrastore_ffi.dylib  # .so on Linux
+
+julia --project=julia/InfraStore.jl -e 'using Pkg; Pkg.instantiate()'
+julia --project=julia/InfraStore.jl julia/InfraStore.jl/test/runtests.jl
+```
+
+`using InfraStore` always works; the resolution happens on the first call that reaches the native
+library, and the path is cached for the rest of the session — so set the variable before that first
+call, in the same shell that launched Julia. To use the checkout from your own project,
+`Pkg.develop(path="/path/to/infrastore/julia/InfraStore.jl")` with the variable set.
+
+### If it does not load
+
+- **`Could not locate libinfrastore_ffi at <path>.`** — The resolved path is not a file. If `<path>`
+  is under `.julia/artifacts`, the artifact download did not complete: `Pkg.instantiate()` (or
+  `Pkg.add("InfraStore")` again) fetches it. If it is your own path, export `INFRASTORE_LIB` before
+  the first store call.
+- **`could not load library`** — Check the path exists and has the right extension for your OS
+  (`.dylib` on macOS, `.so` on Linux, `.dll` on Windows), and that you built with `--release` if
+  your variable points at `target/release`.
+- **`InvalidParameterError` on add** — `owner_id` must be an integer (e.g. `42`, an `Int64`), and
+  `features` values must be JSON scalars.
+
+## Load the Package
+
+```julia
+using Dates, InfraStore
 ```
 
 Exported names include `Store`, `SingleTimeSeries`, `NonSequentialTimeSeries`, the forecast structs
@@ -49,7 +91,8 @@ The store is finalized automatically, but you can release it eagerly with `close
 ts = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(100.0:123.0), "load")
 ```
 
-A bare `DateTime` carries no zone, and this package reads one as **UTC**. If your timestamps are
+A bare `DateTime` carries no zone, so this package reads one as a **wall clock** — the store holds
+its fields unchanged and records the spelling as `ZonelessReference()`. If your timestamps are
 genuinely zoned, `using TimeZones` and pass a `ZonedDateTime` instead — it names an instant on its
 own, and is accepted anywhere a `DateTime` is:
 
@@ -61,7 +104,8 @@ ts = SingleTimeSeries(
 )
 ```
 
-Reads return a `DateTime` in UTC either way; see
+Reads return a bare `DateTime` holding the instant either way, with the recorded spelling beside it
+(`zoned_timestamp` fuses the two back together); see
 [Time and resolution conversions](../reference/julia-api.md#time-and-resolution-conversions).
 
 ```julia
@@ -123,7 +167,7 @@ transition. Reads still return a `DateTime` holding the instant, with the refere
 None of them is part of a series' identity or of either content hash, so two adds that differ only
 in a descriptor are a duplicate. See
 [Optional Descriptors](../explanation/data-model.md#optional-descriptors) and
-[Time references](../explanation/data-model.md#time-references).
+[Time references](../explanation/time-references.md).
 
 ### Add many series at once
 

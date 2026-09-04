@@ -21,10 +21,10 @@ given timestamp**, and accept that reading **one component's entire array** is c
 **Why.** The workload that matters is simulation. A production-cost or power-flow model steps
 through time and, at each step, needs the value of every generator, load, and branch for that one
 timestamp — a slice _across_ series, not _down_ one. With this layout that slice is a single chunk
-read; the [`ForecastReader` / `StaticReader`](./storage-model.md#the-array-side-hdf5) columnar
-surface is built directly on it. The inverse access — pulling one component's full history — has to
-touch every chunk band and is slow by design. That trade is deliberate: the simulation read path is
-the hot one, and it is the one parent packages hand to their users.
+read; the [`ForecastReader` / `StaticReader`](./readers.md) columnar surface is built directly on
+it. The inverse access — pulling one component's full history — has to touch every chunk band and is
+slow by design. That trade is deliberate: the simulation read path is the hot one, and it is the one
+parent packages hand to their users.
 
 **What this means for parent-package developers.**
 
@@ -62,7 +62,7 @@ Two consequences a parent-package developer should know:
 
 - **A window sweep is cheap; naive per-window reads are not, unless you go through the reader.**
   Because a chunk is the decompression unit, reading a single window still pulls its whole block.
-  The [`ForecastReader`](./storage-model.md) sizes its in-memory cache to that same block width, so
+  The [`ForecastReader`](./readers.md) sizes its in-memory cache to that same block width, so
   stepping the window timeline decompresses each block exactly once. Reach for `ForecastReader` (or
   read the whole array once and index it) rather than issuing an independent whole-array read per
   window — the latter re-decompresses overlapping data.

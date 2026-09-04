@@ -108,7 +108,7 @@ pub fn identity_line(m: &TimeSeriesMetadata) -> String {
 ///
 /// The store holds instants; this is the one place the CLI turns one back into
 /// the spelling it arrived in, so a value printed by `get`, `list`, `info`, or
-/// `export` reads as it was written rather than being relabelled UTC.
+/// `export` reads as it was written rather than being relabeled UTC.
 ///
 /// * `Utc` and an unset reference → RFC 3339 with `Z`.
 /// * `FixedOffset` → RFC 3339 at that offset — the offset the file carried,

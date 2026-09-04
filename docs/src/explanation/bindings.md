@@ -83,7 +83,7 @@ The conventions that shape the Julia API:
 
 `InfraStore.jl` loads the cdylib from the `INFRASTORE_LIB` environment variable when it is set, and
 otherwise from the `libinfrastore_ffi` artifact its `Artifacts.toml` pins to the matching GitHub
-Release (see [Integrate with Julia](../how-to/integrate-julia.md)). See the
+Release (see [Integrate with Julia](../guides/julia.md#install)). See the
 [Julia guide](../guides/julia.md), the [C ABI reference](../reference/c-abi.md), and the
 [Julia API reference](../reference/julia-api.md).
 
@@ -125,8 +125,7 @@ pair directly and supports both reads and writes. Its shape:
 - **Store access is isolated.** All store opening lives behind one module, so a future remote/gRPC
   mode can be added without touching the command handlers; today there is no remote mode.
 
-See the [Use the `infrastore` CLI how-to](../how-to/use-cli.md) and the
-[CLI reference](../reference/cli.md).
+See the [CLI guide](../guides/cli.md) and the [CLI reference](../reference/cli.md).
 
 ## What Every Binding Shares
 
@@ -144,17 +143,19 @@ bindings reimplement storage — they all funnel through the one core.
 
 The bindings funnel through one core, and the surface is now broadly consistent. Both static series
 types are available everywhere (read+write, except the read-only gRPC server), and
-[forecasts](./data-model.md#forecasts) read back across every interface. The remaining asymmetry is
-that the read-only gRPC server does not accept any writes:
+[forecasts](./time-series-types.md#forecasts) read back across every interface. The remaining
+asymmetry is that the read-only gRPC server does not accept any writes:
 
-| Capability                    | Rust core | C ABI | Python | Julia | gRPC        |
-| ----------------------------- | --------- | ----- | ------ | ----- | ----------- |
-| `SingleTimeSeries` r/w        | ✅        | ✅    | ✅     | ✅    | read-only   |
-| `NonSequentialTimeSeries` r/w | ✅        | ✅    | ✅     | ✅    | read-only   |
-| dtypes beyond `f64`           | ✅        | ✅    | ✅     | ✅    | read-only   |
-| Create forecasts              | ✅        | ✅    | ✅     | ✅    | ❌          |
-| Read forecast values          | ✅        | ✅    | ✅     | ✅    | ✅          |
-| Forecast metadata / counts    | ✅        | ✅    | ✅     | ✅    | list/counts |
+| Capability                    | Rust core | C ABI | Python | Julia | CLI    | gRPC        |
+| ----------------------------- | --------- | ----- | ------ | ----- | ------ | ----------- |
+| `SingleTimeSeries` r/w        | ✅        | ✅    | ✅     | ✅    | ✅     | read-only   |
+| `NonSequentialTimeSeries` r/w | ✅        | ✅    | ✅     | ✅    | ✅     | read-only   |
+| dtypes beyond `f64`           | ✅        | ✅    | ✅     | ✅    | ✅     | read-only   |
+| Create forecasts              | ✅        | ✅    | ✅     | ✅    | ✅     | ❌          |
+| Read forecast values          | ✅        | ✅    | ✅     | ✅    | ✅     | ✅          |
+| Forecast metadata / counts    | ✅        | ✅    | ✅     | ✅    | ✅     | list/counts |
+| Readers (columnar sweep)      | ✅        | ✅    | ✅     | ✅    | `grid` | ❌          |
+| Association catalogs          | ✅        | ✅    | ✅     | ✅    | ✅     | ❌          |
 
 The only gap is by design: writes (including forecasts added through `add_time_series`) require
 local filesystem access, so the read-only gRPC server serves forecast reads but not writes.

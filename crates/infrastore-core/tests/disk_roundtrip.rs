@@ -2,7 +2,7 @@
 //!
 //! These exercise the on-disk format and slot map: write to a real store file,
 //! close, reopen, and verify what comes back. Also covers the spill-on-1001 and
-//! compaction (rewrite-and-replace) behaviours documented in the spec.
+//! compaction (rewrite-and-replace) behaviors documented in the spec.
 
 use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{

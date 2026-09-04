@@ -309,7 +309,7 @@ end
 
 # The result types are compared and hashed by value. Julia's default `==` for an
 # immutable struct is `===`-based, which would compare the `Vector` / `Dict`
-# fields above by identity, so `==`, a matching `hash`, and a field-labelled
+# fields above by identity, so `==`, a matching `hash`, and a field-labeled
 # `show` are generated for each of them here.
 const _RESULT_TYPES = (
     :TimeSeriesMetadata,

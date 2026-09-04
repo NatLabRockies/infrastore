@@ -80,61 +80,105 @@ bump plus an append-only migration**, not a re-created store. A catalog written 
 in place on its first writable open. See
 [Upgrade a store in place](../explanation/design-choices.md#upgrade-a-store-in-place-rather-than-bricking-it).
 
-(`0.19.0` moved a `NonSequentialTimeSeries`'s timestamps out of the SQLite catalog and into the HDF5
-file: the `timestamp_sets` table is gone, and each distinct time axis is now an `i64` dataset of
-unix milliseconds under `time_series/timestamps/`, named by the same content hash the association
+### Version history
+
+Newest first. Each entry is the change that forced the bump; `0.19.0` is both the current
+`DATA_FORMAT_VERSION` and the current `MIN_UPGRADABLE_VERSION`, so only the top entry describes
+stores this build can open.
+
+**`0.19.0`** — moved a `NonSequentialTimeSeries`'s timestamps out of the SQLite catalog and into the
+HDF5 file: the `timestamp_sets` table is gone, and each distinct time axis is now an `i64` dataset
+of unix milliseconds under `time_series/timestamps/`, named by the same content hash the association
 row already carried. The hash domain changed with it — `timestamps_hash` is now the SHA-256 of those
 milliseconds rather than of the delta-varint blob the table held — so the `nsts_…` pool names change
 too. The timestamps are data, and belong in the half of the artifact built for data: a store may
 hold many distinct axes, each of them long, and a JSON document round trip needs them to travel with
-the artifact rather than be locked inside the catalog; `0.18.0` made the `id` column of all three
-catalog tables — `time_series_associations`, `supplemental_attribute_associations`, and
-`parent_child_associations` — an `INTEGER PRIMARY KEY AUTOINCREMENT` rather than a bare rowid alias,
-so an id is never reissued once its row is deleted. It is the one bump that adds no column and
-changes no value, and it still cannot be additive: `AUTOINCREMENT` is part of a table's declaration
-and there is no `ALTER TABLE` for it, so applying this DDL to an older catalog would leave all three
-tables on recycled ids while reporting success. Recycled ids matter because the id is an external
-reference — a consumer stores it in its own model — and reuse makes a stale reference resolve to a
-different, valid row; `0.17.0` added the metadata column `time_reference`, which records how a
-series' timestamps were _spelled_ — an instant in UTC, an instant at a fixed offset, an instant in a
-named IANA zone, or a wall clock naming no instant. It also changes how stored timestamps are
-_interpreted_: a row marked `zoneless` holds wall clocks the store keeps as if UTC, which an older
-reader would hand back as instants. See
-[Time references](../explanation/data-model.md#time-references); `0.16.0` added the metadata column
-`component_field`; `0.15.0` renamed the metadata column `ext` to `application_data` and added the
-`quantity_kind` and `unit_system` columns; unlike a new _table_, new _columns_ are not picked up by
-the idempotent `CREATE TABLE IF NOT EXISTS` DDL, so a store one version behind is rejected on open;
-`0.14.0` moved a `NonSequentialTimeSeries`'s timestamps out of the association row: the
+the artifact rather than be locked inside the catalog.
+
+**`0.18.0`** — made the `id` column of all three catalog tables (`time_series_associations`,
+`supplemental_attribute_associations`, and `parent_child_associations`) an
+`INTEGER PRIMARY KEY AUTOINCREMENT` rather than a bare rowid alias, so an id is never reissued once
+its row is deleted. Recycled ids matter because the id is an external reference — a consumer stores
+it in its own model — and reuse makes a stale reference resolve to a different, valid row.
+
+This is the one bump that adds no column and changes no value. It was taken because `AUTOINCREMENT`
+is part of a table's declaration and there is no `ALTER TABLE` for it, so re-running the DDL over an
+older catalog would have left all three tables on recycled ids _while reporting success_ — and,
+before the migration ladder existed, stranding that catalog was the only way to keep it out. **The
+version floor is what enforces the guarantee, and it holds:** `MIN_UPGRADABLE_VERSION` is `0.19.0`,
+so every catalog predating this entry is `Incompatible` and refused on open. No store this build can
+open lacks `AUTOINCREMENT`. The silent-recycling failure above is what the bump _prevented_; it is
+not a state a store can be found in, and nothing needs to check for it at runtime
+(`every_association_table_declares_autoincrement` in
+`crates/infrastore-core/tests/association_ids.rs` holds a fresh catalog to the property, and
+`sqlite_sequence` is what proves the keyword took effect rather than merely being present).
+
+The ladder has since changed what a repeat would cost, so do not reason from this entry to the next
+one. A table rebuild is now an ordinary migration — [revision 2](#schema_version) is exactly that,
+and carries the `AUTOINCREMENT` high-water mark across by hand — so the same change made today would
+be a `CATALOG_SCHEMA_REVISION` bump that upgrades existing catalogs in place, not a
+`DATA_FORMAT_VERSION` bump that strands them.
+
+**`0.17.0`** — added the metadata column `time_reference`, which records how a series' timestamps
+were _spelled_: an instant in UTC, an instant at a fixed offset, an instant in a named IANA zone, or
+a wall clock naming no instant. It also changes how stored timestamps are _interpreted_ — a row
+marked `zoneless` holds wall clocks the store keeps as if UTC, which an older reader would hand back
+as instants. See [Time References](../explanation/time-references.md).
+
+**`0.16.0`** — added the metadata column `component_field`.
+
+**`0.15.0`** — renamed the metadata column `ext` to `application_data` and added the `quantity_kind`
+and `unit_system` columns. Unlike a new _table_, new _columns_ are not picked up by the idempotent
+`CREATE TABLE IF NOT EXISTS` DDL, so a store one version behind is rejected on open.
+
+**`0.14.0`** — moved a `NonSequentialTimeSeries`'s timestamps out of the association row: the
 `timestamps_json` TEXT column became a `timestamps_hash` BLOB resolving into a then-new
 content-addressed `timestamp_sets` catalog table (which `0.19.0` replaced with the HDF5 datasets
-described above), and irregular arrays that share a time axis are now column-packed into `nsts_…`
-datasets keyed by that hash instead of one standalone `arr_…` dataset each; `0.13.0` replaced the
-`dtype` column with `element_type`, which names the _logical_ element type and derives the physical
-dtype from it — see [Element types](./element-types.md); `0.12.0` changed `owner_category` and
-`time_series_type` from TEXT names to small INTEGER codes — see
-[Discriminant encoding](#discriminant-encoding) below; `0.11.0` renamed the metadata column
-`logical_type` to `ext` — an opaque, package-owned extension payload (typically JSON) the store
-stores verbatim and never interprets; `0.10.0` replaced the per-association `features` table with
-the content-addressed `feature_sets` table below, so a feature map is stored once and shared by
-every association that uses it — dropping the `association_id` foreign key and its
-`ON DELETE CASCADE`; `0.9.0` changed the packed-dataset chunking to timestamp-major
-`(1, cols, *element_shape)` and made the column count `cols` per-dataset (sized to the writing
-batch) instead of a fixed 1,000, optimizing reads across series by timestamp and bulk writes;
-`0.8.0` added the forecast `interval` to the association uniqueness key — so two forecasts of one
-variable that differ only by interval are now distinct series — widening both unique indexes (the
-`NULL`-folding index now `COALESCE`s `interval` as well as `resolution`); `0.7.0` made
-`resolution`/`horizon`/`interval` calendar-aware [periods](../explanation/data-model.md): they are
-now encoded as ISO-8601 duration strings (e.g. `PT1H`, `P1M`, `P1Y`) rather than integer
-milliseconds, in both the packed dataset names and the SQLite columns, so irregular periods
-(`Month`/`Quarter`/`Year`) can be represented distinctly from fixed spans; `0.6.0` added
-`owner_category` to the association uniqueness key (so the owner identity is the pair
-`(owner_id, owner_category)`), widening the unique indexes and `idx_owner`; `0.5.0` changed the
-owner identifier to a signed 64-bit integer (`owner_id`); `0.4.0` is the baseline the Rust port of
-InfrastructureSystems.jl shipped with — the version that introduced `DATA_FORMAT_VERSION` itself;
-`0.3.0` switched the time unit from nanoseconds to milliseconds, renaming the SQLite `*_ns` columns
-to `*_ms` and encoding the packed dataset name's `{res}` field in milliseconds instead of whole
-seconds; `0.2.0` introduced typed, multi-dimensional arrays and the two-mode array layout below;
-`0.1.0` stored only 1-D `f64`.)
+described above), and irregular arrays sharing a time axis became column-packed into `nsts_…`
+datasets keyed by that hash instead of one standalone `arr_…` dataset each.
+
+**`0.13.0`** — replaced the `dtype` column with `element_type`, which names the _logical_ element
+type and derives the physical dtype from it. See [Element types](./element-types.md).
+
+**`0.12.0`** — changed `owner_category` and `time_series_type` from TEXT names to small INTEGER
+codes. See [Discriminant encoding](#discriminant-encoding) below.
+
+**`0.11.0`** — renamed the metadata column `logical_type` to `ext`, an opaque, package-owned
+extension payload (typically JSON) the store stores verbatim and never interprets.
+
+**`0.10.0`** — replaced the per-association `features` table with the content-addressed
+`feature_sets` table below, so a feature map is stored once and shared by every association that
+uses it, dropping the `association_id` foreign key and its `ON DELETE CASCADE`.
+
+**`0.9.0`** — changed the packed-dataset chunking to timestamp-major `(1, cols, *element_shape)` and
+made the column count `cols` per-dataset (sized to the writing batch) instead of a fixed 1,000,
+optimizing reads across series by timestamp and bulk writes.
+
+**`0.8.0`** — added the forecast `interval` to the association uniqueness key, so two forecasts of
+one variable differing only by interval became distinct series. This widened both unique indexes
+(the `NULL`-folding index now `COALESCE`s `interval` as well as `resolution`).
+
+**`0.7.0`** — made `resolution`/`horizon`/`interval` calendar-aware
+[periods](../explanation/time-series-types.md#periods), encoded as ISO-8601 duration strings (e.g.
+`PT1H`, `P1M`, `P1Y`) rather than integer milliseconds, in both the packed dataset names and the
+SQLite columns, so irregular periods (`Month`/`Quarter`/`Year`) can be represented distinctly from
+fixed spans.
+
+**`0.6.0`** — added `owner_category` to the association uniqueness key, making the owner identity
+the pair `(owner_id, owner_category)` and widening the unique indexes and `idx_owner`.
+
+**`0.5.0`** — changed the owner identifier to a signed 64-bit integer (`owner_id`).
+
+**`0.4.0`** — the baseline the Rust port of InfrastructureSystems.jl shipped with, and the version
+that introduced `DATA_FORMAT_VERSION` itself.
+
+**`0.3.0`** — switched the time unit from nanoseconds to milliseconds, renaming the SQLite `*_ns`
+columns to `*_ms` and encoding the packed dataset name's `{res}` field in milliseconds instead of
+whole seconds.
+
+**`0.2.0`** — introduced typed, multi-dimensional arrays and the two-mode array layout below.
+
+**`0.1.0`** — stored only 1-D `f64`.
 
 ## Arrays Are Typed and N-Dimensional
 
@@ -542,10 +586,15 @@ catalog was never opened for writing.
 CREATE TABLE schema_version (version INTEGER NOT NULL);
 ```
 
-A single-column table holding the catalog schema version. Creating the catalog inserts `version = 1`
-if the table is empty; `1` is the current value. This tracks the SQLite schema alone and is distinct
-from the HDF5 `data_format_version` attribute, which governs the artifact as a whole and is the
-value `open` validates.
+A single-column table holding the catalog's own schema revision — `CATALOG_SCHEMA_REVISION`, which
+is **2** as of this build. It holds at most one row: the DDL creates the table, and the migration
+ladder writes the revision, replacing whatever was there. A fresh catalog is stamped with the
+current revision directly rather than seeded at `1` and walked up the ladder.
+
+An absent table, or a present one holding no row, reads as revision `1` — the pre-ladder shape,
+which is where the ladder starts. This tracks the SQLite schema alone and is distinct from the HDF5
+`data_format_version` attribute, which governs the artifact as a whole and is the value `open`
+validates; the two move independently.
 
 ### `catalog_identity`
 
@@ -656,7 +705,7 @@ and so lands on an existing store's first writable open without a `data_format_v
 - **Timestamps** are RFC 3339 strings in UTC, holding a whole number of **milliseconds**. The format
   could carry finer digits and a store written before the precision rule may, so a reader must parse
   the full string; but no current write path produces one — see
-  [timestamp precision](../explanation/data-model.md#timestamp-precision).
+  [timestamp precision](../explanation/time-series-types.md#timestamp-precision).
 - **Periods** (`resolution`, `horizon`, `interval`) are canonical **ISO-8601 duration strings** in
   SQLite (`PT1H`, `P1M`, `P1Y`), and the packed dataset name's `{res}` field uses the same encoding.
   Calendar periods (`Month`/`Quarter`/`Year`) are stored distinctly from fixed spans.

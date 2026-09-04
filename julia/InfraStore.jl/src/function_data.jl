@@ -534,7 +534,7 @@ end
 Whether `element_type` names a layout [`decode_element_values`](@ref) turns into
 values, as opposed to a plain dtype whose stored numbers are already the answer.
 
-False for a spelling this version does not recognise, which reads back as raw
+False for a spelling this version does not recognize, which reads back as raw
 numbers rather than failing.
 """
 function is_composite_element_type(element_type::AbstractString)
