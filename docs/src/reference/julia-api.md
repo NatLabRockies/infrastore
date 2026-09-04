@@ -41,7 +41,7 @@ Exported names (types first, then functions):
 `num_distinct_arrays`, `open_copy`, `open_store`, `persist!`, `persist_catalog!`, `read_by_id`,
 `read_by_ids`, `read_only`, `remove_by_filter!`, `remove_by_ids!`,
 `remove_parent_child_associations!`, `remove_supplemental_attribute_associations!`,
-`rename_time_series!`, `replace_owner!`, `replace_parent_child_component_id!`,
+`replace_owner!`, `replace_parent_child_component_id!`,
 `replace_supplemental_attribute_component_id!`, `rollback_transaction!`, `static_grid`,
 `static_groups`, `static_read!`, `static_summary`, `static_timestamps`, `static_values`,
 `supplemental_attribute_counts_by_type`, `supplemental_attribute_summary`, `time_series_counts`,
@@ -382,7 +382,7 @@ straight back into any of those calls;
 grouping carries no dtype — so their `time_series_type` is always the bare one.
 
 Every write returns the catalog row's `id` as a plain `Int64` — assigned, never reissued, and what
-every read, removal, rename and copy takes.
+every read, removal and copy takes.
 
 ```julia
 struct TimeSeriesMetadata                    # get_metadata_by_id / list_metadata
@@ -464,7 +464,7 @@ add_time_series!(
     quantity_kind = ts.quantity_kind, unit_system = ts.unit_system,
     component_field = ts.component_field, application_data = ts.application_data,
     id = nothing,   # file under this catalog id (imports); `nothing` lets the catalog assign
-) -> Int64   # the catalog row's id -- what every read, removal and rename takes
+) -> Int64   # the catalog row's id -- what every read and removal takes
 
 read_by_id(store::Store, id::Integer;
           start_time=nothing, len=nothing, count=nothing,
@@ -944,7 +944,6 @@ list_names(store; <list_metadata filters>) -> Vector{String}        # distinct n
 list_owner_types(store; <list_metadata filters>) -> Vector{String}  # distinct owner types, sorted
 remove_by_filter!(store; <list_metadata filters>) -> Int
                                   # remove every match in one all-or-nothing transaction; count removed
-rename_time_series!(store, id::Integer, new_name) -> Int64   # same row and id, new name
 get_compression(store) -> CompressionSettings  # compression=:deflate|:none, level, shuffle; restored from file on open
 verify_integrity(store) -> Int    # number of integrity errors; 0 == intact
 compact!(store) -> CompactionReport   # reclaims both halves; on an on-disk store this rewrites the
@@ -983,8 +982,8 @@ list_metadata(store; owner_id=nothing, owner_category=nothing, time_series_type=
 `list_metadata` is the package's one **identify** entry point: it returns a full
 [`TimeSeriesMetadata`](#result-types) per matching row — identity, the per-type descriptive
 snapshot, the physical detail (`data_hash`, `element_type`, `percentiles`, `application_data`), and
-the row's `id`, which is what every read, removal, rename, and copy then takes. Fields that do not
-apply to a row's type are `nothing`. All the filters are optional and independent, and combine as a
+the row's `id`, which is what every read, removal, and copy then takes. Fields that do not apply to
+a row's type are `nothing`. All the filters are optional and independent, and combine as a
 conjunction; with none set the whole store is listed:
 
 - `owner_id`, `owner_category` — scope to one owner.

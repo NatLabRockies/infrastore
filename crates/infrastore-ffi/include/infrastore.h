@@ -1620,10 +1620,10 @@ int32_t infrastore_store_list_metadata_by_ids(const struct InfraStore *handle,
  *   this cannot select the rows that left it unset.)
  *
  * Each row carries `id`, the association id the catalog filed it under (the
- * same id `infrastore_store_add_batch` returns) — the address every read,
- * removal and rename takes. A row carries no timestamp vector: an irregular
- * series' time axis is the one part of a row that costs a read per row, so a
- * listing omits it and a caller that needs it reads the series.
+ * same id `infrastore_store_add_batch` returns) — the address every read and
+ * removal takes. A row carries no timestamp vector: an irregular series' time
+ * axis is the one part of a row that costs a read per row, so a listing omits
+ * it and a caller that needs it reads the series.
  *
  * Returns the JSON through `out_json` as an **owned** allocation the caller
  * releases with `infrastore_string_free`; `out_len` is its byte length. A
@@ -1731,19 +1731,6 @@ int32_t infrastore_store_remove_by_filter(struct InfraStore *handle,
                                           const char *component_field,
                                           int32_t zoneless,
                                           uint64_t *out_removed);
-
-/**
- * Rename the association filed under `id` to `new_name`. Only the catalog name
- * changes; the array is untouched, and the id is the same afterwards — a rename
- * moves the name, not the reference. `INFRASTORE_ERR_NOT_FOUND` if the id names
- * no row, or a duplicate error if the new identity already exists.
- *
- * # Safety
- *
- * `handle` must be a live read-write store handle. `new_name` must be
- * null-terminated UTF-8.
- */
-int32_t infrastore_store_rename(struct InfraStore *handle, int64_t id, const char *new_name);
 
 /**
  * Release a `u64` dims buffer returned by `infrastore_bulk_result_get_forecast`.
@@ -2423,6 +2410,21 @@ int32_t infrastore_static_reader_group_id(const struct InfraStoreStaticReaderHan
                                           int64_t *out_id);
 
 /**
+ * Discard whatever the reader is holding: every group's buffer goes empty and
+ * the timestamp of the last read is forgotten.
+ *
+ * For a caller that refuses a read before it reaches the core — the Julia
+ * wrapper checks the bound's spelling against the reader's timeline, which
+ * `at_unix_ms` cannot carry — so that a refusal leaves the same empty reader
+ * as one the core itself rejects. Always succeeds on a live handle.
+ *
+ * # Safety
+ *
+ * `reader` must be a live static-reader handle.
+ */
+int32_t infrastore_static_reader_invalidate(struct InfraStoreStaticReaderHandle *reader);
+
+/**
  * Read the value of every series at `at_unix_ms`, filling the reader's reusable
  * buffers. After this, `infrastore_static_reader_group_values` exposes each group's
  * bytes. Errors if `at_unix_ms` is off the reader's grid.
@@ -2588,6 +2590,17 @@ int32_t infrastore_forecast_reader_entry_info(const struct InfraStoreForecastRea
 int32_t infrastore_forecast_reader_entry_id(const struct InfraStoreForecastReaderHandle *reader,
                                             uint64_t entry_idx,
                                             int64_t *out_id);
+
+/**
+ * Discard whatever the reader is holding: every entry's window goes empty and
+ * the timestamp of the last read is forgotten. The counterpart of
+ * `infrastore_static_reader_invalidate`; see it for why a binding needs this.
+ *
+ * # Safety
+ *
+ * `reader` must be a live forecast-reader handle.
+ */
+int32_t infrastore_forecast_reader_invalidate(struct InfraStoreForecastReaderHandle *reader);
 
 /**
  * Read the forecast window at `at_unix_ms` for every entry, filling the

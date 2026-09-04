@@ -72,7 +72,7 @@ series_id = store.add_time_series(
     features={"model_year": 2030, "scenario": "high"},
     units="MW",
 )
-# `series_id` is the catalog row's id: how every read, removal and rename
+# `series_id` is the catalog row's id: how every read and removal
 # addresses the series, and one integer to keep in your own model.
 ```
 

@@ -4865,10 +4865,10 @@ pub unsafe extern "C" fn infrastore_store_list_metadata_by_ids(
 ///   this cannot select the rows that left it unset.)
 ///
 /// Each row carries `id`, the association id the catalog filed it under (the
-/// same id `infrastore_store_add_batch` returns) — the address every read,
-/// removal and rename takes. A row carries no timestamp vector: an irregular
-/// series' time axis is the one part of a row that costs a read per row, so a
-/// listing omits it and a caller that needs it reads the series.
+/// same id `infrastore_store_add_batch` returns) — the address every read and
+/// removal takes. A row carries no timestamp vector: an irregular series' time
+/// axis is the one part of a row that costs a read per row, so a listing omits
+/// it and a caller that needs it reads the series.
 ///
 /// Returns the JSON through `out_json` as an **owned** allocation the caller
 /// releases with `infrastore_string_free`; `out_len` is its byte length. A
@@ -5115,36 +5115,6 @@ pub unsafe extern "C" fn infrastore_store_remove_by_filter(
             unsafe { *out_removed = n as u64 };
             INFRASTORE_OK
         }
-        Err(e) => map_core_error(e),
-    }
-}
-
-/// Rename the association filed under `id` to `new_name`. Only the catalog name
-/// changes; the array is untouched, and the id is the same afterwards — a rename
-/// moves the name, not the reference. `INFRASTORE_ERR_NOT_FOUND` if the id names
-/// no row, or a duplicate error if the new identity already exists.
-///
-/// # Safety
-///
-/// `handle` must be a live read-write store handle. `new_name` must be
-/// null-terminated UTF-8.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn infrastore_store_rename(
-    handle: *mut InfraStoreHandle,
-    id: i64,
-    new_name: *const c_char,
-) -> i32 {
-    clear_error();
-    let store = deref_handle!(mut handle);
-    let new_name = match unsafe { cstr_to_str(new_name) } {
-        Ok(s) => s,
-        Err(c) => return c,
-    };
-    match store
-        .inner
-        .rename_time_series(core_lib::TimeSeriesId(id), new_name)
-    {
-        Ok(_) => INFRASTORE_OK,
         Err(e) => map_core_error(e),
     }
 }
@@ -7053,6 +7023,33 @@ pub unsafe extern "C" fn infrastore_static_reader_group_id(
     INFRASTORE_OK
 }
 
+/// Discard whatever the reader is holding: every group's buffer goes empty and
+/// the timestamp of the last read is forgotten.
+///
+/// For a caller that refuses a read before it reaches the core — the Julia
+/// wrapper checks the bound's spelling against the reader's timeline, which
+/// `at_unix_ms` cannot carry — so that a refusal leaves the same empty reader
+/// as one the core itself rejects. Always succeeds on a live handle.
+///
+/// # Safety
+///
+/// `reader` must be a live static-reader handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_static_reader_invalidate(
+    reader: *mut InfraStoreStaticReaderHandle,
+) -> i32 {
+    clear_error();
+    let reader = match unsafe { reader.as_mut() } {
+        Some(r) => r,
+        None => {
+            set_error("reader handle is null");
+            return INFRASTORE_ERR_NULL_POINTER;
+        }
+    };
+    reader.inner.invalidate();
+    INFRASTORE_OK
+}
+
 /// Read the value of every series at `at_unix_ms`, filling the reader's reusable
 /// buffers. After this, `infrastore_static_reader_group_values` exposes each group's
 /// bytes. Errors if `at_unix_ms` is off the reader's grid.
@@ -7475,6 +7472,29 @@ pub unsafe extern "C" fn infrastore_forecast_reader_entry_id(
         }
     };
     unsafe { *out_id = entry.id().get() };
+    INFRASTORE_OK
+}
+
+/// Discard whatever the reader is holding: every entry's window goes empty and
+/// the timestamp of the last read is forgotten. The counterpart of
+/// `infrastore_static_reader_invalidate`; see it for why a binding needs this.
+///
+/// # Safety
+///
+/// `reader` must be a live forecast-reader handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_forecast_reader_invalidate(
+    reader: *mut InfraStoreForecastReaderHandle,
+) -> i32 {
+    clear_error();
+    let reader = match unsafe { reader.as_mut() } {
+        Some(r) => r,
+        None => {
+            set_error("reader handle is null");
+            return INFRASTORE_ERR_NULL_POINTER;
+        }
+    };
+    reader.inner.invalidate();
     INFRASTORE_OK
 }
 

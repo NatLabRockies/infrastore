@@ -55,7 +55,6 @@ const COMMAND_GROUPS: &[(&str, &[&str])] = &[
             "merge",
             "transform",
             "remove",
-            "rename",
             "copy",
             "replace-owner",
             "clear",
@@ -452,18 +451,6 @@ enum Commands {
         /// Restrict to one resolution, e.g. PT1H.
         #[arg(long)]
         resolution: Option<String>,
-    },
-    /// Rename the single series a selector resolves to.
-    #[command(after_help = help::RENAME)]
-    Rename {
-        #[command(flatten)]
-        selector: SelectorArgs,
-        /// The new name.
-        #[arg(long)]
-        new_name: String,
-        /// Show what would be renamed without changing the store.
-        #[arg(long)]
-        dry_run: bool,
     },
     /// Copy the single series a selector resolves to onto another owner.
     #[command(after_help = help::COPY)]
@@ -1007,17 +994,6 @@ fn run(cli: &Cli) -> Result<(), String> {
             interval,
             owner_category.as_deref(),
             resolution.as_deref(),
-            cli.format,
-        ),
-        Commands::Rename {
-            selector,
-            new_name,
-            dry_run,
-        } => commands::manage::rename(
-            &require_store(cli)?,
-            selector,
-            new_name,
-            *dry_run,
             cli.format,
         ),
         Commands::Copy {

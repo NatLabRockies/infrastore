@@ -1337,6 +1337,17 @@ impl Store {
     /// Calls nest: an inner [`Self::begin_transaction`] opens a nested savepoint,
     /// and only the outermost commit makes anything durable.
     ///
+    /// # Cost
+    ///
+    /// A transaction is also how a caller adding many series amortizes the
+    /// per-add HDF5 flush (see [`flush_arrays_before_commit`]): the flush
+    /// happens once for the span instead of once per call. Measured here on
+    /// 2000 single adds of a 24-step `f64` `SingleTimeSeries` against an
+    /// on-disk store, release build: ~1.07 s one at a time, ~0.12 s inside one
+    /// transaction. A bulk add does the same. The cost scales with the bytes a
+    /// call actually wrote, so re-adding data the store already holds is
+    /// already cheap.
+    ///
     /// # Concurrency
     ///
     /// This holds the SQLite write lock until the outermost commit or rollback.
@@ -1762,7 +1773,7 @@ impl Store {
             added.push(id);
         }
 
-        flush_arrays_before_commit(&mut *self.backend, self.txn.is_some())?;
+        flush_arrays_before_commit(&mut *self.backend, staged, self.txn.is_some())?;
         tx.commit()?;
         tracing::debug!(count = added.len(), "transaction committed");
         Ok(added)
@@ -1868,7 +1879,7 @@ impl Store {
                 &mut shared_sets,
             )?));
         }
-        flush_arrays_before_commit(&mut *self.backend, self.txn.is_some())?;
+        flush_arrays_before_commit(&mut *self.backend, staged, self.txn.is_some())?;
         tx.commit()?;
         tracing::debug!(count = parts.len(), "bulk-add transaction committed");
         Ok(parts.into_iter().zip(ids).map(|(_, id)| id).collect())
@@ -1886,11 +1897,13 @@ impl Store {
     ///
     /// The unit is the **forecast family** — `(owner, name, resolution,
     /// features)`, the tuple `transform_single_time_series` files the view under
-    /// beside its source — not the array. Keying on the hash let two owners'
-    /// byte-identical `SingleTimeSeries` stand in for each other: removing one
-    /// owner's source passed because the other owner's row still referenced the
-    /// array, leaving a view with no source in its family, and the other owner's
-    /// source was then refused for a view it never had.
+    /// beside its source — *and* the array both halves reference. A derived view
+    /// shares both with its source, and either alone admits a false match:
+    /// keying on the hash let two owners' byte-identical `SingleTimeSeries`
+    /// stand in for each other, while keying on the family alone pinned a
+    /// `SingleTimeSeries` that merely shares the family with a view copied there
+    /// over a different array — a row [`Self::copy_time_series`] writes on
+    /// purpose. See [`crate::metadata::forecast_family_conflict_on_array`].
     fn check_no_orphaned_dst(
         tx: &rusqlite::Connection,
         removed_sts: impl IntoIterator<Item = crate::metadata::DeletedRow>,
@@ -1903,21 +1916,13 @@ impl Store {
                 row.name.clone(),
                 row.resolution,
                 row.features_hash,
+                row.data_hash,
             );
             if !seen.insert(family) {
                 continue;
             }
-            let probe = |ts_type| {
-                crate::metadata::forecast_family_conflict(
-                    tx,
-                    row.owner_id,
-                    row.owner_category,
-                    &row.name,
-                    row.resolution,
-                    &row.features_hash,
-                    ts_type,
-                )
-            };
+            let probe =
+                |ts_type| crate::metadata::forecast_family_conflict_on_array(tx, &row, ts_type);
             if probe(TimeSeriesType::DeterministicSingleTimeSeries)?
                 && !probe(TimeSeriesType::SingleTimeSeries)?
             {
@@ -2847,6 +2852,11 @@ impl Store {
         reader: &mut StaticReader,
         at: chrono::DateTime<chrono::Utc>,
     ) -> Result<()> {
+        // The whole reader goes invalid first: a failure anywhere in this call
+        // -- including `index_at`, which fails before a group is touched --
+        // must not leave some groups holding this timestamp's values and others
+        // the previous one's. See `StaticReader::invalidate`.
+        reader.invalidate();
         let index = reader.index_at(at)?;
         for group in reader.groups_mut() {
             group.fill(|hashes, dtype, out| {
@@ -2915,6 +2925,8 @@ impl Store {
         reader: &mut ForecastReader,
         at: chrono::DateTime<chrono::Utc>,
     ) -> Result<()> {
+        // Invalid until this call succeeds, exactly as in `static_read`.
+        reader.invalidate();
         let window = reader.window_index(at)?;
         // One read per *slot*: forecasts that share an array and read plan
         // (e.g. components referencing one shared forecast) collapse to a single
@@ -3575,43 +3587,6 @@ impl Store {
         types.sort();
         types.dedup();
         Ok(types)
-    }
-
-    /// Rename the association filed under `id`, returning its row as renamed.
-    ///
-    /// Only the catalog association's name changes; the underlying array and its
-    /// hash are untouched, and the id is the same afterwards — a rename moves
-    /// the name, not the reference, so anything holding the id keeps working.
-    /// Errors: [`TimeSeriesError::NotFound`] if `id` names no row,
-    /// [`TimeSeriesError::DuplicateTimeSeries`] if a series with the new
-    /// identity already exists, [`TimeSeriesError::ReadOnlyStore`] on a
-    /// read-only store.
-    pub fn rename_time_series(
-        &mut self,
-        id: TimeSeriesId,
-        new_name: &str,
-    ) -> Result<TimeSeriesMetadata> {
-        if self.read_only {
-            return Err(TimeSeriesError::ReadOnlyStore);
-        }
-        // A rename moves the row to a new family identity, which can put it
-        // alongside the counterpart it is mutually exclusive with. Read the row
-        // first so the check can be posed against the *destination* name.
-        let mut probe = self
-            .metadata
-            .get_by_id(id.get(), &*self.backend)?
-            .ok_or(TimeSeriesError::NotFound)?;
-        probe.name = new_name.to_string();
-
-        let tx = self.metadata.savepoint()?;
-        check_forecast_family_free(&tx, &probe, "rename to")?;
-        // By primary key, so this is one row or none — there is no wider-
-        // predicate case left to guard against.
-        if MetadataStore::rename_by_id(&tx, id.get(), new_name)? == 0 {
-            return Err(TimeSeriesError::NotFound);
-        }
-        tx.commit()?;
-        Ok(probe)
     }
 
     /// Return the forecast parameters recorded in the store, optionally
@@ -5138,11 +5113,24 @@ fn resolve_irregular_layouts(
 /// Inside a cross-operation transaction the nested commit is not durable
 /// either, so the flush waits for [`Store::commit_transaction`] to do it once
 /// for the whole span. The in-memory backend's flush is a no-op.
+///
+/// A call that staged nothing skips it. Arrays are content-addressed, so an add
+/// whose hash the backend already holds returns from `put_array` before writing
+/// a byte (`Ok(false)`), and its row names an array some earlier call already
+/// flushed — there is no dirty buffer for this one to push. `staged` is per
+/// call and lists exactly what this one put into the backend, so an empty pair
+/// is precisely that case. It matters because the flush is not free: a caller
+/// adding series one at a time pays an fsync-shaped cost per call, and a
+/// re-add of data the store already holds paid it for nothing. A call that
+/// *did* write still flushes — that is the guarantee above, and the way to
+/// amortize it across many writes is [`Store::begin_transaction`] or a bulk
+/// add, both of which flush once for the whole span.
 fn flush_arrays_before_commit(
     backend: &mut dyn StorageBackend,
+    staged: &StagedWrites,
     in_transaction: bool,
 ) -> Result<()> {
-    if in_transaction {
+    if in_transaction || (staged.arrays.is_empty() && staged.timestamps.is_empty()) {
         return Ok(());
     }
     backend.flush()

@@ -10,8 +10,11 @@
 //! * a forecast removed after the reader cached its block is `NotFound`, not
 //!   served from the cache;
 //! * the `DeterministicSingleTimeSeries` removal guard is per forecast family
-//!   (owner, name, resolution, features), not per array, so two owners'
-//!   byte-identical sources cannot stand in for each other.
+//!   (owner, name, resolution, features) *and* per array, so two owners'
+//!   byte-identical sources cannot stand in for each other and a view copied
+//!   into a family pins only a source it is actually a view of;
+//! * a failed read leaves a reader wholly empty, not holding one timestamp's
+//!   values in the groups it reached and another's in the groups it did not.
 //!
 //! Both backends run every case: the write boundary is shared, but the two
 //! backends stored a malformed array differently (the on-disk one refused it in
@@ -378,6 +381,136 @@ fn the_derived_forecast_source_guard_is_per_owner() {
         assert_eq!(
             store.remove_by_ids(&[s1, dst_of(store, 1)]).unwrap(),
             2,
+            "{backend}"
+        );
+    });
+}
+
+/// The guard pins a source only for a view that is actually a view *of it*.
+///
+/// The family alone is not enough. `copy_time_series` deliberately writes a
+/// `DeterministicSingleTimeSeries` with no source at the destination, and that
+/// copy can land in a family where an unrelated `SingleTimeSeries` lives — the
+/// two are distinct identities, so the catalog holds both. Probing the family
+/// alone made that unrelated source unremovable on behalf of a view over a
+/// different array entirely.
+#[test]
+fn a_copied_view_does_not_pin_an_unrelated_source_in_its_family() {
+    each_backend(|store, backend| {
+        // Owner 1: a source and the view derived from it. Both name array A.
+        let src = add(
+            store,
+            1,
+            TimeSeriesData::SingleTimeSeries(sts("load", hourly(8))),
+        )
+        .unwrap();
+        store
+            .transform_single_time_series(
+                Duration::hours(2),
+                Duration::hours(1),
+                None,
+                None,
+                TransformPolicy::default(),
+            )
+            .unwrap();
+
+        // Owner 2: a source of its own over *different* values, so a different
+        // array; then owner 1's view copied onto it under the same name. Owner
+        // 2's family now holds an STS and a DST that have no relationship.
+        let unrelated = add(
+            store,
+            2,
+            TimeSeriesData::SingleTimeSeries(sts("load", hourly(7))),
+        )
+        .unwrap();
+        store
+            .copy_time_series(dst_of(store, 1), 2, "Generator", None)
+            .unwrap();
+        assert_ne!(
+            store
+                .get_metadata_by_id(unrelated)
+                .unwrap()
+                .unwrap()
+                .data_hash,
+            store.get_metadata_by_id(src).unwrap().unwrap().data_hash,
+            "{backend}: the two sources must be different arrays for this case"
+        );
+
+        // Owner 2's source backs nothing: the view beside it is a view of owner
+        // 1's array, and removing this row takes nothing away from it.
+        assert_eq!(store.remove_by_ids(&[unrelated]).unwrap(), 1, "{backend}");
+        // The copied view still reads, because it holds its array by hash.
+        store
+            .read_by_id(dst_of(store, 2), ReadWindow::full())
+            .unwrap();
+        // And owner 1's source is still pinned by the view that *is* over it.
+        let err = store.remove_by_ids(&[src]).unwrap_err();
+        assert!(is_invalid(&err), "{backend}: {err}");
+    });
+}
+
+/// A failed read leaves the whole reader empty, not half of one read and half
+/// of the last.
+///
+/// `StaticGroup::fill` clears the group it is filling, but a read is one
+/// operation over every group: a failure part way through left the groups
+/// already filled holding the new timestamp's values while the rest held the
+/// previous read's, all of it still labelled with the previous timestamp. An
+/// off-grid timestamp is the sharper form — it fails before any group is
+/// touched, so every group kept the last read intact and a caller that ignored
+/// the error saw a full, plausible, wrong answer.
+#[test]
+fn a_failed_static_read_empties_the_whole_reader() {
+    each_backend(|store, backend| {
+        for owner in 1..=2 {
+            add(
+                store,
+                owner,
+                TimeSeriesData::SingleTimeSeries(sts("load", hourly(8))),
+            )
+            .unwrap();
+        }
+        // A second dtype, so the reader holds more than one group and the
+        // all-or-nothing claim has something to be about.
+        let i64s: Vec<i64> = (0..8).collect();
+        add(
+            store,
+            3,
+            TimeSeriesData::SingleTimeSeries(sts(
+                "count",
+                TypedArray::from_slice(vec![8], &i64s).unwrap(),
+            )),
+        )
+        .unwrap();
+
+        let mut reader = store
+            .build_static_reader(ListFilter::new().resolution(Duration::hours(1)))
+            .unwrap();
+        assert!(
+            reader.groups().len() > 1,
+            "{backend}: two dtypes, two groups"
+        );
+        store.static_read(&mut reader, t0()).unwrap();
+        assert!(
+            reader.groups().iter().all(|g| !g.values().is_empty()),
+            "{backend}: the first read fills every group"
+        );
+
+        // Half past the hour is not a point on an hourly grid.
+        let off_grid = t0() + Duration::minutes(30);
+        assert!(
+            store.static_read(&mut reader, off_grid).is_err(),
+            "{backend}"
+        );
+        assert!(
+            reader.groups().iter().all(|g| g.values().is_empty()),
+            "{backend}: a failed read leaves no group serving its old values"
+        );
+
+        // And the reader still works afterwards.
+        store.static_read(&mut reader, t0()).unwrap();
+        assert!(
+            reader.groups().iter().all(|g| !g.values().is_empty()),
             "{backend}"
         );
     });

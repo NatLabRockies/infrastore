@@ -402,7 +402,6 @@ infrastore --store demo.h5 verify                 # re-hash every array; exit 1 
 infrastore --store demo.h5 check-consistency      # every SingleTimeSeries of a resolution on one grid
 infrastore --store demo.h5 stats                  # association, owner, and distinct-array counts
 infrastore --store demo.h5 remove --owner-id 42 --name load --dry-run
-infrastore --store demo.h5 rename --owner-id 42 --name load --new-name load_2024
 infrastore --store demo.h5 compact --force        # rewrite the .h5 so deletions actually shrink it
 ```
 

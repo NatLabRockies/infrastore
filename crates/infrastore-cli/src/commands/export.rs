@@ -354,32 +354,34 @@ fn render_json(
             );
         }
         _ => {
-            let arr = match data {
-                TimeSeriesData::Deterministic(d) => &d.data,
-                TimeSeriesData::Probabilistic(p) => &p.data,
-                TimeSeriesData::Scenarios(s) => &s.data,
+            // Every scalar here describes the windows in `values`, so all of
+            // them come from the forecast that was *read*, never from the
+            // catalog row. Under `--time-range` the row's `initial_timestamp`
+            // and `count` describe windows this document does not contain: a
+            // document claiming `count: 24` beside a two-window array both
+            // mislabels the data and is not re-readable, because the
+            // constructor would reject the pair. The two static arms above read
+            // from `s`/`ns` for the same reason.
+            let (arr, horizon) = match data {
+                TimeSeriesData::Deterministic(d) => (&d.data, d.horizon),
+                TimeSeriesData::Probabilistic(p) => (&p.data, p.horizon),
+                TimeSeriesData::Scenarios(s) => (&s.data, s.horizon),
                 _ => unreachable!(),
             };
-            if let Some(t) = meta.initial_timestamp {
-                obj.insert(
-                    "initial_timestamp".into(),
-                    json!(fields::render_timestamp(t, meta.time_reference.as_ref())),
-                );
-            }
-            if let Some(r) = meta.resolution {
-                obj.insert("resolution".into(), json!(r.to_iso8601()));
-            }
-            if let Some(h) = meta.horizon {
-                obj.insert("horizon".into(), json!(h.to_iso8601()));
-            }
-            if let Some(iv) = meta.interval {
-                obj.insert("interval".into(), json!(iv.to_iso8601()));
-            }
-            if let Some(c) = meta.count {
-                obj.insert("count".into(), json!(c));
-            }
-            if let Some(p) = &meta.percentiles {
-                obj.insert("percentiles".into(), json!(p));
+            let grid = show::ForecastGrid::of(data)?;
+            obj.insert(
+                "initial_timestamp".into(),
+                json!(fields::render_timestamp(
+                    grid.initial_timestamp,
+                    meta.time_reference.as_ref()
+                )),
+            );
+            obj.insert("resolution".into(), json!(grid.resolution.to_iso8601()));
+            obj.insert("horizon".into(), json!(horizon.to_iso8601()));
+            obj.insert("interval".into(), json!(grid.interval.to_iso8601()));
+            obj.insert("count".into(), json!(grid.count));
+            if let TimeSeriesData::Probabilistic(p) = data {
+                obj.insert("percentiles".into(), json!(p.percentiles));
             }
             if let TimeSeriesData::Scenarios(s) = data {
                 obj.insert("scenario_count".into(), json!(s.scenario_count));

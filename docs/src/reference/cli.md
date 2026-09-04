@@ -35,7 +35,7 @@ Every global option is accepted after the command too (`infrastore add --store d
 (`list`, `get`, `grid`, `info`, `export`, `names`, `owner-types`, `owners`, `exists`, `stats`,
 `store-info`, `arrays`, `summary`, `attributes`, `links`, `diff`, `verify`, `check-consistency`,
 `resolutions`, `params`, `compact`, and `add --dry-run`) render their results in it. The write
-commands (`init`, `add`, `merge`, `remove`, `rename`, `copy`, `replace-owner`, `clear`, `transform`,
+commands (`init`, `add`, `merge`, `remove`, `copy`, `replace-owner`, `clear`, `transform`,
 `persist`, `plot`, `attach`, `detach`, `link`, `unlink`, `reassign`) report their outcome in it:
 prose under `table`, and a one-object status document under `json`/`jsonl`, so a scripted mutation
 pipes into `jq` the way a scripted query does.
@@ -210,7 +210,6 @@ So `-f csv get --limit 3` still writes every row; thin a pipe with `--stride`, o
 | `merge`         | Copy matching series from another store into this one.                          |
 | `transform`     | Derive `DeterministicSingleTimeSeries` from stored `SingleTimeSeries`.          |
 | `remove`        | Delete a single series, or every match with `--all` (prompts unless `--force`). |
-| `rename`        | Rename the single series a selector resolves to (`--new-name`).                 |
 | `copy`          | Copy the single series a selector resolves to onto another owner.               |
 | `replace-owner` | Reassign every series from one owner to another.                                |
 | `clear`         | Remove all series, or all for one owner (prompts unless `--force`).             |
@@ -227,7 +226,6 @@ infrastore --store demo.h5 merge --from other.h5 --name-glob 'load_*'
 infrastore --store demo.h5 transform --horizon PT24H --interval PT1H
 infrastore --store demo.h5 remove --owner-id 42 --name load --type SingleTimeSeries
 infrastore --store demo.h5 remove --all --name-glob 'scratch_*' --dry-run
-infrastore --store demo.h5 rename --owner-id 42 --name load --new-name demand
 infrastore --store demo.h5 copy --name load --dst-owner-id 43 --dst-owner-type Generator
 infrastore --store demo.h5 replace-owner --old 42 --new 43 --owner-category Component
 infrastore --store demo.h5 clear --owner-id 42 --owner-category Component
@@ -400,7 +398,6 @@ infrastore --store <PATH> owners      [--owner-category <C>] [--type <T>] [--res
 infrastore --store <PATH> exists      [SELECTOR...]
 infrastore --store <PATH> diff --against <PATH.h5> [SELECTOR...] [--all]
 infrastore --store <PATH> remove  [SELECTOR...] [--all] [--force] [--dry-run]
-infrastore --store <PATH> rename  [SELECTOR...] --new-name <NAME> [--dry-run]
 infrastore --store <PATH> copy    [SELECTOR...] --dst-owner-id <I> --dst-owner-type <T> [--new-name <NAME>] [--dry-run]
 infrastore --store <PATH> replace-owner --old <I> --new <I> --owner-category <C> [--dry-run]
 infrastore --store <PATH> clear   [--owner-id <I> --owner-category <C>] [--force] [--dry-run]
@@ -453,9 +450,9 @@ that distinguish them (`..._PT1H_model_year-2030.csv`), so an export never silen
 of its own output. Filenames are compared case-insensitively, so an export produces the same set of
 files on Linux, macOS, and Windows.
 
-`--dry-run` on `remove`, `clear`, `replace-owner`, `rename`, `copy`, `merge`, `persist`, `attach`,
-`detach`, `link`, `unlink`, and `reassign` prints what would change and exits without opening the
-store for writing.
+`--dry-run` on `remove`, `clear`, `replace-owner`, `copy`, `merge`, `persist`, `attach`, `detach`,
+`link`, `unlink`, and `reassign` prints what would change and exits without opening the store for
+writing.
 
 `add --dry-run` is a validate mode: it resolves every descriptor, reads every CSV in full, and
 prints the resolved `(owner, type, name, element type, shape)` table without opening the store at

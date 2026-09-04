@@ -260,6 +260,30 @@ impl StaticReader {
         self.last_read = Some(at);
     }
 
+    /// Drop every group's buffer and the timestamp they were read at.
+    ///
+    /// A read is one operation over the whole reader, so its failure has to
+    /// leave the whole reader empty. [`StaticGroup::fill`] already clears the
+    /// group it is filling, but that is per group: without this, a failure part
+    /// way through left the groups already filled holding the *new* timestamp's
+    /// values while the ones not yet reached held the *previous* read's, and
+    /// the recorded read timestamp still named the previous one — so a caller that
+    /// ignored the error read two different instants side by side, both labelled
+    /// as the earlier one. Resolving the timestamp can fail before any group is
+    /// touched at all, which is the same hazard with none of them updated.
+    ///
+    /// Public because a binding can refuse a read before the core sees it — the
+    /// Julia wrapper checks the bound's spelling against the reader's timeline,
+    /// which the C ABI's bare `i64` cannot carry — and such a refusal owes the
+    /// caller the same empty reader that a refusal inside [`Store::static_read`]
+    /// produces.
+    pub fn invalidate(&mut self) {
+        self.last_read = None;
+        for group in &mut self.groups {
+            group.filled = false;
+        }
+    }
+
     /// Map a wall-clock timestamp to its 0-based array index on the reader's
     /// timeline. Errors (never clamps) if `at` is not a point on it — before the
     /// start, off-grid or absent from the vector, or past the end. The
@@ -902,6 +926,24 @@ impl ForecastReader {
 
     pub(crate) fn mark_read(&mut self, at: DateTime<Utc>) {
         self.last_read = Some(at);
+    }
+
+    /// Drop every slot's window and the timestamp they were read at, for the
+    /// reason [`StaticReader::invalidate`] gives.
+    ///
+    /// The slots' cached *blocks* are deliberately kept: `cached` is the I/O
+    /// optimization that makes stepping a timeline cheap, and it describes what
+    /// the backend holds rather than what the reader is advertising. `filled` is
+    /// the half that gates [`WindowSlot::window`], so clearing it is what makes
+    /// a failed read read as empty. A block that has genuinely gone is dropped
+    /// by [`WindowSlot::forget`] on the path that discovers it.
+    ///
+    /// Public for the reason [`StaticReader::invalidate`] gives.
+    pub fn invalidate(&mut self) {
+        self.last_read = None;
+        for slot in &mut self.slots {
+            slot.filled = false;
+        }
     }
 
     /// Window index for `at` on the forecast timeline (`initial + k·interval`).

@@ -572,6 +572,13 @@ abstract (also matches `DeterministicSingleTimeSeries`), and all matched forecas
 window timeline (`initial_timestamp` + `interval` + `count`). `static_read` / `forecast_read` error
 (never clamp) if `at` is off the grid/timeline.
 
+**A read is all-or-nothing.** It spans every group (or slot), so a failure anywhere leaves the
+reader wholly empty rather than holding the new timestamp's values in the groups it reached and the
+previous read's in the ones it did not — `values()` / `window()` go empty and stay empty until a
+read succeeds. `invalidate()` is the same thing on demand, for a binding that refuses a read before
+the core sees it (the Julia wrapper checks the bound's spelling against the reader's timeline, which
+the C ABI's `at_unix_ms` cannot carry).
+
 **Window-read deduplication.** A `ForecastReader` groups its entries into `WindowSlot`s keyed by
 `(array hash, read plan)`: forecasts that reference the same array and slice it the same way —
 deduplicated identical data, or several `DeterministicSingleTimeSeries` over one `SingleTimeSeries`
@@ -716,9 +723,9 @@ Neither association catalog is exposed over the [gRPC server](./grpc-api.md) or 
 
 `TimeSeriesId` is the catalog id of one association — the only way to address a stored series. It is
 a newtype over `i64` rather than a bare integer because the store hands out several unrelated
-integer id streams (this one, `owner_id`, and the two association catalogs' own ids), and every
-read, removal and rename takes one of them; passing an `owner_id` where a series id belongs is a
-type error here rather than a lookup that silently finds the wrong row.
+integer id streams (this one, `owner_id`, and the two association catalogs' own ids), and every read
+and removal takes one of them; passing an `owner_id` where a series id belongs is a type error here
+rather than a lookup that silently finds the wrong row.
 
 ```rust
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -973,7 +980,7 @@ impl Scenarios {
 ### `StaticReader` and `StaticGroup`
 
 The columnar static-series reader (see [Readers](#readers)). `Period` is the crate's resolution
-type. `values()` is empty until the first `Store::static_read`.
+type. `values()` is empty until the first `Store::static_read`, and empty again after one fails.
 
 ```rust
 impl StaticReader {

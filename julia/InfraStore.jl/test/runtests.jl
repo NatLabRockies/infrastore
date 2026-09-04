@@ -7,7 +7,7 @@ using InfraStore
 #
 # The store has no key. `list_metadata` is the identify half — it answers which
 # series exist and hands back the catalog `id` that addresses each — and every
-# read, removal and rename takes that id. These wrap the resolution the tests
+# read and removal takes that id. These wrap the resolution the tests
 # would otherwise repeat at every call site, and assert exactly one match so a
 # fixture that grows a sibling fails here rather than silently addressing
 # whichever row came back first.
@@ -1901,7 +1901,7 @@ end
     @test sort(list_names(store)) == ["Wind_speed", "solar_ghi"]
 end
 
-@testset "Phase 2 additions: units, time_range, discovery, rename, bulk dispatch" begin
+@testset "Phase 2 additions: units, time_range, discovery, bulk dispatch" begin
     store = Store(in_memory=true)
     t0 = DateTime(2024, 1, 1)
     res = Hour(1)
@@ -1969,15 +1969,6 @@ end
     # resolve_id resolves a Deterministic request; the read takes the id.
     rid = resolve_id(Deterministic, store, 2, Component, "fc")
     @test read_by_id(store, rid).data == det.data
-
-    # rename_time_series! moves the association.
-    nk = rename_time_series!(store, k, "load2")
-    @test resolve_metadata(
-        SingleTimeSeries, store, 1, Component, "load2"; resolution=res
-    ).units == "MW"
-    @test_throws InfraStore.NotFoundError resolve_metadata(
-        SingleTimeSeries, store, 1, Component, "load"; resolution=res
-    )
 
     # remove_by_filter! removes matching series.
     removed = remove_by_filter!(store; owner_id=3)

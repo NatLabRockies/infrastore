@@ -1,4 +1,4 @@
-"""Tests for the Phase-3 Python surface: readers, discovery/removal/rename,
+"""Tests for the Phase-3 Python surface: readers, discovery/removal,
 richer metadata rows, transform params, application_data, key set semantics."""
 
 from __future__ import annotations
@@ -145,25 +145,20 @@ def test_bulk_read_time_range():
         np.testing.assert_array_equal(sliced[i].data, expected.data)
 
 
-def test_discovery_and_removal_and_rename():
+def test_discovery_and_removal():
     store = Store.create(in_memory=True)
     store.add_time_series(owner_id=1, owner_type="Generator",
                           owner_category=OwnerCategory.Component, time_series=_sts("load", 1.0))
     store.add_time_series(owner_id=2, owner_type="Bus",
                           owner_category=OwnerCategory.Component, time_series=_sts("voltage", 2.0))
-    kf = store.add_time_series(owner_id=3, owner_type="Generator",
-                               owner_category=OwnerCategory.Component, time_series=_det("fc"))
+    store.add_time_series(owner_id=3, owner_type="Generator",
+                          owner_category=OwnerCategory.Component, time_series=_det("fc"))
 
     assert store.get_intervals() == ["PT1H"]
     assert store.get_intervals(time_series_type=TimeSeriesType.SingleTimeSeries) == []
     assert sorted(store.list_names()) == ["fc", "load", "voltage"]
     assert store.list_names(owner_type="Generator") == ["fc", "load"]
     assert sorted(store.list_owner_types()) == ["Bus", "Generator"]
-
-    # rename
-    # A rename moves the name, not the reference: the id still resolves.
-    store.rename_time_series(kf, "fc2")
-    assert store.get_metadata_by_id(kf)["name"] == "fc2"
 
     # remove_by_filter
     removed = store.remove_by_filter(owner_id=2)

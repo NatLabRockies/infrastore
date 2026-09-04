@@ -472,6 +472,8 @@ int32_t infrastore_static_reader_group_id(const struct InfraStoreStaticReaderHan
                                   int64_t *out_id);  /* the column's catalog id */
 int32_t infrastore_static_reader_read(struct InfraStoreStaticReaderHandle *reader,
                               const struct InfraStore *store, int64_t at_unix_ms);
+int32_t infrastore_static_reader_invalidate(struct InfraStoreStaticReaderHandle *reader);
+                              /* empty every group; for a caller refusing a read of its own */
 int32_t infrastore_static_reader_group_values(const struct InfraStoreStaticReaderHandle *reader, uint64_t group_idx,
                                       const uint8_t **out_ptr,  /* borrowed; valid until next read/free */
                                       uint64_t *out_byte_len);
@@ -533,11 +535,20 @@ int32_t infrastore_forecast_reader_entry_id(const struct InfraStoreForecastReade
                                     uint64_t entry_idx, int64_t *out_id);  /* the entry's catalog id */
 int32_t infrastore_forecast_reader_read(struct InfraStoreForecastReaderHandle *reader,
                                 const struct InfraStore *store, int64_t at_unix_ms);
+int32_t infrastore_forecast_reader_invalidate(struct InfraStoreForecastReaderHandle *reader);
+                                /* empty every entry's window */
 int32_t infrastore_forecast_reader_entry_values(const struct InfraStoreForecastReaderHandle *reader, uint64_t entry_idx,
                                         const uint8_t **out_ptr,  /* borrowed; valid until next read/free */
                                         uint64_t *out_byte_len);
 void infrastore_forecast_reader_free(struct InfraStoreForecastReaderHandle *reader);
 ```
+
+**A read is all-or-nothing.** A read spans every group (or entry), so a failing
+`infrastore_static_reader_read` / `infrastore_forecast_reader_read` leaves the reader wholly empty —
+`..._group_values` / `..._entry_values` hand back a zero-length buffer — rather than some groups
+holding the new timestamp's values and the rest the previous read's. A binding that refuses a read
+before calling in (the Julia wrapper checks the bound's spelling against the reader's timeline,
+which `at_unix_ms` cannot carry) calls `..._invalidate` to leave the same empty reader behind.
 
 **Window-read deduplication.** Forecasts that reference the same backing array and read plan
 (deduplicated identical data, or several `DeterministicSingleTimeSeries` over one
@@ -734,7 +745,7 @@ int32_t infrastore_store_replace_owner(struct InfraStore *handle,
                                int32_t owner_category, uint64_t *out_updated);
 /* List catalog metadata rows as a JSON array (identity, the per-type descriptive
    snapshot, the physical detail, and the association `id` the write handed back
-   — the address every read, removal and rename takes). A row carries no
+   — the address every read and removal takes). A row carries no
    timestamp vector: an irregular series' time axis is the one part of a row that
    costs a read per row, so a listing omits it and a caller that needs it reads
    the series. The filters are independent; with none set the whole store is

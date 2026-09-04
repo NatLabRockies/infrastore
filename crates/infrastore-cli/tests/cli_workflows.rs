@@ -1118,6 +1118,61 @@ fn export_time_range_labels_forecast_rows_with_the_windows_it_kept() {
     assert_windows_five_and_six(&fs::read_to_string(file.path()).unwrap());
 }
 
+/// `export -f json` describes the windows it holds, like `get` and the CSV
+/// path above.
+///
+/// The JSON arm took `initial_timestamp`, `count`, `resolution`, `horizon` and
+/// `interval` from the catalog row while `shape`/`values` came from the sliced
+/// read, so a `--time-range` export announced `"count": 24` beside a two-window
+/// array. That document both mislabels the data and is not re-readable: the
+/// constructor rejects a count that disagrees with the array.
+#[test]
+fn export_json_time_range_describes_the_windows_it_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("f.h5");
+    seed_day_of_windows(dir.path(), &store);
+
+    let args = [
+        "-f",
+        "json",
+        "export",
+        "--name",
+        "load_det",
+        "--time-range",
+        WINDOWS_FIVE_AND_SIX,
+    ];
+    let parsed: serde_json::Value = serde_json::from_str(&run(&store, &args)).unwrap();
+    assert_eq!(parsed["count"], 2, "{parsed}");
+    assert_eq!(parsed["shape"], serde_json::json!([2, 2]), "{parsed}");
+    assert!(
+        parsed["initial_timestamp"]
+            .as_str()
+            .unwrap()
+            .starts_with("2024-01-01T05:00:00"),
+        "{parsed}"
+    );
+    // The grid the slice did not change is still reported.
+    assert_eq!(parsed["resolution"], "PT1H", "{parsed}");
+    assert_eq!(parsed["horizon"], "PT2H", "{parsed}");
+    assert_eq!(parsed["interval"], "PT1H", "{parsed}");
+
+    // An unsliced export still describes the whole forecast.
+    let whole: serde_json::Value = serde_json::from_str(&run(
+        &store,
+        &["-f", "json", "export", "--name", "load_det"],
+    ))
+    .unwrap();
+    assert_eq!(whole["count"], 24, "{whole}");
+    assert_eq!(whole["shape"], serde_json::json!([2, 24]), "{whole}");
+    assert!(
+        whole["initial_timestamp"]
+            .as_str()
+            .unwrap()
+            .starts_with("2024-01-01T00:00:00"),
+        "{whole}"
+    );
+}
+
 // --- B4/B5: row windows and richer stats -----------------------------------
 
 #[test]
@@ -1984,15 +2039,7 @@ fn every_mutating_command_emits_json_on_stdout_under_f_json() {
     let plan = json_stdout(&store, &["add", "--descriptor", d, "--dry-run"]);
     assert_eq!(plan["items"].as_array().unwrap().len(), 1, "{plan}");
 
-    // rename / copy / replace-owner, each with its dry run
-    let sel = ["--owner-id", "42", "--name", "load"];
-    let mut args = vec!["rename", "--new-name", "load2"];
-    args.extend_from_slice(&sel);
-    args.push("--dry-run");
-    assert_eq!(json_stdout(&store, &args)["would_rename"], 1);
-    args.pop();
-    assert_eq!(json_stdout(&store, &args)["renamed"], 1);
-
+    // copy / replace-owner, each with its dry run
     let mut args = vec![
         "copy",
         "--dst-owner-id",
@@ -2000,7 +2047,7 @@ fn every_mutating_command_emits_json_on_stdout_under_f_json() {
         "--dst-owner-type",
         "Generator",
     ];
-    args.extend_from_slice(&["--owner-id", "42", "--name", "load2"]);
+    args.extend_from_slice(&["--owner-id", "42", "--name", "load"]);
     assert_eq!(json_stdout(&store, &args)["copied"], 1);
 
     assert_eq!(
@@ -2046,13 +2093,13 @@ fn every_mutating_command_emits_json_on_stdout_under_f_json() {
             "42",
         ],
     );
-    // Owner 42 holds `load2` plus the forecast `transform` derived from it.
+    // Owner 42 holds `load` plus the forecast `transform` derived from it.
     assert_eq!(exported["exported"], 2);
     assert_eq!(exported["files"].as_array().unwrap().len(), 2);
 
     let svg = dir.path().join("c.svg");
     let mut args = vec!["plot", "--out", svg.to_str().unwrap()];
-    args.extend_from_slice(&["--owner-id", "42", "--name", "load2"]);
+    args.extend_from_slice(&["--owner-id", "42", "--name", "load"]);
     assert!(json_stdout(&store, &args)["wrote"].is_string());
 
     // The association catalogs.
@@ -2100,7 +2147,20 @@ fn every_mutating_command_emits_json_on_stdout_under_f_json() {
 
     // merge / remove / clear
     let other = dir.path().join("other.h5");
-    run(&other, &["add", "--descriptor", d]);
+    // Seeded under a different name, so the merge below has nothing to collide
+    // with: `--owner-id 42` brings this store's `load` and the forecast derived
+    // from it across.
+    let other_desc = write(
+        dir.path(),
+        "other.json",
+        r#"{"owner_id": 42, "owner_type": "Generator", "name": "baseline",
+            "type": "SingleTimeSeries", "element_type": "f64", "csv": "v.csv",
+            "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H"}"#,
+    );
+    run(
+        &other,
+        &["add", "--descriptor", other_desc.to_str().unwrap()],
+    );
     assert_eq!(
         json_stdout(
             &other,
@@ -2127,7 +2187,7 @@ fn every_mutating_command_emits_json_on_stdout_under_f_json() {
                 "--owner-id",
                 "42",
                 "--name",
-                "load2",
+                "load",
                 "--force"
             ]
         )["removed"],

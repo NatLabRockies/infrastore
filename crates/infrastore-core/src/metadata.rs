@@ -1464,35 +1464,6 @@ impl MetadataStore {
         .map_err(map_unique_violation)
     }
 
-    /// Rename one association identified by `key` to `new_name`, leaving its data
-    /// and hash untouched. Returns the number of rows updated (0 if `key` matches
-    /// nothing). A collision with an existing series of the new identity maps to
-    /// [`TimeSeriesError::DuplicateTimeSeries`].
-    /// Rename the association filed under `id`. One row by primary key, so no
-    /// predicate can be wider than the caller asked for.
-    /// Move one row to `new_name`, by primary key.
-    ///
-    /// The destination name may already be taken by a sibling sharing the rest
-    /// of the identity, and the uniqueness index catches that. It has to be
-    /// reported as [`TimeSeriesError::DuplicateTimeSeries`], the same as the
-    /// insert path does: a raw `SqliteFailure` naming an index is a caller's
-    /// problem stated in the catalog's vocabulary, and nothing above this can
-    /// classify it.
-    pub fn rename_by_id(tx: &Connection, id: i64, new_name: &str) -> Result<usize> {
-        match tx
-            .prepare_cached("UPDATE time_series_associations SET name = ?2 WHERE id = ?1")?
-            .execute(rusqlite::params![id, new_name])
-        {
-            Ok(n) => Ok(n),
-            Err(rusqlite::Error::SqliteFailure(err, _))
-                if err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE =>
-            {
-                Err(TimeSeriesError::DuplicateTimeSeries)
-            }
-            Err(e) => Err(e.into()),
-        }
-    }
-
     /// Delete every association in the store. Returns the removed data_hashes.
     pub fn delete_all(tx: &Connection) -> Result<Vec<[u8; 32]>> {
         let bytes_list: Vec<Vec<u8>> = collect_data_hashes(
@@ -3474,6 +3445,56 @@ pub fn forecast_family_conflict(
                 name,
                 resolution_iso,
                 features_hash.as_slice(),
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(exists.is_some())
+}
+
+/// Does an association of `conflicting_type` exist in the family `(owner_id,
+/// owner_category, name, resolution, features)` that also references the array
+/// `data_hash`?
+///
+/// [`forecast_family_conflict`] with the array pinned down as well, which is
+/// what the removal guard needs. A `DeterministicSingleTimeSeries` is a *view*
+/// over one `SingleTimeSeries` array, so the pair the guard protects shares
+/// both the family and the hash — and either half alone admits a false match:
+///
+/// * hash alone lets two owners' byte-identical `SingleTimeSeries` stand in for
+///   each other, so removing one owner's source passes on the strength of the
+///   other owner's row;
+/// * family alone pins an unrelated `SingleTimeSeries` that merely shares the
+///   family with a view copied there. [`Store::copy_time_series`] writes such a
+///   view deliberately, and it is a view over a *different* array, so removing
+///   that source takes nothing away from it.
+///
+/// Takes the [`DeletedRow`] whole rather than seven positional fields: it
+/// already *is* the tuple being probed — the family plus the array — and the
+/// removal guard is its only caller.
+pub fn forecast_family_conflict_on_array(
+    tx: &Connection,
+    row: &DeletedRow,
+    conflicting_type: TimeSeriesType,
+) -> Result<bool> {
+    let resolution_iso = row.resolution.map(period_to_iso);
+    let exists: Option<i64> = tx
+        .prepare_cached(
+            "SELECT 1 FROM time_series_associations
+             WHERE owner_id = ?1 AND owner_category = ?2 AND time_series_type = ?3 AND name = ?4
+               AND ((?5 IS NULL AND resolution IS NULL) OR resolution = ?5)
+               AND features_hash = ?6 AND data_hash = ?7
+             LIMIT 1",
+        )?
+        .query_row(
+            params![
+                row.owner_id,
+                row.owner_category.code(),
+                conflicting_type.code(),
+                row.name,
+                resolution_iso,
+                row.features_hash.as_slice(),
+                row.data_hash.as_slice(),
             ],
             |row| row.get(0),
         )

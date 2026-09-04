@@ -35,22 +35,21 @@ cohort of `NonSequentialTimeSeries` sharing one timestamp vector (its `resolutio
 the latter). The discovery/maintenance surface (`get_intervals`, `list_names`, `list_owner_types`,
 name-pattern filtering via `ListFilter::name_glob` (SQLite `GLOB`), `ListFilter::component_field`
 (exact match; served by the partial index `idx_component_field`, so it can never select rows that
-left the field unset), `remove_by_filter`, `rename_time_series`, the time-sliced
-`read_by_ids_range`, `AddRequest`/`Store::add` preserving `application_data`, and serde on the core
-types) is available in the Rust core and threaded through the C ABI/Julia and Python bindings. Two
-**association catalogs** are available in the Rust core, C ABI, Julia, Python, and the CLI (read via
-`attributes` / `links`, write via `attach` / `detach` / `link` / `unlink` / `reassign`), but not
-over gRPC: `supplemental_attribute_associations` (component ↔ supplemental attribute, the wider
-surface — counts, counts-by-type, grouped summary) and `parent_child_associations` (directed
-component ↔ component edges, e.g. a generator connected to a bus, deliberately narrower until a
-consumer needs more). Both are independent of time series in both directions, and of each other.
-Every catalog row carries an **`id`** — an `INTEGER PRIMARY KEY AUTOINCREMENT`, so it is never
-reissued once its row is deleted — and it is **the only way to address a stored time series**. A
-consumer records the id in its own object model and references the series by it (a generator's
-`operation_cost` naming the series that varies it). In the Rust core it is the newtype
-`TimeSeriesId(i64)`, so an `owner_id` cannot be passed where a series id belongs; it is
-`#[serde(transparent)]`, so SQLite, the gRPC wire and the OpenAPI document are unchanged and every
-binding still exchanges a plain integer.
+left the field unset), `remove_by_filter`, the time-sliced `read_by_ids_range`,
+`AddRequest`/`Store::add` preserving `application_data`, and serde on the core types) is available
+in the Rust core and threaded through the C ABI/Julia and Python bindings. Two **association
+catalogs** are available in the Rust core, C ABI, Julia, Python, and the CLI (read via `attributes`
+/ `links`, write via `attach` / `detach` / `link` / `unlink` / `reassign`), but not over gRPC:
+`supplemental_attribute_associations` (component ↔ supplemental attribute, the wider surface —
+counts, counts-by-type, grouped summary) and `parent_child_associations` (directed component ↔
+component edges, e.g. a generator connected to a bus, deliberately narrower until a consumer needs
+more). Both are independent of time series in both directions, and of each other. Every catalog row
+carries an **`id`** — an `INTEGER PRIMARY KEY AUTOINCREMENT`, so it is never reissued once its row
+is deleted — and it is **the only way to address a stored time series**. A consumer records the id
+in its own object model and references the series by it (a generator's `operation_cost` naming the
+series that varies it). In the Rust core it is the newtype `TimeSeriesId(i64)`, so an `owner_id`
+cannot be passed where a series id belongs; it is `#[serde(transparent)]`, so SQLite, the gRPC wire
+and the OpenAPI document are unchanged and every binding still exchanges a plain integer.
 
 The surface splits into _identify_ and _act_. Identifying is four calls, all returning the same
 `TimeSeriesMetadata` row: `list_metadata(filter)` (by attributes, 0..N), `list_metadata_by_ids(ids)`
@@ -67,21 +66,22 @@ export wants, since it knows the bounds and not the step count) — with two typ
 while a `NonSequentialTimeSeries` selects only timestamps at or after `start`; and a forecast's
 `start` must be a window boundary at or before the last window, since there is no partial window to
 return, so only its `end` clips; `remove_by_ids` / `remove_by_ids!` is all-or-nothing;
-`rename_time_series(id, name)` and `copy_time_series(id, …)` take one. Writes return ids and nothing
-else — `TimeSeriesId` / `Vec<TimeSeriesId>` in the Rust core, `int` in Python and Julia, an `out_id`
-across the C ABI — and a caller wanting the rest of the row asks `get_metadata_by_id`. Removals are
-not on the read-only gRPC server.
+`copy_time_series(id, …)` takes one. A series' name is fixed once written — there is no rename, so
+an id and the row it names can never drift apart. Writes return ids and nothing else —
+`TimeSeriesId` / `Vec<TimeSeriesId>` in the Rust core, `int` in Python and Julia, an `out_id` across
+the C ABI — and a caller wanting the rest of the row asks `get_metadata_by_id`. Removals are not on
+the read-only gRPC server.
 
 The id crosses the gRPC wire and the OpenAPI one — where the schema spells it `association_id`, a
 rename `openapi.rs` applies the same way it maps `unit_system` between the store's snake_case and
 the schema's SCREAMING_CASE. It is descriptive — outside a series' `KeyIdentity` and both content
 hashes — but unlike the descriptors above it describes the _row_ rather than the data: it is
 per-store, so `merge` assigns fresh ids and `diff` ignores it, while
-`rename`/`reassign`/`compact`/`persist_to` all preserve it. `KeyIdentity` — the uniqueness tuple the
-catalog files a row under — survives as an internal write-path type and is explicitly _not_ an
-address. **No `add_*` accepts an id** — not `add_time_series`, a bulk add, or either association
-catalog's attach/link — because "never reissued" is a guarantee of `AUTOINCREMENT`, and a caller
-free to name an id could re-file a retired one. The single exception is the rows-only import
+`reassign`/`compact`/`persist_to` all preserve it. `KeyIdentity` — the uniqueness tuple the catalog
+files a row under — survives as an internal write-path type and is explicitly _not_ an address. **No
+`add_*` accepts an id** — not `add_time_series`, a bulk add, or either association catalog's
+attach/link — because "never reissued" is a guarantee of `AUTOINCREMENT`, and a caller free to name
+an id could re-file a retired one. The single exception is the rows-only import
 `import_time_series_associations_openapi` (`Store::import_association_rows`), which files each row
 under the `association_id` the document recorded so its references survive: all-or-none across the
 batch, and only above the catalog's high-water mark. It refuses a row whose array is absent, a

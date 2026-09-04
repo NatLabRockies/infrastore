@@ -41,7 +41,7 @@ Under development, unstable API, integrating with parent packages
 - **A stable handle for every series** — each catalog row carries an `id` a consumer can store in
   its own model (a generator's cost function naming the series that varies it). It is never
   reissued, so a reference can go stale but can never come to mean a different series, and it
-  survives a rename, a reassignment, a compaction, and a save-and-reopen.
+  survives a reassignment, a compaction, and a save-and-reopen.
 - **Timestamps that round-trip as written** — every series records a `time_reference`: an instant in
   UTC, an instant at a fixed offset, an instant in a named IANA zone, or a wall clock naming no
   instant at all. Each binding infers it from the input type — a naive `datetime` or a bare
@@ -51,8 +51,7 @@ Under development, unstable API, integrating with parent packages
   which `zoned_timestamp` fuses back into a `ZonedDateTime` (a `DateTime` is what its consumers
   destructure today).
 - **Discovery and maintenance** — `get_intervals`, `list_names`, `list_owner_types`, glob name
-  filters, filtered and bulk delete, rename, time-sliced `read_by_ids_range`, and serde on the core
-  types.
+  filters, filtered and bulk delete, time-sliced `read_by_ids_range`, and serde on the core types.
 - **Read-only gRPC service** — serve a store to remote readers, with optional API-key auth. Writes
   require local filesystem access.
 - **Built for power-systems data** — the data model maps onto
@@ -239,10 +238,10 @@ inspection (`stats`, `store-info`, `summary`, `verify`, `check-consistency`, `re
 association catalogs read _and_ write (`attributes`, `links`, `attach`, `detach`, `link`, `unlink`,
 `reassign`), bulk export (`export`, one timestamped CSV or JSON file per series, re-readable by
 `add`), cross-store work (`diff`, which exits nonzero when two catalogs differ, and `merge`), and
-maintenance (`init`, `rename`, `copy`, `replace-owner`, `clear`, `persist`, `compact`,
-`remove --all`). Destructive commands take `--dry-run`, and `persist` refuses an existing
-destination without `--force`. `infrastore completions <shell>` emits shell completions. Full
-reference: [CLI](https://natlabrockies.github.io/infrastore/latest/reference/cli.html).
+maintenance (`init`, `copy`, `replace-owner`, `clear`, `persist`, `compact`, `remove --all`).
+Destructive commands take `--dry-run`, and `persist` refuses an existing destination without
+`--force`. `infrastore completions <shell>` emits shell completions. Full reference:
+[CLI](https://natlabrockies.github.io/infrastore/latest/reference/cli.html).
 
 ## Server
 

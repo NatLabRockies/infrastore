@@ -314,19 +314,6 @@ fn bulk_read_range_matches_per_key_get_time_series() {
 
 // ---- 1.7 discovery enumerations -------------------------------------------
 
-// ---- 1.8 rename ------------------------------------------------------------
-
-#[test]
-fn rename_stale_id_is_not_found() {
-    let mut store = create_store(None, true).unwrap();
-    // Ids are never reissued, so one the catalog never minted stays stale.
-    let missing = infrastore_core::TimeSeriesId(999);
-    assert!(matches!(
-        store.rename_time_series(missing, "x"),
-        Err(TimeSeriesError::NotFound)
-    ));
-}
-
 // ---- 1.9 serde coverage ----------------------------------------------------
 
 #[test]
@@ -424,101 +411,6 @@ fn add_sts(store: &mut infrastore_core::Store, owner: i64, name: &str, base: f64
             TimeSeriesData::SingleTimeSeries(sts(name, base, 4)),
         ))
         .unwrap()
-}
-
-#[test]
-fn rename_moves_the_association() {
-    for_each_backend_mut(
-        |store| add_sts(store, 1, "old", 10.0),
-        |store, key, backend| {
-            let new_key = store.rename_time_series(*key, "new").unwrap();
-            assert_eq!(new_key.name, "new", "{backend}");
-            // A rename moves the name, not the reference: the id is the same
-            // afterwards, so anything holding it keeps working. This is the
-            // opposite of the old key-addressed behaviour, where the name was
-            // part of the address and a rename retired it.
-            assert_eq!(new_key.id, Some(*key), "{backend}");
-            assert_eq!(
-                store
-                    .get_metadata_by_id(*key)
-                    .unwrap()
-                    .expect("the id still resolves")
-                    .name,
-                "new",
-                "{backend}"
-            );
-            // The renamed series still reads its original values: a rename must
-            // not disturb the array it points at.
-            let got = store
-                .read_by_id(*key, infrastore_core::ReadWindow::full())
-                .unwrap();
-            assert_eq!(
-                got.as_single().unwrap().data.to_f64_vec().unwrap(),
-                vec![10.0, 11.0, 12.0, 13.0],
-                "{backend}"
-            );
-            assert_eq!(store.num_distinct_arrays().unwrap(), 1, "{backend}");
-        },
-    );
-}
-
-#[test]
-fn rename_collision_is_duplicate() {
-    for_each_backend_mut(
-        |store| {
-            let a = add_sts(store, 1, "a", 1.0);
-            add_sts(store, 1, "b", 2.0);
-            a
-        },
-        |store, a, backend| {
-            let err = store.rename_time_series(*a, "b").unwrap_err();
-            assert!(
-                matches!(err, TimeSeriesError::DuplicateTimeSeries),
-                "{backend}: got {err:?}"
-            );
-            // The failed rename left both series intact.
-            let mut names = store.list_names(ListFilter::new()).unwrap();
-            names.sort();
-            assert_eq!(names, vec!["a", "b"], "{backend}");
-        },
-    );
-}
-
-#[test]
-fn renaming_one_sharer_of_an_array_leaves_the_other_readable() {
-    // Two owners with identical values share one content-addressed array.
-    // Renaming one must not repoint or reclaim the shared array.
-    for_each_backend_mut(
-        |store| {
-            let a = add_sts(store, 1, "shared", 5.0);
-            let b = add_sts(store, 2, "shared", 5.0);
-            (a, b)
-        },
-        |store, (a, b), backend| {
-            assert_eq!(store.num_distinct_arrays().unwrap(), 1, "{backend}");
-            let renamed = store.rename_time_series(*a, "renamed").unwrap();
-            assert_eq!(store.num_distinct_arrays().unwrap(), 1, "{backend}");
-
-            let expected = vec![5.0, 6.0, 7.0, 8.0];
-            // A rename moves the name, not the reference: `a` still addresses
-            // the renamed row.
-            assert_eq!(renamed.id, Some(*a));
-            for (key, who) in [(*a, "renamed"), (*b, "untouched")] {
-                let got = store
-                    .read_by_id(key, infrastore_core::ReadWindow::full())
-                    .unwrap();
-                assert_eq!(
-                    got.as_single().unwrap().data.to_f64_vec().unwrap(),
-                    expected,
-                    "{backend}/{who}"
-                );
-            }
-            // Both still reference the same array.
-            let meta = store.get_metadata_by_id(*a).unwrap().unwrap();
-            let (sts_refs, dst_refs) = store.count_array_references(&meta.data_hash).unwrap();
-            assert_eq!((sts_refs, dst_refs), (2, 0), "{backend}");
-        },
-    );
 }
 
 #[test]
@@ -1312,7 +1204,6 @@ fn a_read_only_store_rejects_every_write_entry_point() {
             .copy_time_series(key, 2, "Generator", None)
             .map(|_| ())
     ));
-    assert!(is_ro(store.rename_time_series(key, "other").map(|_| ())));
     assert!(is_ro(
         store
             .transform_single_time_series(
@@ -1664,14 +1555,14 @@ fn a_single_time_series_whose_length_disagrees_with_its_array_is_rejected() {
 /// `Deterministic` and `DeterministicSingleTimeSeries` are mutually exclusive
 /// for one family — on *every* path that writes an association row.
 ///
-/// The add path has always enforced this. `copy_time_series`, `replace_owner`
-/// and `rename_time_series` did not: they write through
-/// `MetadataStore::insert`/`replace_owner`/`rename`, which skip the check, and
-/// each of the three moves a row to a *new* family identity, which is precisely
-/// the operation that can pair the two. The resulting state is one the rest of
-/// the code treats as unreachable: `resolve_metadata` reports the family as
-/// ambiguous with no way to narrow it (both candidates share resolution *and*
-/// interval), and `transform_single_time_series` refuses to run again.
+/// The add path has always enforced this. `copy_time_series` and
+/// `replace_owner` did not: they write through
+/// `MetadataStore::insert`/`replace_owner`, which skip the check, and each
+/// moves a row to a *new* family identity, which is precisely the operation
+/// that can pair the two. The resulting state is one the rest of the code
+/// treats as unreachable: `resolve_metadata` reports the family as ambiguous
+/// with no way to narrow it (both candidates share resolution *and* interval),
+/// and `transform_single_time_series` refuses to run again.
 #[test]
 fn every_write_path_refuses_to_pair_deterministic_with_its_single_view() {
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
@@ -1771,105 +1662,11 @@ fn every_write_path_refuses_to_pair_deterministic_with_its_single_view() {
         ["DeterministicSingleTimeSeries", "SingleTimeSeries"]
     );
 
-    // Route 3: rename a Deterministic the same owner already holds into the
-    // DST's family.
-    let mut store = seeded();
-    let other = dense(&mut store, 1, "other");
-    let err = store.rename_time_series(other, "load").unwrap_err();
-    assert!(
-        matches!(err, TimeSeriesError::InvalidParameter(ref m) if m.contains("mutually exclusive")),
-        "rename: {err}"
-    );
-    // "other" is a different family, so it legitimately survives untouched.
-    assert_eq!(
-        store
-            .list_metadata(ListFilter::new().owner_id(1))
-            .unwrap()
-            .iter()
-            .filter(|k| k.name == "load")
-            .count(),
-        2
-    );
-
     // The rule still permits the unrelated cases: a Deterministic on a family
     // with no DST, and a copy to a family that is free.
     let mut store = seeded();
     dense(&mut store, 5, "unrelated");
     assert_eq!(store.list_metadata(ListFilter::new()).unwrap().len(), 3);
-}
-
-/// A rename names one series, and touches one row or none.
-///
-/// `MetadataStore::rename` matched any interval when the key carried none —
-/// a predicate copied from `delete_by_key`, where it is a documented
-/// convenience. For a rename it meant a key with `interval: None` updated
-/// *every* interval of a forecast family, and `rename_time_series` committed
-/// that multi-row update before discovering the ambiguity, reporting an error
-/// for an operation that had already taken full effect.
-#[test]
-fn renaming_with_an_underspecified_key_changes_nothing() {
-    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
-    let mut store = create_store(None, true).unwrap();
-    let vals: Vec<f64> = (0..12).map(f64::from).collect();
-
-    // Two forecasts of one variable that differ only by interval — a day-ahead
-    // and a real-time forecast, which the catalog treats as distinct series.
-    for interval in [Duration::hours(1), Duration::hours(24)] {
-        store
-            .add(AddRequest::new(
-                1,
-                "Generator",
-                OwnerCategory::Component,
-                TimeSeriesData::Deterministic(
-                    Deterministic::new(
-                        initial,
-                        Duration::hours(1),
-                        Duration::hours(4),
-                        interval,
-                        3,
-                        TypedArray::from_f64(vec![4, 3], &vals),
-                        "load",
-                    )
-                    .unwrap(),
-                ),
-            ))
-            .unwrap();
-    }
-
-    // A rename can no longer be ambiguous: it names one id, and an id names one
-    // row. Where a key with an unset interval used to match a whole forecast
-    // family -- and a rename through it was refused for that reason -- the
-    // ambiguity now surfaces in the identify half, where a caller can see it
-    // and narrow.
-    let underspecified = ListFilter::new()
-        .owner_id(1)
-        .owner_category(OwnerCategory::Component)
-        .name("load")
-        .time_series_type(TimeSeriesType::Deterministic)
-        .exact_features(Features::new())
-        .resolution(Duration::hours(1));
-    assert_eq!(
-        store.list_metadata(underspecified.clone()).unwrap().len(),
-        2,
-        "interval is part of the identity, so both survive an unset one"
-    );
-
-    // Naming the interval selects exactly one, and renaming it touches only it.
-    let exact = store
-        .list_metadata(underspecified.interval(Duration::hours(24)))
-        .unwrap();
-    assert_eq!(exact.len(), 1);
-    store
-        .rename_time_series(exact[0].id.unwrap(), "day_ahead")
-        .unwrap();
-    let mut names: Vec<String> = store
-        .list_metadata(ListFilter::new())
-        .unwrap()
-        .iter()
-        .map(|k| k.name.to_string())
-        .collect();
-    names.sort();
-    assert_eq!(names, ["day_ahead", "load"]);
 }
 
 /// A reader's column layout is a total order, so series that differ only by

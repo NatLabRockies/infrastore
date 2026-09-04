@@ -2,7 +2,7 @@
 #
 # The wire carries no key. `list_metadata` is the identify half — it answers
 # which series exist and hands back the catalog `id` that addresses each — and
-# every read, removal and rename takes that id.
+# every read and removal takes that id.
 
 # The Julia time series type for a key's integer type code.
 function _type_for_code(code::Integer)

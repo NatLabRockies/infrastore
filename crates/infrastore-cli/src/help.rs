@@ -130,12 +130,6 @@ Examples:
   infrastore --store demo.h5 remove --all --name-glob 'scratch_*' --dry-run
   infrastore --store demo.h5 remove --all --owner-id 42 --force";
 
-pub const RENAME: &str = "\
-Examples:
-  infrastore --store demo.h5 rename --owner-id 42 --name load --new-name demand
-  infrastore --store demo.h5 rename --name load --type SingleTimeSeries \\
-      --new-name demand --dry-run";
-
 pub const COPY: &str = "\
 Examples:
   infrastore --store demo.h5 copy --owner-id 42 --name load \\
