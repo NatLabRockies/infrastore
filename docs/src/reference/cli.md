@@ -1,8 +1,7 @@
 # CLI Reference
 
 `infrastore-cli` builds the `infrastore` binary, which reads and writes a store directly on disk
-(HDF5 + SQLite). For a task-oriented walkthrough, see
-[Use the `infrastore` CLI](../how-to/use-cli.md).
+(HDF5 + SQLite). For a task-oriented walkthrough, see [Use the `infrastore` CLI](../guides/cli.md).
 
 The CLI covers time series and both
 [association catalogs](../explanation/data-model.md#associations-between-entities), read and write.
@@ -109,9 +108,9 @@ Three things to know:
 - It is global, so it also covers `--time-range` bounds and `--issue-time`, which hit the same
   parser.
 - Whatever it resolves is also **recorded**, as the series' `time_reference` (see
-  [Time references](../explanation/data-model.md#time-references)) — so a read hands the same
-  spelling back rather than relabelling everything UTC. `--assume-timezone -07:00` over a midnight
-  column stores `07:00Z` and prints `2024-01-01T00:00:00-07:00`.
+  [Time references](../explanation/time-references.md)) — so a read hands the same spelling back
+  rather than relabelling everything UTC. `--assume-timezone -07:00` over a midnight column stores
+  `07:00Z` and prints `2024-01-01T00:00:00-07:00`.
 
 **Prefer a named zone to a fixed offset** for anything that crosses a daylight-saving transition. A
 year of Denver data read as `-07:00` renders every timestamp after March an hour wrong; the same
@@ -587,8 +586,8 @@ another. The lowercase forms are a command-line shorthand, not a second vocabula
   `--issue-time`): RFC3339 (e.g. `2024-01-01T00:00:00Z`) or a bare integer of epoch milliseconds. A
   _stored_ timestamp must be a whole number of milliseconds — a finer one is refused by `add` rather
   than truncated, and the epoch-millisecond form cannot express one at all. See
-  [timestamp precision](../explanation/data-model.md#timestamp-precision). A timestamp with no
-  offset needs [`--assume-timezone` or `--zoneless`](#zoneless-timestamps), and whichever one you
+  [timestamp precision](../explanation/time-series-types.md#timestamp-precision). A timestamp with
+  no offset needs [`--assume-timezone` or `--zoneless`](#zoneless-timestamps), and whichever one you
   pass is also recorded as the series' `time_reference`.
 - **`--time-range`** is a pair of _timestamps_, not a duration: `START..END` (half-open — `START`
   inclusive, `END` exclusive), where each side is parsed as a timestamp. For example

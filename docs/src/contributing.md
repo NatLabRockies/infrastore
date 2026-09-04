@@ -64,9 +64,11 @@ Docs follow the [Diataxis](https://diataxis.fr/) framework. Put new pages in the
 | ---------------- | ---------------------- | ------------------------------------------ |
 | Getting Started  | `src/getting-started/` | First-run, learning-oriented quick starts  |
 | Explanation      | `src/explanation/`     | Concepts, architecture, design rationale   |
-| Developer Guides | `src/guides/`          | End-to-end, per-language usage             |
-| How-To           | `src/how-to/`          | A single task in the fewest steps          |
+| Developer Guides | `src/guides/`          | End-to-end usage, install through workflow |
 | Reference        | `src/reference/`       | Exact signatures, schemas, on-disk layouts |
+
+There is deliberately no separate how-to section: a task-sized recipe belongs in the guide for the
+language it applies to, so a reader following one page is not sent between three.
 
 After adding a page, add it to `src/SUMMARY.md`. Preview locally:
 

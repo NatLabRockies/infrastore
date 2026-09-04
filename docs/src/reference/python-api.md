@@ -66,13 +66,13 @@ bound against a series that records instants, or an aware bound against a zonele
 `InvalidParameterError` rather than being coerced, and so does a `time_range` whose two ends
 disagree. `list_metadata(zoneless=...)`, `build_static_reader(..., zoneless=...)`, and the other
 filter-taking methods take a `zoneless` predicate for building a coherent selection. See
-[Time references](../explanation/data-model.md#time-references) for the full rules.
+[Time references](../explanation/time-references.md) for the full rules.
 
 A `datetime` that is **stored** — an initial timestamp, or an entry of a `NonSequentialTimeSeries`
 timestamp vector — must also be a whole number of milliseconds; `microsecond` must be a multiple of
 1000. A finer instant raises `InvalidParameterError` rather than being silently truncated, because
 it cannot survive every binding intact (see
-[timestamp precision](../explanation/data-model.md#timestamp-precision)). Note that
+[timestamp precision](../explanation/time-series-types.md#timestamp-precision)). Note that
 `datetime.now(timezone.utc)` carries microseconds: quantize it, e.g.
 `now.replace(microsecond=now.microsecond // 1000 * 1000)`. A `datetime` used only as a _query_ bound
 — a `time_range` end, a reader's `when` — is unconstrained.

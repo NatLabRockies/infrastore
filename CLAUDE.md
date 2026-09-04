@@ -168,8 +168,9 @@ inspection. The read-only gRPC server carries the full read surface too, id-addr
 `AssociationExists`, `HasAnyTimeSeries`, `ReadById` / `ReadByIds`, detailed/per-type counts,
 `ListOwnerIds`, `GetIntervals`, static/forecast summaries, and `CheckStaticConsistency`. Every RPC
 is named for the `Store` method it exposes, with `<Rpc>Req` / `<Rpc>Resp` messages. Auth is `none`
-(default) or `api_key` via the `x-api-key` header. See `README.md` and
-`docs/src/explanation/data-model.md` for the authoritative feature matrix.
+(default) or `api_key` via the `x-api-key` header. See `README.md`,
+`docs/src/explanation/time-series-types.md` (the six types and their write paths), and
+`docs/src/explanation/bindings.md` (per-binding coverage) for the authoritative feature matrix.
 
 ## Code Quality Requirements
 

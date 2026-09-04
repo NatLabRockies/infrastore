@@ -32,8 +32,8 @@ The `[workspace.dependencies]` pins are easy to miss and fail late: `cargo publi
 names the old one. cargo-release moves `Cargo.lock` in the same commit.
 
 Two more version strings ride along, neither load-bearing: the `VERSION=v0.8.0` download example in
-`docs/src/getting-started/installation.md` and in `docs/src/how-to/use-cli.md`, so a version's
-published docs point at that version's own binaries.
+`docs/src/getting-started/installation.md` and in `docs/src/guides/cli.md`, so a version's published
+docs point at that version's own binaries.
 
 Two workflows guard this. `crates-release` refuses to publish if the tag does not match the
 workspace version, and `python-wheels` opens with a `versions agree` job that parses all four files

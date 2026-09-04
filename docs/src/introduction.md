@@ -61,7 +61,7 @@ flowchart TB
 - **Three language bindings** — Use it from Rust, Python, or Julia with the same on-disk format
 - **An `infrastore` command-line tool** — Load time series from CSV, and list, read, export, plot,
   diff, and inspect a store straight from a terminal, with `table` / `json` / `jsonl` / `csv` output
-  ([CLI how-to](./how-to/use-cli.md))
+  ([CLI guide](./guides/cli.md))
 - **Read-only gRPC service** — Serve a store over the network for remote readers, with optional
   API-key authentication
 - **Designed for power-systems data** — The data model maps onto
@@ -70,22 +70,30 @@ flowchart TB
 
 ## Who Should Read This
 
-| Audience                           | Start here                                             |
-| ---------------------------------- | ------------------------------------------------------ |
-| **Developers of a package on top** | [Embedding in a Parent Package](./guides/embedding.md) |
-| **Python package developers**      | [Python Developer Guide](./guides/python.md)           |
-| **Julia package developers**       | [Julia Developer Guide](./guides/julia.md)             |
-| **Rust developers**                | [Rust Developer Guide](./guides/rust.md)               |
-| **Command-line users**             | [Use the `infrastore` CLI](./how-to/use-cli.md)        |
-| **Anyone deploying the server**    | [gRPC Server & Client](./guides/server.md)             |
-| **Tooling & forensics**            | [On-Disk File Format](./reference/file-format.md)      |
+Most people reading this are building a package **on top of** infrastore — infrasys or
+InfrastructureSystems.jl, or something like them — rather than calling it directly. That is the
+first row, and it is the one page to read if you read only one.
+
+| Audience                            | Start here                                              |
+| ----------------------------------- | ------------------------------------------------------- |
+| **Developers of a package on top**  | [Embedding in a Parent Package](./guides/embedding.md)  |
+| **Deciding how to model your data** | [Time-Series Types](./explanation/time-series-types.md) |
+| **Python package developers**       | [Python Developer Guide](./guides/python.md)            |
+| **Julia package developers**        | [Julia Developer Guide](./guides/julia.md)              |
+| **Rust developers**                 | [Rust Developer Guide](./guides/rust.md)                |
+| **Command-line users**              | [CLI Developer Guide](./guides/cli.md)                  |
+| **Anyone deploying the server**     | [gRPC Server & Client](./guides/server.md)              |
+| **Tooling & forensics**             | [On-Disk File Format](./reference/file-format.md)       |
 
 ## Next Steps
 
 - **Setting up?** Start with [Installation](./getting-started/installation.md).
 - **Want the 60-second tour?** Read the Quick Start for
-  [Python](./getting-started/quick-start-python.md) or
-  [Julia](./getting-started/quick-start-julia.md). Rust users can go straight to the
+  [Python](./getting-started/quick-start-python.md),
+  [Julia](./getting-started/quick-start-julia.md), or
+  [the CLI](./getting-started/quick-start-cli.md). Rust users can go straight to the
   [Rust Developer Guide](./guides/rust.md).
+- **Not sure which type your data is?** See
+  [Choosing a Type](./explanation/time-series-types.md#choosing-a-type).
 - **Want to understand how it works?** Read the [Architecture](./explanation/architecture.md).
 - **Need exact bytes on disk?** See the [On-Disk File Format](./reference/file-format.md).

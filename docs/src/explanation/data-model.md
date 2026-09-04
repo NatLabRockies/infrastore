@@ -5,6 +5,11 @@ The data model mirrors the time-series concepts originally developed in
 **component** (or supplemental attribute) owns one or more named time series, and each time series
 may exist in several variants distinguished by **features**.
 
+This page covers the **catalog** side of that — who owns a series, what distinguishes two series
+that share a name, how a row is filed, and how it is addressed once stored. Two neighbours cover the
+rest: [Time-Series Types](./time-series-types.md) for what the six types mean and which to reach
+for, and [Time References](./time-references.md) for how a series' timestamps are spelled.
+
 ## Owners
 
 Every time series belongs to an owner, identified by three fields:
@@ -21,175 +26,6 @@ Every time series belongs to an owner, identified by three fields:
 independent, so the same `owner_id` can name a component **and** a supplemental attribute at once —
 the category disambiguates them, keeping the two owners' series distinct. Owner-scoped operations
 therefore take the category alongside the id (see [Identity](#identity)).
-
-## Time-Series Types
-
-The data model defines six time-series types, all present in the `TimeSeriesType` enum and the
-metadata schema. Both static series types are implemented across every interface. The four forecast
-types support reading values across the Rust core, the C ABI, Python, Julia, and gRPC. Dense
-forecasts are written through the generic `add_time_series` across the Rust core, Python, and Julia
-(the C ABI keeps the per-type `infrastore_store_add_forecast` / `infrastore_store_add_probabilistic`
-transport functions), and `DeterministicSingleTimeSeries` is derived from stored `SingleTimeSeries`
-via `transform_single_time_series` (gRPC stays read-only):
-
-| Type                            | Write path                                | Description                                         |
-| ------------------------------- | ----------------------------------------- | --------------------------------------------------- |
-| `SingleTimeSeries`              | `add_time_series`                         | One array sampled at a fixed resolution             |
-| `NonSequentialTimeSeries`       | `add_time_series`                         | Values at explicit, irregular timestamps            |
-| `Deterministic`                 | `add_time_series`                         | Forecast: a `(horizon × count)` window matrix       |
-| `DeterministicSingleTimeSeries` | derived by `transform_single_time_series` | Forecast view over an underlying `SingleTimeSeries` |
-| `Probabilistic`                 | `add_time_series`                         | Forecast with percentile bands                      |
-| `Scenarios`                     | `add_time_series`                         | Forecast with discrete scenarios                    |
-
-All six types can be **read** from every interface: the Rust core, the C ABI, Python, Julia, the
-`infrastore` CLI, and the gRPC server. The **write** paths in the table are available in the Rust
-core, the C ABI, Python, Julia, and the CLI — never over gRPC, whose service is read-only. And no
-interface adds a `DeterministicSingleTimeSeries` directly: it only ever comes into existence by
-transforming a stored `SingleTimeSeries`.
-
-**`DeterministicSingleTimeSeries` is a storage-level view, and reads always return a
-`Deterministic`.** This is by design in every binding: `TimeSeriesData` has no
-`DeterministicSingleTimeSeries` variant, and a read synthesizes the windowed `Deterministic` from
-the underlying static array without copying it. The `DeterministicSingleTimeSeries` tag stays
-visible in _catalog_ surfaces — keys, metadata rows, counts, summaries — so callers can see which of
-their forecasts are synthetic, and can address, copy, or remove the association.
-
-It is never something you must _ask for_. **A request for `Deterministic` matches both storage
-forms** — in reads, key resolution, catalog filters, and reader builds alike — so which one a store
-holds stays an internal detail. Requesting `DeterministicSingleTimeSeries` narrows to the derived
-form, which is how a caller audits what it has. This mirrors InfrastructureSystems.jl, where a
-`Deterministic` request lowers to both concrete type names.
-
-Reading forecast _values_ is wired across the Rust core, the C ABI, Python, Julia, and gRPC. Writing
-dense forecasts goes through the generic `add_time_series` (a `Deterministic`, `Probabilistic`, or
-`Scenarios` object) in the Rust core, Python, and Julia, with the C ABI exposing the per-type
-`infrastore_store_add_forecast` / `infrastore_store_add_probabilistic` transport; a
-`DeterministicSingleTimeSeries` is produced by `transform_single_time_series`. The read-only gRPC
-server serves forecast reads but does not accept writes. See [Forecasts](#forecasts) below.
-
-### `NonSequentialTimeSeries`
-
-A `NonSequentialTimeSeries` pairs each value with an explicit UTC timestamp. Timestamps must be
-strictly increasing and their count must match the data length.
-
-The timestamp vector is stored in the catalog, **content-addressed and shared**: series sampled at
-the same instants — an outage schedule, a set of event times, a market timeline — hold one copy
-between them rather than one each. That shared vector is also the series' _cohort_: the values of
-every series on it are column-packed into one timestamp-major HDF5 dataset, exactly as
-`SingleTimeSeries` at one resolution are, so a [`StaticReader`](../reference/rust-api.md#readers)
-can sweep them a timestamp at a time. A series alone on its time axis keeps a standalone array
-instead — packing only pays once a cohort is several columns wide. See the
-[storage model](./storage-model.md) for the layout.
-
-### `SingleTimeSeries`
-
-A `SingleTimeSeries` is an `initial_timestamp`, a `resolution` (a [period](#periods)), and an array
-of values:
-
-```text
-value
-  ^
-  |        *
-  |     *     *
-  |  *           *
-  +--+--+--+--+--+--> time
-   t0 t0+r  ...   t0+(n-1)r
-```
-
-The timestamps are implied — sample `i` is at `initial_timestamp + i * resolution` — so only the
-values are stored.
-
-### Periods
-
-`resolution`, and the forecast `horizon`/`interval`, are **calendar-aware periods**, not plain fixed
-spans. A period is one of two kinds:
-
-- **fixed** — a fixed nanosecond span (`Hour`, `Minute`, `Day`, `Week`), backed by a duration;
-- **calendar** — a count of calendar months (`Month` = 1, `Quarter` = 3, `Year` = 12), where
-  `initial_timestamp + i * resolution` is computed by calendar arithmetic (so a monthly grid lands
-  on the same day-of-month each step rather than every `N` milliseconds).
-
-A fixed period is **never** equal to a calendar one, even when their spans coincide for a given
-month. Periods are encoded as ISO-8601 duration strings (`PT1H`, `P1M`, `P1Y`) on disk and across
-every binding (the Python/gRPC surfaces accept a `timedelta`/duration for fixed periods and an
-ISO-8601 string for either kind, and return the ISO-8601 string).
-
-### Timestamp precision
-
-Every instant the store records — a `SingleTimeSeries` or forecast `initial_timestamp`, and every
-entry of a `NonSequentialTimeSeries` timestamp vector — is **a whole number of milliseconds**, the
-same floor a fixed period has. One millisecond is the finest resolution a period can express, and it
-is likewise the finest instant a series can be written at.
-
-The rule is enforced on write, in the core, for all five addable types: a finer instant is rejected
-with an `InvalidParameter` error rather than truncated. This is what makes a timestamp mean the same
-thing in every consumer. The bindings do not share one precision — the C ABI and Julia exchange
-instants as `i64` Unix milliseconds, Python's `datetime` is microsecond, and gRPC and the Rust core
-carry a full RFC 3339 string — so a finer instant would be silently truncated at some boundaries and
-not others, putting the same series on different instants depending on who read it. For a
-`NonSequentialTimeSeries` whose timestamps are less than a millisecond apart it is worse: two
-distinct timestamps collapse into one, and the vector stops being strictly increasing on the way
-back out.
-
-A **leap second** is refused by the same rule, for the same reason, though it is not a matter of
-precision. Chrono spells one as a sub-second component at or above one second (`23:59:60`), which is
-a whole number of milliseconds and would otherwise pass — but a Unix millisecond count cannot
-express a leap second at all, so writing one would store the _following_ second. That is not merely
-lossy: a leap second and the second after it are distinct instants that would become one stored
-instant, so two genuinely different `NonSequentialTimeSeries` time axes would share a content hash
-and be interned as one, and a single vector holding `23:59:60` followed by `00:00:00` would go in
-strictly increasing and come back out with a duplicate. Use the second either side of it.
-
-A series needing a finer grid should scale its unit and record it in `units`, exactly as it must for
-a sub-millisecond resolution: a 500 µs series is a 500-unit series.
-
-Two things are deliberately _not_ constrained. A **query bound** — a `time_range` end, a reader's
-`when` — may be arbitrarily fine; it is not stored, and the read paths already say what an off-grid
-bound does (see [reading a time range](../reference/rust-api.md#reading-a-time-range)). And **reads
-stay permissive**: an artifact written before this rule may hold finer instants and still reads back
-exactly as written, which is why the rule does not change `DATA_FORMAT_VERSION`.
-
-### Typed, N-dimensional arrays
-
-Every series' values are a **`TypedArray`**: an element `dtype` (`f64`, `f32`, the integer widths,
-or `bool`) and a shape `[length, k1, k2, …]`. The first axis is time; the trailing axes are a fixed
-**per-step element shape**, so a step can hold a scalar (empty element shape) or a small tuple — for
-example the 3 coefficients of a quadratic cost curve (element shape `[3]`). The association's
-`element_type` says what those elements mean and how a ragged value (a piecewise curve, say) is
-packed into a fixed-width row — see [Element types](../reference/element-types.md). The optional
-`application_data` payload travels alongside for a binding's own use; the store never interprets it.
-
-### Forecasts
-
-The four forecast types store their values as a content-addressed `TypedArray` in its **native
-shape** (the dense types as standalone HDF5 variables; a `DeterministicSingleTimeSeries` reuses its
-backing `SingleTimeSeries` array), while the windowing parameters live in metadata. A forecast
-association records `horizon` (the span each window covers), `interval` (the spacing between
-successive window start times), `count` (the number of windows), and — for `Probabilistic` — a
-`percentiles` vector.
-
-| Type                            | Conventional array shape                   | Extra metadata |
-| ------------------------------- | ------------------------------------------ | -------------- |
-| `Deterministic`                 | `(horizon_count, count)`                   | —              |
-| `DeterministicSingleTimeSeries` | the backing `SingleTimeSeries` array       | —              |
-| `Probabilistic`                 | `(percentile_count, horizon_count, count)` | `percentiles`  |
-| `Scenarios`                     | `(scenario_count, horizon_count, count)`   | —              |
-
-The store does not interpret the layout — the caller owns the array shape (the Rust core takes a
-native-shape `TypedArray` inside a `Deterministic` / `Probabilistic` / `Scenarios` object; the C ABI
-takes a row-major byte buffer with explicit dims, and the Julia wrapper accepts a native array and
-serializes it row-major), and a `DeterministicSingleTimeSeries` deduplicates against the static
-series it forecasts. A `DeterministicSingleTimeSeries` is not added directly — it is derived from
-every stored `SingleTimeSeries` by `transform_single_time_series` (Rust core, C ABI, Python, Julia),
-sharing the underlying array. Because a `DeterministicSingleTimeSeries` is a synthetic view of a
-`SingleTimeSeries`, it is **mutually exclusive** with a real `Deterministic` for the same family
-(`owner`, `name`, `resolution`, `features`, regardless of interval): adding a `Deterministic` when a
-`DeterministicSingleTimeSeries` view exists — or deriving one when a `Deterministic` exists — raises
-`InvalidParameter`. Forecast values read back through the same path as everything else: `read_by_id`
-returns the forecast object matching the row's stored type, in every binding and over gRPC — a read
-names only an id, so there is no requested type to disagree with what is stored. The low-level
-metadata + array path remains available for raw access. See the
-[Rust API](../reference/rust-api.md#forecasts) and [C ABI](../reference/c-abi.md#forecasts).
 
 ## Features
 
@@ -428,7 +264,7 @@ Each association can also carry:
   it names a field on that attribute.
 - **`time_reference`** — how this series' timestamps were _spelled_: `utc`, `zoneless`, a fixed
   offset (`-07:00`), or an IANA zone name (`America/Denver`). See
-  [Time references](#time-references) below, which this one deserves a section of its own for.
+  [Time References](./time-references.md), which this one deserves a page of its own for.
 - **`application_data`** — an opaque, **package-owned** extension payload stored verbatim (typically
   JSON) that a binding writes and reads for its own purposes. The store never parses or interprets
   it, and end users are not expected to set it. Element typing does _not_ live here: that is
@@ -452,146 +288,6 @@ owner. Being descriptive rather than identifying, it narrows a listing but never
 row on its own — one component may carry several series for one field, distinguished by name or
 features. It matches exactly and case-sensitively, and a series that declares no `component_field`
 matches no value, so the filter cannot select the rows that left it unset.
-
-## Time References
-
-The store records **instants**. A `time_reference` records what those instants were _written as_, so
-a series comes back the way it went in instead of being relabelled UTC at every boundary.
-
-| Spelling         | Meaning                                                           |
-| ---------------- | ----------------------------------------------------------------- |
-| `utc`            | An instant, written as UTC.                                       |
-| `-07:00`         | An instant, written at a fixed offset from UTC.                   |
-| `America/Denver` | An instant, written in a named IANA zone. Held opaquely.          |
-| `zoneless`       | A wall clock. Names no instant; the store holds it as if UTC.     |
-| _unset_          | Unspecified — **not** a claim the timestamps were written as UTC. |
-
-Three of the four name an instant; `zoneless` does not, and most rules below split on that binary
-rather than on the four spellings. An unset reference groups with the zoned ones.
-
-Each binding **infers** the spelling from the input type, so nothing takes a new required argument:
-
-| Binding | `utc`                    | fixed offset             | named zone                             | `zoneless`                     |
-| ------- | ------------------------ | ------------------------ | -------------------------------------- | ------------------------------ |
-| Python  | `timezone.utc`           | fixed-offset `tzinfo`    | `tzinfo` exposing a `key` (`ZoneInfo`) | naive `datetime`               |
-| Julia   | UTC `ZonedDateTime`      | `FixedTimeZone`          | `VariableTimeZone`, by its name        | bare `DateTime`                |
-| CLI     | `Z` in text, or the flag | `-07:00` in text or flag | `--assume-timezone America/Denver`     | bare timestamp, `--zoneless`   |
-| Rust    | `DateTime<Utc>`          | declare it               | declare it                             | **declare it** — no naive type |
-
-`ZoneInfo("UTC")` records the _zone_ `UTC`, not the literal `utc`. The two render identically
-forever; the difference shows up only in what the catalog reports back, which is the point of
-recording a spelling at all.
-
-### A spelling is not a grid
-
-A reference records how timestamps were _written_. It does not change how the grid is _stepped_:
-`resolution` and `interval` are durations, so an hourly series has hourly **instants** whatever its
-reference says. Rendering an hourly `America/Denver` series across the November fall-back gives
-`01:00-06:00`, `01:00-07:00`, `02:00-07:00` — two identical wall clocks, two distinct instants,
-correctly ordered.
-
-That is the difference between two things "store this in Denver time" can mean:
-
-- **Instants, displayed in Denver.** Storage is untouched — UTC instants plus a label. **This is
-  what a named zone means here.**
-- **A local-clock grid** — hourly _by the clock_, so a 23-hour day in March and a 25-hour one in
-  November. This is inexpressible in `SingleTimeSeries` and the dense forecasts, whose grid is a
-  `Period`: a fixed count of milliseconds. Use `NonSequentialTimeSeries`, which carries an explicit
-  instant per value, so the caller derives those days and the data records them rather than
-  arithmetic implying them.
-
-Someone with 8760 naive Denver timestamps who localizes only the first and passes `resolution = 1h`
-gets labels shifted by an hour after each transition, and nothing in the data distinguishes that
-from a correct series. The store cannot detect it; the split above is the thing to know.
-
-### Months step on the UTC calendar
-
-`Period::Months` is calendar arithmetic, so unlike a fixed period it has to be told _which_
-calendar. It uses the stored **UTC** one, and the reference does not redirect it. TimeZones.jl steps
-the _local_ clock instead, so the two disagree by an hour at every DST transition and by up to a day
-at a month boundary.
-
-Local-frame stepping is refused for two independent reasons: it is the local → instant direction the
-store deliberately never runs (below), and it would let a spelling decide _which instants_ a series
-contains. A calendar period on a zoned series is warned about on write, so the disagreement is
-findable before it is filed as a bug. A caller who wants months on a local calendar wants a
-local-clock grid, and the answer is the one above: `NonSequentialTimeSeries`.
-
-### Why a named zone is safe
-
-The ambiguity a named zone is feared for lives in the **local → instant** direction, and the core
-never runs it.
-
-- **On input** that direction has already happened, in the caller's own datetime library. Julia
-  refuses an ambiguous local time outright; Python resolves it through `fold`. Either way the
-  binding is handed a value that already names one definite instant. The CLI is the exception,
-  because it is handed _text_ — see below.
-- **On output** the store runs only **instant → local**, which is total and single-valued: one
-  instant maps to exactly one wall clock in a named zone, and converting it back yields the same
-  instant.
-
-So a year-long Denver series stamped `-07:00` renders every timestamp after the March transition an
-hour wrong, while the same series stamped `America/Denver` renders all of them correctly. Recording
-"the offset in effect at `initial_timestamp`" is the one option that is quietly incorrect, which is
-why it is not among the four spellings.
-
-Two caveats belong here rather than in the type. Rendering a named zone is
-**tz-database-dependent**, so a retroactive rule change moves the displayed local time of an
-already-stored instant — the store records the instant, and the label is a rendering hint. And a
-zone name's **existence is audited, never gated**: the core checks only that a name is shaped like
-an IANA name and cannot be read as an offset or as either literal. Every layer that _has_ a database
-— the CLI via `chrono-tz`, Python via `zoneinfo`, Julia via `TimeZones` — warns on a name it does
-not recognize and stores it anyway, and `infrastore store-info` reports the catalog's distinct
-spellings with unrecognized zones flagged. Gating would turn a rare read-time error into a
-write-time error coupled to _our_ release cadence: when IANA adds a zone, a caller whose own
-database already has it would be refused until they upgraded.
-
-### The CLI is where local → instant actually happens
-
-Every other binding is handed an already-resolved datetime. The CLI is handed text, so
-`--assume-timezone America/Denver` over a zoneless column is the one place in the system that runs
-local → instant itself, and `chrono-tz` answers in three values — each with its own behavior, per
-row:
-
-| Result           | Meaning                         | CLI behavior                                  |
-| ---------------- | ------------------------------- | --------------------------------------------- |
-| a single instant | the ordinary case               | ingest it                                     |
-| two candidates   | the repeated fall-back hour     | **error**, naming the row and both candidates |
-| none             | the skipped spring-forward hour | **error**, naming the row                     |
-
-Rejecting loudly, per row, with both candidates named is what makes a named zone acceptable here;
-silently picking one is not. Reading is unaffected: rendering a stored instant in a named zone is
-the total direction, so `--assume-timezone` plays no part in it.
-
-### Query bounds and mixed selections
-
-A bound must be spelled the way the series is, and a mismatch is refused rather than coerced:
-
-| Series reference      | Wall-clock bound | Instant bound                              |
-| --------------------- | ---------------- | ------------------------------------------ |
-| `utc` / offset / zone | **error**        | accept — any offset names the same instant |
-| `zoneless`            | accept           | **error**                                  |
-| _unset_               | **error**        | accept                                     |
-
-An off-grid bound still names an unambiguous instant, so flooring it is well-defined — that is why
-`time_range` snaps. A wall-clock bound against a series that records instants is a **category
-error**: there is no defined mapping to fall back on. Bounds stay unconstrained in _precision_,
-though: a sub-millisecond bound names a real instant even though a stored one may not.
-
-The same partition drives two rejections and one filter:
-
-1. A **ranged bulk read** over a selection spanning both groups is refused — no single bound is
-   valid for all of it. An unranged one is unaffected: without a bound there is nothing to disagree
-   about, and each series carries its own spelling back.
-2. A **`StaticReader`** materializes one timestamp axis, so a mixed cohort is refused at _build_
-   time, where the error can name the series that disagree. Mixing `utc`, an offset, and a named
-   zone in one cohort is fine — all three name instants, and the axis is spelled with the cohort's
-   reference when every member agrees and `utc` when they merely agree on naming instants.
-3. **`ListFilter::zoneless`** is the constructive half: `true` selects the wall-clock series,
-   `false` selects everything that accepts an instant bound — the three zoned spellings _and_ the
-   rows that left the reference unset. It is a binary predicate rather than a match on a specific
-   spelling because an exact match cannot name that second group at all (the trap `component_field`
-   documents), and here those rows are a coherence group rather than an oversight.
 
 ## Associations Between Entities
 
@@ -641,7 +337,8 @@ type into its subtypes stays in the calling language, where the type hierarchy l
 > described above — are also called "associations" throughout this documentation and the code. They
 > are unrelated to the entity-to-entity tables described in this section.
 
-Both are available in the Rust core, the C ABI, Julia, and Python; neither is exposed over gRPC or
-the `infrastore` CLI. The supplemental-attribute surface is the wider of the two (it carries counts
-and a grouped summary) because each of its operations is driven by an existing consumer; the
-parent/child surface is deliberately narrower for now.
+Both are available in the Rust core, the C ABI, Julia, Python, and the `infrastore` CLI (`attach` /
+`detach` / `link` / `unlink`); neither is exposed over the read-only gRPC server. The
+supplemental-attribute surface is the wider of the two (it carries counts and a grouped summary)
+because each of its operations is driven by an existing consumer; the parent/child surface is
+deliberately narrower for now.

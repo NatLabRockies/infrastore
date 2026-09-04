@@ -434,7 +434,7 @@ too, rather than returning an empty selection.
 
 `end < start` is `InvalidParameter` for every type. Query bounds themselves are unconstrained: they
 may be finer than the millisecond every _stored_ instant is held to (see
-[timestamp precision](../explanation/data-model.md#timestamp-precision)).
+[timestamp precision](../explanation/time-series-types.md#timestamp-precision)).
 
 A [reader](#readers) is exact rather than range-based: `index_at` maps a timestamp to its index and
 errors if that instant is not on the timeline — for both the regular and the irregular case. It
@@ -1153,8 +1153,7 @@ infer it from theirs.
 
 `validate` checks shape only: a zone name must be non-empty, bounded, IANA-shaped, and unreadable as
 an offset or as either literal — which is what lets one catalog column hold all four spellings.
-Existence is deliberately not checked; see
-[Time references](../explanation/data-model.md#time-references).
+Existence is deliberately not checked; see [Time references](../explanation/time-references.md).
 
 ```rust
 pub struct TimeRange {
@@ -1234,7 +1233,7 @@ zoned spellings _and_ the rows that left the reference unset. An exact match cou
 second group at all (the trap `component_field` documents), and here those rows are a coherence
 group rather than an oversight. It is the constructive half of the rules that make
 `read_by_ids_range` and `build_static_reader` refuse a selection spanning both groups; see
-[Time references](../explanation/data-model.md#time-references).
+[Time references](../explanation/time-references.md).
 
 ### `AddRequest`
 

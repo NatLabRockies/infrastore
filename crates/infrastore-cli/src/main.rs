@@ -1483,9 +1483,10 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../../docs/src/reference/cli.md"
         ),
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/src/guides/cli.md"),
         concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../docs/src/how-to/use-cli.md"
+            "/../../docs/src/getting-started/quick-start-cli.md"
         ),
     ];
 

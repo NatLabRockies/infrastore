@@ -72,6 +72,33 @@ integer to store in your own object model when it needs to point at it (see
 [Association ids](../explanation/data-model.md#association-ids)). Adding a series whose identity
 already exists returns `TimeSeriesError::DuplicateTimeSeries`.
 
+### Descriptors
+
+The descriptive attributes ride on the series object, not on the write call, so a read returns what
+the write declared:
+
+```rust
+use infrastore_core::{TimeReference, UnitSystem};
+
+let ts = SingleTimeSeries::new(initial, Duration::hours(1), data, "load")
+    .with_units("MW")
+    .with_quantity_kind("ActivePower")
+    .with_unit_system(UnitSystem::NaturalUnits)
+    .with_component_field("max_active_power")
+    .with_time_reference(TimeReference::Zone("America/Denver".into()))
+    .with_application_data(r#"{"source": "weather_year_2012"}"#);
+```
+
+**A native Rust caller declares `time_reference` itself.** Every other binding infers it from the
+input type — Python from `tzinfo`, Julia from `DateTime` versus `ZonedDateTime` — but
+`DateTime<Utc>` is already an instant, so there is nothing to infer from. Leaving it unset means
+_unspecified_, which is not a claim the timestamps were written as UTC. It is not inert: a query
+bound must be spelled the way the series is, and a selection spanning both coherence groups is
+refused. See [Time References](../explanation/time-references.md).
+
+None of these descriptors is part of a series' identity or of either content hash, so two adds
+differing only in one are a duplicate.
+
 ### Bulk inserts
 
 For many series at once, `add_time_series_bulk` takes a `Vec<AddRequest>` and commits the whole
@@ -121,6 +148,27 @@ I/O until `commit`, which is all-or-nothing. Dropping the session without commit
 Adding series one at a time with `add_time_series` instead packs them incrementally into shared
 default-width datasets; that stays space-efficient but writes each column with a read-modify-write,
 so prefer a bulk insert or session when loading in volume.
+
+### The irregular type
+
+`NonSequentialTimeSeries` carries an explicit instant per value instead of a grid. Its constructor
+validates that the timestamps are strictly increasing and match the data length, and returns
+`Result<Self, String>`:
+
+```rust
+use infrastore_core::NonSequentialTimeSeries;
+
+// Values that exist only at these instants — asking between them is an error.
+let outages = NonSequentialTimeSeries::new(instants, data, "forced_outage")?;
+
+store.add_time_series(
+    42, "ThermalStandard", OwnerCategory::Component,
+    TimeSeriesData::NonSequentialTimeSeries(outages), Features::new(),
+)?;
+```
+
+See [Choosing a Type](../explanation/time-series-types.md#choosing-a-type) if you are deciding
+between it and a `SingleTimeSeries`.
 
 ## Read a Series
 
@@ -212,8 +260,9 @@ let array = store.get_array_by_hash(&meta.data_hash)?;
 
 Dense forecasts are written through the generic `add_time_series` by wrapping a `Deterministic`,
 `Probabilistic`, or `Scenarios` object in `TimeSeriesData`. Each forecast object holds a
-`TypedArray` in its native shape (the [data model](../explanation/data-model.md#forecasts) lists the
-conventional shapes per type); the store content-addresses it and records the windowing parameters:
+`TypedArray` in its native shape (the [data model](../explanation/time-series-types.md#forecasts)
+lists the conventional shapes per type); the store content-addresses it and records the windowing
+parameters:
 
 ```rust
 use infrastore_core::{Deterministic, TimeSeriesData, TimeSeriesError, TypedArray};
@@ -303,6 +352,68 @@ let rows = store.list_metadata(
 // resolver, so ambiguity is the caller's to name rather than the store's.
 let [meta] = &rows[..] else { panic!("expected exactly one match: {rows:?}") };
 ```
+
+## Per-Timestamp Reads (Simulation Loop)
+
+The layout is optimized for "every component's value at one timestamp", and a **reader** is the API
+for that. Build one once outside the loop, then step it; the buffers are reused, so a tight loop
+allocates nothing. A reader is a passive plan — it does not borrow the `Store`, so the read goes
+through `Store::static_read` / `Store::forecast_read`, which fill it. See
+[Readers](../explanation/readers.md) for the concepts.
+
+### Static series
+
+```rust
+use infrastore_core::{ListFilter, TimeSeriesType};
+
+let mut reader = store.build_static_reader(ListFilter::new().resolution(Duration::hours(1)))?;
+for at in reader.timestamps().collect::<Vec<_>>() {
+    store.static_read(&mut reader, at)?;
+    for group in reader.groups() {
+        let bytes = group.values();   // [num_columns, *element_shape], row-major LE
+        // group.keys()[j] identifies column j; group.dtype(), group.element_shape()
+    }
+}
+```
+
+`build_static_reader` covers both static types, and the filter decides what must hold:
+`SingleTimeSeries` (the default) must pin a resolution and share one grid; `NonSequentialTimeSeries`
+must pin **no** resolution — `reader.resolution()` is then `None` — and its columns must lie on one
+timestamp vector:
+
+```rust
+let mut reader = store.build_static_reader(
+    ListFilter::new().time_series_type(TimeSeriesType::NonSequentialTimeSeries),
+)?;
+```
+
+Whatever the kind, `reader.timestamps()` walks the timeline, so the loop body above is unchanged.
+Coherence is validated at **build** time, where the error can name the series that disagree — there
+is no presence mask, and `static_read` errors rather than clamps on an off-grid instant.
+
+### Forecasts
+
+```rust
+let mut reader = store.build_forecast_reader(
+    ListFilter::new()
+        .time_series_type(TimeSeriesType::Deterministic)
+        .resolution(Duration::hours(1)),
+)?;
+for k in 0..reader.count() {
+    let at = reader.interval().add_to(reader.initial_timestamp(), k as i64).unwrap();
+    store.forecast_read(&mut reader, at)?;
+    for (i, entry) in reader.entries().iter().enumerate() {
+        let slot = reader.entry_slot(i);
+        let bytes = slot.window();    // window of slot.window_shape(), row-major LE
+        // entry.id() names the forecast; get_metadata_by_id resolves its owner
+    }
+}
+```
+
+Entries that reference the same array and slice it the same way share one `WindowSlot`, and
+`forecast_read` performs one backend read per **slot** — so a forecast shared by a hundred owners is
+decompressed once per step. Dedup your own per-entry work by slot the same way. Note that
+`entry_slot(i)` takes the _entry_ index, while `entry.slot()` is that slot's index into `slots()`.
 
 ## Copy, Remove, and Maintain
 

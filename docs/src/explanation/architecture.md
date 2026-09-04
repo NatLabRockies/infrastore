@@ -90,7 +90,7 @@ flowchart LR
 ```
 
 The backend is chosen behind the [`StorageBackend`](../reference/rust-api.md#storagebackend-trait)
-trait. v0 ships two implementations:
+trait. There are two implementations:
 
 - **`MemoryBackend`** — arrays in a hash map; selected when `in_memory = true`. No filesystem I/O.
 - **`Hdf5Backend`** — arrays in an HDF5 file; selected when a path is given.

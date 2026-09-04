@@ -244,7 +244,7 @@ refuses a ranged bulk read whose selection mixes zoneless series with instant-be
 `ListMetadataReq.zoneless` is the constructive half — `true` selects the wall-clock series, `false`
 selects everything that accepts an instant bound, including the rows that recorded no reference.
 
-See [Time references](../explanation/data-model.md#time-references) for the full rules.
+See [Time references](../explanation/time-references.md) for the full rules.
 
 ## Forecasts Over gRPC
 

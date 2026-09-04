@@ -1,10 +1,16 @@
-# Use the `infrastore` CLI
+# CLI Developer Guide
 
 `infrastore` loads time series from CSV files and inspects a store, talking directly to the on-disk
-`.h5` + `.h5.sqlite` pair (no gRPC server required). For the full command and descriptor reference,
-see [CLI Reference](../reference/cli.md).
+`.h5` + `.h5.sqlite` pair — no gRPC server, and unlike the server it is **not** read-only. This
+guide walks the whole workflow; for every flag, the descriptor schema, and the CSV layouts, see the
+[CLI Reference](../reference/cli.md). For a 60-second round trip, see the
+[CLI Quick Start](../getting-started/quick-start-cli.md).
 
-## 1. Install the Binary
+It is also the fastest way to see what a consumer package actually wrote: `infrastore list` and
+`infrastore info` read any artifact your package produces, and `infrastore diff` compares two by
+hash without reading arrays.
+
+## Install
 
 Grab a prebuilt archive from the
 [Releases page](https://github.com/NatLabRockies/infrastore/releases) — the executables inside are
@@ -34,7 +40,7 @@ cargo build -p infrastore-cli --release
 
 The examples below assume `infrastore` is on your `PATH` (or use `./target/debug/infrastore`).
 
-## 2. Describe the Data
+## Describe the Data
 
 Numeric values live in a CSV; everything that does not fit a flat grid (owner, name, type,
 element_type, resolution, initial timestamp, units, features) lives in a **descriptor JSON**. Print
@@ -96,7 +102,7 @@ infrastore --store demo.h5 --assume-timezone UTC add --descriptor load.json
 A timestamp that carries its own offset is never overridden. See
 [Zoneless timestamps](../reference/cli.md#zoneless-timestamps).
 
-## 3. Add It to a Store
+## Add It to a Store
 
 ```sh
 infrastore --store demo.h5 add --descriptor load.json --dry-run   # check first
@@ -179,7 +185,7 @@ the headers already are ids:
 
 `infrastore grid` writes that same shape back out, so the two are an inverse pair — see below.
 
-## 4. Read It Back
+## Read It Back
 
 `infrastore` follows an output convention: a global `-f/--format` with `table` (default), `json`,
 `jsonl`, and `csv`. The read commands render their results in it; the write commands (`add`,
@@ -268,7 +274,7 @@ as do `--owner-category component` and `--owner-category Component`. What the CL
 so descriptors, rendered rows, and `-f json` output all string-match each other. The lowercase forms
 are a typing shortcut on the command line, not a second vocabulary.
 
-## 5. Look at It
+## Chart It
 
 ```sh
 infrastore --store demo.h5 get --name load --plot                        # sparkline, no file
@@ -285,7 +291,7 @@ are `line`, `duration` (the load duration curve), `heatmap` (time-of-day against
 you catch a timezone or DST shift), `fan` (percentile bands or scenario traces for one forecast
 window), and `overlay` (a `Deterministic`'s windows over the actuals it came from).
 
-## 6. Find the Bytes on Disk
+## Find the Bytes on Disk
 
 Arrays are content-addressed, so identical values are stored once and shared. `arrays` shows what
 collapsed onto what, and where each array actually lives:
@@ -309,7 +315,7 @@ hashes as garbage bytes, and in `.mode box` it mangles the table borders:
 sqlite3 demo.h5.sqlite 'SELECT name, data_hash FROM time_series_readable;'
 ```
 
-## 7. Associations
+## Associations
 
 Two association catalogs live alongside the time series, readable and writable here:
 
@@ -329,7 +335,7 @@ consumer's object graph — so the flags are bare ids and type names. `attach --
 because the four columns are two interchangeable-looking `(id, type)` pairs and a swapped file would
 silently invert every relationship. `detach` and `unlink` are the inverses, and take `--dry-run`.
 
-## 8. Forecasts
+## Forecasts
 
 All five writable types work (`SingleTimeSeries`, `NonSequentialTimeSeries`, `Deterministic`,
 `Probabilistic`, `Scenarios`). `infrastore template Deterministic` prints a descriptor to edit, but
@@ -377,11 +383,7 @@ a single window instead of dumping all of them:
 infrastore --store demo.h5 get --name load --type deterministic_single --window 0
 ```
 
-Combined with `--time-range`, both address the windows the range _selected_: `--window 0` is the
-first selected window, and `--issue-time` must name one of them — a window the forecast has but the
-range dropped is reported as outside the selected range, not as missing.
-
-## 9. Compare and Move Stores
+## Compare and Move Stores
 
 ```sh
 infrastore --store run.h5 diff --against baseline.h5      # exits 1 when they differ
@@ -395,7 +397,7 @@ same hash. `merge` moves arrays as bytes, so nothing is lost to a CSV round trip
 one write that refuses an existing destination without `--force`: a save that fails partway may
 already have destroyed what was there.
 
-## 10. Maintain It
+## Maintain It
 
 ```sh
 infrastore --store demo.h5 verify                 # re-hash every array; exit 1 on a mismatch

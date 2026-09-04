@@ -42,7 +42,7 @@ do not hand-edit it. The [Julia binding](./julia-api.md) is the primary consumer
   one, and the store refuses a bound whose spelling the series cannot answer rather than coercing
   it. The `zoneless` filter argument on the list/filter exports is a tri-state `int32_t`: negative
   means no filter, `0` selects the instant-bearing rows (including those with no reference), and `1`
-  selects the wall-clock rows. See [Time references](../explanation/data-model.md#time-references).
+  selects the wall-clock rows. See [Time references](../explanation/time-references.md).
 - **Features** are passed as a JSON object string whose values are int / float / bool / string. An
   add call whose feature names shadow a time-series or key field (`name`, `resolution`, `owner_id`,
   …) fails with `INFRASTORE_ERR_INVALID_PARAMETER`; see
@@ -269,8 +269,8 @@ discriminant — `0 = SingleTimeSeries`, `1 = NonSequentialTimeSeries`, `2 = Det
 per [Type filters](#type-filters) below. Forecast values are dtype-generic raw little-endian byte
 buffers with explicit dimensions — the same `element_type`, `ndims`, `dims_ptr`, `data_ptr`,
 `data_byte_len` convention as the static add functions (see the
-[data model](../explanation/data-model.md#forecasts) for the conventional shapes); the store records
-the windowing parameters in metadata and does not interpret the layout. A
+[data model](../explanation/time-series-types.md#forecasts) for the conventional shapes); the store
+records the windowing parameters in metadata and does not interpret the layout. A
 `DeterministicSingleTimeSeries` (`3`) is read like any other forecast but cannot be written through
 `infrastore_store_add_forecast` — it is derived via `infrastore_store_transform_single_time_series`.
 
@@ -1052,7 +1052,7 @@ cargo build -p infrastore-ffi --release
 ```
 
 Point consumers at it via the `INFRASTORE_LIB` environment variable (see the
-[Julia how-to](../how-to/integrate-julia.md)).
+[Julia guide](../guides/julia.md#install)).
 
 ## Tracing
 

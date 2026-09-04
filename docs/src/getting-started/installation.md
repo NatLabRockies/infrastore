@@ -78,8 +78,8 @@ The package does not link a system HDF5 or `HDF5_jll`. Its `Artifacts.toml` poin
 prebuilt, statically linked library for the platform — Linux x86_64 and aarch64 (glibc), macOS
 x86_64 and Apple Silicon, and Windows x86_64 — and nothing else needs installing. To run against a
 locally built library instead (a working tree, or a platform outside that list), set
-`INFRASTORE_LIB`; it takes precedence over the artifact.
-[Integrate with Julia](../how-to/integrate-julia.md) has both recipes, and
+`INFRASTORE_LIB`; it takes precedence over the artifact. The
+[Julia guide](../guides/julia.md#install) has both recipes, and
 [Releasing](../releasing.md#5-julia--general) explains why the binary is self-hosted rather than a
 JLL.
 
@@ -130,6 +130,27 @@ The workspace Cargo config (`.cargo/config.toml`) sets macOS linker flags so
 `cargo build
 --workspace` can link the PyO3 cdylib without `maturin`. On Linux those flags are inert.
 
+## Build the Native Library
+
+`InfraStore.jl` and any other C consumer load the C ABI cdylib. Building it is the one target most
+people need out of a checkout:
+
+```sh
+cargo build -p infrastore-ffi --release
+# -> target/release/libinfrastore_ffi.{dylib,so,dll}
+# Regenerates the C header at crates/infrastore-ffi/include/infrastore.h
+```
+
+Point consumers at it with `INFRASTORE_LIB`, which takes precedence over the artifact `Pkg`
+installed:
+
+```sh
+export INFRASTORE_LIB=$PWD/target/release/libinfrastore_ffi.dylib  # .so on Linux
+```
+
+Add it to your shell profile to make it permanent. The Python wheel is built separately with
+`maturin` — see [the Python guide](../guides/python.md#from-a-checkout).
+
 ## Crates in the Workspace
 
 | Crate               | What it builds                                                       |
@@ -144,8 +165,8 @@ The workspace Cargo config (`.cargo/config.toml`) sets macOS linker flags so
 
 ## Next Steps
 
-- Build a store and round-trip a series in the [Python](./quick-start-python.md) or
-  [Julia](./quick-start-julia.md) Quick Start.
-- Set up a language binding: [Python](../how-to/integrate-python.md) ·
-  [Julia](../how-to/integrate-julia.md).
-- Stand up the [gRPC server](../how-to/run-server.md).
+- Build a store and round-trip a series in the [Python](./quick-start-python.md),
+  [Julia](./quick-start-julia.md), or [CLI](./quick-start-cli.md) Quick Start.
+- Read the developer guide for your language: [Python](../guides/python.md) ·
+  [Julia](../guides/julia.md) · [Rust](../guides/rust.md) · [CLI](../guides/cli.md).
+- Stand up the [gRPC server](../guides/server.md).

@@ -1,8 +1,61 @@
 # Python Developer Guide
 
-This guide covers building on the `infrastore` PyO3 module. For exact signatures and return shapes,
-see the [Python API reference](../reference/python-api.md). To install the wheel into your
-environment, see [Integrate with Python](../how-to/integrate-python.md).
+This guide covers building on the `infrastore` PyO3 module, from installing the wheel to the calls a
+consumer package makes. For exact signatures and return shapes, see the
+[Python API reference](../reference/python-api.md).
+
+## Install
+
+Python 3.11 or newer. The wheels are prebuilt and statically linked, so a consumer package such as
+infrasys needs nothing else:
+
+```sh
+pip install infrastore
+```
+
+The wheel is built against the **`abi3-py311`** stable ABI, so one wheel works on CPython 3.11 and
+every newer 3.x without recompiling.
+
+### From a checkout
+
+Building from source needs the [build tools](../getting-started/installation.md#build-prerequisites)
+(`cmake`, a C compiler, `protobuf`) — but **no system HDF5**. The binding is built with
+[maturin](https://www.maturin.rs/); `maturin develop` compiles the extension and installs it into
+the active virtual environment:
+
+```sh
+cd crates/infrastore-py
+python3 -m venv .venv && source .venv/bin/activate
+pip install maturin pytest numpy tzdata  # tzdata: zoneinfo on Windows
+pip install netCDF4 h5py                 # only for the HDF5-interop tests
+maturin develop
+
+python -c "import infrastore; print(infrastore.__version__)"
+pytest ../../python/tests
+```
+
+To produce a wheel you can install elsewhere:
+
+```sh
+maturin build --release
+# -> target/wheels/infrastore-<version>-cp311-abi3-<platform>.whl
+```
+
+Installing an unreleased core into a consumer's environment is the same `maturin develop`, run with
+that consumer's venv active.
+
+### If it does not import
+
+- **`ImportError` for the extension** — Ensure you ran `maturin develop` in the active venv, or that
+  you `pip install`-ed the wheel into the interpreter you are running.
+- **HDF5 build errors with `HDF5_DIR` set** — Unset it. The vendored build compiles its own HDF5 and
+  the variable redirects it at an external install while static libraries are still requested (see
+  [Build Prerequisites](../getting-started/installation.md#build-prerequisites)).
+- **`InvalidParameterError` on add** — Pass a NumPy array (any shape) whose dtype is one of
+  `float64`, `float32`, `int64`, `int32`, `int16`, `int8`, `uint64`, `uint32`, `uint16`, `uint8`, or
+  `bool`; any other dtype (e.g. `complex128` or a string dtype) raises. Feature values must be
+  `int`/`float`/`bool`/`str`. Timestamps for a `NonSequentialTimeSeries` must be strictly
+  increasing.
 
 ## Import
 
@@ -111,7 +164,7 @@ every `==` a caller writes.
 None of them is part of the key or of either content hash, so two adds that differ only in a
 descriptor are a duplicate. See
 [Optional Descriptors](../explanation/data-model.md#optional-descriptors) and
-[Time references](../explanation/data-model.md#time-references).
+[Time references](../explanation/time-references.md).
 
 ### Add many series at once
 
