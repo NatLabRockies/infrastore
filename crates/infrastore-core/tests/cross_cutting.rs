@@ -817,10 +817,14 @@ fn a_store_can_be_moved_to_another_thread() {
 }
 
 #[test]
-fn a_second_read_only_handle_on_one_path_can_be_opened() {
-    // Two handles on one on-disk store, in one process. PIN that a second
-    // read-only open succeeds alongside the first (the HDF5 side takes a
-    // shared HDF5 lock, and SQLite readers do not exclude each other).
+fn a_second_handle_on_one_path_is_refused_whatever_its_mode() {
+    // Two handles on one on-disk store in one process used to be admitted for
+    // read-only opens (HDF5 takes a shared lock, SQLite readers do not exclude
+    // each other) and left to the platform for a reader beside a writer.
+    // Neither was safe: a handle indexes the packed columns once at open, so a
+    // reader beside a writer served another series' values once a slot was
+    // reused, and two writers overwrote each other's columns. Every second
+    // handle is now `StoreInUse`; `artifact_safety.rs` pins the full contract.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
     let key = {
@@ -828,63 +832,27 @@ fn a_second_read_only_handle_on_one_path_can_be_opened() {
         let key = add(&mut store, 1, sts_at("load", t0(), Duration::hours(1)));
         store.flush().unwrap();
         key
+    };
+    let in_use = |r: Result<Store, infrastore_core::TimeSeriesError>| {
+        matches!(r, Err(infrastore_core::TimeSeriesError::StoreInUse { .. }))
     };
 
     let first = open_store(path.as_path(), true).unwrap();
-    let second = open_store(path.as_path(), true).unwrap();
-    for (label, store) in [("first", &first), ("second", &second)] {
-        let got = store
-            .read_by_id(key, infrastore_core::ReadWindow::full())
-            .unwrap();
-        assert_eq!(
-            got.as_single().unwrap().data.to_f64_vec().unwrap(),
-            vec![1.0, 2.0, 3.0, 4.0],
-            "{label}"
-        );
-    }
-}
-
-#[test]
-fn a_read_only_handle_alongside_a_writable_one_is_pinned() {
-    // PIN whichever way this lands: a read-write handle is already open when a
-    // read-only one is requested. HDF5's file locking may or may not permit it,
-    // and the SQLite side has a 5 s busy_timeout, so the outcome is
-    // platform-dependent — the point is that it either works or fails cleanly,
-    // never corrupts.
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.h5");
-    let key = {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
-        let key = add(&mut store, 1, sts_at("load", t0(), Duration::hours(1)));
-        store.flush().unwrap();
-        key
-    };
+    assert!(in_use(open_store(path.as_path(), true)));
+    drop(first);
 
     let writable = open_store(path.as_path(), false).unwrap();
-    match open_store(path.as_path(), true) {
-        Ok(reader) => {
-            // If it opens, it must read the flushed data correctly.
-            let got = reader
-                .read_by_id(key, infrastore_core::ReadWindow::full())
-                .unwrap();
-            assert_eq!(
-                got.as_single().unwrap().data.to_f64_vec().unwrap(),
-                vec![1.0, 2.0, 3.0, 4.0]
-            );
-        }
-        Err(e) => {
-            // If it does not, the failure carries a diagnostic.
-            assert!(!e.to_string().is_empty());
-        }
-    }
+    assert!(in_use(open_store(path.as_path(), true)));
     drop(writable);
 
-    // Once the writable handle is gone, a read-only open definitely works.
+    // Once the other handle is gone, a read-only open works.
     let reader = open_store(path.as_path(), true).unwrap();
-    assert!(
-        reader
-            .read_by_id(key, infrastore_core::ReadWindow::full())
-            .is_ok()
+    let got = reader
+        .read_by_id(key, infrastore_core::ReadWindow::full())
+        .unwrap();
+    assert_eq!(
+        got.as_single().unwrap().data.to_f64_vec().unwrap(),
+        vec![1.0, 2.0, 3.0, 4.0]
     );
 }
 

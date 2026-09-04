@@ -20,6 +20,7 @@ from infrastore import (
     SingleTimeSeries,
     Store,
     StoreExistsError,
+    TimeSeriesError,
 )
 
 
@@ -179,12 +180,40 @@ def test_persist_catalog_is_a_checkpoint_not_a_mode_switch(tmp_path):
         add(store, 2, 200.0)
         store.flush()
 
-        with Store.open(path, read_only=True) as reopened:
-            assert [k['owner_id'] for k in reopened.list_metadata()] == [1]
+        # Read off the catalog file itself: a second Store on a path this
+        # process already holds open is refused (StoreInUse).
+        assert owners_on_disk(path) == [1]
 
         store.persist_catalog()
-        with Store.open(path, read_only=True) as reopened:
-            assert sorted(k['owner_id'] for k in reopened.list_metadata()) == [1, 2]
+        assert owners_on_disk(path) == [1, 2]
+
+    with Store.open(path, read_only=True) as reopened:
+        assert sorted(k['owner_id'] for k in reopened.list_metadata()) == [1, 2]
+
+
+def owners_on_disk(path) -> list[int]:
+    """The owners the catalog *on disk* lists, straight from the SQLite file."""
+    import sqlite3
+
+    with sqlite3.connect(f"{path}.sqlite") as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT owner_id FROM time_series_associations ORDER BY owner_id"
+        ).fetchall()
+    return [owner for (owner,) in rows]
+
+
+def test_a_second_handle_on_an_open_artifact_is_refused(tmp_path):
+    """Two handles on one artifact in one process would read and write the
+    wrong packed columns, so the second is refused whatever its mode."""
+    path = tmp_path / "held.h5"
+    with Store.create(path) as store:
+        add(store, 1, 100.0)
+        for read_only in (False, True):
+            with pytest.raises(TimeSeriesError, match="already open in this process"):
+                Store.open(path, read_only=read_only)
+    # Gone with the handle.
+    with Store.open(path, read_only=True) as reopened:
+        assert len(reopened.list_metadata()) == 1
 
 
 def test_a_failed_catalog_checkpoint_keeps_the_catalog_in_ram(tmp_path):

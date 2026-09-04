@@ -453,3 +453,86 @@ fn locate_array_reports_no_on_disk_location_for_an_in_memory_store() {
     assert_eq!(store.locate_array(&hash).unwrap(), ArrayLocation::InMemory);
     assert!(store.locate_array(&[0u8; 32]).is_err());
 }
+
+/// A dense forecast whose array is byte-identical to a packed static series'
+/// shares that column -- content addressing keeps one copy -- and every read
+/// of it has to work from there, including the forecast reader's window read,
+/// which used to reject a packed location outright. Both orders of arrival
+/// are covered because the layout is decided by whichever row came first.
+#[test]
+fn a_forecast_sharing_a_packed_array_reads_through_the_forecast_reader() {
+    use infrastore_core::{Deterministic, ListFilter};
+    for forecast_first in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = create_store(Some(&dir.path().join("shared.h5")), false).unwrap();
+        let values: Vec<f64> = (0..24 * 7).map(|i| i as f64).collect();
+        // A length-24 series with element shape [7] and a 24-step forecast
+        // with 7 windows both store a `[24, 7]` f64 array.
+        let sts = TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+            t0(),
+            Duration::hours(1),
+            TypedArray::from_f64(vec![24, 7], &values),
+            "sts",
+        ));
+        let det = TimeSeriesData::Deterministic(
+            Deterministic::new(
+                t0(),
+                Duration::hours(1),
+                Duration::hours(24),
+                Duration::hours(1),
+                7,
+                TypedArray::from_f64(vec![24, 7], &values),
+                "det",
+            )
+            .unwrap(),
+        );
+        let order = if forecast_first {
+            [det, sts]
+        } else {
+            [sts, det]
+        };
+        let ids: Vec<_> = order
+            .into_iter()
+            .map(|data| {
+                store
+                    .add_time_series(
+                        1,
+                        "Generator",
+                        OwnerCategory::Component,
+                        data,
+                        Features::new(),
+                    )
+                    .unwrap()
+            })
+            .collect();
+        let hash = |id| store.get_metadata_by_id(id).unwrap().unwrap().data_hash;
+        assert_eq!(hash(ids[0]), hash(ids[1]), "one array, two rows");
+
+        let mut reader = store
+            .build_forecast_reader(
+                ListFilter::new()
+                    .time_series_type(TimeSeriesType::Deterministic)
+                    .resolution(Duration::hours(1)),
+            )
+            .unwrap();
+        store
+            .forecast_read(&mut reader, t0() + Duration::hours(3))
+            .unwrap();
+        // Window 3 is column 3 of the `[24, 7]` array.
+        let expected: Vec<f64> = (0..24).map(|h| (h * 7 + 3) as f64).collect();
+        assert_eq!(
+            reader.entry_slot(0).window_to_vec::<f64>().unwrap(),
+            expected,
+            "forecast_first={forecast_first}"
+        );
+        // The static side of the same bytes reads as it always did.
+        let mut sr = store
+            .build_static_reader(ListFilter::new().resolution(Duration::hours(1)))
+            .unwrap();
+        store
+            .static_read(&mut sr, t0() + Duration::hours(2))
+            .unwrap();
+        let row: Vec<f64> = (0..7).map(|k| (2 * 7 + k) as f64).collect();
+        assert_eq!(sr.groups()[0].values_to_vec::<f64>().unwrap(), row);
+    }
+}

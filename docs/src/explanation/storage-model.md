@@ -240,6 +240,16 @@ So: keep a live store on local disk, let one process write it, and copy the fini
 shared storage afterwards. Two concurrent writers on a filesystem without working locks will corrupt
 the HDF5 file, and no amount of care inside this library can prevent it.
 
+Inside one process the library enforces the rule itself, and more strictly than the lock does: a
+second `Store` on a path that is already open fails with `StoreInUse` whatever its mode, and so do
+`create_replacing` and `persist_to` aimed at a path another handle holds. A read-only handle is not
+exempt because its map from content hash to packed column is built once at open — after the writer
+removes a series and reuses the slot, that map points a live hash at another series' values, and
+libhdf5 sharing one file object between the two opens makes the reader's cache agree with it. The
+HDF5 lock does not see this case at all, and it is the easier mistake to make: an unclosed handle in
+a notebook or REPL, a fixture and a test body, a read-only handle opened for a report beside the
+writer. Close the handle you hold before opening another.
+
 `verify_integrity()` is the backstop. Every array carries a SHA-256 companion, and the check
 re-reads and re-hashes all of them, so corruption is detectable even when it is not preventable —
 worth running against an artifact whose history you do not trust. The CLI exposes it as
@@ -258,11 +268,17 @@ between two placements, independently of where the arrays live:
 `Attached` is the default and what a long-lived on-disk store wants: the CLI mutates one command per
 process and relies on each one landing.
 
-`InMemory` suits a consumer that builds a store in a scratch directory beside its own volatile state
-— a `System` under construction, say. A crash loses that state regardless, so journaling the scratch
-catalog buys nothing, and skipping it removes per-commit WAL and fsync work. Arrays still stream to
-the HDF5 file, so this does **not** require the data to fit in memory. Nothing is durable until
-`persist_to`.
+The array half has its own moment of durability, because libhdf5 writes its caches back lazily while
+a catalog commit lands at once. Every write call that put new arrays into the file flushes it before
+committing the rows that name them, so a process killed right after the call returns leaves both
+halves agreeing. Inside a transaction the flush is deferred to the outermost commit, and a call that
+wrote nothing new (a re-add of content the store already holds) skips it. The flush is not free — a
+caller adding series one at a time pays it per call — and a bulk add or a transaction is how to pay
+it once for many writes. `InMemory` suits a consumer that builds a store in a scratch directory
+beside its own volatile state — a `System` under construction, say. A crash loses that state
+regardless, so journaling the scratch catalog buys nothing, and skipping it removes per-commit WAL
+and fsync work. Arrays still stream to the HDF5 file, so this does **not** require the data to fit
+in memory. Nothing is durable until `persist_to`.
 
 Two caveats. Opening with `InMemory` reads `<path>.sqlite` into RAM but still opens the HDF5 half
 **in place**, so mutations land in the original file; a caller that means to leave the source

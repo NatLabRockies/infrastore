@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use sha2::{Digest, Sha256};
 
@@ -955,6 +956,61 @@ fn mint_generation() -> String {
         })
 }
 
+/// Artifact paths a `Store` in this process currently holds open. See
+/// [`TimeSeriesError::StoreInUse`] for why a second handle is refused.
+static OPEN_ARTIFACTS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+/// Registration of one artifact path in [`OPEN_ARTIFACTS`], released on drop.
+///
+/// Taken before anything else an open or create does, so an attempt that fails
+/// part-way releases the path with the error, and dropped after the store's
+/// backend (field order), so the file is closed before the path is free again.
+struct OpenGuard(PathBuf);
+
+impl OpenGuard {
+    fn acquire(path: &Path) -> Result<Self> {
+        let key = artifact_key(path);
+        let mut open = OPEN_ARTIFACTS.lock().unwrap_or_else(|e| e.into_inner());
+        if open.contains(&key) {
+            return Err(TimeSeriesError::StoreInUse {
+                path: path.display().to_string(),
+            });
+        }
+        open.push(key.clone());
+        Ok(Self(key))
+    }
+
+    /// Whether `path` is free, without holding it.
+    fn check(path: &Path) -> Result<()> {
+        Self::acquire(path).map(drop)
+    }
+}
+
+impl Drop for OpenGuard {
+    fn drop(&mut self) {
+        let mut open = OPEN_ARTIFACTS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(i) = open.iter().position(|p| *p == self.0) {
+            open.swap_remove(i);
+        }
+    }
+}
+
+/// The key an artifact is registered under: its directory canonicalized (the
+/// file itself need not exist yet -- a create registers before writing) joined
+/// with the file name, so two spellings of one path collide. A path whose
+/// directory cannot be resolved is keyed as written; the open that follows
+/// reports why.
+fn artifact_key(path: &Path) -> PathBuf {
+    let dir = match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.canonicalize(),
+        _ => std::env::current_dir(),
+    };
+    match (dir, path.file_name()) {
+        (Ok(dir), Some(name)) => dir.join(name),
+        _ => path.to_path_buf(),
+    }
+}
+
 pub struct Store {
     backend: Box<dyn StorageBackend>,
     metadata: MetadataStore,
@@ -966,6 +1022,9 @@ pub struct Store {
     catalog: CatalogMode,
     /// `Some` while a cross-operation transaction is open.
     txn: Option<OpenTxn>,
+    /// Holds `file_path` in [`OPEN_ARTIFACTS`] for this store's lifetime. Last
+    /// field on purpose: it drops after `backend` has closed the file.
+    _open_guard: Option<OpenGuard>,
 }
 
 impl Store {
@@ -1030,11 +1089,13 @@ impl Store {
                 file_path: None,
                 catalog,
                 txn: None,
+                _open_guard: None,
             });
         }
         let file_path = path.ok_or_else(|| {
             TimeSeriesError::InvalidParameter("path is required when in_memory=false".into())
         })?;
+        let open_guard = OpenGuard::acquire(file_path)?;
         reject_existing_artifact(file_path)?;
         let metadata = match catalog {
             CatalogMode::Attached => {
@@ -1056,6 +1117,7 @@ impl Store {
             file_path: Some(file_path.to_path_buf()),
             catalog,
             txn: None,
+            _open_guard: Some(open_guard),
         })
     }
 
@@ -1081,6 +1143,9 @@ impl Store {
         compression: Compression,
         catalog: CatalogMode,
     ) -> Result<Self> {
+        // Checked before anything is deleted: the files about to go may be the
+        // ones another handle in this process is reading and writing.
+        OpenGuard::check(path)?;
         let sqlite = catalog_sqlite_path(path);
         // Sidecars before the database they belong to: a `-wal` outliving its
         // database is the one ordering SQLite would try to recover from.
@@ -1190,6 +1255,9 @@ impl Store {
     /// motivated the check, a `persist_to` interrupted between its two renames
     /// onto a destination that predates stamping.
     pub fn open_with_catalog(path: &Path, read_only: bool, catalog: CatalogMode) -> Result<Self> {
+        // One handle per artifact per process, read-only ones included: a
+        // reader's column index is as stale as a writer's -- see `StoreInUse`.
+        let open_guard = OpenGuard::acquire(path)?;
         let sqlite_path = catalog_sqlite_path(path);
         // Three steps, in this order, and each one is load-bearing.
         //
@@ -1267,6 +1335,7 @@ impl Store {
             file_path: Some(path.to_path_buf()),
             catalog,
             txn: None,
+            _open_guard: Some(open_guard),
         })
     }
 
@@ -1413,6 +1482,13 @@ impl Store {
         } else {
             (Vec::new(), Vec::new())
         };
+        if depth == 0 {
+            // Every array the transaction wrote reaches the file before the
+            // release that makes the rows naming it durable -- the same order
+            // the bulk add keeps, paid once per transaction rather than once
+            // per operation inside it.
+            self.backend.flush()?;
+        }
         self.metadata
             .execute_txn_stmt(&format!("RELEASE {};", Self::txn_savepoint(depth)))?;
         if depth > 0 {
@@ -4395,6 +4471,17 @@ impl Store {
             return Err(TimeSeriesError::InvalidParameter(
                 "cannot persist while a transaction is open; commit or roll back first".into(),
             ));
+        }
+        // The renames below replace whatever is at `path`. Another handle in
+        // this process holding it open would keep reading the file that was
+        // renamed away -- the same hazard `StoreInUse` refuses at open. This
+        // store's own path is exempt: that handle is `self`.
+        if self
+            .file_path
+            .as_deref()
+            .is_none_or(|src| !same_file(src, path))
+        {
+            OpenGuard::check(path)?;
         }
         self.flush()?;
 
