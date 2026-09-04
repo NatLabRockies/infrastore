@@ -1094,6 +1094,11 @@ sharing one across threads requires external synchronization — the gRPC server
 the thread that created it.</p>
 <p><code>MetadataStore</code> uses transactions for atomic multi-row writes. The library does not coordinate
 multiple processes writing the same file concurrently — a single writer owns the files at a time.</p>
+<p>Within one process the rule is enforced: opening an artifact that another <code>Store</code> in the process
+already holds — read-only or not — fails with <code>StoreInUse</code>, and so do <code>create_replacing</code> and
+<code>persist_to</code> aimed at a held path. Each handle indexes the HDF5 file's packed columns once at open,
+and libhdf5 shares one file object between two opens of a file, so a second handle would read and
+write the wrong columns. Drop the handle before opening another.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="design-choices"><a class="header" href="#design-choices">Design Choices</a></h1>
 <p>infrastore is a foundation library. End users rarely call it directly — they reach it through a
 parent package such as
@@ -2173,6 +2178,15 @@ WAL journaling is likewise unsafe over NFS.</p>
 <p>So: keep a live store on local disk, let one process write it, and copy the finished artifact to
 shared storage afterwards. Two concurrent writers on a filesystem without working locks will corrupt
 the HDF5 file, and no amount of care inside this library can prevent it.</p>
+<p>Inside one process the library enforces the rule itself, and more strictly than the lock does: a
+second <code>Store</code> on a path that is already open fails with <code>StoreInUse</code> whatever its mode, and so do
+<code>create_replacing</code> and <code>persist_to</code> aimed at a path another handle holds. A read-only handle is not
+exempt because its map from content hash to packed column is built once at open — after the writer
+removes a series and reuses the slot, that map points a live hash at another series' values, and
+libhdf5 sharing one file object between the two opens makes the reader's cache agree with it. The
+HDF5 lock does not see this case at all, and it is the easier mistake to make: an unclosed handle in
+a notebook or REPL, a fixture and a test body, a read-only handle opened for a report beside the
+writer. Close the handle you hold before opening another.</p>
 <p><code>verify_integrity()</code> is the backstop. Every array carries a SHA-256 companion, and the check
 re-reads and re-hashes all of them, so corruption is detectable even when it is not preventable —
 worth running against an artifact whose history you do not trust. The CLI exposes it as
@@ -2187,11 +2201,17 @@ between two placements, independently of where the arrays live:</p>
 </div>
 <p><code>Attached</code> is the default and what a long-lived on-disk store wants: the CLI mutates one command per
 process and relies on each one landing.</p>
-<p><code>InMemory</code> suits a consumer that builds a store in a scratch directory beside its own volatile state
-— a <code>System</code> under construction, say. A crash loses that state regardless, so journaling the scratch
-catalog buys nothing, and skipping it removes per-commit WAL and fsync work. Arrays still stream to
-the HDF5 file, so this does <strong>not</strong> require the data to fit in memory. Nothing is durable until
-<code>persist_to</code>.</p>
+<p>The array half has its own moment of durability, because libhdf5 writes its caches back lazily while
+a catalog commit lands at once. Every write call that put new arrays into the file flushes it before
+committing the rows that name them, so a process killed right after the call returns leaves both
+halves agreeing. Inside a transaction the flush is deferred to the outermost commit, and a call that
+wrote nothing new (a re-add of content the store already holds) skips it. The flush is not free — a
+caller adding series one at a time pays it per call — and a bulk add or a transaction is how to pay
+it once for many writes. <code>InMemory</code> suits a consumer that builds a store in a scratch directory
+beside its own volatile state — a <code>System</code> under construction, say. A crash loses that state
+regardless, so journaling the scratch catalog buys nothing, and skipping it removes per-commit WAL
+and fsync work. Arrays still stream to the HDF5 file, so this does <strong>not</strong> require the data to fit
+in memory. Nothing is durable until <code>persist_to</code>.</p>
 <p>Two caveats. Opening with <code>InMemory</code> reads <code>&lt;path&gt;.sqlite</code> into RAM but still opens the HDF5 half
 <strong>in place</strong>, so mutations land in the original file; a caller that means to leave the source
 untouched until an explicit save wants <code>open_copy</code> (see <a href="explanation/storage-model.html#working-on-a-copy">Working on a Copy</a>).
@@ -6848,6 +6868,10 @@ pub enum TimeSeriesError {
     /// A store already exists where one was about to be created. See
     /// [`create_store`](#constructors).
     StoreExists { path: String },
+    /// The artifact is already open in this process, in any mode. One handle
+    /// per artifact per process; drop it before opening another. Surfaces as
+    /// the base `TimeSeriesError` in Python and `GenericError` in Julia.
+    StoreInUse { path: String },
     Io(std::io::Error),
     Sqlite(rusqlite::Error),
     Serde(serde_json::Error),

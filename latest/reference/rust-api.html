@@ -1610,6 +1610,10 @@ pub enum TimeSeriesError {
     /// A store already exists where one was about to be created. See
     /// [`create_store`](#constructors).
     StoreExists { path: String },
+    /// The artifact is already open in this process, in any mode. One handle
+    /// per artifact per process; drop it before opening another. Surfaces as
+    /// the base `TimeSeriesError` in Python and `GenericError` in Julia.
+    StoreInUse { path: String },
     Io(std::io::Error),
     Sqlite(rusqlite::Error),
     Serde(serde_json::Error),
