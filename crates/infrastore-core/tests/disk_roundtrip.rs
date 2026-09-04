@@ -68,7 +68,7 @@ fn persistent_round_trip() {
 /// source store usable: its arrays are read out of the live handle into the new
 /// file, so the handle stays open throughout.
 #[test]
-fn on_disk_persist_copies_and_leaves_the_source_usable() {
+fn on_disk_persist_writes_afresh_and_leaves_the_source_usable() {
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("store.h5");
     let dest = dir.path().join("copy.h5");
