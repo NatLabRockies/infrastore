@@ -98,11 +98,26 @@ the artifact rather than be locked inside the catalog.
 **`0.18.0`** — made the `id` column of all three catalog tables (`time_series_associations`,
 `supplemental_attribute_associations`, and `parent_child_associations`) an
 `INTEGER PRIMARY KEY AUTOINCREMENT` rather than a bare rowid alias, so an id is never reissued once
-its row is deleted. It is the one bump that adds no column and changes no value, and it still cannot
-be additive: `AUTOINCREMENT` is part of a table's declaration and there is no `ALTER TABLE` for it,
-so applying this DDL to an older catalog would leave all three tables on recycled ids while
-reporting success. Recycled ids matter because the id is an external reference — a consumer stores
+its row is deleted. Recycled ids matter because the id is an external reference — a consumer stores
 it in its own model — and reuse makes a stale reference resolve to a different, valid row.
+
+This is the one bump that adds no column and changes no value. It was taken because `AUTOINCREMENT`
+is part of a table's declaration and there is no `ALTER TABLE` for it, so re-running the DDL over an
+older catalog would have left all three tables on recycled ids _while reporting success_ — and,
+before the migration ladder existed, stranding that catalog was the only way to keep it out. **The
+version floor is what enforces the guarantee, and it holds:** `MIN_UPGRADABLE_VERSION` is `0.19.0`,
+so every catalog predating this entry is `Incompatible` and refused on open. No store this build can
+open lacks `AUTOINCREMENT`. The silent-recycling failure above is what the bump _prevented_; it is
+not a state a store can be found in, and nothing needs to check for it at runtime
+(`every_association_table_declares_autoincrement` in
+`crates/infrastore-core/tests/association_ids.rs` holds a fresh catalog to the property, and
+`sqlite_sequence` is what proves the keyword took effect rather than merely being present).
+
+The ladder has since changed what a repeat would cost, so do not reason from this entry to the next
+one. A table rebuild is now an ordinary migration — [revision 2](#schema_version) is exactly that,
+and carries the `AUTOINCREMENT` high-water mark across by hand — so the same change made today would
+be a `CATALOG_SCHEMA_REVISION` bump that upgrades existing catalogs in place, not a
+`DATA_FORMAT_VERSION` bump that strands them.
 
 **`0.17.0`** — added the metadata column `time_reference`, which records how a series' timestamps
 were _spelled_: an instant in UTC, an instant at a fixed offset, an instant in a named IANA zone, or
@@ -571,10 +586,15 @@ catalog was never opened for writing.
 CREATE TABLE schema_version (version INTEGER NOT NULL);
 ```
 
-A single-column table holding the catalog schema version. Creating the catalog inserts `version = 1`
-if the table is empty; `1` is the current value. This tracks the SQLite schema alone and is distinct
-from the HDF5 `data_format_version` attribute, which governs the artifact as a whole and is the
-value `open` validates.
+A single-column table holding the catalog's own schema revision — `CATALOG_SCHEMA_REVISION`, which
+is **2** as of this build. It holds at most one row: the DDL creates the table, and the migration
+ladder writes the revision, replacing whatever was there. A fresh catalog is stamped with the
+current revision directly rather than seeded at `1` and walked up the ladder.
+
+An absent table, or a present one holding no row, reads as revision `1` — the pre-ladder shape,
+which is where the ladder starts. This tracks the SQLite schema alone and is distinct from the HDF5
+`data_format_version` attribute, which governs the artifact as a whole and is the value `open`
+validates; the two move independently.
 
 ### `catalog_identity`
 
