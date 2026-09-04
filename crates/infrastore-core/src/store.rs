@@ -1340,7 +1340,7 @@ impl Store {
     /// # Cost
     ///
     /// A transaction is also how a caller adding many series amortizes the
-    /// per-add HDF5 flush (see [`flush_arrays_before_commit`]): the flush
+    /// per-add HDF5 flush (see `flush_arrays_before_commit`): the flush
     /// happens once for the span instead of once per call. Measured here on
     /// 2000 single adds of a 24-step `f64` `SingleTimeSeries` against an
     /// on-disk store, release build: ~1.07 s one at a time, ~0.12 s inside one
@@ -1656,6 +1656,19 @@ impl Store {
     /// Mirrors the spec's `add_time_series` signature; the public surface is
     /// intentionally wide here. Use [`AddRequest`] + [`Self::add_time_series_bulk`]
     /// for ergonomic call sites.
+    ///
+    /// **Adding many series one at a time is the slow path.** Each call outside
+    /// a transaction flushes the HDF5 file before its catalog row commits, so a
+    /// row can never name bytes the file did not receive (see
+    /// `flush_arrays_before_commit`), and that flush costs roughly the same
+    /// whether it pushes one array or a thousand — it is a walk of libhdf5's
+    /// metadata cache, not a write proportional to what changed. Wrap a run of
+    /// adds in [`Self::begin_transaction`], or use
+    /// [`Self::add_time_series_bulk`], and the flush happens once for the whole
+    /// span instead of once per series. Measured on 400 hourly week-long f64
+    /// series against an on-disk store, release build: ~2.1 s one at a time
+    /// against ~61 ms inside one transaction, with the bulk path unchanged from
+    /// before the flush existed.
     pub fn add_time_series(
         &mut self,
         owner_id: i64,
@@ -1678,7 +1691,8 @@ impl Store {
     /// [`Self::add_time_series`] — both preserve the series' `element_type`,
     /// `units`, `quantity_kind`, `unit_system`, `component_field`, and
     /// `application_data`, since those travel on the [`TimeSeriesData`] itself.
-    /// Routed through the same per-column path.
+    /// Routed through the same per-column path, including its per-call flush —
+    /// see [`Self::add_time_series`] on batching a run of these.
     pub fn add(&mut self, request: AddRequest) -> Result<TimeSeriesId> {
         self.add_per_column(vec![request])
             .map(|mut added| added.remove(0))
@@ -2852,18 +2866,38 @@ impl Store {
         reader: &mut StaticReader,
         at: chrono::DateTime<chrono::Utc>,
     ) -> Result<()> {
-        // The whole reader goes invalid first: a failure anywhere in this call
-        // -- including `index_at`, which fails before a group is touched --
-        // must not leave some groups holding this timestamp's values and others
-        // the previous one's. See `StaticReader::invalidate`.
-        reader.invalidate();
+        // All-or-nothing: on success every group holds `at`, and on *any*
+        // failure the reader is emptied. Both halves matter. `index_at` fails
+        // before a group is touched, so without this every group would still
+        // hold the previous read -- a full, plausible, wrong answer under an
+        // `Err`. A group failing part way through is the other half: the groups
+        // already filled hold `at` while the rest hold the previous timestamp,
+        // and nothing distinguishes them. See `StaticReader::invalidate`.
+        match self.static_read_into(reader, at) {
+            Ok(()) => {
+                reader.mark_read(at);
+                Ok(())
+            }
+            Err(e) => {
+                reader.invalidate();
+                Err(e)
+            }
+        }
+    }
+
+    /// The body of [`Self::static_read`], so that every `?` in it lands on one
+    /// error path the caller can empty the reader from.
+    fn static_read_into(
+        &self,
+        reader: &mut StaticReader,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<()> {
         let index = reader.index_at(at)?;
         for group in reader.groups_mut() {
             group.fill(|hashes, dtype, out| {
                 self.backend.read_index_into(hashes, dtype, index, out)
             })?;
         }
-        reader.mark_read(at);
         Ok(())
     }
 
@@ -2925,8 +2959,25 @@ impl Store {
         reader: &mut ForecastReader,
         at: chrono::DateTime<chrono::Utc>,
     ) -> Result<()> {
-        // Invalid until this call succeeds, exactly as in `static_read`.
-        reader.invalidate();
+        // All-or-nothing, exactly as in `static_read`.
+        match self.forecast_read_into(reader, at) {
+            Ok(()) => {
+                reader.mark_read(at);
+                Ok(())
+            }
+            Err(e) => {
+                reader.invalidate();
+                Err(e)
+            }
+        }
+    }
+
+    /// The body of [`Self::forecast_read`]; see [`Self::static_read_into`].
+    fn forecast_read_into(
+        &self,
+        reader: &mut ForecastReader,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<()> {
         let window = reader.window_index(at)?;
         // One read per *slot*: forecasts that share an array and read plan
         // (e.g. components referencing one shared forecast) collapse to a single
@@ -2958,7 +3009,6 @@ impl Store {
                 },
             )?;
         }
-        reader.mark_read(at);
         Ok(())
     }
 

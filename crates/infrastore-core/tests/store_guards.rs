@@ -449,6 +449,57 @@ fn a_copied_view_does_not_pin_an_unrelated_source_in_its_family() {
     });
 }
 
+/// The same, for a failure *inside* the loop rather than before it.
+///
+/// Invalidating once up front only covers the timestamp that fails before any
+/// group is touched. A group failing part way through is the other half: every
+/// group before it has already been filled with the new timestamp's values and
+/// `fill` sets `filled = true` as it goes, so an up-front invalidation is long
+/// spent by the time the error is raised. The reader is emptied on the error
+/// path too, so both cases end the same way.
+#[test]
+fn a_static_read_failing_mid_loop_empties_the_groups_it_already_filled() {
+    each_backend(|store, backend| {
+        add(
+            store,
+            1,
+            TimeSeriesData::SingleTimeSeries(sts("load", hourly(8))),
+        )
+        .unwrap();
+        let i64s: Vec<i64> = (0..8).collect();
+        add(
+            store,
+            2,
+            TimeSeriesData::SingleTimeSeries(sts(
+                "count",
+                TypedArray::from_slice(vec![8], &i64s).unwrap(),
+            )),
+        )
+        .unwrap();
+
+        let mut reader = store
+            .build_static_reader(ListFilter::new().resolution(Duration::hours(1)))
+            .unwrap();
+        assert!(reader.groups().len() > 1, "{backend}");
+        store.static_read(&mut reader, t0()).unwrap();
+
+        // Pull the array out from under the *last* group, so the read fails
+        // only after the earlier ones have been filled with this timestamp.
+        // A reader holds hashes, not catalog rows, so it keeps pointing at the
+        // array the removal reclaimed.
+        let last = reader.groups().len() - 1;
+        let victims: Vec<TimeSeriesId> = reader.groups()[last].ids().to_vec();
+        assert_eq!(store.remove_by_ids(&victims).unwrap(), victims.len());
+
+        let err = store.static_read(&mut reader, t0() + Duration::hours(1));
+        assert!(err.is_err(), "{backend}: the reclaimed array must not read");
+        assert!(
+            reader.groups().iter().all(|g| g.values().is_empty()),
+            "{backend}: the groups filled before the failure are emptied too"
+        );
+    });
+}
+
 /// A failed read leaves the whole reader empty, not half of one read and half
 /// of the last.
 ///
