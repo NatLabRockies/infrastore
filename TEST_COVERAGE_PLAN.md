@@ -105,10 +105,9 @@ New integration-test file `tests/edge_values.rs` for 1.1–1.4; other items exte
     attribute `"0.9.0"`); add the **newer**-version case (e.g. `"99.0.0"`) and the missing-attribute
     case.
 - **1.8 Backend parity.** These currently run memory-only; thread each through
-  `common::for_each_backend`: glob filtering (`tests/filtering.rs`), `rename_time_series`
-  (collision + shared-array cases), `remove_by_filter` / `remove_time_series_bulk` rollback,
-  discovery (`get_intervals`, `list_names`, `list_owner_types`), `copy_time_series`. Keep series
-  tiny (length 3–4) so the disk variants stay fast.
+  `common::for_each_backend`: glob filtering (`tests/filtering.rs`), `remove_by_filter` /
+  `remove_time_series_bulk` rollback, discovery (`get_intervals`, `list_names`, `list_owner_types`),
+  `copy_time_series`. Keep series tiny (length 3–4) so the disk variants stay fast.
 - **1.9 Missing error/API paths** (extend `tests/api_additions.rs`): direct
   `get_time_series(missing_key)` → `NotFound`; wrong-type read (a `KeyIdentity` whose
   `time_series_type` mismatches the stored row); `bulk_read(&[])`, `bulk_read_range(&[])`,

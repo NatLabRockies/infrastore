@@ -266,7 +266,7 @@ const _AddableTimeSeries = Union{
 
 Add a time series (`SingleTimeSeries`, `NonSequentialTimeSeries`,
 `Deterministic`, `Probabilistic`, or `Scenarios`) and return the catalog `id`
-its row was filed under — the handle every read, removal and rename takes, and
+its row was filed under — the handle every read and removal takes, and
 the one a caller records in its own object model. `owner_id` identifies the
 owning component / supplemental attribute (a signed 64-bit integer). The
 association `name` comes from the time series object (`ts.name`), as do its
@@ -343,27 +343,6 @@ function association_exists(store::Store, id::Integer)
         )::Int32
     )
     return out_present[]
-end
-
-"""
-    rename_time_series!(store, id, new_name) -> Int64
-
-Rename the association filed under `id` to `new_name`, returning `id`.
-
-A rename moves the *name*, not the reference: the id is the same afterwards, so
-anything holding it keeps working. Only the catalog row changes — the underlying
-array and its content hash are untouched. Throws `NotFoundError` if `id` names
-no row, or `DuplicateTimeSeriesError` if a series with the new identity already
-exists.
-"""
-function rename_time_series!(store::Store, id::Integer, new_name::AbstractString)
-    code = @ccall lib_path().infrastore_store_rename(
-        store::Ptr{Cvoid},
-        Int64(id)::Int64,
-        String(new_name)::Cstring,
-    )::Int32
-    _check(code)
-    return Int64(id)
 end
 
 """

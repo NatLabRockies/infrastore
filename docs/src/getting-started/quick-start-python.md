@@ -49,8 +49,8 @@ assert np.array_equal(np.asarray(got.data), np.asarray(ts.data))
 2. **`add_time_series`** hashed the array, wrote it to the backend (deduplicating on the hash), and
    recorded a catalog association filed under
    `(owner_id, owner_category, type, name, resolution, interval, features)`. It returned that row's
-   **id** — the handle to record in your own object model, and what every read, removal and rename
-   takes from here on.
+   **id** — the handle to record in your own object model, and what every read and removal takes
+   from here on.
 3. **`read_by_id(series_id)`** looked up the row by primary key, read the array back by its content
    hash, and reconstructed a `SingleTimeSeries`.
 

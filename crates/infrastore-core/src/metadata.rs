@@ -1350,10 +1350,11 @@ impl MetadataStore {
         tx: &Connection,
         id: i64,
         expected_owner: Option<(i64, OwnerCategory)>,
-    ) -> Result<Option<([u8; 32], TimeSeriesType)>> {
-        let row: Option<(Vec<u8>, i64, i64, i64)> = tx
+    ) -> Result<Option<DeletedRow>> {
+        let row: Option<RawDeletedRow> = tx
             .prepare_cached(
-                "SELECT data_hash, time_series_type, owner_id, owner_category \
+                "SELECT data_hash, time_series_type, owner_id, owner_category, name, \
+                        resolution, features_hash \
                  FROM time_series_associations WHERE id = ?1",
             )?
             .query_row(params![id], |r| {
@@ -1362,14 +1363,27 @@ impl MetadataStore {
                     r.get::<_, i64>(1)?,
                     r.get::<_, i64>(2)?,
                     r.get::<_, i64>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, Option<String>>(5)?,
+                    r.get::<_, Vec<u8>>(6)?,
                 ))
             })
             .optional()?;
-        let Some((hash_bytes, type_code, owner_id, owner_category_code)) = row else {
+        let Some((
+            hash_bytes,
+            type_code,
+            owner_id,
+            owner_category_code,
+            name,
+            resolution_iso,
+            features_hash_bytes,
+        )) = row
+        else {
             return Ok(None);
         };
+        let owner_category = decode_category(owner_category_code)?;
         if let Some((expected_id, expected_category)) = expected_owner {
-            let actual_category = decode_category(owner_category_code)?;
+            let actual_category = owner_category;
             if owner_id != expected_id || actual_category != expected_category {
                 return Err(TimeSeriesError::OwnerMismatch {
                     id,
@@ -1388,7 +1402,21 @@ impl MetadataStore {
                 hash_bytes.len()
             ))
         })?;
-        Ok(Some((hash, decode_type(type_code)?)))
+        let features_hash = bytes_to_hash32(&features_hash_bytes).ok_or_else(|| {
+            TimeSeriesError::IntegrityError(format!(
+                "malformed catalog row: features_hash is {} bytes, expected 32",
+                features_hash_bytes.len()
+            ))
+        })?;
+        Ok(Some(DeletedRow {
+            data_hash: hash,
+            time_series_type: decode_type(type_code)?,
+            owner_id,
+            owner_category,
+            name,
+            resolution: resolution_iso.as_deref().map(iso_to_period).transpose()?,
+            features_hash,
+        }))
     }
 
     /// Delete all associations for the owner `(owner_id, owner_category)`.
@@ -1434,35 +1462,6 @@ impl MetadataStore {
             params![new_owner, old_owner, owner_category.code()],
         )
         .map_err(map_unique_violation)
-    }
-
-    /// Rename one association identified by `key` to `new_name`, leaving its data
-    /// and hash untouched. Returns the number of rows updated (0 if `key` matches
-    /// nothing). A collision with an existing series of the new identity maps to
-    /// [`TimeSeriesError::DuplicateTimeSeries`].
-    /// Rename the association filed under `id`. One row by primary key, so no
-    /// predicate can be wider than the caller asked for.
-    /// Move one row to `new_name`, by primary key.
-    ///
-    /// The destination name may already be taken by a sibling sharing the rest
-    /// of the identity, and the uniqueness index catches that. It has to be
-    /// reported as [`TimeSeriesError::DuplicateTimeSeries`], the same as the
-    /// insert path does: a raw `SqliteFailure` naming an index is a caller's
-    /// problem stated in the catalog's vocabulary, and nothing above this can
-    /// classify it.
-    pub fn rename_by_id(tx: &Connection, id: i64, new_name: &str) -> Result<usize> {
-        match tx
-            .prepare_cached("UPDATE time_series_associations SET name = ?2 WHERE id = ?1")?
-            .execute(rusqlite::params![id, new_name])
-        {
-            Ok(n) => Ok(n),
-            Err(rusqlite::Error::SqliteFailure(err, _))
-                if err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE =>
-            {
-                Err(TimeSeriesError::DuplicateTimeSeries)
-            }
-            Err(e) => Err(e.into()),
-        }
     }
 
     /// Delete every association in the store. Returns the removed data_hashes.
@@ -3406,24 +3405,6 @@ pub fn timestamp_references_in_tx(tx: &Connection, timestamps_hash: &[u8; 32]) -
     Ok(count)
 }
 
-/// Count the associations of one `time_series_type` referencing `data_hash`,
-/// inside an in-flight transaction.
-pub fn typed_references_to_in_tx(
-    tx: &Connection,
-    data_hash: &[u8; 32],
-    ts_type: TimeSeriesType,
-) -> Result<i64> {
-    let count: i64 = tx
-        .prepare_cached(
-            "SELECT COUNT(*) FROM time_series_associations
-         WHERE data_hash = ?1 AND time_series_type = ?2",
-        )?
-        .query_row(params![data_hash.as_slice(), ts_type.code()], |row| {
-            row.get(0)
-        })?;
-    Ok(count)
-}
-
 /// Does an association of `conflicting_type` already exist sharing the
 /// abstract-deterministic family identity `(owner_id, owner_category, name,
 /// resolution, features)`, *ignoring* interval and the requesting type?
@@ -3469,6 +3450,78 @@ pub fn forecast_family_conflict(
         )
         .optional()?;
     Ok(exists.is_some())
+}
+
+/// Does an association of `conflicting_type` exist in the family `(owner_id,
+/// owner_category, name, resolution, features)` that also references the array
+/// `data_hash`?
+///
+/// [`forecast_family_conflict`] with the array pinned down as well, which is
+/// what the removal guard needs. A `DeterministicSingleTimeSeries` is a *view*
+/// over one `SingleTimeSeries` array, so the pair the guard protects shares
+/// both the family and the hash — and either half alone admits a false match:
+///
+/// * hash alone lets two owners' byte-identical `SingleTimeSeries` stand in for
+///   each other, so removing one owner's source passes on the strength of the
+///   other owner's row;
+/// * family alone pins an unrelated `SingleTimeSeries` that merely shares the
+///   family with a view copied there. [`Store::copy_time_series`] writes such a
+///   view deliberately, and it is a view over a *different* array, so removing
+///   that source takes nothing away from it.
+///
+/// Takes the [`DeletedRow`] whole rather than seven positional fields: it
+/// already *is* the tuple being probed — the family plus the array — and the
+/// removal guard is its only caller.
+pub fn forecast_family_conflict_on_array(
+    tx: &Connection,
+    row: &DeletedRow,
+    conflicting_type: TimeSeriesType,
+) -> Result<bool> {
+    let resolution_iso = row.resolution.map(period_to_iso);
+    let exists: Option<i64> = tx
+        .prepare_cached(
+            "SELECT 1 FROM time_series_associations
+             WHERE owner_id = ?1 AND owner_category = ?2 AND time_series_type = ?3 AND name = ?4
+               AND ((?5 IS NULL AND resolution IS NULL) OR resolution = ?5)
+               AND features_hash = ?6 AND data_hash = ?7
+             LIMIT 1",
+        )?
+        .query_row(
+            params![
+                row.owner_id,
+                row.owner_category.code(),
+                conflicting_type.code(),
+                row.name,
+                resolution_iso,
+                row.features_hash.as_slice(),
+                row.data_hash.as_slice(),
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(exists.is_some())
+}
+
+/// The columns [`MetadataStore::delete_by_id`] reads before deleting, as SQLite
+/// hands them over: `(data_hash, time_series_type, owner_id, owner_category,
+/// name, resolution, features_hash)`.
+type RawDeletedRow = (Vec<u8>, i64, i64, i64, String, Option<String>, Vec<u8>);
+
+/// What [`MetadataStore::delete_by_id`] knew about the row it removed: the
+/// array it named, its type, and the **forecast family** it belonged to -- the
+/// `(owner, name, resolution, features)` tuple [`forecast_family_conflict`]
+/// probes. A removal needs the family, not just the hash, to decide whether a
+/// `DeterministicSingleTimeSeries` lost its source: two owners' byte-identical
+/// `SingleTimeSeries` share a hash but are different sources.
+#[derive(Debug, Clone)]
+pub struct DeletedRow {
+    pub data_hash: [u8; 32],
+    pub time_series_type: TimeSeriesType,
+    pub owner_id: i64,
+    pub owner_category: OwnerCategory,
+    pub name: String,
+    pub resolution: Option<Period>,
+    pub features_hash: [u8; 32],
 }
 
 /// The first series whose move from `old_owner` to `new_owner` would put both

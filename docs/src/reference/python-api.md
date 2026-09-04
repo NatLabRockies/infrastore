@@ -189,7 +189,7 @@ def add_time_series_bulk(self, items: list[dict]) -> list[int]: ...
 # faster than looping over add_time_series. Results are in input order.
 
 # Every write returns the catalog `id` its row was filed under -- the handle to
-# record in your own object model, and what every read, removal and rename
+# record in your own object model, and what every read and removal
 # takes. It is never reissued once its row is deleted. No add takes an id: the
 # catalog assigns, and the write reports what it chose. The one writer that
 # files rows under supplied ids is import_time_series_associations_openapi.
@@ -221,8 +221,6 @@ def copy_time_series(
 ) -> int: ...
 # Attach the same array to another owner (no data is duplicated); returns the
 # copy's own id. The source id is untouched and still resolves.
-def rename_time_series(self, id: int, new_name: str) -> None: ...
-# A rename moves the name, not the reference: the id is the same afterwards.
 
 def get_array_by_hash(self, data_hash: str) -> numpy.ndarray: ...
 # The raw array behind a 64-char hex content hash, bypassing the catalog.

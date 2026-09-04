@@ -46,8 +46,8 @@ println("read $(length(got)) values @ $(got.resolution) from $(got.initial_times
 2. **`add_time_series!`** hashed the array, wrote it to the backend (deduplicating on the hash), and
    recorded a catalog association filed under
    `(owner_id, owner_category, type, name, resolution, interval, features)`. It returned that row's
-   **id** — the handle to record in your own object model, and what every read, removal and rename
-   takes from here on.
+   **id** — the handle to record in your own object model, and what every read and removal takes
+   from here on.
 3. **`read_by_id(store, id)`** looked up the row by primary key, read the array back by its content
    hash, and reconstructed a `SingleTimeSeries`. Note that `resolution` comes back as a
    `Millisecond`.
@@ -60,9 +60,9 @@ of a cost curve.
 ## Finding a Series You Did Not Just Write
 
 The store splits _identify_ from _act_. `list_metadata` is the identify half — it answers which
-series exist and hands back the `id` that addresses each — and every read, removal and rename takes
-that id. A caller that records ids in its own object model does the first half once and skips it
-from then on:
+series exist and hands back the `id` that addresses each — and every read and removal takes that id.
+A caller that records ids in its own object model does the first half once and skips it from then
+on:
 
 ```julia
 row = only(list_metadata(store; owner_id = 42, name = "load", resolution = Hour(1)))

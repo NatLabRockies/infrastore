@@ -55,7 +55,6 @@ const COMMAND_GROUPS: &[(&str, &[&str])] = &[
             "merge",
             "transform",
             "remove",
-            "rename",
             "copy",
             "replace-owner",
             "clear",
@@ -326,7 +325,10 @@ enum Commands {
     Get {
         #[command(flatten)]
         selector: SelectorArgs,
-        /// Restrict to a half-open time range START..END (RFC3339 or epoch-ms).
+        /// Restrict to a time range START..END (RFC3339 or epoch-ms; END exclusive). A
+        /// regular series' START inside a step selects that step, an irregular series
+        /// keeps only timestamps at or after START, and a forecast's START must be a
+        /// window boundary (only its END clips).
         #[arg(long)]
         time_range: Option<String>,
         /// Max rows to show in table output (default 50).
@@ -359,7 +361,10 @@ enum Commands {
     Grid {
         #[command(flatten)]
         selector: SelectorArgs,
-        /// Restrict to a half-open time range START..END (RFC3339 or epoch-ms).
+        /// Restrict to a time range START..END (RFC3339 or epoch-ms; END exclusive). A
+        /// regular series' START inside a step selects that step, an irregular series
+        /// keeps only timestamps at or after START, and a forecast's START must be a
+        /// window boundary (only its END clips).
         #[arg(long)]
         time_range: Option<String>,
         /// Max rows to show in table output (default 50).
@@ -383,7 +388,10 @@ enum Commands {
         /// Destination file (.svg or .html); `-` writes to stdout.
         #[arg(long, default_value = "chart.svg")]
         out: PathBuf,
-        /// Restrict to a half-open time range START..END (RFC3339 or epoch-ms).
+        /// Restrict to a time range START..END (RFC3339 or epoch-ms; END exclusive). A
+        /// regular series' START inside a step selects that step, an irregular series
+        /// keeps only timestamps at or after START, and a forecast's START must be a
+        /// window boundary (only its END clips).
         #[arg(long)]
         time_range: Option<String>,
         /// Chart title (defaults to the series name).
@@ -443,18 +451,6 @@ enum Commands {
         /// Restrict to one resolution, e.g. PT1H.
         #[arg(long)]
         resolution: Option<String>,
-    },
-    /// Rename the single series a selector resolves to.
-    #[command(after_help = help::RENAME)]
-    Rename {
-        #[command(flatten)]
-        selector: SelectorArgs,
-        /// The new name.
-        #[arg(long)]
-        new_name: String,
-        /// Show what would be renamed without changing the store.
-        #[arg(long)]
-        dry_run: bool,
     },
     /// Copy the single series a selector resolves to onto another owner.
     #[command(after_help = help::COPY)]
@@ -536,7 +532,10 @@ enum Commands {
         /// Directory to write one file per matched series.
         #[arg(long)]
         dir: Option<PathBuf>,
-        /// Restrict to a half-open time range START..END (RFC3339 or epoch-ms).
+        /// Restrict to a time range START..END (RFC3339 or epoch-ms; END exclusive). A
+        /// regular series' START inside a step selects that step, an irregular series
+        /// keeps only timestamps at or after START, and a forecast's START must be a
+        /// window boundary (only its END clips).
         #[arg(long)]
         time_range: Option<String>,
     },
@@ -995,17 +994,6 @@ fn run(cli: &Cli) -> Result<(), String> {
             interval,
             owner_category.as_deref(),
             resolution.as_deref(),
-            cli.format,
-        ),
-        Commands::Rename {
-            selector,
-            new_name,
-            dry_run,
-        } => commands::manage::rename(
-            &require_store(cli)?,
-            selector,
-            new_name,
-            *dry_run,
             cli.format,
         ),
         Commands::Copy {

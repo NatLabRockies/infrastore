@@ -864,6 +864,315 @@ fn a_forecast_window_can_be_selected_by_index_or_issue_time() {
     assert!(err.contains("--window"), "{err}");
 }
 
+/// A day of hourly `Deterministic` windows, two steps each: 24 windows,
+/// `[H=2, count=24]` row-major, so the value at `(step, window)` is
+/// `step * 24 + window` and every row can be checked against its label.
+fn seed_day_of_windows(dir: &Path, store: &Path) {
+    let mut body = String::from("value\n");
+    for v in 0..48 {
+        body.push_str(&format!("{v}\n"));
+    }
+    write(dir, "d.csv", &body);
+    let json = r#"{"owner_id": 42, "owner_type": "Generator", "name": "load_det",
+                   "type": "Deterministic", "element_type": "f64", "csv": "d.csv",
+                   "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H",
+                   "horizon": "PT2H", "interval": "PT1H", "count": 24}"#;
+    let d = write(dir, "d.json", json);
+    run(store, &["add", "--descriptor", d.to_str().unwrap()]);
+}
+
+/// `(issue_time, target_time, value)` of one forecast CSV row.
+fn forecast_row(line: &str) -> (String, String, f64) {
+    let mut parts = line.split(',');
+    let issue = parts.next().unwrap().to_string();
+    let target = parts.next().unwrap().to_string();
+    let value: f64 = parts.next().unwrap().parse().unwrap();
+    (issue, target, value)
+}
+
+/// The rows a `--time-range` over windows 5 and 6 must produce: the kept
+/// windows' own issue times, not the first two windows' relabelled onto them.
+fn assert_windows_five_and_six(csv: &str) {
+    let rows: Vec<_> = data_lines(csv).iter().map(|l| forecast_row(l)).collect();
+    let expected = [
+        ("2024-01-01T05:00:00", "2024-01-01T05:00:00", 5.0),
+        ("2024-01-01T05:00:00", "2024-01-01T06:00:00", 29.0),
+        ("2024-01-01T06:00:00", "2024-01-01T06:00:00", 6.0),
+        ("2024-01-01T06:00:00", "2024-01-01T07:00:00", 30.0),
+    ];
+    assert_eq!(rows.len(), expected.len(), "{csv}");
+    for ((issue, target, value), (want_issue, want_target, want_value)) in rows.iter().zip(expected)
+    {
+        assert!(issue.starts_with(want_issue), "issue_time {issue}: {csv}");
+        assert!(
+            target.starts_with(want_target),
+            "target_time {target}: {csv}"
+        );
+        assert_eq!(*value, want_value, "{csv}");
+    }
+}
+
+const WINDOWS_FIVE_AND_SIX: &str = "2024-01-01T05:00:00Z..2024-01-01T07:00:00Z";
+
+#[test]
+fn a_time_range_labels_forecast_rows_with_the_windows_it_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("f.h5");
+    seed_day_of_windows(dir.path(), &store);
+
+    let sliced = run(
+        &store,
+        &[
+            "-f",
+            "csv",
+            "get",
+            "--name",
+            "load_det",
+            "--time-range",
+            WINDOWS_FIVE_AND_SIX,
+        ],
+    );
+    assert_windows_five_and_six(&sliced);
+
+    // The JSON document describes the windows it holds, not the stored row.
+    let json = run(
+        &store,
+        &[
+            "-f",
+            "json",
+            "get",
+            "--name",
+            "load_det",
+            "--time-range",
+            WINDOWS_FIVE_AND_SIX,
+        ],
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed["count"], 2, "{json}");
+    assert_eq!(parsed["shape"], serde_json::json!([2, 2]), "{json}");
+    assert!(
+        parsed["initial_timestamp"]
+            .as_str()
+            .unwrap()
+            .starts_with("2024-01-01T05:00:00"),
+        "{json}"
+    );
+}
+
+#[test]
+fn a_window_under_a_time_range_is_indexed_within_the_selected_windows() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("f.h5");
+    seed_day_of_windows(dir.path(), &store);
+
+    // `--window 1` is the second *selected* window: window 6 of the forecast.
+    let by_index = run(
+        &store,
+        &[
+            "-f",
+            "csv",
+            "get",
+            "--name",
+            "load_det",
+            "--time-range",
+            WINDOWS_FIVE_AND_SIX,
+            "--window",
+            "1",
+        ],
+    );
+    let rows: Vec<_> = data_lines(&by_index)
+        .iter()
+        .map(|l| forecast_row(l))
+        .collect();
+    assert_eq!(rows.len(), 2, "{by_index}");
+    assert!(rows[0].0.starts_with("2024-01-01T06:00:00"), "{by_index}");
+    assert!(rows[0].1.starts_with("2024-01-01T06:00:00"), "{by_index}");
+    assert_eq!(rows[0].2, 6.0, "{by_index}");
+    assert!(rows[1].1.starts_with("2024-01-01T07:00:00"), "{by_index}");
+    assert_eq!(rows[1].2, 30.0, "{by_index}");
+
+    // `--issue-time` names one of the selected windows' issue times.
+    let by_time = run(
+        &store,
+        &[
+            "-f",
+            "csv",
+            "get",
+            "--name",
+            "load_det",
+            "--time-range",
+            WINDOWS_FIVE_AND_SIX,
+            "--issue-time",
+            "2024-01-01T06:00:00Z",
+        ],
+    );
+    assert_eq!(
+        by_time, by_index,
+        "--issue-time must resolve to the same window"
+    );
+
+    // A window the forecast has but the range dropped is reported as outside
+    // the selection, not as nonexistent -- by index and by issue time alike.
+    let err = run_err(
+        &store,
+        &[
+            "get",
+            "--name",
+            "load_det",
+            "--time-range",
+            WINDOWS_FIVE_AND_SIX,
+            "--window",
+            "2",
+        ],
+    );
+    assert!(err.contains("outside the selected --time-range"), "{err}");
+    assert!(err.contains("2 windows"), "{err}");
+    let err = run_err(
+        &store,
+        &[
+            "get",
+            "--name",
+            "load_det",
+            "--time-range",
+            WINDOWS_FIVE_AND_SIX,
+            "--issue-time",
+            "2024-01-01T08:00:00Z",
+        ],
+    );
+    assert!(err.contains("outside the selected --time-range"), "{err}");
+
+    // A time no window is issued at is nonexistent under either grid, and an
+    // index past the stored forecast likewise: neither is "outside the
+    // selection", which would promise a window the forecast never had.
+    let err = run_err(
+        &store,
+        &[
+            "get",
+            "--name",
+            "load_det",
+            "--time-range",
+            WINDOWS_FIVE_AND_SIX,
+            "--issue-time",
+            "2024-01-01T05:30:00Z",
+        ],
+    );
+    assert!(err.contains("no window is issued at"), "{err}");
+    assert!(!err.contains("outside"), "{err}");
+    let err = run_err(
+        &store,
+        &[
+            "get",
+            "--name",
+            "load_det",
+            "--time-range",
+            WINDOWS_FIVE_AND_SIX,
+            "--window",
+            "30",
+        ],
+    );
+    assert!(err.contains("this forecast has 24 windows"), "{err}");
+
+    // Without a range the whole forecast is addressable, and the old wording
+    // still names a window the forecast lacks.
+    let err = run_err(&store, &["get", "--name", "load_det", "--window", "24"]);
+    assert!(err.contains("this forecast has 24 windows"), "{err}");
+}
+
+#[test]
+fn export_time_range_labels_forecast_rows_with_the_windows_it_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("f.h5");
+    seed_day_of_windows(dir.path(), &store);
+
+    let exported = run(
+        &store,
+        &[
+            "-f",
+            "csv",
+            "export",
+            "--name",
+            "load_det",
+            "--time-range",
+            WINDOWS_FIVE_AND_SIX,
+        ],
+    );
+    assert_windows_five_and_six(&exported);
+
+    // And the same rows land in a directory export.
+    let out_dir = dir.path().join("out");
+    run(
+        &store,
+        &[
+            "-f",
+            "csv",
+            "export",
+            "--name",
+            "load_det",
+            "--time-range",
+            WINDOWS_FIVE_AND_SIX,
+            "--dir",
+            out_dir.to_str().unwrap(),
+        ],
+    );
+    let file = fs::read_dir(&out_dir).unwrap().next().unwrap().unwrap();
+    assert_windows_five_and_six(&fs::read_to_string(file.path()).unwrap());
+}
+
+/// `export -f json` describes the windows it holds, like `get` and the CSV
+/// path above.
+///
+/// The JSON arm took `initial_timestamp`, `count`, `resolution`, `horizon` and
+/// `interval` from the catalog row while `shape`/`values` came from the sliced
+/// read, so a `--time-range` export announced `"count": 24` beside a two-window
+/// array. That document both mislabels the data and is not re-readable: the
+/// constructor rejects a count that disagrees with the array.
+#[test]
+fn export_json_time_range_describes_the_windows_it_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("f.h5");
+    seed_day_of_windows(dir.path(), &store);
+
+    let args = [
+        "-f",
+        "json",
+        "export",
+        "--name",
+        "load_det",
+        "--time-range",
+        WINDOWS_FIVE_AND_SIX,
+    ];
+    let parsed: serde_json::Value = serde_json::from_str(&run(&store, &args)).unwrap();
+    assert_eq!(parsed["count"], 2, "{parsed}");
+    assert_eq!(parsed["shape"], serde_json::json!([2, 2]), "{parsed}");
+    assert!(
+        parsed["initial_timestamp"]
+            .as_str()
+            .unwrap()
+            .starts_with("2024-01-01T05:00:00"),
+        "{parsed}"
+    );
+    // The grid the slice did not change is still reported.
+    assert_eq!(parsed["resolution"], "PT1H", "{parsed}");
+    assert_eq!(parsed["horizon"], "PT2H", "{parsed}");
+    assert_eq!(parsed["interval"], "PT1H", "{parsed}");
+
+    // An unsliced export still describes the whole forecast.
+    let whole: serde_json::Value = serde_json::from_str(&run(
+        &store,
+        &["-f", "json", "export", "--name", "load_det"],
+    ))
+    .unwrap();
+    assert_eq!(whole["count"], 24, "{whole}");
+    assert_eq!(whole["shape"], serde_json::json!([2, 24]), "{whole}");
+    assert!(
+        whole["initial_timestamp"]
+            .as_str()
+            .unwrap()
+            .starts_with("2024-01-01T00:00:00"),
+        "{whole}"
+    );
+}
+
 // --- B4/B5: row windows and richer stats -----------------------------------
 
 #[test]
@@ -1730,15 +2039,7 @@ fn every_mutating_command_emits_json_on_stdout_under_f_json() {
     let plan = json_stdout(&store, &["add", "--descriptor", d, "--dry-run"]);
     assert_eq!(plan["items"].as_array().unwrap().len(), 1, "{plan}");
 
-    // rename / copy / replace-owner, each with its dry run
-    let sel = ["--owner-id", "42", "--name", "load"];
-    let mut args = vec!["rename", "--new-name", "load2"];
-    args.extend_from_slice(&sel);
-    args.push("--dry-run");
-    assert_eq!(json_stdout(&store, &args)["would_rename"], 1);
-    args.pop();
-    assert_eq!(json_stdout(&store, &args)["renamed"], 1);
-
+    // copy / replace-owner, each with its dry run
     let mut args = vec![
         "copy",
         "--dst-owner-id",
@@ -1746,7 +2047,7 @@ fn every_mutating_command_emits_json_on_stdout_under_f_json() {
         "--dst-owner-type",
         "Generator",
     ];
-    args.extend_from_slice(&["--owner-id", "42", "--name", "load2"]);
+    args.extend_from_slice(&["--owner-id", "42", "--name", "load"]);
     assert_eq!(json_stdout(&store, &args)["copied"], 1);
 
     assert_eq!(
@@ -1792,13 +2093,13 @@ fn every_mutating_command_emits_json_on_stdout_under_f_json() {
             "42",
         ],
     );
-    // Owner 42 holds `load2` plus the forecast `transform` derived from it.
+    // Owner 42 holds `load` plus the forecast `transform` derived from it.
     assert_eq!(exported["exported"], 2);
     assert_eq!(exported["files"].as_array().unwrap().len(), 2);
 
     let svg = dir.path().join("c.svg");
     let mut args = vec!["plot", "--out", svg.to_str().unwrap()];
-    args.extend_from_slice(&["--owner-id", "42", "--name", "load2"]);
+    args.extend_from_slice(&["--owner-id", "42", "--name", "load"]);
     assert!(json_stdout(&store, &args)["wrote"].is_string());
 
     // The association catalogs.
@@ -1846,7 +2147,20 @@ fn every_mutating_command_emits_json_on_stdout_under_f_json() {
 
     // merge / remove / clear
     let other = dir.path().join("other.h5");
-    run(&other, &["add", "--descriptor", d]);
+    // Seeded under a different name, so the merge below has nothing to collide
+    // with: `--owner-id 42` brings this store's `load` and the forecast derived
+    // from it across.
+    let other_desc = write(
+        dir.path(),
+        "other.json",
+        r#"{"owner_id": 42, "owner_type": "Generator", "name": "baseline",
+            "type": "SingleTimeSeries", "element_type": "f64", "csv": "v.csv",
+            "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H"}"#,
+    );
+    run(
+        &other,
+        &["add", "--descriptor", other_desc.to_str().unwrap()],
+    );
     assert_eq!(
         json_stdout(
             &other,
@@ -1860,22 +2174,24 @@ fn every_mutating_command_emits_json_on_stdout_under_f_json() {
         )["merged"],
         2
     );
-    // `--type` because `transform` left a forecast sharing the name.
+    // Both rows of the name -- `--all`, since the selector matches the series
+    // and the forecast `transform` derived from it. A derived forecast cannot
+    // outlive its own owner's source, so selecting the `SingleTimeSeries` alone
+    // is refused; one batch removes the pair regardless of order.
     assert_eq!(
         json_stdout(
             &store,
             &[
                 "remove",
+                "--all",
                 "--owner-id",
                 "42",
                 "--name",
-                "load2",
-                "--type",
-                "SingleTimeSeries",
+                "load",
                 "--force"
             ]
         )["removed"],
-        1
+        2
     );
     assert_eq!(
         json_stdout(&store, &["remove", "--all", "--owner-id", "999", "--force"])["removed"],

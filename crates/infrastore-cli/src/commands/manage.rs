@@ -117,64 +117,6 @@ pub fn transform(
     )
 }
 
-/// `rename`: rename the single series a selector resolves to.
-pub fn rename(
-    store_path: &Path,
-    selector: &SelectorArgs,
-    new_name: &str,
-    dry_run: bool,
-    format: Format,
-) -> Result<(), String> {
-    let store = store_access::open_readonly(store_path)?;
-    let (meta, key) = selector.resolve(&store)?;
-    drop(store);
-    if dry_run {
-        return report(
-            format,
-            || {
-                json!({
-                    "dry_run": true,
-                    "would_rename": 1,
-                    "name": meta.name,
-                    "new_name": new_name,
-                    "owner_id": meta.owner_id,
-                })
-            },
-            || {
-                println!(
-                    "Would rename '{}' (owner {}) to '{new_name}'.",
-                    meta.name, meta.owner_id
-                );
-            },
-        );
-    }
-    let mut store = store_access::open_writable(store_path)?;
-    store
-        .rename_time_series(key, new_name)
-        .map_err(|e| e.to_string())?;
-    store.flush().map_err(|e| e.to_string())?;
-    report(
-        format,
-        || {
-            json!({
-                "renamed": 1,
-                "name": meta.name,
-                "new_name": new_name,
-                "owner_id": meta.owner_id,
-            })
-        },
-        || {
-            println!(
-                "{}",
-                color::header(&format!(
-                    "Renamed '{}' (owner {}) to '{new_name}'.",
-                    meta.name, meta.owner_id
-                ))
-            );
-        },
-    )
-}
-
 /// `remove --all`: remove every series matching the selector (may be several).
 pub fn remove_all(
     store_path: &Path,

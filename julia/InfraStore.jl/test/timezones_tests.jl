@@ -77,6 +77,31 @@ end
     @test_throws InfraStore.InvalidParameterError static_read!(
         reader, DateTime(2024, 1, 1, 9)
     )
+
+    # An axis that recorded no spelling (`time_reference=nothing`, the shape a
+    # legacy row arrives in) groups with the zoned ones, as in the core: a
+    # ZonedDateTime reads it, and a bare DateTime is refused -- the same verdict
+    # `read_by_id(...; start_time=)` reaches through the core on that series.
+    ukey = add_time_series!(
+        store, 4, "Generator", Component,
+        SingleTimeSeries(
+            DateTime(2024, 1, 1, 7), Hour(1), collect(20.0:23.0), "load";
+            time_reference=nothing,
+        ),
+    )
+    ureader = build_static_reader(store; resolution=Hour(1), owner_id=4)
+    @test static_grid(ureader).time_reference === nothing
+    static_read!(ureader, ZonedDateTime(DateTime(2024, 1, 1, 2), denver))  # = 09:00Z
+    @test static_values(ureader, 1)[1] == 22.0
+    @test_throws InfraStore.InvalidParameterError static_read!(
+        ureader, DateTime(2024, 1, 1, 9)
+    )
+    @test_throws InfraStore.InvalidParameterError read_by_id(
+        store, ukey; start_time=DateTime(2024, 1, 1, 9), len=1
+    )
+    @test read_by_id(
+        store, ukey; start_time=ZonedDateTime(DateTime(2024, 1, 1, 2), denver), len=1
+    ).data == [22.0]
 end
 
 @testset "an irregular vector is ordered by instant, not by wall clock" begin
@@ -253,4 +278,50 @@ end
     @test_throws InfraStore.InvalidParameterError zoned_timestamp(naive)
     @test is_zoneless(naive.time_reference)
     @test !is_zoneless(nothing)
+end
+
+@testset "a refused point read leaves the reader empty" begin
+    # The spelling check runs in Julia, before the ccall, because the ABI's
+    # `at_unix_ms` cannot carry the bound's spelling. So the core never sees the
+    # call and its own "a failed read empties the reader" rule never applies:
+    # without the invalidation the mismatch threw while `static_values` went on
+    # serving the window the *previous, successful* read had filled, as though it
+    # answered the timestamp that had just been refused.
+    values = collect(1.0:4.0)
+    initial = DateTime(2024, 1, 1)
+
+    # A wall-clock axis reads a wall clock, and refuses an instant.
+    wall = Store(in_memory=true)
+    add_time_series!(
+        wall, 1, "Generator", Component,
+        SingleTimeSeries(initial, Hour(1), values, "load"),
+    )
+    r = build_static_reader(wall; resolution=Hour(1))
+    static_read!(r, DateTime(2024, 1, 1, 1))
+    @test static_values(r, 1) == [2.0]
+    @test_throws InfraStore.InvalidParameterError static_read!(
+        r, ZonedDateTime(DateTime(2024, 1, 1, 2), tz"UTC")
+    )
+    @test isempty(static_values(r, 1))
+    # The reader still works afterwards.
+    static_read!(r, DateTime(2024, 1, 1, 2))
+    @test static_values(r, 1) == [3.0]
+
+    # The same for a forecast reader, in the other direction: an instant-bearing
+    # timeline refuses a bare DateTime.
+    fc = Store(in_memory=true)
+    add_time_series!(
+        fc, 1, "Generator", Component,
+        Deterministic(
+            ZonedDateTime(initial, tz"UTC"), Hour(1), Hour(2), Hour(1), 2,
+            reshape(collect(1.0:4.0), 2, 2), "load",
+        ),
+    )
+    fr = build_forecast_reader(fc, Deterministic; resolution=Hour(1))
+    forecast_read!(fr, ZonedDateTime(initial, tz"UTC"))
+    @test !isempty(forecast_values(fr, 1))
+    @test_throws InfraStore.InvalidParameterError forecast_read!(
+        fr, DateTime(2024, 1, 1, 1)
+    )
+    @test isempty(forecast_values(fr, 1))
 end

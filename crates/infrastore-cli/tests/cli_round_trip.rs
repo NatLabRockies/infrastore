@@ -499,31 +499,12 @@ fn admin_commands_json() {
 }
 
 #[test]
-fn rename_and_remove_all() {
+fn remove_all() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("rn.h5");
     seed_two(dir.path(), &store);
 
-    // Rename owner 1's series.
-    run(
-        &store,
-        &[
-            "rename",
-            "--owner-id",
-            "1",
-            "--owner-category",
-            "component",
-            "--name",
-            "load",
-            "--new-name",
-            "load2",
-        ],
-    );
-    let list = run(&store, &["-f", "json", "list", "--owner-id", "1"]);
-    assert!(list.contains("load2"), "renamed list: {list}");
-    assert!(!list.contains("\"load\""), "old name gone: {list}");
-
-    // Remove every "load" series (owner 2 still has it) with --all.
+    // Remove every "load" series (both owners hold one) with --all.
     run(&store, &["remove", "--all", "--force", "--name", "load"]);
     let after = run(&store, &["-f", "json", "list", "--name", "load"]);
     assert!(after.contains("\"items\": []"), "removed: {after}");
@@ -620,21 +601,6 @@ fn dry_run_mutates_nothing() {
         ],
     );
     assert!(out.contains("Would reassign 1"), "replace dry-run: {out}");
-    let out = run(
-        &store,
-        &[
-            "rename",
-            "--owner-id",
-            "1",
-            "--name",
-            "load",
-            "--new-name",
-            "x",
-            "--dry-run",
-        ],
-    );
-    assert!(out.contains("Would rename"), "rename dry-run: {out}");
-
     // Nothing changed.
     let list = run(&store, &["-f", "json", "list"]);
     assert_eq!(list.matches("\"load\"").count(), 2, "unchanged: {list}");

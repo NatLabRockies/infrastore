@@ -74,7 +74,7 @@ id = add_time_series!(
     features = Dict("model_year" => 2030),
     units = "MW",
 )
-# `id` is the catalog row's id: how every read, removal and rename addresses
+# `id` is the catalog row's id: how every read and removal addresses
 # the series, and one integer to keep in your own model.
 ```
 
@@ -88,8 +88,8 @@ Notes:
   `DuplicateTimeSeriesError`.
 
 `add_time_series!` returns the catalog row's `id` as an `Int64` (see
-[Association ids](../explanation/data-model.md#association-ids)). Every read, removal, rename and
-copy takes that id; `list_metadata` is how you recover one for a series you did not just write.
+[Association ids](../explanation/data-model.md#association-ids)). Every read, removal and copy takes
+that id; `list_metadata` is how you recover one for a series you did not just write.
 
 Two more rules worth knowing up front. **Stored instants and periods are millisecond-precision**: a
 `Microsecond(1)` resolution, a `Millisecond(0)` one, or a negative period is refused with

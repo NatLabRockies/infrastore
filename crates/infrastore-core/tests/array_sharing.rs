@@ -7,8 +7,6 @@
 //! * The persist-time layout planner promoting a hash shared by a *packed*
 //!   (`SingleTimeSeries`) and a *standalone* (`NonSequentialTimeSeries`) key to
 //!   standalone, so both read back correctly (`store.rs` `plans` logic).
-//! * `rename_time_series` leaving the backing array, its hash, and the shared
-//!   reference count untouched.
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{
@@ -233,54 +231,6 @@ fn shared_hash_across_packed_and_standalone_persists_as_standalone() {
 
     let report = store.verify_integrity().unwrap();
     assert!(report.ok(), "integrity errors: {:?}", report.errors);
-}
-
-// --- rename preserves the array / hash / refcount ------------------------------
-
-#[test]
-fn rename_preserves_the_shared_array_and_refcount() {
-    let mut store = create_store(None, true).unwrap();
-    // Two owners share one array (identical data).
-    let k1 = add_sts(&mut store, 1);
-    let k2 = add_sts(&mut store, 2);
-    let hash = store.get_metadata_by_id(k1).unwrap().unwrap().data_hash;
-    assert_eq!(store.num_distinct_arrays().unwrap(), 1);
-    assert_eq!(store.count_array_references(&hash).unwrap(), (2, 0));
-
-    // Rename one sharer.
-    let renamed = store.rename_time_series(k1, "renamed").unwrap();
-
-    // Rename touches only the name: same hash, same shared array, same refcount.
-    assert_eq!(
-        store
-            .get_metadata_by_id(renamed.id.unwrap())
-            .unwrap()
-            .unwrap()
-            .data_hash,
-        hash
-    );
-    assert_eq!(store.num_distinct_arrays().unwrap(), 1);
-    assert_eq!(store.count_array_references(&hash).unwrap(), (2, 0));
-
-    // Both the renamed series and the untouched sharer still read the data.
-    assert_eq!(
-        store
-            .read_by_id(renamed.id.unwrap(), infrastore_core::ReadWindow::full())
-            .unwrap()
-            .as_single()
-            .unwrap()
-            .data,
-        sts_series().data
-    );
-    assert_eq!(
-        store
-            .read_by_id(k2, infrastore_core::ReadWindow::full())
-            .unwrap()
-            .as_single()
-            .unwrap()
-            .data,
-        sts_series().data
-    );
 }
 
 // ---------------------------------------------------------------------------

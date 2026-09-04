@@ -301,7 +301,11 @@ static_groups(reader::StaticReader) = reader.groups
 Read the value of every series at `t`, filling the reader's buffers. Throws if
 `t` is off the reader's timeline. Follow with [`static_values`] per group.
 
-`t` is a `DateTime` (read as UTC) or, with TimeZones loaded, a `ZonedDateTime`.
+`t` must be spelled the way the reader's axis was written: a bare `DateTime` is a
+wall clock (zoneless) and reads a zoneless axis; an axis that records instants
+(`utc`, an offset, a zone name, or one whose `time_reference` is unspecified)
+needs a `ZonedDateTime`, with TimeZones loaded. A mismatch throws
+`InvalidParameterError`, as it does on a ranged read.
 """
 # Refuse a point read whose spelling the reader's axis cannot answer.
 #
@@ -311,17 +315,35 @@ Read the value of every series at `t`, filling the reader's buffers. Throws if
 # `DateTime` (a wall clock) could read an instant-bearing axis, and a
 # `ZonedDateTime` a zoneless one, each reinterpreted as UTC and returning a
 # *row* rather than the error the same mismatch earns on a range.
-function _check_point_spelling(axis::Union{Nothing, TimeReference}, t, what::AbstractString)
-    axis === nothing && return nothing
+#
+# An *unset* reference groups with the zoned variants, as it does in the core
+# (`TimeReference::accepts_zoned_bound`): an unspecified spelling is not a
+# floating third case that answers either, so a bare `DateTime` is refused
+# against it exactly as `read_by_id(...; start_time=)` refuses one.
+#
+# `on_mismatch` runs just before the throw. A reader passes
+# `_invalidate_reader!` through it: refusing here is refusing the read, so the
+# reader owes the caller the same empty buffers a refusal inside the core would
+# leave. The check itself stays free of side effects, which is how the tests
+# exercise it directly.
+function _check_point_spelling(
+    axis::Union{Nothing, TimeReference}, t, what::AbstractString; on_mismatch=nothing
+)
     bound_zoneless = is_zoneless(_time_reference_of(t))
-    axis_zoneless = is_zoneless(axis)
+    axis_zoneless = is_zoneless(axis)  # `is_zoneless(nothing)` is false
     bound_zoneless == axis_zoneless && return nothing
+    on_mismatch === nothing || on_mismatch()
     if bound_zoneless
+        spelled = if axis === nothing
+            "time_reference unspecified"
+        else
+            "time_reference \"$(_time_reference_str(axis))\""
+        end
         throw(
             InvalidParameterError(
                 "the read timestamp carries no zone, but $what records instants " *
-                "(time_reference \"$(_time_reference_str(axis))\"); a wall clock does not " *
-                "name one, and the store will not guess a zone for it",
+                "($spelled); a wall clock does not name one, and the store will not " *
+                "guess a zone for it",
             ),
         )
     end
@@ -332,18 +354,6 @@ function _check_point_spelling(axis::Union{Nothing, TimeReference}, t, what::Abs
             "instant onto them",
         ),
     )
-end
-
-function static_read!(reader::StaticReader, t)
-    _check_point_spelling(reader.time_reference, t, "this reader's timeline")
-    _check(
-        @ccall lib_path().infrastore_static_reader_read(
-            reader::Ptr{Cvoid},
-            reader.store::Ptr{Cvoid},
-            _to_unix_ms(t)::Int64,
-        )::Int32
-    )
-    return reader
 end
 
 """
@@ -602,16 +612,65 @@ function forecast_num_slots(reader::ForecastReader)
     return Int(out_n[])
 end
 
+function static_read!(reader::StaticReader, t)
+    _check_point_spelling(
+        reader.time_reference,
+        t,
+        "this reader's timeline";
+        on_mismatch=() -> _invalidate_reader!(reader),
+    )
+    _check(
+        @ccall lib_path().infrastore_static_reader_read(
+            reader::Ptr{Cvoid},
+            reader.store::Ptr{Cvoid},
+            _to_unix_ms(t)::Int64,
+        )::Int32
+    )
+    return reader
+end
+
+# Drop what the reader is holding, so a refusal in `_check_point_spelling`
+# leaves it empty.
+#
+# The spelling check runs in Julia, because the ABI's `at_unix_ms` cannot
+# carry the bound's spelling — so a mismatch throws without the core ever seeing
+# the call, and the core's own "a failed read leaves the reader empty" rule
+# never gets a chance to apply. Without this, a successful read followed by a
+# mismatched one left `static_values`/`forecast_values` serving the *earlier*
+# window as though it answered the timestamp that just failed.
+#
+# Always succeeds on a live handle, so the return code is deliberately dropped:
+# this runs on the way to throwing, and a second error would replace the one the
+# caller needs to see.
+function _invalidate_reader!(reader::StaticReader)
+    @ccall lib_path().infrastore_static_reader_invalidate(reader::Ptr{Cvoid})::Int32
+    return nothing
+end
+
+function _invalidate_reader!(reader::ForecastReader)
+    @ccall lib_path().infrastore_forecast_reader_invalidate(reader::Ptr{Cvoid})::Int32
+    return nothing
+end
+
 """
     forecast_read!(reader, t) -> reader
 
 Read the forecast window at `t` for every entry, filling the reader's buffers.
 Throws if `t` is off the window timeline. Follow with [`forecast_values`].
 
-`t` is a `DateTime` (read as UTC) or, with TimeZones loaded, a `ZonedDateTime`.
+`t` must be spelled the way the reader's axis was written: a bare `DateTime` is a
+wall clock (zoneless) and reads a zoneless axis; an axis that records instants
+(`utc`, an offset, a zone name, or one whose `time_reference` is unspecified)
+needs a `ZonedDateTime`, with TimeZones loaded. A mismatch throws
+`InvalidParameterError`, as it does on a ranged read.
 """
 function forecast_read!(reader::ForecastReader, t)
-    _check_point_spelling(reader.time_reference, t, "this reader's timeline")
+    _check_point_spelling(
+        reader.time_reference,
+        t,
+        "this reader's timeline";
+        on_mismatch=() -> _invalidate_reader!(reader),
+    )
     _check(
         @ccall lib_path().infrastore_forecast_reader_read(
             reader::Ptr{Cvoid},

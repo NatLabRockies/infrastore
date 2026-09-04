@@ -451,8 +451,11 @@ fn far_future_end_does_not_overflow() {
 
 /// `NonSequentialTimeSeries` windows are half-open `[start, end)` — `start`
 /// matching a timestamp is inclusive, `end` matching one is exclusive,
-/// consistent with `SingleTimeSeries`. Empty and out-of-range windows return
-/// an empty series.
+/// consistent with `SingleTimeSeries` *on* the grid. Off the grid the two
+/// deliberately differ: a regular series floors `start` onto the step that
+/// covers it (see `single_slice_boundary_semantics`), where an irregular
+/// series pairs a value with an instant and so selects nothing before
+/// `start`. Empty and out-of-range windows return an empty series.
 #[test]
 fn non_sequential_boundary_semantics() {
     let t0 = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();

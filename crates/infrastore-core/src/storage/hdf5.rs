@@ -912,14 +912,22 @@ impl Inner {
             self.compression,
         )?;
         // The hash companion is tiny and rewritten per column; contiguous.
-        create_ds(
+        if let Err(e) = create_ds(
             &single,
             &hash_name,
             Dtype::Bool, // stored as u8
             &[cols, 64],
             None,
             Compression::None,
-        )?;
+        ) {
+            // The pair is created as two objects, so a failure between them
+            // (disk full) would leave a data dataset with no companion -- and
+            // `rebuild_index` refuses to open a file holding one, turning an
+            // interrupted write into an unopenable store. Unlink the half that
+            // landed so the failure stays a failed write.
+            let _ = single.unlink(name);
+            return Err(e);
+        }
         self.datasets.insert(
             name.to_string(),
             DatasetState {
@@ -1019,90 +1027,120 @@ impl Inner {
         let dtype = new[0].2.dtype;
         let element_shape = new[0].2.element_shape().to_vec();
         let length = new[0].2.length();
-        let block = element_block_bytes(dtype, &element_shape);
-        let group_key = (dtype, element_shape.clone(), length, group);
 
         let mut start = 0;
         while start < new.len() {
             let remaining = new.len() - start;
             let width = resolve_dataset_cols(Some(remaining), dtype, &element_shape);
             let seg = &new[start..start + width];
-
-            let base = dataset_base_name(dtype, &element_shape, length, group);
-            let spill_count = self.dataset_groups.get(&group_key).map_or(0, Vec::len);
-            let name = spill_name(&base, spill_count);
-            self.create_packed_dataset(&name, dtype, &element_shape, length, group, Some(width))?;
-            let hash_name = format!("{name}{HASH_SUFFIX}");
-
-            // Interleave the segment's arrays into one row-major
-            // `(length, width, *element_shape)` buffer and write it as a
-            // single hyperslab covering whole chunks.
-            let mut buf = vec![0u8; length * width * block];
-            for (c, (_, _, array)) in seg.iter().enumerate() {
-                // Checked once per array rather than trusted per timestep. The
-                // slice below indexes by a stride derived from the *shape*, so a
-                // `TypedArray` whose `bytes` do not match it panicked here —
-                // reachable in safe code, since the fields are public and a
-                // struct literal bypasses `TypedArray::new`. The single-add path
-                // reaches `write_sel`, where ndarray reports the same mismatch as
-                // an `IntegrityError`, so the two write paths disagreed on
-                // error-versus-panic for one input; worse, this panicked *after*
-                // the dataset was created, leaving the store mid-write.
-                let needed = length * block;
-                if array.bytes.len() < needed {
-                    return Err(TimeSeriesError::IntegrityError(format!(
-                        "array holds {} bytes but its shape {:?} describes {needed} bytes",
-                        array.bytes.len(),
-                        array.shape
-                    )));
+            if let Err(e) = self.put_packed_segment(seg, dtype, &element_shape, length, group) {
+                // The segments before this one are indexed but the caller
+                // never learns their hashes -- the `?` discards `written` --
+                // so `Store::settle` could not unwind them and they lingered
+                // as unreferenced columns until `compact`. Unwind them here,
+                // where the hashes are still known; the failing segment itself
+                // indexed nothing.
+                for (_, hash, _) in &new[..start] {
+                    let _ = self.remove_array_locked(hash);
                 }
-                for t in 0..length {
-                    let src = &array.bytes[t * block..(t + 1) * block];
-                    let dst = (t * width + c) * block;
-                    buf[dst..dst + block].copy_from_slice(src);
-                }
+                return Err(e);
             }
-            let ds = self.dataset(&name)?;
-            let mut slice_shape = vec![length, width];
-            slice_shape.extend_from_slice(&element_shape);
-            write_sel(
-                &ds,
-                dtype,
-                &buf,
-                &slice_shape,
-                packed_block_ranges(0..length, 0..width, &element_shape),
-            )?;
-            // Hash rows for the whole segment in one write.
-            let mut hash_buf = vec![0u8; width * 64];
-            for (c, (_, hash, _)) in seg.iter().enumerate() {
-                hash_buf[c * 64..(c + 1) * 64].copy_from_slice(hash_hex(hash).as_bytes());
-            }
-            let hash_ds = self.dataset(&hash_name)?;
-            write_sel(
-                &hash_ds,
-                Dtype::Bool,
-                &hash_buf,
-                &[width, 64],
-                vec![0..width, 0..64],
-            )?;
-
-            let state = self.datasets.get_mut(&name).expect("dataset created");
-            for (c, (_, hash, _)) in seg.iter().enumerate() {
-                state.columns[c] = Some(hash_hex(hash));
-            }
-            for (c, (orig, hash, _)) in seg.iter().enumerate() {
-                self.by_hash.insert(
-                    *hash,
-                    Location::Packed {
-                        dataset: name.clone(),
-                        col: c,
-                    },
-                );
+            for (orig, _, _) in seg {
                 written[*orig] = true;
             }
             start += width;
         }
         Ok(written)
+    }
+
+    /// One batch-sized segment of [`Self::put_packed_block`]: a fresh dataset
+    /// sized to `seg`, one interleaved hyperslab write, one hash-row write, then
+    /// the index. Nothing is indexed until every write has landed, so a failure
+    /// leaves at most an empty dataset whose columns are free.
+    fn put_packed_segment(
+        &mut self,
+        seg: &[(usize, [u8; 32], &TypedArray)],
+        dtype: Dtype,
+        element_shape: &[usize],
+        length: usize,
+        group: PackGroup,
+    ) -> Result<()> {
+        let width = seg.len();
+        let block = element_block_bytes(dtype, element_shape);
+        let group_key = (dtype, element_shape.to_vec(), length, group);
+
+        let base = dataset_base_name(dtype, element_shape, length, group);
+        let spill_count = self.dataset_groups.get(&group_key).map_or(0, Vec::len);
+        let name = spill_name(&base, spill_count);
+        self.create_packed_dataset(&name, dtype, element_shape, length, group, Some(width))?;
+        let hash_name = format!("{name}{HASH_SUFFIX}");
+
+        // Interleave the segment's arrays into one row-major
+        // `(length, width, *element_shape)` buffer and write it as a
+        // single hyperslab covering whole chunks.
+        let mut buf = vec![0u8; length * width * block];
+        for (c, (_, _, array)) in seg.iter().enumerate() {
+            // Checked once per array rather than trusted per timestep. The
+            // slice below indexes by a stride derived from the *shape*, so a
+            // `TypedArray` whose `bytes` do not match it panicked here —
+            // reachable in safe code, since the fields are public and a
+            // struct literal bypasses `TypedArray::new`. The single-add path
+            // reaches `write_sel`, where ndarray reports the same mismatch as
+            // an `IntegrityError`, so the two write paths disagreed on
+            // error-versus-panic for one input; worse, this panicked *after*
+            // the dataset was created, leaving the store mid-write.
+            let needed = length * block;
+            if array.bytes.len() < needed {
+                return Err(TimeSeriesError::IntegrityError(format!(
+                    "array holds {} bytes but its shape {:?} describes {needed} bytes",
+                    array.bytes.len(),
+                    array.shape
+                )));
+            }
+            for t in 0..length {
+                let src = &array.bytes[t * block..(t + 1) * block];
+                let dst = (t * width + c) * block;
+                buf[dst..dst + block].copy_from_slice(src);
+            }
+        }
+        let ds = self.dataset(&name)?;
+        let mut slice_shape = vec![length, width];
+        slice_shape.extend_from_slice(element_shape);
+        write_sel(
+            &ds,
+            dtype,
+            &buf,
+            &slice_shape,
+            packed_block_ranges(0..length, 0..width, element_shape),
+        )?;
+        // Hash rows for the whole segment in one write.
+        let mut hash_buf = vec![0u8; width * 64];
+        for (c, (_, hash, _)) in seg.iter().enumerate() {
+            hash_buf[c * 64..(c + 1) * 64].copy_from_slice(hash_hex(hash).as_bytes());
+        }
+        let hash_ds = self.dataset(&hash_name)?;
+        write_sel(
+            &hash_ds,
+            Dtype::Bool,
+            &hash_buf,
+            &[width, 64],
+            vec![0..width, 0..64],
+        )?;
+
+        let state = self.datasets.get_mut(&name).expect("dataset created");
+        for (c, (_, hash, _)) in seg.iter().enumerate() {
+            state.columns[c] = Some(hash_hex(hash));
+        }
+        for (c, (_, hash, _)) in seg.iter().enumerate() {
+            self.by_hash.insert(
+                *hash,
+                Location::Packed {
+                    dataset: name.clone(),
+                    col: c,
+                },
+            );
+        }
+        Ok(())
     }
 
     #[tracing::instrument(skip(self, hash, data), fields(bytes = data.bytes.len()))]
@@ -1483,40 +1521,146 @@ impl Inner {
             .get(hash)
             .ok_or(TimeSeriesError::NotFound)?
             .clone();
+        // The window's bounds against the array's logical shape, and the range
+        // each logical axis selects: the count axis `start..start + len`, the
+        // rest whole.
+        let check_bounds = |dims: &[usize]| -> Result<()> {
+            if count_axis >= dims.len() {
+                return Err(TimeSeriesError::IntegrityError(format!(
+                    "count axis {count_axis} out of bounds for shape {dims:?}"
+                )));
+            }
+            if start + len > dims[count_axis] {
+                return Err(TimeSeriesError::InvalidParameter(format!(
+                    "window block {start}..{} out of bounds for axis length {}",
+                    start + len,
+                    dims[count_axis]
+                )));
+            }
+            Ok(())
+        };
+        let axis_range = |axis: usize, axis_len: usize| -> Range<usize> {
+            if axis == count_axis {
+                start..start + len
+            } else {
+                0..axis_len
+            }
+        };
         match loc {
             Location::Standalone { var } => {
                 let ds = self.dataset(&var)?;
+                // The same assertion `read_locked` makes: HDF5 converts on
+                // read, so decoding with the catalog's dtype alone would hand a
+                // drifted row back as silently truncated values.
+                check_standalone_dtype(&ds, hash, dtype)?;
                 let dims = ds.shape();
-                if count_axis >= dims.len() {
-                    return Err(TimeSeriesError::IntegrityError(format!(
-                        "count axis {count_axis} out of bounds for shape {dims:?}"
-                    )));
-                }
-                if start + len > dims[count_axis] {
-                    return Err(TimeSeriesError::InvalidParameter(format!(
-                        "window block {start}..{} out of bounds for axis length {}",
-                        start + len,
-                        dims[count_axis]
-                    )));
-                }
+                check_bounds(&dims)?;
                 let ranges: Vec<Range<usize>> = dims
                     .iter()
                     .enumerate()
-                    .map(|(i, &axis_len)| {
-                        if i == count_axis {
-                            start..start + len
-                        } else {
-                            0..axis_len
-                        }
-                    })
+                    .map(|(i, &axis_len)| axis_range(i, axis_len))
                     .collect();
                 let bytes = read_sel(&ds, dtype, ranges)?;
                 out.extend_from_slice(&bytes);
                 Ok(())
             }
-            Location::Packed { .. } => Err(TimeSeriesError::IntegrityError(
-                "forecast window read expects a standalone array, found a packed one".into(),
-            )),
+            // A dense forecast files under whatever layout its content hash
+            // already has: `put_array` returns early on a known hash, so a
+            // forecast byte-identical to a packed static array (a `[6, 4]`
+            // `SingleTimeSeries` and a `Deterministic` with horizon 6 and count
+            // 4 hash alike -- the hash covers dtype, shape and bytes, not the
+            // series type) points at a packed column. `compact` promotes it to
+            // standalone, but a reader must not have to wait for that. The
+            // column is a hyperslab like any other: the dataset is `(length,
+            // cols, *element_shape)` for the logical `[length, *element_shape]`,
+            // so the column is pinned and logical axis `j >= 1` is dataset axis
+            // `j + 1`; a unit column axis leaves row-major order unchanged.
+            Location::Packed { dataset, col } => {
+                let state = self.datasets.get(&dataset).ok_or_else(|| {
+                    TimeSeriesError::IntegrityError(format!("dataset {dataset} missing"))
+                })?;
+                super::check_dtype(hash, state.dtype, dtype)?;
+                let mut logical = vec![state.length];
+                logical.extend_from_slice(&state.element_shape);
+                check_bounds(&logical)?;
+                let mut ranges = vec![axis_range(0, logical[0]), col..col + 1];
+                ranges.extend(
+                    logical
+                        .iter()
+                        .enumerate()
+                        .skip(1)
+                        .map(|(j, &axis_len)| axis_range(j, axis_len)),
+                );
+                let ds = self.dataset(&dataset)?;
+                let bytes = read_sel(&ds, state.dtype, ranges)?;
+                out.extend_from_slice(&bytes);
+                Ok(())
+            }
+        }
+    }
+
+    /// Drop `hash` from the index and make its bytes unreachable. The caller
+    /// holds the lock and has checked writability; this is the body of
+    /// [`StorageBackend::remove_array`], factored out so a write that fails
+    /// part-way ([`Self::put_packed_block`]) can unwind what it indexed.
+    fn remove_array_locked(&mut self, hash: &[u8; 32]) -> Result<()> {
+        let loc = match self.by_hash.remove(hash) {
+            Some(v) => v,
+            None => return Ok(()),
+        };
+        match loc {
+            // Standalone: unlink the dataset outright. HDF5 does not return the
+            // freed space to the filesystem — the file only shrinks when
+            // `Store::compact` repacks it — but the object becomes unreachable
+            // immediately and stays that way across a reopen (`rebuild_index`
+            // re-indexes by scanning links, so a lingering dataset would be
+            // resurrected as live). Re-adding the same content therefore
+            // rewrites the dataset instead of being a pure re-index; that is
+            // the accepted cost of making removal real.
+            Location::Standalone { var } => {
+                // Drop any cached handle first: it keeps the object alive past
+                // the unlink and would serve stale reads.
+                self.handles.borrow_mut().remove(&var);
+                self.standalone_vars.remove(&var);
+                let single = self.single()?;
+                single.unlink(&var).map_err(map_h5)
+            }
+            // Packed: drop the column from the index, clear its hash companion
+            // so a reopen does not re-index it, and zero the column's data so
+            // no stale values are readable through the slot once it is reused.
+            // Costs a read-modify-write of the touched chunks; removal is not a
+            // hot path.
+            Location::Packed { dataset, col } => {
+                let (hash_name, dtype, element_shape, length) = {
+                    let state = self.datasets.get_mut(&dataset).ok_or_else(|| {
+                        TimeSeriesError::IntegrityError(format!("dataset {dataset} missing"))
+                    })?;
+                    if col < state.columns.len() {
+                        state.columns[col] = None;
+                    }
+                    (
+                        state.hash_name.clone(),
+                        state.dtype,
+                        state.element_shape.clone(),
+                        state.length,
+                    )
+                };
+                self.write_hash_row(&hash_name, col, None)?;
+                if length > 0 {
+                    let ds = self.dataset(&dataset)?;
+                    let mut slice_shape = vec![length, 1];
+                    slice_shape.extend_from_slice(&element_shape);
+                    let zeros = vec![0u8; slice_shape.iter().product::<usize>() * dtype.size()];
+                    write_sel(
+                        &ds,
+                        dtype,
+                        &zeros,
+                        &slice_shape,
+                        packed_ranges(0..length, col, &element_shape),
+                    )?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -1620,66 +1764,9 @@ impl StorageBackend for Hdf5Backend {
     }
 
     fn remove_array(&mut self, hash: &[u8; 32]) -> Result<()> {
-        let mut inner = self.inner.lock().expect("mutex poisoned");
+        let inner = self.inner.get_mut().expect("mutex poisoned");
         inner.ensure_writable()?;
-        let loc = match inner.by_hash.remove(hash) {
-            Some(v) => v,
-            None => return Ok(()),
-        };
-        match loc {
-            // Standalone: unlink the dataset outright. HDF5 does not return the
-            // freed space to the filesystem — the file only shrinks when
-            // `Store::compact` repacks it — but the object becomes unreachable
-            // immediately and stays that way across a reopen (`rebuild_index`
-            // re-indexes by scanning links, so a lingering dataset would be
-            // resurrected as live). Re-adding the same content therefore
-            // rewrites the dataset instead of being a pure re-index; that is
-            // the accepted cost of making removal real.
-            Location::Standalone { var } => {
-                // Drop any cached handle first: it keeps the object alive past
-                // the unlink and would serve stale reads.
-                inner.handles.borrow_mut().remove(&var);
-                inner.standalone_vars.remove(&var);
-                let single = inner.single()?;
-                single.unlink(&var).map_err(map_h5)
-            }
-            // Packed: drop the column from the index, clear its hash companion
-            // so a reopen does not re-index it, and zero the column's data so
-            // no stale values are readable through the slot once it is reused.
-            // Costs a read-modify-write of the touched chunks; removal is not a
-            // hot path.
-            Location::Packed { dataset, col } => {
-                let (hash_name, dtype, element_shape, length) = {
-                    let state = inner.datasets.get_mut(&dataset).ok_or_else(|| {
-                        TimeSeriesError::IntegrityError(format!("dataset {dataset} missing"))
-                    })?;
-                    if col < state.columns.len() {
-                        state.columns[col] = None;
-                    }
-                    (
-                        state.hash_name.clone(),
-                        state.dtype,
-                        state.element_shape.clone(),
-                        state.length,
-                    )
-                };
-                inner.write_hash_row(&hash_name, col, None)?;
-                if length > 0 {
-                    let ds = inner.dataset(&dataset)?;
-                    let mut slice_shape = vec![length, 1];
-                    slice_shape.extend_from_slice(&element_shape);
-                    let zeros = vec![0u8; slice_shape.iter().product::<usize>() * dtype.size()];
-                    write_sel(
-                        &ds,
-                        dtype,
-                        &zeros,
-                        &slice_shape,
-                        packed_ranges(0..length, col, &element_shape),
-                    )?;
-                }
-                Ok(())
-            }
-        }
+        inner.remove_array_locked(hash)
     }
 
     fn contains(&self, hash: &[u8; 32]) -> Result<bool> {

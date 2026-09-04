@@ -1650,21 +1650,24 @@ fn compact_shrinks_the_file_after_a_removal() {
     let path = dir.path().join("store.h5");
     let mut store = create_store(Some(path.as_path()), false).unwrap();
 
-    let keep = store
-        .add_time_series(
-            1,
-            "Generator",
-            OwnerCategory::Component,
-            TimeSeriesData::SingleTimeSeries(series(2024, 24, 1.0)),
-            Features::new(),
-        )
-        .unwrap();
+    // The forecast goes in *before* the survivor so its space is interior to
+    // the file: HDF5 truncates a freed tail on flush, and the point here is the
+    // space only a rewrite returns.
     let drop_me = store
         .add_time_series(
             2,
             "Generator",
             OwnerCategory::Component,
             TimeSeriesData::Deterministic(bulky_forecast(0.0)),
+            Features::new(),
+        )
+        .unwrap();
+    let keep = store
+        .add_time_series(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series(2024, 24, 1.0)),
             Features::new(),
         )
         .unwrap();

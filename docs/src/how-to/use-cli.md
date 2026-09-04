@@ -377,6 +377,10 @@ a single window instead of dumping all of them:
 infrastore --store demo.h5 get --name load --type deterministic_single --window 0
 ```
 
+Combined with `--time-range`, both address the windows the range _selected_: `--window 0` is the
+first selected window, and `--issue-time` must name one of them — a window the forecast has but the
+range dropped is reported as outside the selected range, not as missing.
+
 ## 9. Compare and Move Stores
 
 ```sh
@@ -398,7 +402,6 @@ infrastore --store demo.h5 verify                 # re-hash every array; exit 1 
 infrastore --store demo.h5 check-consistency      # every SingleTimeSeries of a resolution on one grid
 infrastore --store demo.h5 stats                  # association, owner, and distinct-array counts
 infrastore --store demo.h5 remove --owner-id 42 --name load --dry-run
-infrastore --store demo.h5 rename --owner-id 42 --name load --new-name load_2024
 infrastore --store demo.h5 compact --force        # rewrite the .h5 so deletions actually shrink it
 ```
 

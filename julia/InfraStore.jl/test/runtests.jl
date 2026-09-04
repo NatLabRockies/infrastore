@@ -7,7 +7,7 @@ using InfraStore
 #
 # The store has no key. `list_metadata` is the identify half — it answers which
 # series exist and hands back the catalog `id` that addresses each — and every
-# read, removal and rename takes that id. These wrap the resolution the tests
+# read and removal takes that id. These wrap the resolution the tests
 # would otherwise repeat at every call site, and assert exactly one match so a
 # fixture that grows a sibling fails here rather than silently addressing
 # whichever row came back first.
@@ -1901,7 +1901,7 @@ end
     @test sort(list_names(store)) == ["Wind_speed", "solar_ghi"]
 end
 
-@testset "Phase 2 additions: units, time_range, discovery, rename, bulk dispatch" begin
+@testset "Phase 2 additions: units, time_range, discovery, bulk dispatch" begin
     store = Store(in_memory=true)
     t0 = DateTime(2024, 1, 1)
     res = Hour(1)
@@ -1969,15 +1969,6 @@ end
     # resolve_id resolves a Deterministic request; the read takes the id.
     rid = resolve_id(Deterministic, store, 2, Component, "fc")
     @test read_by_id(store, rid).data == det.data
-
-    # rename_time_series! moves the association.
-    nk = rename_time_series!(store, k, "load2")
-    @test resolve_metadata(
-        SingleTimeSeries, store, 1, Component, "load2"; resolution=res
-    ).units == "MW"
-    @test_throws InfraStore.NotFoundError resolve_metadata(
-        SingleTimeSeries, store, 1, Component, "load"; resolution=res
-    )
 
     # remove_by_filter! removes matching series.
     removed = remove_by_filter!(store; owner_id=3)
@@ -3009,14 +3000,10 @@ end
         path = joinpath(dir, "compact.h5")
         t0 = DateTime(2024, 1, 1)
         store = Store(in_memory=false, path=path)
-        add_time_series!(
-            store,
-            1,
-            "Generator",
-            Component,
-            SingleTimeSeries(t0, Hour(1), Float64[1, 2, 3, 4], "keep"),
-        )
-        # Big enough that dropping it moves the file size past HDF5's own noise.
+        # Big enough that dropping it moves the file size past HDF5's own noise,
+        # and written *before* the survivor so its space is interior to the
+        # file: HDF5 truncates a freed tail on flush, and the point here is the
+        # space only a rewrite returns.
         horizon, count = 48, 400
         add_time_series!(
             store,
@@ -3032,6 +3019,13 @@ end
                 reshape(collect(Float64, 1:(horizon * count)), horizon, count),
                 "drop",
             ),
+        )
+        add_time_series!(
+            store,
+            1,
+            "Generator",
+            Component,
+            SingleTimeSeries(t0, Hour(1), Float64[1, 2, 3, 4], "keep"),
         )
         flush!(store)
         drop_key = only(owner_ids(store, 2, Component))
@@ -4745,15 +4739,53 @@ end
     static_read!(rw, DateTime(2024, 1, 1, 1))
     @test static_values(rw, 1) == [2.0]
 
-    # An unspecified axis has nothing to disagree with, so it accepts either.
+    # An unspecified axis (a legacy row that recorded no spelling) groups with
+    # the zoned ones, as in the core's `TimeReference::accepts_zoned_bound`: it
+    # is not a floating third case that answers either. A wall clock is refused
+    # here exactly as `read_by_id(...; start_time=)` refuses it on the same
+    # series, with the reference worded as unspecified rather than quoted.
     unspecified = Store(in_memory=true)
-    add_time_series!(
+    ukey = add_time_series!(
         unspecified, 1, "Generator", Component,
         SingleTimeSeries(initial, Hour(1), values, "load"; time_reference=nothing),
     )
     ru = build_static_reader(unspecified; resolution=Hour(1))
-    static_read!(ru, DateTime(2024, 1, 1, 1))
-    @test static_values(ru, 1) == [2.0]
+    @test ru.time_reference === nothing
+    err = try
+        static_read!(ru, DateTime(2024, 1, 1, 1))
+        nothing
+    catch e
+        e
+    end
+    @test err isa InfraStore.InvalidParameterError
+    @test occursin("time_reference unspecified", sprint(showerror, err))
+    @test occursin("carries no zone", sprint(showerror, err))
+    @test_throws InfraStore.InvalidParameterError read_by_id(
+        unspecified, ukey; start_time=DateTime(2024, 1, 1, 1), len=1
+    )
+    # The direct check agrees, for both directions of the mismatch.
+    @test_throws InfraStore.InvalidParameterError InfraStore._check_point_spelling(
+        nothing, DateTime(2024, 1, 1), "x"
+    )
+    @test InfraStore._check_point_spelling(
+        ZonelessReference(), DateTime(2024, 1, 1), "x"
+    ) ===
+        nothing
+    # (A ZonedDateTime against an unspecified axis is accepted; that case lives
+    # in the TimeZones tests, which can spell one.)
+
+    # The forecast point read obeys the same rule on an unspecified axis.
+    ufc = Store(in_memory=true)
+    add_time_series!(
+        ufc, 1, "Generator", Component,
+        SingleTimeSeries(initial, Hour(1), values, "load"; time_reference=nothing),
+    )
+    transform_single_time_series!(ufc, Hour(2), Hour(1))
+    ufr = build_forecast_reader(ufc, Deterministic; resolution=Hour(1))
+    @test ufr.time_reference === nothing
+    @test_throws InfraStore.InvalidParameterError forecast_read!(
+        ufr, DateTime(2024, 1, 1, 1)
+    )
 
     # The forecast point read obeys the same rule.
     fc = Store(in_memory=true)

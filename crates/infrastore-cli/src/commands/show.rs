@@ -2,7 +2,8 @@
 
 use std::path::Path;
 
-use infrastore_core::{Dtype, TimeSeriesData, TimeSeriesMetadata, TypedArray};
+use chrono::{DateTime, Utc};
+use infrastore_core::{Dtype, Period, TimeSeriesData, TimeSeriesMetadata, TypedArray};
 use serde_json::{Map, Value, json};
 
 use crate::color;
@@ -341,9 +342,84 @@ pub fn get(
             render_sequential(&meta, &ts, &ns.data, format, opts.rows)
         }
         _ => {
-            let window = resolve_window(&meta, opts)?;
-            render_forecast(&meta, &data, format, opts.rows, window)
+            let grid = ForecastGrid::of(&data)?;
+            let window = resolve_window(&grid, &ForecastGrid::stored(&meta)?, opts)?;
+            render_forecast(&meta, &data, &grid, format, opts.rows, window)
         }
+    }
+}
+
+/// The window grid of a dense forecast *as it was read*.
+///
+/// A `--time-range` read hands back only the windows it selected, and the
+/// returned `TimeSeriesData` names them: its `initial_timestamp` is the first
+/// selected window's issue time and its `count` the number selected. The catalog
+/// row still describes the whole stored forecast, so labelling the returned
+/// rows from it would stamp the dropped windows' issue times onto the kept ones.
+/// Every window-aware rendering therefore resolves against this grid and keeps
+/// `meta` for what only the row knows (name, `time_reference`, ...).
+pub struct ForecastGrid {
+    pub initial_timestamp: DateTime<Utc>,
+    pub resolution: Period,
+    pub interval: Period,
+    pub count: usize,
+}
+
+impl ForecastGrid {
+    pub fn of(data: &TimeSeriesData) -> Result<Self, String> {
+        let (initial_timestamp, resolution, interval, count) = match data {
+            TimeSeriesData::Deterministic(d) => {
+                (d.initial_timestamp, d.resolution, d.interval, d.count)
+            }
+            TimeSeriesData::Probabilistic(p) => {
+                (p.initial_timestamp, p.resolution, p.interval, p.count)
+            }
+            TimeSeriesData::Scenarios(s) => {
+                (s.initial_timestamp, s.resolution, s.interval, s.count)
+            }
+            other => {
+                return Err(format!(
+                    "expected a forecast, got {}",
+                    other.time_series_type().as_str()
+                ));
+            }
+        };
+        Ok(Self {
+            initial_timestamp,
+            resolution,
+            interval,
+            count,
+        })
+    }
+
+    /// The grid the catalog row records: the whole stored forecast, where
+    /// [`Self::of`] is the (possibly sliced) data a read returned.
+    pub fn stored(meta: &TimeSeriesMetadata) -> Result<Self, String> {
+        Ok(Self {
+            initial_timestamp: meta
+                .initial_timestamp
+                .ok_or("forecast metadata is missing initial_timestamp")?,
+            resolution: meta
+                .resolution
+                .ok_or("forecast metadata is missing resolution")?,
+            interval: meta
+                .interval
+                .ok_or("forecast metadata is missing interval")?,
+            count: meta.count.ok_or("forecast metadata is missing count")?,
+        })
+    }
+
+    /// The window issued exactly at `at`, if this grid has one.
+    fn window_at(&self, at: DateTime<Utc>) -> Option<usize> {
+        (0..self.count)
+            .find(|&c| self.interval.add_to(self.initial_timestamp, c as i64) == Some(at))
+    }
+
+    /// The issue time of window `c`.
+    fn issue_time(&self, c: usize) -> Result<DateTime<Utc>, String> {
+        self.interval
+            .add_to(self.initial_timestamp, c as i64)
+            .ok_or_else(|| format!("timestamp overflow at window {c}"))
     }
 }
 
@@ -359,40 +435,71 @@ fn reject_forecast_flags(opts: &GetOptions<'_>, meta: &TimeSeriesMetadata) -> Re
 }
 
 /// The forecast window index `--window` / `--issue-time` names, if either was
-/// given.
+/// given, checked against the windows the read returned.
 ///
-/// `--issue-time` is resolved against the stored `initial_timestamp` and
-/// `interval` rather than searched for: a timestamp that is not exactly a window
-/// boundary is a mistake worth reporting, not one to round away.
+/// Both resolve against `grid` — the windows actually read — rather than the
+/// catalog row, so under `--time-range` `--window N` is the `N`th *selected*
+/// window and `--issue-time` must name one of the selected ones. A miss is then
+/// reported as outside the selected range, not as a window the forecast lacks.
+///
+/// `--issue-time` is resolved against `initial_timestamp` and `interval` rather
+/// than searched for: a timestamp that is not exactly a window boundary is a
+/// mistake worth reporting, not one to round away.
 fn resolve_window(
-    meta: &TimeSeriesMetadata,
+    grid: &ForecastGrid,
+    stored: &ForecastGrid,
     opts: &GetOptions<'_>,
 ) -> Result<Option<usize>, String> {
+    let count = grid.count;
+    // Under `--time-range`, `grid` is the selection and `stored` the whole
+    // forecast. A miss is reported as "outside the selection" only when the
+    // stored forecast has that window; a window it never had is nonexistent
+    // under either grid, and saying otherwise would contradict the exact
+    // boundary rule.
+    let sliced = opts.time_range.is_some();
     match (opts.window, opts.issue_time) {
         (Some(_), Some(_)) => Err("--window and --issue-time both name a window; use one".into()),
-        (Some(w), None) => Ok(Some(w)),
+        (Some(w), None) => {
+            if w >= count {
+                let last = count.saturating_sub(1);
+                return Err(if sliced && w < stored.count {
+                    format!(
+                        "--window {w} is outside the selected --time-range, which holds \
+                         {count} windows (0..{last})"
+                    )
+                } else {
+                    format!(
+                        "--window {w} is out of range: this forecast has {} windows (0..{})",
+                        stored.count,
+                        stored.count.saturating_sub(1)
+                    )
+                });
+            }
+            Ok(Some(w))
+        }
         (None, Some(spec)) => {
             let wanted = parse::parse_timestamp(spec)?;
-            let initial = meta
-                .initial_timestamp
-                .ok_or("forecast metadata is missing initial_timestamp")?;
-            let interval = meta
-                .interval
-                .ok_or("forecast metadata is missing interval")?;
-            let count = meta.count.unwrap_or(0);
-            for c in 0..count {
-                match interval.add_to(initial, c as i64) {
-                    Some(t) if t == wanted => return Ok(Some(c)),
-                    _ => continue,
-                }
+            if let Some(c) = grid.window_at(wanted) {
+                return Ok(Some(c));
             }
-            Err(format!(
-                "no window is issued at {}; this forecast has {count} windows starting at {} \
-                 every {}",
-                wanted.to_rfc3339(),
-                initial.to_rfc3339(),
-                interval.to_iso8601()
-            ))
+            let initial = grid.initial_timestamp.to_rfc3339();
+            let interval = grid.interval.to_iso8601();
+            Err(if sliced && stored.window_at(wanted).is_some() {
+                format!(
+                    "the window issued at {} is outside the selected --time-range, which holds \
+                     {count} windows starting at {initial} every {interval}",
+                    wanted.to_rfc3339()
+                )
+            } else {
+                format!(
+                    "no window is issued at {}; this forecast has {} windows starting at {} \
+                     every {}",
+                    wanted.to_rfc3339(),
+                    stored.count,
+                    stored.initial_timestamp.to_rfc3339(),
+                    stored.interval.to_iso8601()
+                )
+            })
         }
         (None, None) => Ok(None),
     }
@@ -646,10 +753,12 @@ fn render_sequential(
 /// A dense forecast, rendered as the structured view in every format.
 ///
 /// Every format renders [`forecast_csv_rows`]'s view: `issue_time`,
-/// `target_time`, and one column per percentile / scenario.
+/// `target_time`, and one column per percentile / scenario. `window` has
+/// already been checked against `grid` by [`resolve_window`].
 fn render_forecast(
     meta: &TimeSeriesMetadata,
     data: &TimeSeriesData,
+    grid: &ForecastGrid,
     format: Format,
     rows_window: RowWindow,
     window: Option<usize>,
@@ -660,14 +769,7 @@ fn render_forecast(
     // One window is a contiguous run of `horizon` rows, because
     // `forecast_csv_rows` emits window-major.
     if let Some(c) = window {
-        let count = meta.count.unwrap_or(0);
-        if c >= count {
-            return Err(format!(
-                "--window {c} is out of range: this forecast has {count} windows (0..{})",
-                count.saturating_sub(1)
-            ));
-        }
-        let horizon = rows.len() / count.max(1);
+        let horizon = rows.len() / grid.count.max(1);
         rows = rows[c * horizon..(c + 1) * horizon].to_vec();
     }
 
@@ -675,6 +777,18 @@ fn render_forecast(
         f if f.is_json() => {
             let mut obj = Map::new();
             meta_fields(meta, arr, &mut obj);
+            // The document's `values` and `shape` are the windows read, so the
+            // grid printed beside them has to be theirs too: under
+            // `--time-range` the row's `initial_timestamp` and `count` describe
+            // windows this document does not contain.
+            obj.insert(
+                "initial_timestamp".into(),
+                json!(fields::render_timestamp(
+                    grid.initial_timestamp,
+                    meta.time_reference.as_ref()
+                )),
+            );
+            obj.insert("count".into(), json!(grid.count));
             if let TimeSeriesData::Scenarios(s) = data {
                 obj.insert("scenario_count".into(), json!(s.scenario_count));
             }
@@ -868,21 +982,18 @@ fn value_headers(per_step: usize) -> Vec<String> {
 /// `issue_time` / `target_time`, and one value column per leading series
 /// (percentile / scenario) x element entry. Shared by `get -f csv` and
 /// `export`.
+///
+/// The rows are labelled from `data`'s own grid (see [`ForecastGrid`]), so a
+/// `--time-range` slice is stamped with the issue times of the windows it kept;
+/// `meta` supplies only the `time_reference` the timestamps are spelled in.
 pub fn forecast_csv_rows(
     meta: &TimeSeriesMetadata,
     data: &TimeSeriesData,
 ) -> Result<(Vec<String>, Vec<Vec<String>>), String> {
     let arr = data_array(data);
     let decoded = csv_io::array_to_strings(arr);
-    let initial = meta
-        .initial_timestamp
-        .ok_or("forecast metadata is missing initial_timestamp")?;
-    let resolution = meta
-        .resolution
-        .ok_or("forecast metadata is missing resolution")?;
-    let interval = meta
-        .interval
-        .ok_or("forecast metadata is missing interval")?;
+    let grid = ForecastGrid::of(data)?;
+    let resolution = grid.resolution;
 
     // Leading series axis (percentiles / scenarios) and its column labels;
     // Deterministic has none.
@@ -907,6 +1018,12 @@ pub fn forecast_csv_rows(
         .shape
         .get(h_axis + 1)
         .ok_or_else(|| format!("unexpected forecast array shape {:?}", arr.shape))?;
+    if count != grid.count {
+        return Err(format!(
+            "forecast array holds {count} windows but its grid says {}",
+            grid.count
+        ));
+    }
     let per_step: usize = arr.shape[h_axis + 2..].iter().product::<usize>().max(1);
     let num_series = series_labels.len().max(1);
 
@@ -927,9 +1044,7 @@ pub fn forecast_csv_rows(
 
     let mut rows = Vec::with_capacity(count * horizon_len);
     for c in 0..count {
-        let issue = interval
-            .add_to(initial, c as i64)
-            .ok_or_else(|| format!("timestamp overflow at window {c}"))?;
+        let issue = grid.issue_time(c)?;
         for h in 0..horizon_len {
             let target = resolution
                 .add_to(issue, h as i64)

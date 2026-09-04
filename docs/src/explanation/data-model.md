@@ -271,13 +271,13 @@ identity is a metadata concept; the array is shared by
 ## Association IDs
 
 Every catalog row has an **`id`**: a plain integer, assigned by the store, that names _that row_. It
-is **the** way to address a series — every read, removal, rename and copy takes one.
+is **the** way to address a series — every read, removal and copy takes one.
 
 The identity above describes a series: owner, name, resolution, features. An id names the row the
 store filed it under. That difference is the point: a consumer that wants to record "this
 generator's cost curve is _that_ series" inside its own object model would otherwise have to embed
-the whole identity tuple, and keep it in step with every rename. An id is one integer, and a rename
-does not move it.
+the whole identity tuple, and keep it in step with every change to it. An id is one integer, and
+nothing moves it: a name is fixed once written, so the two can never drift apart.
 
 ```julia
 id = add_time_series!(store, 42, "ThermalStandard", Component, cost_curve)
@@ -285,9 +285,9 @@ generator.operation_cost.variable = id   # one integer, stored in the model
 ```
 
 The surface splits in two along that line. **Identify** — `list_metadata` and its by-id companions —
-answers which series exist and hands back the id for each. **Act** — every read, removal, rename and
-copy — takes that id. A caller that knows a series only by its attributes does the first half once
-and keeps the id; there is deliberately no combined resolver, because the two halves have different
+answers which series exist and hands back the id for each. **Act** — every read, removal and copy —
+takes that id. A caller that knows a series only by its attributes does the first half once and
+keeps the id; there is deliberately no combined resolver, because the two halves have different
 costs and a caller that repeats a lookup it could have cached should be able to see that it is.
 
 Three properties make an id safe to persist:
@@ -368,7 +368,13 @@ _checked_, where `read_by_ids_range` _clips_: a start off the series' own grid, 
 past its end, is an error rather than the smaller answer a range would return. A range says
 "whatever lies between these bounds" — which is what an export wants, knowing the bounds and not the
 step count — while a window says "these exact steps", and a caller that asked for 24 and silently
-received 3 has a bug the store can see and it cannot.
+received 3 has a bug the store can see and it cannot. What a range clips _to_ is type-specific: a
+regular series' value covers its step, so a `start` inside a step selects that step and the sliced
+`initial_timestamp` can precede `start`; an irregular series' value is an instant, so only
+timestamps at or after `start` are selected; and a forecast window is a whole array with nothing
+partial to return, so a forecast's `start` must be a window boundary at or before the last window
+(an error otherwise) and only its `end` clips. See
+[Reading a time range](../reference/rust-api.md#reading-a-time-range).
 
 ### The owner guard
 

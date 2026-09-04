@@ -191,6 +191,11 @@ impl StaticGroup {
         F: FnOnce(&[[u8; 32]], Dtype, &mut Vec<u8>) -> Result<()>,
     {
         let dtype = self.element_type.physical_dtype();
+        // Cleared before the read, not after: the backend clears and refills the
+        // buffer per placement, so a failure part-way leaves it holding fewer
+        // columns than `ids()`. A caller that ignores the error must see an
+        // empty buffer, not a partial one that still claims to be a row.
+        self.filled = false;
         read(&self.hashes, dtype, &mut self.buf)?;
         self.filled = true;
         Ok(())
@@ -253,6 +258,35 @@ impl StaticReader {
 
     pub(crate) fn mark_read(&mut self, at: DateTime<Utc>) {
         self.last_read = Some(at);
+    }
+
+    /// Drop every group's buffer and the timestamp they were read at.
+    ///
+    /// A read is one operation over the whole reader, so its failure has to
+    /// leave the whole reader empty. `StaticGroup::fill` already clears the
+    /// group it is filling, but that is per group, and it is the groups it does
+    /// *not* reach that are the problem: a failure part way through left the
+    /// groups already filled holding the **new** timestamp's values while the
+    /// rest held the **previous** read's, and the recorded read timestamp still
+    /// named the previous one — so a caller that ignored the error read two
+    /// different instants side by side, both labelled as the earlier one.
+    /// Resolving the timestamp can fail before any group is touched at all,
+    /// which is the same hazard with none of them updated.
+    ///
+    /// [`Store::static_read`] therefore calls this on *every* error path rather
+    /// than once before the loop: invalidating up front handles only the second
+    /// case, and leaves the first exactly as it was.
+    ///
+    /// Public because a binding can refuse a read before the core sees it — the
+    /// Julia wrapper checks the bound's spelling against the reader's timeline,
+    /// which the C ABI's bare `i64` cannot carry — and such a refusal owes the
+    /// caller the same empty reader that a refusal inside [`Store::static_read`]
+    /// produces.
+    pub fn invalidate(&mut self) {
+        self.last_read = None;
+        for group in &mut self.groups {
+            group.filled = false;
+        }
     }
 
     /// Map a wall-clock timestamp to its 0-based array index on the reader's
@@ -655,6 +689,34 @@ pub struct WindowSlot {
 }
 
 impl WindowSlot {
+    /// The array this slot reads.
+    pub(crate) fn hash(&self) -> &[u8; 32] {
+        &self.hash
+    }
+
+    /// Whether a read of `window` would be answered from the cached block
+    /// without touching the backend -- the case a caller has to probe for
+    /// itself, because a removal since the block was read is invisible to a
+    /// read that does no I/O.
+    pub(crate) fn serves_from_cache(&self, window: usize) -> bool {
+        match self.read {
+            WindowRead::Dense { .. } => {
+                let cols = self.block_cols.max(1);
+                let start = (window / cols) * cols;
+                let end = (start + cols).min(self.count);
+                self.cached.as_ref() == Some(&(start..end))
+            }
+            WindowRead::Derived { .. } => false,
+        }
+    }
+
+    /// Drop the cached block and the last window: the array is gone, so
+    /// neither describes anything the store still holds.
+    pub(crate) fn forget(&mut self) {
+        self.cached = None;
+        self.filled = false;
+    }
+
     /// Physical dtype of the window bytes, derived from [`Self::element_type`].
     pub fn dtype(&self) -> Dtype {
         self.element_type.physical_dtype()
@@ -714,6 +776,10 @@ impl WindowSlot {
         // The slot's element type comes from the catalog; the backend is told
         // the dtype rather than inferring one from what it stored.
         let dtype = self.element_type.physical_dtype();
+        // Cleared before the read: the derived path fails before it touches the
+        // buffer, so without this a failed read left `window()` serving the
+        // previous window as if it were the one asked for.
+        self.filled = false;
         match self.read {
             WindowRead::Dense { count_axis } => {
                 let cols = self.block_cols.max(1);
@@ -865,6 +931,24 @@ impl ForecastReader {
 
     pub(crate) fn mark_read(&mut self, at: DateTime<Utc>) {
         self.last_read = Some(at);
+    }
+
+    /// Drop every slot's window and the timestamp they were read at, for the
+    /// reason [`StaticReader::invalidate`] gives.
+    ///
+    /// The slots' cached *blocks* are deliberately kept: `cached` is the I/O
+    /// optimization that makes stepping a timeline cheap, and it describes what
+    /// the backend holds rather than what the reader is advertising. `filled` is
+    /// the half that gates [`WindowSlot::window`], so clearing it is what makes
+    /// a failed read read as empty. A block that has genuinely gone is dropped
+    /// by `WindowSlot::forget` on the path that discovers it.
+    ///
+    /// Public for the reason [`StaticReader::invalidate`] gives.
+    pub fn invalidate(&mut self) {
+        self.last_read = None;
+        for slot in &mut self.slots {
+            slot.filled = false;
+        }
     }
 
     /// Window index for `at` on the forecast timeline (`initial + k·interval`).

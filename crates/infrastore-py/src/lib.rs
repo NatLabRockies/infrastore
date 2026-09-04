@@ -2215,18 +2215,6 @@ impl PyStore {
             .map_err(map_err)
     }
 
-    /// Rename the association filed under `id`.
-    ///
-    /// Only the catalog name changes, and the id is the same afterwards — a
-    /// rename moves the name, not the reference, so anything holding the id
-    /// keeps working.
-    fn rename_time_series(&mut self, id: i64, new_name: &str) -> PyResult<()> {
-        self.store_mut()?
-            .rename_time_series(core_lib::TimeSeriesId(id), new_name)
-            .map_err(map_err)?;
-        Ok(())
-    }
-
     /// Return a list of catalog metadata dicts matching the filter. Each dict
     /// has `id` — the association id that addresses the series — plus
     /// `owner_id`, `owner_type`, `owner_category`, `time_series_type`, `name`,
