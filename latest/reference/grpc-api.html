@@ -413,7 +413,7 @@ bound whose spelling the series cannot answer (<code>InvalidArgument</code>) rat
 refuses a ranged bulk read whose selection mixes zoneless series with instant-bearing ones.
 <code>ListMetadataReq.zoneless</code> is the constructive half — <code>true</code> selects the wall-clock series, <code>false</code>
 selects everything that accepts an instant bound, including the rows that recorded no reference.</p>
-<p>See <a href="../explanation/data-model.html#time-references">Time references</a> for the full rules.</p>
+<p>See <a href="../explanation/time-references.html">Time references</a> for the full rules.</p>
 <h2 id="forecasts-over-grpc"><a class="header" href="#forecasts-over-grpc">Forecasts Over gRPC</a></h2>
 <p>The service is read-only, but its read surface covers dense forecasts. Forecast associations created
 through the <a href="./rust-api.html#forecasts">Rust core</a> or <a href="./c-abi.html#forecasts">C ABI</a> appear in

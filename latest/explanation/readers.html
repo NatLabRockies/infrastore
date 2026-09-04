@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>How-To Guides - infrastore Documentation</title>
+        <title>Readers - infrastore Documentation</title>
 
 
         <!-- Custom HTML head -->
@@ -150,7 +150,7 @@
                         <a href="https://github.com/NatLabRockies/infrastore" title="Git repository" aria-label="Git repository">
                             <i id="git-repository-button" class="fa fa-github"></i>
                         </a>
-                        <a href="https://github.com/NatLabRockies/infrastore/edit/main/docs/src/how-to/index.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                        <a href="https://github.com/NatLabRockies/infrastore/edit/main/docs/src/explanation/readers.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
                             <i id="git-edit-button" class="fa fa-edit"></i>
                         </a>
 
@@ -184,26 +184,85 @@
 
                 <div id="content" class="content">
                     <main>
-                        <h1 id="how-to-guides"><a class="header" href="#how-to-guides">How-To Guides</a></h1>
-<p>Task-oriented recipes. Each page solves one problem in the fewest steps and links out to the
-<a href="../guides/index.html">guides</a> and <a href="../reference/index.html">reference</a> for depth.</p>
+                        <h1 id="readers"><a class="header" href="#readers">Readers</a></h1>
+<p>A <strong>reader</strong> is the columnar bulk-read surface: build one once over a filter, then walk the timeline
+and take every matching series' value at each instant. It is the access pattern the on-disk layout
+is built for, and the one a parent package hands to its users, so it is worth understanding as a
+concept rather than as two type names.</p>
+<p>There are two, and they are described signature-by-signature in each language's reference
+(<a href="../reference/rust-api.html#readers">Rust</a>, <a href="../reference/python-api.html#readers">Python</a>,
+<a href="../reference/julia-api.html#readers-per-timestamp-iteration">Julia</a>,
+<a href="../reference/c-abi.html#readers">C ABI</a>):</p>
+<div class="table-wrapper"><table><thead><tr><th>Reader</th><th>Sweeps</th></tr></thead><tbody>
+<tr><td><code>StaticReader</code></td><td>both static types — one value per column per instant</td></tr>
+<tr><td><code>ForecastReader</code></td><td>the four forecast types — one whole window per column per issue time</td></tr>
+</tbody></table>
+</div>
+<p>Neither is exposed over gRPC.</p>
+<h2 id="why-they-exist"><a class="header" href="#why-they-exist">Why They Exist</a></h2>
+<p>Static arrays that share a shape are packed as <strong>columns of one dataset</strong>, with the HDF5 chunking
+<code>(1, cols, *element_shape)</code> — a single chunk holds one timestamp across every column. So "every
+generator's output at hour 4 371" is one chunk read, while "this one generator's whole year" has to
+touch every chunk band in the dataset.</p>
+<p>That asymmetry is deliberate
+(<a href="./design-choices.html#data-orientation-optimize-for-reading-every-component-at-one-timestamp">Design Choices</a>),
+and a reader is the API that spends it correctly. A loop of whole-series reads walks the slow
+direction once per component; a reader walks the fast one once per timestep.</p>
+<p>The forecast case is the same argument with a different unit. A dense forecast array is chunked in
+bounded blocks along the window axis, so reading one window decompresses its whole block. A
+<code>ForecastReader</code> sizes its cache to that block width, so a sweep over the window timeline
+decompresses each block exactly once — where independent per-window reads re-decompress overlapping
+data every step.</p>
+<h2 id="a-reader-is-a-plan-not-a-cursor"><a class="header" href="#a-reader-is-a-plan-not-a-cursor">A Reader Is a Plan, Not a Cursor</a></h2>
+<p>Building one resolves the filter to a fixed set of columns, pins the timeline, and allocates the
+buffers each read will overwrite in place. It holds no borrow on the store and advances no position
+of its own: the caller names the instant, the store fills the buffers, the caller walks the columns.
+A tight simulation loop therefore allocates nothing after the build.</p>
+<p>Two consequences worth planning around:</p>
 <ul>
-<li><a href="./install.html">Install the Native Library</a> — Build the cdylib and system dependencies.</li>
-<li><a href="./integrate-python.html">Integrate with Python</a> — Get the <code>infrastore</code> wheel into your project.</li>
-<li><a href="./integrate-julia.html">Integrate with Julia</a> — Wire <code>InfraStore.jl</code> to the native library.</li>
-<li><a href="./run-server.html">Run the gRPC Server</a> — Serve a store for remote readers.</li>
-<li><a href="./use-cli.html">Use the <code>infrastore</code> CLI</a> — Load and inspect a store from the command line.</li>
+<li><strong>The column set is frozen at build time.</strong> A series added afterwards is not in the reader; build
+a new one.</li>
+<li><strong>The cost is paid up front.</strong> Building resolves metadata for every matching row, so build once
+outside the loop — never per timestep.</li>
 </ul>
+<h2 id="one-timeline-per-reader"><a class="header" href="#one-timeline-per-reader">One Timeline Per Reader</a></h2>
+<p>A reader materializes <strong>one</strong> timestamp axis shared by every column, because that is what makes a
+read a single positional lookup rather than a per-column search. What "one timeline" requires
+depends on the type the filter names:</p>
+<div class="table-wrapper"><table><thead><tr><th>Filtered type</th><th>Resolution</th><th>The columns must…</th></tr></thead><tbody>
+<tr><td><code>SingleTimeSeries</code></td><td>pinned</td><td>share one grid — <code>initial_timestamp</code> and <code>length</code></td></tr>
+<tr><td><code>NonSequentialTimeSeries</code></td><td>none</td><td>lie on one timestamp vector (the on-disk cohort)</td></tr>
+</tbody></table>
+</div>
+<p>A mismatched cohort is refused at <strong>build</strong> time, where the error can name the series that disagree,
+rather than at the first read. The same applies to
+<a href="./time-references.html#query-bounds-and-mixed-selections">time-reference coherence</a>: a reader whose
+matched series mix wall clocks with instants is refused, because no single axis can be spelled for
+both.</p>
+<h2 id="sharing-is-resolved-once"><a class="header" href="#sharing-is-resolved-once">Sharing Is Resolved Once</a></h2>
+<p>Where the static side shares storage by packing many components into one dataset, forecasts share it
+by <a href="./content-addressing.html">content addressing</a>: identical arrays are stored once. A
+<code>ForecastReader</code> inherits that at read time — it reads each distinct backing array a single time per
+step and fans the result out to every column referencing it, so a forecast shared by a hundred
+components costs one decompression, not a hundred.</p>
+<p>That fan-out is visible to the caller: an entry's <strong>slot</strong> identifies the underlying array, so
+per-component work downstream of the read can dedup the same way the read did rather than repeating
+itself once per referencing component.</p>
+<h2 id="when-not-to-use-one"><a class="header" href="#when-not-to-use-one">When Not to Use One</a></h2>
+<p>A reader is the wrong tool for the inverse access — one component's full history, an export, a plot
+of a single series. Reach for <code>read_by_ids</code> over the ids you want, which reads packed series in one
+decompress-once pass per dataset. It is still the slow direction against this layout, but it is far
+cheaper than a <code>read_by_id</code> per series, and much cheaper than building a reader you will step once.</p>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../guides/benchmarks.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../explanation/time-references.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
-                            <a rel="next prefetch" href="../how-to/install.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../explanation/storage-model.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <i class="fa fa-angle-right"></i>
                             </a>
 
@@ -213,11 +272,11 @@
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../guides/benchmarks.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../explanation/time-references.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <i class="fa fa-angle-left"></i>
                     </a>
 
-                    <a rel="next prefetch" href="../how-to/install.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../explanation/storage-model.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <i class="fa fa-angle-right"></i>
                     </a>
             </nav>

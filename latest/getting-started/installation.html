@@ -245,8 +245,8 @@ Pkg.add("InfraStore")
 prebuilt, statically linked library for the platform — Linux x86_64 and aarch64 (glibc), macOS
 x86_64 and Apple Silicon, and Windows x86_64 — and nothing else needs installing. To run against a
 locally built library instead (a working tree, or a platform outside that list), set
-<code>INFRASTORE_LIB</code>; it takes precedence over the artifact.
-<a href="../how-to/integrate-julia.html">Integrate with Julia</a> has both recipes, and
+<code>INFRASTORE_LIB</code>; it takes precedence over the artifact. The
+<a href="../guides/julia.html#install">Julia guide</a> has both recipes, and
 <a href="../releasing.html#5-julia--general">Releasing</a> explains why the binary is self-hosted rather than a
 JLL.</p>
 <p>The rest of this page covers building the workspace from a checkout.</p>
@@ -281,6 +281,19 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 </code></pre>
 <p>The workspace Cargo config (<code>.cargo/config.toml</code>) sets macOS linker flags so
 <code>cargo build --workspace</code> can link the PyO3 cdylib without <code>maturin</code>. On Linux those flags are inert.</p>
+<h2 id="build-the-native-library"><a class="header" href="#build-the-native-library">Build the Native Library</a></h2>
+<p><code>InfraStore.jl</code> and any other C consumer load the C ABI cdylib. Building it is the one target most
+people need out of a checkout:</p>
+<pre><code class="language-sh">cargo build -p infrastore-ffi --release
+# -&gt; target/release/libinfrastore_ffi.{dylib,so,dll}
+# Regenerates the C header at crates/infrastore-ffi/include/infrastore.h
+</code></pre>
+<p>Point consumers at it with <code>INFRASTORE_LIB</code>, which takes precedence over the artifact <code>Pkg</code>
+installed:</p>
+<pre><code class="language-sh">export INFRASTORE_LIB=$PWD/target/release/libinfrastore_ffi.dylib  # .so on Linux
+</code></pre>
+<p>Add it to your shell profile to make it permanent. The Python wheel is built separately with
+<code>maturin</code> — see <a href="../guides/python.html#from-a-checkout">the Python guide</a>.</p>
 <h2 id="crates-in-the-workspace"><a class="header" href="#crates-in-the-workspace">Crates in the Workspace</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Crate</th><th>What it builds</th></tr></thead><tbody>
 <tr><td><code>infrastore-core</code></td><td>Types, HDF5 + SQLite storage, hashing, Rust API</td></tr>
@@ -294,18 +307,18 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 </div>
 <h2 id="next-steps"><a class="header" href="#next-steps">Next Steps</a></h2>
 <ul>
-<li>Build a store and round-trip a series in the <a href="./quick-start-python.html">Python</a> or
-<a href="./quick-start-julia.html">Julia</a> Quick Start.</li>
-<li>Set up a language binding: <a href="../how-to/integrate-python.html">Python</a> ·
-<a href="../how-to/integrate-julia.html">Julia</a>.</li>
-<li>Stand up the <a href="../how-to/run-server.html">gRPC server</a>.</li>
+<li>Build a store and round-trip a series in the <a href="./quick-start-python.html">Python</a>,
+<a href="./quick-start-julia.html">Julia</a>, or <a href="./quick-start-cli.html">CLI</a> Quick Start.</li>
+<li>Read the developer guide for your language: <a href="../guides/python.html">Python</a> ·
+<a href="../guides/julia.html">Julia</a> · <a href="../guides/rust.html">Rust</a> · <a href="../guides/cli.html">CLI</a>.</li>
+<li>Stand up the <a href="../guides/server.html">gRPC server</a>.</li>
 </ul>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../introduction.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../guides/embedding.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
@@ -319,7 +332,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../introduction.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../guides/embedding.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <i class="fa fa-angle-left"></i>
                     </a>
 

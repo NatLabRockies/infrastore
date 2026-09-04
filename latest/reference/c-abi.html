@@ -226,7 +226,7 @@ milliseconds either way, so <code>time_range_zoneless</code> is what tells a wal
 one, and the store refuses a bound whose spelling the series cannot answer rather than coercing
 it. The <code>zoneless</code> filter argument on the list/filter exports is a tri-state <code>int32_t</code>: negative
 means no filter, <code>0</code> selects the instant-bearing rows (including those with no reference), and <code>1</code>
-selects the wall-clock rows. See <a href="../explanation/data-model.html#time-references">Time references</a>.</li>
+selects the wall-clock rows. See <a href="../explanation/time-references.html">Time references</a>.</li>
 <li><strong>Features</strong> are passed as a JSON object string whose values are int / float / bool / string. An
 add call whose feature names shadow a time-series or key field (<code>name</code>, <code>resolution</code>, <code>owner_id</code>,
 …) fails with <code>INFRASTORE_ERR_INVALID_PARAMETER</code>; see
@@ -435,8 +435,8 @@ discriminant — <code>0 = SingleTimeSeries</code>, <code>1 = NonSequentialTimeS
 per <a href="#type-filters">Type filters</a> below. Forecast values are dtype-generic raw little-endian byte
 buffers with explicit dimensions — the same <code>element_type</code>, <code>ndims</code>, <code>dims_ptr</code>, <code>data_ptr</code>,
 <code>data_byte_len</code> convention as the static add functions (see the
-<a href="../explanation/data-model.html#forecasts">data model</a> for the conventional shapes); the store records
-the windowing parameters in metadata and does not interpret the layout. A
+<a href="../explanation/time-series-types.html#forecasts">data model</a> for the conventional shapes); the store
+records the windowing parameters in metadata and does not interpret the layout. A
 <code>DeterministicSingleTimeSeries</code> (<code>3</code>) is read like any other forecast but cannot be written through
 <code>infrastore_store_add_forecast</code> — it is derived via <code>infrastore_store_transform_single_time_series</code>.</p>
 <p>The C ABI keeps these per-type add functions as low-level transport (the higher-level bindings layer
@@ -1133,7 +1133,7 @@ a buffer of <code>*needed + 1</code>. This is the pattern <code>TimeSeries.jl</c
 # Library at: target/release/libinfrastore_ffi.{dylib,so,dll}
 </code></pre>
 <p>Point consumers at it via the <code>INFRASTORE_LIB</code> environment variable (see the
-<a href="../how-to/integrate-julia.html">Julia how-to</a>).</p>
+<a href="../guides/julia.html#install">Julia guide</a>).</p>
 <h2 id="tracing"><a class="header" href="#tracing">Tracing</a></h2>
 <pre><code class="language-c">int32_t infrastore_store_init_logging(const char *filter);
 </code></pre>

@@ -1,0 +1,364 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Time References - infrastore Documentation</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Time-series storage for power-systems and energy simulations, with Rust, Python, and Julia bindings">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../custom.css">
+        <link rel="stylesheet" href="../pagetoc.css">
+        <link rel="stylesheet" href="../version-selector.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">infrastore Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/NatLabRockies/infrastore" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/NatLabRockies/infrastore/edit/main/docs/src/explanation/time-references.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="time-references"><a class="header" href="#time-references">Time References</a></h1>
+<p>The store records <strong>instants</strong>. A <code>time_reference</code> records what those instants were <em>written as</em>, so
+a series comes back the way it went in instead of being relabeled UTC at every boundary.</p>
+<div class="table-wrapper"><table><thead><tr><th>Spelling</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>utc</code></td><td>An instant, written as UTC.</td></tr>
+<tr><td><code>-07:00</code></td><td>An instant, written at a fixed offset from UTC.</td></tr>
+<tr><td><code>America/Denver</code></td><td>An instant, written in a named IANA zone. Held opaquely.</td></tr>
+<tr><td><code>zoneless</code></td><td>A wall clock. Names no instant; the store holds it as if UTC.</td></tr>
+<tr><td><em>unset</em></td><td>Unspecified — <strong>not</strong> a claim the timestamps were written as UTC.</td></tr>
+</tbody></table>
+</div>
+<p>Three of the four name an instant; <code>zoneless</code> does not, and most rules below split on that binary
+rather than on the four spellings. An unset reference groups with the zoned ones.</p>
+<p>Each binding <strong>infers</strong> the spelling from the input type, so nothing takes a new required argument:</p>
+<div class="table-wrapper"><table><thead><tr><th>Binding</th><th><code>utc</code></th><th>fixed offset</th><th>named zone</th><th><code>zoneless</code></th></tr></thead><tbody>
+<tr><td>Python</td><td><code>timezone.utc</code></td><td>fixed-offset <code>tzinfo</code></td><td><code>tzinfo</code> exposing a <code>key</code> (<code>ZoneInfo</code>)</td><td>naive <code>datetime</code></td></tr>
+<tr><td>Julia</td><td>UTC <code>ZonedDateTime</code></td><td><code>FixedTimeZone</code></td><td><code>VariableTimeZone</code>, by its name</td><td>bare <code>DateTime</code></td></tr>
+<tr><td>CLI</td><td><code>Z</code> in text, or the flag</td><td><code>-07:00</code> in text or flag</td><td><code>--assume-timezone America/Denver</code></td><td>bare timestamp, <code>--zoneless</code></td></tr>
+<tr><td>Rust</td><td><code>DateTime&lt;Utc&gt;</code></td><td>declare it</td><td>declare it</td><td><strong>declare it</strong> — no naive type</td></tr>
+</tbody></table>
+</div>
+<p><code>ZoneInfo("UTC")</code> records the <em>zone</em> <code>UTC</code>, not the literal <code>utc</code>. The two render identically
+forever; the difference shows up only in what the catalog reports back, which is the point of
+recording a spelling at all.</p>
+<h2 id="a-spelling-is-not-a-grid"><a class="header" href="#a-spelling-is-not-a-grid">A spelling is not a grid</a></h2>
+<p>A reference records how timestamps were <em>written</em>. It does not change how the grid is <em>stepped</em>:
+<code>resolution</code> and <code>interval</code> are durations, so an hourly series has hourly <strong>instants</strong> whatever its
+reference says. Rendering an hourly <code>America/Denver</code> series across the November fall-back gives
+<code>01:00-06:00</code>, <code>01:00-07:00</code>, <code>02:00-07:00</code> — two identical wall clocks, two distinct instants,
+correctly ordered.</p>
+<p>That is the difference between two things "store this in Denver time" can mean:</p>
+<ul>
+<li><strong>Instants, displayed in Denver.</strong> Storage is untouched — UTC instants plus a label. <strong>This is
+what a named zone means here.</strong></li>
+<li><strong>A local-clock grid</strong> — hourly <em>by the clock</em>, so a 23-hour day in March and a 25-hour one in
+November. This is inexpressible in <code>SingleTimeSeries</code> and the dense forecasts, whose grid is a
+<code>Period</code>: a fixed count of milliseconds. Use
+<a href="./time-series-types.html#nonsequentialtimeseries"><code>NonSequentialTimeSeries</code></a>, which carries an
+explicit instant per value, so the caller derives those days and the data records them rather than
+arithmetic implying them.</li>
+</ul>
+<p>Someone with 8760 naive Denver timestamps who localizes only the first and passes <code>resolution = 1h</code>
+gets labels shifted by an hour after each transition, and nothing in the data distinguishes that
+from a correct series. The store cannot detect it; the split above is the thing to know.</p>
+<h2 id="months-step-on-the-utc-calendar"><a class="header" href="#months-step-on-the-utc-calendar">Months step on the UTC calendar</a></h2>
+<p><code>Period::Months</code> is calendar arithmetic, so unlike a fixed period it has to be told <em>which</em>
+calendar. It uses the stored <strong>UTC</strong> one, and the reference does not redirect it. TimeZones.jl steps
+the <em>local</em> clock instead, so the two disagree by an hour at every DST transition and by up to a day
+at a month boundary.</p>
+<p>Local-frame stepping is refused for two independent reasons: it is the local → instant direction the
+store deliberately never runs (below), and it would let a spelling decide <em>which instants</em> a series
+contains. A calendar period on a zoned series is warned about on write, so the disagreement is
+findable before it is filed as a bug. A caller who wants months on a local calendar wants a
+local-clock grid, and the answer is the one above: <code>NonSequentialTimeSeries</code>.</p>
+<h2 id="why-a-named-zone-is-safe"><a class="header" href="#why-a-named-zone-is-safe">Why a named zone is safe</a></h2>
+<p>The ambiguity a named zone is feared for lives in the <strong>local → instant</strong> direction, and the core
+never runs it.</p>
+<ul>
+<li><strong>On input</strong> that direction has already happened, in the caller's own datetime library. Julia
+refuses an ambiguous local time outright; Python resolves it through <code>fold</code>. Either way the
+binding is handed a value that already names one definite instant. The CLI is the exception,
+because it is handed <em>text</em> — see below.</li>
+<li><strong>On output</strong> the store runs only <strong>instant → local</strong>, which is total and single-valued: one
+instant maps to exactly one wall clock in a named zone, and converting it back yields the same
+instant.</li>
+</ul>
+<p>So a year-long Denver series stamped <code>-07:00</code> renders every timestamp after the March transition an
+hour wrong, while the same series stamped <code>America/Denver</code> renders all of them correctly. Recording
+"the offset in effect at <code>initial_timestamp</code>" is the one option that is quietly incorrect, which is
+why it is not among the four spellings.</p>
+<p>Two caveats belong here rather than in the type. Rendering a named zone is
+<strong>tz-database-dependent</strong>, so a retroactive rule change moves the displayed local time of an
+already-stored instant — the store records the instant, and the label is a rendering hint. And a
+zone name's <strong>existence is audited, never gated</strong>: the core checks only that a name is shaped like
+an IANA name and cannot be read as an offset or as either literal. Every layer that <em>has</em> a database
+— the CLI via <code>chrono-tz</code>, Python via <code>zoneinfo</code>, Julia via <code>TimeZones</code> — warns on a name it does
+not recognize and stores it anyway, and <code>infrastore store-info</code> reports the catalog's distinct
+spellings with unrecognized zones flagged. Gating would turn a rare read-time error into a
+write-time error coupled to <em>our</em> release cadence: when IANA adds a zone, a caller whose own
+database already has it would be refused until they upgraded.</p>
+<h2 id="the-cli-is-where-local--instant-actually-happens"><a class="header" href="#the-cli-is-where-local--instant-actually-happens">The CLI is where local → instant actually happens</a></h2>
+<p>Every other binding is handed an already-resolved datetime. The CLI is handed text, so
+<code>--assume-timezone America/Denver</code> over a zoneless column is the one place in the system that runs
+local → instant itself, and <code>chrono-tz</code> answers in three values — each with its own behavior, per
+row:</p>
+<div class="table-wrapper"><table><thead><tr><th>Result</th><th>Meaning</th><th>CLI behavior</th></tr></thead><tbody>
+<tr><td>a single instant</td><td>the ordinary case</td><td>ingest it</td></tr>
+<tr><td>two candidates</td><td>the repeated fall-back hour</td><td><strong>error</strong>, naming the row and both candidates</td></tr>
+<tr><td>none</td><td>the skipped spring-forward hour</td><td><strong>error</strong>, naming the row</td></tr>
+</tbody></table>
+</div>
+<p>Rejecting loudly, per row, with both candidates named is what makes a named zone acceptable here;
+silently picking one is not. Reading is unaffected: rendering a stored instant in a named zone is
+the total direction, so <code>--assume-timezone</code> plays no part in it.</p>
+<h2 id="query-bounds-and-mixed-selections"><a class="header" href="#query-bounds-and-mixed-selections">Query bounds and mixed selections</a></h2>
+<p>A bound must be spelled the way the series is, and a mismatch is refused rather than coerced:</p>
+<div class="table-wrapper"><table><thead><tr><th>Series reference</th><th>Wall-clock bound</th><th>Instant bound</th></tr></thead><tbody>
+<tr><td><code>utc</code> / offset / zone</td><td><strong>error</strong></td><td>accept — any offset names the same instant</td></tr>
+<tr><td><code>zoneless</code></td><td>accept</td><td><strong>error</strong></td></tr>
+<tr><td><em>unset</em></td><td><strong>error</strong></td><td>accept</td></tr>
+</tbody></table>
+</div>
+<p>An off-grid bound still names an unambiguous instant, so flooring it is well-defined — that is why
+<code>time_range</code> snaps. A wall-clock bound against a series that records instants is a <strong>category
+error</strong>: there is no defined mapping to fall back on. Bounds stay unconstrained in <em>precision</em>,
+though: a sub-millisecond bound names a real instant even though a stored one may not.</p>
+<p>The same partition drives two rejections and one filter:</p>
+<ol>
+<li>A <strong>ranged bulk read</strong> over a selection spanning both groups is refused — no single bound is
+valid for all of it. An unranged one is unaffected: without a bound there is nothing to disagree
+about, and each series carries its own spelling back.</li>
+<li>A <strong><code>StaticReader</code></strong> materializes one timestamp axis, so a mixed cohort is refused at <em>build</em>
+time, where the error can name the series that disagree. Mixing <code>utc</code>, an offset, and a named
+zone in one cohort is fine — all three name instants, and the axis is spelled with the cohort's
+reference when every member agrees and <code>utc</code> when they merely agree on naming instants.</li>
+<li><strong><code>ListFilter::zoneless</code></strong> is the constructive half: <code>true</code> selects the wall-clock series,
+<code>false</code> selects everything that accepts an instant bound — the three zoned spellings <em>and</em> the
+rows that left the reference unset. It is a binary predicate rather than a match on a specific
+spelling because an exact match cannot name that second group at all (the trap <code>component_field</code>
+documents), and here those rows are a coherence group rather than an oversight.</li>
+</ol>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../explanation/data-model.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../explanation/readers.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../explanation/data-model.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../explanation/readers.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="../mermaid.min.js"></script>
+        <script src="../mermaid-init.js"></script>
+        <script src="../pagetoc.js"></script>
+        <script src="../version-selector.js"></script>
+
+
+
+    </div>
+    </body>
+</html>

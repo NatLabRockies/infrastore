@@ -242,7 +242,7 @@ an optional per-step element shape (e.g. the coefficient tuple of a cost curve)<
 <li><strong>Three language bindings</strong> — Use it from Rust, Python, or Julia with the same on-disk format</li>
 <li><strong>An <code>infrastore</code> command-line tool</strong> — Load time series from CSV, and list, read, export, plot,
 diff, and inspect a store straight from a terminal, with <code>table</code> / <code>json</code> / <code>jsonl</code> / <code>csv</code> output
-(<a href="./how-to/use-cli.html">CLI how-to</a>)</li>
+(<a href="./guides/cli.html">CLI guide</a>)</li>
 <li><strong>Read-only gRPC service</strong> — Serve a store over the network for remote readers, with optional
 API-key authentication</li>
 <li><strong>Designed for power-systems data</strong> — The data model maps onto
@@ -250,12 +250,16 @@ API-key authentication</li>
 <a href="https://github.com/NatLabRockies/infrasys">infrasys</a> owners, categories, and time-series concepts</li>
 </ul>
 <h2 id="who-should-read-this"><a class="header" href="#who-should-read-this">Who Should Read This</a></h2>
+<p>Most people reading this are building a package <strong>on top of</strong> infrastore — infrasys or
+InfrastructureSystems.jl, or something like them — rather than calling it directly. That is the
+first row, and it is the one page to read if you read only one.</p>
 <div class="table-wrapper"><table><thead><tr><th>Audience</th><th>Start here</th></tr></thead><tbody>
 <tr><td><strong>Developers of a package on top</strong></td><td><a href="./guides/embedding.html">Embedding in a Parent Package</a></td></tr>
+<tr><td><strong>Deciding how to model your data</strong></td><td><a href="./explanation/time-series-types.html">Time-Series Types</a></td></tr>
 <tr><td><strong>Python package developers</strong></td><td><a href="./guides/python.html">Python Developer Guide</a></td></tr>
 <tr><td><strong>Julia package developers</strong></td><td><a href="./guides/julia.html">Julia Developer Guide</a></td></tr>
 <tr><td><strong>Rust developers</strong></td><td><a href="./guides/rust.html">Rust Developer Guide</a></td></tr>
-<tr><td><strong>Command-line users</strong></td><td><a href="./how-to/use-cli.html">Use the <code>infrastore</code> CLI</a></td></tr>
+<tr><td><strong>Command-line users</strong></td><td><a href="./guides/cli.html">CLI Developer Guide</a></td></tr>
 <tr><td><strong>Anyone deploying the server</strong></td><td><a href="./guides/server.html">gRPC Server &amp; Client</a></td></tr>
 <tr><td><strong>Tooling &amp; forensics</strong></td><td><a href="./reference/file-format.html">On-Disk File Format</a></td></tr>
 </tbody></table>
@@ -264,9 +268,12 @@ API-key authentication</li>
 <ul>
 <li><strong>Setting up?</strong> Start with <a href="./getting-started/installation.html">Installation</a>.</li>
 <li><strong>Want the 60-second tour?</strong> Read the Quick Start for
-<a href="./getting-started/quick-start-python.html">Python</a> or
-<a href="./getting-started/quick-start-julia.html">Julia</a>. Rust users can go straight to the
+<a href="./getting-started/quick-start-python.html">Python</a>,
+<a href="./getting-started/quick-start-julia.html">Julia</a>, or
+<a href="./getting-started/quick-start-cli.html">the CLI</a>. Rust users can go straight to the
 <a href="./guides/rust.html">Rust Developer Guide</a>.</li>
+<li><strong>Not sure which type your data is?</strong> See
+<a href="./explanation/time-series-types.html#choosing-a-type">Choosing a Type</a>.</li>
 <li><strong>Want to understand how it works?</strong> Read the <a href="./explanation/architecture.html">Architecture</a>.</li>
 <li><strong>Need exact bytes on disk?</strong> See the <a href="./reference/file-format.html">On-Disk File Format</a>.</li>
 </ul>
@@ -276,7 +283,7 @@ API-key authentication</li>
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
 
-                            <a rel="next prefetch" href="getting-started/installation.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="guides/embedding.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <i class="fa fa-angle-right"></i>
                             </a>
 
@@ -287,7 +294,7 @@ API-key authentication</li>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
 
-                    <a rel="next prefetch" href="getting-started/installation.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="guides/embedding.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <i class="fa fa-angle-right"></i>
                     </a>
             </nav>

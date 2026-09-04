@@ -203,10 +203,10 @@ given timestamp</strong>, and accept that reading <strong>one component's entire
 <p><strong>Why.</strong> The workload that matters is simulation. A production-cost or power-flow model steps
 through time and, at each step, needs the value of every generator, load, and branch for that one
 timestamp — a slice <em>across</em> series, not <em>down</em> one. With this layout that slice is a single chunk
-read; the <a href="./storage-model.html#the-array-side-hdf5"><code>ForecastReader</code> / <code>StaticReader</code></a> columnar
-surface is built directly on it. The inverse access — pulling one component's full history — has to
-touch every chunk band and is slow by design. That trade is deliberate: the simulation read path is
-the hot one, and it is the one parent packages hand to their users.</p>
+read; the <a href="./readers.html"><code>ForecastReader</code> / <code>StaticReader</code></a> columnar surface is built directly on
+it. The inverse access — pulling one component's full history — has to touch every chunk band and is
+slow by design. That trade is deliberate: the simulation read path is the hot one, and it is the one
+parent packages hand to their users.</p>
 <p><strong>What this means for parent-package developers.</strong></p>
 <ul>
 <li>Lay out bulk writes so that series sharing a shape land in the same dataset — that is what fills
@@ -240,7 +240,7 @@ the entire year of windows.</p>
 <ul>
 <li><strong>A window sweep is cheap; naive per-window reads are not, unless you go through the reader.</strong>
 Because a chunk is the decompression unit, reading a single window still pulls its whole block.
-The <a href="./storage-model.html"><code>ForecastReader</code></a> sizes its in-memory cache to that same block width, so
+The <a href="./readers.html"><code>ForecastReader</code></a> sizes its in-memory cache to that same block width, so
 stepping the window timeline decompresses each block exactly once. Reach for <code>ForecastReader</code> (or
 read the whole array once and index it) rather than issuing an independent whole-array read per
 window — the latter re-decompresses overlapping data.</li>
@@ -382,7 +382,7 @@ id a deleted row already used, which is the one thing <code>AUTOINCREMENT</code>
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
-                            <a rel="next prefetch" href="../explanation/data-model.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../explanation/time-series-types.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <i class="fa fa-angle-right"></i>
                             </a>
 
@@ -396,7 +396,7 @@ id a deleted row already used, which is the one thing <code>AUTOINCREMENT</code>
                         <i class="fa fa-angle-left"></i>
                     </a>
 
-                    <a rel="next prefetch" href="../explanation/data-model.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../explanation/time-series-types.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <i class="fa fa-angle-right"></i>
                     </a>
             </nav>

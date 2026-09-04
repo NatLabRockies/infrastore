@@ -188,7 +188,7 @@
 <p>The Julia package is <strong><code>InfraStore.jl</code></strong> (module <code>InfraStore</code>); it wraps the <a href="./c-abi.html">C ABI</a>
 cdylib. The library is resolved from the <code>INFRASTORE_LIB</code> environment variable (development builds),
 or else from the <code>libinfrastore_ffi</code> artifact that <code>Pkg</code> downloads at install time (see
-<a href="../how-to/integrate-julia.html">Integrate with Julia</a>).</p>
+<a href="../guides/julia.html#install">Integrate with Julia</a>).</p>
 <pre><code class="language-julia">using InfraStore
 </code></pre>
 <p>Exported names (types first, then functions):</p>
@@ -738,7 +738,7 @@ parameterized by that <code>Deterministic</code>.</p>
 <a href="#types">Types</a>) and added through the generic <code>add_time_series!</code>. Each struct wraps a native
 <code>AbstractArray</code> of any supported element type and dimensionality — the binding derives the stored
 dtype and dims and converts to row-major bytes, just like the static <code>add_time_series!</code> (see the
-<a href="../explanation/data-model.html#forecasts">data model</a> for the conventional shapes).</p>
+<a href="../explanation/time-series-types.html#forecasts">data model</a> for the conventional shapes).</p>
 <p>The forecast <code>name</code> comes from the struct, e.g.
 <code>Deterministic(initial, resolution, horizon, interval, count, data, name)</code>.</p>
 <pre><code class="language-julia">add_time_series!(
@@ -1258,8 +1258,8 @@ clocks, so the strictly-increasing rule is checked after conversion. It must als
 spelling — one series records one reference.</li>
 <li>Milliseconds are lossless in both directions: the store records every instant to the millisecond
 and refuses a finer one on write, so this boundary cannot truncate a series written under that
-rule. See <a href="../explanation/data-model.html#timestamp-precision">timestamp precision</a>. (An artifact
-written before the rule may hold finer instants; those still truncate here.)</li>
+rule. See <a href="../explanation/time-series-types.html#timestamp-precision">timestamp precision</a>. (An
+artifact written before the rule may hold finer instants; those still truncate here.)</li>
 <li><code>resolution</code> is passed as a <code>Period</code> and converted to an ISO-8601 duration string; reads return
 resolution as a <code>Period</code> (<code>Millisecond</code> for fixed durations).</li>
 </ul>
@@ -1312,8 +1312,8 @@ that records instants, or a <code>ZonedDateTime</code> bound against a zoneless 
 <code>InvalidParameterError</code> rather than being coerced, and so does a <code>time_range</code> whose two ends
 disagree. <code>list_metadata</code>, <code>build_static_reader</code>, and the other filter-taking functions accept
 <code>zoneless=true|false</code> for building a coherent selection. See
-<a href="../explanation/data-model.html#time-references">Time references</a> for the full rules, including why a
-calendar <code>Month</code>/<code>Year</code> resolution still steps on the UTC calendar.</p>
+<a href="../explanation/time-references.html">Time references</a> for the full rules, including why a calendar
+<code>Month</code>/<code>Year</code> resolution still steps on the UTC calendar.</p>
 <p>Because a read always hands back a bare <code>DateTime</code>, the obvious round trip does <strong>not</strong> close on a
 series that records instants — the returned timestamp holds the instant, but its Julia type says
 wall clock:</p>

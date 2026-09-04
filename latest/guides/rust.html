@@ -245,6 +245,29 @@ the catalog row's id, which is both how every read and removal addresses the ser
 integer to store in your own object model when it needs to point at it (see
 <a href="../explanation/data-model.html#association-ids">Association ids</a>). Adding a series whose identity
 already exists returns <code>TimeSeriesError::DuplicateTimeSeries</code>.</p>
+<h3 id="descriptors"><a class="header" href="#descriptors">Descriptors</a></h3>
+<p>The descriptive attributes ride on the series object, not on the write call, so a read returns what
+the write declared:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use infrastore_core::{TimeReference, UnitSystem};
+
+let ts = SingleTimeSeries::new(initial, Duration::hours(1), data, "load")
+    .with_units("MW")
+    .with_quantity_kind("ActivePower")
+    .with_unit_system(UnitSystem::NaturalUnits)
+    .with_component_field("max_active_power")
+    .with_time_reference(TimeReference::Zone("America/Denver".into()))
+    .with_application_data(r#"{"source": "weather_year_2012"}"#);
+<span class="boring">}</span></code></pre></pre>
+<p><strong>A native Rust caller declares <code>time_reference</code> itself.</strong> Every other binding infers it from the
+input type — Python from <code>tzinfo</code>, Julia from <code>DateTime</code> versus <code>ZonedDateTime</code> — but
+<code>DateTime&lt;Utc&gt;</code> is already an instant, so there is nothing to infer from. Leaving it unset means
+<em>unspecified</em>, which is not a claim the timestamps were written as UTC. It is not inert: a query
+bound must be spelled the way the series is, and a selection spanning both coherence groups is
+refused. See <a href="../explanation/time-references.html">Time References</a>.</p>
+<p>None of these descriptors is part of a series' identity or of either content hash, so two adds
+differing only in one are a duplicate.</p>
 <h3 id="bulk-inserts"><a class="header" href="#bulk-inserts">Bulk inserts</a></h3>
 <p>For many series at once, <code>add_time_series_bulk</code> takes a <code>Vec&lt;AddRequest&gt;</code> and commits the whole
 batch atomically — any error rolls back every array and association in the call:</p>
@@ -290,6 +313,24 @@ I/O until <code>commit</code>, which is all-or-nothing. Dropping the session wit
 <p>Adding series one at a time with <code>add_time_series</code> instead packs them incrementally into shared
 default-width datasets; that stays space-efficient but writes each column with a read-modify-write,
 so prefer a bulk insert or session when loading in volume.</p>
+<h3 id="the-irregular-type"><a class="header" href="#the-irregular-type">The irregular type</a></h3>
+<p><code>NonSequentialTimeSeries</code> carries an explicit instant per value instead of a grid. Its constructor
+validates that the timestamps are strictly increasing and match the data length, and returns
+<code>Result&lt;Self, String&gt;</code>:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use infrastore_core::NonSequentialTimeSeries;
+
+// Values that exist only at these instants — asking between them is an error.
+let outages = NonSequentialTimeSeries::new(instants, data, "forced_outage")?;
+
+store.add_time_series(
+    42, "ThermalStandard", OwnerCategory::Component,
+    TimeSeriesData::NonSequentialTimeSeries(outages), Features::new(),
+)?;
+<span class="boring">}</span></code></pre></pre>
+<p>See <a href="../explanation/time-series-types.html#choosing-a-type">Choosing a Type</a> if you are deciding
+between it and a <code>SingleTimeSeries</code>.</p>
 <h2 id="read-a-series"><a class="header" href="#read-a-series">Read a Series</a></h2>
 <p>Every read takes a <code>TimeSeriesId</code> — the one an add returned, or one off a <code>list_metadata</code> row. The
 row's own type decides what comes back:</p>
@@ -369,8 +410,9 @@ let array = store.get_array_by_hash(&amp;meta.data_hash)?;
 <h2 id="forecasts"><a class="header" href="#forecasts">Forecasts</a></h2>
 <p>Dense forecasts are written through the generic <code>add_time_series</code> by wrapping a <code>Deterministic</code>,
 <code>Probabilistic</code>, or <code>Scenarios</code> object in <code>TimeSeriesData</code>. Each forecast object holds a
-<code>TypedArray</code> in its native shape (the <a href="../explanation/data-model.html#forecasts">data model</a> lists the
-conventional shapes per type); the store content-addresses it and records the windowing parameters:</p>
+<code>TypedArray</code> in its native shape (the <a href="../explanation/time-series-types.html#forecasts">data model</a>
+lists the conventional shapes per type); the store content-addresses it and records the windowing
+parameters:</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>use infrastore_core::{Deterministic, TimeSeriesData, TimeSeriesError, TypedArray};
@@ -455,6 +497,61 @@ let rows = store.list_metadata(
 // resolver, so ambiguity is the caller's to name rather than the store's.
 let [meta] = &amp;rows[..] else { panic!("expected exactly one match: {rows:?}") };
 <span class="boring">}</span></code></pre></pre>
+<h2 id="per-timestamp-reads-simulation-loop"><a class="header" href="#per-timestamp-reads-simulation-loop">Per-Timestamp Reads (Simulation Loop)</a></h2>
+<p>The layout is optimized for "every component's value at one timestamp", and a <strong>reader</strong> is the API
+for that. Build one once outside the loop, then step it; the buffers are reused, so a tight loop
+allocates nothing. A reader is a passive plan — it does not borrow the <code>Store</code>, so the read goes
+through <code>Store::static_read</code> / <code>Store::forecast_read</code>, which fill it. See
+<a href="../explanation/readers.html">Readers</a> for the concepts.</p>
+<h3 id="static-series"><a class="header" href="#static-series">Static series</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use infrastore_core::{ListFilter, TimeSeriesType};
+
+let mut reader = store.build_static_reader(ListFilter::new().resolution(Duration::hours(1)))?;
+for at in reader.timestamps().collect::&lt;Vec&lt;_&gt;&gt;() {
+    store.static_read(&amp;mut reader, at)?;
+    for group in reader.groups() {
+        let bytes = group.values();   // [num_columns, *element_shape], row-major LE
+        // group.keys()[j] identifies column j; group.dtype(), group.element_shape()
+    }
+}
+<span class="boring">}</span></code></pre></pre>
+<p><code>build_static_reader</code> covers both static types, and the filter decides what must hold:
+<code>SingleTimeSeries</code> (the default) must pin a resolution and share one grid; <code>NonSequentialTimeSeries</code>
+must pin <strong>no</strong> resolution — <code>reader.resolution()</code> is then <code>None</code> — and its columns must lie on one
+timestamp vector:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let mut reader = store.build_static_reader(
+    ListFilter::new().time_series_type(TimeSeriesType::NonSequentialTimeSeries),
+)?;
+<span class="boring">}</span></code></pre></pre>
+<p>Whatever the kind, <code>reader.timestamps()</code> walks the timeline, so the loop body above is unchanged.
+Coherence is validated at <strong>build</strong> time, where the error can name the series that disagree — there
+is no presence mask, and <code>static_read</code> errors rather than clamps on an off-grid instant.</p>
+<h3 id="forecasts-1"><a class="header" href="#forecasts-1">Forecasts</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let mut reader = store.build_forecast_reader(
+    ListFilter::new()
+        .time_series_type(TimeSeriesType::Deterministic)
+        .resolution(Duration::hours(1)),
+)?;
+for k in 0..reader.count() {
+    let at = reader.interval().add_to(reader.initial_timestamp(), k as i64).unwrap();
+    store.forecast_read(&amp;mut reader, at)?;
+    for (i, entry) in reader.entries().iter().enumerate() {
+        let slot = reader.entry_slot(i);
+        let bytes = slot.window();    // window of slot.window_shape(), row-major LE
+        // entry.id() names the forecast; get_metadata_by_id resolves its owner
+    }
+}
+<span class="boring">}</span></code></pre></pre>
+<p>Entries that reference the same array and slice it the same way share one <code>WindowSlot</code>, and
+<code>forecast_read</code> performs one backend read per <strong>slot</strong> — so a forecast shared by a hundred owners is
+decompressed once per step. Dedup your own per-entry work by slot the same way. Note that
+<code>entry_slot(i)</code> takes the <em>entry</em> index, while <code>entry.slot()</code> is that slot's index into <code>slots()</code>.</p>
 <h2 id="copy-remove-and-maintain"><a class="header" href="#copy-remove-and-maintain">Copy, Remove, and Maintain</a></h2>
 <p><code>copy_time_series</code> re-points an existing association at another owner, optionally renaming it. It
 writes a metadata row only — arrays are content-addressed, so no data is duplicated — and it
@@ -608,7 +705,7 @@ does not coordinate multiple <em>processes</em> writing the same files either.</
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../guides/embedding.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../guides/index.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
@@ -622,7 +719,7 @@ does not coordinate multiple <em>processes</em> writing the same files either.</
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../guides/embedding.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../guides/index.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <i class="fa fa-angle-left"></i>
                     </a>
 

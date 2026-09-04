@@ -259,7 +259,7 @@ block-write path through the existing batch / <code>add_time_series_bulk</code> 
 </ul>
 <p><code>InfraStore.jl</code> loads the cdylib from the <code>INFRASTORE_LIB</code> environment variable when it is set, and
 otherwise from the <code>libinfrastore_ffi</code> artifact its <code>Artifacts.toml</code> pins to the matching GitHub
-Release (see <a href="../how-to/integrate-julia.html">Integrate with Julia</a>). See the
+Release (see <a href="../guides/julia.html#install">Integrate with Julia</a>). See the
 <a href="../guides/julia.html">Julia guide</a>, the <a href="../reference/c-abi.html">C ABI reference</a>, and the
 <a href="../reference/julia-api.html">Julia API reference</a>.</p>
 <h3 id="infrastructuresystemsjl-integration"><a class="header" href="#infrastructuresystemsjl-integration">InfrastructureSystems.jl Integration</a></h3>
@@ -294,8 +294,7 @@ one-object status document under <code>json</code>/<code>jsonl</code>). Only <co
 <li><strong>Store access is isolated.</strong> All store opening lives behind one module, so a future remote/gRPC
 mode can be added without touching the command handlers; today there is no remote mode.</li>
 </ul>
-<p>See the <a href="../how-to/use-cli.html">Use the <code>infrastore</code> CLI how-to</a> and the
-<a href="../reference/cli.html">CLI reference</a>.</p>
+<p>See the <a href="../guides/cli.html">CLI guide</a> and the <a href="../reference/cli.html">CLI reference</a>.</p>
 <h2 id="what-every-binding-shares"><a class="header" href="#what-every-binding-shares">What Every Binding Shares</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Concern</th><th>Single source of truth</th></tr></thead><tbody>
 <tr><td>Types &amp; validation</td><td><code>infrastore-core</code> (<code>Store</code>, <code>TimeSeriesId</code>, <code>Features</code>)</td></tr>
@@ -309,15 +308,17 @@ bindings reimplement storage — they all funnel through the one core.</p>
 <h2 id="feature-coverage-varies-by-binding"><a class="header" href="#feature-coverage-varies-by-binding">Feature Coverage Varies by Binding</a></h2>
 <p>The bindings funnel through one core, and the surface is now broadly consistent. Both static series
 types are available everywhere (read+write, except the read-only gRPC server), and
-<a href="./data-model.html#forecasts">forecasts</a> read back across every interface. The remaining asymmetry is
-that the read-only gRPC server does not accept any writes:</p>
-<div class="table-wrapper"><table><thead><tr><th>Capability</th><th>Rust core</th><th>C ABI</th><th>Python</th><th>Julia</th><th>gRPC</th></tr></thead><tbody>
-<tr><td><code>SingleTimeSeries</code> r/w</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>read-only</td></tr>
-<tr><td><code>NonSequentialTimeSeries</code> r/w</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>read-only</td></tr>
-<tr><td>dtypes beyond <code>f64</code></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>read-only</td></tr>
-<tr><td>Create forecasts</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>❌</td></tr>
-<tr><td>Read forecast values</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
-<tr><td>Forecast metadata / counts</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>list/counts</td></tr>
+<a href="./time-series-types.html#forecasts">forecasts</a> read back across every interface. The remaining
+asymmetry is that the read-only gRPC server does not accept any writes:</p>
+<div class="table-wrapper"><table><thead><tr><th>Capability</th><th>Rust core</th><th>C ABI</th><th>Python</th><th>Julia</th><th>CLI</th><th>gRPC</th></tr></thead><tbody>
+<tr><td><code>SingleTimeSeries</code> r/w</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>read-only</td></tr>
+<tr><td><code>NonSequentialTimeSeries</code> r/w</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>read-only</td></tr>
+<tr><td>dtypes beyond <code>f64</code></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>read-only</td></tr>
+<tr><td>Create forecasts</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>❌</td></tr>
+<tr><td>Read forecast values</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td>Forecast metadata / counts</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>list/counts</td></tr>
+<tr><td>Readers (columnar sweep)</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td><code>grid</code></td><td>❌</td></tr>
+<tr><td>Association catalogs</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>❌</td></tr>
 </tbody></table>
 </div>
 <p>The only gap is by design: writes (including forecasts added through <code>add_time_series</code>) require

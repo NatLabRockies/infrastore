@@ -268,7 +268,7 @@ on-disk format.</p>
     style SQL fill:#1e7e34,color:#fff
 </pre>
 <p>The backend is chosen behind the <a href="../reference/rust-api.html#storagebackend-trait"><code>StorageBackend</code></a>
-trait. v0 ships two implementations:</p>
+trait. There are two implementations:</p>
 <ul>
 <li><strong><code>MemoryBackend</code></strong> — arrays in a hash map; selected when <code>in_memory = true</code>. No filesystem I/O.</li>
 <li><strong><code>Hdf5Backend</code></strong> — arrays in an HDF5 file; selected when a path is given.</li>

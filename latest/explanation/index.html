@@ -186,16 +186,22 @@
                     <main>
                         <h1 id="explanation"><a class="header" href="#explanation">Explanation</a></h1>
 <p>This section explains how infrastore is put together and why. It is understanding-oriented: read it
-to build a mental model, not to accomplish a specific task. For step-by-step recipes see the
-<a href="../how-to/index.html">How-To Guides</a>; for exhaustive listings see the
+to build a mental model, not to accomplish a specific task. For the calls that do the work see the
+<a href="../guides/index.html">Developer Guides</a>; for exhaustive listings see the
 <a href="../reference/index.html">Reference</a>.</p>
 <ul>
 <li><a href="./architecture.html">Architecture</a> — The crates, the two-file storage split, and how the language
 bindings sit on top of a single core.</li>
 <li><a href="./design-choices.html">Design Choices</a> — What infrastore optimizes for and why, written for
 developers of parent packages like IS.jl and infrasys.</li>
-<li><a href="./data-model.html">Data Model</a> — Owners, time-series types, keys, feature maps, and the
-associations between catalog entities.</li>
+<li><a href="./time-series-types.html">Time-Series Types</a> — The six types, which one your data wants, and the
+vocabulary they share: periods, timestamp precision, typed arrays.</li>
+<li><a href="./data-model.html">Data Model</a> — Owners, features, identity, association ids, and the associations
+between catalog entities.</li>
+<li><a href="./time-references.html">Time References</a> — How a series' timestamps are spelled, what that does and
+does not change, and why a named zone is safe.</li>
+<li><a href="./readers.html">Readers</a> — The columnar bulk-read surface: why it exists, what one timeline per
+reader means, and when to reach for something else.</li>
 <li><a href="./storage-model.html">Storage Model</a> — Why arrays go to HDF5 and metadata goes to SQLite, and how
 the two stay consistent.</li>
 <li><a href="./content-addressing.html">Content Addressing</a> — How arrays are hashed, deduplicated, and verified.</li>
@@ -207,7 +213,7 @@ core.</li>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../getting-started/quick-start-julia.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../getting-started/quick-start-cli.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
@@ -221,7 +227,7 @@ core.</li>
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../getting-started/quick-start-julia.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../getting-started/quick-start-cli.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <i class="fa fa-angle-left"></i>
                     </a>
 

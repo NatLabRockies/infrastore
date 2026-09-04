@@ -190,7 +190,8 @@ with byte-identical values therefore resolve to the same hash and are stored exa
 the mechanism that lets many <a href="./data-model.html#identity">series</a> share one underlying array.</p>
 <h2 id="the-array-hash"><a class="header" href="#the-array-hash">The Array Hash</a></h2>
 <p><code>array_hash</code> produces a deterministic 32-byte digest from a
-<a href="./data-model.html#typed-n-dimensional-arrays"><code>TypedArray</code></a>. The hashed byte stream is, in order:</p>
+<a href="./time-series-types.html#typed-n-dimensional-arrays"><code>TypedArray</code></a>. The hashed byte stream is, in
+order:</p>
 <ol>
 <li>A <strong>dtype tag</strong>: the dtype name (<code>f64</code>, <code>f32</code>, <code>i64</code>, <code>i32</code>, <code>i16</code>, <code>i8</code>, <code>u64</code>, <code>u32</code>, <code>u16</code>,
 <code>u8</code>, <code>bool</code>) followed by a NUL byte.</li>
@@ -332,9 +333,9 @@ end
 shared = filter(((_, rows),) -&gt; length(rows) &gt; 1, groups)   # arrays referenced by &gt;1 series
 </code></pre>
 <p>This read-side view is what lets a downstream caller collapse work across owners that share data.
-The <a href="../reference/julia-api.html#forecastreader"><code>ForecastReader</code></a> builds on the same grouping
-internally: forecasts that share an array (and read plan) are read from disk <strong>once per timestamp</strong>
-no matter how many components reference them — see
+The <a href="./readers.html"><code>ForecastReader</code></a> builds on the same grouping internally: forecasts that share an
+array (and read plan) are read from disk <strong>once per timestamp</strong> no matter how many components
+reference them — see
 <a href="../reference/julia-api.html#window-read-deduplication">Window-read deduplication</a>. (This is exactly
 how InfrastructureSystems.jl backs its own <code>get_shared_time_series</code> and forecast reader.)</p>
 <h2 id="stability-is-a-contract"><a class="header" href="#stability-is-a-contract">Stability is a Contract</a></h2>

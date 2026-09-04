@@ -223,6 +223,14 @@ method = "none"
 </ol>
 <p>On startup the server validates the auth section, opens the first <code>[data].files</code> entry read-only,
 and serves the <code>CatalogStore</code> service on <code>host:port</code>. Set <code>RUST_LOG=debug</code> for verbose logs.</p>
+<p>v0 serves the <strong>first</strong> <code>[data].files</code> entry; multi-file serving is reserved for later.</p>
+<h3 id="check-that-it-is-up"><a class="header" href="#check-that-it-is-up">Check that it is up</a></h3>
+<p>With <a href="https://github.com/fullstorydev/grpcurl"><code>grpcurl</code></a> and the proto file:</p>
+<pre><code class="language-sh">grpcurl -plaintext -proto proto/infrastore/v1/store.proto \
+  127.0.0.1:50051 infrastore.v1.CatalogStore/GetCounts
+</code></pre>
+<p>Add <code>-H 'x-api-key: replace-me-with-a-secret'</code> when authentication is enabled. The equivalent from
+Rust is <code>RemoteClient::connect(...).get_counts()</code> — see <a href="#the-rust-client">The Rust Client</a> below.</p>
 <h2 id="the-rust-client"><a class="header" href="#the-rust-client">The Rust Client</a></h2>
 <p><code>RemoteClient</code> mirrors the read methods of <code>Store</code> and returns the same core types. gRPC status
 codes are mapped back onto <code>TimeSeriesError</code>, so remote and local calls surface the same error
@@ -301,7 +309,7 @@ server requires authentication.</p>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../guides/julia.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../guides/cli.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
@@ -315,7 +323,7 @@ server requires authentication.</p>
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../guides/julia.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../guides/cli.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <i class="fa fa-angle-left"></i>
                     </a>
 

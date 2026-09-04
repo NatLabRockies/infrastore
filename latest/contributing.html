@@ -233,11 +233,12 @@ hand-edit it; it is refreshed when you build <code>infrastore-ffi</code>.</li>
 <div class="table-wrapper"><table><thead><tr><th>Category</th><th>Location</th><th>When</th></tr></thead><tbody>
 <tr><td>Getting Started</td><td><code>src/getting-started/</code></td><td>First-run, learning-oriented quick starts</td></tr>
 <tr><td>Explanation</td><td><code>src/explanation/</code></td><td>Concepts, architecture, design rationale</td></tr>
-<tr><td>Developer Guides</td><td><code>src/guides/</code></td><td>End-to-end, per-language usage</td></tr>
-<tr><td>How-To</td><td><code>src/how-to/</code></td><td>A single task in the fewest steps</td></tr>
+<tr><td>Developer Guides</td><td><code>src/guides/</code></td><td>End-to-end usage, install through workflow</td></tr>
 <tr><td>Reference</td><td><code>src/reference/</code></td><td>Exact signatures, schemas, on-disk layouts</td></tr>
 </tbody></table>
 </div>
+<p>There is deliberately no separate how-to section: a task-sized recipe belongs in the guide for the
+language it applies to, so a reader following one page is not sent between three.</p>
 <p>After adding a page, add it to <code>src/SUMMARY.md</code>. Preview locally:</p>
 <pre><code class="language-sh">cd docs
 mdbook serve --open

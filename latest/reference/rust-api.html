@@ -609,7 +609,7 @@ checks the exact landing for. A <code>start</code> that is aligned but at or pas
 too, rather than returning an empty selection.</p>
 <p><code>end &lt; start</code> is <code>InvalidParameter</code> for every type. Query bounds themselves are unconstrained: they
 may be finer than the millisecond every <em>stored</em> instant is held to (see
-<a href="../explanation/data-model.html#timestamp-precision">timestamp precision</a>).</p>
+<a href="../explanation/time-series-types.html#timestamp-precision">timestamp precision</a>).</p>
 <p>A <a href="#readers">reader</a> is exact rather than range-based: <code>index_at</code> maps a timestamp to its index and
 errors if that instant is not on the timeline — for both the regular and the irregular case. It
 never floors, ceils, or clamps.</p>
@@ -1265,8 +1265,7 @@ UTC. Rust has no naive datetime type, so a native caller <strong>declares</stron
 infer it from theirs.</p>
 <p><code>validate</code> checks shape only: a zone name must be non-empty, bounded, IANA-shaped, and unreadable as
 an offset or as either literal — which is what lets one catalog column hold all four spellings.
-Existence is deliberately not checked; see
-<a href="../explanation/data-model.html#time-references">Time references</a>.</p>
+Existence is deliberately not checked; see <a href="../explanation/time-references.html">Time references</a>.</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>pub struct TimeRange {
@@ -1338,7 +1337,7 @@ zoned spellings <em>and</em> the rows that left the reference unset. An exact ma
 second group at all (the trap <code>component_field</code> documents), and here those rows are a coherence
 group rather than an oversight. It is the constructive half of the rules that make
 <code>read_by_ids_range</code> and <code>build_static_reader</code> refuse a selection spanning both groups; see
-<a href="../explanation/data-model.html#time-references">Time references</a>.</p>
+<a href="../explanation/time-references.html">Time references</a>.</p>
 <h3 id="addrequest"><a class="header" href="#addrequest"><code>AddRequest</code></a></h3>
 <p>The element type of <code>add_time_series_bulk</code> (and of <code>BulkAdd::push</code>), mirroring the <code>add_time_series</code>
 arguments plus an optional <code>application_data</code> — an opaque, package-owned payload (typically JSON)

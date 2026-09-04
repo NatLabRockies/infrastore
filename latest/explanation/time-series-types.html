@@ -1,0 +1,418 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Time-Series Types - infrastore Documentation</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Time-series storage for power-systems and energy simulations, with Rust, Python, and Julia bindings">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../custom.css">
+        <link rel="stylesheet" href="../pagetoc.css">
+        <link rel="stylesheet" href="../version-selector.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">infrastore Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/NatLabRockies/infrastore" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/NatLabRockies/infrastore/edit/main/docs/src/explanation/time-series-types.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="time-series-types"><a class="header" href="#time-series-types">Time-Series Types</a></h1>
+<p>infrastore stores six time-series types. Two are <strong>static</strong> — a value per instant, on a grid or on
+explicit timestamps — and four are <strong>forecasts</strong>, where each entry is a window of values issued at
+one time. This page covers what each one means, when to reach for it, and the vocabulary they share:
+periods, timestamp precision, and typed arrays.</p>
+<p>For how a series is filed and addressed once stored — owners, features, identity, the association id
+— see the <a href="./data-model.html">Data Model</a>. For how the timestamps are <em>spelled</em>, see
+<a href="./time-references.html">Time References</a>.</p>
+<h2 id="choosing-a-type"><a class="header" href="#choosing-a-type">Choosing a Type</a></h2>
+<p>The static types differ in one thing: <strong>what value the series yields at an instant you did not
+store</strong>. That question, not the shape of your input data, is what picks one.</p>
+<div class="table-wrapper"><table><thead><tr><th>If your data is…</th><th>Use</th></tr></thead><tbody>
+<tr><td>sampled on a fixed grid — hourly load, 5-minute dispatch</td><td><a href="#singletimeseries"><code>SingleTimeSeries</code></a></td></tr>
+<tr><td>at explicit instants, and <strong>undefined between them</strong> — outages, events</td><td><a href="#nonsequentialtimeseries"><code>NonSequentialTimeSeries</code></a></td></tr>
+<tr><td>a local-clock grid — hourly <em>by the wall clock</em>, across DST</td><td><code>NonSequentialTimeSeries</code> (<a href="./time-references.html#a-spelling-is-not-a-grid">why</a>)</td></tr>
+<tr><td>windows of values issued at successive times</td><td>a <a href="#forecasts">forecast type</a></td></tr>
+</tbody></table>
+</div>
+<p>Two follow-ups that come up every time:</p>
+<ul>
+<li><strong>The value shape is a separate axis.</strong> A series of cost curves is not a new type — it is one of
+the types above with an <a href="../reference/element-types.html"><code>element_type</code></a> naming the curve. See
+<a href="#the-element-axis-is-not-the-time-axis">the element axis</a>.</li>
+<li><strong>A grid you cannot fill densely is not automatically irregular.</strong> A <code>SingleTimeSeries</code> costs one
+value per step and packs into a shared dataset; the irregular types carry an explicit timestamp
+vector. Prefer the grid when there is one.</li>
+</ul>
+<h2 id="the-six-types"><a class="header" href="#the-six-types">The Six Types</a></h2>
+<p>All six are present in the <code>TimeSeriesType</code> enum and in the metadata schema, and all six can be
+<strong>read</strong> from every interface: the Rust core, the C ABI, Python, Julia, the <code>infrastore</code> CLI, and
+the gRPC server. The write paths differ, because the read-only gRPC server accepts none of them and
+one type is never written directly at all:</p>
+<div class="table-wrapper"><table><thead><tr><th>Type</th><th>Write path</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>SingleTimeSeries</code></td><td><code>add_time_series</code></td><td>One array sampled at a fixed resolution</td></tr>
+<tr><td><code>NonSequentialTimeSeries</code></td><td><code>add_time_series</code></td><td>Values at explicit, irregular timestamps</td></tr>
+<tr><td><code>Deterministic</code></td><td><code>add_time_series</code></td><td>Forecast: a <code>(horizon × count)</code> window matrix</td></tr>
+<tr><td><code>DeterministicSingleTimeSeries</code></td><td>derived by <code>transform_single_time_series</code></td><td>Forecast view over an underlying <code>SingleTimeSeries</code></td></tr>
+<tr><td><code>Probabilistic</code></td><td><code>add_time_series</code></td><td>Forecast with percentile bands</td></tr>
+<tr><td><code>Scenarios</code></td><td><code>add_time_series</code></td><td>Forecast with discrete scenarios</td></tr>
+</tbody></table>
+</div>
+<p>Every write path in the table is available in the Rust core, the C ABI, Python, Julia, and the CLI.
+No interface adds a <code>DeterministicSingleTimeSeries</code> directly: it only ever comes into existence by
+transforming a stored <code>SingleTimeSeries</code>.</p>
+<p><strong><code>DeterministicSingleTimeSeries</code> is a storage-level view, and reads always return a
+<code>Deterministic</code>.</strong> This is by design in every binding: <code>TimeSeriesData</code> has no
+<code>DeterministicSingleTimeSeries</code> variant, and a read synthesizes the windowed <code>Deterministic</code> from
+the underlying static array without copying it. The <code>DeterministicSingleTimeSeries</code> tag stays
+visible in <em>catalog</em> surfaces — keys, metadata rows, counts, summaries — so callers can see which of
+their forecasts are synthetic, and can address, copy, or remove the association.</p>
+<p>It is never something you must <em>ask for</em>. <strong>A request for <code>Deterministic</code> matches both storage
+forms</strong> — in reads, key resolution, catalog filters, and reader builds alike — so which one a store
+holds stays an internal detail. Requesting <code>DeterministicSingleTimeSeries</code> narrows to the derived
+form, which is how a caller audits what it has. This mirrors InfrastructureSystems.jl, where a
+<code>Deterministic</code> request lowers to both concrete type names.</p>
+<p>See <a href="#forecasts">Forecasts</a> below for how the four windowed types are laid out.</p>
+<h3 id="singletimeseries"><a class="header" href="#singletimeseries"><code>SingleTimeSeries</code></a></h3>
+<p>A <code>SingleTimeSeries</code> is an <code>initial_timestamp</code>, a <code>resolution</code> (a <a href="#periods">period</a>), and an array
+of values:</p>
+<pre><code class="language-text">value
+  ^
+  |        *
+  |     *     *
+  |  *           *
+  +--+--+--+--+--+--&gt; time
+   t0 t0+r  ...   t0+(n-1)r
+</code></pre>
+<p>The timestamps are implied — sample <code>i</code> is at <code>initial_timestamp + i * resolution</code> — so only the
+values are stored.</p>
+<h3 id="nonsequentialtimeseries"><a class="header" href="#nonsequentialtimeseries"><code>NonSequentialTimeSeries</code></a></h3>
+<p>A <code>NonSequentialTimeSeries</code> pairs each value with an explicit UTC timestamp. Timestamps must be
+strictly increasing and their count must match the data length.</p>
+<p>The timestamp vector is stored in the HDF5 file, <strong>content-addressed and shared</strong>: series sampled at
+the same instants — an outage schedule, a set of event times, a market timeline — hold one copy
+between them rather than one each. That shared vector is also the series' <em>cohort</em>: the values of
+every series on it are column-packed into one timestamp-major HDF5 dataset, exactly as
+<code>SingleTimeSeries</code> at one resolution are, so a <a href="./readers.html"><code>StaticReader</code></a> can sweep them a
+timestamp at a time. A series alone on its time axis keeps a standalone array instead — packing only
+pays once a cohort is several columns wide. See the <a href="./storage-model.html">storage model</a> for the
+layout.</p>
+<h3 id="forecasts"><a class="header" href="#forecasts">Forecasts</a></h3>
+<p>The four forecast types store their values as a content-addressed <code>TypedArray</code> in its <strong>native
+shape</strong> (the dense types as standalone HDF5 variables; a <code>DeterministicSingleTimeSeries</code> reuses its
+backing <code>SingleTimeSeries</code> array), while the windowing parameters live in metadata. A forecast
+association records <code>horizon</code> (the span each window covers), <code>interval</code> (the spacing between
+successive window start times), <code>count</code> (the number of windows), and — for <code>Probabilistic</code> — a
+<code>percentiles</code> vector.</p>
+<div class="table-wrapper"><table><thead><tr><th>Type</th><th>Conventional array shape</th><th>Extra metadata</th></tr></thead><tbody>
+<tr><td><code>Deterministic</code></td><td><code>(horizon_count, count)</code></td><td>—</td></tr>
+<tr><td><code>DeterministicSingleTimeSeries</code></td><td>the backing <code>SingleTimeSeries</code> array</td><td>—</td></tr>
+<tr><td><code>Probabilistic</code></td><td><code>(percentile_count, horizon_count, count)</code></td><td><code>percentiles</code></td></tr>
+<tr><td><code>Scenarios</code></td><td><code>(scenario_count, horizon_count, count)</code></td><td>—</td></tr>
+</tbody></table>
+</div>
+<p>The store does not interpret the layout — the caller owns the array shape (the Rust core takes a
+native-shape <code>TypedArray</code> inside a <code>Deterministic</code> / <code>Probabilistic</code> / <code>Scenarios</code> object; the C ABI
+takes a row-major byte buffer with explicit dims, and the Julia wrapper accepts a native array and
+serializes it row-major), and a <code>DeterministicSingleTimeSeries</code> deduplicates against the static
+series it forecasts. A <code>DeterministicSingleTimeSeries</code> is not added directly — it is derived from
+every stored <code>SingleTimeSeries</code> by <code>transform_single_time_series</code> (Rust core, C ABI, Python, Julia),
+sharing the underlying array. Because a <code>DeterministicSingleTimeSeries</code> is a synthetic view of a
+<code>SingleTimeSeries</code>, it is <strong>mutually exclusive</strong> with a real <code>Deterministic</code> for the same family
+(<code>owner</code>, <code>name</code>, <code>resolution</code>, <code>features</code>, regardless of interval): adding a <code>Deterministic</code> when a
+<code>DeterministicSingleTimeSeries</code> view exists — or deriving one when a <code>Deterministic</code> exists — raises
+<code>InvalidParameter</code>. Forecast values read back through the same path as everything else: <code>read_by_id</code>
+returns the forecast object matching the row's stored type, in every binding and over gRPC — a read
+names only an id, so there is no requested type to disagree with what is stored. The low-level
+metadata + array path remains available for raw access. See the
+<a href="../reference/rust-api.html#forecasts">Rust API</a> and <a href="../reference/c-abi.html#forecasts">C ABI</a>.</p>
+<h2 id="shared-vocabulary"><a class="header" href="#shared-vocabulary">Shared Vocabulary</a></h2>
+<h3 id="periods"><a class="header" href="#periods">Periods</a></h3>
+<p><code>resolution</code>, and the forecast <code>horizon</code>/<code>interval</code>, are <strong>calendar-aware periods</strong>, not plain fixed
+spans. A period is one of two kinds:</p>
+<ul>
+<li><strong>fixed</strong> — a fixed nanosecond span (<code>Hour</code>, <code>Minute</code>, <code>Day</code>, <code>Week</code>), backed by a duration;</li>
+<li><strong>calendar</strong> — a count of calendar months (<code>Month</code> = 1, <code>Quarter</code> = 3, <code>Year</code> = 12), where
+<code>initial_timestamp + i * resolution</code> is computed by calendar arithmetic (so a monthly grid lands
+on the same day-of-month each step rather than every <code>N</code> milliseconds).</li>
+</ul>
+<p>A fixed period is <strong>never</strong> equal to a calendar one, even when their spans coincide for a given
+month. Periods are encoded as ISO-8601 duration strings (<code>PT1H</code>, <code>P1M</code>, <code>P1Y</code>) on disk and across
+every binding (the Python/gRPC surfaces accept a <code>timedelta</code>/duration for fixed periods and an
+ISO-8601 string for either kind, and return the ISO-8601 string).</p>
+<h3 id="timestamp-precision"><a class="header" href="#timestamp-precision">Timestamp precision</a></h3>
+<p>Every instant the store records — a <code>SingleTimeSeries</code> or forecast <code>initial_timestamp</code>, every entry
+of a <code>NonSequentialTimeSeries</code> timestamp vector — is <strong>a whole number of milliseconds</strong>, the same
+floor a fixed period has. One millisecond is the finest resolution a period can express, and it is
+likewise the finest instant a series can be written at.</p>
+<p>The rule is enforced on write, in the core, for all five addable types: a finer instant is rejected
+with an <code>InvalidParameter</code> error rather than truncated. This is what makes a timestamp mean the same
+thing in every consumer. The bindings do not share one precision — the C ABI and Julia exchange
+instants as <code>i64</code> Unix milliseconds, Python's <code>datetime</code> is microsecond, and gRPC and the Rust core
+carry a full RFC 3339 string — so a finer instant would be silently truncated at some boundaries and
+not others, putting the same series on different instants depending on who read it. For a
+<code>NonSequentialTimeSeries</code> whose timestamps are less than a millisecond apart it is worse: two
+distinct timestamps collapse into one, and the vector stops being strictly increasing on the way
+back out.</p>
+<p>A <strong>leap second</strong> is refused by the same rule, for the same reason, though it is not a matter of
+precision. Chrono spells one as a sub-second component at or above one second (<code>23:59:60</code>), which is
+a whole number of milliseconds and would otherwise pass — but a Unix millisecond count cannot
+express a leap second at all, so writing one would store the <em>following</em> second. That is not merely
+lossy: a leap second and the second after it are distinct instants that would become one stored
+instant, so two genuinely different <code>NonSequentialTimeSeries</code> time axes would share a content hash
+and be interned as one, and a single vector holding <code>23:59:60</code> followed by <code>00:00:00</code> would go in
+strictly increasing and come back out with a duplicate. Use the second either side of it.</p>
+<p>A series needing a finer grid should scale its unit and record it in <code>units</code>, exactly as it must for
+a sub-millisecond resolution: a 500 µs series is a 500-unit series.</p>
+<p>Two things are deliberately <em>not</em> constrained. A <strong>query bound</strong> — a <code>time_range</code> end, a reader's
+<code>when</code> — may be arbitrarily fine; it is not stored, and the read paths already say what an off-grid
+bound does (see <a href="../reference/rust-api.html#reading-a-time-range">reading a time range</a>). And <strong>reads
+stay permissive</strong>: an artifact written before this rule may hold finer instants and still reads back
+exactly as written, which is why the rule does not change <code>DATA_FORMAT_VERSION</code>.</p>
+<h3 id="the-element-axis-is-not-the-time-axis"><a class="header" href="#the-element-axis-is-not-the-time-axis">The element axis is not the time axis</a></h3>
+<p>Two independent things decide what a series is, and requests to add a type usually conflate them:</p>
+<div class="table-wrapper"><table><thead><tr><th>Axis</th><th>What it says</th><th>Where it lives</th></tr></thead><tbody>
+<tr><td><strong>series type</strong></td><td>the time semantics — a fixed grid versus explicit instants</td><td>the six types above</td></tr>
+<tr><td><strong>element type</strong></td><td>the value shape — a scalar, a tuple, a piecewise curve</td><td><a href="../reference/element-types.html"><code>element_type</code></a></td></tr>
+</tbody></table>
+</div>
+<p>So a cost curve that varies over time is not a seventh type: it is one of the types above with
+<code>element_type = piecewise_linear</code> — the dates on the time axis, the curve points as the values, and
+the non-curve fields that are constant across the curve (a volume window, a curve-kind tag) in
+<code>application_data</code>. A read decodes the element type back into curves rather than handing back a
+packing.</p>
+<p>What does <strong>not</strong> belong in a value is a JSON blob: anything the store cannot describe cannot be
+deduplicated, hashed, or read columnar, and it puts the consumer back in the business of parsing its
+own storage.</p>
+<h3 id="typed-n-dimensional-arrays"><a class="header" href="#typed-n-dimensional-arrays">Typed, N-dimensional arrays</a></h3>
+<p>Every series' values are a <strong><code>TypedArray</code></strong>: an element <code>dtype</code> (<code>f64</code>, <code>f32</code>, the integer widths,
+or <code>bool</code>) and a shape <code>[length, k1, k2, …]</code>. The first axis is time; the trailing axes are a fixed
+<strong>per-step element shape</strong>, so a step can hold a scalar (empty element shape) or a small tuple — for
+example the 3 coefficients of a quadratic cost curve (element shape <code>[3]</code>). The association's
+<code>element_type</code> says what those elements mean and how a ragged value (a piecewise curve, say) is
+packed into a fixed-width row — see <a href="../reference/element-types.html">Element types</a>. The optional
+<code>application_data</code> payload travels alongside for a binding's own use; the store never interprets it.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../explanation/design-choices.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../explanation/data-model.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../explanation/design-choices.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../explanation/data-model.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="../mermaid.min.js"></script>
+        <script src="../mermaid-init.js"></script>
+        <script src="../pagetoc.js"></script>
+        <script src="../version-selector.js"></script>
+
+
+
+    </div>
+    </body>
+</html>

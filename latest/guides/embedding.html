@@ -247,7 +247,7 @@ infers it from the input type, so nothing takes a new argument; a native Rust ca
 having no naive datetime type to infer from. It changes nothing about the stored instants, the grid,
 or either content hash — but the store does hold a series to its claim: a query bound must be
 spelled the way the series is, and a zoneless series cannot share one reader axis or one ranged bulk
-read with instant-bearing ones. See <a href="../explanation/data-model.html#time-references">Time references</a>.</p>
+read with instant-bearing ones. See <a href="../explanation/time-references.html">Time references</a>.</p>
 <p><strong><code>application_data</code> is yours.</strong> It is an opaque payload stored and returned verbatim, so a parent
 package can carry whatever it needs per association (a serialized type tag, a provenance record)
 without the store knowing. Because the store never validates it, version it yourself if its shape
@@ -378,7 +378,9 @@ per-component work dedup the same way. The inverse access — one component's fu
 slow direction, and <code>read_by_ids</code> over many ids is the right call when you need it, not a loop of
 <code>read_by_id</code>. See the per-language sections:
 <a href="./python.html#per-timestamp-reads-simulation-loop">Python</a>,
-<a href="./julia.html#per-timestamp-reads-simulation-loop">Julia</a>, <a href="./rust.html">Rust</a>.</p>
+<a href="./julia.html#per-timestamp-reads-simulation-loop">Julia</a>,
+<a href="./rust.html#per-timestamp-reads-simulation-loop">Rust</a>. The concepts are in
+<a href="../explanation/readers.html">Readers</a>.</p>
 <h2 id="time"><a class="header" href="#time">Time</a></h2>
 <ul>
 <li>Every stored instant is a whole number of <strong>milliseconds</strong>; the write path raises
@@ -386,12 +388,13 @@ slow direction, and <code>read_by_ids</code> over many ids is the right call whe
 milliseconds while Python's <code>datetime</code> is microsecond. Quantize <code>now()</code> before storing it. Query
 bounds are unconstrained.</li>
 <li><strong>Python</strong> requires timezone-aware <code>datetime</code>s everywhere and returns UTC; a naive value raises.</li>
-<li><strong>Julia</strong> treats a bare <code>DateTime</code> as UTC and returns <code>DateTime</code>; with <code>using TimeZones</code> a
-<code>ZonedDateTime</code> is accepted anywhere a timestamp goes and converted to the instant it names. Reads
-still return <code>DateTime</code>, because InfrastructureSystems.jl destructures them.</li>
+<li><strong>Julia</strong> reads a bare <code>DateTime</code> as a wall clock, recording <code>ZonelessReference()</code>; with
+<code>using TimeZones</code> a <code>ZonedDateTime</code> is accepted anywhere a timestamp goes and converted to the
+instant it names. Reads still return a bare <code>DateTime</code> holding the instant, because
+InfrastructureSystems.jl destructures them.</li>
 </ul>
 <p>A parent package that has a notion of local time therefore converts at its own boundary and stores
-instants. See <a href="../explanation/data-model.html#timestamp-precision">Timestamp precision</a>.</p>
+instants. See <a href="../explanation/time-series-types.html#timestamp-precision">Timestamp precision</a>.</p>
 <h2 id="associations-beyond-time-series"><a class="header" href="#associations-beyond-time-series">Associations Beyond Time Series</a></h2>
 <p>The catalog records two relationship tables that have nothing to do with time series:
 supplemental-attribute attachments (component ↔ attribute, with counts and grouped summaries) and
@@ -405,7 +408,7 @@ filters take concrete type names, exactly like <code>owner_type</code> above. Se
 <p><strong>Pin a minor range.</strong> The on-disk format is governed by <code>DATA_FORMAT_VERSION</code>; opening an artifact
 written by an incompatible version raises <code>IncompatibleFormat</code> rather than misreading it. The
 bindings track the workspace version, so a parent package depends on a compatible range
-(<code>infrastore&gt;=0.8,&lt;0.9</code> in <code>pyproject.toml</code>; a <code>[compat]</code> entry in <code>Project.toml</code>) and bumps it
+(<code>infrastore&gt;=0.11,&lt;0.12</code> in <code>pyproject.toml</code>; a <code>[compat]</code> entry in <code>Project.toml</code>) and bumps it
 deliberately. Do not cite core source line numbers in your own docs — they move.</p>
 <p><strong>Map the error taxonomy, do not flatten it.</strong> Every binding exposes the core's <code>TimeSeriesError</code>
 variants as distinct types (<code>NotFound</code>, <code>DuplicateTimeSeries</code>, <code>DuplicateAssociation</code>,
@@ -423,8 +426,7 @@ cheap "nothing here" probe.</li>
 <li>The <code>infrastore</code> CLI reads any artifact your package writes. <code>infrastore list</code> and
 <code>infrastore info</code> are the fastest way to see what a consumer actually stored, and
 <code>infrastore diff --against</code> compares two artifacts by hash without reading arrays — a usable CI
-gate for "the rewrite produced the same store". See
-<a href="../how-to/use-cli.html">Use the <code>infrastore</code> CLI</a>.</li>
+gate for "the rewrite produced the same store". See <a href="../guides/cli.html">Use the <code>infrastore</code> CLI</a>.</li>
 <li>To test unreleased core changes from a consumer checkout, install the binding into the consumer's
 environment (<code>maturin develop --manifest-path crates/infrastore-py/Cargo.toml</code> with the consumer's
 venv active; <code>Pkg.develop(path=...)</code> plus <code>INFRASTORE_LIB</code> for Julia).</li>
@@ -457,11 +459,11 @@ The dependency pins a compatible minor range of infrastore.</li>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../guides/index.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../introduction.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
-                            <a rel="next prefetch" href="../guides/rust.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../getting-started/installation.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <i class="fa fa-angle-right"></i>
                             </a>
 
@@ -471,11 +473,11 @@ The dependency pins a compatible minor range of infrastore.</li>
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../guides/index.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../introduction.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <i class="fa fa-angle-left"></i>
                     </a>
 
-                    <a rel="next prefetch" href="../guides/rust.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../getting-started/installation.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <i class="fa fa-angle-right"></i>
                     </a>
             </nav>

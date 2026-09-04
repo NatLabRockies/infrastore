@@ -211,8 +211,8 @@ together and tag the repo once per release, so every registry pins the same comm
 <code>infrastore-core</code> at the new version, then rejects <code>infrastore-proto</code> because its requirement still
 names the old one. cargo-release moves <code>Cargo.lock</code> in the same commit.</p>
 <p>Two more version strings ride along, neither load-bearing: the <code>VERSION=v0.8.0</code> download example in
-<code>docs/src/getting-started/installation.md</code> and in <code>docs/src/how-to/use-cli.md</code>, so a version's
-published docs point at that version's own binaries.</p>
+<code>docs/src/getting-started/installation.md</code> and in <code>docs/src/guides/cli.md</code>, so a version's published
+docs point at that version's own binaries.</p>
 <p>Two workflows guard this. <code>crates-release</code> refuses to publish if the tag does not match the
 workspace version, and <code>python-wheels</code> opens with a <code>versions agree</code> job that parses all four files
 above and fails unless they agree with each other and with the tag.</p>
@@ -221,7 +221,7 @@ above and fails unless they agree with each other and with the tag.</p>
 <code>0.4.0</code> artifacts and passed; only the upload caught it, with <code>400 File already exists</code>, because
 <code>0.4.0</code> was long since on PyPI. A PyPI filename can never be reused, so that tag was unpublishable
 and the release had to move to <code>0.5.1</code>. The guard runs before the wheel matrix, so the same mistake
-now costs seconds instead of a burnt version number.</p>
+now costs seconds instead of a burned version number.</p>
 <h2 id="hdf5-linkage"><a class="header" href="#hdf5-linkage">HDF5 linkage</a></h2>
 <p>Every distribution channel — the Rust crates, the Python wheel, and <code>InfraStore_jll</code> — ships with
 the <code>vendored</code> feature: HDF5 and zlib are compiled from source and linked statically.

@@ -186,8 +186,7 @@
                     <main>
                         <h1 id="cli-reference"><a class="header" href="#cli-reference">CLI Reference</a></h1>
 <p><code>infrastore-cli</code> builds the <code>infrastore</code> binary, which reads and writes a store directly on disk
-(HDF5 + SQLite). For a task-oriented walkthrough, see
-<a href="../how-to/use-cli.html">Use the <code>infrastore</code> CLI</a>.</p>
+(HDF5 + SQLite). For a task-oriented walkthrough, see <a href="../guides/cli.html">Use the <code>infrastore</code> CLI</a>.</p>
 <p>The CLI covers time series and both
 <a href="../explanation/data-model.html#associations-between-entities">association catalogs</a>, read and write.
 The store holds only the <em>relationship</em> — the components and supplemental attributes themselves live
@@ -268,9 +267,9 @@ overridden, so a mixed file loads correctly and a fully-offset file is unaffecte
 <li>It is global, so it also covers <code>--time-range</code> bounds and <code>--issue-time</code>, which hit the same
 parser.</li>
 <li>Whatever it resolves is also <strong>recorded</strong>, as the series' <code>time_reference</code> (see
-<a href="../explanation/data-model.html#time-references">Time references</a>) — so a read hands the same
-spelling back rather than relabelling everything UTC. <code>--assume-timezone -07:00</code> over a midnight
-column stores <code>07:00Z</code> and prints <code>2024-01-01T00:00:00-07:00</code>.</li>
+<a href="../explanation/time-references.html">Time references</a>) — so a read hands the same spelling back
+rather than relabeling everything UTC. <code>--assume-timezone -07:00</code> over a midnight column stores
+<code>07:00Z</code> and prints <code>2024-01-01T00:00:00-07:00</code>.</li>
 </ul>
 <p><strong>Prefer a named zone to a fixed offset</strong> for anything that crosses a daylight-saving transition. A
 year of Denver data read as <code>-07:00</code> renders every timestamp after March an hour wrong; the same
@@ -286,7 +285,7 @@ re-read the column with --assume-timezone -06:00 or -07:00.
 </code></pre>
 <h4 id="--zoneless-keep-them-as-wall-clocks"><a class="header" href="#--zoneless-keep-them-as-wall-clocks"><code>--zoneless</code>: keep them as wall clocks</a></h4>
 <p>For data that has no time zone and wants none — modeled profiles on 24-hour days, say — <code>--zoneless</code>
-stores the fields as written, converts nothing, and reads them back unlabelled:</p>
+stores the fields as written, converts nothing, and reads them back unlabeled:</p>
 <pre><code class="language-console">$ infrastore --store s.h5 --zoneless add --csv profile.csv ...
 $ infrastore --store s.h5 get --owner-id 42 --name load -f csv
 2024-01-01T00:00:00,1
@@ -668,8 +667,8 @@ calendar ones. This is also the spelling every command <em>prints</em>, so a dur
 <code>--issue-time</code>): RFC3339 (e.g. <code>2024-01-01T00:00:00Z</code>) or a bare integer of epoch milliseconds. A
 <em>stored</em> timestamp must be a whole number of milliseconds — a finer one is refused by <code>add</code> rather
 than truncated, and the epoch-millisecond form cannot express one at all. See
-<a href="../explanation/data-model.html#timestamp-precision">timestamp precision</a>. A timestamp with no
-offset needs <a href="#zoneless-timestamps"><code>--assume-timezone</code> or <code>--zoneless</code></a>, and whichever one you
+<a href="../explanation/time-series-types.html#timestamp-precision">timestamp precision</a>. A timestamp with
+no offset needs <a href="#zoneless-timestamps"><code>--assume-timezone</code> or <code>--zoneless</code></a>, and whichever one you
 pass is also recorded as the series' <code>time_reference</code>.</p>
 </li>
 <li>

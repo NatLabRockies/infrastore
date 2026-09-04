@@ -238,12 +238,12 @@ bound against a series that records instants, or an aware bound against a zonele
 <code>InvalidParameterError</code> rather than being coerced, and so does a <code>time_range</code> whose two ends
 disagree. <code>list_metadata(zoneless=...)</code>, <code>build_static_reader(..., zoneless=...)</code>, and the other
 filter-taking methods take a <code>zoneless</code> predicate for building a coherent selection. See
-<a href="../explanation/data-model.html#time-references">Time references</a> for the full rules.</p>
+<a href="../explanation/time-references.html">Time references</a> for the full rules.</p>
 <p>A <code>datetime</code> that is <strong>stored</strong> — an initial timestamp, or an entry of a <code>NonSequentialTimeSeries</code>
 timestamp vector — must also be a whole number of milliseconds; <code>microsecond</code> must be a multiple of
 1000. A finer instant raises <code>InvalidParameterError</code> rather than being silently truncated, because
 it cannot survive every binding intact (see
-<a href="../explanation/data-model.html#timestamp-precision">timestamp precision</a>). Note that
+<a href="../explanation/time-series-types.html#timestamp-precision">timestamp precision</a>). Note that
 <code>datetime.now(timezone.utc)</code> carries microseconds: quantize it, e.g.
 <code>now.replace(microsecond=now.microsecond // 1000 * 1000)</code>. A <code>datetime</code> used only as a <em>query</em> bound
 — a <code>time_range</code> end, a reader's <code>when</code> — is unconstrained.</p>

@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Use the infrastore CLI - infrastore Documentation</title>
+        <title>CLI - infrastore Documentation</title>
 
 
         <!-- Custom HTML head -->
@@ -150,7 +150,7 @@
                         <a href="https://github.com/NatLabRockies/infrastore" title="Git repository" aria-label="Git repository">
                             <i id="git-repository-button" class="fa fa-github"></i>
                         </a>
-                        <a href="https://github.com/NatLabRockies/infrastore/edit/main/docs/src/how-to/use-cli.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                        <a href="https://github.com/NatLabRockies/infrastore/edit/main/docs/src/guides/cli.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
                             <i id="git-edit-button" class="fa fa-edit"></i>
                         </a>
 
@@ -184,11 +184,16 @@
 
                 <div id="content" class="content">
                     <main>
-                        <h1 id="use-the-infrastore-cli"><a class="header" href="#use-the-infrastore-cli">Use the <code>infrastore</code> CLI</a></h1>
+                        <h1 id="cli-developer-guide"><a class="header" href="#cli-developer-guide">CLI Developer Guide</a></h1>
 <p><code>infrastore</code> loads time series from CSV files and inspects a store, talking directly to the on-disk
-<code>.h5</code> + <code>.h5.sqlite</code> pair (no gRPC server required). For the full command and descriptor reference,
-see <a href="../reference/cli.html">CLI Reference</a>.</p>
-<h2 id="1-install-the-binary"><a class="header" href="#1-install-the-binary">1. Install the Binary</a></h2>
+<code>.h5</code> + <code>.h5.sqlite</code> pair — no gRPC server, and unlike the server it is <strong>not</strong> read-only. This
+guide walks the whole workflow; for every flag, the descriptor schema, and the CSV layouts, see the
+<a href="../reference/cli.html">CLI Reference</a>. For a 60-second round trip, see the
+<a href="../getting-started/quick-start-cli.html">CLI Quick Start</a>.</p>
+<p>It is also the fastest way to see what a consumer package actually wrote: <code>infrastore list</code> and
+<code>infrastore info</code> read any artifact your package produces, and <code>infrastore diff</code> compares two by
+hash without reading arrays.</p>
+<h2 id="install"><a class="header" href="#install">Install</a></h2>
 <p>Grab a prebuilt archive from the
 <a href="https://github.com/NatLabRockies/infrastore/releases">Releases page</a> — the executables inside are
 statically linked against HDF5, so there is nothing else to install:</p>
@@ -206,7 +211,7 @@ archive list and checksum verification.</p>
 cargo build -p infrastore-cli --release
 </code></pre>
 <p>The examples below assume <code>infrastore</code> is on your <code>PATH</code> (or use <code>./target/debug/infrastore</code>).</p>
-<h2 id="2-describe-the-data"><a class="header" href="#2-describe-the-data">2. Describe the Data</a></h2>
+<h2 id="describe-the-data"><a class="header" href="#describe-the-data">Describe the Data</a></h2>
 <p>Numeric values live in a CSV; everything that does not fit a flat grid (owner, name, type,
 element_type, resolution, initial timestamp, units, features) lives in a <strong>descriptor JSON</strong>. Print
 a starting point for any type with <code>template</code>:</p>
@@ -253,7 +258,7 @@ global <code>--assume-timezone</code> (<code>UTC</code>, or a fixed offset like 
 </code></pre>
 <p>A timestamp that carries its own offset is never overridden. See
 <a href="../reference/cli.html#zoneless-timestamps">Zoneless timestamps</a>.</p>
-<h2 id="3-add-it-to-a-store"><a class="header" href="#3-add-it-to-a-store">3. Add It to a Store</a></h2>
+<h2 id="add-it-to-a-store"><a class="header" href="#add-it-to-a-store">Add It to a Store</a></h2>
 <pre><code class="language-sh">infrastore --store demo.h5 add --descriptor load.json --dry-run   # check first
 infrastore --store demo.h5 add --descriptor load.json
 </code></pre>
@@ -311,7 +316,7 @@ the headers already are ids:</p>
 }
 </code></pre>
 <p><code>infrastore grid</code> writes that same shape back out, so the two are an inverse pair — see below.</p>
-<h2 id="4-read-it-back"><a class="header" href="#4-read-it-back">4. Read It Back</a></h2>
+<h2 id="read-it-back"><a class="header" href="#read-it-back">Read It Back</a></h2>
 <p><code>infrastore</code> follows an output convention: a global <code>-f/--format</code> with <code>table</code> (default), <code>json</code>,
 <code>jsonl</code>, and <code>csv</code>. The read commands render their results in it; the write commands (<code>add</code>,
 <code>remove</code>, <code>transform</code>, …) report their outcome in it — prose under <code>table</code>, a one-object status
@@ -379,7 +384,7 @@ as do <code>--owner-category component</code> and <code>--owner-category Compone
 <code>list</code>/<code>get</code>/<code>info</code> output and in what <code>template</code> writes — is always the canonical CamelCase name,
 so descriptors, rendered rows, and <code>-f json</code> output all string-match each other. The lowercase forms
 are a typing shortcut on the command line, not a second vocabulary.</p>
-<h2 id="5-look-at-it"><a class="header" href="#5-look-at-it">5. Look at It</a></h2>
+<h2 id="chart-it"><a class="header" href="#chart-it">Chart It</a></h2>
 <pre><code class="language-sh">infrastore --store demo.h5 get --name load --plot                        # sparkline, no file
 infrastore --store demo.h5 plot --name load --out load.svg               # the profile
 infrastore --store demo.h5 plot --name load --kind duration --out ldc.svg
@@ -392,7 +397,7 @@ dark themes inside it — so it opens in a browser and drops into a report. The 
 are <code>line</code>, <code>duration</code> (the load duration curve), <code>heatmap</code> (time-of-day against day, which is how
 you catch a timezone or DST shift), <code>fan</code> (percentile bands or scenario traces for one forecast
 window), and <code>overlay</code> (a <code>Deterministic</code>'s windows over the actuals it came from).</p>
-<h2 id="6-find-the-bytes-on-disk"><a class="header" href="#6-find-the-bytes-on-disk">6. Find the Bytes on Disk</a></h2>
+<h2 id="find-the-bytes-on-disk"><a class="header" href="#find-the-bytes-on-disk">Find the Bytes on Disk</a></h2>
 <p>Arrays are content-addressed, so identical values are stored once and shared. <code>arrays</code> shows what
 collapsed onto what, and where each array actually lives:</p>
 <pre><code class="language-sh">infrastore --store demo.h5 store-info    # both file paths, format version, compression
@@ -408,7 +413,7 @@ metadata alone.</p>
 hashes as garbage bytes, and in <code>.mode box</code> it mangles the table borders:</p>
 <pre><code class="language-sh">sqlite3 demo.h5.sqlite 'SELECT name, data_hash FROM time_series_readable;'
 </code></pre>
-<h2 id="7-associations"><a class="header" href="#7-associations">7. Associations</a></h2>
+<h2 id="associations"><a class="header" href="#associations">Associations</a></h2>
 <p>Two association catalogs live alongside the time series, readable and writable here:</p>
 <pre><code class="language-sh">infrastore --store demo.h5 attributes                 # component &lt;-&gt; supplemental attribute
 infrastore --store demo.h5 attributes --summary       # counts by (component type, attribute type)
@@ -423,7 +428,7 @@ consumer's object graph — so the flags are bare ids and type names. <code>atta
 <code>link --from</code> import a whole table in one all-or-nothing transaction; their header is checked,
 because the four columns are two interchangeable-looking <code>(id, type)</code> pairs and a swapped file would
 silently invert every relationship. <code>detach</code> and <code>unlink</code> are the inverses, and take <code>--dry-run</code>.</p>
-<h2 id="8-forecasts"><a class="header" href="#8-forecasts">8. Forecasts</a></h2>
+<h2 id="forecasts"><a class="header" href="#forecasts">Forecasts</a></h2>
 <p>All five writable types work (<code>SingleTimeSeries</code>, <code>NonSequentialTimeSeries</code>, <code>Deterministic</code>,
 <code>Probabilistic</code>, <code>Scenarios</code>). <code>infrastore template Deterministic</code> prints a descriptor to edit, but
 it is plain JSON and says nothing about the data layout, so here is the rule:</p>
@@ -458,10 +463,7 @@ and one column per percentile or scenario — and <code>--window N</code> (or <c
 a single window instead of dumping all of them:</p>
 <pre><code class="language-sh">infrastore --store demo.h5 get --name load --type deterministic_single --window 0
 </code></pre>
-<p>Combined with <code>--time-range</code>, both address the windows the range <em>selected</em>: <code>--window 0</code> is the
-first selected window, and <code>--issue-time</code> must name one of them — a window the forecast has but the
-range dropped is reported as outside the selected range, not as missing.</p>
-<h2 id="9-compare-and-move-stores"><a class="header" href="#9-compare-and-move-stores">9. Compare and Move Stores</a></h2>
+<h2 id="compare-and-move-stores"><a class="header" href="#compare-and-move-stores">Compare and Move Stores</a></h2>
 <pre><code class="language-sh">infrastore --store run.h5 diff --against baseline.h5      # exits 1 when they differ
 infrastore --store demo.h5 merge --from other.h5 --name-glob 'load_*'
 infrastore --store demo.h5 persist --dest backup.h5 --force
@@ -471,7 +473,7 @@ makes it cheap enough for a CI gate: two series hold the same numbers exactly wh
 same hash. <code>merge</code> moves arrays as bytes, so nothing is lost to a CSV round trip. <code>persist</code> is the
 one write that refuses an existing destination without <code>--force</code>: a save that fails partway may
 already have destroyed what was there.</p>
-<h2 id="10-maintain-it"><a class="header" href="#10-maintain-it">10. Maintain It</a></h2>
+<h2 id="maintain-it"><a class="header" href="#maintain-it">Maintain It</a></h2>
 <pre><code class="language-sh">infrastore --store demo.h5 verify                 # re-hash every array; exit 1 on a mismatch
 infrastore --store demo.h5 check-consistency      # every SingleTimeSeries of a resolution on one grid
 infrastore --store demo.h5 stats                  # association, owner, and distinct-array counts
@@ -500,11 +502,11 @@ piped/redirected or when <code>NO_COLOR</code> is set, so <code>-f json</code>/<
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../how-to/run-server.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../guides/julia.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
-                            <a rel="next prefetch" href="../reference/index.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../guides/server.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <i class="fa fa-angle-right"></i>
                             </a>
 
@@ -514,11 +516,11 @@ piped/redirected or when <code>NO_COLOR</code> is set, so <code>-f json</code>/<
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../how-to/run-server.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../guides/julia.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <i class="fa fa-angle-left"></i>
                     </a>
 
-                    <a rel="next prefetch" href="../reference/index.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../guides/server.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <i class="fa fa-angle-right"></i>
                     </a>
             </nav>
