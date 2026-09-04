@@ -357,8 +357,8 @@ cargo run -p infrastore-server -- --config my_server.toml
   exactly this), where a crash loses that state anyway. `MemoryBackend` + `Attached` is rejected.
   `persist_catalog` writes only the `.sqlite` half, stamped to match the HDF5 file already beside it
   — the cheap way to land an in-memory catalog when the arrays are already in place (`persist_to` to
-  another path has to copy them). The CLI calls it at the end of every `add`/`init`, because one
-  command per process means a catalog still in RAM at exit is lost, not deferred.
+  another path has to write them again). The CLI calls it at the end of every `add`/`init`, because
+  one command per process means a catalog still in RAM at exit is lost, not deferred.
 - The two halves carry a matching **generation stamp** — the HDF5 root attribute
   `catalog_generation` and the catalog's `catalog_identity` table. `persist_to` stages both halves,
   fsyncs, and renames them into place; because two renames cannot be atomic together, a fresh stamp

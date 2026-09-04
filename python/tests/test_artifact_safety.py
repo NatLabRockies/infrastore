@@ -162,7 +162,7 @@ def test_persist_catalog_pairs_an_in_memory_catalog_with_its_arrays(tmp_path):
         add(store, 1, 100.0)
         assert not (tmp_path / "scratch.h5.sqlite").exists()
         # Writes only the catalog: the arrays are already where they belong, so
-        # unlike persist_to() this copies nothing.
+        # unlike persist_to() this writes no arrays.
         store.persist_catalog()
 
     with Store.open(path, read_only=True) as reopened:

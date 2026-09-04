@@ -21,7 +21,8 @@ use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{
     AddRequest, CatalogMode, Deterministic, ListFilter, NonSequentialTimeSeries, OwnerCategory,
     Probabilistic, Scenarios, SingleTimeSeries, Store, SupplementalAttributeAssociation,
-    TimeSeriesData, TimeSeriesError, TimeSeriesMetadata, TransformPolicy, TypedArray, UnitSystem,
+    TimeSeriesData, TimeSeriesError, TimeSeriesMetadata, TimeSeriesType, TransformPolicy,
+    TypedArray, UnitSystem,
 };
 
 fn ts(y: i32, mo: u32, d: u32, h: u32) -> DateTime<Utc> {
@@ -528,6 +529,57 @@ fn an_arrays_only_persist_round_trips_through_the_document() {
         sorted_rows(&restored),
         before,
         "the bundle plus the document is the store it came from",
+    );
+}
+
+/// The bundle is the live set: a series removed from the source leaves a dead
+/// slot in the source file until `compact`, and `persist_arrays_to` writes only
+/// what the catalog still names, so the restored store has nothing to reclaim.
+#[test]
+fn an_arrays_only_persist_leaves_dead_arrays_behind() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source_path = dir.path().join("source.h5");
+    let bundle = dir.path().join("bundle.h5");
+
+    let mut store = build_full_store(&source_path);
+    // A dense forecast: its array is a standalone dataset nothing else shares,
+    // so removing it leaves a dead dataset in the source file.
+    let victim = sorted_rows(&store)
+        .into_iter()
+        .find(|m| m.time_series_type == TimeSeriesType::Probabilistic)
+        .and_then(|m| m.id)
+        .expect("the full store holds a probabilistic forecast");
+    store
+        .remove_by_ids(&[victim])
+        .expect("removing a stored series should succeed");
+    let ts_json = store
+        .export_time_series_associations_openapi(&ListFilter::new())
+        .expect("export should succeed");
+    let before = sorted_rows(&store);
+    store
+        .persist_arrays_to(&bundle)
+        .expect("the array half should publish on its own");
+    let source_report = store
+        .compact()
+        .expect("compacting the source should succeed");
+    assert!(
+        source_report.slots_reclaimed + source_report.datasets_dropped > 0,
+        "the source still carried the removed series' array: {source_report:?}",
+    );
+
+    let mut restored = Store::open_without_catalog(&bundle, CatalogMode::Attached)
+        .expect("the one-file bundle should open");
+    restored
+        .import_time_series_associations_openapi(&ts_json)
+        .expect("every row should import");
+    assert_eq!(sorted_rows(&restored), before, "the live rows round-trip");
+    let report = restored
+        .compact()
+        .expect("compacting the restored bundle should succeed");
+    assert_eq!(
+        report.slots_reclaimed + report.datasets_dropped,
+        0,
+        "the bundle carried nothing the catalog does not name: {report:?}",
     );
 }
 

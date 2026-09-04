@@ -477,17 +477,24 @@ fn a_dropped_bulk_add_writes_no_arrays() {
     );
 }
 
-/// The two halves of `persist_to` are not symmetric, and the difference is
-/// visible in the result. A store whose arrays are already a file gets that
-/// file *copied*, dead space and all; a store whose arrays are in memory gets
-/// them *materialized*, which writes only what the catalog still references.
-/// Neither is wrong — the copy preserves the live layout — but a caller sizing
-/// a save should know which one they are getting.
+/// A save is the live set whichever backend holds it. A store whose arrays are
+/// already a file carries every slot a removal freed since its last `compact`,
+/// because HDF5 cannot give the space back in place; `persist_to` reads the
+/// arrays the catalog still names out of that file into a fresh one, exactly as
+/// it materializes an in-memory store, so neither save has anything left for a
+/// compaction to reclaim.
 #[test]
-fn saving_copies_an_array_file_but_materializes_an_in_memory_one() {
+fn saving_writes_the_live_set_whichever_backend_holds_it() {
     let dir = tempfile::tempdir().unwrap();
+    let reclaimable = |dest: &std::path::Path| {
+        let mut saved = open_store(dest, false).unwrap();
+        assert!(saved.verify_integrity().unwrap().ok());
+        assert_eq!(saved.num_distinct_arrays().unwrap(), 1);
+        let report = saved.compact().unwrap();
+        report.slots_reclaimed + report.datasets_dropped
+    };
 
-    // Arrays on disk: the freed slot travels into the save.
+    // Arrays on disk: the freed slot stays behind in the source.
     let src = dir.path().join("src.h5");
     let from_disk = dir.path().join("from-disk.h5");
     {
@@ -498,15 +505,19 @@ fn saving_copies_an_array_file_but_materializes_an_in_memory_one() {
             .clear_time_series(Some((2, OwnerCategory::Component)))
             .unwrap();
         store.persist_to(&from_disk).unwrap();
+        let source = store.compact().unwrap();
+        assert!(
+            source.slots_reclaimed > 0,
+            "the source still carried the freed slot: {source:?}"
+        );
     }
-    let mut saved = open_store(&from_disk, false).unwrap();
-    let copied = saved.compact().unwrap();
-    assert!(
-        copied.slots_reclaimed > 0,
-        "the copy inherited the source's freed slot: {copied:?}"
+    assert_eq!(
+        reclaimable(&from_disk),
+        0,
+        "a save from a file writes only the live set"
     );
 
-    // Arrays in memory: only the live set is written out.
+    // Arrays in memory: the same live set, the same way.
     let from_memory = dir.path().join("from-memory.h5");
     {
         let mut store = create_store(None, true).unwrap();
@@ -517,11 +528,10 @@ fn saving_copies_an_array_file_but_materializes_an_in_memory_one() {
             .unwrap();
         store.persist_to(&from_memory).unwrap();
     }
-    let mut saved = open_store(&from_memory, false).unwrap();
-    let materialized = saved.compact().unwrap();
     assert_eq!(
-        materialized.slots_reclaimed, 0,
-        "materializing writes the live set, so the save starts compact: {materialized:?}"
+        reclaimable(&from_memory),
+        0,
+        "a save from memory writes only the live set"
     );
 }
 
