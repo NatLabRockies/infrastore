@@ -64,10 +64,9 @@ fn persistent_round_trip() {
     assert!(report.ok(), "integrity errors: {:?}", report.errors);
 }
 
-/// Persisting an *on-disk* store copies both halves and leaves the source store
-/// usable. `persist_to` has to close its HDF5 handle around the copy — HDF5
-/// keeps a byte-range lock on an open file, which makes the copy fail on Windows
-/// with ERROR_LOCK_VIOLATION — so this also covers the reopen after that swap.
+/// Persisting an *on-disk* store writes both halves afresh and leaves the
+/// source store usable: its arrays are read out of the live handle into the new
+/// file, so the handle stays open throughout.
 #[test]
 fn on_disk_persist_copies_and_leaves_the_source_usable() {
     let dir = tempfile::tempdir().unwrap();

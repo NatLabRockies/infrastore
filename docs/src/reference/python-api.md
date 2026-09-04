@@ -360,7 +360,7 @@ def persist_arrays_to(self, path: str) -> None: ...
 # a <path>.sqlite is already there, since its rows would be left dangling.
 def persist_catalog(self) -> None: ...
 # Writes an in-memory catalog to this store's own <path>.sqlite, stamped to
-# match the HDF5 file already beside it. Unlike persist_to, copies no arrays:
+# match the HDF5 file already beside it. Unlike persist_to, writes no arrays:
 # they are already in place. A checkpoint, not a mode switch — the catalog
 # stays in RAM. For catalog="attached" this is flush().
 

@@ -290,11 +290,12 @@ no catalog. Reopening it as `Attached` creates a fresh, unstamped catalog beside
 because the arrays are there but nothing names them.
 
 `persist_catalog()` is the cheap way to land an in-memory catalog when the arrays are already in
-their final place. `persist_to` aimed at another path has to copy the array file; `persist_catalog`
-writes only the `.sqlite` half, stamped to match the HDF5 file already sitting beside it. That is
-what makes `InMemory` usable for what it is good for — skipping per-commit journaling during a bulk
-load — without paying a full copy of the arrays to land the result. It is a checkpoint, not a mode
-switch: the catalog stays in RAM, and later changes are again RAM-only until the next call.
+their final place. `persist_to` aimed at another path has to write the arrays again;
+`persist_catalog` writes only the `.sqlite` half, stamped to match the HDF5 file already sitting
+beside it. That is what makes `InMemory` usable for what it is good for — skipping per-commit
+journaling during a bulk load — without paying a full copy of the arrays to land the result. It is a
+checkpoint, not a mode switch: the catalog stays in RAM, and later changes are again RAM-only until
+the next call.
 
 ## Saving: One Pair, Two Renames
 

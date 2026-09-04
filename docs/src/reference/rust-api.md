@@ -407,7 +407,7 @@ can be moved between threads, but sharing one requires external synchronization 
   (every distinct array by hash, plus the whole catalog). Because arrays are content-addressed, this
   reproduces every series — static, forecast, non-sequential — without per-type reconstruction.
 - **`persist_catalog`** — Writes an in-memory catalog to this store's own `<path>.sqlite`, stamped
-  to match the HDF5 file already beside it. Unlike `persist_to`, copies no arrays: they are already
+  to match the HDF5 file already beside it. Unlike `persist_to`, writes no arrays: they are already
   in place. A checkpoint, not a mode switch — the catalog stays in RAM afterwards. For a
   `CatalogMode::Attached` store this is `flush`.
 
