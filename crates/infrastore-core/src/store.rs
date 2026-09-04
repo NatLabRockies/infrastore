@@ -979,11 +979,6 @@ impl OpenGuard {
         open.push(key.clone());
         Ok(Self(key))
     }
-
-    /// Whether `path` is free, without holding it.
-    fn check(path: &Path) -> Result<()> {
-        Self::acquire(path).map(drop)
-    }
 }
 
 impl Drop for OpenGuard {
@@ -995,12 +990,16 @@ impl Drop for OpenGuard {
     }
 }
 
-/// The key an artifact is registered under: its directory canonicalized (the
-/// file itself need not exist yet -- a create registers before writing) joined
-/// with the file name, so two spellings of one path collide. A path whose
-/// directory cannot be resolved is keyed as written; the open that follows
-/// reports why.
+/// The key an artifact is registered under: the path canonicalized, so two
+/// spellings of one file -- a relative and an absolute form, or a symlink and
+/// its target -- collide. A file that does not exist yet (a create registers
+/// before writing) is keyed by its directory canonicalized plus the file name,
+/// and a path whose directory cannot be resolved either is keyed as written;
+/// the open that follows reports why.
 fn artifact_key(path: &Path) -> PathBuf {
+    if let Ok(real) = path.canonicalize() {
+        return real;
+    }
     let dir = match path.parent() {
         Some(dir) if !dir.as_os_str().is_empty() => dir.canonicalize(),
         _ => std::env::current_dir(),
@@ -1143,9 +1142,11 @@ impl Store {
         compression: Compression,
         catalog: CatalogMode,
     ) -> Result<Self> {
-        // Checked before anything is deleted: the files about to go may be the
-        // ones another handle in this process is reading and writing.
-        OpenGuard::check(path)?;
+        // Taken before anything is deleted: the files about to go may be the
+        // ones another handle in this process is reading and writing. Held
+        // across the removals and released just before the create below takes
+        // its own.
+        let guard = OpenGuard::acquire(path)?;
         let sqlite = catalog_sqlite_path(path);
         // Sidecars before the database they belong to: a `-wal` outliving its
         // database is the one ordering SQLite would try to recover from.
@@ -1153,6 +1154,7 @@ impl Store {
         remove_if_exists(&sqlite_sidecar(&sqlite, "-shm"))?;
         remove_if_exists(&sqlite)?;
         remove_if_exists(path)?;
+        drop(guard);
         Self::create_with_catalog(Some(path), false, compression, catalog)
     }
 
@@ -1482,13 +1484,6 @@ impl Store {
         } else {
             (Vec::new(), Vec::new())
         };
-        if depth == 0 {
-            // Every array the transaction wrote reaches the file before the
-            // release that makes the rows naming it durable -- the same order
-            // the bulk add keeps, paid once per transaction rather than once
-            // per operation inside it.
-            self.backend.flush()?;
-        }
         self.metadata
             .execute_txn_stmt(&format!("RELEASE {};", Self::txn_savepoint(depth)))?;
         if depth > 0 {
@@ -4474,15 +4469,19 @@ impl Store {
         }
         // The renames below replace whatever is at `path`. Another handle in
         // this process holding it open would keep reading the file that was
-        // renamed away -- the same hazard `StoreInUse` refuses at open. This
-        // store's own path is exempt: that handle is `self`.
-        if self
+        // renamed away -- the same hazard `StoreInUse` refuses at open -- so
+        // the destination is held for the whole save, not just probed: an
+        // open landing between a probe and the rename would be replaced under
+        // all the same. This store's own path is exempt: that handle is `self`.
+        let _destination = if self
             .file_path
             .as_deref()
             .is_none_or(|src| !same_file(src, path))
         {
-            OpenGuard::check(path)?;
-        }
+            Some(OpenGuard::acquire(path)?)
+        } else {
+            None
+        };
         self.flush()?;
 
         // Saving an attached catalog onto its own artifact is already done: the

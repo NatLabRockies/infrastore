@@ -835,6 +835,13 @@ fn a_second_handle_on_an_open_artifact_is_refused() {
         &dir.path().join(".").join("held.h5"),
         true
     )));
+    // So is a symlink to it: the key is the canonical path, not the spelling.
+    #[cfg(unix)]
+    {
+        let alias = dir.path().join("alias.h5");
+        std::os::unix::fs::symlink(&path, &alias).unwrap();
+        assert!(in_use(open_store(&alias, true)));
+    }
     assert!(in_use(create_store_replacing(
         &path,
         Compression::default(),
