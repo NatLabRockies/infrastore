@@ -242,13 +242,14 @@ the HDF5 file, and no amount of care inside this library can prevent it.
 
 Inside one process the library enforces the rule itself, and more strictly than the lock does: a
 second `Store` on a path that is already open fails with `StoreInUse` whatever its mode, and so do
-`create_replacing` and `persist_to` aimed at a path another handle holds. A read-only handle is not
-exempt because its map from content hash to packed column is built once at open — after the writer
-removes a series and reuses the slot, that map points a live hash at another series' values, and
-libhdf5 sharing one file object between the two opens makes the reader's cache agree with it. The
-HDF5 lock does not see this case at all, and it is the easier mistake to make: an unclosed handle in
-a notebook or REPL, a fixture and a test body, a read-only handle opened for a report beside the
-writer. Close the handle you hold before opening another.
+`create_replacing`, `open_without_catalog`, `persist_to`, and `persist_arrays_to` aimed at a path
+another handle holds. A read-only handle is not exempt because its map from content hash to packed
+column is built once at open — after the writer removes a series and reuses the slot, that map
+points a live hash at another series' values, and libhdf5 sharing one file object between the two
+opens makes the reader's cache agree with it. The HDF5 lock does not see this case at all, and it is
+the easier mistake to make: an unclosed handle in a notebook or REPL, a fixture and a test body, a
+read-only handle opened for a report beside the writer. Close the handle you hold before opening
+another.
 
 `verify_integrity()` is the backstop. Every array carries a SHA-256 companion, and the check
 re-reads and re-hashes all of them, so corruption is detectable even when it is not preventable —

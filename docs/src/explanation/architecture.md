@@ -150,7 +150,8 @@ the thread that created it.
 multiple processes writing the same file concurrently — a single writer owns the files at a time.
 
 Within one process the rule is enforced: opening an artifact that another `Store` in the process
-already holds — read-only or not — fails with `StoreInUse`, and so do `create_replacing` and
-`persist_to` aimed at a held path. Each handle indexes the HDF5 file's packed columns once at open,
-and libhdf5 shares one file object between two opens of a file, so a second handle would read and
-write the wrong columns. Drop the handle before opening another.
+already holds — read-only or not — fails with `StoreInUse`, and so do `create_replacing`,
+`open_without_catalog`, `persist_to`, and `persist_arrays_to` aimed at a held path. Each handle
+indexes the HDF5 file's packed columns once at open, and libhdf5 shares one file object between two
+opens of a file, so a second handle would read and write the wrong columns. Drop the handle before
+opening another.

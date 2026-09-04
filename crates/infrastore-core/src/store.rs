@@ -1376,6 +1376,10 @@ impl Store {
     ///
     /// Never read-only: writing the rows back is the entire purpose.
     pub fn open_without_catalog(path: &Path, catalog: CatalogMode) -> Result<Self> {
+        // One handle per artifact per process, exactly as `open_with_catalog`:
+        // the arrays are opened in place, so a second handle on them would be
+        // the same stale-index hazard `StoreInUse` refuses everywhere else.
+        let open_guard = OpenGuard::acquire(path)?;
         let sqlite_path = catalog_sqlite_path(path);
         if sqlite_path.exists() {
             return Err(TimeSeriesError::StoreExists {
@@ -1406,6 +1410,7 @@ impl Store {
             file_path: Some(path.to_path_buf()),
             catalog,
             txn: None,
+            _open_guard: Some(open_guard),
         })
     }
 
@@ -4725,12 +4730,6 @@ impl Store {
                 "cannot persist while a transaction is open; commit or roll back first".into(),
             ));
         }
-        let sqlite_path = catalog_sqlite_path(path);
-        if sqlite_path.exists() {
-            return Err(TimeSeriesError::StoreExists {
-                path: sqlite_path.display().to_string(),
-            });
-        }
         // Writing the live arrays onto the file this store is reading them from
         // would be a rename over its own open handle, and there is no catalog
         // here to make the result meaningful anyway.
@@ -4742,6 +4741,17 @@ impl Store {
             return Err(TimeSeriesError::InvalidParameter(
                 "cannot persist a store's arrays onto its own array file".into(),
             ));
+        }
+        // The rename below replaces whatever array file is at `path`. As in
+        // `persist_to`, a handle in this process holding it open would keep
+        // reading the file that was renamed away, so the destination is held
+        // for the whole save rather than probed.
+        let _destination = OpenGuard::acquire(path)?;
+        let sqlite_path = catalog_sqlite_path(path);
+        if sqlite_path.exists() {
+            return Err(TimeSeriesError::StoreExists {
+                path: sqlite_path.display().to_string(),
+            });
         }
         self.flush()?;
 

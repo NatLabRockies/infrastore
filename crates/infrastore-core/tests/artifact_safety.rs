@@ -847,10 +847,21 @@ fn a_second_handle_on_an_open_artifact_is_refused() {
         Compression::default(),
         CatalogMode::Attached
     )));
-    // A save onto a held path would rename its file out from under it.
+    // The arrays-only way in opens the same file in place, so it is refused
+    // before it can even notice the catalog beside it.
+    assert!(in_use(Store::open_without_catalog(
+        &path,
+        CatalogMode::Attached
+    )));
+    // A save onto a held path would rename its file out from under it --
+    // whether it lands both halves or the arrays alone.
     let mut other = create_store(Some(&dir.path().join("other.h5")), false).unwrap();
     assert!(matches!(
         other.persist_to(&path),
+        Err(TimeSeriesError::StoreInUse { .. })
+    ));
+    assert!(matches!(
+        other.persist_arrays_to(&path),
         Err(TimeSeriesError::StoreInUse { .. })
     ));
 
