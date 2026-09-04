@@ -322,8 +322,8 @@ door, the guarantee holds there too: a supplied id must sit above the destinatio
 issued ids of its own), and a document supplies one for every row or for none. Neither association
 catalog's wire form carries an id at all, so both always assign.
 
-The same round trip carries two fields the schema gained late, vendored here from an un-merged
-SiennaSchemas branch (`crates/infrastore-core/sienna_schemas/SOURCE.md` records which commit):
+The same round trip carries two fields the schema gained late
+(`crates/infrastore-core/sienna_schemas/SOURCE.md` records the upstream commit vendored here):
 `array_shape`, the stored array's full native shape (`[length, *element_shape]` in the catalog's
 terms, where the schema's `element_shape` is only the per-step trailing shape), and
 `time_reference`. Both exist so an imported row is _identical_ to the exported one — the forecast

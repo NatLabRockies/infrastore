@@ -9,10 +9,10 @@ this is a maintainer-run sync rather than a live fetch, mirroring the `conforman
 
 - **Source repo**: upstream is `Sienna-Platform/SiennaSchemas`. The sync script vendors whatever
   local checkout is passed to it.
-- **Source commit**: `c1ec95047af1ad2bf86a314385e3304299759260`
+- **Source commit**: `6786680f1080a8d11edb159c2bdaa7efb5a34b2a`
 - **Sync note**: the vendored copy may include un-merged upstream changes from the local checkout
   used.
-- **Synced**: 2026-09-03T14:24:03Z
+- **Synced**: 2026-09-04T19:53:45Z
 
 ## Refreshing
 
