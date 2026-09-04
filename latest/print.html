@@ -1585,14 +1585,41 @@ door, the guarantee holds there too: a supplied id must sit above the destinatio
 (<code>DuplicateAssociationId</code> otherwise, so a document's ids fit a fresh store but not one that has
 issued ids of its own), and a document supplies one for every row or for none. Neither association
 catalog's wire form carries an id at all, so both always assign.</p>
-<p>The same round trip carries two fields the schema gained late, vendored here from an un-merged
-SiennaSchemas branch (<code>conformance/sienna_schemas/SOURCE.md</code> records which commit): <code>array_shape</code>,
-the stored array's full native shape (<code>[length, *element_shape]</code> in the catalog's terms, where the
-schema's <code>element_shape</code> is only the per-step trailing shape), and <code>time_reference</code>. Both exist so
-an imported row is <em>identical</em> to the exported one — the forecast layouts above are conventions the
-caller owns, so the native shape cannot be rebuilt from <code>horizon</code> and <code>count</code>. Neither is required:
-a producer predating them writes rows without them, a reader that does not know them ignores them,
-and an import that finds them absent falls back to the schema's own fields.</p>
+<p>The same round trip carries two fields the schema gained late
+(<code>crates/infrastore-core/sienna_schemas/SOURCE.md</code> records the upstream commit vendored here):
+<code>array_shape</code>, the stored array's full native shape (<code>[length, *element_shape]</code> in the catalog's
+terms, where the schema's <code>element_shape</code> is only the per-step trailing shape), and
+<code>time_reference</code>. Both exist so an imported row is <em>identical</em> to the exported one — the forecast
+layouts above are conventions the caller owns, so the native shape cannot be rebuilt from <code>horizon</code>
+and <code>count</code>. Neither is required: a producer predating them writes rows without them, a reader that
+does not know them ignores them, and an import that finds them absent falls back to the schema's own
+fields.</p>
+<h3 id="reading-an-artifact-back-from-arrays-plus-a-document"><a class="header" href="#reading-an-artifact-back-from-arrays-plus-a-document">Reading an artifact back from arrays plus a document</a></h3>
+<p>Those two fields exist so that a document can stand in for the catalog entirely. A consumer that
+already ships the association rows in JSON of its own — PowerSystems writes a <code>system.json</code> beside a
+<code>time_series.h5</code> — carries the <code>.sqlite</code> half for nothing: the arrays are the part that cannot be
+reconstructed, and the catalog can be replayed. <code>Store::open_without_catalog</code> is the way in. It
+opens the array half of an artifact whose catalog is absent and mints an empty one carrying the
+array file's <em>own</em> generation stamp, so the rebuilt pair opens normally ever after; an ordinary
+<code>open</code> cannot, because a stamped array file beside an unstamped catalog is exactly the half-finished
+save the paired-stamp check exists to catch.</p>
+<p>All six types make the trip, including <code>NonSequentialTimeSeries</code> — which needs one field the others
+do not. Its timestamp vector lives in the store rather than the document, content-addressed so a
+cohort sharing one axis stores it once, and the values cannot imply which axis a row is on: arrays
+are content-addressed too, so two irregular series with byte-identical values on <em>different</em> axes
+share one stored array and only the catalog's <code>timestamps_hash</code> distinguishes them. An import that
+guessed would hand back another series' timestamps. So the wire form <strong>locates</strong> the axis, as
+<code>timestamps_uri</code> — the same kind of field <code>uri</code> is for the values, and a locator rather than the
+vector itself precisely because the axis is shared, where inlining it would repeat the whole vector
+on every row of the cohort. The axis ships in the array file alongside the arrays, so the import
+resolves the locator against the store; a row missing it, or naming an axis the store does not hold,
+is refused.</p>
+<p>Both imports validate every incoming row against those vendored schemas before decoding it, so a
+document that drifted from the contract is refused in the schema's own terms — the row, the field,
+and what was expected — rather than by whatever the Rust struct happens to notice first. A
+time-series row is checked against the per-type schema its own <code>time_series_type</code> selects, which is
+what the wrapper's <code>discriminator</code> prescribes and what keeps the error specific: a failed <code>oneOf</code>
+can only report that nothing matched.</p>
 <p>Each of the three catalog tables keeps its own independent counter, so an id is only meaningful
 alongside the table it came from.</p>
 <p>Writes report the id they used, and reads take one:</p>
@@ -5439,6 +5466,7 @@ pub fn create_store_replacing(
 ) -&gt; Result&lt;Store&gt;
 pub fn open_store(path: &amp;Path, read_only: bool) -&gt; Result&lt;Store&gt;
 pub fn open_store_copy(src: &amp;Path, dest: &amp;Path, catalog: CatalogMode) -&gt; Result&lt;Store&gt;
+pub fn open_store_without_catalog(path: &amp;Path, catalog: CatalogMode) -&gt; Result&lt;Store&gt;
 <span class="boring">}</span></code></pre></pre>
 <ul>
 <li><code>create_store(None, true)</code> — in-memory store, no filesystem I/O.</li>
@@ -5454,9 +5482,13 @@ can leave neither the old store nor the new one.</li>
 <li><code>open_store_copy(src, dest, catalog)</code> — copies both halves to <code>dest</code> and opens the copy
 read-write, leaving <code>src</code> untouched. The safe way to load a store you intend to change: mutating
 an artifact in place is unrecoverable if interrupted, since HDF5 has no journal.</li>
+<li><code>open_store_without_catalog(path, catalog)</code> — opens the array half of an artifact whose catalog is
+<strong>absent</strong> and mints an empty one, returning a writable store that holds every array and no rows.
+The way in to a store shipped as arrays plus an OpenAPI document; see
+<a href="reference/rust-api.html#restoring-a-catalog-from-a-document">restoring a catalog from a document</a>.</li>
 </ul>
 <p><code>Store::create</code> / <code>Store::create_with_compression</code> / <code>Store::create_replacing</code> / <code>Store::open</code> /
-<code>Store::open_copy</code> are the inherent-method equivalents.</p>
+<code>Store::open_copy</code> / <code>Store::open_without_catalog</code> are the inherent-method equivalents.</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>pub enum Compression {
@@ -6082,6 +6114,49 @@ target.add_parent_child_associations(exported)?;
 <span class="boring">}</span></code></pre></pre>
 <p>Neither association catalog is exposed over the <a href="reference/./grpc-api.html">gRPC server</a> or the
 <a href="reference/./cli.html"><code>infrastore</code> CLI</a>.</p>
+<h3 id="restoring-a-catalog-from-a-document"><a class="header" href="#restoring-a-catalog-from-a-document">Restoring a catalog from a document</a></h3>
+<p>An artifact is two files, but a consumer that already carries the association rows in JSON of its
+own — PowerSystems ships a <code>system.json</code> beside a <code>time_series.h5</code> — has no reason to move the
+<code>.sqlite</code> half around as well. The arrays are the half that cannot be reconstructed; the catalog can
+be replayed.</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use infrastore_core::{CatalogMode, ListFilter, Store};
+
+// Writing side: the arrays are already in `bundle.h5`; take the rows as JSON.
+let store = Store::open(path, true)?;
+let ts_rows = store.export_time_series_associations_openapi(&amp;ListFilter::new())?;
+let sa_rows = store.export_supplemental_attribute_associations_openapi()?;
+
+// Reading side: `bundle.h5` arrived with no `bundle.h5.sqlite` beside it.
+let mut restored = Store::open_without_catalog(path, CatalogMode::Attached)?;
+restored.import_time_series_associations_openapi(&amp;ts_rows)?;
+restored.import_supplemental_attribute_associations_openapi(&amp;sa_rows)?;
+<span class="boring">}</span></code></pre></pre>
+<p><code>Store::open</code> cannot open that bundle: the array file carries a generation stamp and a catalog
+created on the spot does not, so it reports <code>MismatchedArtifact</code> — the right answer everywhere
+except here. <code>open_without_catalog</code> mints a catalog carrying the array file's <em>own</em> stamp, so the
+rebuilt pair opens normally ever after. It refuses (<code>StoreExists</code>) when a catalog is already there;
+delete it first to rebuild deliberately.</p>
+<p>Every row keeps the <code>association_id</code> the document recorded, which is the point — an import that
+assigned fresh ids would leave every reference in the document pointing at the wrong series.</p>
+<p><strong>What each row must name.</strong> The array it resolves to, under the geometry that array actually has —
+a document carries locators, never values. And, for a <code>NonSequentialTimeSeries</code>, its time axis, as
+<code>timestamps_uri</code>. That one is a locator for the same reason the array is: the axis is stored beside
+the arrays and shared across a cohort. It cannot be left out and inferred, because arrays are
+content-addressed — two irregular series with byte-identical values on <em>different</em> axes share one
+stored array, and only the catalog's <code>timestamps_hash</code> tells them apart, so an import that guessed
+would hand back another series' timestamps.</p>
+<p>Incoming rows are validated against the vendored <a href="reference/rust-api.html#the-wire-contract">SiennaSchemas</a> specs before
+anything is decoded, so a document that drifted is refused in the schema's own terms.</p>
+<h3 id="the-wire-contract"><a class="header" href="#the-wire-contract">The wire contract</a></h3>
+<p>The JSON spelling both directions use is SiennaSchemas' own, vendored at
+<code>crates/infrastore-core/sienna_schemas/</code> (its <code>SOURCE.md</code> records the upstream commit; refresh with
+<code>scripts/sync_sienna_schemas.sh</code>). Those files are compiled into the crate and are what the import
+path validates against — no filesystem access, no network. A time-series row is checked against the
+per-type schema its own <code>time_series_type</code> selects, which is how the wrapper's <code>discriminator</code> says
+to read it and what makes an error name the offending field rather than only reporting that a
+<code>oneOf</code> matched nothing.</p>
 <h2 id="types"><a class="header" href="#types">Types</a></h2>
 <h3 id="timeseriesid-and-keyidentity"><a class="header" href="#timeseriesid-and-keyidentity"><code>TimeSeriesId</code> and <code>KeyIdentity</code></a></h3>
 <p><code>TimeSeriesId</code> is the catalog id of one association — the only way to address a stored series. It is
@@ -7197,6 +7272,11 @@ def verify_integrity(self) -&gt; dict: ...
 # {"ok": bool, "errors": list[str]}
 def flush(self) -&gt; None: ...
 def persist_to(self, path: str) -&gt; None: ...
+def persist_arrays_to(self, path: str) -&gt; None: ...
+# Writes only the array half, leaving no catalog beside it — the write-side
+# counterpart of Store.open_without_catalog, for shipping an artifact as arrays
+# plus a document of your own. Atomic: one file, one rename. StoreExistsError if
+# a &lt;path&gt;.sqlite is already there, since its rows would be left dangling.
 def persist_catalog(self) -&gt; None: ...
 # Writes an in-memory catalog to this store's own &lt;path&gt;.sqlite, stamped to
 # match the HDF5 file already beside it. Unlike persist_to, copies no arrays:
@@ -7749,6 +7829,9 @@ directly.</p>
 def import_time_series_associations_openapi(self, json: str) -&gt; int: ...
 def export_supplemental_attribute_associations_openapi(self) -&gt; str: ...
 def import_supplemental_attribute_associations_openapi(self, json: str) -&gt; int: ...
+
+@classmethod
+def open_without_catalog(cls, path: str, *, catalog: str = "attached") -&gt; Store: ...
 </code></pre>
 <p><code>export_time_series_associations_openapi</code> takes the same filter keywords as <code>list_metadata</code>. Every
 row's <code>uri</code> and <code>data_hash</code> are the hex-encoded content hash the store already has for that row —
@@ -7762,13 +7845,32 @@ back), returning the number of rows inserted.</p>
 only</strong>: the document carries locators, never values, so every row must name an array this store
 already holds — the arrays arrive with the artifact. Each row keeps the <code>association_id</code> it carries,
 which is the point: an import that assigned fresh ids would leave every reference the document
-records pointing at the wrong series. A row whose array is absent, or a <code>NonSequentialTimeSeries</code>
-row (whose <code>timestamps_hash</code> is store-internal and so not on the wire, leaving the document with no
-way to say which stored time axis the row sits on), raises <code>InvalidParameterError</code> and rolls the
-whole batch back.</p>
+records pointing at the wrong series. An irregular series locates its time axis with
+<code>timestamps_uri</code>, filled from the axis's own content hash: the axis is stored beside the arrays and
+shared across a cohort, and the values cannot imply it — two irregular series with byte-identical
+values on different axes share one content-addressed array. A row missing the locator, or naming an
+axis the store does not hold, is refused. Any of those, or an absent array, raises
+<code>InvalidParameterError</code> and rolls the whole batch back.</p>
 <p>Infrastore never modifies the data to make an incoming document agree with what it already holds. A
 geometry disagreement between an added series and its own association row is likewise rejected at
 the add boundary (<code>InvalidParameterError</code>), loudly and without writing anything.</p>
+<p>Incoming rows are validated against the vendored SiennaSchemas specs before anything is decoded, so
+a document that drifted from the contract is refused in the schema's own terms — naming the row and
+the field.</p>
+<h3 id="reading-a-bundle-back-with-no-catalog"><a class="header" href="#reading-a-bundle-back-with-no-catalog">Reading a bundle back with no catalog</a></h3>
+<p><code>Store.open_without_catalog</code> opens the array half of an artifact whose <code>.sqlite</code> is <strong>absent</strong>,
+minting an empty catalog, so the document's rows can be replayed into it. This is what lets a
+consumer ship arrays plus JSON and nothing else:</p>
+<pre><code class="language-python">store = Store.open_without_catalog("bundle.h5")
+store.import_time_series_associations_openapi(ts_rows_json)
+store.import_supplemental_attribute_associations_openapi(sa_rows_json)
+</code></pre>
+<p><code>Store.open</code> cannot open that bundle — the array file carries a generation stamp and a catalog
+created on the spot does not, so it reports a mismatched artifact. The catalog minted here inherits
+the array file's own stamp, so every later <code>open</code> behaves normally. It raises <code>StoreExistsError</code>
+when a catalog is already there; a store that has one wants <code>Store.open</code>.</p>
+<p>A bundle carrying <code>NonSequentialTimeSeries</code> still needs its <code>.sqlite</code>: those rows cannot be
+replayed, for the reason above.</p>
 <pre><code class="language-python">store = Store.create(in_memory=True)
 store.add_time_series(
     owner_id=1, owner_type="Generator", owner_category=OwnerCategory.Component,
@@ -8812,6 +8914,7 @@ writes directly.</p>
 import_time_series_associations_openapi!(store, json::AbstractString) -&gt; Int
 export_supplemental_attribute_associations_openapi(store) -&gt; String
 import_supplemental_attribute_associations_openapi!(store, json::AbstractString) -&gt; Int
+open_store_without_catalog(path; catalog=:attached) -&gt; Store
 </code></pre>
 <p><code>export_time_series_associations_openapi</code> takes the same filter keywords as <code>list_metadata</code>. Every
 row's <code>uri</code> and <code>data_hash</code> are the hex-encoded content hash the store already has for that row —
@@ -8825,13 +8928,32 @@ back), returning the number of rows inserted.</p>
 only</strong>: the document carries locators, never values, so every row must name an array this store
 already holds — the arrays arrive with the artifact. Each row keeps the <code>association_id</code> it carries,
 which is the point: an import that assigned fresh ids would leave every reference the document
-records pointing at the wrong series. A row whose array is absent, or a <code>NonSequentialTimeSeries</code>
-row (whose <code>timestamps_hash</code> is store-internal and so not on the wire, leaving the document with no
-way to say which stored time axis the row sits on), throws <code>InvalidParameterError</code> and rolls the
-whole batch back.</p>
+records pointing at the wrong series. An irregular series locates its time axis with
+<code>timestamps_uri</code>, filled from the axis's own content hash: the axis is stored beside the arrays and
+shared across a cohort, and the values cannot imply it — two irregular series with byte-identical
+values on different axes share one content-addressed array. A row missing the locator, or naming an
+axis the store does not hold, is refused. Any of those, or an absent array, throws
+<code>InvalidParameterError</code> and rolls the whole batch back.</p>
 <p>Infrastore never modifies the data to make an incoming document agree with what it already holds. A
 geometry disagreement between an added series and its own association row is likewise rejected at
 the add boundary (<code>InvalidParameterError</code>), loudly and without writing anything.</p>
+<p>Incoming rows are validated against the vendored SiennaSchemas specs before anything is decoded, so
+a document that drifted from the contract is refused in the schema's own terms — naming the row and
+the field.</p>
+<h3 id="reading-a-bundle-back-with-no-catalog-1"><a class="header" href="#reading-a-bundle-back-with-no-catalog-1">Reading a bundle back with no catalog</a></h3>
+<p><code>open_store_without_catalog</code> opens the array half of an artifact whose <code>.sqlite</code> is <strong>absent</strong>,
+minting an empty catalog, so the document's rows can be replayed into it. This is what lets a
+consumer ship arrays plus JSON and nothing else:</p>
+<pre><code class="language-julia">store = open_store_without_catalog("bundle.h5")
+import_time_series_associations_openapi!(store, ts_rows_json)
+import_supplemental_attribute_associations_openapi!(store, sa_rows_json)
+</code></pre>
+<p><code>open_store</code> cannot open that bundle — the array file carries a generation stamp and a catalog
+created on the spot does not, so it reports a mismatched artifact. The catalog minted here inherits
+the array file's own stamp, so every later <code>open_store</code> behaves normally. It throws
+<code>StoreExistsError</code> when a catalog is already there; a store that has one wants <code>open_store</code>.</p>
+<p>A bundle carrying <code>NonSequentialTimeSeries</code> still needs its <code>.sqlite</code>: those rows cannot be
+replayed, for the reason above.</p>
 <h2 id="errors-1"><a class="header" href="#errors-1">Errors</a></h2>
 <p>All subtype <code>TimeSeriesException</code>:</p>
 <div class="table-wrapper"><table><thead><tr><th>Type</th><th>Mapped from FFI code</th></tr></thead><tbody>
@@ -9067,6 +9189,14 @@ int32_t infrastore_store_create_with_catalog(const char *path, bool in_memory, u
                                          uint8_t deflate_level, bool shuffle, uint8_t catalog_mode,
                                          struct InfraStore **out);
 int32_t infrastore_store_open_with_catalog(const char *path, bool read_only, uint8_t catalog_mode,
+                                         struct InfraStore **out);
+/* Open the array half of an artifact whose catalog is ABSENT, minting an empty one stamped to
+   match the arrays, and hand back a writable store holding every array and no rows — the way in
+   to a store shipped as arrays plus an OpenAPI document. Replay the rows with
+   infrastore_store_import_time_series_associations_openapi and its supplemental-attribute
+   counterpart. INFRASTORE_ERR_STORE_EXISTS when &lt;path&gt;.sqlite is already there; that store wants
+   infrastore_store_open. Never read-only. */
+int32_t infrastore_store_open_without_catalog(const char *path, uint8_t catalog_mode,
                                          struct InfraStore **out);
 /* The create entry points above fail with INFRASTORE_ERR_STORE_EXISTS when either half of a
    store is already at `path`. This one discards it first — both halves plus the catalog's
@@ -9914,11 +10044,12 @@ int32_t infrastore_store_import_supplemental_attribute_associations_openapi(
 fields with that same content hash, hex-encoded, on export. The time-series import writes <em>rows</em>
 only: infrastore never modifies the data to make an incoming document agree with what it already
 holds, so a row naming an array this store does not hold is refused
-(<code>INFRASTORE_ERR_INVALID_PARAMETER</code>) rather than written as a dangling reference, and a
-<code>NonSequentialTimeSeries</code> row is refused outright because the wire form carries no
-<code>timestamps_hash</code>, so the document does not say which stored time axis the row sits on. A geometry
-disagreement between an added series and its own association row is likewise rejected at the add
-boundary, loudly and without writing anything.</p>
+(<code>INFRASTORE_ERR_INVALID_PARAMETER</code>) rather than written as a dangling reference. A
+<code>NonSequentialTimeSeries</code> row locates its time axis the same way, with <code>timestamps_uri</code>: the values
+cannot imply it, since two irregular series with identical values on different axes share one
+content-addressed array, so a row missing the locator or naming an axis this store does not hold is
+refused alike. A geometry disagreement between an added series and its own association row is
+likewise rejected at the add boundary, loudly and without writing anything.</p>
 <h2 id="error-messages"><a class="header" href="#error-messages">Error Messages</a></h2>
 <pre><code class="language-c">int32_t infrastore_last_error_message(char *buf, uint64_t buf_len, uint64_t *needed);
 </code></pre>

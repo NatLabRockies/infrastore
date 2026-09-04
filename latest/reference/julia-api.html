@@ -1178,6 +1178,7 @@ writes directly.</p>
 import_time_series_associations_openapi!(store, json::AbstractString) -&gt; Int
 export_supplemental_attribute_associations_openapi(store) -&gt; String
 import_supplemental_attribute_associations_openapi!(store, json::AbstractString) -&gt; Int
+open_store_without_catalog(path; catalog=:attached) -&gt; Store
 </code></pre>
 <p><code>export_time_series_associations_openapi</code> takes the same filter keywords as <code>list_metadata</code>. Every
 row's <code>uri</code> and <code>data_hash</code> are the hex-encoded content hash the store already has for that row —
@@ -1191,13 +1192,32 @@ back), returning the number of rows inserted.</p>
 only</strong>: the document carries locators, never values, so every row must name an array this store
 already holds — the arrays arrive with the artifact. Each row keeps the <code>association_id</code> it carries,
 which is the point: an import that assigned fresh ids would leave every reference the document
-records pointing at the wrong series. A row whose array is absent, or a <code>NonSequentialTimeSeries</code>
-row (whose <code>timestamps_hash</code> is store-internal and so not on the wire, leaving the document with no
-way to say which stored time axis the row sits on), throws <code>InvalidParameterError</code> and rolls the
-whole batch back.</p>
+records pointing at the wrong series. An irregular series locates its time axis with
+<code>timestamps_uri</code>, filled from the axis's own content hash: the axis is stored beside the arrays and
+shared across a cohort, and the values cannot imply it — two irregular series with byte-identical
+values on different axes share one content-addressed array. A row missing the locator, or naming an
+axis the store does not hold, is refused. Any of those, or an absent array, throws
+<code>InvalidParameterError</code> and rolls the whole batch back.</p>
 <p>Infrastore never modifies the data to make an incoming document agree with what it already holds. A
 geometry disagreement between an added series and its own association row is likewise rejected at
 the add boundary (<code>InvalidParameterError</code>), loudly and without writing anything.</p>
+<p>Incoming rows are validated against the vendored SiennaSchemas specs before anything is decoded, so
+a document that drifted from the contract is refused in the schema's own terms — naming the row and
+the field.</p>
+<h3 id="reading-a-bundle-back-with-no-catalog"><a class="header" href="#reading-a-bundle-back-with-no-catalog">Reading a bundle back with no catalog</a></h3>
+<p><code>open_store_without_catalog</code> opens the array half of an artifact whose <code>.sqlite</code> is <strong>absent</strong>,
+minting an empty catalog, so the document's rows can be replayed into it. This is what lets a
+consumer ship arrays plus JSON and nothing else:</p>
+<pre><code class="language-julia">store = open_store_without_catalog("bundle.h5")
+import_time_series_associations_openapi!(store, ts_rows_json)
+import_supplemental_attribute_associations_openapi!(store, sa_rows_json)
+</code></pre>
+<p><code>open_store</code> cannot open that bundle — the array file carries a generation stamp and a catalog
+created on the spot does not, so it reports a mismatched artifact. The catalog minted here inherits
+the array file's own stamp, so every later <code>open_store</code> behaves normally. It throws
+<code>StoreExistsError</code> when a catalog is already there; a store that has one wants <code>open_store</code>.</p>
+<p>A bundle carrying <code>NonSequentialTimeSeries</code> still needs its <code>.sqlite</code>: those rows cannot be
+replayed, for the reason above.</p>
 <h2 id="errors"><a class="header" href="#errors">Errors</a></h2>
 <p>All subtype <code>TimeSeriesException</code>:</p>
 <div class="table-wrapper"><table><thead><tr><th>Type</th><th>Mapped from FFI code</th></tr></thead><tbody>

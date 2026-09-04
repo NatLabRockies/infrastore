@@ -270,6 +270,14 @@ int32_t infrastore_store_create_with_catalog(const char *path, bool in_memory, u
                                          struct InfraStore **out);
 int32_t infrastore_store_open_with_catalog(const char *path, bool read_only, uint8_t catalog_mode,
                                          struct InfraStore **out);
+/* Open the array half of an artifact whose catalog is ABSENT, minting an empty one stamped to
+   match the arrays, and hand back a writable store holding every array and no rows — the way in
+   to a store shipped as arrays plus an OpenAPI document. Replay the rows with
+   infrastore_store_import_time_series_associations_openapi and its supplemental-attribute
+   counterpart. INFRASTORE_ERR_STORE_EXISTS when &lt;path&gt;.sqlite is already there; that store wants
+   infrastore_store_open. Never read-only. */
+int32_t infrastore_store_open_without_catalog(const char *path, uint8_t catalog_mode,
+                                         struct InfraStore **out);
 /* The create entry points above fail with INFRASTORE_ERR_STORE_EXISTS when either half of a
    store is already at `path`. This one discards it first — both halves plus the catalog's
    -wal/-shm sidecars — and is destructive and not atomic. */
@@ -1116,11 +1124,12 @@ int32_t infrastore_store_import_supplemental_attribute_associations_openapi(
 fields with that same content hash, hex-encoded, on export. The time-series import writes <em>rows</em>
 only: infrastore never modifies the data to make an incoming document agree with what it already
 holds, so a row naming an array this store does not hold is refused
-(<code>INFRASTORE_ERR_INVALID_PARAMETER</code>) rather than written as a dangling reference, and a
-<code>NonSequentialTimeSeries</code> row is refused outright because the wire form carries no
-<code>timestamps_hash</code>, so the document does not say which stored time axis the row sits on. A geometry
-disagreement between an added series and its own association row is likewise rejected at the add
-boundary, loudly and without writing anything.</p>
+(<code>INFRASTORE_ERR_INVALID_PARAMETER</code>) rather than written as a dangling reference. A
+<code>NonSequentialTimeSeries</code> row locates its time axis the same way, with <code>timestamps_uri</code>: the values
+cannot imply it, since two irregular series with identical values on different axes share one
+content-addressed array, so a row missing the locator or naming an axis this store does not hold is
+refused alike. A geometry disagreement between an added series and its own association row is
+likewise rejected at the add boundary, loudly and without writing anything.</p>
 <h2 id="error-messages"><a class="header" href="#error-messages">Error Messages</a></h2>
 <pre><code class="language-c">int32_t infrastore_last_error_message(char *buf, uint64_t buf_len, uint64_t *needed);
 </code></pre>
