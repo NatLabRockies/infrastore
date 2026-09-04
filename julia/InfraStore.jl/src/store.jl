@@ -180,6 +180,42 @@ function open_store(
 end
 
 """
+    open_store_without_catalog(path; catalog=:attached)
+
+Open the array half of an artifact whose catalog is **absent**, minting an empty
+one, and return a writable store holding every array and no rows.
+
+This is the way in to a store shipped as arrays plus an OpenAPI document — a
+`system.json` beside a `time_series.h5`, with no `.sqlite` carried along. Replay
+the document's rows into the returned store with
+[`import_time_series_associations_openapi!`](@ref) and
+[`import_supplemental_attribute_associations_openapi!`](@ref) and the artifact is
+whole again, association ids included.
+
+[`open_store`](@ref) cannot do this: the array file carries a generation stamp
+and a catalog created on the spot does not, so it reports a mismatched artifact —
+which is the right answer everywhere except here. The catalog minted here
+inherits the array file's own stamp, so every later `open_store` behaves
+normally.
+
+Throws [`StoreExistsError`](@ref) when `\$path.sqlite` is already there: minting
+over a real catalog would discard its rows, and a store that has one wants
+[`open_store`](@ref).
+"""
+function open_store_without_catalog(
+    path::AbstractString;
+    catalog::Union{Symbol, AbstractString}=:attached,
+)
+    catalog_mode = _catalog_code(catalog, false)
+    out = Ref{Ptr{Cvoid}}(C_NULL)
+    code = @ccall lib_path().infrastore_store_open_without_catalog(
+        path::Cstring, catalog_mode::UInt8, out::Ref{Ptr{Cvoid}}
+    )::Int32
+    _check(code)
+    return Store(out[])
+end
+
+"""
     open_copy(src, dest; catalog=:attached)
 
 Copy the store at `src` to `dest` and open the copy read-write.

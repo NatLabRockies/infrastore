@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Refreshes conformance/sienna_schemas/ from a local SiennaSchemas checkout.
+# Refreshes crates/infrastore-core/sienna_schemas/ from a local SiennaSchemas checkout.
 # Maintainer-run only: never wired into build.rs or CI (this repo's policy is
-# no network/build-time fetching; see conformance/sienna_schemas/SOURCE.md).
+# no network/build-time fetching; see crates/infrastore-core/sienna_schemas/SOURCE.md).
 #
 # Usage: scripts/sync_sienna_schemas.sh [path-to-SiennaSchemas-checkout]
 #   Default source path: ../SiennaSchemas (sibling of this repo checkout)
@@ -10,7 +10,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SRC_ARG="${1:-$REPO_ROOT/../SiennaSchemas}"
-DEST="$REPO_ROOT/conformance/sienna_schemas"
+DEST="$REPO_ROOT/crates/infrastore-core/sienna_schemas"
 
 if [ ! -d "$SRC_ARG" ]; then
   echo "error: source checkout not found at $SRC_ARG" >&2
@@ -68,15 +68,23 @@ src_path, dest_path, *keep = sys.argv[1:]
 with open(src_path) as f:
     data = json.load(f)
 
-missing = [name for name in keep if name not in data["definitions"]]
-if missing:
-    sys.exit(f"error: definitions not found in {src_path}: {missing}")
+# Follow whichever key the source uses rather than hardcoding one. Upstream
+# moved `definitions` -> `$defs`, and the vendored copy has to keep the source's
+# spelling verbatim: the TimeSeries schemas `$ref` into this file by that exact
+# pointer, so trimming into the other key silently dangles every one of them.
+defs_key = next((k for k in ("$defs", "definitions") if k in data), None)
+if defs_key is None:
+    sys.exit(f"error: {src_path} has neither a $defs nor a definitions block")
 
-trimmed = {
-    "$schema": data["$schema"],
-    "definitions": {name: data["definitions"][name] for name in keep},
-    "id": data["id"],
-}
+missing = [name for name in keep if name not in data[defs_key]]
+if missing:
+    sys.exit(f"error: {defs_key} not found in {src_path}: {missing}")
+
+trimmed = {"$schema": data["$schema"]}
+# `id` disappeared upstream; carry it only when the source still has one.
+if "id" in data:
+    trimmed["id"] = data["id"]
+trimmed[defs_key] = {name: data[defs_key][name] for name in keep}
 with open(dest_path, "w") as f:
     f.write(json.dumps(trimmed, indent=2, ensure_ascii=False) + "\n")
 PYEOF

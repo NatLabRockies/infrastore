@@ -1270,6 +1270,74 @@ impl Store {
         })
     }
 
+    /// Open the array half of an artifact whose catalog is **absent**, minting
+    /// an empty one, and hand back a writable store holding every array and no
+    /// rows.
+    ///
+    /// This is the way in to an artifact shipped as arrays plus a document: a
+    /// consumer that already carries the association rows in JSON of its own
+    /// (`system.json` beside a `time_series.h5`) has no reason to move the
+    /// `.sqlite` around as well. Replay the rows into the returned store —
+    /// [`Self::import_time_series_associations_openapi`] and its
+    /// supplemental-attribute counterpart — and the artifact is whole again,
+    /// ids included.
+    ///
+    /// Without this there is no such way in. [`Self::open`] refuses the pair
+    /// with [`TimeSeriesError::MismatchedArtifact`], because the arrays carry a
+    /// generation stamp and a catalog created on the spot does not, and that
+    /// refusal is right for every case but this one: a lone stamp normally means
+    /// a half-finished save.
+    ///
+    /// # What it refuses
+    ///
+    /// A catalog that is already there ([`TimeSeriesError::StoreExists`], naming
+    /// it). Minting over one would discard its rows, which is
+    /// [`Self::create_replacing`]'s job and nobody else's — and an existing
+    /// catalog means [`Self::open`] is the call that was wanted. Delete it first
+    /// to rebuild deliberately.
+    ///
+    /// # The stamp
+    ///
+    /// The fresh catalog takes the array file's *own* generation rather than a
+    /// newly minted one, so the halves are paired and every later [`Self::open`]
+    /// behaves normally. An unstamped array file leaves the catalog unstamped
+    /// too — the "both unstamped" pairing an artifact predating the stamp has.
+    ///
+    /// Never read-only: writing the rows back is the entire purpose.
+    pub fn open_without_catalog(path: &Path, catalog: CatalogMode) -> Result<Self> {
+        let sqlite_path = catalog_sqlite_path(path);
+        if sqlite_path.exists() {
+            return Err(TimeSeriesError::StoreExists {
+                path: sqlite_path.display().to_string(),
+            });
+        }
+        let mut backend = open_backend(path, false)?;
+        let metadata = match catalog {
+            CatalogMode::Attached => MetadataStore::open_path(&sqlite_path, false)?,
+            CatalogMode::InMemory => MetadataStore::open_in_memory()?,
+        };
+        // A catalog born from the current DDL is at the current revision, so
+        // there is no ladder to climb — but an array file at an older, still
+        // upgradable format stamp is waiting on exactly that, and the catalog
+        // beside it now *is* current. Discharge it on the same terms
+        // `open_with_catalog` does: only an attached catalog has actually
+        // landed on disk.
+        if backend.pending_format_upgrade() && catalog == CatalogMode::Attached {
+            backend.finish_format_upgrade()?;
+        }
+        if let Some(generation) = backend.generation() {
+            metadata.set_generation(&generation)?;
+        }
+        Ok(Self {
+            backend,
+            metadata,
+            read_only: false,
+            file_path: Some(path.to_path_buf()),
+            catalog,
+            txn: None,
+        })
+    }
+
     pub fn read_only(&self) -> bool {
         self.read_only
     }
@@ -2246,11 +2314,15 @@ impl Store {
     ///   the backend holds: a document naming a real array under a length or
     ///   element shape it was not hashed from would otherwise file a row whose
     ///   metadata and data disagree.
-    /// - `NonSequentialTimeSeries` is refused. The store holds its timestamp
-    ///   vector with the arrays, so the values do arrive with the artifact — but
-    ///   the wire form deliberately carries no `timestamps_hash` (it is
-    ///   store-internal, like `features_hash`), so a document names no time axis
-    ///   and no import can tell which of the store's the row sits on.
+    /// - A `NonSequentialTimeSeries` row must carry its time axis in
+    ///   `timestamps`, and that axis must already be in the array file, with as
+    ///   many entries as the row declares. The axis cannot be inferred from the
+    ///   values: arrays are content-addressed, so two irregular series with
+    ///   byte-identical values on *different* axes share one stored array, and
+    ///   only `timestamps_hash` tells them apart. The wire form therefore
+    ///   locates the axis explicitly (`timestamps_uri`), which
+    ///   [`Self::import_time_series_associations_openapi`] resolves before
+    ///   calling this.
     /// - A `DeterministicSingleTimeSeries` is a view of a `SingleTimeSeries`,
     ///   so its source must be present — in this batch or already stored. Views
     ///   are therefore written last, after the rows they may depend on.
@@ -2260,14 +2332,48 @@ impl Store {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
+        // Resolved once for the batch rather than per row: a cohort of irregular
+        // series shares one axis, so this is a handful of hashes however many
+        // rows name them.
+        let mut stored_axes: Option<HashSet<[u8; 32]>> = None;
         for meta in &rows {
             if meta.time_series_type == TimeSeriesType::NonSequentialTimeSeries {
-                return Err(TimeSeriesError::InvalidParameter(format!(
-                    "cannot import NonSequentialTimeSeries '{}': the wire form carries no \
-                     timestamps_hash, so the document does not say which stored time axis \
-                     the row sits on",
-                    meta.name,
-                )));
+                let Some(timestamps) = meta.timestamps.as_deref() else {
+                    return Err(TimeSeriesError::InvalidParameter(format!(
+                        "cannot import NonSequentialTimeSeries '{}' (owner {}): the row names no \
+                         time axis, and one cannot be inferred from the values — two irregular \
+                         series with identical values on different axes share one \
+                         content-addressed array. A document supplies the axis as \
+                         `timestamps_uri`",
+                        meta.name, meta.owner_id,
+                    )));
+                };
+                if let Some(length) = meta.length
+                    && length != timestamps.len()
+                {
+                    return Err(TimeSeriesError::InvalidParameter(format!(
+                        "cannot import NonSequentialTimeSeries '{}' (owner {}): it declares \
+                         length {length} but names a time axis of {} timestamps",
+                        meta.name,
+                        meta.owner_id,
+                        timestamps.len(),
+                    )));
+                }
+                let axis = crate::hash::timestamps_hash(timestamps);
+                let axes = match &stored_axes {
+                    Some(axes) => axes,
+                    None => stored_axes.insert(self.stored_time_axes()?),
+                };
+                if !axes.contains(&axis) {
+                    return Err(TimeSeriesError::InvalidParameter(format!(
+                        "cannot import NonSequentialTimeSeries '{}' (owner {}): it names time \
+                         axis {}, which this store does not hold — the axis arrives with the \
+                         artifact, like the arrays",
+                        meta.name,
+                        meta.owner_id,
+                        crate::hash::hash_hex(&axis),
+                    )));
+                }
             }
             if !self.backend.contains(&meta.data_hash)? {
                 return Err(TimeSeriesError::InvalidParameter(format!(
@@ -2724,6 +2830,26 @@ impl Store {
         filter: ListFilter,
     ) -> Result<Vec<TimeSeriesMetadata>> {
         self.metadata.list(&filter.into(), &*self.backend)
+    }
+
+    /// The stored timestamp vector content-addressed by `hash`, or
+    /// [`TimeSeriesError::NotFound`].
+    ///
+    /// The one place an axis is reachable by its own address rather than through
+    /// a row that already names it: an OpenAPI document locates an irregular
+    /// series' axis (`timestamps_uri`) instead of carrying it, so the import has
+    /// a hash and needs the vector. See [`crate::openapi`].
+    pub(crate) fn timestamps_for(
+        &self,
+        hash: &[u8; 32],
+    ) -> Result<Vec<chrono::DateTime<chrono::Utc>>> {
+        self.backend.get_timestamps(hash)
+    }
+
+    /// Every timestamp vector the array file holds, by content hash — so a
+    /// batch can check the axes it names without a read per row.
+    pub(crate) fn stored_time_axes(&self) -> Result<HashSet<[u8; 32]>> {
+        Ok(self.backend.timestamp_hashes()?.into_iter().collect())
     }
 
     /// List the catalog row of every association matching `filter`, without its
@@ -4478,6 +4604,106 @@ impl Store {
         staged
             .and_then(|()| Self::swap_into_place(&tmp_h5, path, &tmp_sqlite, &sqlite_path))
             .inspect_err(|_| Self::clear_temps(&tmp_h5, &tmp_sqlite))
+    }
+
+    /// Write only the **array half** to `path`, leaving no catalog beside it.
+    ///
+    /// The mirror of [`Self::persist_catalog`], which writes only the other
+    /// half, and the write-side counterpart of
+    /// [`Self::open_without_catalog`]: together they are how a consumer ships an
+    /// artifact as arrays plus a document of its own, with the catalog's rows
+    /// carried in that document rather than in a `.sqlite` nobody reads.
+    /// Everything the catalog holds is already in such a document — every row's
+    /// `association_id`, and its `data_hash` pointer into the file written here.
+    ///
+    /// Which arrays land follows the backend, exactly as [`Self::persist_to`]
+    /// does: an in-memory store is materialized, so only the arrays the catalog
+    /// still references are written, while an on-disk store's file is copied
+    /// whole — dead slots and unlinked datasets included, since HDF5 does not
+    /// reclaim that space in place. [`Self::compact`] is what drops them; run it
+    /// first when the bundle's size matters.
+    ///
+    /// Atomic, unlike `persist_to`. There is one file to publish, so there is
+    /// one rename, and the interrupted-between-two-renames case that the
+    /// generation stamp exists to catch cannot arise. The file still carries a
+    /// fresh stamp, which `open_without_catalog` copies onto the catalog it
+    /// mints, so the rebuilt pair agrees.
+    ///
+    /// Refuses to write over an existing catalog's partner: a `<path>.sqlite`
+    /// beside the destination would be paired with the file this replaces, and
+    /// publishing new arrays under it produces exactly the dangling-rows
+    /// artifact [`TimeSeriesError::StoreExists`] guards against elsewhere.
+    pub fn persist_arrays_to(&mut self, path: &Path) -> Result<()> {
+        if self.in_transaction() {
+            return Err(TimeSeriesError::InvalidParameter(
+                "cannot persist while a transaction is open; commit or roll back first".into(),
+            ));
+        }
+        let sqlite_path = catalog_sqlite_path(path);
+        if sqlite_path.exists() {
+            return Err(TimeSeriesError::StoreExists {
+                path: sqlite_path.display().to_string(),
+            });
+        }
+        // Writing the live arrays onto the file this store is reading them from
+        // would be a rename over its own open handle, and there is no catalog
+        // here to make the result meaningful anyway.
+        if self
+            .file_path
+            .as_deref()
+            .is_some_and(|src| same_file(src, path))
+        {
+            return Err(TimeSeriesError::InvalidParameter(
+                "cannot persist a store's arrays onto its own array file".into(),
+            ));
+        }
+        self.flush()?;
+
+        let tag = temp_tag();
+        let tmp_h5 = persist_temp_path(path, &tag);
+        remove_if_exists(&tmp_h5)?;
+        let generation = mint_generation();
+
+        let staged = (|| -> Result<()> {
+            match self.file_path.clone() {
+                // Arrays live in this process: read them out of the live
+                // backend, which writes exactly the referenced set.
+                None => {
+                    let mut backend = Hdf5Backend::create(&tmp_h5, self.compression())?;
+                    self.materialize_into(&mut backend)?;
+                    backend.flush()?;
+                    drop(backend);
+                }
+                // Already a file — copy it, so the saved layout matches the
+                // live one. The same HDF5 byte-range lock `persist_to` works
+                // around applies, so the handle is dropped for the copy and
+                // reopened afterwards, on the failure path too.
+                Some(src) => {
+                    let owed = self.backend.pending_format_upgrade();
+                    drop(std::mem::replace(
+                        &mut self.backend,
+                        Box::new(MemoryBackend::new()) as Box<dyn StorageBackend>,
+                    ));
+                    let copied = std::fs::copy(&src, &tmp_h5)
+                        .map_err(TimeSeriesError::from)
+                        .and_then(|_| stamp_staged_copy(&tmp_h5, owed));
+                    self.backend = open_backend(&src, self.read_only)?;
+                    copied?;
+                }
+            }
+            crate::storage::hdf5::stamp_generation(&tmp_h5, &generation)?;
+            sync_file(&tmp_h5)
+        })();
+
+        staged
+            .and_then(|()| {
+                sync_parent_dir(path)?;
+                std::fs::rename(&tmp_h5, path)?;
+                sync_parent_dir(path)
+            })
+            .inspect_err(|_| {
+                let _ = std::fs::remove_file(&tmp_h5);
+            })
     }
 
     /// Write an in-memory catalog out to this store's *own* `<path>.sqlite`,

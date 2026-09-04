@@ -1206,6 +1206,7 @@ export_time_series_associations_openapi(store; filters...) -> String
 import_time_series_associations_openapi!(store, json::AbstractString) -> Int
 export_supplemental_attribute_associations_openapi(store) -> String
 import_supplemental_attribute_associations_openapi!(store, json::AbstractString) -> Int
+open_store_without_catalog(path; catalog=:attached) -> Store
 ```
 
 `export_time_series_associations_openapi` takes the same filter keywords as `list_metadata`. Every
@@ -1222,14 +1223,40 @@ back), returning the number of rows inserted.
 only**: the document carries locators, never values, so every row must name an array this store
 already holds — the arrays arrive with the artifact. Each row keeps the `association_id` it carries,
 which is the point: an import that assigned fresh ids would leave every reference the document
-records pointing at the wrong series. A row whose array is absent, or a `NonSequentialTimeSeries`
-row (whose `timestamps_hash` is store-internal and so not on the wire, leaving the document with no
-way to say which stored time axis the row sits on), throws `InvalidParameterError` and rolls the
-whole batch back.
+records pointing at the wrong series. An irregular series locates its time axis with
+`timestamps_uri`, filled from the axis's own content hash: the axis is stored beside the arrays and
+shared across a cohort, and the values cannot imply it — two irregular series with byte-identical
+values on different axes share one content-addressed array. A row missing the locator, or naming an
+axis the store does not hold, is refused. Any of those, or an absent array, throws
+`InvalidParameterError` and rolls the whole batch back.
 
 Infrastore never modifies the data to make an incoming document agree with what it already holds. A
 geometry disagreement between an added series and its own association row is likewise rejected at
 the add boundary (`InvalidParameterError`), loudly and without writing anything.
+
+Incoming rows are validated against the vendored SiennaSchemas specs before anything is decoded, so
+a document that drifted from the contract is refused in the schema's own terms — naming the row and
+the field.
+
+### Reading a bundle back with no catalog
+
+`open_store_without_catalog` opens the array half of an artifact whose `.sqlite` is **absent**,
+minting an empty catalog, so the document's rows can be replayed into it. This is what lets a
+consumer ship arrays plus JSON and nothing else:
+
+```julia
+store = open_store_without_catalog("bundle.h5")
+import_time_series_associations_openapi!(store, ts_rows_json)
+import_supplemental_attribute_associations_openapi!(store, sa_rows_json)
+```
+
+`open_store` cannot open that bundle — the array file carries a generation stamp and a catalog
+created on the spot does not, so it reports a mismatched artifact. The catalog minted here inherits
+the array file's own stamp, so every later `open_store` behaves normally. It throws
+`StoreExistsError` when a catalog is already there; a store that has one wants `open_store`.
+
+A bundle carrying `NonSequentialTimeSeries` still needs its `.sqlite`: those rows cannot be
+replayed, for the reason above.
 
 ## Errors
 

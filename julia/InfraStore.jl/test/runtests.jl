@@ -5149,3 +5149,81 @@ include("element_type_conformance.jl")
     @test remove_by_ids!(store, [id]; owner=(3, Component)) == 1
     @test association_exists(store, id) == false
 end
+
+# ---- JSON-only restore -------------------------------------------------------
+#
+# Reading an artifact back from its arrays plus the OpenAPI document alone, with
+# no `.sqlite` beside the HDF5 file. `open_store_without_catalog` is the way in;
+# the core's `tests/json_only_restore.rs` pins the round trip itself, and these
+# check the binding reaches it.
+
+@testset "open_store_without_catalog rebuilds a catalog from the document" begin
+    mktempdir() do dir
+        path = joinpath(dir, "bundle.h5")
+        ts_json, sa_json, before = Store(; path=path) do store
+            add_time_series!(
+                store, 7, "ThermalStandard", Component,
+                SingleTimeSeries(DateTime(2030, 1, 1), Hour(1), collect(1.0:24.0),
+                    "max_active_power"),
+            )
+            add_supplemental_attribute_associations!(
+                store,
+                [SupplementalAttributeAssociation(7, "ThermalStandard", 12, "Outage")],
+            )
+            (
+                export_time_series_associations_openapi(store),
+                export_supplemental_attribute_associations_openapi(store),
+                list_metadata(store),
+            )
+        end
+        rm(path * ".sqlite")
+
+        store = open_store_without_catalog(path)
+        try
+            @test isempty(list_metadata(store))
+            @test import_time_series_associations_openapi!(store, ts_json) == 1
+            @test import_supplemental_attribute_associations_openapi!(store, sa_json) == 1
+
+            after = list_metadata(store)
+            @test [row.id for row in after] ==
+                [row.id for row in before]
+            @test read_by_id(store, after[1].id).data == collect(1.0:24.0)
+        finally
+            close!(store)
+        end
+
+        # The minted catalog inherited the array file's generation stamp, so the
+        # rebuilt pair opens like any other store.
+        open_store(path) do reopened
+            @test length(list_metadata(reopened)) == 1
+        end
+    end
+end
+
+@testset "open_store_without_catalog refuses to mint over an existing catalog" begin
+    mktempdir() do dir
+        path = joinpath(dir, "kept.h5")
+        close!(Store(; path=path))
+        @test_throws InfraStore.StoreExistsError open_store_without_catalog(path)
+    end
+end
+
+@testset "the import holds a document to the SiennaSchemas contract" begin
+    store = Store(in_memory=true)
+    add_time_series!(
+        store, 1, "Generator", Component,
+        SingleTimeSeries(DateTime(2030, 1, 1), Hour(1), collect(1.0:4.0), "load"),
+    )
+    rows = InfraStore.JSON.parse(export_time_series_associations_openapi(store))
+    delete!(rows[1], "owner_type")
+    @test_throws InfraStore.InvalidParameterError import_time_series_associations_openapi!(
+        store, InfraStore.JSON.json(rows)
+    )
+
+    rows = InfraStore.JSON.parse(export_time_series_associations_openapi(store))
+    rows[1]["time_series_type"] = "Sporadic"
+    @test_throws InfraStore.InvalidParameterError import_time_series_associations_openapi!(
+        store, InfraStore.JSON.json(rows)
+    )
+    close!(store)
+end

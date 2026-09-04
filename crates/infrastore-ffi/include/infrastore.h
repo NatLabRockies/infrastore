@@ -322,6 +322,25 @@ int32_t infrastore_store_open_with_catalog(const char *path,
                                            struct InfraStore **out);
 
 /**
+ * Open the array half of an artifact whose catalog is absent, minting an empty one.
+ *
+ * The way in to a store shipped as arrays plus an OpenAPI document: the returned handle holds
+ * every array and no rows, ready for `infrastore_store_import_time_series_associations_openapi`
+ * and its supplemental-attribute counterpart to replay them. The fresh catalog inherits the array
+ * file's own generation stamp, so a later `infrastore_store_open` sees a coherent pair.
+ *
+ * Refuses (`INFRASTORE_ERR_STORE_EXISTS`) when `<path>.sqlite` is already there — that store wants
+ * `infrastore_store_open`. Never read-only.
+ *
+ * # Safety
+ *
+ * Standard: see the crate-level ABI conventions.
+ */
+int32_t infrastore_store_open_without_catalog(const char *path,
+                                              uint8_t catalog_mode,
+                                              struct InfraStore **out);
+
+/**
  * Report where `handle`'s catalog lives through `out`: `0` attached, `1` in memory.
  *
  * # Safety
@@ -814,6 +833,30 @@ int32_t infrastore_store_flush(struct InfraStore *handle);
  * `path` must be a valid NUL-terminated UTF-8 C string.
  */
 int32_t infrastore_store_persist(struct InfraStore *handle, const char *path);
+
+/**
+ * Persist only the **array half** to `path`, leaving no catalog beside it.
+ *
+ * The mirror of `infrastore_store_persist_catalog`, and the write-side counterpart of
+ * `infrastore_store_open_without_catalog`: together they let a consumer ship an artifact as arrays
+ * plus a document of its own, with the catalog's rows carried in that document. Which arrays land
+ * follows the backend, exactly as `infrastore_store_persist` does: an in-memory store is
+ * materialized, so only the arrays the catalog still references are written, while an on-disk
+ * store's file is copied whole — dead slots included, since HDF5 does not reclaim that space in
+ * place. Call `infrastore_store_compact` first when the bundle's size matters.
+ *
+ * Atomic — one file, one rename. The file still carries a fresh generation stamp, which
+ * `infrastore_store_open_without_catalog` copies onto the catalog it mints.
+ *
+ * `INFRASTORE_ERR_STORE_EXISTS` when a `<path>.sqlite` is already beside the destination: it is
+ * paired with the file this would replace, so publishing new arrays under it would leave its rows
+ * dangling. `INFRASTORE_ERR_INVALID_PARAMETER` for this store's own array file.
+ *
+ * # Safety
+ *
+ * `path` must be a valid NUL-terminated UTF-8 C string.
+ */
+int32_t infrastore_store_persist_arrays(struct InfraStore *handle, const char *path);
 
 /**
  * Write an in-memory catalog to this store's own `<path>.sqlite`, pairing it with the HDF5 file

@@ -158,14 +158,45 @@ door, the guarantee holds there too: a supplied id must sit above the destinatio
 issued ids of its own), and a document supplies one for every row or for none. Neither association
 catalog's wire form carries an id at all, so both always assign.
 
-The same round trip carries two fields the schema gained late, vendored here from an un-merged
-SiennaSchemas branch (`conformance/sienna_schemas/SOURCE.md` records which commit): `array_shape`,
-the stored array's full native shape (`[length, *element_shape]` in the catalog's terms, where the
-schema's `element_shape` is only the per-step trailing shape), and `time_reference`. Both exist so
-an imported row is _identical_ to the exported one — the forecast layouts above are conventions the
-caller owns, so the native shape cannot be rebuilt from `horizon` and `count`. Neither is required:
-a producer predating them writes rows without them, a reader that does not know them ignores them,
-and an import that finds them absent falls back to the schema's own fields.
+The same round trip carries two fields the schema gained late
+(`crates/infrastore-core/sienna_schemas/SOURCE.md` records the upstream commit vendored here):
+`array_shape`, the stored array's full native shape (`[length, *element_shape]` in the catalog's
+terms, where the schema's `element_shape` is only the per-step trailing shape), and
+`time_reference`. Both exist so an imported row is _identical_ to the exported one — the forecast
+layouts above are conventions the caller owns, so the native shape cannot be rebuilt from `horizon`
+and `count`. Neither is required: a producer predating them writes rows without them, a reader that
+does not know them ignores them, and an import that finds them absent falls back to the schema's own
+fields.
+
+### Reading an artifact back from arrays plus a document
+
+Those two fields exist so that a document can stand in for the catalog entirely. A consumer that
+already ships the association rows in JSON of its own — PowerSystems writes a `system.json` beside a
+`time_series.h5` — carries the `.sqlite` half for nothing: the arrays are the part that cannot be
+reconstructed, and the catalog can be replayed. `Store::open_without_catalog` is the way in. It
+opens the array half of an artifact whose catalog is absent and mints an empty one carrying the
+array file's _own_ generation stamp, so the rebuilt pair opens normally ever after; an ordinary
+`open` cannot, because a stamped array file beside an unstamped catalog is exactly the half-finished
+save the paired-stamp check exists to catch.
+
+All six types make the trip, including `NonSequentialTimeSeries` — which needs one field the others
+do not. Its timestamp vector lives in the store rather than the document, content-addressed so a
+cohort sharing one axis stores it once, and the values cannot imply which axis a row is on: arrays
+are content-addressed too, so two irregular series with byte-identical values on _different_ axes
+share one stored array and only the catalog's `timestamps_hash` distinguishes them. An import that
+guessed would hand back another series' timestamps. So the wire form **locates** the axis, as
+`timestamps_uri` — the same kind of field `uri` is for the values, and a locator rather than the
+vector itself precisely because the axis is shared, where inlining it would repeat the whole vector
+on every row of the cohort. The axis ships in the array file alongside the arrays, so the import
+resolves the locator against the store; a row missing it, or naming an axis the store does not hold,
+is refused.
+
+Both imports validate every incoming row against those vendored schemas before decoding it, so a
+document that drifted from the contract is refused in the schema's own terms — the row, the field,
+and what was expected — rather than by whatever the Rust struct happens to notice first. A
+time-series row is checked against the per-type schema its own `time_series_type` selects, which is
+what the wrapper's `discriminator` prescribes and what keeps the error specific: a failed `oneOf`
+can only report that nothing matched.
 
 Each of the three catalog tables keeps its own independent counter, so an id is only meaningful
 alongside the table it came from.

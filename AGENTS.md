@@ -30,6 +30,15 @@ multidimensional per-timestep values. Auth is `none` (default) or `api_key` via 
 header. See `README.md` and `docs/src/explanation/data-model.md` for the authoritative feature
 matrix.
 
+The two association catalogs also round-trip as OpenAPI-row JSON in SiennaSchemas' wire spelling,
+which is what lets an artifact be read back from **arrays plus a document alone**, with no `.sqlite`
+carried along: `Store::open_without_catalog` opens the array half of such a bundle and mints an
+empty catalog stamped to match, and the imports replay the rows into it, association ids preserved.
+Incoming rows are validated against the schemas vendored at `crates/infrastore-core/sienna_schemas/`
+and compiled into the crate. All six time-series types round-trip: a `NonSequentialTimeSeries`
+locates its time axis with `timestamps_uri`, which it needs because content-addressed arrays are
+shared across axes and so cannot imply one.
+
 ## Code Quality Requirements
 
 **All code changes must pass the following checks before being committed:**

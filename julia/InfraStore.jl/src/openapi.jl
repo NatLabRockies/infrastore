@@ -70,9 +70,11 @@ half of the round trip whose export is
 Rows only: the document carries locators, never values, so every row must name
 an array this store already holds, and each row keeps the `association_id` it
 carries — an import that assigned fresh ids would leave every reference the
-document records pointing at the wrong series. A row whose array is absent, or a
-`NonSequentialTimeSeries` row (whose timestamp vector is not on the wire),
-throws `InvalidParameterError`.
+document records pointing at the wrong series. A `NonSequentialTimeSeries` row
+also locates its time axis with `timestamps_uri`, since the values cannot imply
+it: two irregular series with identical values on different axes share one
+content-addressed array. A row whose array or axis is absent throws
+`InvalidParameterError`.
 """
 function import_time_series_associations_openapi!(store::Store, json::AbstractString)
     out = Ref{UInt64}(0)

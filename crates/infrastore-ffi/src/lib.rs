@@ -865,6 +865,50 @@ pub unsafe extern "C" fn infrastore_store_open_with_catalog(
     INFRASTORE_OK
 }
 
+/// Open the array half of an artifact whose catalog is absent, minting an empty one.
+///
+/// The way in to a store shipped as arrays plus an OpenAPI document: the returned handle holds
+/// every array and no rows, ready for `infrastore_store_import_time_series_associations_openapi`
+/// and its supplemental-attribute counterpart to replay them. The fresh catalog inherits the array
+/// file's own generation stamp, so a later `infrastore_store_open` sees a coherent pair.
+///
+/// Refuses (`INFRASTORE_ERR_STORE_EXISTS`) when `<path>.sqlite` is already there — that store wants
+/// `infrastore_store_open`. Never read-only.
+///
+/// # Safety
+///
+/// Standard: see the crate-level ABI conventions.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_store_open_without_catalog(
+    path: *const c_char,
+    catalog_mode: u8,
+    out: *mut *mut InfraStoreHandle,
+) -> i32 {
+    clear_error();
+    if out.is_null() {
+        set_error("out pointer is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let path = match unsafe { cstr_to_str(path) } {
+        Ok(s) => PathBuf::from(s),
+        Err(code) => {
+            set_error("invalid path string");
+            return code;
+        }
+    };
+    let catalog = match catalog_from_code(catalog_mode) {
+        Ok(c) => c,
+        Err(code) => return code,
+    };
+    let store = match core_lib::open_store_without_catalog(&path, catalog) {
+        Ok(s) => s,
+        Err(e) => return map_core_error(e),
+    };
+    let handle = Box::new(InfraStoreHandle { inner: store });
+    unsafe { *out = Box::into_raw(handle) };
+    INFRASTORE_OK
+}
+
 /// Report where `handle`'s catalog lives through `out`: `0` attached, `1` in memory.
 ///
 /// # Safety
@@ -2253,6 +2297,46 @@ pub unsafe extern "C" fn infrastore_store_persist(
     }
 }
 
+/// Persist only the **array half** to `path`, leaving no catalog beside it.
+///
+/// The mirror of `infrastore_store_persist_catalog`, and the write-side counterpart of
+/// `infrastore_store_open_without_catalog`: together they let a consumer ship an artifact as arrays
+/// plus a document of its own, with the catalog's rows carried in that document. Which arrays land
+/// follows the backend, exactly as `infrastore_store_persist` does: an in-memory store is
+/// materialized, so only the arrays the catalog still references are written, while an on-disk
+/// store's file is copied whole — dead slots included, since HDF5 does not reclaim that space in
+/// place. Call `infrastore_store_compact` first when the bundle's size matters.
+///
+/// Atomic — one file, one rename. The file still carries a fresh generation stamp, which
+/// `infrastore_store_open_without_catalog` copies onto the catalog it mints.
+///
+/// `INFRASTORE_ERR_STORE_EXISTS` when a `<path>.sqlite` is already beside the destination: it is
+/// paired with the file this would replace, so publishing new arrays under it would leave its rows
+/// dangling. `INFRASTORE_ERR_INVALID_PARAMETER` for this store's own array file.
+///
+/// # Safety
+///
+/// `path` must be a valid NUL-terminated UTF-8 C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_store_persist_arrays(
+    handle: *mut InfraStoreHandle,
+    path: *const c_char,
+) -> i32 {
+    clear_error();
+    let store = deref_handle!(mut handle);
+    let path = match unsafe { cstr_to_str(path) } {
+        Ok(s) => PathBuf::from(s),
+        Err(code) => {
+            set_error("invalid path string");
+            return code;
+        }
+    };
+    match store.inner.persist_arrays_to(&path) {
+        Ok(()) => INFRASTORE_OK,
+        Err(e) => map_core_error(e),
+    }
+}
+
 /// Write an in-memory catalog to this store's own `<path>.sqlite`, pairing it with the HDF5 file
 /// already there.
 ///
@@ -2733,7 +2817,7 @@ unsafe fn write_str_out(s: &str, buf: *mut c_char, cap: u64, out_len: *mut u64) 
         *out_len = bytes.len() as u64;
         if !buf.is_null() && cap > 0 {
             let n = bytes.len().min((cap - 1) as usize);
-            ptr::copy_nonoverlapping(bytes.as_ptr(), buf as *mut u8, n);
+            ptr::copy_nonoverlapping(bytes.as_ptr(), buf.cast::<u8>(), n);
             *buf.add(n) = 0;
         }
     }
@@ -8993,7 +9077,7 @@ mod abi_tests {
         assert!(needed > 0);
 
         // The fetch: the same call with a buffer the probe sized.
-        let mut buf = vec![0i8; needed as usize + 1];
+        let mut buf: Vec<c_char> = vec![0; needed as usize + 1];
         let mut got = 0u64;
         assert_eq!(
             unsafe {

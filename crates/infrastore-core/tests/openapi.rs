@@ -548,15 +548,24 @@ fn sa_import_rejects_malformed_json() {
     assert!(matches!(err, TimeSeriesError::Serde(_)));
 }
 
+/// The row schemas are open objects, so an extra field clears the schema check
+/// and is caught by `deny_unknown_fields` on the `Raw*` struct. That happens
+/// after the document has become a `Value`, which is where serde_json's
+/// line/column went, so the error has to name the row itself.
 #[test]
 fn sa_import_rejects_unknown_fields() {
     let mut store = create_store(None, true).expect("in-memory store should initialize");
     let json = r#"[{"component_id":1,"component_type":"Generator","attribute_id":100,
+        "attribute_type":"GeographicInfo"},
+        {"component_id":2,"component_type":"Generator","attribute_id":101,
         "attribute_type":"GeographicInfo","extra":"nope"}]"#;
     let err = store
         .import_supplemental_attribute_associations_openapi(json)
         .unwrap_err();
-    assert!(matches!(err, TimeSeriesError::Serde(_)));
+    let message = err.to_string();
+    assert!(matches!(err, TimeSeriesError::InvalidParameter(_)));
+    assert!(message.contains("row 1"), "{message}");
+    assert!(message.contains("extra"), "{message}");
 }
 
 #[test]
