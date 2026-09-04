@@ -735,6 +735,12 @@ assert!(reader.resolution().is_none());     // no constant step to report
 abstract (also matches <code>DeterministicSingleTimeSeries</code>), and all matched forecasts must share one
 window timeline (<code>initial_timestamp</code> + <code>interval</code> + <code>count</code>). <code>static_read</code> / <code>forecast_read</code> error
 (never clamp) if <code>at</code> is off the grid/timeline.</p>
+<p><strong>A read is all-or-nothing.</strong> It spans every group (or slot), so a failure anywhere leaves the
+reader wholly empty rather than holding the new timestamp's values in the groups it reached and the
+previous read's in the ones it did not — <code>values()</code> / <code>window()</code> go empty and stay empty until a
+read succeeds. <code>invalidate()</code> is the same thing on demand, for a binding that refuses a read before
+the core sees it (the Julia wrapper checks the bound's spelling against the reader's timeline, which
+the C ABI's <code>at_unix_ms</code> cannot carry).</p>
 <p><strong>Window-read deduplication.</strong> A <code>ForecastReader</code> groups its entries into <code>WindowSlot</code>s keyed by
 <code>(array hash, read plan)</code>: forecasts that reference the same array and slice it the same way —
 deduplicated identical data, or several <code>DeterministicSingleTimeSeries</code> over one <code>SingleTimeSeries</code>
@@ -869,9 +875,9 @@ target.add_parent_child_associations(exported)?;
 <h3 id="timeseriesid-and-keyidentity"><a class="header" href="#timeseriesid-and-keyidentity"><code>TimeSeriesId</code> and <code>KeyIdentity</code></a></h3>
 <p><code>TimeSeriesId</code> is the catalog id of one association — the only way to address a stored series. It is
 a newtype over <code>i64</code> rather than a bare integer because the store hands out several unrelated
-integer id streams (this one, <code>owner_id</code>, and the two association catalogs' own ids), and every
-read, removal and rename takes one of them; passing an <code>owner_id</code> where a series id belongs is a
-type error here rather than a lookup that silently finds the wrong row.</p>
+integer id streams (this one, <code>owner_id</code>, and the two association catalogs' own ids), and every read
+and removal takes one of them; passing an <code>owner_id</code> where a series id belongs is a type error here
+rather than a lookup that silently finds the wrong row.</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1103,7 +1109,7 @@ impl Scenarios {
 <span class="boring">}</span></code></pre></pre>
 <h3 id="staticreader-and-staticgroup"><a class="header" href="#staticreader-and-staticgroup"><code>StaticReader</code> and <code>StaticGroup</code></a></h3>
 <p>The columnar static-series reader (see <a href="#readers">Readers</a>). <code>Period</code> is the crate's resolution
-type. <code>values()</code> is empty until the first <code>Store::static_read</code>.</p>
+type. <code>values()</code> is empty until the first <code>Store::static_read</code>, and empty again after one fails.</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>impl StaticReader {

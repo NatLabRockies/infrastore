@@ -212,7 +212,7 @@ in the consumer's object graph — which is why the association flags are bare i
 (<code>list</code>, <code>get</code>, <code>grid</code>, <code>info</code>, <code>export</code>, <code>names</code>, <code>owner-types</code>, <code>owners</code>, <code>exists</code>, <code>stats</code>,
 <code>store-info</code>, <code>arrays</code>, <code>summary</code>, <code>attributes</code>, <code>links</code>, <code>diff</code>, <code>verify</code>, <code>check-consistency</code>,
 <code>resolutions</code>, <code>params</code>, <code>compact</code>, and <code>add --dry-run</code>) render their results in it. The write
-commands (<code>init</code>, <code>add</code>, <code>merge</code>, <code>remove</code>, <code>rename</code>, <code>copy</code>, <code>replace-owner</code>, <code>clear</code>, <code>transform</code>,
+commands (<code>init</code>, <code>add</code>, <code>merge</code>, <code>remove</code>, <code>copy</code>, <code>replace-owner</code>, <code>clear</code>, <code>transform</code>,
 <code>persist</code>, <code>plot</code>, <code>attach</code>, <code>detach</code>, <code>link</code>, <code>unlink</code>, <code>reassign</code>) report their outcome in it:
 prose under <code>table</code>, and a one-object status document under <code>json</code>/<code>jsonl</code>, so a scripted mutation
 pipes into <code>jq</code> the way a scripted query does.</p>
@@ -346,7 +346,6 @@ the two reach different formats:</p>
 <tr><td><code>merge</code></td><td>Copy matching series from another store into this one.</td></tr>
 <tr><td><code>transform</code></td><td>Derive <code>DeterministicSingleTimeSeries</code> from stored <code>SingleTimeSeries</code>.</td></tr>
 <tr><td><code>remove</code></td><td>Delete a single series, or every match with <code>--all</code> (prompts unless <code>--force</code>).</td></tr>
-<tr><td><code>rename</code></td><td>Rename the single series a selector resolves to (<code>--new-name</code>).</td></tr>
 <tr><td><code>copy</code></td><td>Copy the single series a selector resolves to onto another owner.</td></tr>
 <tr><td><code>replace-owner</code></td><td>Reassign every series from one owner to another.</td></tr>
 <tr><td><code>clear</code></td><td>Remove all series, or all for one owner (prompts unless <code>--force</code>).</td></tr>
@@ -363,7 +362,6 @@ infrastore --store demo.h5 merge --from other.h5 --name-glob 'load_*'
 infrastore --store demo.h5 transform --horizon PT24H --interval PT1H
 infrastore --store demo.h5 remove --owner-id 42 --name load --type SingleTimeSeries
 infrastore --store demo.h5 remove --all --name-glob 'scratch_*' --dry-run
-infrastore --store demo.h5 rename --owner-id 42 --name load --new-name demand
 infrastore --store demo.h5 copy --name load --dst-owner-id 43 --dst-owner-type Generator
 infrastore --store demo.h5 replace-owner --old 42 --new 43 --owner-category Component
 infrastore --store demo.h5 clear --owner-id 42 --owner-category Component
@@ -507,7 +505,6 @@ infrastore --store &lt;PATH&gt; owners      [--owner-category &lt;C&gt;] [--type
 infrastore --store &lt;PATH&gt; exists      [SELECTOR...]
 infrastore --store &lt;PATH&gt; diff --against &lt;PATH.h5&gt; [SELECTOR...] [--all]
 infrastore --store &lt;PATH&gt; remove  [SELECTOR...] [--all] [--force] [--dry-run]
-infrastore --store &lt;PATH&gt; rename  [SELECTOR...] --new-name &lt;NAME&gt; [--dry-run]
 infrastore --store &lt;PATH&gt; copy    [SELECTOR...] --dst-owner-id &lt;I&gt; --dst-owner-type &lt;T&gt; [--new-name &lt;NAME&gt;] [--dry-run]
 infrastore --store &lt;PATH&gt; replace-owner --old &lt;I&gt; --new &lt;I&gt; --owner-category &lt;C&gt; [--dry-run]
 infrastore --store &lt;PATH&gt; clear   [--owner-id &lt;I&gt; --owner-category &lt;C&gt;] [--force] [--dry-run]
@@ -554,9 +551,9 @@ identity. When two matched series would share one filename, each gains a suffix 
 that distinguish them (<code>..._PT1H_model_year-2030.csv</code>), so an export never silently overwrites part
 of its own output. Filenames are compared case-insensitively, so an export produces the same set of
 files on Linux, macOS, and Windows.</p>
-<p><code>--dry-run</code> on <code>remove</code>, <code>clear</code>, <code>replace-owner</code>, <code>rename</code>, <code>copy</code>, <code>merge</code>, <code>persist</code>, <code>attach</code>,
-<code>detach</code>, <code>link</code>, <code>unlink</code>, and <code>reassign</code> prints what would change and exits without opening the
-store for writing.</p>
+<p><code>--dry-run</code> on <code>remove</code>, <code>clear</code>, <code>replace-owner</code>, <code>copy</code>, <code>merge</code>, <code>persist</code>, <code>attach</code>, <code>detach</code>,
+<code>link</code>, <code>unlink</code>, and <code>reassign</code> prints what would change and exits without opening the store for
+writing.</p>
 <p><code>add --dry-run</code> is a validate mode: it resolves every descriptor, reads every CSV in full, and
 prints the resolved <code>(owner, type, name, element type, shape)</code> table without opening the store at
 all. That catches the whole class of "I got the shape wrong" errors before a multi-GB load starts.
@@ -681,7 +678,11 @@ inclusive, <code>END</code> exclusive), where each side is parsed as a timestamp
 <code>--time-range 2024-01-01T01:00:00Z..2024-01-01T03:00:00Z</code>. A duration such as <code>--time-range 1h</code> is
 rejected with <code>invalid --time-range '1h' (expected START..END)</code>. A range bound need not be
 grid-aligned for a static series, and must be a window boundary for a forecast; see
-<a href="rust-api.html#reading-a-time-range">reading a time range</a> for what each type selects.</p>
+<a href="rust-api.html#reading-a-time-range">reading a time range</a> for what each type selects. A sliced
+forecast is rendered as the windows it kept — their own issue times, and a <code>count</code> and
+<code>initial_timestamp</code> in <code>-f json</code> that describe the slice — and <code>get</code>'s <code>--window N</code> /
+<code>--issue-time</code> then address those windows: <code>--window 0</code> is the first <em>selected</em> one, and a window
+outside the range is reported as such rather than as one the forecast lacks.</p>
 </li>
 </ul>
 <h2 id="descriptor-schema"><a class="header" href="#descriptor-schema">Descriptor Schema</a></h2>

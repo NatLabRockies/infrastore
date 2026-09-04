@@ -458,6 +458,9 @@ and one column per percentile or scenario — and <code>--window N</code> (or <c
 a single window instead of dumping all of them:</p>
 <pre><code class="language-sh">infrastore --store demo.h5 get --name load --type deterministic_single --window 0
 </code></pre>
+<p>Combined with <code>--time-range</code>, both address the windows the range <em>selected</em>: <code>--window 0</code> is the
+first selected window, and <code>--issue-time</code> must name one of them — a window the forecast has but the
+range dropped is reported as outside the selected range, not as missing.</p>
 <h2 id="9-compare-and-move-stores"><a class="header" href="#9-compare-and-move-stores">9. Compare and Move Stores</a></h2>
 <pre><code class="language-sh">infrastore --store run.h5 diff --against baseline.h5      # exits 1 when they differ
 infrastore --store demo.h5 merge --from other.h5 --name-glob 'load_*'
@@ -473,7 +476,6 @@ already have destroyed what was there.</p>
 infrastore --store demo.h5 check-consistency      # every SingleTimeSeries of a resolution on one grid
 infrastore --store demo.h5 stats                  # association, owner, and distinct-array counts
 infrastore --store demo.h5 remove --owner-id 42 --name load --dry-run
-infrastore --store demo.h5 rename --owner-id 42 --name load --new-name load_2024
 infrastore --store demo.h5 compact --force        # rewrite the .h5 so deletions actually shrink it
 </code></pre>
 <p>Deleting frees a column or unlinks a dataset, but HDF5 cannot give the space back in place, so the

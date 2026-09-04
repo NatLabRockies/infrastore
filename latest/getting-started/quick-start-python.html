@@ -230,8 +230,8 @@ in-memory SQLite metadata database.</li>
 <li><strong><code>add_time_series</code></strong> hashed the array, wrote it to the backend (deduplicating on the hash), and
 recorded a catalog association filed under
 <code>(owner_id, owner_category, type, name, resolution, interval, features)</code>. It returned that row's
-<strong>id</strong> — the handle to record in your own object model, and what every read, removal and rename
-takes from here on.</li>
+<strong>id</strong> — the handle to record in your own object model, and what every read and removal takes
+from here on.</li>
 <li><strong><code>read_by_id(series_id)</code></strong> looked up the row by primary key, read the array back by its content
 hash, and reconstructed a <code>SingleTimeSeries</code>.</li>
 </ol>

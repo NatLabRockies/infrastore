@@ -405,19 +405,19 @@ identity is a metadata concept; the array is shared by
 <a href="./content-addressing.html">content addressing</a>.</p>
 <h2 id="association-ids"><a class="header" href="#association-ids">Association IDs</a></h2>
 <p>Every catalog row has an <strong><code>id</code></strong>: a plain integer, assigned by the store, that names <em>that row</em>. It
-is <strong>the</strong> way to address a series — every read, removal, rename and copy takes one.</p>
+is <strong>the</strong> way to address a series — every read, removal and copy takes one.</p>
 <p>The identity above describes a series: owner, name, resolution, features. An id names the row the
 store filed it under. That difference is the point: a consumer that wants to record "this
 generator's cost curve is <em>that</em> series" inside its own object model would otherwise have to embed
-the whole identity tuple, and keep it in step with every rename. An id is one integer, and a rename
-does not move it.</p>
+the whole identity tuple, and keep it in step with every change to it. An id is one integer, and
+nothing moves it: a name is fixed once written, so the two can never drift apart.</p>
 <pre><code class="language-julia">id = add_time_series!(store, 42, "ThermalStandard", Component, cost_curve)
 generator.operation_cost.variable = id   # one integer, stored in the model
 </code></pre>
 <p>The surface splits in two along that line. <strong>Identify</strong> — <code>list_metadata</code> and its by-id companions —
-answers which series exist and hands back the id for each. <strong>Act</strong> — every read, removal, rename and
-copy — takes that id. A caller that knows a series only by its attributes does the first half once
-and keeps the id; there is deliberately no combined resolver, because the two halves have different
+answers which series exist and hands back the id for each. <strong>Act</strong> — every read, removal and copy —
+takes that id. A caller that knows a series only by its attributes does the first half once and
+keeps the id; there is deliberately no combined resolver, because the two halves have different
 costs and a caller that repeats a lookup it could have cached should be able to see that it is.</p>
 <p>Three properties make an id safe to persist:</p>
 <ul>
@@ -489,7 +489,13 @@ learn a series' <code>resolution</code> or <code>count</code> before asking for 
 past its end, is an error rather than the smaller answer a range would return. A range says
 "whatever lies between these bounds" — which is what an export wants, knowing the bounds and not the
 step count — while a window says "these exact steps", and a caller that asked for 24 and silently
-received 3 has a bug the store can see and it cannot.</p>
+received 3 has a bug the store can see and it cannot. What a range clips <em>to</em> is type-specific: a
+regular series' value covers its step, so a <code>start</code> inside a step selects that step and the sliced
+<code>initial_timestamp</code> can precede <code>start</code>; an irregular series' value is an instant, so only
+timestamps at or after <code>start</code> are selected; and a forecast window is a whole array with nothing
+partial to return, so a forecast's <code>start</code> must be a window boundary at or before the last window
+(an error otherwise) and only its <code>end</code> clips. See
+<a href="../reference/rust-api.html#reading-a-time-range">Reading a time range</a>.</p>
 <h3 id="the-owner-guard"><a class="header" href="#the-owner-guard">The owner guard</a></h3>
 <p><code>read_by_id</code> and <code>remove_by_ids</code> each take an optional <strong>expected owner</strong> — <code>read_by_id_for_owner</code> /
 <code>remove_by_ids_for_owner</code> in the Rust core, an <code>owner=(id, category)</code> keyword in Julia, keyword-only

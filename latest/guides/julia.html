@@ -238,7 +238,7 @@ ts = SingleTimeSeries(
     features = Dict("model_year" =&gt; 2030),
     units = "MW",
 )
-# `id` is the catalog row's id: how every read, removal and rename addresses
+# `id` is the catalog row's id: how every read and removal addresses
 # the series, and one integer to keep in your own model.
 </code></pre>
 <p>Notes:</p>
@@ -251,8 +251,8 @@ ts = SingleTimeSeries(
 <code>DuplicateTimeSeriesError</code>.</li>
 </ul>
 <p><code>add_time_series!</code> returns the catalog row's <code>id</code> as an <code>Int64</code> (see
-<a href="../explanation/data-model.html#association-ids">Association ids</a>). Every read, removal, rename and
-copy takes that id; <code>list_metadata</code> is how you recover one for a series you did not just write.</p>
+<a href="../explanation/data-model.html#association-ids">Association ids</a>). Every read, removal and copy takes
+that id; <code>list_metadata</code> is how you recover one for a series you did not just write.</p>
 <p>Two more rules worth knowing up front. <strong>Stored instants and periods are millisecond-precision</strong>: a
 <code>Microsecond(1)</code> resolution, a <code>Millisecond(0)</code> one, or a negative period is refused with
 <code>InvalidParameterError</code> (query bounds are unconstrained). And a <code>Store</code> is <strong>not thread-safe</strong>:

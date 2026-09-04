@@ -222,7 +222,7 @@ or else from the <code>libinfrastore_ffi</code> artifact that <code>Pkg</code> d
 <code>num_distinct_arrays</code>, <code>open_copy</code>, <code>open_store</code>, <code>persist!</code>, <code>persist_catalog!</code>, <code>read_by_id</code>,
 <code>read_by_ids</code>, <code>read_only</code>, <code>remove_by_filter!</code>, <code>remove_by_ids!</code>,
 <code>remove_parent_child_associations!</code>, <code>remove_supplemental_attribute_associations!</code>,
-<code>rename_time_series!</code>, <code>replace_owner!</code>, <code>replace_parent_child_component_id!</code>,
+<code>replace_owner!</code>, <code>replace_parent_child_component_id!</code>,
 <code>replace_supplemental_attribute_component_id!</code>, <code>rollback_transaction!</code>, <code>static_grid</code>,
 <code>static_groups</code>, <code>static_read!</code>, <code>static_summary</code>, <code>static_timestamps</code>, <code>static_values</code>,
 <code>supplemental_attribute_counts_by_type</code>, <code>supplemental_attribute_summary</code>, <code>time_series_counts</code>,
@@ -518,7 +518,7 @@ straight back into any of those calls;
 <p><code>TimeSeriesTypeCount</code>, <code>StaticSummaryRow</code>, and <code>ForecastSummaryRow</code> group by stored type alone — the
 grouping carries no dtype — so their <code>time_series_type</code> is always the bare one.</p>
 <p>Every write returns the catalog row's <code>id</code> as a plain <code>Int64</code> — assigned, never reissued, and what
-every read, removal, rename and copy takes.</p>
+every read, removal and copy takes.</p>
 <pre><code class="language-julia">struct TimeSeriesMetadata                    # get_metadata_by_id / list_metadata
     owner_id          :: Int64
     owner_type        :: String
@@ -591,7 +591,7 @@ that the timestamps are wall clocks. Three- and four-argument constructors (<cod
     quantity_kind = ts.quantity_kind, unit_system = ts.unit_system,
     component_field = ts.component_field, application_data = ts.application_data,
     id = nothing,   # file under this catalog id (imports); `nothing` lets the catalog assign
-) -&gt; Int64   # the catalog row's id -- what every read, removal and rename takes
+) -&gt; Int64   # the catalog row's id -- what every read and removal takes
 
 read_by_id(store::Store, id::Integer;
           start_time=nothing, len=nothing, count=nothing,
@@ -866,7 +866,9 @@ are partitioned into <code>(dtype, element_shape)</code> groups, and each group'
 static_grid(reader)       -&gt; StaticGrid  # .initial_timestamp, .resolution (or nothing), .length
 static_timestamps(reader) -&gt; Vector{DateTime}  # every instant on the timeline, in order
 static_groups(reader)     -&gt; Vector{StaticGroup}  # each: .dtype, .element_shape, .keys
-static_read!(reader, t::DateTime) -&gt; reader  # fills buffers; errors if t is off the timeline
+static_read!(reader, t) -&gt; reader  # fills buffers; errors if t is off the timeline
+       # t is spelled like the axis: a bare DateTime (a wall clock) for a zoneless one,
+       # a ZonedDateTime (TimeZones loaded) for one recording instants or unspecified
 static_values(reader, group_index::Integer) -&gt; Array
        # (num_columns, element_dims...); column j is static_groups(reader)[group_index].keys[j]
 </code></pre>
@@ -904,7 +906,8 @@ forecast_timeline(reader)  -&gt; ForecastTimeline
        # (initial_timestamp::DateTime, resolution::Period, interval::Period, count::Int)
 forecast_entries(reader)   -&gt; Vector{ForecastEntry}  # each: .dtype, .window_shape, .key, .slot
 forecast_num_slots(reader) -&gt; Int                    # physical reads per timestamp (see below)
-forecast_read!(reader, t::DateTime) -&gt; reader        # fills buffers; errors if t is off the timeline
+forecast_read!(reader, t) -&gt; reader                  # fills buffers; errors if t is off the timeline
+       # t is spelled like the axis, as for static_read!: DateTime only for a zoneless one
 forecast_values(reader, entry_index::Integer) -&gt; Array  # window of size .window_shape
 </code></pre>
 <p>Valid read timestamps are <code>initial_timestamp + k·interval</code> for <code>k in 0:count-1</code> (each names the
@@ -956,7 +959,6 @@ list_names(store; &lt;list_metadata filters&gt;) -&gt; Vector{String}        # d
 list_owner_types(store; &lt;list_metadata filters&gt;) -&gt; Vector{String}  # distinct owner types, sorted
 remove_by_filter!(store; &lt;list_metadata filters&gt;) -&gt; Int
                                   # remove every match in one all-or-nothing transaction; count removed
-rename_time_series!(store, id::Integer, new_name) -&gt; Int64   # same row and id, new name
 get_compression(store) -&gt; CompressionSettings  # compression=:deflate|:none, level, shuffle; restored from file on open
 verify_integrity(store) -&gt; Int    # number of integrity errors; 0 == intact
 compact!(store) -&gt; CompactionReport   # reclaims both halves; on an on-disk store this rewrites the
@@ -992,8 +994,8 @@ close!(store) -&gt; Nothing
 <p><code>list_metadata</code> is the package's one <strong>identify</strong> entry point: it returns a full
 <a href="#result-types"><code>TimeSeriesMetadata</code></a> per matching row — identity, the per-type descriptive
 snapshot, the physical detail (<code>data_hash</code>, <code>element_type</code>, <code>percentiles</code>, <code>application_data</code>), and
-the row's <code>id</code>, which is what every read, removal, rename, and copy then takes. Fields that do not
-apply to a row's type are <code>nothing</code>. All the filters are optional and independent, and combine as a
+the row's <code>id</code>, which is what every read, removal, and copy then takes. Fields that do not apply to
+a row's type are <code>nothing</code>. All the filters are optional and independent, and combine as a
 conjunction; with none set the whole store is listed:</p>
 <ul>
 <li><code>owner_id</code>, <code>owner_category</code> — scope to one owner.</li>

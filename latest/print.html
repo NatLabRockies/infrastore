@@ -430,8 +430,8 @@ in-memory SQLite metadata database.</li>
 <li><strong><code>add_time_series</code></strong> hashed the array, wrote it to the backend (deduplicating on the hash), and
 recorded a catalog association filed under
 <code>(owner_id, owner_category, type, name, resolution, interval, features)</code>. It returned that row's
-<strong>id</strong> — the handle to record in your own object model, and what every read, removal and rename
-takes from here on.</li>
+<strong>id</strong> — the handle to record in your own object model, and what every read and removal takes
+from here on.</li>
 <li><strong><code>read_by_id(series_id)</code></strong> looked up the row by primary key, read the array back by its content
 hash, and reconstructed a <code>SingleTimeSeries</code>.</li>
 </ol>
@@ -518,8 +518,8 @@ SQLite metadata database.</li>
 <li><strong><code>add_time_series!</code></strong> hashed the array, wrote it to the backend (deduplicating on the hash), and
 recorded a catalog association filed under
 <code>(owner_id, owner_category, type, name, resolution, interval, features)</code>. It returned that row's
-<strong>id</strong> — the handle to record in your own object model, and what every read, removal and rename
-takes from here on.</li>
+<strong>id</strong> — the handle to record in your own object model, and what every read and removal takes
+from here on.</li>
 <li><strong><code>read_by_id(store, id)</code></strong> looked up the row by primary key, read the array back by its content
 hash, and reconstructed a <code>SingleTimeSeries</code>. Note that <code>resolution</code> comes back as a
 <code>Millisecond</code>.</li>
@@ -530,9 +530,9 @@ hash, and reconstructed a <code>SingleTimeSeries</code>. Note that <code>resolut
 of a cost curve.</p>
 <h2 id="finding-a-series-you-did-not-just-write"><a class="header" href="#finding-a-series-you-did-not-just-write">Finding a Series You Did Not Just Write</a></h2>
 <p>The store splits <em>identify</em> from <em>act</em>. <code>list_metadata</code> is the identify half — it answers which
-series exist and hands back the <code>id</code> that addresses each — and every read, removal and rename takes
-that id. A caller that records ids in its own object model does the first half once and skips it
-from then on:</p>
+series exist and hands back the <code>id</code> that addresses each — and every read and removal takes that id.
+A caller that records ids in its own object model does the first half once and skips it from then
+on:</p>
 <pre><code class="language-julia">row = only(list_metadata(store; owner_id = 42, name = "load", resolution = Hour(1)))
 got = read_by_id(store, row.id)
 
@@ -1129,19 +1129,19 @@ identity is a metadata concept; the array is shared by
 <a href="explanation/./content-addressing.html">content addressing</a>.</p>
 <h2 id="association-ids"><a class="header" href="#association-ids">Association IDs</a></h2>
 <p>Every catalog row has an <strong><code>id</code></strong>: a plain integer, assigned by the store, that names <em>that row</em>. It
-is <strong>the</strong> way to address a series — every read, removal, rename and copy takes one.</p>
+is <strong>the</strong> way to address a series — every read, removal and copy takes one.</p>
 <p>The identity above describes a series: owner, name, resolution, features. An id names the row the
 store filed it under. That difference is the point: a consumer that wants to record "this
 generator's cost curve is <em>that</em> series" inside its own object model would otherwise have to embed
-the whole identity tuple, and keep it in step with every rename. An id is one integer, and a rename
-does not move it.</p>
+the whole identity tuple, and keep it in step with every change to it. An id is one integer, and
+nothing moves it: a name is fixed once written, so the two can never drift apart.</p>
 <pre><code class="language-julia">id = add_time_series!(store, 42, "ThermalStandard", Component, cost_curve)
 generator.operation_cost.variable = id   # one integer, stored in the model
 </code></pre>
 <p>The surface splits in two along that line. <strong>Identify</strong> — <code>list_metadata</code> and its by-id companions —
-answers which series exist and hands back the id for each. <strong>Act</strong> — every read, removal, rename and
-copy — takes that id. A caller that knows a series only by its attributes does the first half once
-and keeps the id; there is deliberately no combined resolver, because the two halves have different
+answers which series exist and hands back the id for each. <strong>Act</strong> — every read, removal and copy —
+takes that id. A caller that knows a series only by its attributes does the first half once and
+keeps the id; there is deliberately no combined resolver, because the two halves have different
 costs and a caller that repeats a lookup it could have cached should be able to see that it is.</p>
 <p>Three properties make an id safe to persist:</p>
 <ul>
@@ -1213,7 +1213,13 @@ learn a series' <code>resolution</code> or <code>count</code> before asking for 
 past its end, is an error rather than the smaller answer a range would return. A range says
 "whatever lies between these bounds" — which is what an export wants, knowing the bounds and not the
 step count — while a window says "these exact steps", and a caller that asked for 24 and silently
-received 3 has a bug the store can see and it cannot.</p>
+received 3 has a bug the store can see and it cannot. What a range clips <em>to</em> is type-specific: a
+regular series' value covers its step, so a <code>start</code> inside a step selects that step and the sliced
+<code>initial_timestamp</code> can precede <code>start</code>; an irregular series' value is an instant, so only
+timestamps at or after <code>start</code> are selected; and a forecast window is a whole array with nothing
+partial to return, so a forecast's <code>start</code> must be a window boundary at or before the last window
+(an error otherwise) and only its <code>end</code> clips. See
+<a href="explanation/../reference/rust-api.html#reading-a-time-range">Reading a time range</a>.</p>
 <h3 id="the-owner-guard"><a class="header" href="#the-owner-guard">The owner guard</a></h3>
 <p><code>read_by_id</code> and <code>remove_by_ids</code> each take an optional <strong>expected owner</strong> — <code>read_by_id_for_owner</code> /
 <code>remove_by_ids_for_owner</code> in the Rust core, an <code>owner=(id, category)</code> keyword in Julia, keyword-only
@@ -2847,7 +2853,7 @@ carried on the object — the same array can be added under different names. Use
     features={"model_year": 2030, "scenario": "high"},
     units="MW",
 )
-# `series_id` is the catalog row's id: how every read, removal and rename
+# `series_id` is the catalog row's id: how every read and removal
 # addresses the series, and one integer to keep in your own model.
 </code></pre>
 <p><code>features</code> is a plain dict whose values are <code>int</code>, <code>float</code>, <code>bool</code>, or <code>str</code>. Adding a series whose
@@ -3228,7 +3234,7 @@ ts = SingleTimeSeries(
     features = Dict("model_year" =&gt; 2030),
     units = "MW",
 )
-# `id` is the catalog row's id: how every read, removal and rename addresses
+# `id` is the catalog row's id: how every read and removal addresses
 # the series, and one integer to keep in your own model.
 </code></pre>
 <p>Notes:</p>
@@ -3241,8 +3247,8 @@ ts = SingleTimeSeries(
 <code>DuplicateTimeSeriesError</code>.</li>
 </ul>
 <p><code>add_time_series!</code> returns the catalog row's <code>id</code> as an <code>Int64</code> (see
-<a href="guides/../explanation/data-model.html#association-ids">Association ids</a>). Every read, removal, rename and
-copy takes that id; <code>list_metadata</code> is how you recover one for a series you did not just write.</p>
+<a href="guides/../explanation/data-model.html#association-ids">Association ids</a>). Every read, removal and copy takes
+that id; <code>list_metadata</code> is how you recover one for a series you did not just write.</p>
 <p>Two more rules worth knowing up front. <strong>Stored instants and periods are millisecond-precision</strong>: a
 <code>Microsecond(1)</code> resolution, a <code>Millisecond(0)</code> one, or a negative period is refused with
 <code>InvalidParameterError</code> (query bounds are unconstrained). And a <code>Store</code> is <strong>not thread-safe</strong>:
@@ -4424,6 +4430,9 @@ and one column per percentile or scenario — and <code>--window N</code> (or <c
 a single window instead of dumping all of them:</p>
 <pre><code class="language-sh">infrastore --store demo.h5 get --name load --type deterministic_single --window 0
 </code></pre>
+<p>Combined with <code>--time-range</code>, both address the windows the range <em>selected</em>: <code>--window 0</code> is the
+first selected window, and <code>--issue-time</code> must name one of them — a window the forecast has but the
+range dropped is reported as outside the selected range, not as missing.</p>
 <h2 id="9-compare-and-move-stores"><a class="header" href="#9-compare-and-move-stores">9. Compare and Move Stores</a></h2>
 <pre><code class="language-sh">infrastore --store run.h5 diff --against baseline.h5      # exits 1 when they differ
 infrastore --store demo.h5 merge --from other.h5 --name-glob 'load_*'
@@ -4439,7 +4448,6 @@ already have destroyed what was there.</p>
 infrastore --store demo.h5 check-consistency      # every SingleTimeSeries of a resolution on one grid
 infrastore --store demo.h5 stats                  # association, owner, and distinct-array counts
 infrastore --store demo.h5 remove --owner-id 42 --name load --dry-run
-infrastore --store demo.h5 rename --owner-id 42 --name load --new-name load_2024
 infrastore --store demo.h5 compact --force        # rewrite the .h5 so deletions actually shrink it
 </code></pre>
 <p>Deleting frees a column or unlinks a dataset, but HDF5 cannot give the space back in place, so the
@@ -5791,6 +5799,12 @@ assert!(reader.resolution().is_none());     // no constant step to report
 abstract (also matches <code>DeterministicSingleTimeSeries</code>), and all matched forecasts must share one
 window timeline (<code>initial_timestamp</code> + <code>interval</code> + <code>count</code>). <code>static_read</code> / <code>forecast_read</code> error
 (never clamp) if <code>at</code> is off the grid/timeline.</p>
+<p><strong>A read is all-or-nothing.</strong> It spans every group (or slot), so a failure anywhere leaves the
+reader wholly empty rather than holding the new timestamp's values in the groups it reached and the
+previous read's in the ones it did not — <code>values()</code> / <code>window()</code> go empty and stay empty until a
+read succeeds. <code>invalidate()</code> is the same thing on demand, for a binding that refuses a read before
+the core sees it (the Julia wrapper checks the bound's spelling against the reader's timeline, which
+the C ABI's <code>at_unix_ms</code> cannot carry).</p>
 <p><strong>Window-read deduplication.</strong> A <code>ForecastReader</code> groups its entries into <code>WindowSlot</code>s keyed by
 <code>(array hash, read plan)</code>: forecasts that reference the same array and slice it the same way —
 deduplicated identical data, or several <code>DeterministicSingleTimeSeries</code> over one <code>SingleTimeSeries</code>
@@ -5925,9 +5939,9 @@ target.add_parent_child_associations(exported)?;
 <h3 id="timeseriesid-and-keyidentity"><a class="header" href="#timeseriesid-and-keyidentity"><code>TimeSeriesId</code> and <code>KeyIdentity</code></a></h3>
 <p><code>TimeSeriesId</code> is the catalog id of one association — the only way to address a stored series. It is
 a newtype over <code>i64</code> rather than a bare integer because the store hands out several unrelated
-integer id streams (this one, <code>owner_id</code>, and the two association catalogs' own ids), and every
-read, removal and rename takes one of them; passing an <code>owner_id</code> where a series id belongs is a
-type error here rather than a lookup that silently finds the wrong row.</p>
+integer id streams (this one, <code>owner_id</code>, and the two association catalogs' own ids), and every read
+and removal takes one of them; passing an <code>owner_id</code> where a series id belongs is a type error here
+rather than a lookup that silently finds the wrong row.</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -6159,7 +6173,7 @@ impl Scenarios {
 <span class="boring">}</span></code></pre></pre>
 <h3 id="staticreader-and-staticgroup"><a class="header" href="#staticreader-and-staticgroup"><code>StaticReader</code> and <code>StaticGroup</code></a></h3>
 <p>The columnar static-series reader (see <a href="reference/rust-api.html#readers">Readers</a>). <code>Period</code> is the crate's resolution
-type. <code>values()</code> is empty until the first <code>Store::static_read</code>.</p>
+type. <code>values()</code> is empty until the first <code>Store::static_read</code>, and empty again after one fails.</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>impl StaticReader {
@@ -6873,7 +6887,7 @@ def add_time_series_bulk(self, items: list[dict]) -&gt; list[int]: ...
 # faster than looping over add_time_series. Results are in input order.
 
 # Every write returns the catalog `id` its row was filed under -- the handle to
-# record in your own object model, and what every read, removal and rename
+# record in your own object model, and what every read and removal
 # takes. It is never reissued once its row is deleted. No add takes an id: the
 # catalog assigns, and the write reports what it chose. The one writer that
 # files rows under supplied ids is import_time_series_associations_openapi.
@@ -6905,8 +6919,6 @@ def copy_time_series(
 ) -&gt; int: ...
 # Attach the same array to another owner (no data is duplicated); returns the
 # copy's own id. The source id is untouched and still resolves.
-def rename_time_series(self, id: int, new_name: str) -&gt; None: ...
-# A rename moves the name, not the reference: the id is the same afterwards.
 
 def get_array_by_hash(self, data_hash: str) -&gt; numpy.ndarray: ...
 # The raw array behind a 64-char hex content hash, bypassing the catalog.
@@ -7698,7 +7710,7 @@ or else from the <code>libinfrastore_ffi</code> artifact that <code>Pkg</code> d
 <code>num_distinct_arrays</code>, <code>open_copy</code>, <code>open_store</code>, <code>persist!</code>, <code>persist_catalog!</code>, <code>read_by_id</code>,
 <code>read_by_ids</code>, <code>read_only</code>, <code>remove_by_filter!</code>, <code>remove_by_ids!</code>,
 <code>remove_parent_child_associations!</code>, <code>remove_supplemental_attribute_associations!</code>,
-<code>rename_time_series!</code>, <code>replace_owner!</code>, <code>replace_parent_child_component_id!</code>,
+<code>replace_owner!</code>, <code>replace_parent_child_component_id!</code>,
 <code>replace_supplemental_attribute_component_id!</code>, <code>rollback_transaction!</code>, <code>static_grid</code>,
 <code>static_groups</code>, <code>static_read!</code>, <code>static_summary</code>, <code>static_timestamps</code>, <code>static_values</code>,
 <code>supplemental_attribute_counts_by_type</code>, <code>supplemental_attribute_summary</code>, <code>time_series_counts</code>,
@@ -7994,7 +8006,7 @@ straight back into any of those calls;
 <p><code>TimeSeriesTypeCount</code>, <code>StaticSummaryRow</code>, and <code>ForecastSummaryRow</code> group by stored type alone — the
 grouping carries no dtype — so their <code>time_series_type</code> is always the bare one.</p>
 <p>Every write returns the catalog row's <code>id</code> as a plain <code>Int64</code> — assigned, never reissued, and what
-every read, removal, rename and copy takes.</p>
+every read, removal and copy takes.</p>
 <pre><code class="language-julia">struct TimeSeriesMetadata                    # get_metadata_by_id / list_metadata
     owner_id          :: Int64
     owner_type        :: String
@@ -8067,7 +8079,7 @@ that the timestamps are wall clocks. Three- and four-argument constructors (<cod
     quantity_kind = ts.quantity_kind, unit_system = ts.unit_system,
     component_field = ts.component_field, application_data = ts.application_data,
     id = nothing,   # file under this catalog id (imports); `nothing` lets the catalog assign
-) -&gt; Int64   # the catalog row's id -- what every read, removal and rename takes
+) -&gt; Int64   # the catalog row's id -- what every read and removal takes
 
 read_by_id(store::Store, id::Integer;
           start_time=nothing, len=nothing, count=nothing,
@@ -8342,7 +8354,9 @@ are partitioned into <code>(dtype, element_shape)</code> groups, and each group'
 static_grid(reader)       -&gt; StaticGrid  # .initial_timestamp, .resolution (or nothing), .length
 static_timestamps(reader) -&gt; Vector{DateTime}  # every instant on the timeline, in order
 static_groups(reader)     -&gt; Vector{StaticGroup}  # each: .dtype, .element_shape, .keys
-static_read!(reader, t::DateTime) -&gt; reader  # fills buffers; errors if t is off the timeline
+static_read!(reader, t) -&gt; reader  # fills buffers; errors if t is off the timeline
+       # t is spelled like the axis: a bare DateTime (a wall clock) for a zoneless one,
+       # a ZonedDateTime (TimeZones loaded) for one recording instants or unspecified
 static_values(reader, group_index::Integer) -&gt; Array
        # (num_columns, element_dims...); column j is static_groups(reader)[group_index].keys[j]
 </code></pre>
@@ -8380,7 +8394,8 @@ forecast_timeline(reader)  -&gt; ForecastTimeline
        # (initial_timestamp::DateTime, resolution::Period, interval::Period, count::Int)
 forecast_entries(reader)   -&gt; Vector{ForecastEntry}  # each: .dtype, .window_shape, .key, .slot
 forecast_num_slots(reader) -&gt; Int                    # physical reads per timestamp (see below)
-forecast_read!(reader, t::DateTime) -&gt; reader        # fills buffers; errors if t is off the timeline
+forecast_read!(reader, t) -&gt; reader                  # fills buffers; errors if t is off the timeline
+       # t is spelled like the axis, as for static_read!: DateTime only for a zoneless one
 forecast_values(reader, entry_index::Integer) -&gt; Array  # window of size .window_shape
 </code></pre>
 <p>Valid read timestamps are <code>initial_timestamp + k·interval</code> for <code>k in 0:count-1</code> (each names the
@@ -8432,7 +8447,6 @@ list_names(store; &lt;list_metadata filters&gt;) -&gt; Vector{String}        # d
 list_owner_types(store; &lt;list_metadata filters&gt;) -&gt; Vector{String}  # distinct owner types, sorted
 remove_by_filter!(store; &lt;list_metadata filters&gt;) -&gt; Int
                                   # remove every match in one all-or-nothing transaction; count removed
-rename_time_series!(store, id::Integer, new_name) -&gt; Int64   # same row and id, new name
 get_compression(store) -&gt; CompressionSettings  # compression=:deflate|:none, level, shuffle; restored from file on open
 verify_integrity(store) -&gt; Int    # number of integrity errors; 0 == intact
 compact!(store) -&gt; CompactionReport   # reclaims both halves; on an on-disk store this rewrites the
@@ -8468,8 +8482,8 @@ close!(store) -&gt; Nothing
 <p><code>list_metadata</code> is the package's one <strong>identify</strong> entry point: it returns a full
 <a href="reference/julia-api.html#result-types"><code>TimeSeriesMetadata</code></a> per matching row — identity, the per-type descriptive
 snapshot, the physical detail (<code>data_hash</code>, <code>element_type</code>, <code>percentiles</code>, <code>application_data</code>), and
-the row's <code>id</code>, which is what every read, removal, rename, and copy then takes. Fields that do not
-apply to a row's type are <code>nothing</code>. All the filters are optional and independent, and combine as a
+the row's <code>id</code>, which is what every read, removal, and copy then takes. Fields that do not apply to
+a row's type are <code>nothing</code>. All the filters are optional and independent, and combine as a
 conjunction; with none set the whole store is listed:</p>
 <ul>
 <li><code>owner_id</code>, <code>owner_category</code> — scope to one owner.</li>
@@ -9252,6 +9266,8 @@ int32_t infrastore_static_reader_group_id(const struct InfraStoreStaticReaderHan
                                   int64_t *out_id);  /* the column's catalog id */
 int32_t infrastore_static_reader_read(struct InfraStoreStaticReaderHandle *reader,
                               const struct InfraStore *store, int64_t at_unix_ms);
+int32_t infrastore_static_reader_invalidate(struct InfraStoreStaticReaderHandle *reader);
+                              /* empty every group; for a caller refusing a read of its own */
 int32_t infrastore_static_reader_group_values(const struct InfraStoreStaticReaderHandle *reader, uint64_t group_idx,
                                       const uint8_t **out_ptr,  /* borrowed; valid until next read/free */
                                       uint64_t *out_byte_len);
@@ -9307,11 +9323,19 @@ int32_t infrastore_forecast_reader_entry_id(const struct InfraStoreForecastReade
                                     uint64_t entry_idx, int64_t *out_id);  /* the entry's catalog id */
 int32_t infrastore_forecast_reader_read(struct InfraStoreForecastReaderHandle *reader,
                                 const struct InfraStore *store, int64_t at_unix_ms);
+int32_t infrastore_forecast_reader_invalidate(struct InfraStoreForecastReaderHandle *reader);
+                                /* empty every entry's window */
 int32_t infrastore_forecast_reader_entry_values(const struct InfraStoreForecastReaderHandle *reader, uint64_t entry_idx,
                                         const uint8_t **out_ptr,  /* borrowed; valid until next read/free */
                                         uint64_t *out_byte_len);
 void infrastore_forecast_reader_free(struct InfraStoreForecastReaderHandle *reader);
 </code></pre>
+<p><strong>A read is all-or-nothing.</strong> A read spans every group (or entry), so a failing
+<code>infrastore_static_reader_read</code> / <code>infrastore_forecast_reader_read</code> leaves the reader wholly empty —
+<code>..._group_values</code> / <code>..._entry_values</code> hand back a zero-length buffer — rather than some groups
+holding the new timestamp's values and the rest the previous read's. A binding that refuses a read
+before calling in (the Julia wrapper checks the bound's spelling against the reader's timeline,
+which <code>at_unix_ms</code> cannot carry) calls <code>..._invalidate</code> to leave the same empty reader behind.</p>
 <p><strong>Window-read deduplication.</strong> Forecasts that reference the same backing array and read plan
 (deduplicated identical data, or several <code>DeterministicSingleTimeSeries</code> over one
 <code>SingleTimeSeries</code>) collapse to a single <em>window slot</em>. <code>infrastore_forecast_reader_read</code> performs
@@ -9489,7 +9513,7 @@ int32_t infrastore_store_replace_owner(struct InfraStore *handle,
                                int32_t owner_category, uint64_t *out_updated);
 /* List catalog metadata rows as a JSON array (identity, the per-type descriptive
    snapshot, the physical detail, and the association `id` the write handed back
-   — the address every read, removal and rename takes). A row carries no
+   — the address every read and removal takes). A row carries no
    timestamp vector: an irregular series' time axis is the one part of a row that
    costs a read per row, so a listing omits it and a caller that needs it reads
    the series. The filters are independent; with none set the whole store is
@@ -10186,7 +10210,7 @@ in the consumer's object graph — which is why the association flags are bare i
 (<code>list</code>, <code>get</code>, <code>grid</code>, <code>info</code>, <code>export</code>, <code>names</code>, <code>owner-types</code>, <code>owners</code>, <code>exists</code>, <code>stats</code>,
 <code>store-info</code>, <code>arrays</code>, <code>summary</code>, <code>attributes</code>, <code>links</code>, <code>diff</code>, <code>verify</code>, <code>check-consistency</code>,
 <code>resolutions</code>, <code>params</code>, <code>compact</code>, and <code>add --dry-run</code>) render their results in it. The write
-commands (<code>init</code>, <code>add</code>, <code>merge</code>, <code>remove</code>, <code>rename</code>, <code>copy</code>, <code>replace-owner</code>, <code>clear</code>, <code>transform</code>,
+commands (<code>init</code>, <code>add</code>, <code>merge</code>, <code>remove</code>, <code>copy</code>, <code>replace-owner</code>, <code>clear</code>, <code>transform</code>,
 <code>persist</code>, <code>plot</code>, <code>attach</code>, <code>detach</code>, <code>link</code>, <code>unlink</code>, <code>reassign</code>) report their outcome in it:
 prose under <code>table</code>, and a one-object status document under <code>json</code>/<code>jsonl</code>, so a scripted mutation
 pipes into <code>jq</code> the way a scripted query does.</p>
@@ -10320,7 +10344,6 @@ the two reach different formats:</p>
 <tr><td><code>merge</code></td><td>Copy matching series from another store into this one.</td></tr>
 <tr><td><code>transform</code></td><td>Derive <code>DeterministicSingleTimeSeries</code> from stored <code>SingleTimeSeries</code>.</td></tr>
 <tr><td><code>remove</code></td><td>Delete a single series, or every match with <code>--all</code> (prompts unless <code>--force</code>).</td></tr>
-<tr><td><code>rename</code></td><td>Rename the single series a selector resolves to (<code>--new-name</code>).</td></tr>
 <tr><td><code>copy</code></td><td>Copy the single series a selector resolves to onto another owner.</td></tr>
 <tr><td><code>replace-owner</code></td><td>Reassign every series from one owner to another.</td></tr>
 <tr><td><code>clear</code></td><td>Remove all series, or all for one owner (prompts unless <code>--force</code>).</td></tr>
@@ -10337,7 +10360,6 @@ infrastore --store demo.h5 merge --from other.h5 --name-glob 'load_*'
 infrastore --store demo.h5 transform --horizon PT24H --interval PT1H
 infrastore --store demo.h5 remove --owner-id 42 --name load --type SingleTimeSeries
 infrastore --store demo.h5 remove --all --name-glob 'scratch_*' --dry-run
-infrastore --store demo.h5 rename --owner-id 42 --name load --new-name demand
 infrastore --store demo.h5 copy --name load --dst-owner-id 43 --dst-owner-type Generator
 infrastore --store demo.h5 replace-owner --old 42 --new 43 --owner-category Component
 infrastore --store demo.h5 clear --owner-id 42 --owner-category Component
@@ -10481,7 +10503,6 @@ infrastore --store &lt;PATH&gt; owners      [--owner-category &lt;C&gt;] [--type
 infrastore --store &lt;PATH&gt; exists      [SELECTOR...]
 infrastore --store &lt;PATH&gt; diff --against &lt;PATH.h5&gt; [SELECTOR...] [--all]
 infrastore --store &lt;PATH&gt; remove  [SELECTOR...] [--all] [--force] [--dry-run]
-infrastore --store &lt;PATH&gt; rename  [SELECTOR...] --new-name &lt;NAME&gt; [--dry-run]
 infrastore --store &lt;PATH&gt; copy    [SELECTOR...] --dst-owner-id &lt;I&gt; --dst-owner-type &lt;T&gt; [--new-name &lt;NAME&gt;] [--dry-run]
 infrastore --store &lt;PATH&gt; replace-owner --old &lt;I&gt; --new &lt;I&gt; --owner-category &lt;C&gt; [--dry-run]
 infrastore --store &lt;PATH&gt; clear   [--owner-id &lt;I&gt; --owner-category &lt;C&gt;] [--force] [--dry-run]
@@ -10528,9 +10549,9 @@ identity. When two matched series would share one filename, each gains a suffix 
 that distinguish them (<code>..._PT1H_model_year-2030.csv</code>), so an export never silently overwrites part
 of its own output. Filenames are compared case-insensitively, so an export produces the same set of
 files on Linux, macOS, and Windows.</p>
-<p><code>--dry-run</code> on <code>remove</code>, <code>clear</code>, <code>replace-owner</code>, <code>rename</code>, <code>copy</code>, <code>merge</code>, <code>persist</code>, <code>attach</code>,
-<code>detach</code>, <code>link</code>, <code>unlink</code>, and <code>reassign</code> prints what would change and exits without opening the
-store for writing.</p>
+<p><code>--dry-run</code> on <code>remove</code>, <code>clear</code>, <code>replace-owner</code>, <code>copy</code>, <code>merge</code>, <code>persist</code>, <code>attach</code>, <code>detach</code>,
+<code>link</code>, <code>unlink</code>, and <code>reassign</code> prints what would change and exits without opening the store for
+writing.</p>
 <p><code>add --dry-run</code> is a validate mode: it resolves every descriptor, reads every CSV in full, and
 prints the resolved <code>(owner, type, name, element type, shape)</code> table without opening the store at
 all. That catches the whole class of "I got the shape wrong" errors before a multi-GB load starts.
@@ -10655,7 +10676,11 @@ inclusive, <code>END</code> exclusive), where each side is parsed as a timestamp
 <code>--time-range 2024-01-01T01:00:00Z..2024-01-01T03:00:00Z</code>. A duration such as <code>--time-range 1h</code> is
 rejected with <code>invalid --time-range '1h' (expected START..END)</code>. A range bound need not be
 grid-aligned for a static series, and must be a window boundary for a forecast; see
-<a href="reference/rust-api.html#reading-a-time-range">reading a time range</a> for what each type selects.</p>
+<a href="reference/rust-api.html#reading-a-time-range">reading a time range</a> for what each type selects. A sliced
+forecast is rendered as the windows it kept — their own issue times, and a <code>count</code> and
+<code>initial_timestamp</code> in <code>-f json</code> that describe the slice — and <code>get</code>'s <code>--window N</code> /
+<code>--issue-time</code> then address those windows: <code>--window 0</code> is the first <em>selected</em> one, and a window
+outside the range is reported as such rather than as one the forecast lacks.</p>
 </li>
 </ul>
 <h2 id="descriptor-schema"><a class="header" href="#descriptor-schema">Descriptor Schema</a></h2>
