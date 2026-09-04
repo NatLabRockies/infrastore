@@ -881,8 +881,12 @@ Persist only the **array half** to `path`, leaving no catalog beside it.
 The mirror of [`persist_catalog!`](@ref), and the write-side counterpart of
 [`open_store_without_catalog`](@ref): together they let a consumer ship an
 artifact as arrays plus a document of its own, carrying the catalog's rows in
-that document rather than in a `.sqlite` nobody reads. The arrays written are
-the live set the catalog references, not everything the backend holds.
+that document rather than in a `.sqlite` nobody reads. Which arrays land follows
+the backend, exactly as [`persist!`](@ref) does: an in-memory store is
+materialized, so only the arrays the catalog still references are written, while
+an on-disk store's file is copied whole — dead slots included, since HDF5 does
+not reclaim that space in place. Call [`compact!`](@ref) first when the bundle's
+size matters.
 
 Atomic, unlike [`persist!`](@ref) — one file, one rename. The file still carries
 a fresh generation stamp, which `open_store_without_catalog` copies onto the

@@ -839,8 +839,11 @@ int32_t infrastore_store_persist(struct InfraStore *handle, const char *path);
  *
  * The mirror of `infrastore_store_persist_catalog`, and the write-side counterpart of
  * `infrastore_store_open_without_catalog`: together they let a consumer ship an artifact as arrays
- * plus a document of its own, with the catalog's rows carried in that document. The arrays written
- * are the live set the catalog references, not everything the backend holds.
+ * plus a document of its own, with the catalog's rows carried in that document. Which arrays land
+ * follows the backend, exactly as `infrastore_store_persist` does: an in-memory store is
+ * materialized, so only the arrays the catalog still references are written, while an on-disk
+ * store's file is copied whole — dead slots included, since HDF5 does not reclaim that space in
+ * place. Call `infrastore_store_compact` first when the bundle's size matters.
  *
  * Atomic — one file, one rename. The file still carries a fresh generation stamp, which
  * `infrastore_store_open_without_catalog` copies onto the catalog it mints.

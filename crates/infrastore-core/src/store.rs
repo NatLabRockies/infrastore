@@ -4516,9 +4516,12 @@ impl Store {
     /// Everything the catalog holds is already in such a document — every row's
     /// `association_id`, and its `data_hash` pointer into the file written here.
     ///
-    /// The arrays written are the ones the catalog still *references*, not every
-    /// array the backend happens to hold: liveness lives in the catalog, so this
-    /// is the same live set [`Self::persist_to`] writes.
+    /// Which arrays land follows the backend, exactly as [`Self::persist_to`]
+    /// does: an in-memory store is materialized, so only the arrays the catalog
+    /// still references are written, while an on-disk store's file is copied
+    /// whole — dead slots and unlinked datasets included, since HDF5 does not
+    /// reclaim that space in place. [`Self::compact`] is what drops them; run it
+    /// first when the bundle's size matters.
     ///
     /// Atomic, unlike `persist_to`. There is one file to publish, so there is
     /// one rename, and the interrupted-between-two-renames case that the

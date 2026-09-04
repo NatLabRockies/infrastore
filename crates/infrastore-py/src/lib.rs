@@ -3191,8 +3191,12 @@ impl PyStore {
     /// the write-side counterpart of `Store.open_without_catalog()`: together
     /// they are how a consumer ships an artifact as arrays plus a document of
     /// its own, carrying the catalog's rows in that document rather than in a
-    /// `.sqlite` nobody reads. The arrays written are the live set the catalog
-    /// references, not everything the backend holds.
+    /// `.sqlite` nobody reads. Which arrays land follows the backend, exactly as
+    /// `persist_to()` does: an in-memory store is materialized, so only the
+    /// arrays the catalog still references are written, while an on-disk store's
+    /// file is copied whole — dead slots included, since HDF5 does not reclaim
+    /// that space in place. Call `compact()` first when the bundle's size
+    /// matters.
     ///
     /// Atomic, unlike `persist_to()` — one file, so one rename. The file still
     /// carries a fresh generation stamp, which `open_without_catalog()` copies
