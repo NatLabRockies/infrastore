@@ -87,7 +87,7 @@ infrastore template NonSequentialTimeSeries > outages.json
 infrastore --store demo.h5 names                    # distinct series names
 infrastore --store demo.h5 get --name load --plot   # a terminal sparkline
 infrastore --store demo.h5 store-info               # format version, compression, catalog state
-infrastore --store demo.h5 -f json list             # every read command honours -f
+infrastore --store demo.h5 -f json list             # every read command honors -f
 ```
 
 ## Next Steps

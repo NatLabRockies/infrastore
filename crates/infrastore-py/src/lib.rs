@@ -250,7 +250,7 @@ fn spell_instant<'py>(
     match reference {
         None | Some(core_lib::TimeReference::Utc) => Ok(utc_obj),
         Some(core_lib::TimeReference::Zoneless) => {
-            // A wall clock: the stored instant's UTC fields, unlabelled.
+            // A wall clock: the stored instant's UTC fields, unlabeled.
             let kwargs = PyDict::new(py);
             kwargs.set_item("tzinfo", py.None())?;
             Ok(utc_obj.call_method("replace", (), Some(&kwargs))?)

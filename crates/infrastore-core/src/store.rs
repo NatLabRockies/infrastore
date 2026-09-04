@@ -574,7 +574,7 @@ pub struct TransformOutcome {
     pub sources: usize,
     /// The stored interval, after single-window normalization.
     pub interval: Period,
-    /// True when the requested `interval` equalled the horizon and that horizon
+    /// True when the requested `interval` equaled the horizon and that horizon
     /// spanned the whole series, so the interval was normalized to zero.
     pub interval_normalized: bool,
     /// The views this call wrote, in the order they were written — the catalog
@@ -5497,7 +5497,7 @@ fn data_array(data: &TimeSeriesData) -> &TypedArray {
 }
 
 /// [`crate::timestamps::require_millisecond_precision`] as a
-/// [`TimeSeriesError`], labelled with the type whose `initial_timestamp` it is.
+/// [`TimeSeriesError`], labeled with the type whose `initial_timestamp` it is.
 fn require_ms(t: chrono::DateTime<chrono::Utc>, label: &str) -> Result<()> {
     crate::timestamps::require_millisecond_precision(t, || format!("{label} initial_timestamp"))
         .map_err(TimeSeriesError::InvalidParameter)

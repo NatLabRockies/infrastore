@@ -44,7 +44,7 @@ end
 
 # The physical dtype an `element_type` string stores, mirroring
 # `ElementType::physical_dtype` in the Rust core. `nothing` for a spelling this
-# wrapper does not recognise — the core is the authority on the vocabulary, so an
+# wrapper does not recognize — the core is the authority on the vocabulary, so an
 # unknown string is forwarded and rejected there rather than here.
 function _physical_dtype_of(element_type::AbstractString)
     s = String(element_type)

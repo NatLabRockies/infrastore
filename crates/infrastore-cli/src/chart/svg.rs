@@ -30,7 +30,7 @@ const LEGEND_Y: f64 = 64.0;
 /// labels to place outside the plot area.
 const MARGIN_RIGHT: f64 = 24.0;
 
-/// At or below this many series, each line is also labelled at its right end.
+/// At or below this many series, each line is also labeled at its right end.
 ///
 /// The palette's contrast relief: several light-mode hues sit under 3:1 against
 /// the surface, so identity must not rest on the swatch alone. Above the
@@ -75,15 +75,15 @@ pub struct Chart {
 
 impl Chart {
     pub fn render(&self) -> String {
-        let labelled: Vec<&Series> = self
+        let labeled: Vec<&Series> = self
             .series
             .iter()
             .filter(|s| s.emphasis || self.series.len() <= DIRECT_LABEL_MAX)
             .collect();
-        let margin_right = if labelled.is_empty() {
+        let margin_right = if labeled.is_empty() {
             MARGIN_RIGHT
         } else {
-            let longest = labelled
+            let longest = labeled
                 .iter()
                 .map(|s| s.label.chars().count())
                 .max()
@@ -221,7 +221,7 @@ impl Chart {
             }
         }
 
-        for s in &labelled {
+        for s in &labeled {
             if let Some((x, y)) = s.points.iter().rev().find(|(_, y)| y.is_finite()) {
                 let _ = writeln!(
                     out,
@@ -308,7 +308,7 @@ pub struct Heatmap {
     pub subtitle: String,
     pub x_label: String,
     pub y_label: String,
-    /// Column tick labels; `None` entries are unlabelled columns.
+    /// Column tick labels; `None` entries are unlabeled columns.
     pub x_labels: Vec<Option<String>>,
     pub y_labels: Vec<Option<String>>,
     /// `values[row][col]`, `None` where there is no reading.
@@ -664,10 +664,10 @@ mod tests {
     }
 
     /// A forecast's windows, or a spaghetti plot's scenarios, are many traces
-    /// with one meaning: only the first is labelled, and the unlabelled rest
+    /// with one meaning: only the first is labeled, and the unlabeled rest
     /// must not each add a swatch claiming to be a separate thing.
     #[test]
-    fn unlabelled_traces_add_nothing_to_the_legend() {
+    fn unlabeled_traces_add_nothing_to_the_legend() {
         let mut c = chart(vec![(0.0, 0.0), (1.0, 1.0)]);
         c.series[0].label = "actual".into();
         for _ in 0..5 {
@@ -682,7 +682,7 @@ mod tests {
         assert_eq!(
             svg.matches(r#"class="swatch"#).count(),
             1,
-            "one labelled series, so one swatch:\n{svg}"
+            "one labeled series, so one swatch:\n{svg}"
         );
     }
 

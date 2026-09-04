@@ -2,7 +2,7 @@
 //!
 //! The store records instants. [`TimeReference`] records the spelling those
 //! instants arrived in, so a series round-trips as it was written instead of
-//! being relabelled UTC at every boundary.
+//! being relabeled UTC at every boundary.
 
 use std::fmt;
 use std::str::FromStr;

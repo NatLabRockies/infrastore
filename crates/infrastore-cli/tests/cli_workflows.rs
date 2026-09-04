@@ -891,7 +891,7 @@ fn forecast_row(line: &str) -> (String, String, f64) {
 }
 
 /// The rows a `--time-range` over windows 5 and 6 must produce: the kept
-/// windows' own issue times, not the first two windows' relabelled onto them.
+/// windows' own issue times, not the first two windows' relabeled onto them.
 fn assert_windows_five_and_six(csv: &str) {
     let rows: Vec<_> = data_lines(csv).iter().map(|l| forecast_row(l)).collect();
     let expected = [
@@ -2586,7 +2586,7 @@ fn summary_csv_is_one_uniform_table() {
     // No prose headings leaked into the stream.
     assert!(!out.contains("Static series"), "{out}");
     assert!(!out.contains("Forecast series"), "{out}");
-    // Both kinds are labelled, and each carries the columns that apply to it.
+    // Both kinds are labeled, and each carries the columns that apply to it.
     assert!(rows.iter().any(|r| r.starts_with("static,")), "{out}");
     assert!(rows.iter().any(|r| r.starts_with("forecast,")), "{out}");
 
@@ -2713,7 +2713,7 @@ fn a_fan_draws_a_probabilistics_percentile_bands() {
         &["plot", "--name", "load_prob", "--kind", "fan", "--out", "-"],
     );
     assert_self_contained("fan", &svg);
-    // The outer pair nests into one band, labelled by the bounds it spans --
+    // The outer pair nests into one band, labeled by the bounds it spans --
     // a band is a filled area, not two separate strokes.
     assert!(
         svg.contains(r#"class="band"#),
@@ -2721,7 +2721,7 @@ fn a_fan_draws_a_probabilistics_percentile_bands() {
     );
     assert!(
         svg.contains("p10\u{2013}p90"),
-        "the band is labelled by its bounds: {svg}"
+        "the band is labeled by its bounds: {svg}"
     );
     // The median has no partner to pair with, so it stays a line of its own.
     assert!(svg.contains("p50"), "the median is drawn and named: {svg}");
@@ -2760,7 +2760,7 @@ fn a_fan_draws_one_trace_per_scenario() {
     );
     assert_self_contained("fan/scenarios", &svg);
     // Scenarios are unordered alternatives, not confidence bounds, so each is
-    // its own labelled trace -- there is no pair to nest into a band.
+    // its own labeled trace -- there is no pair to nest into a band.
     for label in ["s0", "s1", "s2"] {
         assert!(svg.contains(label), "{label} missing from: {svg}");
     }
@@ -2797,7 +2797,7 @@ fn an_overlay_draws_a_deterministic_against_the_actuals_it_came_from() {
     // named so the two are tellable apart.
     assert!(
         svg.contains("actual"),
-        "the source series must be labelled: {svg}"
+        "the source series must be labeled: {svg}"
     );
 }
 

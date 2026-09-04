@@ -115,7 +115,7 @@ end
 # materializes the `(H, count, element_dims...)` array of the `Deterministic` it
 # becomes — one axis more.
 #
-# An `element_type` this wrapper does not recognise leaves the base type bare
+# An `element_type` this wrapper does not recognize leaves the base type bare
 # rather than guessing: the core owns the vocabulary, and a row written by a
 # newer one must still decode.
 function _parameterized_type(

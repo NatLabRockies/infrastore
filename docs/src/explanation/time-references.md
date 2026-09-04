@@ -1,7 +1,7 @@
 # Time References
 
 The store records **instants**. A `time_reference` records what those instants were _written as_, so
-a series comes back the way it went in instead of being relabelled UTC at every boundary.
+a series comes back the way it went in instead of being relabeled UTC at every boundary.
 
 | Spelling         | Meaning                                                           |
 | ---------------- | ----------------------------------------------------------------- |

@@ -145,7 +145,7 @@ end
 
 How a time series' timestamps were *spelled*. The store records instants; this
 records what they were written **as**, so a series comes back the way it went in
-instead of being relabelled UTC at the boundary.
+instead of being relabeled UTC at the boundary.
 
 Four subtypes, and most rules split on a binary rather than on all four:
 [`UTCReference`](@ref), [`FixedOffsetReference`](@ref) and [`ZoneReference`](@ref)
@@ -282,7 +282,7 @@ end
     ZonelessReference()
 
 A wall clock. Names no instant; the store holds it as if UTC and hands it back
-unlabelled.
+unlabeled.
 """
 struct ZonelessReference <: TimeReference end
 

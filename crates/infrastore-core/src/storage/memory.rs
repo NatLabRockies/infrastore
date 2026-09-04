@@ -13,7 +13,7 @@ use super::{ArrayLayout, CompactionReport, IntegrityReport, PackGroup, StorageBa
 /// Pure in-memory storage backend.
 ///
 /// Used for `in_memory=true` stores and as the default test backend. Tracks a
-/// "tombstoned" set so the slot-reclamation behaviour can be exercised against
+/// "tombstoned" set so the slot-reclamation behavior can be exercised against
 /// the same surface as the HDF5 backend.
 #[derive(Debug, Default)]
 pub(crate) struct MemoryBackend {

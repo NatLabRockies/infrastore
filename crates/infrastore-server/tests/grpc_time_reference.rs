@@ -278,7 +278,7 @@ async fn a_ranged_bulk_read_cannot_span_both_coherence_groups() {
 
 /// The irregular type carries a spelling on the same terms, and it is the one
 /// whose timestamps are stored rather than derived -- so a dropped reference
-/// there changes what the vector *means*, not just how it is labelled.
+/// there changes what the vector *means*, not just how it is labeled.
 #[tokio::test]
 async fn an_irregular_series_carries_its_spelling_too() {
     let mut store = create_store(None, true).unwrap();

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 /// other mistake in this file already fails loudly (`api_key` with no keys, an
 /// unknown method, an empty `files` list), so this closes the one path that
 /// failed open. The cost is that a config written for a newer version, carrying
-/// a key this binary does not know, is refused rather than partly honoured;
+/// a key this binary does not know, is refused rather than partly honored;
 /// for a file that decides whether authentication happens, that is the safer
 /// direction to fail in.
 #[derive(Debug, Clone, Deserialize, Serialize)]

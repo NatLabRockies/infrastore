@@ -1510,7 +1510,7 @@ end
     end
 
     # Between two instants there is no value, so the read throws rather than
-    # picking a neighbour.
+    # picking a neighbor.
     @test_throws InfraStore.InvalidParameterError static_read!(r, t0 + Minute(1))
     # A resolution filter makes no sense for an irregular reader.
     @test_throws InfraStore.InvalidParameterError build_static_reader(
@@ -3039,7 +3039,7 @@ end
         @test report isa CompactionReport
         @test report.bytes_reclaimed == before - after > 0
         @test report.slots_reclaimed >= 0
-        # The result struct gets the shared value semantics and labelled show.
+        # The result struct gets the shared value semantics and labeled show.
         @test report == CompactionReport(
             report.slots_reclaimed,
             report.datasets_dropped,
@@ -3416,7 +3416,7 @@ end
 # ---- Result structs --------------------------------------------------------
 #
 # The catalog / metadata queries return structs (not NamedTuples or Dicts):
-# typed fields, value equality, hashability, and a field-labelled `show`.
+# typed fields, value equality, hashability, and a field-labeled `show`.
 
 @testset "query results are structs with typed fields" begin
     store = Store(in_memory=true)
@@ -4949,7 +4949,7 @@ end
     end
 
     # Reversed, with a repeat: neither the catalog's order nor uniqueness is
-    # assumed, and each row comes back labelled with its own name.
+    # assumed, and each row comes back labeled with its own name.
     got = read_by_ids(store, [ids[3], ids[1], ids[3], ids[2]])
     @test length(got) == 4
     @test all(g isa SingleTimeSeries for g in got)

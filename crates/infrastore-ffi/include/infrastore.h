@@ -10,7 +10,7 @@
  * Concurrency. One handle, one thread at a time -- reads included. A handle may
  *   be moved between threads, and handles onto different stores are
  *   independent, but a single handle must never be in two calls at once. A
- *   concurrent pair of reads through one handle is undefined behaviour, not
+ *   concurrent pair of reads through one handle is undefined behavior, not
  *   merely a lost update. The error state is per-thread.
  *
  * Handles. Every handle argument must be live, non-null, created by this
@@ -183,7 +183,7 @@ typedef struct InfraStoreStaticReaderHandle InfraStoreStaticReaderHandle;
  * The subscriber is initialized at most once per process. Subsequent calls
  * are no-ops. Returns `INFRASTORE_OK` on success, `INFRASTORE_ERR_INVALID_UTF8` if `filter`
  * is not valid UTF-8, or `INFRASTORE_ERR_INVALID_PARAMETER` if `filter` contains an
- * invalid directive (e.g. an unrecognised level name).
+ * invalid directive (e.g. an unrecognized level name).
  *
  * # Safety
  *
@@ -1287,7 +1287,7 @@ int32_t infrastore_bulk_result_get_single(const struct InfraStoreBulkReadHandle 
  * ids are given. The id-addressed counterpart of `infrastore_store_bulk_read`:
  * results come back in the same `InfraStoreBulkReadHandle`, so a caller reads
  * them out with the same `infrastore_bulk_result_*` accessors, and repeats in
- * `ids` are honoured in place.
+ * `ids` are honored in place.
  *
  * The read direction of the id every write hands back through its `out_id`: a
  * caller that recorded ids in its own model resolves them here instead of

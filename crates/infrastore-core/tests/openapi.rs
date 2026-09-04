@@ -1291,7 +1291,7 @@ fn an_import_resolves_the_array_by_data_hash_before_uri() {
     );
 
     // A malformed `data_hash` is a document error, named as such — it is never
-    // silently skipped in favour of the `uri` beside it.
+    // silently skipped in favor of the `uri` beside it.
     let mut target = full_surface_anchor_target();
     let err = target
         .import_time_series_associations_openapi(&with_uri(Some(&hash), Some("not-a-hash")))

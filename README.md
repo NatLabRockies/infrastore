@@ -46,7 +46,7 @@ Under development, unstable API, integrating with parent packages
   UTC, an instant at a fixed offset, an instant in a named IANA zone, or a wall clock naming no
   instant at all. Each binding infers it from the input type — a naive `datetime` or a bare
   `DateTime` is a wall clock, a `ZoneInfo`/`ZonedDateTime` keeps its zone — and gives the spelling
-  back on read instead of relabelling everything UTC at the boundary. Python returns the timestamp
+  back on read instead of relabeling everything UTC at the boundary. Python returns the timestamp
   already in that spelling; Julia returns the instant as a `DateTime` with the reference beside it,
   which `zoned_timestamp` fuses back into a `ZonedDateTime` (a `DateTime` is what its consumers
   destructure today).

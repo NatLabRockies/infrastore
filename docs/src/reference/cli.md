@@ -109,7 +109,7 @@ Three things to know:
   parser.
 - Whatever it resolves is also **recorded**, as the series' `time_reference` (see
   [Time references](../explanation/time-references.md)) — so a read hands the same spelling back
-  rather than relabelling everything UTC. `--assume-timezone -07:00` over a midnight column stores
+  rather than relabeling everything UTC. `--assume-timezone -07:00` over a midnight column stores
   `07:00Z` and prints `2024-01-01T00:00:00-07:00`.
 
 **Prefer a named zone to a fixed offset** for anything that crosses a daylight-saving transition. A
@@ -131,7 +131,7 @@ re-read the column with --assume-timezone -06:00 or -07:00.
 #### `--zoneless`: keep them as wall clocks
 
 For data that has no time zone and wants none — modeled profiles on 24-hour days, say — `--zoneless`
-stores the fields as written, converts nothing, and reads them back unlabelled:
+stores the fields as written, converts nothing, and reads them back unlabeled:
 
 ```console
 $ infrastore --store s.h5 --zoneless add --csv profile.csv ...

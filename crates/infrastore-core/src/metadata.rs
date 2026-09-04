@@ -2815,7 +2815,7 @@ impl MetadataStore {
         // Same rule as `replace_supplemental_attribute_component_id`: the type
         // labels are denormalized for filtering, so they move with the id. A
         // component can appear on either end of an edge, so its type is looked
-        // up from both, and only the end actually being rewritten is relabelled.
+        // up from both, and only the end actually being rewritten is relabeled.
         // Only for a real move, as above.
         let destination_type: Option<String> = if old_id == new_id {
             None

@@ -6,7 +6,7 @@ The data model mirrors the time-series concepts originally developed in
 may exist in several variants distinguished by **features**.
 
 This page covers the **catalog** side of that — who owns a series, what distinguishes two series
-that share a name, how a row is filed, and how it is addressed once stored. Two neighbours cover the
+that share a name, how a row is filed, and how it is addressed once stored. Two neighbors cover the
 rest: [Time-Series Types](./time-series-types.md) for what the six types mean and which to reach
 for, and [Time References](./time-references.md) for how a series' timestamps are spelled.
 
@@ -151,7 +151,7 @@ about them. The one place ids do cross a boundary — and the one writer that fi
 was given — is the [OpenAPI document round trip](../reference/file-format.md), where preserving them
 is the whole point: an import that assigned fresh ids would leave every reference the document
 carries pointing at the wrong series. That wire form spells the field `association_id` — in a
-document travelling beside components and supplemental attributes, an unqualified `id` would not say
+document traveling beside components and supplemental attributes, an unqualified `id` would not say
 which id it is — and the schema requires it on every time-series row. Because the import is the only
 door, the guarantee holds there too: a supplied id must sit above the destination catalog's counter
 (`DuplicateAssociationId` otherwise, so a document's ids fit a fresh store but not one that has
