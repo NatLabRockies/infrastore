@@ -20,6 +20,16 @@ allow = [
     "HDF5",
     "ISC",
     "MIT",
+    # MIT No Attribution, carried by `borrow-or-share` (reached through
+    # `jsonschema -> referencing -> fluent-uri`, which `infrastore-core` pulls in
+    # to validate the OpenAPI import path against the vendored SiennaSchemas
+    # specs). It is MIT with the attribution clause dropped, so it is strictly
+    # more permissive than the `MIT` above, but SPDX gives it its own identifier
+    # and it has to be allowed by name. It reached this list when `jsonschema`
+    # moved from a dev-dependency to a real one: cargo-deny leaves dev
+    # dependencies out of its graph, so the tree was never license-checked until
+    # then.
+    "MIT-0",
     "MPL-2.0",
     "Unicode-3.0",
     "Unlicense",
