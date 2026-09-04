@@ -126,18 +126,28 @@ class TestSupplementalAttributeExportImport:
             store.import_supplemental_attribute_associations_openapi("{not valid json")
 
     def test_import_rejects_unknown_fields(self):
+        """The row schemas are open objects, so an extra field clears the
+        schema check and is caught by the row struct — after the document has
+        become a `Value`, which is where the parser's line and column went. The
+        row index is the coordinate that survives, so the error carries it."""
         store = Store.create(in_memory=True)
         bad = json.dumps(
             [
                 {
                     "component_id": 1, "component_type": "Generator",
                     "attribute_id": 100, "attribute_type": "GeographicInfo",
+                },
+                {
+                    "component_id": 2, "component_type": "Generator",
+                    "attribute_id": 101, "attribute_type": "GeographicInfo",
                     "extra": "nope",
-                }
+                },
             ]
         )
-        with pytest.raises(infrastore.StorageError):
+        with pytest.raises(infrastore.InvalidParameterError) as excinfo:
             store.import_supplemental_attribute_associations_openapi(bad)
+        assert "row 1" in str(excinfo.value)
+        assert "extra" in str(excinfo.value)
 
     def test_import_rolls_back_a_duplicate_within_the_batch(self):
         store = Store.create(in_memory=True)

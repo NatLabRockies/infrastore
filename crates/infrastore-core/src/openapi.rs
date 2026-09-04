@@ -709,7 +709,12 @@ where
     let mut out = Vec::with_capacity(values.len());
     for (index, value) in values.into_iter().enumerate() {
         check(&value, index)?;
-        out.push(convert(serde_json::from_value(value)?)?);
+        // Parsing to `Value` first cost serde_json's line/column, and the row
+        // schemas are open objects, so an unknown field reaches this call as the
+        // first thing that rejects it. Without the index it would name no row.
+        let raw: Raw =
+            serde_json::from_value(value).map_err(|e| wire_err(format!("row {index}: {e}")))?;
+        out.push(convert(raw)?);
     }
     Ok(out)
 }
@@ -847,5 +852,83 @@ impl Store {
         json: &str,
     ) -> Result<usize> {
         import_sa_rows(self, json)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ts_row_json(extra: &str) -> String {
+        format!(
+            r#"[
+              {{
+                "association_id": 1,
+                "owner_id": 7,
+                "owner_type": "ThermalStandard",
+                "owner_category": "Component",
+                "time_series_type": "SingleTimeSeries",
+                "name": "max_active_power",
+                "features": {{}},
+                "uri": "6044a282e6ea37af7982ca551b8d5dca932fe4fb696bf9cfa14e7316e2693286",
+                "element_type": "f64",
+                "element_shape": [],
+                "initial_timestamp": "2030-01-01T00:00:00Z",
+                "resolution": "PT1H",
+                "length": 24
+              }},
+              {{
+                "association_id": 2,
+                "owner_id": 8,
+                "owner_type": "ThermalStandard",
+                "owner_category": "Component",
+                "time_series_type": "SingleTimeSeries",
+                "name": "min_active_power",
+                "features": {{}},
+                "uri": "b1946ac92492d2347c6235b4d2611184a1b8a2e5f0b6d5ba9b7b8c4d3e2f1a09",
+                "element_type": "f64",
+                "element_shape": [],
+                "initial_timestamp": "2030-01-01T00:00:00Z",
+                "resolution": "PT1H",
+                "length": 24{extra}
+              }}
+            ]"#
+        )
+    }
+
+    /// An unknown field passes the schema — the row schemas are open objects —
+    /// so `deny_unknown_fields` on the `Raw*` struct is what rejects it, and
+    /// that happens after the document has become a `Value` and lost its
+    /// line/column. The row index is the coordinate that survives, so the error
+    /// has to carry it.
+    #[test]
+    fn an_unknown_field_names_the_row_it_is_in() {
+        let json = ts_row_json(",\n                \"owner_typ\": \"Typo\"");
+        let value: Vec<Value> = serde_json::from_str(&json).expect("the document parses");
+        schema::check_time_series_row(&value[1], 1)
+            .expect("the open row schema does not catch an extra field");
+
+        let Err(err) = decode_rows(
+            &json,
+            schema::check_time_series_row,
+            RawTsRow::into_metadata,
+        ) else {
+            panic!("deny_unknown_fields rejects the typo");
+        };
+        let message = err.to_string();
+        assert!(message.contains("row 1"), "{message}");
+        assert!(message.contains("owner_typ"), "{message}");
+    }
+
+    #[test]
+    fn a_clean_document_decodes_every_row() {
+        let Ok(rows) = decode_rows(
+            &ts_row_json(""),
+            schema::check_time_series_row,
+            RawTsRow::into_metadata,
+        ) else {
+            panic!("both rows conform");
+        };
+        assert_eq!(rows.len(), 2);
     }
 }
