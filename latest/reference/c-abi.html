@@ -855,7 +855,7 @@ int32_t infrastore_store_in_transaction(struct InfraStore *handle, bool *out);
    materializing an in-memory store to disk. Existing target files are overwritten. */
 int32_t infrastore_store_persist(struct InfraStore *handle, const char *path);
 /* Write an in-memory catalog to this store's own &lt;path&gt;.sqlite, stamped to match the HDF5 file
-   already beside it. Unlike infrastore_store_persist, copies no arrays: they are already in
+   already beside it. Unlike infrastore_store_persist, writes no arrays: they are already in
    place. A checkpoint, not a mode switch. For catalog_mode=0 this is infrastore_store_flush. */
 int32_t infrastore_store_persist_catalog(struct InfraStore *handle);
 /* has_owner=false clears all; when true, the owner is the pair (owner_id, owner_category). */

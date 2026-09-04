@@ -1095,10 +1095,11 @@ the thread that created it.</p>
 <p><code>MetadataStore</code> uses transactions for atomic multi-row writes. The library does not coordinate
 multiple processes writing the same file concurrently — a single writer owns the files at a time.</p>
 <p>Within one process the rule is enforced: opening an artifact that another <code>Store</code> in the process
-already holds — read-only or not — fails with <code>StoreInUse</code>, and so do <code>create_replacing</code> and
-<code>persist_to</code> aimed at a held path. Each handle indexes the HDF5 file's packed columns once at open,
-and libhdf5 shares one file object between two opens of a file, so a second handle would read and
-write the wrong columns. Drop the handle before opening another.</p>
+already holds — read-only or not — fails with <code>StoreInUse</code>, and so do <code>create_replacing</code>,
+<code>open_without_catalog</code>, <code>persist_to</code>, and <code>persist_arrays_to</code> aimed at a held path. Each handle
+indexes the HDF5 file's packed columns once at open, and libhdf5 shares one file object between two
+opens of a file, so a second handle would read and write the wrong columns. Drop the handle before
+opening another.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="design-choices"><a class="header" href="#design-choices">Design Choices</a></h1>
 <p>infrastore is a foundation library. End users rarely call it directly — they reach it through a
 parent package such as
@@ -2180,13 +2181,14 @@ shared storage afterwards. Two concurrent writers on a filesystem without workin
 the HDF5 file, and no amount of care inside this library can prevent it.</p>
 <p>Inside one process the library enforces the rule itself, and more strictly than the lock does: a
 second <code>Store</code> on a path that is already open fails with <code>StoreInUse</code> whatever its mode, and so do
-<code>create_replacing</code> and <code>persist_to</code> aimed at a path another handle holds. A read-only handle is not
-exempt because its map from content hash to packed column is built once at open — after the writer
-removes a series and reuses the slot, that map points a live hash at another series' values, and
-libhdf5 sharing one file object between the two opens makes the reader's cache agree with it. The
-HDF5 lock does not see this case at all, and it is the easier mistake to make: an unclosed handle in
-a notebook or REPL, a fixture and a test body, a read-only handle opened for a report beside the
-writer. Close the handle you hold before opening another.</p>
+<code>create_replacing</code>, <code>open_without_catalog</code>, <code>persist_to</code>, and <code>persist_arrays_to</code> aimed at a path
+another handle holds. A read-only handle is not exempt because its map from content hash to packed
+column is built once at open — after the writer removes a series and reuses the slot, that map
+points a live hash at another series' values, and libhdf5 sharing one file object between the two
+opens makes the reader's cache agree with it. The HDF5 lock does not see this case at all, and it is
+the easier mistake to make: an unclosed handle in a notebook or REPL, a fixture and a test body, a
+read-only handle opened for a report beside the writer. Close the handle you hold before opening
+another.</p>
 <p><code>verify_integrity()</code> is the backstop. Every array carries a SHA-256 companion, and the check
 re-reads and re-hashes all of them, so corruption is detectable even when it is not preventable —
 worth running against an artifact whose history you do not trust. The CLI exposes it as
@@ -2220,11 +2222,12 @@ no catalog. Reopening it as <code>Attached</code> creates a fresh, unstamped cat
 <a href="explanation/storage-model.html#saving-one-pair-two-renames">paired stamp</a> rejects that combination — which is the right answer,
 because the arrays are there but nothing names them.</p>
 <p><code>persist_catalog()</code> is the cheap way to land an in-memory catalog when the arrays are already in
-their final place. <code>persist_to</code> aimed at another path has to copy the array file; <code>persist_catalog</code>
-writes only the <code>.sqlite</code> half, stamped to match the HDF5 file already sitting beside it. That is
-what makes <code>InMemory</code> usable for what it is good for — skipping per-commit journaling during a bulk
-load — without paying a full copy of the arrays to land the result. It is a checkpoint, not a mode
-switch: the catalog stays in RAM, and later changes are again RAM-only until the next call.</p>
+their final place. <code>persist_to</code> aimed at another path has to write the arrays again;
+<code>persist_catalog</code> writes only the <code>.sqlite</code> half, stamped to match the HDF5 file already sitting
+beside it. That is what makes <code>InMemory</code> usable for what it is good for — skipping per-commit
+journaling during a bulk load — without paying a full copy of the arrays to land the result. It is a
+checkpoint, not a mode switch: the catalog stays in RAM, and later changes are again RAM-only until
+the next call.</p>
 <h2 id="saving-one-pair-two-renames"><a class="header" href="#saving-one-pair-two-renames">Saving: One Pair, Two Renames</a></h2>
 <p><code>persist_to</code> writes both halves to temporary siblings, fsyncs them, and only then renames them into
 place, so a crash before the first rename leaves the destination untouched.</p>
@@ -5844,7 +5847,7 @@ existing targets. An on-disk store is flushed and copied; an in-memory store is 
 (every distinct array by hash, plus the whole catalog). Because arrays are content-addressed, this
 reproduces every series — static, forecast, non-sequential — without per-type reconstruction.</li>
 <li><strong><code>persist_catalog</code></strong> — Writes an in-memory catalog to this store's own <code>&lt;path&gt;.sqlite</code>, stamped
-to match the HDF5 file already beside it. Unlike <code>persist_to</code>, copies no arrays: they are already
+to match the HDF5 file already beside it. Unlike <code>persist_to</code>, writes no arrays: they are already
 in place. A checkpoint, not a mode switch — the catalog stays in RAM afterwards. For a
 <code>CatalogMode::Attached</code> store this is <code>flush</code>.</li>
 </ul>
@@ -7303,7 +7306,7 @@ def persist_arrays_to(self, path: str) -&gt; None: ...
 # a &lt;path&gt;.sqlite is already there, since its rows would be left dangling.
 def persist_catalog(self) -&gt; None: ...
 # Writes an in-memory catalog to this store's own &lt;path&gt;.sqlite, stamped to
-# match the HDF5 file already beside it. Unlike persist_to, copies no arrays:
+# match the HDF5 file already beside it. Unlike persist_to, writes no arrays:
 # they are already in place. A checkpoint, not a mode switch — the catalog
 # stays in RAM. For catalog="attached" this is flush().
 
@@ -9799,7 +9802,7 @@ int32_t infrastore_store_in_transaction(struct InfraStore *handle, bool *out);
    materializing an in-memory store to disk. Existing target files are overwritten. */
 int32_t infrastore_store_persist(struct InfraStore *handle, const char *path);
 /* Write an in-memory catalog to this store's own &lt;path&gt;.sqlite, stamped to match the HDF5 file
-   already beside it. Unlike infrastore_store_persist, copies no arrays: they are already in
+   already beside it. Unlike infrastore_store_persist, writes no arrays: they are already in
    place. A checkpoint, not a mode switch. For catalog_mode=0 this is infrastore_store_flush. */
 int32_t infrastore_store_persist_catalog(struct InfraStore *handle);
 /* has_owner=false clears all; when true, the owner is the pair (owner_id, owner_category). */

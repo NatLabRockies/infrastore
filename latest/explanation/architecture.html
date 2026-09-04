@@ -317,10 +317,11 @@ the thread that created it.</p>
 <p><code>MetadataStore</code> uses transactions for atomic multi-row writes. The library does not coordinate
 multiple processes writing the same file concurrently — a single writer owns the files at a time.</p>
 <p>Within one process the rule is enforced: opening an artifact that another <code>Store</code> in the process
-already holds — read-only or not — fails with <code>StoreInUse</code>, and so do <code>create_replacing</code> and
-<code>persist_to</code> aimed at a held path. Each handle indexes the HDF5 file's packed columns once at open,
-and libhdf5 shares one file object between two opens of a file, so a second handle would read and
-write the wrong columns. Drop the handle before opening another.</p>
+already holds — read-only or not — fails with <code>StoreInUse</code>, and so do <code>create_replacing</code>,
+<code>open_without_catalog</code>, <code>persist_to</code>, and <code>persist_arrays_to</code> aimed at a held path. Each handle
+indexes the HDF5 file's packed columns once at open, and libhdf5 shares one file object between two
+opens of a file, so a second handle would read and write the wrong columns. Drop the handle before
+opening another.</p>
 
                     </main>
 

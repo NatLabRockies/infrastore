@@ -393,13 +393,14 @@ shared storage afterwards. Two concurrent writers on a filesystem without workin
 the HDF5 file, and no amount of care inside this library can prevent it.</p>
 <p>Inside one process the library enforces the rule itself, and more strictly than the lock does: a
 second <code>Store</code> on a path that is already open fails with <code>StoreInUse</code> whatever its mode, and so do
-<code>create_replacing</code> and <code>persist_to</code> aimed at a path another handle holds. A read-only handle is not
-exempt because its map from content hash to packed column is built once at open — after the writer
-removes a series and reuses the slot, that map points a live hash at another series' values, and
-libhdf5 sharing one file object between the two opens makes the reader's cache agree with it. The
-HDF5 lock does not see this case at all, and it is the easier mistake to make: an unclosed handle in
-a notebook or REPL, a fixture and a test body, a read-only handle opened for a report beside the
-writer. Close the handle you hold before opening another.</p>
+<code>create_replacing</code>, <code>open_without_catalog</code>, <code>persist_to</code>, and <code>persist_arrays_to</code> aimed at a path
+another handle holds. A read-only handle is not exempt because its map from content hash to packed
+column is built once at open — after the writer removes a series and reuses the slot, that map
+points a live hash at another series' values, and libhdf5 sharing one file object between the two
+opens makes the reader's cache agree with it. The HDF5 lock does not see this case at all, and it is
+the easier mistake to make: an unclosed handle in a notebook or REPL, a fixture and a test body, a
+read-only handle opened for a report beside the writer. Close the handle you hold before opening
+another.</p>
 <p><code>verify_integrity()</code> is the backstop. Every array carries a SHA-256 companion, and the check
 re-reads and re-hashes all of them, so corruption is detectable even when it is not preventable —
 worth running against an artifact whose history you do not trust. The CLI exposes it as
@@ -433,11 +434,12 @@ no catalog. Reopening it as <code>Attached</code> creates a fresh, unstamped cat
 <a href="#saving-one-pair-two-renames">paired stamp</a> rejects that combination — which is the right answer,
 because the arrays are there but nothing names them.</p>
 <p><code>persist_catalog()</code> is the cheap way to land an in-memory catalog when the arrays are already in
-their final place. <code>persist_to</code> aimed at another path has to copy the array file; <code>persist_catalog</code>
-writes only the <code>.sqlite</code> half, stamped to match the HDF5 file already sitting beside it. That is
-what makes <code>InMemory</code> usable for what it is good for — skipping per-commit journaling during a bulk
-load — without paying a full copy of the arrays to land the result. It is a checkpoint, not a mode
-switch: the catalog stays in RAM, and later changes are again RAM-only until the next call.</p>
+their final place. <code>persist_to</code> aimed at another path has to write the arrays again;
+<code>persist_catalog</code> writes only the <code>.sqlite</code> half, stamped to match the HDF5 file already sitting
+beside it. That is what makes <code>InMemory</code> usable for what it is good for — skipping per-commit
+journaling during a bulk load — without paying a full copy of the arrays to land the result. It is a
+checkpoint, not a mode switch: the catalog stays in RAM, and later changes are again RAM-only until
+the next call.</p>
 <h2 id="saving-one-pair-two-renames"><a class="header" href="#saving-one-pair-two-renames">Saving: One Pair, Two Renames</a></h2>
 <p><code>persist_to</code> writes both halves to temporary siblings, fsyncs them, and only then renames them into
 place, so a crash before the first rename leaves the destination untouched.</p>

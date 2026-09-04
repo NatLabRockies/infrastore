@@ -586,7 +586,7 @@ existing targets. An on-disk store is flushed and copied; an in-memory store is 
 (every distinct array by hash, plus the whole catalog). Because arrays are content-addressed, this
 reproduces every series — static, forecast, non-sequential — without per-type reconstruction.</li>
 <li><strong><code>persist_catalog</code></strong> — Writes an in-memory catalog to this store's own <code>&lt;path&gt;.sqlite</code>, stamped
-to match the HDF5 file already beside it. Unlike <code>persist_to</code>, copies no arrays: they are already
+to match the HDF5 file already beside it. Unlike <code>persist_to</code>, writes no arrays: they are already
 in place. A checkpoint, not a mode switch — the catalog stays in RAM afterwards. For a
 <code>CatalogMode::Attached</code> store this is <code>flush</code>.</li>
 </ul>
