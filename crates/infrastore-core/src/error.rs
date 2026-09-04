@@ -129,6 +129,22 @@ pub enum TimeSeriesError {
     )]
     StoreExists { path: String },
 
+    /// The artifact at `path` is already open in this process.
+    ///
+    /// Every `Store` builds its own map from content hash to HDF5 column at
+    /// open and trusts it for its lifetime, while libhdf5 shares one file
+    /// object between two opens of the same file in a process. Two handles on
+    /// one artifact therefore disagree: two writers each think the other's
+    /// slot is free and overwrite it, and a reader beside a writer resolves a
+    /// hash to a column that now holds another series' values. HDF5's file
+    /// lock only refuses a second *process*, so this is the in-process half of
+    /// the single-writer rule. Drop the handle you hold before opening another.
+    #[error(
+        "the store at {path} is already open in this process; a second handle would \
+         read and write the wrong packed columns. Close the existing handle first"
+    )]
+    StoreInUse { path: String },
+
     #[error("store is read-only")]
     ReadOnlyStore,
 

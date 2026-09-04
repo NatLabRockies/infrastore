@@ -51,6 +51,24 @@ fn read_values(store: &Store, owner: i64) -> Vec<f64> {
     s.data.to_f64_vec().unwrap()
 }
 
+/// The owners the catalog *on disk* lists, read straight from the SQLite file.
+///
+/// A second `Store` on a path this process already holds open is refused
+/// (`StoreInUse`), so a test that wants to know what a checkpoint has landed
+/// while the writer is still live asks the catalog file itself.
+fn owners_on_disk(path: &std::path::Path) -> Vec<i64> {
+    let conn = rusqlite::Connection::open_with_flags(
+        catalog_sqlite_path(path),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let mut stmt = conn
+        .prepare("SELECT DISTINCT owner_id FROM time_series_associations ORDER BY owner_id")
+        .unwrap();
+    let owners = stmt.query_map([], |r| r.get(0)).unwrap();
+    owners.map(Result::unwrap).collect()
+}
+
 /// Every owner with a key in `store`, sorted.
 fn owners(store: &Store) -> Vec<i64> {
     let mut ids: Vec<i64> = store
@@ -358,8 +376,9 @@ fn open_copy_can_hand_back_an_in_memory_catalog() {
     assert_eq!(copy.catalog_mode(), CatalogMode::InMemory);
     add(&mut copy, 2, 200.0);
     copy.flush().unwrap();
-    assert!(
-        owners(&open_store(&dest, true).unwrap()) == vec![1],
+    assert_eq!(
+        owners_on_disk(&dest),
+        vec![1],
         "the copied catalog on disk is still the source's until a checkpoint"
     );
 
@@ -443,20 +462,17 @@ fn persist_catalog_is_a_checkpoint_not_a_mode_switch() {
     add(&mut store, 2, 200.0);
     store.flush().unwrap();
 
-    {
-        let reopened = open_store(&path, true).unwrap();
-        assert_eq!(read_values(&reopened, 1)[0], 100.0);
-        assert!(
-            reopened
-                .list_metadata(ListFilter::new().owner_id(2))
-                .unwrap()
-                .is_empty(),
-            "post-checkpoint changes must not be on disk yet"
-        );
-    }
+    assert_eq!(
+        owners_on_disk(&path),
+        vec![1],
+        "post-checkpoint changes must not be on disk yet"
+    );
 
     store.persist_catalog().unwrap();
+    assert_eq!(owners_on_disk(&path), vec![1, 2]);
+    drop(store);
     let reopened = open_store(&path, true).unwrap();
+    assert_eq!(read_values(&reopened, 1)[0], 100.0);
     assert_eq!(read_values(&reopened, 2)[0], 200.0);
 }
 
@@ -798,4 +814,57 @@ fn an_abandoned_scratch_file_blocks_recreation_until_it_is_replaced() {
         "the abandoned run's arrays did not come back"
     );
     assert!(store.verify_integrity().unwrap().ok());
+}
+
+/// Two handles on one artifact in one process disagree about which packed
+/// slots are free and where each hash lives, so a second one is refused
+/// whatever its mode -- see `TimeSeriesError::StoreInUse`. The HDF5 file lock
+/// does not cover this case: it only refuses a second *process*.
+#[test]
+fn a_second_handle_on_an_open_artifact_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("held.h5");
+    let mut writer = create_store(Some(&path), false).unwrap();
+    add(&mut writer, 1, 0.0);
+    let in_use =
+        |r: Result<Store, TimeSeriesError>| matches!(r, Err(TimeSeriesError::StoreInUse { .. }));
+    assert!(in_use(open_store(&path, false)));
+    assert!(in_use(open_store(&path, true)));
+    // Another spelling of the same path is the same artifact.
+    assert!(in_use(open_store(
+        &dir.path().join(".").join("held.h5"),
+        true
+    )));
+    // So is a symlink to it: the key is the canonical path, not the spelling.
+    #[cfg(unix)]
+    {
+        let alias = dir.path().join("alias.h5");
+        std::os::unix::fs::symlink(&path, &alias).unwrap();
+        assert!(in_use(open_store(&alias, true)));
+    }
+    assert!(in_use(create_store_replacing(
+        &path,
+        Compression::default(),
+        CatalogMode::Attached
+    )));
+    // A save onto a held path would rename its file out from under it.
+    let mut other = create_store(Some(&dir.path().join("other.h5")), false).unwrap();
+    assert!(matches!(
+        other.persist_to(&path),
+        Err(TimeSeriesError::StoreInUse { .. })
+    ));
+
+    // None of those refusals disturbed the handle that holds the path, and
+    // dropping it frees the path again.
+    add(&mut writer, 2, 10.0);
+    drop(writer);
+    let reader = open_store(&path, true).unwrap();
+    assert_eq!(read_values(&reader, 2)[0], 10.0);
+    drop(reader);
+    // An open that fails for some other reason releases the path with the error.
+    assert!(matches!(
+        create_store(Some(&path), false),
+        Err(TimeSeriesError::StoreExists { .. })
+    ));
+    open_store(&path, true).unwrap();
 }
