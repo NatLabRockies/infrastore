@@ -36,6 +36,11 @@ Issues = "https://github.com/NatLabRockies/infrastore/issues"
 # `tzdata` because `zoneinfo` has no time-zone database to read on Windows and
 # the datetime tests name real zones; see the note on `test-requires` below.
 test = ["pytest>=7", "tzdata"]
+# `to_arrow()` only. Kept out of `dependencies` deliberately: pyarrow is several
+# times the size of the wheel that would pull it in, and the binding's currency
+# is numpy arrays -- a caller who never asks for a table should not carry it.
+# The method imports it lazily and raises an ImportError naming this extra.
+arrow = ["pyarrow>=14"]
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
@@ -69,7 +74,12 @@ build-frontend = "build"
 # conversion refuses -- so this is a test dependency on every platform, not a
 # Windows workaround. It is not a runtime dependency of the wheel: the binding
 # converts whatever zone the caller supplies and never resolves one itself.
-test-requires = ["pytest>=7", "netCDF4", "h5py", "tzdata"]
+#
+# `pyarrow` is the `arrow` extra, here so the built wheel actually exercises
+# `to_arrow()` rather than skipping it. The interesting part is cross-platform:
+# the method hands numpy buffers to pyarrow, and the two agree on byte order and
+# datetime64 semantics only if the platform is the one both were built for.
+test-requires = ["pytest>=7", "netCDF4", "h5py", "tzdata", "pyarrow>=14"]
 test-command = "pytest -q {project}/python/tests"
 
 # Install the Rust toolchain before building. The `$HOME/.cargo/bin` PATH override

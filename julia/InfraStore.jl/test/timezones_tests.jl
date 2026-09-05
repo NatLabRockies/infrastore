@@ -278,6 +278,68 @@ end
     @test_throws InfraStore.InvalidParameterError zoned_timestamp(naive)
     @test is_zoneless(naive.time_reference)
     @test !is_zoneless(nothing)
+    # `zoned_timestamps` fuses the same two halves over the whole grid, so it
+    # refuses for the same reason.
+    @test_throws InfraStore.InvalidParameterError zoned_timestamps(naive)
+end
+
+@testset "a calendar grid steps the stored calendar, not TimeZones.jl's local one" begin
+    # Julia is the one binding whose date library steps a *local* clock for an
+    # irregular period: `ZonedDateTime + Month(1)` lands on the same local
+    # day-of-month, while the core adds a month to the stored UTC instant. The
+    # two disagree by the DST offset across a transition, so `timestamps` has to
+    # step the bare `DateTime` the series holds -- stepping the ZonedDateTime
+    # would make the Julia binding disagree with the core and with every other
+    # binding about which instants the series contains.
+    d = tz"America/Denver"
+    start = ZonedDateTime(DateTime(2024, 11, 1), d)
+    s = SingleTimeSeries(start, Month(1), collect(1.0:3.0), "monthly")
+
+    # The stored instants: a month added on the UTC calendar.
+    @test timestamps(s) ==
+        [DateTime(2024, 11, 1, 6), DateTime(2024, 12, 1, 6), DateTime(2025, 1, 1, 6)]
+
+    # Rendered in Denver, the second and third land at 23:00 the day *before* --
+    # the offset changed under them. This is the documented drift, not a bug.
+    @test zoned_timestamps(s) == [
+        ZonedDateTime(DateTime(2024, 11, 1, 0), d),
+        ZonedDateTime(DateTime(2024, 11, 30, 23), d),
+        ZonedDateTime(DateTime(2024, 12, 31, 23), d),
+    ]
+
+    # And that is *not* what stepping the local clock gives, which is the whole
+    # point of pinning it.
+    @test zoned_timestamps(s) != [start + Month(k) for k in 0:2]
+end
+
+@testset "zoned_timestamps fuses a SingleTimeSeries grid with its spelling" begin
+    denver = tz"America/Denver"
+    start = ZonedDateTime(DateTime(2024, 1, 1), denver)
+    series = SingleTimeSeries(start, Hour(1), collect(1.0:3.0), "load")
+
+    # The zoneless grid and the zoned one describe the same instants; the second
+    # just carries the spelling the series recorded.
+    @test zoned_timestamps(series) ==
+        [zoned_timestamp(t, series.time_reference) for t in timestamps(series)]
+    @test zoned_timestamps(series)[1] == start
+    @test length(zoned_timestamps(series)) == 3
+    @test all(t -> t isa ZonedDateTime, zoned_timestamps(series))
+
+    # A PT1H grid steps instants, not wall clocks: across spring-forward the
+    # local hour jumps 01:00 -> 03:00 while the instants stay an hour apart.
+    dst = SingleTimeSeries(
+        ZonedDateTime(DateTime(2024, 3, 10, 1), denver), Hour(1), collect(1.0:2.0), "dst"
+    )
+    stamps = zoned_timestamps(dst)
+    @test Dates.hour(DateTime(stamps[1])) == 1
+    @test Dates.hour(DateTime(stamps[2])) == 3
+    @test stamps[2] - stamps[1] == Hour(1)
+
+    # And it survives a store round trip, which is where the spelling is
+    # actually reconstructed rather than merely carried in memory.
+    store = Store(in_memory=true)
+    key = add_time_series!(store, 1, "Generator", Component, series)
+    @test zoned_timestamps(read_by_id(store, key)) == zoned_timestamps(series)
 end
 
 @testset "a refused point read leaves the reader empty" begin

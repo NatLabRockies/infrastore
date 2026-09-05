@@ -73,9 +73,12 @@ end
 """
     zoned_timestamps(series) -> Vector{ZonedDateTime}
 
-Every timestamp of a [`NonSequentialTimeSeries`](@ref) — or every breakpoint of
-a [`PersistentTimeSeries`](@ref) — fused with the spelling the series recorded.
-Requires `using TimeZones`; see [`zoned_timestamp`](@ref).
+Every timestamp of a static series — every entry of a
+[`NonSequentialTimeSeries`](@ref), every breakpoint of a
+[`PersistentTimeSeries`](@ref), every grid point of a
+[`SingleTimeSeries`](@ref) — fused with the spelling the series recorded.
+The zoneless counterpart is [`timestamps`](@ref). Requires `using TimeZones`;
+see [`zoned_timestamp`](@ref).
 """
 function zoned_timestamps(ts::NonSequentialTimeSeries)
     return [zoned_timestamp(t, ts.time_reference) for t in ts.timestamps]
@@ -83,6 +86,61 @@ end
 
 function zoned_timestamps(ts::PersistentTimeSeries)
     return [zoned_timestamp(t, ts.time_reference) for t in ts.timestamps]
+end
+
+"""
+    timestamps(series) -> Vector{DateTime}
+
+Every timestamp of a static series, in order.
+
+For a [`NonSequentialTimeSeries`](@ref) or [`PersistentTimeSeries`](@ref) this is
+the stored vector; for a [`SingleTimeSeries`](@ref) it materializes the grid,
+`initial_timestamp + k * resolution`. The one method that is not a field access
+is the one that matters: a `Month` or `Year` resolution steps on the calendar, so
+a caller multiplying a fixed span by the index gets a monthly series wrong.
+
+The instants are the ones stored; the spelling beside them is `time_reference`.
+[`zoned_timestamps`](@ref) fuses the two, and needs `using TimeZones`.
+
+```julia
+ts = SingleTimeSeries(DateTime(2024, 1, 31), Month(1), [1.0, 2.0, 3.0], "monthly")
+timestamps(ts)  # 2024-01-31, 2024-02-29, 2024-03-31
+```
+"""
+function timestamps(ts::SingleTimeSeries)
+    # `size(data, 1)`, not `length`: the container interface counts elements, and
+    # a multidimensional per-step value has more of them than there are steps.
+    steps = size(ts.data, 1)
+    steps == 0 && return DateTime[]
+    # Through the core rather than `ts.initial_timestamp + k * ts.resolution`.
+    # Julia is the one binding whose date library has calendar arithmetic of its
+    # own, and TimeZones.jl overloads it to step a *local* clock -- which the
+    # core deliberately does not. Computing here would be a second implementation
+    # of what instants a series contains, agreeing with the core only by luck.
+    out_len = Ref{UInt64}(0)
+    initial = _to_unix_ms(ts.initial_timestamp)
+    iso = _period_to_iso(ts.resolution)
+    _check(
+        @ccall lib_path().infrastore_grid_timestamps(
+            initial::Int64, iso::Cstring, UInt64(steps)::UInt64,
+            C_NULL::Ptr{Int64}, UInt64(0)::UInt64, out_len::Ref{UInt64},
+        )::Int32
+    )
+    millis = Vector{Int64}(undef, Int(out_len[]))
+    _check(
+        @ccall lib_path().infrastore_grid_timestamps(
+            initial::Int64, iso::Cstring, UInt64(steps)::UInt64,
+            millis::Ptr{Int64}, UInt64(length(millis))::UInt64, out_len::Ref{UInt64},
+        )::Int32
+    )
+    return [_from_unix_ms(ms) for ms in millis]
+end
+
+timestamps(ts::NonSequentialTimeSeries) = copy(ts.timestamps)
+timestamps(ts::PersistentTimeSeries) = copy(ts.timestamps)
+
+function zoned_timestamps(ts::SingleTimeSeries)
+    return [zoned_timestamp(t, ts.time_reference) for t in timestamps(ts)]
 end
 
 for FT in (:Deterministic, :Probabilistic, :Scenarios)

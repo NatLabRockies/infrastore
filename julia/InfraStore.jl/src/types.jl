@@ -208,6 +208,92 @@ function SingleTimeSeries(
     )
 end
 
+"""
+    SingleTimeSeries(timestamps::AbstractVector, data, name; kwargs...)
+
+Build from the timeline you actually hold, inferring the resolution and
+**proving** the instants lie on it.
+
+The four-argument form takes `initial_timestamp` + `resolution` and the store
+cannot check the claim, because the vector it describes is never supplied. This
+form takes the vector: it either fits a period exactly, or it is refused naming
+the entry that broke the pattern and pointing at
+[`NonSequentialTimeSeries`](@ref).
+
+**This is how a local-clock timeline reaches the store.** The core has no
+time-zone database and never runs local → instant; you materialize the grid in
+`Dates`/`TimeZones` — where the policy for a nonexistent or ambiguous wall clock
+belongs — and hand over the instants. An hourly local grid in a DST zone *is* a
+uniform instant grid, so it compacts to a `SingleTimeSeries`; a daily or monthly
+one is not, and is refused so you store it explicitly instead.
+
+Accepts `ZonedDateTime`s with `using TimeZones`, and records their spelling the
+same way the four-argument form records the spelling of its `initial`.
+
+```julia
+hours = [ZonedDateTime(DateTime(2024, 11, 3), tz"America/Denver") + Hour(k) for k in 0:5]
+SingleTimeSeries(hours, values, "load")     # compacts to PT1H
+
+days = [ZonedDateTime(DateTime(2024, 11, d), tz"America/Denver") for d in 1:5]
+SingleTimeSeries(days, values, "peak")      # refused: use NonSequentialTimeSeries
+```
+"""
+function SingleTimeSeries(
+    timestamps::AbstractVector,
+    data::AbstractArray,
+    name::AbstractString;
+    application_data::Union{Nothing, AbstractString}=nothing,
+    element_type::Union{Nothing, AbstractString}=nothing,
+    units::Union{Nothing, AbstractString}=nothing,
+    quantity_kind::Union{Nothing, AbstractString}=nothing,
+    unit_system::Union{Nothing, UnitSystem, AbstractString}=nothing,
+    component_field::Union{Nothing, AbstractString}=nothing,
+    time_reference::TimeReferenceArg=INFERRED,
+)
+    steps = size(data, 1)
+    if length(timestamps) != steps
+        throw(
+            InvalidParameterError(
+                "SingleTimeSeries: $(length(timestamps)) timestamps for $steps value(s); " *
+                "the vector must have one entry per time step",
+            ),
+        )
+    end
+    resolution = infer_resolution(timestamps)
+    return SingleTimeSeries(
+        first(timestamps), resolution, data, name;
+        application_data, element_type, units, quantity_kind, unit_system,
+        component_field, time_reference,
+    )
+end
+
+"""
+    infer_resolution(timestamps) -> Period
+
+The period that reproduces `timestamps` exactly, or an `InvalidParameterError`
+naming the entry that breaks the pattern.
+
+Runs in the core, not in `Dates`: it is the same arithmetic
+[`timestamps`](@ref) steps forward with, so a vector this accepts is one the
+store will reproduce. A fixed span wins when both a fixed and a calendar reading
+fit — two entries always fit some fixed span — so pass an explicit `Month(1)` to
+the four-argument constructor if you mean calendar months on a short vector.
+"""
+function infer_resolution(timestamps::AbstractVector)
+    millis = Int64[_to_unix_ms(t) for t in timestamps]
+    out_iso = Ref{Ptr{Cchar}}(C_NULL)
+    _check(
+        @ccall lib_path().infrastore_infer_period(
+            millis::Ptr{Int64}, UInt64(length(millis))::UInt64, out_iso::Ref{Ptr{Cchar}}
+        )::Int32
+    )
+    try
+        return _iso_to_period(unsafe_string(out_iso[]))
+    finally
+        _free_cstr(out_iso[])
+    end
+end
+
 # ---- Non-sequential time series -------------------------------------------
 
 struct NonSequentialTimeSeries{T, N}

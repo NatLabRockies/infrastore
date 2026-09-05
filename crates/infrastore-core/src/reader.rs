@@ -637,7 +637,7 @@ fn index_on_grid(
 /// The timestamp at 0-based `index` on a regular grid `initial + index·step`.
 /// The inverse of [`index_on_grid`]: bounds-checks `index < len` and errors on
 /// date-arithmetic overflow. `what` names the grid in error messages.
-fn timestamp_on_grid(
+pub(crate) fn timestamp_on_grid(
     initial: DateTime<Utc>,
     step: Period,
     len: usize,

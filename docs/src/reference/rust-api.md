@@ -884,10 +884,33 @@ impl SingleTimeSeries {
     pub fn with_time_reference(self, time_reference: TimeReference) -> Self;
     pub fn with_component_field(self, component_field: impl Into<String>) -> Self;
     pub fn with_application_data(self, application_data: impl Into<String>) -> Self;
+
+    pub fn timestamp_at(&self, index: usize) -> Result<DateTime<Utc>>;
+    pub fn timestamps(&self) -> impl Iterator<Item = DateTime<Utc>> + '_;
+
+    pub fn from_timestamps(
+        timestamps: &[DateTime<Utc>], data: TypedArray, name: impl Into<String>,
+    ) -> Result<Self, String>;
 }
 ```
 
+`from_timestamps` builds from the timeline a caller holds, inferring the resolution with
+[`Period::infer`] and **proving** the instants lie on it. `new` takes `initial_timestamp` +
+`resolution` and cannot check the claim — the vector it describes is never supplied — so a caller
+whose values sit on a drifting timeline gets a grid that silently disagrees with their data.
+`from_timestamps` either fits a `Period` exactly or errors naming the index that broke the pattern
+and pointing at `NonSequentialTimeSeries`. It is also **how a local-clock timeline reaches the
+store**: the core has no time-zone database and never runs local → instant, so the caller
+materializes their local grid in their own date library and hands over the instants.
+
 `length` is derived from the array's first axis (`data.length()`) by `new`.
+
+`timestamps` materializes the grid, `[0, length)` in order — the regular counterpart of the explicit
+vector `NonSequentialTimeSeries` and `PersistentTimeSeries` carry as a field, and the only correct
+way to rebuild the timeline: a `Period::Months` resolution steps on the **calendar**, so a series
+starting January 31st lands on February 29th, and multiplying a fixed span by the index gets it
+wrong. `timestamp_at` is the single-index form, erroring past `length` or on date overflow. Both
+report UTC instants; how they were _spelled_ is `time_reference`, which neither applies.
 
 The descriptors travel on the series rather than on the write request, so a read returns what a
 write declared. `element_type` is **not** an `Option`: `new` resolves it to `Scalar(data.dtype)` —
@@ -1040,10 +1063,20 @@ impl Deterministic {
         horizon: impl Into<Period>, interval: impl Into<Period>, count: usize, data: TypedArray,
         name: impl Into<String>,
     ) -> Result<Self, String>;
+
+    pub fn horizon_count(&self) -> usize;
+    pub fn window_start(&self, index: usize) -> Result<DateTime<Utc>>;
+    pub fn window_timestamps(&self, index: usize) -> Result<Vec<DateTime<Utc>>>;
 }
 ```
 
 `new` validates `data.shape` against `[H, count, *E]` where `H = horizon / resolution`.
+
+A forecast has **two grids** and both are needed to place a value: windows step by `interval`
+(`window_start`), and the steps inside one window step by `resolution` (`window_timestamps`, which
+returns `horizon_count()` of them from that window's issue time). They coincide only where windows
+abut without overlapping — a day-ahead forecast reissued hourly overlaps 23 of every 24 steps.
+`horizon_count` is `data.shape[0]`, which `validate` holds equal to `horizon / resolution`.
 
 `validate` re-checks those same invariants against the values the struct currently holds, and
 returns the same `Err(String)`. Every field is `pub` and the type derives `Deserialize`, so a struct

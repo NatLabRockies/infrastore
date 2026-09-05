@@ -45,7 +45,7 @@ Exported names (types first, then functions):
 `replace_supplemental_attribute_component_id!`, `rollback_transaction!`, `static_grid`,
 `static_groups`, `static_read!`, `static_summary`, `static_timestamps`, `static_values`,
 `supplemental_attribute_counts_by_type`, `supplemental_attribute_summary`, `time_series_counts`,
-`transaction`, `transform_single_time_series!`, `verify_integrity`, `zoned_timestamp`,
+`timestamps`, `transaction`, `transform_single_time_series!`, `verify_integrity`, `zoned_timestamp`,
 `zoned_timestamps`.
 
 ## Constructors
@@ -1405,9 +1405,43 @@ place every instant identically forever, and telling them apart is the point of 
 at all.
 
 ```julia
+timestamps(series::SingleTimeSeries)         -> Vector{DateTime}
+timestamps(series::NonSequentialTimeSeries)  -> Vector{DateTime}
+timestamps(series::PersistentTimeSeries)     -> Vector{DateTime}
+
+infer_resolution(timestamps) -> Period
+SingleTimeSeries(timestamps::AbstractVector, data, name; kwargs...)
+```
+
+Every timestamp of a static series, in order. For the two irregular types this is a copy of the
+stored vector; for a `SingleTimeSeries` it walks the grid from `initial_timestamp` by `resolution`.
+That one method is the reason the function exists: a `Month` or `Year` resolution steps on the
+**calendar**, so a series starting January 31st lands on February 29th, and a caller multiplying a
+fixed span by the index would get it wrong. One entry per _time step_, so a multidimensional
+per-step value gives fewer timestamps than `length(series)` counts elements.
+
+The instants are the ones stored; the spelling beside them is `series.time_reference`.
+
+The `SingleTimeSeries` grid is computed **in the core**, through `infrastore_grid_timestamps`, not
+with `initial_timestamp + k * resolution` here. Julia is the one binding whose date library has
+calendar arithmetic of its own — and whose TimeZones overload steps a _local_ clock the core
+deliberately does not — so computing it here would be a second implementation of which instants a
+series contains, agreeing with the core only by luck.
+
+`infer_resolution` is the inverse: the period that reproduces a timeline exactly, or an
+`InvalidParameterError` naming the entry that breaks the pattern. The three-argument
+`SingleTimeSeries(timestamps, data, name)` constructor uses it to build from the timeline you hold
+rather than a resolution you assert — which is **how a local-clock grid reaches the store**. An
+hourly local grid in a DST zone is a uniform instant grid and compacts; a daily or monthly one is
+not, and is refused so you store it as a `NonSequentialTimeSeries` instead. A calendar-scale period
+(`Day(1)` or coarser, and any `Month`/`Year`) on a `ZoneReference` is refused at the write for the
+same reason; sub-daily periods are unaffected.
+
+```julia
 zoned_timestamp(instant::DateTime, reference::TimeReference) -> ZonedDateTime
 zoned_timestamp(series) -> ZonedDateTime          # SingleTimeSeries / the three forecasts
 zoned_timestamp(metadata::TimeSeriesMetadata) -> ZonedDateTime
+zoned_timestamps(series::SingleTimeSeries)        -> Vector{ZonedDateTime}
 zoned_timestamps(series::NonSequentialTimeSeries) -> Vector{ZonedDateTime}
 zoned_timestamps(series::PersistentTimeSeries)    -> Vector{ZonedDateTime}
 ```

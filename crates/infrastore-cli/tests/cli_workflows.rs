@@ -3841,15 +3841,16 @@ fn a_csv_whose_rows_disagree_about_their_offset_says_so_and_names_the_fix() {
     );
 }
 
-/// A calendar period steps on the UTC calendar whatever the series' spelling
-/// says, and that is warned about — but only where it can actually bite.
+/// A calendar-scale period steps in instants whatever the series' spelling says.
+/// On a named zone that is refused; on the spellings that cannot drift it is
+/// allowed, and on a fixed offset it is warned about.
 ///
 /// The gate used to be `is_zoned()`, which is true for `utc` as well, so every
 /// UTC series with a monthly period was warned about DST drift against the very
 /// calendar it steps on. A warning that cannot come true, on the most common
 /// spelling there is, is how a real one gets ignored.
 #[test]
-fn the_calendar_period_warning_fires_only_where_the_calendars_can_disagree() {
+fn a_calendar_scale_period_is_refused_on_a_named_zone_and_allowed_where_it_cannot_drift() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("cal.h5");
     write(dir.path(), "m.csv", "value\n1\n2\n3\n");
@@ -3875,7 +3876,6 @@ fn the_calendar_period_warning_fires_only_where_the_calendars_can_disagree() {
                 d.to_str().unwrap(),
             ],
         );
-        assert!(out.status.success(), "{name} should still be stored");
         String::from_utf8_lossy(&out.stderr).into_owned()
     };
 
@@ -3890,16 +3890,33 @@ fn the_calendar_period_warning_fires_only_where_the_calendars_can_disagree() {
         "a wall clock is held as if UTC, so it steps on its own calendar"
     );
 
-    // A named zone genuinely can disagree -- both at a month boundary and at a
-    // DST transition -- so it is warned about, and the remedy is named.
-    let warned = add_monthly(3, "zone_monthly", Some("America/Denver"));
-    assert!(warned.contains("calendar period"), "{warned}");
-    assert!(warned.contains("NonSequentialTimeSeries"), "{warned}");
+    // A named zone genuinely disagrees -- at a month boundary and at every DST
+    // transition -- so the combination is refused, and both remedies are named.
+    let refused = add_monthly(3, "zone_monthly", Some("America/Denver"));
+    assert!(refused.contains("cannot be combined"), "{refused}");
+    assert!(refused.contains("from_timestamps"), "{refused}");
+    assert!(refused.contains("NonSequentialTimeSeries"), "{refused}");
 
-    // So can a fixed offset, at a month boundary.
+    // A fixed offset has no DST to drift against, so it is stored -- but a
+    // calendar month still steps the UTC calendar rather than the offset's.
     assert!(
         add_monthly(4, "offset_monthly", Some("-07:00")).contains("calendar period"),
         "a fixed offset can still disagree at a month boundary"
+    );
+
+    // Sub-daily is the case that must stay legal: an hourly grid in a DST zone
+    // *is* the local clock, so refusing it would push callers onto a fixed
+    // offset that is silently wrong for half the year.
+    let hourly = r#"{"owner_id": 5, "owner_type": "G", "name": "zone_hourly",
+             "type": "SingleTimeSeries", "element_type": "f64", "csv": "m.csv",
+             "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H",
+             "time_reference": "America/Denver"}"#;
+    let d = write(dir.path(), "zone_hourly.json", hourly);
+    let out = raw(&store, &["add", "--descriptor", d.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "an hourly grid in a DST zone must stay storable: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }
 

@@ -703,6 +703,202 @@ fn numpy_from_typed<'py>(
     shaped.call_method0("copy")
 }
 
+// ---- Arrow export ---------------------------------------------------------
+
+/// Import `pyarrow`, or explain which extra provides it.
+///
+/// Deliberately not a runtime dependency of the wheel: pyarrow is several times
+/// the size of everything else installed, and the binding's own currency is
+/// numpy arrays. Only `to_arrow` needs it, so only `to_arrow` asks for it.
+fn pyarrow(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
+    py.import("pyarrow").map_err(|_| {
+        pyo3::exceptions::PyImportError::new_err(
+            "to_arrow() requires pyarrow, which infrastore does not install by default. \
+             Install it with `pip install 'infrastore[arrow]'` (or `pip install pyarrow`).",
+        )
+    })
+}
+
+/// The pyarrow timestamp type that spells `reference`.
+///
+/// Arrow's `timestamp(unit, tz)` is the same shape as the store's own model — an
+/// instant plus the spelling it was written in — so the mapping is total and
+/// lossless. Millisecond unit throughout, which is the precision every instant
+/// the store records is held to, so nothing is widened or truncated:
+///
+/// | reference | Arrow type |
+/// | --- | --- |
+/// | `None`, `utc` | `timestamp[ms, tz=UTC]` |
+/// | `zoneless` | `timestamp[ms]` (no zone) |
+/// | `-07:00` | `timestamp[ms, tz=-07:00]` |
+/// | `America/Denver` | `timestamp[ms, tz=America/Denver]` |
+///
+/// A zone this interpreter's tz database does not know warns and falls back to
+/// UTC, matching [`spell_instant`]: the instants are intact either way, and
+/// failing a read over a label nobody can resolve would be worse.
+fn arrow_timestamp_type<'py>(
+    pa: &Bound<'py, PyModule>,
+    reference: Option<&core_lib::TimeReference>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let py = pa.py();
+    let zone: Option<String> = match reference {
+        None | Some(core_lib::TimeReference::Utc) => Some("UTC".to_string()),
+        Some(core_lib::TimeReference::Zoneless) => None,
+        Some(r @ core_lib::TimeReference::FixedOffset(_)) => Some(r.as_storage_string()),
+        Some(core_lib::TimeReference::Zone(name)) => {
+            // pyarrow builds the type from any string, so probe the zone the way
+            // the datetime path does rather than trusting it to complain later.
+            if zone_info(py, name).is_err() {
+                warn_unknown_zone(py, name)?;
+                Some("UTC".to_string())
+            } else {
+                Some(name.clone())
+            }
+        }
+    };
+    match zone {
+        Some(tz) => pa.call_method1("timestamp", ("ms", tz)),
+        None => pa.call_method1("timestamp", ("ms",)),
+    }
+}
+
+/// `instants` as a pyarrow `timestamp[ms, …]` array.
+///
+/// Built from the raw milliseconds through numpy rather than from a list of
+/// `datetime` objects: an 8760-row year should not allocate 8760 Python objects
+/// on its way out, and `pa.array` reads a `datetime64[ms]` buffer as the UTC
+/// instants they are before labelling them with the zone.
+fn arrow_timestamp_array<'py>(
+    pa: &Bound<'py, PyModule>,
+    instants: &[DateTime<Utc>],
+    reference: Option<&core_lib::TimeReference>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let py = pa.py();
+    let mut raw = Vec::with_capacity(instants.len() * 8);
+    for t in instants {
+        raw.extend_from_slice(&t.timestamp_millis().to_le_bytes());
+    }
+    let np = py.import("numpy")?;
+    let millis = np.call_method1("frombuffer", (PyBytes::new(py, &raw), "<i8"))?;
+    let as_dt64 = millis.call_method1("astype", ("datetime64[ms]",))?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("type", arrow_timestamp_type(pa, reference)?)?;
+    pa.call_method("array", (as_dt64,), Some(&kwargs))
+}
+
+/// A numpy array shaped `(entries, *element_shape)` as one pyarrow column.
+///
+/// A scalar element gives a primitive array. A multidimensional one gives nested
+/// `fixed_size_list`s — one level per element dimension, innermost first, which
+/// is the order the flat C-ordered buffer is already in.
+fn arrow_column<'py>(
+    pa: &Bound<'py, PyModule>,
+    values: &Bound<'py, PyAny>,
+    element_shape: &[usize],
+) -> PyResult<Bound<'py, PyAny>> {
+    // The stored bytes are little-endian; pyarrow wants the platform's order. A
+    // no-op everywhere infrastore is built today.
+    let native = values.call_method1(
+        "astype",
+        (values
+            .getattr("dtype")?
+            .call_method1("newbyteorder", ("=",))?,),
+    )?;
+    let flat = native.call_method1("reshape", ((-1i64,),))?;
+    let mut column = pa.call_method1("array", (flat,))?;
+    for dim in element_shape.iter().rev() {
+        column = pa
+            .getattr("FixedSizeListArray")?
+            .call_method1("from_arrays", (column, *dim))?;
+    }
+    Ok(column)
+}
+
+/// `data` as one pyarrow column, one entry per timestep.
+fn arrow_value_array<'py>(
+    pa: &Bound<'py, PyModule>,
+    data: &core_lib::TypedArray,
+) -> PyResult<Bound<'py, PyAny>> {
+    let values = numpy_from_typed(pa.py(), data)?;
+    arrow_column(pa, &values, data.element_shape())
+}
+
+/// A two-column `pyarrow.Table` — `timestamp` and `value` — carrying the
+/// series' descriptive attributes as schema metadata.
+///
+/// The value column is named `value` rather than after the series so that tables
+/// from different components concatenate without renaming; the series' own name
+/// rides in the metadata along with everything else that describes the values
+/// but does not address them. Schema metadata is the right home for those: it
+/// survives a Parquet round trip, so the table is not lossy against the object
+/// it came from.
+fn arrow_table<'py>(
+    py: Python<'py>,
+    instants: &[DateTime<Utc>],
+    reference: Option<&core_lib::TimeReference>,
+    data: &core_lib::TypedArray,
+    metadata: BTreeMap<String, String>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let pa = pyarrow(py)?;
+    let column = arrow_value_array(&pa, data)?;
+    arrow_table_from_column(&pa, instants, reference, column, metadata)
+}
+
+/// [`arrow_table`] over a value column that is already built — the forecast
+/// path, where one window is a slice of the stored array rather than the whole
+/// of it.
+fn arrow_table_from_column<'py>(
+    pa: &Bound<'py, PyModule>,
+    instants: &[DateTime<Utc>],
+    reference: Option<&core_lib::TimeReference>,
+    column: Bound<'py, PyAny>,
+    metadata: BTreeMap<String, String>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let columns = PyDict::new(pa.py());
+    columns.set_item("timestamp", arrow_timestamp_array(pa, instants, reference)?)?;
+    columns.set_item("value", column)?;
+    let kwargs = PyDict::new(pa.py());
+    kwargs.set_item("metadata", metadata)?;
+    pa.call_method("table", (columns,), Some(&kwargs))
+}
+
+/// The descriptive attributes a `to_arrow` table carries as schema metadata.
+///
+/// A macro for the same reason as `apply_descriptors!`: the three static types
+/// name these fields identically but share no trait. Absent values are left out
+/// rather than written as an empty string, so `b"units" in table.schema.metadata`
+/// answers "was a label declared?".
+macro_rules! arrow_metadata {
+    ($inner:expr, $type_name:literal) => {{
+        let mut meta: BTreeMap<String, String> = BTreeMap::new();
+        meta.insert("time_series_type".to_string(), $type_name.to_string());
+        meta.insert("name".to_string(), $inner.name.clone());
+        meta.insert("element_type".to_string(), $inner.element_type.to_string());
+        if let Some(v) = &$inner.units {
+            meta.insert("units".to_string(), v.clone());
+        }
+        if let Some(v) = &$inner.quantity_kind {
+            meta.insert("quantity_kind".to_string(), v.clone());
+        }
+        if let Some(v) = $inner.unit_system {
+            meta.insert("unit_system".to_string(), v.as_str().to_string());
+        }
+        if let Some(v) = &$inner.component_field {
+            meta.insert("component_field".to_string(), v.clone());
+        }
+        if let Some(v) = &$inner.application_data {
+            meta.insert("application_data".to_string(), v.clone());
+        }
+        if let Some(v) = &$inner.time_reference {
+            meta.insert(
+                "time_reference".to_string(),
+                core_lib::TimeReference::as_storage_string(v),
+            );
+        }
+        meta
+    }};
+}
+
 // ---- Descriptive attributes -----------------------------------------------
 
 /// The descriptive keyword arguments every time-series constructor accepts.
@@ -941,6 +1137,80 @@ impl PyDeterministic {
     }
 
     /// Value equality: all fields including the data array (bitwise).
+    /// The forecast as `{issue_time: pyarrow.Table}`, one entry per window.
+    ///
+    /// Requires pyarrow, which is not installed with infrastore — use
+    /// `pip install 'infrastore[arrow]'`.
+    ///
+    /// The key is the window's issue time — `initial_timestamp + k · interval`,
+    /// spelled the way the series was written. Each value is a two-column
+    /// `timestamp`/`value` table over that window's horizon, shaped exactly like
+    /// a `SingleTimeSeries.to_arrow()`: `horizon / resolution` rows stepping by
+    /// `resolution` from the issue time.
+    ///
+    /// **The dict is in window order**, which Python's insertion-ordered `dict`
+    /// makes an ordering you can rely on: `next(iter(windows))` is the earliest
+    /// issue time and iteration is chronological. It is not a sorted *container*
+    /// — there is no O(log n) range lookup — so `bisect` over `list(windows)` is
+    /// the way to select a span of issue times.
+    ///
+    /// ```python
+    /// windows = forecast.to_arrow_windows()
+    /// windows[datetime(2024, 1, 2, tzinfo=timezone.utc)]   # that day's forecast
+    /// for issue_time, table in windows.items(): ...        # chronological
+    /// ```
+    ///
+    /// Note that the two grids differ and both are needed to place a value:
+    /// windows step by `interval`, the rows inside one step by `resolution`.
+    /// They coincide only for a forecast whose windows abut, which is not the
+    /// common case — a day-ahead forecast reissued hourly overlaps 23 of every
+    /// 24 rows, so the tables deliberately repeat those values rather than
+    /// pretending one timeline covers them.
+    ///
+    /// Each table carries the forecast's descriptive attributes as schema
+    /// metadata, plus its own `issue_time`, so a window written to Parquet on
+    /// its own still knows which one it is.
+    ///
+    /// This materializes every window. The stored array is `[H, count, *E]` —
+    /// window index innermost — so it is transposed once here; for a
+    /// per-timestamp sweep the cheap path is `Store.build_forecast_reader`,
+    /// which reads on the axis the data is already laid out along.
+    fn to_arrow_windows<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let pa = pyarrow(py)?;
+        let inner = &self.inner;
+        let reference = inner.time_reference.as_ref();
+        // `[H, count, *E]` -> `[count, H, *E]`, once and contiguous, so each
+        // window below is a view rather than its own gather.
+        let np = py.import("numpy")?;
+        let stored = numpy_from_typed(py, &inner.data)?;
+        let by_window = np.call_method1(
+            "ascontiguousarray",
+            (stored.call_method1("swapaxes", (0, 1))?,),
+        )?;
+        // The element shape is what follows `[H, count]`; `TypedArray`'s own
+        // `element_shape` drops one axis, which is the static layout's rule.
+        let element_shape: Vec<usize> = inner.data.shape.get(2..).unwrap_or(&[]).to_vec();
+
+        let windows = PyDict::new(py);
+        for k in 0..inner.count {
+            let stamps = inner.window_timestamps(k).map_err(map_err)?;
+            let start = inner.window_start(k).map_err(map_err)?;
+            let mut metadata = arrow_metadata!(inner, "Deterministic");
+            metadata.insert("resolution".to_string(), inner.resolution.to_iso8601());
+            metadata.insert("horizon".to_string(), inner.horizon.to_iso8601());
+            metadata.insert("interval".to_string(), inner.interval.to_iso8601());
+            metadata.insert("count".to_string(), inner.count.to_string());
+            metadata.insert(
+                "issue_time".to_string(),
+                render_catalog_timestamp(start, reference),
+            );
+            let column = arrow_column(&pa, &by_window.get_item(k)?, &element_shape)?;
+            let table = arrow_table_from_column(&pa, &stamps, reference, column, metadata)?;
+            windows.set_item(spell_instant(py, start, reference)?, table)?;
+        }
+        Ok(windows)
+    }
+
     fn __eq__(&self, other: &Self) -> bool {
         self.inner == other.inner
     }
@@ -1427,6 +1697,75 @@ impl PySingleTimeSeries {
         Ok(Self { inner })
     }
 
+    /// Build from the timeline you actually hold, inferring `resolution` and
+    /// **proving** the instants lie on it.
+    ///
+    /// The constructor takes `initial_timestamp` + `resolution` and the store
+    /// cannot check the claim — the vector it describes is never supplied. This
+    /// takes the vector: it either fits a period exactly, or raises
+    /// `InvalidParameterError` naming the entry that broke the pattern and
+    /// pointing at `NonSequentialTimeSeries`.
+    ///
+    /// **This is how a local-clock timeline reaches the store.** The store has
+    /// no time-zone database and never runs local → instant; you materialize the
+    /// grid with `zoneinfo` — where the policy for a nonexistent or ambiguous
+    /// wall clock belongs — and hand over the instants. An hourly local grid in
+    /// a DST zone *is* a uniform instant grid, so it compacts here; a daily or
+    /// monthly one is not, and is refused so you store it explicitly.
+    ///
+    /// The timestamp spelling is inferred from the vector exactly as the
+    /// constructor infers it from `initial_timestamp`, and the vector must agree
+    /// on one spelling.
+    ///
+    /// ```python
+    /// denver = ZoneInfo("America/Denver")
+    /// hours = [datetime(2024, 11, 3, tzinfo=denver) + timedelta(hours=k) for k in range(6)]
+    /// SingleTimeSeries.from_timestamps(hours, values, "load")   # -> resolution "PT1H"
+    ///
+    /// days = [datetime(2024, 11, d, tzinfo=denver) for d in range(1, 6)]
+    /// SingleTimeSeries.from_timestamps(days, values, "peak")    # InvalidParameterError
+    /// ```
+    #[classmethod]
+    #[pyo3(signature = (
+        timestamps, data, name, *, application_data=None, element_type=None, units=None,
+        quantity_kind=None, unit_system=None, component_field=None, time_reference=None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn from_timestamps(
+        _cls: &Bound<'_, pyo3::types::PyType>,
+        py: Python<'_>,
+        timestamps: Vec<PyInstant>,
+        data: &Bound<'_, PyAny>,
+        name: String,
+        application_data: Option<String>,
+        element_type: Option<String>,
+        units: Option<String>,
+        quantity_kind: Option<String>,
+        unit_system: Option<String>,
+        component_field: Option<String>,
+        time_reference: Option<String>,
+    ) -> PyResult<Self> {
+        // One vector, one spelling -- the same rule the irregular constructors
+        // apply, and for the same reason: a series records one reference.
+        let inferred = vector_reference(&timestamps)?;
+        let instants: Vec<DateTime<Utc>> = timestamps.iter().map(|t| t.instant).collect();
+        let typed = typed_array_from_numpy(data)?;
+        let mut inner = core_lib::SingleTimeSeries::from_timestamps(&instants, typed, name)
+            .map_err(InvalidParameterError::new_err)?;
+        let descriptors = DescriptorArgs {
+            application_data,
+            element_type,
+            units,
+            quantity_kind,
+            unit_system,
+            component_field,
+            time_reference,
+        }
+        .resolve(py, inner.element_type, inferred)?;
+        apply_descriptors!(inner, descriptors);
+        Ok(Self { inner })
+    }
+
     #[getter]
     fn name(&self) -> String {
         self.inner.name.clone()
@@ -1502,6 +1841,56 @@ impl PySingleTimeSeries {
     #[getter]
     fn data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         numpy_from_typed(py, &self.inner.data)
+    }
+
+    /// The whole grid materialized, `initial_timestamp` first, spelled the way
+    /// it was written — the regular counterpart of the explicit vector
+    /// `NonSequentialTimeSeries` and `PersistentTimeSeries` carry.
+    ///
+    /// This is the only correct way to rebuild the timeline. A `P1M` resolution
+    /// steps on the calendar, so multiplying a fixed span by the index gets a
+    /// monthly series wrong.
+    #[getter]
+    fn timestamps<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyAny>>> {
+        let grid: Vec<DateTime<Utc>> = self.inner.timestamps().collect();
+        spell_instants(py, &grid, self.inner.time_reference.as_ref())
+    }
+
+    /// This series as a two-column `pyarrow.Table`: `timestamp` and `value`.
+    ///
+    /// Requires pyarrow, which is not installed with infrastore — use
+    /// `pip install 'infrastore[arrow]'`.
+    ///
+    /// The timestamp column materializes the grid (calendar-aware for a monthly
+    /// resolution) and is typed `timestamp[ms, tz=…]` in the series' own
+    /// spelling: UTC, a fixed offset, an IANA zone, or no zone at all for a
+    /// zoneless series. The value column is the array — a primitive type for a
+    /// scalar series, nested `fixed_size_list` for a multidimensional
+    /// per-timestep value. Composite element types stay in their stored
+    /// packing; `element_type` in the schema metadata names what they are, and
+    /// `decode_element_values` unpacks them.
+    ///
+    /// The series' descriptive attributes (`name`, `units`, `quantity_kind`,
+    /// `unit_system`, `component_field`, `element_type`, `time_reference`,
+    /// `resolution`, `application_data`) ride in `table.schema.metadata`, so the
+    /// table is not lossy against the object and survives a Parquet round trip.
+    ///
+    /// ```python
+    /// table = series.to_arrow()
+    /// table.to_pandas()          # if pandas is installed
+    /// polars.from_arrow(table)   # if polars is
+    /// ```
+    fn to_arrow<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let grid: Vec<DateTime<Utc>> = self.inner.timestamps().collect();
+        let mut metadata = arrow_metadata!(self.inner, "SingleTimeSeries");
+        metadata.insert("resolution".to_string(), self.inner.resolution.to_iso8601());
+        arrow_table(
+            py,
+            &grid,
+            self.inner.time_reference.as_ref(),
+            &self.inner.data,
+            metadata,
+        )
     }
 
     /// Value equality: all fields including the data array (bitwise).
@@ -1654,6 +2043,26 @@ impl PyNonSequentialTimeSeries {
     #[getter]
     fn data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         numpy_from_typed(py, &self.inner.data)
+    }
+
+    /// This series as a two-column `pyarrow.Table`: `timestamp` and `value`.
+    ///
+    /// Requires pyarrow, which is not installed with infrastore — use
+    /// `pip install 'infrastore[arrow]'`. Identical in shape to
+    /// `SingleTimeSeries.to_arrow`, except that the timestamp column is the
+    /// stored vector rather than a computed grid, and the metadata carries no
+    /// `resolution` because an irregular timeline has no constant step.
+    ///
+    /// The rows are the timestamps and nothing else: an irregular series has no
+    /// value *between* two of them, so nothing is filled in.
+    fn to_arrow<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        arrow_table(
+            py,
+            &self.inner.timestamps,
+            self.inner.time_reference.as_ref(),
+            &self.inner.data,
+            arrow_metadata!(self.inner, "NonSequentialTimeSeries"),
+        )
     }
 
     /// Value equality: all fields including the data array (bitwise).
@@ -1812,6 +2221,27 @@ impl PyPersistentTimeSeries {
     #[getter]
     fn data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         numpy_from_typed(py, &self.inner.data)
+    }
+
+    /// This series as a two-column `pyarrow.Table`: `timestamp` and `value`.
+    ///
+    /// Requires pyarrow, which is not installed with infrastore — use
+    /// `pip install 'infrastore[arrow]'`.
+    ///
+    /// **One row per breakpoint, not per instant.** A step function is stored
+    /// sparsely and the table is that sparse form: the value at a row stays in
+    /// force until the next row, and past the last one forever. Resampling it
+    /// onto a dense grid is the caller's to do, and needs a grid the series
+    /// itself does not carry — there is no value before the first breakpoint, so
+    /// a grid starting earlier has no answer to give.
+    fn to_arrow<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        arrow_table(
+            py,
+            &self.inner.timestamps,
+            self.inner.time_reference.as_ref(),
+            &self.inner.data,
+            arrow_metadata!(self.inner, "PersistentTimeSeries"),
+        )
     }
 
     /// Value equality: all fields including the data array (bitwise).

@@ -493,13 +493,58 @@ SingleTimeSeries(
 ```
 
 Read-only properties: `initial_timestamp -> datetime`, `resolution -> str` (ISO 8601 duration, e.g.
-`PT1H`), `length -> int`, `data -> numpy.ndarray`, `name -> str`, plus the seven
-[descriptive attributes](#descriptive-attributes). `initial_timestamp` comes back spelled the way it
-was written — see [Time references](#time-references). The constructor accepts either a `timedelta`
-or an ISO 8601 duration string for `resolution`; the getter always returns the ISO string. `name` is
-a required association attribute (the same array may be stored under different names). It is read
-off the object by `add_time_series` and populated on `read_by_id`. The array's `element_type` and
-per-step element shape are preserved through a round-trip.
+`PT1H`), `length -> int`, `data -> numpy.ndarray`, `timestamps -> list[datetime]`, `name -> str`,
+plus the seven [descriptive attributes](#descriptive-attributes). `initial_timestamp` comes back
+spelled the way it was written — see [Time references](#time-references). The constructor accepts
+either a `timedelta` or an ISO 8601 duration string for `resolution`; the getter always returns the
+ISO string. `name` is a required association attribute (the same array may be stored under different
+names). It is read off the object by `add_time_series` and populated on `read_by_id`. The array's
+`element_type` and per-step element shape are preserved through a round-trip.
+
+### `SingleTimeSeries.from_timestamps`
+
+```python
+@classmethod
+def from_timestamps(
+    cls, timestamps: Sequence[datetime], data: numpy.ndarray, name: str, **descriptors
+) -> SingleTimeSeries: ...
+```
+
+Build from the timeline you actually hold, inferring `resolution` and **proving** the instants lie
+on it. The constructor takes `initial_timestamp` + `resolution` and the store cannot check that
+claim — the vector it describes is never supplied. This takes the vector: it either fits a period
+exactly, or raises `InvalidParameterError` naming the entry that broke the pattern and pointing at
+`NonSequentialTimeSeries`.
+
+**This is how a local-clock timeline reaches the store.** The core has no time-zone database and
+never runs local → instant; you materialize the grid with `zoneinfo` — where the policy for a
+nonexistent or ambiguous wall clock belongs — and hand over the instants.
+
+```python
+denver = ZoneInfo("America/Denver")
+
+# An hourly local grid IS a uniform instant grid, so it compacts.
+hours = local_hourly_walk(datetime(2024, 11, 3, tzinfo=denver), 6)
+SingleTimeSeries.from_timestamps(hours, values, "load").resolution   # "PT1H"
+
+# A daily one is not, and says so.
+days = [datetime(2024, 11, d, tzinfo=denver) for d in range(1, 6)]
+SingleTimeSeries.from_timestamps(days, values, "peak")               # InvalidParameterError
+```
+
+> **Step the timeline in instants, not wall clocks.** `aware_datetime + timedelta(hours=1)` is
+> **wall-clock** arithmetic in Python: on a fall-back day it jumps 01:00 straight to 02:00 and
+> silently drops a real hour. Go through UTC —
+> `(t.astimezone(timezone.utc) + step).astimezone(zone)` — or `from_timestamps` will (correctly)
+> refuse the result.
+
+A fixed span wins when both a fixed and a calendar reading fit; two entries always fit some fixed
+span, so pass an explicit `"P1M"` to the constructor if you mean calendar months on a short vector.
+
+`timestamps` materializes the grid — `initial_timestamp + k · resolution`, spelled the way the
+series was written. It is the only correct way to rebuild the timeline: a `P1M` resolution steps on
+the **calendar**, so a January 31st series lands on February 29th, and multiplying a fixed span by
+the index would get it wrong.
 
 ### Descriptive attributes
 
@@ -526,6 +571,59 @@ These live on the object rather than on `add_time_series` so that a read-then-ad
 series read from one store can be added to another unchanged, with no descriptor to re-supply and
 none that a write could silently replace.
 
+### `to_arrow()`
+
+All three static types — `SingleTimeSeries`, `NonSequentialTimeSeries`, and `PersistentTimeSeries` —
+convert to a two-column `pyarrow.Table` of `timestamp` and `value`:
+
+```python
+table = series.to_arrow()
+table.to_pandas()           # if pandas is installed
+polars.from_arrow(table)    # if polars is
+pyarrow.parquet.write_table(table, "series.parquet")
+```
+
+**pyarrow is an optional extra.** It is not installed with infrastore — it is several times the size
+of the wheel that would pull it in, and the binding's own currency is numpy arrays. Install it with
+`pip install 'infrastore[arrow]'`; calling `to_arrow()` without it raises `ImportError` naming the
+extra. Nothing else in the package imports pyarrow.
+
+**The timestamp column carries the series' spelling.** Arrow's `timestamp(unit, tz)` is the same
+shape as the store's own model — an instant plus how it was spelled — so the mapping is total, and
+millisecond unit throughout means nothing is widened or truncated:
+
+| `time_reference`   | Arrow column type                  |
+| ------------------ | ---------------------------------- |
+| unset, or `"utc"`  | `timestamp[ms, tz=UTC]`            |
+| `"zoneless"`       | `timestamp[ms]` (no zone)          |
+| `"-07:00"`         | `timestamp[ms, tz=-07:00]`         |
+| `"America/Denver"` | `timestamp[ms, tz=America/Denver]` |
+
+A zone this interpreter's tz database does not know warns and falls back to UTC, exactly as reading
+`initial_timestamp` does: the instants are intact either way. For a `SingleTimeSeries` the column is
+the materialized grid (calendar-aware for a monthly resolution); for the two irregular types it is
+the stored vector.
+
+**The value column is the array.** A scalar series gives an Arrow primitive (`double`, `int64`,
+`bool`, …); a multidimensional per-timestep value gives nested `fixed_size_list`, one level per
+element dimension. Composite element types stay in their stored packing — `decode_element_values`
+unpacks them, and `element_type` in the metadata says which.
+
+**The descriptive attributes ride in `table.schema.metadata`**, so the table is not lossy against
+the object it came from and survives a Parquet round trip: `name`, `time_series_type`,
+`element_type`, `time_reference`, `resolution` (a `SingleTimeSeries` only — an irregular timeline
+has no constant step), and whichever of `units`, `quantity_kind`, `unit_system`, `component_field`,
+and `application_data` were declared. An undeclared one is **absent** rather than empty, so
+`b"units" in table.schema.metadata` answers "was a label declared?".
+
+The value column is named `value` rather than after the series so that tables from different
+components concatenate without renaming; the series' own name is in the metadata.
+
+A `PersistentTimeSeries` table has **one row per breakpoint, not per instant** — it is the sparse
+step function as stored. Resampling onto a dense grid is the caller's to do, and needs a grid the
+series does not carry: there is no value before the first breakpoint, so a grid starting earlier has
+no answer to give.
+
 ## `NonSequentialTimeSeries`
 
 ```python
@@ -545,10 +643,10 @@ NonSequentialTimeSeries(
 ```
 
 Read-only properties: `timestamps`, `length`, `data`, `name`, and the seven
-[descriptive attributes](#descriptive-attributes). Timestamps must be strictly increasing, match the
-first data dimension, and agree on one spelling — a vector mixing naive and aware values raises
-`InvalidParameterError`, since one series records one reference. `read_by_id` returns this class for
-a non-sequential row.
+[descriptive attributes](#descriptive-attributes), plus [`to_arrow()`](#to_arrow). Timestamps must
+be strictly increasing, match the first data dimension, and agree on one spelling — a vector mixing
+naive and aware values raises `InvalidParameterError`, since one series records one reference.
+`read_by_id` returns this class for a non-sequential row.
 
 ## `PersistentTimeSeries`
 
@@ -570,8 +668,9 @@ PersistentTimeSeries(
 
 A sparse **step function**. Constructed exactly like a `NonSequentialTimeSeries` — same arguments,
 same validation, same spelling inference — with the same read-only properties: `timestamps`,
-`length`, `data`, `name`, and the seven [descriptive attributes](#descriptive-attributes).
-`timestamps` is the breakpoint vector. A step function's scalar-collapse policy belongs in
+`length`, `data`, `name`, and the seven [descriptive attributes](#descriptive-attributes), plus
+[`to_arrow()`](#to_arrow). `timestamps` is the breakpoint vector, and so are the rows of the Arrow
+table — one per breakpoint, not per instant. A step function's scalar-collapse policy belongs in
 `application_data`; the store has no column for it.
 
 What differs is the read: the value at breakpoint `i` is in force until breakpoint `i + 1`, and past
@@ -686,6 +785,48 @@ forecast.count             -> int
 forecast.data              -> numpy.ndarray
 forecast.name              -> str
 ```
+
+#### `to_arrow_windows()`
+
+```python
+Deterministic.to_arrow_windows() -> dict[datetime, pyarrow.Table]
+```
+
+The forecast as one `pyarrow.Table` per window, keyed by **issue time** —
+`initial_timestamp + k · interval`, spelled the way the series was written. Requires the same
+[`arrow` extra](#to_arrow) as the static types.
+
+```python
+windows = forecast.to_arrow_windows()
+windows[datetime(2024, 1, 2, tzinfo=timezone.utc)]   # that window's forecast
+for issue_time, table in windows.items(): ...        # chronological
+```
+
+Each value is a two-column `timestamp`/`value` table shaped **exactly like a
+`SingleTimeSeries.to_arrow()`** — `horizon / resolution` rows stepping by `resolution` from the
+issue time — so one window drops into anything that already consumes a static table.
+
+The dict is in window order, which Python's insertion-ordered `dict` makes an ordering you can rely
+on: `next(iter(windows))` is the earliest issue time and iteration is chronological. It is not a
+sorted _container_, so there is no O(log n) range lookup; `bisect` over `list(windows)` selects a
+span of issue times.
+
+**Two grids, both needed to place a value.** Windows step by `interval`; the rows inside one window
+step by `resolution`. They coincide only for a forecast whose windows abut without overlapping,
+which is not the common case — a day-ahead forecast reissued hourly overlaps 23 of every 24 rows.
+The tables repeat those instants rather than pretending one timeline covers them, which is why this
+is a dict of tables rather than a single table.
+
+Each table carries the forecast's descriptive attributes as schema metadata, plus `resolution`,
+`horizon`, `interval`, `count`, and its own `issue_time` — so a window written to Parquet on its own
+still knows which one it is.
+
+This materializes every window. The stored array is `[H, count, *E]` — window index innermost — so
+it is transposed once on the way out; for a per-timestamp sweep the cheap path is
+[`build_forecast_reader`](#readers), which reads along the axis the data is already laid out on.
+`DeterministicSingleTimeSeries` rows read back as a `Deterministic`, so they convert the same way.
+`Probabilistic` and `Scenarios` do not have this yet — their windows carry a third axis, and how to
+spell it is an open question.
 
 ### `Probabilistic`
 

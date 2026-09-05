@@ -7329,6 +7329,133 @@ pub unsafe extern "C" fn infrastore_static_reader_timestamps(
     INFRASTORE_OK
 }
 
+// ---- Grid arithmetic ------------------------------------------------------
+//
+// Stateless entry points into the core's own period arithmetic, for bindings
+// that hold a series as a native struct and would otherwise reimplement the
+// grid. There is one implementation of "what instants does this series contain"
+// in the project, and it is `Period::add_to`; a binding that computes its own
+// agrees only by luck, and the two date libraries most likely to disagree are
+// the ones that *do* have calendar arithmetic (Julia's `Dates`, whose TimeZones
+// overload steps a local clock the core deliberately does not).
+
+/// Materialize a regular grid: `initial + k · resolution` for `k` in
+/// `[0, length)`, as unix milliseconds.
+///
+/// Probe-then-fetch like `infrastore_static_reader_timestamps`: call with `buf`
+/// null and `cap` 0 to learn the length (always reported through `out_len`),
+/// then again with a buffer that size. Calendar-aware for a `P1M`/`P1Y`
+/// resolution, which steps the **UTC** calendar — the reference a series records
+/// is a spelling, not a grid.
+///
+/// # Safety
+///
+/// `resolution_iso` must be a valid null-terminated UTF-8 ISO-8601 duration and
+/// stay readable for the call. When non-null, `buf` must be valid for writing
+/// `cap` `i64` values. `out_len` must be non-null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_grid_timestamps(
+    initial_unix_ms: i64,
+    resolution_iso: *const c_char,
+    length: u64,
+    buf: *mut i64,
+    cap: u64,
+    out_len: *mut u64,
+) -> i32 {
+    clear_error();
+    if out_len.is_null() {
+        set_error("out_len is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let resolution = match unsafe { cstr_to_optional_period(resolution_iso) } {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            set_error("resolution is required");
+            return INFRASTORE_ERR_INVALID_PARAMETER;
+        }
+        Err(code) => return code,
+    };
+    let Some(initial) = unix_ms_to_datetime(initial_unix_ms) else {
+        set_error("initial timestamp is out of range");
+        return INFRASTORE_ERR_INVALID_PARAMETER;
+    };
+    let mut millis = Vec::with_capacity(length as usize);
+    for k in 0..length {
+        match resolution.add_to(initial, k as i64) {
+            Some(t) => millis.push(datetime_to_unix_ms(t)),
+            None => {
+                set_error(format!(
+                    "timestamp at index {k} on the {res} grid is out of range",
+                    res = resolution.to_iso8601()
+                ));
+                return INFRASTORE_ERR_INVALID_PARAMETER;
+            }
+        }
+    }
+    unsafe { write_i64_slice_out(&millis, buf, cap, out_len) };
+    INFRASTORE_OK
+}
+
+/// The ISO-8601 period that reproduces `timestamps_unix_ms` exactly, or an error
+/// naming the entry that breaks the pattern.
+///
+/// The inverse of [`infrastore_grid_timestamps`], and the check a caller wants
+/// before claiming a resolution they cannot verify. A local-clock timeline that
+/// drifts against every period — a daily or monthly grid in a DST zone — is
+/// refused here with `INFRASTORE_ERR_INVALID_PARAMETER`, and the message names
+/// `NonSequentialTimeSeries` as the remedy.
+///
+/// On success `out_iso` receives an owned C string the caller frees with
+/// `infrastore_string_free`.
+///
+/// # Safety
+///
+/// `timestamps_unix_ms` must reference `len` `i64` values and stay readable for
+/// the call. `out_iso` must be non-null and is only written on success.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_infer_period(
+    timestamps_unix_ms: *const i64,
+    len: u64,
+    out_iso: *mut *mut c_char,
+) -> i32 {
+    clear_error();
+    if out_iso.is_null() {
+        set_error("out_iso is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    if timestamps_unix_ms.is_null() && len > 0 {
+        set_error("timestamps_unix_ms is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let raw: &[i64] = if len == 0 {
+        &[]
+    } else {
+        unsafe { slice::from_raw_parts(timestamps_unix_ms, len as usize) }
+    };
+    let mut instants = Vec::with_capacity(raw.len());
+    for (k, ms) in raw.iter().enumerate() {
+        match unix_ms_to_datetime(*ms) {
+            Some(t) => instants.push(t),
+            None => {
+                set_error(format!(
+                    "timestamp at index {k} is out of range at the ABI boundary"
+                ));
+                return INFRASTORE_ERR_INVALID_PARAMETER;
+            }
+        }
+    }
+    match core_lib::Period::infer(&instants) {
+        Ok(period) => {
+            unsafe { *out_iso = owned_cstr(&period.to_iso8601()) };
+            INFRASTORE_OK
+        }
+        Err(message) => {
+            set_error(&message);
+            INFRASTORE_ERR_INVALID_PARAMETER
+        }
+    }
+}
+
 /// Number of columnar groups in the reader.
 ///
 /// # Safety

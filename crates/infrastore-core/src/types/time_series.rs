@@ -9,6 +9,7 @@ use super::metadata::UnitSystem;
 use super::period::Period;
 use super::time_reference::TimeReference;
 use crate::codec::{self, DecodedValues};
+use crate::reader::timestamp_on_grid;
 
 /// Discriminator for the time series types this store models.
 ///
@@ -325,6 +326,63 @@ impl SingleTimeSeries {
         Ok(Self::new(initial_timestamp, resolution, data, name).with_element_type(element_type))
     }
 
+    /// Build from the timeline a caller actually holds, inferring the
+    /// resolution and **proving** the instants lie on it.
+    ///
+    /// [`Self::new`] takes `initial_timestamp` + `resolution` and has no way to
+    /// check the claim — the vector it describes is never supplied, so a caller
+    /// whose values sit on a drifting timeline gets a grid that silently
+    /// disagrees with their data. This constructor closes that gap by taking the
+    /// vector: it either fits a [`Period`] exactly, or it is refused with the
+    /// index that broke the pattern and a pointer at
+    /// [`NonSequentialTimeSeries`].
+    ///
+    /// **This is how a local-clock timeline reaches the store.** The store has
+    /// no time-zone database and never runs local → instant; the caller
+    /// materializes their local grid in their own date library — where the
+    /// policy for a nonexistent or ambiguous wall clock belongs — and hands over
+    /// the instants. An hourly local grid in a DST zone *is* a uniform instant
+    /// grid, so it compacts here; a daily or monthly local grid is not, so it is
+    /// refused and stored explicitly instead. Either way the store records the
+    /// timeline the caller has rather than one a resolution implies.
+    ///
+    /// Timestamps must be strictly increasing and match the array's first axis.
+    /// See [`Period::infer`] for which period wins when more than one fits.
+    ///
+    /// ```
+    /// # use infrastore_core::{SingleTimeSeries, TypedArray, Period};
+    /// # use chrono::{TimeZone, Utc};
+    /// let month_ends = [
+    ///     Utc.with_ymd_and_hms(2024, 1, 31, 0, 0, 0).unwrap(),
+    ///     Utc.with_ymd_and_hms(2024, 2, 29, 0, 0, 0).unwrap(),
+    ///     Utc.with_ymd_and_hms(2024, 3, 31, 0, 0, 0).unwrap(),
+    /// ];
+    /// let series = SingleTimeSeries::from_timestamps(
+    ///     &month_ends,
+    ///     TypedArray::from_f64(vec![3], &[1.0, 2.0, 3.0]),
+    ///     "monthly",
+    /// )?;
+    /// assert_eq!(series.resolution, Period::Months(1));
+    /// assert_eq!(series.initial_timestamp, month_ends[0]);
+    /// # Ok::<(), String>(())
+    /// ```
+    pub fn from_timestamps(
+        timestamps: &[DateTime<Utc>],
+        data: TypedArray,
+        name: impl Into<String>,
+    ) -> std::result::Result<Self, String> {
+        let length = data.length();
+        if timestamps.len() != length {
+            return Err(format!(
+                "SingleTimeSeries::from_timestamps: {} timestamps for {length} value(s); \
+                 the vector must have one entry per time step",
+                timestamps.len()
+            ));
+        }
+        let resolution = Period::infer(timestamps)?;
+        Ok(Self::new(timestamps[0], resolution, data, name))
+    }
+
     /// Declare the logical element type of the array. Validated on commit
     /// against the array's dtype and per-step shape.
     pub fn with_element_type(mut self, element_type: ElementType) -> Self {
@@ -368,6 +426,49 @@ impl SingleTimeSeries {
     pub fn with_application_data(mut self, application_data: impl Into<String>) -> Self {
         self.application_data = Some(application_data.into());
         self
+    }
+
+    /// The timestamp at 0-based `index` — `initial_timestamp + index ·
+    /// resolution`, calendar-aware for a [`Period::Months`] grid. Errors if
+    /// `index >= length` or the date arithmetic overflows.
+    ///
+    /// The instant is UTC, like every instant the core holds; how it was
+    /// *spelled* is `time_reference`, which this does not apply.
+    pub fn timestamp_at(&self, index: usize) -> crate::Result<DateTime<Utc>> {
+        timestamp_on_grid(
+            self.initial_timestamp,
+            self.resolution,
+            self.length,
+            index,
+            "grid",
+        )
+    }
+
+    /// Materialize the whole grid, `[0, length)` in order — the regular
+    /// counterpart of [`NonSequentialTimeSeries::timestamps`], which is a
+    /// stored vector rather than a computed one.
+    ///
+    /// This is the only correct way to reconstruct the timeline: a
+    /// [`Period::Months`] resolution steps on the calendar, so a caller
+    /// multiplying a fixed span by the index gets a month grid wrong.
+    ///
+    /// ```
+    /// # use infrastore_core::{SingleTimeSeries, TypedArray, Period};
+    /// # use chrono::{TimeZone, Utc};
+    /// let series = SingleTimeSeries::new(
+    ///     Utc.with_ymd_and_hms(2024, 1, 31, 0, 0, 0).unwrap(),
+    ///     Period::Months(1),
+    ///     TypedArray::from_f64(vec![3], &[1.0, 2.0, 3.0]),
+    ///     "monthly",
+    /// );
+    /// let grid: Vec<_> = series.timestamps().collect();
+    /// assert_eq!(grid[1], Utc.with_ymd_and_hms(2024, 2, 29, 0, 0, 0).unwrap());
+    /// ```
+    pub fn timestamps(&self) -> impl Iterator<Item = DateTime<Utc>> + '_ {
+        (0..self.length).map(move |k| {
+            self.timestamp_at(k)
+                .expect("timestamp on the series grid is representable")
+        })
     }
 }
 
@@ -833,6 +934,63 @@ impl Deterministic {
             ));
         }
         Ok(())
+    }
+
+    /// Number of steps in one window — the first axis of `data`, which
+    /// [`Self::validate`] holds equal to `horizon / resolution`.
+    pub fn horizon_count(&self) -> usize {
+        self.data.shape.first().copied().unwrap_or(0)
+    }
+
+    /// The issue time of window `index`: `initial_timestamp + index ·
+    /// interval`, calendar-aware for a [`Period::Months`] interval. Errors if
+    /// `index >= count` or the arithmetic overflows.
+    pub fn window_start(&self, index: usize) -> crate::Result<DateTime<Utc>> {
+        timestamp_on_grid(
+            self.initial_timestamp,
+            self.interval,
+            self.count,
+            index,
+            "forecast window",
+        )
+    }
+
+    /// Every timestamp inside window `index` — [`Self::horizon_count`] of them,
+    /// stepping by `resolution` from the window's issue time.
+    ///
+    /// The two grids are distinct and both are needed to place a value: windows
+    /// step by `interval`, and the steps inside one step by `resolution`. They
+    /// are equal only for a forecast whose windows abut without overlapping,
+    /// which is not the common case — a day-ahead forecast reissued hourly
+    /// overlaps 23 of every 24 steps.
+    ///
+    /// ```
+    /// # use infrastore_core::{Deterministic, TypedArray, Period};
+    /// # use chrono::{TimeZone, Utc, Duration};
+    /// let forecast = Deterministic::new(
+    ///     Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
+    ///     Period::Fixed(Duration::hours(1)),   // resolution
+    ///     Period::Fixed(Duration::hours(2)),   // horizon: H = 2
+    ///     Period::Fixed(Duration::hours(1)),   // interval
+    ///     3,
+    ///     TypedArray::from_f64(vec![2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+    ///     "day_ahead",
+    /// )?;
+    /// assert_eq!(
+    ///     forecast.window_timestamps(1)?,
+    ///     vec![
+    ///         Utc.with_ymd_and_hms(2024, 1, 1, 1, 0, 0).unwrap(),
+    ///         Utc.with_ymd_and_hms(2024, 1, 1, 2, 0, 0).unwrap(),
+    ///     ],
+    /// );
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn window_timestamps(&self, index: usize) -> crate::Result<Vec<DateTime<Utc>>> {
+        let start = self.window_start(index)?;
+        let steps = self.horizon_count();
+        (0..steps)
+            .map(|h| timestamp_on_grid(start, self.resolution, steps, h, "forecast horizon"))
+            .collect()
     }
 }
 
@@ -1852,6 +2010,155 @@ mod tests {
         let n: usize = shape.iter().product();
         let values: Vec<f64> = (0..n).map(|i| i as f64).collect();
         TypedArray::from_f64(shape, &values)
+    }
+
+    // ---- Materialized timelines -------------------------------------------
+
+    fn hourly(length: usize) -> SingleTimeSeries {
+        SingleTimeSeries::new(
+            t0(),
+            Period::Fixed(Duration::hours(1)),
+            arr(vec![length]),
+            "s",
+        )
+    }
+
+    #[test]
+    fn single_time_series_timestamps_walk_the_fixed_grid() {
+        let series = hourly(3);
+        assert_eq!(
+            series.timestamps().collect::<Vec<_>>(),
+            vec![t0(), t0() + Duration::hours(1), t0() + Duration::hours(2)]
+        );
+    }
+
+    #[test]
+    fn single_time_series_timestamps_step_a_month_grid_on_the_calendar() {
+        // The reason this lives in the core rather than in each binding: a
+        // month is not a span, so no multiplication reproduces this.
+        let jan31 = Utc.with_ymd_and_hms(2024, 1, 31, 0, 0, 0).unwrap();
+        let series = SingleTimeSeries::new(jan31, Period::Months(1), arr(vec![4]), "monthly");
+        assert_eq!(
+            series.timestamps().collect::<Vec<_>>(),
+            vec![
+                jan31,
+                Utc.with_ymd_and_hms(2024, 2, 29, 0, 0, 0).unwrap(),
+                Utc.with_ymd_and_hms(2024, 3, 31, 0, 0, 0).unwrap(),
+                Utc.with_ymd_and_hms(2024, 4, 30, 0, 0, 0).unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn single_time_series_timestamps_agree_with_timestamp_at() {
+        let series = hourly(5);
+        for (k, t) in series.timestamps().enumerate() {
+            assert_eq!(series.timestamp_at(k).unwrap(), t);
+        }
+    }
+
+    #[test]
+    fn single_time_series_timestamp_at_rejects_an_index_past_the_grid() {
+        let series = hourly(3);
+        assert!(series.timestamp_at(2).is_ok());
+        let err = series.timestamp_at(3).unwrap_err().to_string();
+        assert!(err.contains("past the grid extent"), "{err}");
+    }
+
+    #[test]
+    fn single_time_series_with_no_steps_has_no_timestamps() {
+        assert_eq!(hourly(0).timestamps().count(), 0);
+        assert!(hourly(0).timestamp_at(0).is_err());
+    }
+
+    fn forecast(horizon_hours: i64, interval_hours: i64, count: usize) -> Deterministic {
+        let h = horizon_hours as usize;
+        Deterministic::new(
+            t0(),
+            Period::Fixed(Duration::hours(1)),
+            Period::Fixed(Duration::hours(horizon_hours)),
+            Period::Fixed(Duration::hours(interval_hours)),
+            count,
+            arr(vec![h, count]),
+            "f",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn deterministic_horizon_count_is_the_first_axis() {
+        let f = forecast(3, 1, 4);
+        assert_eq!(f.horizon_count(), 3);
+        assert_eq!(f.horizon_count(), f.data.shape[0]);
+        assert_eq!(
+            f.horizon_count(),
+            compute_h(f.horizon, f.resolution).unwrap()
+        );
+    }
+
+    #[test]
+    fn deterministic_window_starts_step_by_interval() {
+        let f = forecast(2, 3, 3);
+        let starts: Vec<_> = (0..f.count).map(|k| f.window_start(k).unwrap()).collect();
+        assert_eq!(
+            starts,
+            vec![t0(), t0() + Duration::hours(3), t0() + Duration::hours(6)]
+        );
+    }
+
+    #[test]
+    fn deterministic_window_timestamps_step_by_resolution() {
+        // The two grids are independent: windows every 3h, rows every 1h.
+        let f = forecast(2, 3, 3);
+        assert_eq!(
+            f.window_timestamps(1).unwrap(),
+            vec![t0() + Duration::hours(3), t0() + Duration::hours(4)]
+        );
+    }
+
+    #[test]
+    fn deterministic_windows_overlap_when_reissued_faster_than_the_horizon() {
+        // The property the Arrow binding leans on: neighbouring windows share
+        // instants, so they cannot be flattened onto one timeline.
+        let f = forecast(3, 1, 4);
+        let first = f.window_timestamps(0).unwrap();
+        let second = f.window_timestamps(1).unwrap();
+        assert_eq!(first[1..], second[..second.len() - 1]);
+    }
+
+    #[test]
+    fn deterministic_window_accessors_reject_an_index_past_the_count() {
+        let f = forecast(2, 1, 3);
+        assert!(f.window_start(2).is_ok());
+        let err = f.window_start(3).unwrap_err().to_string();
+        assert!(err.contains("past the forecast window extent"), "{err}");
+        assert!(f.window_timestamps(3).is_err());
+    }
+
+    #[test]
+    fn deterministic_window_starts_step_a_month_interval_on_the_calendar() {
+        let jan31 = Utc.with_ymd_and_hms(2024, 1, 31, 0, 0, 0).unwrap();
+        let f = Deterministic::new(
+            jan31,
+            Period::Months(1),
+            Period::Months(2),
+            Period::Months(1),
+            3,
+            arr(vec![2, 3]),
+            "monthly",
+        )
+        .unwrap();
+        assert_eq!(
+            f.window_start(1).unwrap(),
+            Utc.with_ymd_and_hms(2024, 2, 29, 0, 0, 0).unwrap()
+        );
+        assert_eq!(
+            f.window_timestamps(1).unwrap(),
+            vec![
+                Utc.with_ymd_and_hms(2024, 2, 29, 0, 0, 0).unwrap(),
+                Utc.with_ymd_and_hms(2024, 3, 29, 0, 0, 0).unwrap(),
+            ]
+        );
     }
 
     // ---- TimeSeriesType round trip ----------------------------------------

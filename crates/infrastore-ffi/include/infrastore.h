@@ -2521,6 +2521,49 @@ int32_t infrastore_static_reader_timestamps(const struct InfraStoreStaticReaderH
                                             uint64_t *out_len);
 
 /**
+ * Materialize a regular grid: `initial + k · resolution` for `k` in
+ * `[0, length)`, as unix milliseconds.
+ *
+ * Probe-then-fetch like `infrastore_static_reader_timestamps`: call with `buf`
+ * null and `cap` 0 to learn the length (always reported through `out_len`),
+ * then again with a buffer that size. Calendar-aware for a `P1M`/`P1Y`
+ * resolution, which steps the **UTC** calendar — the reference a series records
+ * is a spelling, not a grid.
+ *
+ * # Safety
+ *
+ * `resolution_iso` must be a valid null-terminated UTF-8 ISO-8601 duration and
+ * stay readable for the call. When non-null, `buf` must be valid for writing
+ * `cap` `i64` values. `out_len` must be non-null.
+ */
+int32_t infrastore_grid_timestamps(int64_t initial_unix_ms,
+                                   const char *resolution_iso,
+                                   uint64_t length,
+                                   int64_t *buf,
+                                   uint64_t cap,
+                                   uint64_t *out_len);
+
+/**
+ * The ISO-8601 period that reproduces `timestamps_unix_ms` exactly, or an error
+ * naming the entry that breaks the pattern.
+ *
+ * The inverse of [`infrastore_grid_timestamps`], and the check a caller wants
+ * before claiming a resolution they cannot verify. A local-clock timeline that
+ * drifts against every period — a daily or monthly grid in a DST zone — is
+ * refused here with `INFRASTORE_ERR_INVALID_PARAMETER`, and the message names
+ * `NonSequentialTimeSeries` as the remedy.
+ *
+ * On success `out_iso` receives an owned C string the caller frees with
+ * `infrastore_string_free`.
+ *
+ * # Safety
+ *
+ * `timestamps_unix_ms` must reference `len` `i64` values and stay readable for
+ * the call. `out_iso` must be non-null and is only written on success.
+ */
+int32_t infrastore_infer_period(const int64_t *timestamps_unix_ms, uint64_t len, char **out_iso);
+
+/**
  * Number of columnar groups in the reader.
  *
  * # Safety

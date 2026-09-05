@@ -159,6 +159,42 @@ end
     @test length(list_metadata(store; owner_id=7, features=nothing)) == 1
 end
 
+@testset "timestamps() over the three static types" begin
+    # The grid is materialized rather than assumed: a Month resolution steps on
+    # the calendar, so index * a fixed span would land on the wrong days.
+    monthly = SingleTimeSeries(DateTime(2024, 1, 31), Month(1), [1.0, 2.0, 3.0, 4.0], "m")
+    @test timestamps(monthly) == [
+        DateTime(2024, 1, 31),
+        DateTime(2024, 2, 29),
+        DateTime(2024, 3, 31),
+        DateTime(2024, 4, 30),
+    ]
+
+    hourly = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), [1.0, 2.0, 3.0], "h")
+    @test timestamps(hourly) == [DateTime(2024, 1, 1, k) for k in 0:2]
+
+    # One entry per time step, not per element: `length` counts elements.
+    multidim = SingleTimeSeries(
+        DateTime(2024, 1, 1), Hour(1), reshape(collect(1.0:6.0), 3, 2), "md"
+    )
+    @test length(timestamps(multidim)) == 3
+
+    @test isempty(
+        timestamps(SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), Float64[], "e"))
+    )
+
+    # The irregular types hand back their stored vector -- and a copy of it, so
+    # a caller mutating the result cannot reach into the series.
+    explicit = [DateTime(2024, 1, 1), DateTime(2024, 3, 9)]
+    for T in (NonSequentialTimeSeries, PersistentTimeSeries)
+        series = T(explicit, [1.0, 2.0], "s")
+        @test timestamps(series) == explicit
+        got = timestamps(series)
+        got[1] = DateTime(1999, 1, 1)
+        @test series.timestamps == explicit
+    end
+end
+
 @testset "persistent round-trip and step semantics" begin
     store = Store(in_memory=true)
     breakpoints = [DateTime(2024, 1, 1), DateTime(2024, 4, 1), DateTime(2024, 7, 1)]
@@ -5335,4 +5371,72 @@ end
         store, InfraStore.JSON.json(rows)
     )
     close!(store)
+end
+
+@testset "the grid comes from the core, not from Julia's Dates" begin
+    # `timestamps` ccalls `infrastore_grid_timestamps` rather than computing
+    # `initial + k * resolution` here. The two agree today, but Julia is the one
+    # binding whose date library has calendar arithmetic of its own -- and whose
+    # TimeZones overload steps a local clock the core deliberately does not -- so
+    # a second implementation would agree only by luck.
+    for (start, res) in [
+        (DateTime(2024, 1, 31), Month(1)),
+        (DateTime(2024, 2, 29), Year(1)),
+        (DateTime(2024, 8, 31), Month(6)),
+        (DateTime(2024, 1, 1), Hour(1)),
+        (DateTime(2024, 1, 1), Day(7)),
+    ]
+        s = SingleTimeSeries(start, res, collect(1.0:6.0), "x")
+        @test timestamps(s) == [start + k * res for k in 0:5]
+    end
+end
+
+@testset "infer_resolution proves a timeline is a grid" begin
+    @test infer_resolution([DateTime(2024, 1, 1, h) for h in 0:3]) == Millisecond(Hour(1))
+    @test infer_resolution([
+        DateTime(2024, 1, 31), DateTime(2024, 2, 29), DateTime(2024, 3, 31)
+    ]) ==
+        Month(1)
+
+    # Denver local midnights across the November transition, as the UTC instants
+    # they land on. The 25-hour step is what no period reproduces.
+    denver_midnights = [
+        DateTime(2024, 11, 1, 6), DateTime(2024, 11, 2, 6),
+        DateTime(2024, 11, 3, 6), DateTime(2024, 11, 4, 7),
+    ]
+    @test_throws InfraStore.InvalidParameterError infer_resolution(denver_midnights)
+
+    # The hourly walk across the same transition *is* a grid.
+    @test infer_resolution([DateTime(2024, 11, 3, h) for h in 6:9]) == Millisecond(Hour(1))
+end
+
+@testset "SingleTimeSeries from a timeline, and the calendar-scale refusal" begin
+    hours = [DateTime(2024, 11, 3, h) for h in 6:9]
+    s = SingleTimeSeries(hours, collect(1.0:4.0), "load"; units="MW")
+    @test s.resolution == Millisecond(Hour(1))
+    @test s.initial_timestamp == first(hours)
+    @test s.units == "MW"
+    @test timestamps(s) == hours
+
+    # Length must match the value array's time axis.
+    @test_throws InfraStore.InvalidParameterError SingleTimeSeries(
+        hours, collect(1.0:3.0), "load"
+    )
+
+    # A calendar-scale period on a named zone is refused at the write.
+    store = Store(in_memory=true)
+    zoned = SingleTimeSeries(
+        DateTime(2024, 11, 1), Day(1), collect(1.0:4.0), "peak";
+        time_reference=ZoneReference("America/Denver"),
+    )
+    @test_throws InfraStore.InvalidParameterError add_time_series!(
+        store, 1, "Generator", Component, zoned
+    )
+
+    # Sub-daily on the same zone stays legal.
+    sub_daily = SingleTimeSeries(
+        DateTime(2024, 11, 1), Hour(1), collect(1.0:4.0), "load";
+        time_reference=ZoneReference("America/Denver"),
+    )
+    @test add_time_series!(store, 1, "Generator", Component, sub_daily) isa Integer
 end

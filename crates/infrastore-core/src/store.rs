@@ -5851,24 +5851,44 @@ fn reject_mixed_zoning(metas: &[TimeSeriesMetadata], what: &str) -> Result<()> {
     Ok(())
 }
 
-/// Validate the declared timestamp spelling, and warn where a spelling and a
-/// calendar period disagree about which calendar they mean.
+/// Validate the declared timestamp spelling, and settle what a calendar-scale
+/// period may mean on a series that names a zone.
 ///
 /// The validation is shape only — see [`TimeReference::validate`]. It runs here
 /// rather than in a constructor because the native Rust path has no binding to
 /// catch a hand-built reference, and this is the funnel every write passes
 /// through.
 ///
-/// The warning covers [`Period::Months`] on a zoned series. A month period is
-/// calendar arithmetic and the store steps it on the *UTC* calendar
-/// ([`Period::add_to`] via chrono's `checked_add_months`), which a caller who
-/// spelled their timestamps in `America/Denver` will read as an hour of drift at
-/// every DST transition and a day at a month boundary. Local-frame stepping is
-/// refused — it is the local → instant direction the core never runs, and it
-/// would let a spelling decide which instants a series contains — so this is
-/// documented behavior plus a warning that makes it findable before it is filed
-/// as a bug. A caller who wants months on a local calendar wants an explicit
-/// instant per value: [`NonSequentialTimeSeries`].
+/// # Why a calendar-scale period on a named zone is refused
+///
+/// The store steps a grid in **instants**, and a period of a day or more on a
+/// named zone cannot mean what it looks like. `P1D` is 86,400,000 ms, so a
+/// series spelled `America/Denver` and stepped daily from local midnight lands
+/// on 23:00 the *previous local day* after each DST transition — silently, and
+/// for the rest of the series. `Period::Months` is worse: it steps the **UTC**
+/// calendar ([`Period::add_to`] via chrono's `checked_add_months`), so a monthly
+/// Denver series drifts by up to a day at every month boundary.
+///
+/// Stepping the *local* frame instead is not the fix. It is the local → instant
+/// direction the core never runs — it needs a time-zone database the core
+/// deliberately does not carry, and it would make a stored series' instants
+/// depend on which IANA release built the reader. It would also require the
+/// storage layer to adopt a policy for wall clocks that do not exist or occur
+/// twice.
+///
+/// So the combination is refused at the door, with two remedies:
+///
+/// - [`SingleTimeSeries::from_timestamps`] — hand over the timeline you have and
+///   let the store infer and *prove* a period, rather than assert one it cannot
+///   check;
+/// - [`NonSequentialTimeSeries`] — an explicit instant per value, which is what
+///   a local-clock daily or monthly grid actually is.
+///
+/// **Sub-daily periods stay legal**, and that is not a compromise: DST moves the
+/// offset, not the length of an hour, so an hourly grid in a DST zone *is* the
+/// local clock — 8784 hours in Denver in 2024, every gap exactly one hour, the
+/// 23- and 25-hour days falling out of instant stepping. Refusing it would push
+/// callers onto a fixed offset, which is silently wrong for half the year.
 fn validate_time_reference(data: &TimeSeriesData) -> Result<()> {
     let Some(reference) = data.time_reference() else {
         return Ok(());
@@ -5898,37 +5918,81 @@ fn validate_time_reference(data: &TimeSeriesData) -> Result<()> {
         TimeSeriesData::NonSequentialTimeSeries(_) | TimeSeriesData::PersistentTimeSeries(_) => {
             [("", None), ("", None), ("", None)]
         }
+        // `horizon` is deliberately absent. It is a window *length*, not a grid
+        // step: it is only ever divided (`H = horizon / resolution`) and never
+        // added to an instant, so it cannot drift against a local clock. A
+        // day-ahead forecast is `horizon = P1D`, which is the canonical shape.
         TimeSeriesData::Deterministic(d) => [
             ("resolution", Some(d.resolution)),
-            ("horizon", Some(d.horizon)),
             ("interval", Some(d.interval)),
+            ("", None),
         ],
         TimeSeriesData::Probabilistic(p) => [
             ("resolution", Some(p.resolution)),
-            ("horizon", Some(p.horizon)),
             ("interval", Some(p.interval)),
+            ("", None),
         ],
         TimeSeriesData::Scenarios(sc) => [
             ("resolution", Some(sc.resolution)),
-            ("horizon", Some(sc.horizon)),
             ("interval", Some(sc.interval)),
+            ("", None),
         ],
     };
+    // A named zone is the only spelling that can shift under a grid: a fixed
+    // offset has no DST, so a day there is exactly one local day, and `Utc` /
+    // `Zoneless` step the calendar they are already on.
+    let named_zone = matches!(reference, TimeReference::Zone(_));
     for (field, period) in calendar_periods {
-        if period.is_some_and(|p| p.is_irregular()) {
+        let Some(period) = period else { continue };
+        if !is_calendar_scale(period) {
+            continue;
+        }
+        if named_zone {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "series {:?}: a {} {field} cannot be combined with the time reference {reference}. \
+                 A period of a day or more is a span of instants, so on a zone that observes \
+                 daylight saving it drifts away from the local clock it looks like -- a daily \
+                 grid from local midnight lands an hour earlier after each transition, and a \
+                 monthly one steps the UTC calendar. Either build it from the timeline you \
+                 have (SingleTimeSeries::from_timestamps, which infers the period and proves \
+                 the instants lie on it), or store an explicit instant per value with \
+                 NonSequentialTimeSeries. Sub-daily periods are unaffected: an hourly grid in \
+                 a DST zone is exactly the local clock.",
+                data.name(),
+                period.to_iso8601(),
+            )));
+        }
+        if period.is_irregular() {
+            // A fixed offset cannot drift, but a calendar month still steps the
+            // UTC calendar rather than the offset's own, which is worth saying.
             tracing::warn!(
                 series = data.name(),
                 field,
                 time_reference = %reference,
-                "a calendar period on a series spelled at an offset or in a named zone \
-                 steps on the UTC calendar, not the reference's: the reference is a \
-                 spelling, not a grid. Expect up to a day of drift at a month boundary, \
-                 and -- for a named zone -- an hour at each DST transition. For a \
-                 local-clock grid, use NonSequentialTimeSeries with explicit timestamps."
+                "a calendar period on a series spelled at a fixed offset steps on the UTC \
+                 calendar, not the offset's: the reference is a spelling, not a grid. Expect \
+                 up to a day of drift at a month boundary. For a local-clock grid, use \
+                 NonSequentialTimeSeries with explicit timestamps."
             );
         }
     }
     Ok(())
+}
+
+/// Whether a period spans a day or more, which is where a grid of instants and a
+/// local clock can part company.
+///
+/// The boundary is the DST shift, which is 30 or 60 minutes in every zone that
+/// observes one: below a day, an instant grid and a local grid step together
+/// (and any resolution dividing the shift keeps its minute-of-hour). At a day
+/// and above they do not. The core has no time-zone database to ask, so this is
+/// a rule about the period alone -- deliberately, since the alternative is
+/// making a stored series' meaning depend on which IANA release is installed.
+fn is_calendar_scale(period: Period) -> bool {
+    match period {
+        Period::Months(m) => m != 0,
+        Period::Fixed(d) => d.num_milliseconds().abs() >= 86_400_000,
+    }
 }
 
 fn validate_data(data: &TimeSeriesData) -> Result<()> {

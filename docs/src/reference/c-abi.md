@@ -455,6 +455,39 @@ int32_t infrastore_store_copy_time_series(struct InfraStore *handle,
                                   const char *new_name);  /* NULL = keep the source name */
 ```
 
+## Grid Arithmetic
+
+Stateless entry points into the core's own period arithmetic, for a binding that holds a series as a
+native struct and would otherwise reimplement the grid.
+
+```c
+int32_t infrastore_grid_timestamps(int64_t initial_unix_ms,
+                                   const char *resolution_iso,
+                                   uint64_t length,
+                                   int64_t *buf,
+                                   uint64_t cap,
+                                   uint64_t *out_len);
+
+int32_t infrastore_infer_period(const int64_t *timestamps_unix_ms,
+                                uint64_t len,
+                                char **out_iso);
+```
+
+`infrastore_grid_timestamps` materializes `initial + k · resolution` for `k` in `[0, length)`,
+probe-then-fetch like `infrastore_static_reader_timestamps` (call with `buf` null and `cap` 0 to
+learn the length). It is calendar-aware for a `P1M`/`P1Y` resolution, which steps the **UTC**
+calendar — the reference a series records is a spelling, not a grid.
+
+`infrastore_infer_period` is the inverse: the ISO-8601 period that reproduces a timeline exactly, or
+`INFRASTORE_ERR_INVALID_PARAMETER` with a message naming the entry that breaks the pattern and
+`NonSequentialTimeSeries` as the remedy. `out_iso` is an owned string the caller frees with
+`infrastore_string_free`. A local-clock daily or monthly grid in a DST zone is refused here, which
+is what lets a caller hand over the timeline they have instead of asserting a resolution the store
+cannot check.
+
+There is exactly one implementation of "which instants does this series contain" in the project, and
+it is the core's `Period::add_to`. These two functions are how a binding reaches it.
+
 ## Readers
 
 The per-timestamp read path is exposed as two opaque reader handles — `InfraStoreStaticReaderHandle`

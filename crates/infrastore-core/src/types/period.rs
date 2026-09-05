@@ -253,6 +253,88 @@ impl Period {
         }
     }
 
+    /// The period that reproduces `timestamps` exactly, or an error naming the
+    /// first entry that breaks the pattern.
+    ///
+    /// This is the store's answer to a caller who *has* a timeline rather than a
+    /// step: hand over the instants and let the store prove they are a grid,
+    /// instead of asserting a resolution the store cannot check. The whole point
+    /// is the failure case — a local-clock timeline that drifts against any
+    /// fixed or calendar step is reported here, at the door, rather than
+    /// silently stored as a grid it is not on.
+    ///
+    /// Deliberately **not** local-calendar-aware: it has no time-zone database
+    /// and never runs local → instant. A caller whose grid is a local clock
+    /// materializes it in their own date library — where the policy for a
+    /// nonexistent or ambiguous wall clock belongs — and the vector they produce
+    /// either fits a period here or is stored as
+    /// [`NonSequentialTimeSeries`](crate::NonSequentialTimeSeries).
+    ///
+    /// [`Period::Fixed`] is tried first and wins ties. Two entries always fit
+    /// *some* fixed span, and three consecutive month starts can too (July,
+    /// August and September are all 31 days), so a caller who means calendar
+    /// months on a short vector should say so with an explicit
+    /// [`Period::Months`] rather than rely on inference.
+    ///
+    /// ```
+    /// # use infrastore_core::Period;
+    /// # use chrono::{TimeZone, Utc};
+    /// let months = [
+    ///     Utc.with_ymd_and_hms(2024, 1, 31, 0, 0, 0).unwrap(),
+    ///     Utc.with_ymd_and_hms(2024, 2, 29, 0, 0, 0).unwrap(),
+    ///     Utc.with_ymd_and_hms(2024, 3, 31, 0, 0, 0).unwrap(),
+    /// ];
+    /// assert_eq!(Period::infer(&months)?, Period::Months(1));
+    /// # Ok::<(), String>(())
+    /// ```
+    pub fn infer(timestamps: &[DateTime<Utc>]) -> std::result::Result<Period, String> {
+        if timestamps.len() < 2 {
+            return Err(format!(
+                "cannot infer a resolution from {} timestamp(s): a grid needs at least two \
+                 to have a step. Construct with an explicit resolution instead.",
+                timestamps.len()
+            ));
+        }
+        // A fixed span first: it is the reading that involves no calendar, and
+        // the one a caller who did not think about calendars meant.
+        let span = timestamps[1] - timestamps[0];
+        if span <= Duration::zero() {
+            return Err(format!(
+                "timestamps must be strictly increasing, but index 1 ({}) is not after \
+                 index 0 ({})",
+                timestamps[1], timestamps[0]
+            ));
+        }
+        let fixed = Period::Fixed(span);
+        if let Some(bad) = fixed.first_divergence(timestamps) {
+            // Then the calendar reading, whose step is the month count between
+            // the first two entries.
+            if let Some(months) = confirmed_months_between(timestamps[0], timestamps[1]) {
+                let calendar = Period::Months(months);
+                match calendar.first_divergence(timestamps) {
+                    None => return Ok(calendar),
+                    Some(calendar_bad) => {
+                        return Err(divergence_message(timestamps, calendar_bad.max(bad)));
+                    }
+                }
+            }
+            return Err(divergence_message(timestamps, bad));
+        }
+        Ok(fixed)
+    }
+
+    /// The index of the first timestamp this period does *not* land on, walking
+    /// from `timestamps[0]`. `None` when the period reproduces the whole vector.
+    fn first_divergence(&self, timestamps: &[DateTime<Utc>]) -> Option<usize> {
+        let start = timestamps[0];
+        timestamps
+            .iter()
+            .enumerate()
+            .skip(1)
+            .find(|(k, t)| self.add_to(start, *k as i64) != Some(**t))
+            .map(|(k, _)| k)
+    }
+
     /// How many of `self` fit in `other` (i.e. `other / self`) as an exact,
     /// strictly-positive integer. Requires both periods to be the same kind;
     /// mixing a `Fixed` and a `Months` period is an error.
@@ -451,6 +533,48 @@ impl Period {
     }
 }
 
+/// Whole calendar months from `a` to `b`, or `None` if `b` is not `a` advanced
+/// by some number of months.
+///
+/// Wraps the raw calendar difference [`months_between`] computes and then
+/// *confirms* it with [`Period::add_to`], because the year/month fields alone do
+/// not settle the count: January 31st plus one month is February 29th, whose
+/// raw difference back to January is still 1, but a landing clamped from a
+/// longer month can read one too high. Trying the count and the one below it is
+/// what makes a month-end series infer `Months(1)` rather than nothing.
+fn confirmed_months_between(a: DateTime<Utc>, b: DateTime<Utc>) -> Option<i32> {
+    if b <= a {
+        return None;
+    }
+    let months = i32::try_from(months_between(a, b)).ok()?;
+    [months, months - 1]
+        .into_iter()
+        .find(|m| *m > 0 && Period::Months(*m).add_to(a, 1) == Some(b))
+}
+
+/// The error for a vector that is not on any grid, naming the entry that broke
+/// the pattern and the remedy.
+///
+/// Names an *index and both instants* rather than saying "not uniform": the
+/// caller is holding a timeline they believe is regular, and the useful thing is
+/// which row disagrees. A local-clock daily series across a DST transition
+/// reports exactly one such row.
+fn divergence_message(timestamps: &[DateTime<Utc>], index: usize) -> String {
+    format!(
+        "timestamps are not on a regular grid: index {index} is {}, but a grid stepping from \
+         index 0 ({}) by {} lands on {}. These instants need an explicit timeline -- store them \
+         as a NonSequentialTimeSeries (or, if each value holds until the next, a \
+         PersistentTimeSeries).",
+        timestamps[index],
+        timestamps[0],
+        (timestamps[1] - timestamps[0]),
+        Period::Fixed(timestamps[1] - timestamps[0])
+            .add_to(timestamps[0], index as i64)
+            .map(|t| t.to_string())
+            .unwrap_or_else(|| "an unrepresentable date".to_string()),
+    )
+}
+
 /// Serialize as the ISO-8601 duration string (`"PT1H"`, `"P1M"`, …), the same
 /// representation used on disk and across every binding. A custom impl (rather
 /// than a derive over the `Fixed`/`Months` enum) keeps the serde form identical
@@ -566,6 +690,149 @@ mod tests {
 
     fn ts(y: i32, mo: u32, d: u32, h: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(y, mo, d, h, 0, 0).unwrap()
+    }
+
+    // ---- Period::infer ----------------------------------------------------
+    //
+    // The DST cases below are spelled as the UTC instants a Denver local grid
+    // actually lands on, hard-coded rather than derived: the core has no
+    // time-zone database, and pinning the instants is what makes these tests a
+    // statement about the store's rule rather than about chrono-tz's data.
+
+    #[test]
+    fn infer_reads_a_fixed_grid() {
+        let hourly = [ts(2024, 1, 1, 0), ts(2024, 1, 1, 1), ts(2024, 1, 1, 2)];
+        assert_eq!(
+            Period::infer(&hourly).unwrap(),
+            Period::Fixed(Duration::hours(1))
+        );
+    }
+
+    #[test]
+    fn infer_reads_a_month_end_grid_as_calendar_months() {
+        // No fixed span reproduces these, so the calendar reading is the only
+        // one that fits -- which is exactly when it should win.
+        let month_ends = [
+            ts(2024, 1, 31, 0),
+            ts(2024, 2, 29, 0),
+            ts(2024, 3, 31, 0),
+            ts(2024, 4, 30, 0),
+        ];
+        assert_eq!(Period::infer(&month_ends).unwrap(), Period::Months(1));
+    }
+
+    #[test]
+    fn infer_reads_a_quarterly_grid() {
+        // 2023 quarters are 90 and 91 days, so no fixed span fits.
+        let quarters = [ts(2023, 1, 1, 0), ts(2023, 4, 1, 0), ts(2023, 7, 1, 0)];
+        assert_eq!(Period::infer(&quarters).unwrap(), Period::Months(3));
+    }
+
+    #[test]
+    fn infer_prefers_the_fixed_reading_when_both_fit() {
+        // Documented, not accidental. Two entries always fit *some* fixed span:
+        let two = [ts(2024, 1, 1, 0), ts(2024, 2, 1, 0)];
+        assert_eq!(
+            Period::infer(&two).unwrap(),
+            Period::Fixed(Duration::days(31))
+        );
+
+        // And longer vectors can too, by coincidence: 2024 is a leap year, so
+        // Q1 and Q2 are both 91 days and a quarterly vector reads as a fixed
+        // 91-day span. The same three quarters in 2023 read as Months(3) (see
+        // above), which is the sharp edge of tie-breaking on the data alone --
+        // a caller who means calendar quarters passes Period::Months(3) rather
+        // than inferring.
+        let leap_quarters = [ts(2024, 1, 1, 0), ts(2024, 4, 1, 0), ts(2024, 7, 1, 0)];
+        assert_eq!(
+            Period::infer(&leap_quarters).unwrap(),
+            Period::Fixed(Duration::days(91))
+        );
+    }
+
+    #[test]
+    fn an_hourly_local_grid_across_a_dst_transition_is_a_uniform_instant_grid() {
+        // Denver local 00:00, 01:00, 01:00(fold), 02:00 on 2024-11-03. DST moves
+        // the offset, not the length of an hour, so these compact to PT1H --
+        // which is why an hourly series in a DST zone is storable as a grid.
+        let denver_hours = [
+            ts(2024, 11, 3, 6),
+            ts(2024, 11, 3, 7),
+            ts(2024, 11, 3, 8),
+            ts(2024, 11, 3, 9),
+        ];
+        assert_eq!(
+            Period::infer(&denver_hours).unwrap(),
+            Period::Fixed(Duration::hours(1))
+        );
+    }
+
+    #[test]
+    fn a_daily_local_grid_across_a_dst_transition_is_refused() {
+        // Denver local midnights Nov 1-5 2024: the 3rd-to-4th step is 25 hours,
+        // so no period reproduces the vector. This is the case that silently
+        // drifted when a caller asserted `P1D` instead of handing over the
+        // timeline.
+        let denver_midnights = [
+            ts(2024, 11, 1, 6),
+            ts(2024, 11, 2, 6),
+            ts(2024, 11, 3, 6),
+            ts(2024, 11, 4, 7), // offset changed under it
+            ts(2024, 11, 5, 7),
+        ];
+        let err = Period::infer(&denver_midnights).unwrap_err();
+        assert!(err.contains("index 3"), "{err}");
+        assert!(err.contains("NonSequentialTimeSeries"), "{err}");
+    }
+
+    #[test]
+    fn a_monthly_local_grid_across_a_dst_transition_is_refused() {
+        // Denver local month starts: the calendar reading fails too, because a
+        // month added to 06:00 UTC lands at 06:00, not 07:00.
+        let denver_months = [ts(2024, 10, 1, 6), ts(2024, 11, 1, 6), ts(2024, 12, 1, 7)];
+        let err = Period::infer(&denver_months).unwrap_err();
+        assert!(err.contains("NonSequentialTimeSeries"), "{err}");
+    }
+
+    #[test]
+    fn infer_needs_at_least_two_timestamps() {
+        assert!(Period::infer(&[]).unwrap_err().contains("at least two"));
+        assert!(
+            Period::infer(&[ts(2024, 1, 1, 0)])
+                .unwrap_err()
+                .contains("at least two")
+        );
+    }
+
+    #[test]
+    fn infer_rejects_a_non_increasing_vector() {
+        let backwards = [ts(2024, 1, 1, 1), ts(2024, 1, 1, 0)];
+        assert!(
+            Period::infer(&backwards)
+                .unwrap_err()
+                .contains("strictly increasing")
+        );
+        let repeated = [ts(2024, 1, 1, 0), ts(2024, 1, 1, 0)];
+        assert!(
+            Period::infer(&repeated)
+                .unwrap_err()
+                .contains("strictly increasing")
+        );
+    }
+
+    #[test]
+    fn an_inferred_period_reproduces_the_vector_it_came_from() {
+        for vector in [
+            vec![ts(2024, 1, 1, 0), ts(2024, 1, 1, 6), ts(2024, 1, 1, 12)],
+            vec![ts(2024, 1, 31, 0), ts(2024, 2, 29, 0), ts(2024, 3, 31, 0)],
+            vec![ts(2023, 1, 1, 0), ts(2024, 1, 1, 0), ts(2025, 1, 1, 0)],
+        ] {
+            let period = Period::infer(&vector).unwrap();
+            let rebuilt: Vec<_> = (0..vector.len())
+                .map(|k| period.add_to(vector[0], k as i64).unwrap())
+                .collect();
+            assert_eq!(rebuilt, vector, "{period:?} did not reproduce its input");
+        }
     }
 
     #[test]

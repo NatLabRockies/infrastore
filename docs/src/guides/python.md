@@ -16,6 +16,13 @@ pip install infrastore
 The wheel is built against the **`abi3-py311`** stable ABI, so one wheel works on CPython 3.11 and
 every newer 3.x without recompiling.
 
+`to_arrow()` needs pyarrow, which is not installed by default — it is several times the size of
+everything else here, and nothing but that one method uses it:
+
+```sh
+pip install 'infrastore[arrow]'
+```
+
 ### From a checkout
 
 Building from source needs the [build tools](../getting-started/installation.md#build-prerequisites)
@@ -244,6 +251,44 @@ read in one decompress-once pass per dataset, which is much faster than a `read_
 series = store.read_by_ids(ids)
 window = store.read_by_ids_range(ids, (start, end))   # the same clip on every series
 ```
+
+### As a table
+
+A read hands back the values as a numpy array with the timeline beside it, not fused into it. When
+you want the two together — to plot, to write Parquet, to hand to pandas or polars — `to_arrow()`
+builds a two-column `pyarrow.Table` of `timestamp` and `value`:
+
+```python
+table = store.read_by_id(series_id).to_arrow()
+table.to_pandas()
+```
+
+It works on all three static types, and needs the [`arrow` extra](#install). The timestamp column is
+typed in the series' own spelling — `timestamp[ms, tz=America/Denver]` for a zoned series, an
+unzoned `timestamp[ms]` for a zoneless one — and the descriptive attributes ride in
+`table.schema.metadata`. A `SingleTimeSeries` grid is materialized calendar-aware, so a monthly
+series lands on month ends rather than on a multiple of 30 days. See
+[`to_arrow()`](../reference/python-api.md#to_arrow).
+
+Without pyarrow, `timestamps` is the same timeline as a plain list of datetimes:
+
+```python
+got = store.read_by_id(series_id)
+list(zip(got.timestamps, got.data))
+```
+
+A `Deterministic` converts to **one table per window** instead, keyed by issue time:
+
+```python
+windows = store.read_by_id(forecast_id).to_arrow_windows()
+windows[datetime(2024, 1, 2, tzinfo=timezone.utc)]   # that window's forecast
+```
+
+Each value looks exactly like a static series' table. It is a dict rather than one table because a
+forecast has two grids that overlap — windows step by `interval`, rows inside a window by
+`resolution` — so a day-ahead forecast reissued hourly shares 23 of every 24 instants between
+neighbouring windows. The dict iterates chronologically. See
+[`to_arrow_windows()`](../reference/python-api.md#to_arrow_windows).
 
 ### Datetimes and precision
 

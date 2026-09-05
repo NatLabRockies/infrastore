@@ -387,12 +387,16 @@ fn a_reader_over_mixed_zoned_spellings_reports_the_shared_truth() {
     );
 }
 
-/// Decision 10, the part a user meets as a surprise: a reference is a spelling,
-/// not a grid. A monthly zoned series steps on the UTC calendar and is *stored*
-/// either way — the disagreement with a local-calendar reading is documented and
-/// warned about, not silently corrected.
+/// Decision 10: a reference is a spelling, not a grid. A calendar period steps
+/// on the stored UTC calendar and the reference does not redirect it.
+///
+/// Spelled here at a **fixed offset**, which is where this is still storable. A
+/// fixed offset has no DST to drift against, so the only disagreement is at a
+/// month boundary, and that is warned about rather than refused. The same period
+/// on a *named zone* is refused outright — see
+/// `a_calendar_scale_period_on_a_named_zone_is_refused`.
 #[test]
-fn a_calendar_period_on_a_zoned_series_still_steps_on_the_utc_calendar() {
+fn a_calendar_period_on_an_offset_series_still_steps_on_the_utc_calendar() {
     let mut store = create_store(None, true).unwrap();
     let months = Period::months(1);
     let series = SingleTimeSeries::new(
@@ -401,7 +405,7 @@ fn a_calendar_period_on_a_zoned_series_still_steps_on_the_utc_calendar() {
         TypedArray::from_f64(vec![3], &[1.0, 2.0, 3.0]),
         "load",
     )
-    .with_time_reference(TimeReference::Zone("America/Denver".into()));
+    .with_time_reference(TimeReference::FixedOffset(-420));
     let key = add(&mut store, 1, TimeSeriesData::SingleTimeSeries(series));
 
     // The grid is the stored UTC calendar: the reference does not redirect it,
@@ -569,4 +573,175 @@ fn the_cohort_refusal_names_the_reader_that_was_asked_for() {
             .contains("StaticReader requires one spelling"),
         "{err}"
     );
+}
+
+/// A calendar-scale period on a named zone is refused; a sub-daily one is not.
+///
+/// This is the line the whole "a reference is a spelling, not a grid" rule rests
+/// on, and it is not drawn at "is there a zone" — it is drawn at whether an
+/// instant grid and a local clock can part company. Below a day they cannot:
+/// DST moves the offset, not the length of an hour, so an hourly Denver grid
+/// *is* the local clock. At a day and above they do, silently and permanently.
+#[test]
+fn a_calendar_scale_period_on_a_named_zone_is_refused() {
+    let denver = || TimeReference::Zone("America/Denver".to_string());
+    let values = TypedArray::from_f64(vec![3], &[1.0, 2.0, 3.0]);
+
+    let build = |period: Period, reference: TimeReference| {
+        SingleTimeSeries::new(t0(), period, values.clone(), "load").with_time_reference(reference)
+    };
+
+    // Sub-daily on a named zone: legal, and must stay so. Refusing it would push
+    // callers onto a fixed offset, which is silently wrong for half the year.
+    for period in [
+        Period::Fixed(Duration::minutes(15)),
+        Period::Fixed(Duration::hours(1)),
+        Period::Fixed(Duration::hours(6)),
+    ] {
+        let mut store = create_store(None, true).unwrap();
+        store
+            .add(AddRequest::new(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(build(period, denver())),
+            ))
+            .unwrap_or_else(|e| panic!("{period:?} on a named zone must be storable: {e}"));
+    }
+
+    // A day or more on a named zone: refused, naming both remedies.
+    for period in [
+        Period::Fixed(Duration::days(1)),
+        Period::Fixed(Duration::days(7)),
+        Period::Months(1),
+        Period::Months(12),
+    ] {
+        let mut store = create_store(None, true).unwrap();
+        let err = store
+            .add(AddRequest::new(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(build(period, denver())),
+            ))
+            .unwrap_err();
+        let message = err.to_string();
+        assert!(
+            matches!(err, TimeSeriesError::InvalidParameter(_)),
+            "{period:?} should be an InvalidParameter: {message}"
+        );
+        assert!(message.contains("from_timestamps"), "{message}");
+        assert!(message.contains("NonSequentialTimeSeries"), "{message}");
+    }
+
+    // The spellings that cannot drift are untouched, calendar period or not. A
+    // fixed offset has no DST; `Utc` and `Zoneless` step the calendar they are
+    // already on.
+    for reference in [
+        TimeReference::Utc,
+        TimeReference::Zoneless,
+        TimeReference::FixedOffset(-420),
+    ] {
+        let mut store = create_store(None, true).unwrap();
+        store
+            .add(AddRequest::new(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(build(Period::Months(1), reference.clone())),
+            ))
+            .unwrap_or_else(|e| panic!("{reference:?} with P1M must be storable: {e}"));
+    }
+}
+
+/// A forecast's *stepping* periods are covered by the same rule -- but its
+/// `horizon` is not, because a horizon is a window length that is only ever
+/// divided (`H = horizon / resolution`), never added to an instant. A day-ahead
+/// forecast is `horizon = P1D`, which must stay legal in any zone.
+#[test]
+fn a_forecast_on_a_named_zone_is_refused_for_a_calendar_scale_period() {
+    let mut store = create_store(None, true).unwrap();
+    let forecast = Deterministic::new(
+        t0(),
+        Period::Fixed(Duration::hours(12)),
+        Period::Fixed(Duration::days(1)), // horizon: a window length, exempt
+        Period::Fixed(Duration::days(1)), // interval: a grid step, refused
+        2,
+        TypedArray::from_f64(vec![2, 2], &[1.0, 2.0, 3.0, 4.0]),
+        "day_ahead",
+    )
+    .unwrap()
+    .with_time_reference(TimeReference::Zone("America/Denver".to_string()));
+    let err = store
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::Deterministic(forecast),
+        ))
+        .unwrap_err();
+    assert!(err.to_string().contains("cannot be combined"), "{err}");
+}
+
+/// `from_timestamps` is the constructive half of that refusal: it takes the
+/// timeline the caller has and proves a period rather than asserting one.
+#[test]
+fn from_timestamps_compacts_an_hourly_local_grid_and_refuses_a_daily_one() {
+    let ms = |h: i64| t0() + Duration::hours(h);
+    let values = TypedArray::from_f64(vec![4], &[1.0, 2.0, 3.0, 4.0]);
+
+    // Denver local hours across fall-back are a uniform instant grid.
+    let hourly = [ms(0), ms(1), ms(2), ms(3)];
+    let series = SingleTimeSeries::from_timestamps(&hourly, values.clone(), "load").unwrap();
+    assert_eq!(series.resolution, Period::Fixed(Duration::hours(1)));
+    assert_eq!(series.timestamps().collect::<Vec<_>>(), hourly);
+
+    // Denver local midnights across the same transition are not: the third step
+    // is 25 hours.
+    let daily = [ms(0), ms(24), ms(48), ms(73)];
+    let err = SingleTimeSeries::from_timestamps(&daily, values.clone(), "peak").unwrap_err();
+    assert!(err.contains("index 3"), "{err}");
+    assert!(err.contains("NonSequentialTimeSeries"), "{err}");
+
+    // And a series built this way is storable even where asserting the period
+    // would have been refused -- because the instants are now proven, not
+    // claimed.
+    let mut store = create_store(None, true).unwrap();
+    let proven = SingleTimeSeries::from_timestamps(&hourly, values, "load")
+        .unwrap()
+        .with_time_reference(TimeReference::Zone("America/Denver".to_string()));
+    store
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(proven),
+        ))
+        .unwrap();
+}
+
+/// A `P1D` horizon on a named zone is the canonical day-ahead forecast and must
+/// stay storable: a horizon is divided, never stepped.
+#[test]
+fn a_calendar_scale_horizon_is_exempt_from_the_refusal() {
+    let mut store = create_store(None, true).unwrap();
+    let day_ahead = Deterministic::new(
+        t0(),
+        Period::Fixed(Duration::hours(1)),  // resolution: sub-daily
+        Period::Fixed(Duration::days(1)),   // horizon: P1D, a window length
+        Period::Fixed(Duration::hours(12)), // interval: sub-daily
+        2,
+        TypedArray::from_f64(vec![24, 2], &[0.0; 48]),
+        "day_ahead",
+    )
+    .unwrap()
+    .with_time_reference(TimeReference::Zone("America/Denver".to_string()));
+    store
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::Deterministic(day_ahead),
+        ))
+        .expect("a P1D horizon is a window length, not a grid step");
 }
