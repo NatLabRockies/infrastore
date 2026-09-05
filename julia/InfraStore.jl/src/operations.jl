@@ -262,16 +262,20 @@ const _AddableTimeSeries = Union{
 
 """
     add_time_series!(store, owner_id, owner_type, owner_category, ts;
-                     features=nothing, element_type=ts.element_type,
-                     units=ts.units, application_data=ts.application_data) -> Int64
+                     features=nothing) -> Int64
 
 Add a time series (`SingleTimeSeries`, `NonSequentialTimeSeries`,
 `PersistentTimeSeries`, `Deterministic`, `Probabilistic`, or `Scenarios`) and
 return the catalog `id` its row was filed under — the handle every read and
 removal takes, and the one a caller records in its own object model. `owner_id`
-identifies the owning component / supplemental attribute (a signed 64-bit integer). The
-association `name` comes from the time series object (`ts.name`), as do its
-`element_type` and `units` labels.
+identifies the owning component / supplemental attribute (a signed 64-bit integer).
+
+`features` is the only thing this call adds to the series. Everything the row
+records about the values themselves comes off the object: its `name`, and its
+`element_type`, `units`, `quantity_kind`, `unit_system`, `component_field`,
+`application_data` and `time_reference` descriptors, each set where the series
+was constructed. That is what makes a read-then-add lossless — a series read
+from one store can be added to another unchanged, with nothing to re-supply.
 
 A `features` key that shadows a field of a time series or of the identity a row
 is filed under (`name`, `resolution`, `owner_id`, …) is rejected: those names

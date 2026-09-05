@@ -123,9 +123,8 @@ series_id = store.add_time_series(
     owner_id=42,
     owner_type="Generator",
     owner_category=OwnerCategory.Component,
-    time_series=ts,   # name comes from ts
+    time_series=ts,   # name and descriptors come from ts
     features={"model_year": 2030, "scenario": "high"},
-    units="MW",
 )
 # `series_id` is the catalog row's id: how every read and removal
 # addresses the series, and one integer to keep in your own model.
@@ -140,21 +139,30 @@ and `interval` come back as ISO 8601 duration strings or `None`).
 
 ### Descriptors
 
-Beyond `units`, an association can carry `quantity_kind` (what the values measure — `"ActivePower"`;
-the one record of what per-unit values mean), `unit_system` (`"natural_units"` or
-`"component_base"`; unset means _unspecified_, not natural units), `component_field` (the field on
-the owning component these values vary — `"max_active_power"`; also a filter), and
-`application_data` (an opaque string the store returns verbatim — the package-owned slot):
+Beyond `units`, a series can carry `quantity_kind` (what the values measure — `"ActivePower"`; the
+one record of what per-unit values mean), `unit_system` (`"natural_units"` or `"component_base"`;
+unset means _unspecified_, not natural units), `component_field` (the field on the owning component
+these values vary — `"max_active_power"`; also a filter), and `application_data` (an opaque string
+the store returns verbatim — the package-owned slot). All of them are set **on the series object**,
+not on the add, and each is a read-only property there:
 
 ```python
-series_id = store.add_time_series(
-    owner_id=42, owner_type="Generator", owner_category=OwnerCategory.Component,
-    time_series=ts,
+ts = SingleTimeSeries(
+    datetime(2024, 1, 1, tzinfo=timezone.utc), timedelta(hours=1), values, "load",
     units="MW", quantity_kind="ActivePower", unit_system="natural_units",
     component_field="max_active_power",
     application_data='{"source": "weather_year_2012"}',
 )
+series_id = store.add_time_series(
+    owner_id=42, owner_type="Generator", owner_category=OwnerCategory.Component,
+    time_series=ts,
+)
+assert store.read_by_id(series_id).quantity_kind == "ActivePower"
 ```
+
+Keeping them on the object is what makes a read-then-add lossless: a series read from one store can
+be added to another unchanged, with no descriptor to re-supply and none the write could silently
+replace.
 
 A series also records a `time_reference` — how its timestamps were spelled — inferred from the
 `datetime` it was built with: `timezone.utc` gives `"utc"`, a fixed-offset `tzinfo` gives
@@ -323,18 +331,22 @@ spelling inference from `tzinfo`:
 from infrastore import PersistentTimeSeries
 
 breakpoints = [datetime(2024, m, 1, tzinfo=timezone.utc) for m in (1, 4, 7, 10)]
-prices = PersistentTimeSeries(breakpoints, np.array([3.5, 4.25, 5.0, 4.75]), "gas_price")
+prices = PersistentTimeSeries(
+    breakpoints,
+    np.array([3.5, 4.25, 5.0, 4.75]),
+    "gas_price",
+    units="USD/MMBtu",
+    component_field="fuel_cost",
+    # Whether a curve is expanded to a full series or collapsed to one scalar is
+    # your application's policy, and rides here where the store never reads it.
+    application_data='{"as_time_series": false, "force_scalar_mode": "midpoint"}',
+)
 
 price_id = store.add_time_series(
     owner_id=7,
     owner_type="ThermalStandard",
     owner_category=OwnerCategory.Component,
     time_series=prices,
-    units="USD/MMBtu",
-    component_field="fuel_cost",
-    # Whether a curve is expanded to a full series or collapsed to one scalar is
-    # your application's policy, and rides here where the store never reads it.
-    application_data='{"as_time_series": false, "force_scalar_mode": "midpoint"}',
 )
 ```
 
@@ -615,12 +627,13 @@ ts = SingleTimeSeries(
     timedelta(hours=1),
     np.arange(24, dtype=np.float64) + 100,
     "load",
+    units="MW",
 )
 series_id = store.add_time_series(
     owner_id=42, owner_type="Generator",
     owner_category=OwnerCategory.Component,
     time_series=ts,
-    features={"model_year": 2030}, units="MW",
+    features={"model_year": 2030},
 )
 got = store.read_by_id(series_id)
 assert got.name == "load"

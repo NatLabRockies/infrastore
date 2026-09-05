@@ -16,23 +16,23 @@ from infrastore import OwnerCategory, SingleTimeSeries, Store
 # HDF5 file plus its SQLite catalog.
 store = Store.create(in_memory=True)
 
-# The name lives on the series object, not on `add_time_series`.
+# The name and the units live on the series object, not on `add_time_series`.
 ts = SingleTimeSeries(
     datetime(2024, 1, 1, tzinfo=timezone.utc),  # initial timestamp (timezone-aware)
     timedelta(hours=1),                         # resolution
     np.arange(24, dtype=np.float64) + 100,      # 24 hourly values
     "load",                                     # name
+    units="MW",                                 # optional, like every descriptor
 )
 
 # The owner is identified by an integer id, an owner type, and a category.
-# Features and units are optional.
+# Features are optional.
 series_id = store.add_time_series(
     owner_id=42,
     owner_type="Generator",
     owner_category=OwnerCategory.Component,
     time_series=ts,
     features={"model_year": 2030},
-    units="MW",
 )
 
 got = store.read_by_id(series_id)

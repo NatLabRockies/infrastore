@@ -74,9 +74,9 @@ def test_a_stored_piecewise_series_round_trips_through_the_store():
         owner_type="Generator",
         owner_category=OwnerCategory.Component,
         time_series=SingleTimeSeries(
-            datetime(2024, 1, 1, tzinfo=timezone.utc), timedelta(hours=1), values, "cost"
+            datetime(2024, 1, 1, tzinfo=timezone.utc), timedelta(hours=1), values, "cost",
+            element_type="piecewise_linear",
         ),
-        element_type="piecewise_linear",
     )
     meta = store.get_metadata_by_id(key)
     assert meta["element_type"] == "piecewise_linear"
@@ -103,8 +103,8 @@ def test_the_store_rejects_an_array_that_contradicts_its_element_type():
                 # quadratic_function needs 3 coefficients per step, not 2.
                 np.zeros((2, 2)),
                 "cost",
+                element_type="quadratic_function",
             ),
-            element_type="quadratic_function",
         )
 
 
@@ -174,8 +174,8 @@ def test_an_encoded_series_reads_back_through_the_store():
             timedelta(hours=1),
             array,
             "cost",
+            element_type="piecewise_linear",
         ),
-        element_type="piecewise_linear",
     )
     row = store.get_metadata_by_id(ts_id)
     assert row["element_type"] == "piecewise_linear"

@@ -22,10 +22,12 @@ def month(m: int) -> datetime:
     return datetime(2024, m, 1, tzinfo=timezone.utc)
 
 
-def curve(name: str, months: list[int]) -> PersistentTimeSeries:
+def curve(name: str, months: list[int], **descriptors) -> PersistentTimeSeries:
     """A step function over `months`, valued `10 * month`."""
     values = np.array([m * 10.0 for m in months], dtype=np.float64)
-    return PersistentTimeSeries([month(m) for m in months], values, name)
+    return PersistentTimeSeries(
+        [month(m) for m in months], values, name, **descriptors
+    )
 
 
 def add(store: Store, owner_id: int, series: PersistentTimeSeries) -> int:
@@ -44,17 +46,20 @@ def hold_last(months: list[int], at: datetime) -> float:
 
 def test_round_trip_and_descriptors():
     store = Store.create(in_memory=True)
-    series = curve("gas_price", [1, 4, 7, 10])
-    id = store.add_time_series(
-        owner_id=7,
-        owner_type="ThermalStandard",
-        owner_category=OwnerCategory.Component,
-        time_series=series,
+    series = curve(
+        "gas_price",
+        [1, 4, 7, 10],
         # The application's own expansion policy rides in application_data; the
         # store never interprets it.
         application_data='{"as_time_series": false, "force_scalar_mode": "midpoint"}',
         units="USD/MMBtu",
         component_field="fuel_cost",
+    )
+    id = store.add_time_series(
+        owner_id=7,
+        owner_type="ThermalStandard",
+        owner_category=OwnerCategory.Component,
+        time_series=series,
     )
 
     back = store.read_by_id(id)
@@ -63,6 +68,9 @@ def test_round_trip_and_descriptors():
     np.testing.assert_array_equal(back.data, series.data)
     assert len(back) == 4
     assert "PersistentTimeSeries" in repr(back)
+
+    assert back.units == "USD/MMBtu"
+    assert back.component_field == "fuel_cost"
 
     meta = store.get_metadata_by_id(id)
     assert meta["time_series_type"] == "PersistentTimeSeries"

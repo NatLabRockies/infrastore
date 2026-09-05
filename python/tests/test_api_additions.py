@@ -24,9 +24,9 @@ def _t0() -> datetime:
     return datetime(2030, 1, 1, tzinfo=timezone.utc)
 
 
-def _sts(name: str, base: float, length: int = 8) -> SingleTimeSeries:
+def _sts(name: str, base: float, length: int = 8, **descriptors) -> SingleTimeSeries:
     data = np.arange(length, dtype=np.float64) + base
-    return SingleTimeSeries(_t0(), timedelta(hours=1), data, name)
+    return SingleTimeSeries(_t0(), timedelta(hours=1), data, name, **descriptors)
 
 
 def _det(name: str) -> Deterministic:
@@ -39,7 +39,7 @@ def test_add_application_data_and_get_metadata():
     store = Store.create(in_memory=True)
     key = store.add_time_series(
         owner_id=1, owner_type="Generator", owner_category=OwnerCategory.Component,
-        time_series=_sts("load", 10.0), units="MW", application_data="Profile",
+        time_series=_sts("load", 10.0, units="MW", application_data="Profile"),
     )
     meta = store.get_metadata_by_id(key)
     assert meta["units"] == "MW"
@@ -53,9 +53,10 @@ def test_unit_descriptors_round_trip():
     store = Store.create(in_memory=True)
     key = store.add_time_series(
         owner_id=1, owner_type="Generator", owner_category=OwnerCategory.Component,
-        time_series=_sts("load", 10.0), units="MW",
-        quantity_kind="ActivePower", unit_system="component_base",
-        component_field="max_active_power",
+        time_series=_sts(
+            "load", 10.0, units="MW", quantity_kind="ActivePower",
+            unit_system="component_base", component_field="max_active_power",
+        ),
     )
     meta = store.get_metadata_by_id(key)
     assert meta["quantity_kind"] == "ActivePower"
@@ -80,7 +81,7 @@ def test_component_field_filter():
         store.add_time_series(
             owner_id=owner, owner_type="Generator",
             owner_category=OwnerCategory.Component,
-            time_series=_sts(name, float(owner)), **kwargs,
+            time_series=_sts(name, float(owner), **kwargs),
         )
 
     # One field, every component that varies it.
@@ -112,7 +113,7 @@ def test_unit_system_unset_is_unspecified_not_natural_units():
     store = Store.create(in_memory=True)
     key = store.add_time_series(
         owner_id=1, owner_type="Generator", owner_category=OwnerCategory.Component,
-        time_series=_sts("load", 10.0), units="MW",
+        time_series=_sts("load", 10.0, units="MW"),
     )
     meta = store.get_metadata_by_id(key)
     assert meta["unit_system"] is None
@@ -124,12 +125,8 @@ def test_unknown_unit_system_is_rejected():
     # Raising beats degrading to None: a misspelled basis that silently became
     # "unspecified" would leave per-unit values indistinguishable from
     # undeclared ones.
-    store = Store.create(in_memory=True)
     with pytest.raises(InvalidParameterError):
-        store.add_time_series(
-            owner_id=1, owner_type="Generator", owner_category=OwnerCategory.Component,
-            time_series=_sts("load", 10.0), unit_system="system_base",
-        )
+        _sts("load", 10.0, unit_system="system_base")
 
 
 def test_bulk_read_time_range():

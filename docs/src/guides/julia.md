@@ -114,9 +114,8 @@ id = add_time_series!(
     42,
     "Generator",
     Component,
-    ts;                                   # name comes from ts
+    ts;                                   # name and descriptors come from ts
     features = Dict("model_year" => 2030),
-    units = "MW",
 )
 # `id` is the catalog row's id: how every read and removal addresses
 # the series, and one integer to keep in your own model.
@@ -181,7 +180,7 @@ adds, and same-shaped series land in the same packed dataset.
 ```julia
 batch = AddBatch()
 for (id, ts) in series
-    add_time_series!(batch, id, "Generator", Component, ts; units = "MW")
+    add_time_series!(batch, id, "Generator", Component, ts)
 end
 ids = add_time_series_bulk!(store, batch)   # Vector{Int64}, in input order; all-or-nothing
 ```
@@ -273,14 +272,15 @@ the buffer row-major). Construct one and add it through the generic `add_time_se
 
 ```julia
 data = zeros(Float64, 24, 7)   # (horizon_count, count)
-fc = Deterministic(DateTime(2024, 1, 1), Hour(1), Hour(24), Hour(24), 7, data, "load_fc")
+fc = Deterministic(
+    DateTime(2024, 1, 1), Hour(1), Hour(24), Hour(24), 7, data, "load_fc"; units = "MW"
+)
 id = add_time_series!(
     store,
     42,
     "Generator",
     Component,
-    fc;                         # name comes from fc
-    units = "MW",
+    fc,                         # name and units come from fc
 )
 
 got = read_by_id(store, id)   # the id add_time_series! returned

@@ -50,7 +50,7 @@ end
     initial = DateTime(2024, 1, 1)
     resolution = Hour(1)
     values = collect(100.0:123.0)
-    ts = SingleTimeSeries(initial, resolution, values, "load")
+    ts = SingleTimeSeries(initial, resolution, values, "load"; units="MW")
 
     key = add_time_series!(
         store,
@@ -59,7 +59,6 @@ end
         Component,
         ts;
         features=Dict("model_year" => 2030),
-        units="MW",
     )
 
     @test association_exists(store, key) == true
@@ -315,11 +314,11 @@ end
     initial = DateTime(2024, 1, 1)
     resolution = Hour(1)
     values = collect(100.0:123.0)
-    ts = SingleTimeSeries(initial, resolution, values, "load")
+    ts = SingleTimeSeries(initial, resolution, values, "load"; units="MW")
 
     owner = 11
     feats = Dict("model_year" => 2030, "scenario" => "high")  # string feature value
-    add_time_series!(store, owner, "Generator", Component, ts; features=feats, units="MW")
+    add_time_series!(store, owner, "Generator", Component, ts; features=feats)
 
     @test has_time_series(
         store, owner, Component, "load"; resolution=resolution, features=feats
@@ -1355,9 +1354,11 @@ end
     batch = AddBatch()
     @test length(batch) == 0
     for i in 1:10
-        ts = SingleTimeSeries(initial, resolution, collect(Float64.(i:(i + 23))), "load")
+        ts = SingleTimeSeries(
+            initial, resolution, collect(Float64.(i:(i + 23))), "load"; units="MW"
+        )
         add_time_series!(
-            batch, i, "Generator", Component, ts; features=Dict("scenario" => i), units="MW"
+            batch, i, "Generator", Component, ts; features=Dict("scenario" => i)
         )
     end
     # A forecast and a non-sequential series in the same batch.
@@ -2014,10 +2015,10 @@ end
     res = Hour(1)
 
     # units round-trips through get_metadata (previously write-only).
-    sts = SingleTimeSeries(t0, res, collect(1.0:8.0), "load")
-    k = add_time_series!(
-        store, 1, "Generator", Component, sts; units="MW", application_data="Profile"
+    sts = SingleTimeSeries(
+        t0, res, collect(1.0:8.0), "load"; units="MW", application_data="Profile"
     )
+    k = add_time_series!(store, 1, "Generator", Component, sts)
     md = resolve_metadata(SingleTimeSeries, store, 1, Component, "load"; resolution=res)
     @test md.units == "MW"
     @test md.application_data == "Profile"
@@ -2059,9 +2060,10 @@ end
         3,
         [0.1, 0.5, 0.9],
         Float64[p + h + c for p in 1:3, h in 1:2, c in 1:3],
-        "pf",
+        "pf";
+        units="MWp",
     )
-    add_time_series!(store, 3, "Generator", Component, prob; units="MWp")
+    add_time_series!(store, 3, "Generator", Component, prob)
     pmd = resolve_metadata(Probabilistic, store, 3, Component, "pf")
     @test pmd.percentiles == [0.1, 0.5, 0.9]
     @test pmd.units == "MWp"
@@ -3217,8 +3219,7 @@ end
         2900,
         "Générateur",
         Component,
-        SingleTimeSeries(t0, Hour(1), Float64[1, 2, 3], name);
-        units="MW·h⁻¹",
+        SingleTimeSeries(t0, Hour(1), Float64[1, 2, 3], name; units="MW·h⁻¹"),
     )
     # `get_metadata` returns the array-side fields; the name and owner type come
     # back through the catalog row.
@@ -3534,9 +3535,9 @@ end
         "Generator",
         Component,
         SingleTimeSeries(
-            t0, Hour(1), Float64[1, 2, 3, 4], "load"; application_data="Profile"
+            t0, Hour(1), Float64[1, 2, 3, 4], "load";
+            application_data="Profile", units="MW",
         );
-        units="MW",
         features=Dict("scenario" => "high"),
     )
     add_time_series!(
@@ -4240,11 +4241,12 @@ end
     )
     @test read_by_id(store, ks).units == "MW"
 
-    # An explicit kwarg still wins over the struct's field: the kwarg is the
-    # lower-level write API and predates the field.
+    # The struct is the only place a label can be set: `add_time_series!` takes
+    # no `units=`, so a write can neither restate nor quietly replace it.
     over = SingleTimeSeries(t0, res, collect(1.0:8.0), "override"; units="MW")
-    ko = add_time_series!(store, 6, "Generator", Component, over; units="kW")
-    @test read_by_id(store, ko).units == "kW"
+    @test_throws MethodError add_time_series!(
+        store, 6, "Generator", Component, over; units="kW"
+    )
 
     # units is not identity: two series differing only in their label collide.
     a = SingleTimeSeries(t0, res, collect(1.0:8.0), "dup"; units="MW")

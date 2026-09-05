@@ -32,9 +32,9 @@ HOUR = timedelta(hours=1)
 DENVER = ZoneInfo("America/Denver")
 
 
-def series(initial, name="load", length=8):
+def series(initial, name="load", length=8, **descriptors):
     return SingleTimeSeries(
-        initial, HOUR, np.arange(length, dtype=np.float64), name
+        initial, HOUR, np.arange(length, dtype=np.float64), name, **descriptors
     )
 
 
@@ -146,7 +146,9 @@ class TestRoundTrip:
 
     def test_an_explicit_argument_overrides_the_inference(self):
         store = Store.create(in_memory=True)
-        key = add(store, 1, series(datetime(2024, 1, 1)), time_reference="America/Denver")
+        key = add(
+            store, 1, series(datetime(2024, 1, 1), time_reference="America/Denver")
+        )
         assert store.read_by_id(key).time_reference == "America/Denver"
 
     def test_an_unrecognized_zone_warns_but_stores(self):
@@ -154,7 +156,8 @@ class TestRoundTrip:
         # whenever IANA moves ahead of this interpreter's tzdata.
         store = Store.create(in_memory=True)
         with pytest.warns(UserWarning, match="tz database"):
-            key = add(store, 1, series(datetime(2024, 1, 1)), time_reference="America/Dever")
+            ts = series(datetime(2024, 1, 1), time_reference="America/Dever")
+        key = add(store, 1, ts)
         assert store.get_metadata_by_id(key)["time_reference"] == "America/Dever"
 
 

@@ -156,14 +156,15 @@ ts = SingleTimeSeries(
     timedelta(hours=1),
     np.arange(24, dtype=np.float64) + 100,
     "load",   # name (required)
+    units="MW",
 )
 # The add returns the catalog id -- the handle every read takes, and the one
 # to record in your own object model.
 series_id = store.add_time_series(
     owner_id=42, owner_type="Generator",
     owner_category=OwnerCategory.Component,
-    time_series=ts,   # name comes from ts
-    features={"model_year": 2030}, units="MW",
+    time_series=ts,   # name and units come from ts
+    features={"model_year": 2030},
 )
 got = store.read_by_id(series_id)
 assert np.array_equal(np.asarray(got.data), np.asarray(ts.data))
@@ -187,9 +188,11 @@ julia --project=julia/InfraStore.jl -e 'using Pkg; Pkg.test()'
 ```julia
 using Dates, InfraStore
 store = Store(in_memory=true)
-ts = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(100.0:123.0), "load")
+ts = SingleTimeSeries(
+    DateTime(2024, 1, 1), Hour(1), collect(100.0:123.0), "load"; units="MW"
+)
 id = add_time_series!(store, 42, "Generator", Component, ts;
-                      features=Dict("model_year" => 2030), units="MW")
+                      features=Dict("model_year" => 2030))
 got = read_by_id(store, id)
 @assert got.data == ts.data
 ```

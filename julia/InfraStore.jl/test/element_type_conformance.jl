@@ -271,14 +271,11 @@ end
         Deterministic{InfraStore.PiecewiseLinear, 2}
 
     # A declaration that contradicts the values is an error, not an override.
+    # The constructor is the only door it can come through: `add_time_series!`
+    # takes no `element_type=`, so a write cannot restate — or contradict — what
+    # the object already settled.
     @test_throws InfraStore.InvalidParameterError SingleTimeSeries(
         t0, res, [InfraStore.LinearFunction(1.0, 2.0)], "bad"; element_type="f64"
-    )
-    # And the same through the other door: a write is where the declaration
-    # would otherwise be dropped without a word, since the values name the tag.
-    lin = SingleTimeSeries(t0, res, [InfraStore.LinearFunction(1.0, 2.0)], "lin2")
-    @test_throws InfraStore.InvalidParameterError add_time_series!(
-        store, 3, "Generator", Component, lin; element_type="tuple(2,f64)"
     )
     close!(store)
 end
@@ -311,13 +308,11 @@ end
         @test ndims(packed.data) == ndims(read.data) + 1
         @test decode_element_values(packed.data, "linear_function") == values
 
-        # And a contradicting declaration is an error at both doors, not an
-        # override — the constructor's and the write's.
+        # And a contradicting declaration is an error at the one door there is,
+        # not an override: the constructor settles `element_type`, and the write
+        # has no say in it.
         @test_throws InfraStore.InvalidParameterError ctor(
             stamps, values, "bad"; element_type="f64"
-        )
-        @test_throws InfraStore.InvalidParameterError add_time_series!(
-            store, owner, "ThermalStandard", Component, ts; element_type="tuple(2,f64)"
         )
     end
     close!(store)

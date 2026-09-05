@@ -40,7 +40,6 @@ def test_in_memory_round_trip():
         owner_type="Generator",
         owner_category=OwnerCategory.Component,
         time_series=s,
-        units="MW",
     )
     assert store.get_metadata_by_id(key)['owner_id'] == 42
     assert store.get_metadata_by_id(key)["owner_category"] == "Component"
@@ -351,19 +350,17 @@ def test_resolution_must_be_a_whole_positive_millisecond():
     assert len(np.asarray(store.read_by_id(key).data)) == 4
 
 
-def test_omitted_descriptor_kwargs_keep_what_the_series_carries():
-    """Re-adding a series read back from the store keeps its descriptors.
+def test_a_series_read_back_carries_its_descriptors_and_re_adds_unchanged():
+    """The descriptors live on the value object, so a read-then-re-add is lossless.
 
-    `units`, `quantity_kind`, `unit_system`, `component_field` and
-    `application_data` were set unconditionally from kwargs defaulting to None,
-    so a read-then-re-add silently cleared five of the six descriptors that
-    `get_time_series` had just populated -- while keeping `element_type`, which
-    was already guarded. The value classes expose no properties for the five, so
-    the caller could neither notice nor re-supply what was lost.
+    They used to be keyword arguments on ``add_time_series`` defaulting to
+    ``None``, with no properties on the value classes to read them back -- so a
+    caller re-adding a series it had just read could neither see what it was
+    carrying nor re-supply it. Now the object is the only place they are set,
+    which makes losing one impossible rather than merely unlikely.
     """
     store = Store.create(in_memory=True)
     initial = datetime(2024, 1, 1, tzinfo=timezone.utc)
-    series = SingleTimeSeries(initial, timedelta(hours=1), np.arange(4.0), "load")
     described = dict(
         units="MW",
         quantity_kind="ActivePower",
@@ -372,18 +369,30 @@ def test_omitted_descriptor_kwargs_keep_what_the_series_carries():
         application_data='{"a": 1}',
         element_type="f64",
     )
-    key = store.add_time_series(
-        1, "Generator", OwnerCategory.Component, series, **described
+    series = SingleTimeSeries(
+        initial, timedelta(hours=1), np.arange(4.0), "load", **described
     )
+    # Every descriptor is readable off the object the caller just built.
+    for field, expected in described.items():
+        assert getattr(series, field) == expected, field
 
-    # Read it back and re-add it under a new owner, supplying nothing.
+    key = store.add_time_series(1, "Generator", OwnerCategory.Component, series)
+
+    # Read it back: the object carries them, and so does the catalog row.
     round_tripped = store.read_by_id(key)
+    for field, expected in described.items():
+        assert getattr(round_tripped, field) == expected, f"read: {field}"
+    meta = store.get_metadata_by_id(key)
+    for field, expected in described.items():
+        assert meta[field] == expected, f"meta: {field}"
+
+    # Re-adding it under a new owner, supplying nothing, keeps all of them.
     key2 = store.add_time_series(
         2, "Generator", OwnerCategory.Component, round_tripped
     )
-    meta = store.get_metadata_by_id(key2)
+    meta2 = store.get_metadata_by_id(key2)
     for field, expected in described.items():
-        assert meta[field] == expected, field
+        assert meta2[field] == expected, f"re-add: {field}"
 
     # The bulk path behaves the same way.
     (added3,) = store.add_time_series_bulk(
@@ -400,16 +409,32 @@ def test_omitted_descriptor_kwargs_keep_what_the_series_carries():
     for field, expected in described.items():
         assert meta3[field] == expected, f"bulk: {field}"
 
-    # An explicitly supplied value still overrides.
-    key4 = store.add_time_series(
-        4,
-        "Generator",
-        OwnerCategory.Component,
-        store.read_by_id(key),
-        units="kW",
-    )
-    assert store.get_metadata_by_id(key4)["units"] == "kW"
-    assert store.get_metadata_by_id(key4)["quantity_kind"] == "ActivePower"
+
+def test_the_write_paths_do_not_take_descriptors():
+    """A descriptor names the values, so only the value object can set one.
+
+    Accepting it at the write too would give the same fact two homes that could
+    disagree -- and the write's would win silently over what the caller had
+    already declared on the series.
+    """
+    store = Store.create(in_memory=True)
+    series = make_series()
+    with pytest.raises(TypeError):
+        store.add_time_series(
+            1, "Generator", OwnerCategory.Component, series, units="MW"
+        )
+    with pytest.raises(InvalidParameterError):
+        store.add_time_series_bulk(
+            [
+                {
+                    "owner_id": 1,
+                    "owner_type": "Generator",
+                    "owner_category": OwnerCategory.Component,
+                    "time_series": series,
+                    "units": "MW",
+                }
+            ]
+        )
 
 
 def test_non_sequential_round_trip_and_slice():
@@ -472,7 +497,6 @@ def test_add_time_series_bulk(tmp_path):
             "owner_category": OwnerCategory.Component,
             "time_series": make_series(base=float(i)),
             "features": {"scenario": i},
-            "units": "MW",
         }
         for i in range(10)
     ]
@@ -540,8 +564,8 @@ def test_add_time_series_bulk_rejects_unknown_keys():
     """A misspelled item key raises rather than being silently ignored.
 
     `add_time_series` gets this for free -- an unexpected keyword argument is a
-    TypeError. The bulk path reads a dict, so a typo used to mean the descriptor
-    it carried was quietly dropped and the series landed without it.
+    TypeError. The bulk path reads a dict, so a typo used to mean whatever the
+    key carried was quietly dropped and the series landed without it.
     """
     store = Store.create(in_memory=True)
     item = {
@@ -549,19 +573,47 @@ def test_add_time_series_bulk_rejects_unknown_keys():
         "owner_type": "Generator",
         "owner_category": OwnerCategory.Component,
         "time_series": make_series(),
-        "unit_sytem": "natural_units",  # sic
+        "feautres": {"scenario": "high"},  # sic
     }
-    with pytest.raises(InvalidParameterError, match="unit_sytem"):
+    with pytest.raises(InvalidParameterError, match="feautres"):
         store.add_time_series_bulk([item])
     # Nothing was written.
     assert store.list_metadata() == []
     # The error names which item is at fault, and what would have worked.
     with pytest.raises(InvalidParameterError, match="item 1"):
-        store.add_time_series_bulk([{k: v for k, v in item.items() if k != "unit_sytem"}, item])
+        store.add_time_series_bulk([{k: v for k, v in item.items() if k != "feautres"}, item])
     # A non-string key is refused the same way.
-    good = {k: v for k, v in item.items() if k != "unit_sytem"}
+    good = {k: v for k, v in item.items() if k != "feautres"}
     with pytest.raises(InvalidParameterError, match="non-string key"):
         store.add_time_series_bulk([{**good, 7: "x"}])
+
+
+def test_a_bulk_item_cannot_name_its_own_id():
+    """No add takes an id -- the catalog assigns and the write reports.
+
+    `id` used to sit in the accepted-key list while nothing read it, so an item
+    naming one was taken and ignored: the row landed under an assigned id and
+    the caller had no way to notice. That is exactly the silent drop the
+    unknown-key check exists to prevent, so `id` has to be refused outright.
+    Replaying ids from a document is `import_time_series_associations_openapi`,
+    which is a different door.
+    """
+    store = Store.create(in_memory=True)
+    item = {
+        "owner_id": 1,
+        "owner_type": "Generator",
+        "owner_category": OwnerCategory.Component,
+        "time_series": make_series(),
+        "id": 7,
+    }
+    with pytest.raises(InvalidParameterError, match="unknown key 'id'"):
+        store.add_time_series_bulk([item])
+    assert store.list_metadata() == []
+    # The single-series path refuses it as an unexpected keyword.
+    with pytest.raises(TypeError):
+        store.add_time_series(
+            1, "Generator", OwnerCategory.Component, make_series(), id=7
+        )
 
 
 # ---------------------------------------------------------------------------

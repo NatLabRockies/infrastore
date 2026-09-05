@@ -49,10 +49,10 @@ class TestTimeSeriesExport:
         store.add_time_series(
             owner_id=7, owner_type="ThermalStandard", owner_category=OwnerCategory.Component,
             time_series=SingleTimeSeries(
-                T0, HOUR, np.zeros(8760, dtype=np.float64), "max_active_power"
+                T0, HOUR, np.zeros(8760, dtype=np.float64), "max_active_power",
+                units="MW", quantity_kind="ActivePower", unit_system="natural_units",
+                component_field="max_active_power",
             ),
-            units="MW", quantity_kind="ActivePower", unit_system="natural_units",
-            component_field="max_active_power",
             features={"scenario": "high_load", "year": 2030},
         )
 
@@ -285,9 +285,8 @@ class TestJsonOnlyRestore:
             owner_id=7, owner_type="ThermalStandard",
             owner_category=OwnerCategory.Component,
             time_series=SingleTimeSeries(
-                T0, HOUR, np.arange(24, dtype=np.float64), "max_active_power"
+                T0, HOUR, np.arange(24, dtype=np.float64), "max_active_power", units="MW"
             ),
-            units="MW",
         )
         store.add_supplemental_attribute_associations([attached(7, 12)])
         ts_json = store.export_time_series_associations_openapi()
@@ -340,9 +339,8 @@ class TestJsonOnlyRestore:
             owner_id=7, owner_type="ThermalStandard",
             owner_category=OwnerCategory.Component,
             time_series=SingleTimeSeries(
-                T0, HOUR, np.arange(24, dtype=np.float64), "max_active_power"
+                T0, HOUR, np.arange(24, dtype=np.float64), "max_active_power", units="MW"
             ),
-            units="MW",
         )
         store.add_supplemental_attribute_associations([attached(7, 12)])
         ts_json = store.export_time_series_associations_openapi()

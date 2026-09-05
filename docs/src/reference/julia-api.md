@@ -217,8 +217,9 @@ Scenarios(initial_timestamp, resolution, horizon, interval, count, data, name; a
     quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=<inferred>)
 # note: scenario_count is NOT a constructor argument
 
-# The seven descriptors after `name` are carried on the struct and become the
-# add_time_series! defaults, so a series built with units="MW" keeps them on add.
+# The seven descriptors after `name` are carried on the struct and are the only
+# place they can be set: add_time_series! takes none of them, so a series built
+# with units="MW" reaches the store with them and comes back with them.
 # `unit_system` is a `UnitSystem`: `NaturalUnits` (the units named by `units`)
 # or `ComponentBase` (per-unit against the owning component's own base). The
 # store records the declaration only — it holds no base and rescales nothing —
@@ -248,12 +249,11 @@ end
 `application_data` is an opaque, package-owned payload (typically JSON) the binding can use to
 reconstruct a domain object on read; the store stores it verbatim and never interprets it.
 `add_time_series!` reads `name` off the object (it is not a call argument), so the same array can be
-stored under different names; its `application_data=` keyword defaults to the object's
-`application_data`. `data` keeps its Julia element type: the binding maps `T` to a stored dtype
-(`Float64`, `Float32`, the signed and unsigned integer widths, `Bool`) and converts to row-major
-bytes on the way down. An `element_type=` keyword declares what the elements _mean_ when they are
-not plain numbers (`"tuple(3,f64)"`, `"piecewise_linear"`, … — see
-[Element types](./element-types.md)); it defaults to the object's own `element_type`, which is
+stored under different names; the same is true of `application_data` and every other descriptor.
+`data` keeps its Julia element type: the binding maps `T` to a stored dtype (`Float64`, `Float32`,
+the signed and unsigned integer widths, `Bool`) and converts to row-major bytes on the way down. The
+constructor's `element_type=` keyword declares what the elements _mean_ when they are not plain
+numbers (`"tuple(3,f64)"`, `"piecewise_linear"`, … — see [Element types](./element-types.md)); it is
 `nothing` for plain scalars.
 
 ## Element values
@@ -275,7 +275,8 @@ get_metadata_by_id(store, id).time_series_type       # SingleTimeSeries{Piecewis
 
 The constructor names the `element_type` from the values, so `element_type=` is only for the numeric
 case where the numbers alone cannot say what they mean; declaring one that contradicts the values is
-an error rather than an override.
+an error rather than an override. The constructor is the only door: `add_time_series!` takes no
+`element_type=`, so a write can neither restate nor contradict what the struct settled.
 
 `raw = true` on a read hands back the packing instead — one axis more, held as the physical dtype —
 for a caller that wants the bytes as stored:
@@ -475,11 +476,16 @@ that the timestamps are wall clocks. Three- and four-argument constructors (`Sta
 add_time_series!(
     store::Store, owner_id, owner_type, owner_category::OwnerCategory,
     ts;   # SingleTimeSeries, NonSequentialTimeSeries, PersistentTimeSeries, or a forecast struct
-    features::AbstractDict = Dict(), element_type = ts.element_type, units = ts.units,
-    quantity_kind = ts.quantity_kind, unit_system = ts.unit_system,
-    component_field = ts.component_field, application_data = ts.application_data,
-    id = nothing,   # file under this catalog id (imports); `nothing` lets the catalog assign
+    features::AbstractDict = Dict(),
 ) -> Int64   # the catalog row's id -- what every read and removal takes
+
+# `features` is the only thing the call adds. `name` and all seven descriptors
+# (`element_type`, `units`, `quantity_kind`, `unit_system`, `component_field`,
+# `application_data`, `time_reference`) come off `ts`, set where it was built.
+# The call does NOT take an `id`: the catalog assigns and the write reports what
+# it chose, because "never reissued" is a guarantee of AUTOINCREMENT that a
+# caller free to name an id could break. Replaying the ids a document recorded
+# is import_time_series_associations_openapi, a different door.
 
 read_by_id(store::Store, id::Integer;
           start_time=nothing, len=nothing, count=nothing,
@@ -690,14 +696,12 @@ The forecast `name` comes from the struct, e.g.
 add_time_series!(
     store, owner_id, owner_type, owner_category::OwnerCategory,
     ts::Union{Deterministic,Probabilistic,Scenarios};
-    features=Dict(), element_type=ts.element_type, units=ts.units,
-    quantity_kind=ts.quantity_kind, unit_system=ts.unit_system,
-    component_field=ts.component_field, application_data=ts.application_data,
+    features=Dict(),
 ) -> Int64
 ```
 
-The descriptor keywords default to the struct's own fields, so a label set at construction survives
-the add; pass a keyword to override it for one association.
+The descriptors come off the struct, exactly as for the static types: a label set at construction is
+what the row records, and the add has no say in it.
 
 A `DeterministicSingleTimeSeries` is not added directly. Derive one from every stored
 `SingleTimeSeries` (sharing the backing array) with:

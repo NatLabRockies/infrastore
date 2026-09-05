@@ -20,7 +20,7 @@ from infrastore import (
 > and unsigned integer widths (`int64`/`int32`/`int16`/`int8`/`uint64`/`uint32`/`uint16`/`uint8`),
 > or `bool`; whatever dtype is given round-trips unchanged. What those elements _mean_ is the
 > association's `element_type` (see [Element types](./element-types.md)), declared with the
-> `element_type=` keyword on `add_time_series` and decoded with `decode_element_values`.
+> `element_type=` keyword on the value constructor and decoded with `decode_element_values`.
 > Multi-dimensional arrays (a per-step element shape) are supported via the NumPy array's shape.
 
 ## Datetimes
@@ -163,29 +163,20 @@ def add_time_series(
         | Deterministic | Probabilistic | Scenarios,
     *,
     features: dict[str, int | float | bool | str] | None = None,
-    units: str | None = None,
-    element_type: str | None = None,
-    application_data: str | None = None,
-    quantity_kind: str | None = None,
-    unit_system: str | None = None,   # "natural_units" | "component_base"
-    time_reference: str | None = None,   # "utc" | "zoneless" | "-07:00" | "America/Denver"
-    component_field: str | None = None,  # e.g. "max_active_power"
 ) -> int: ...   # the catalog id its row was filed under
-# `time_reference` is normally omitted: it is inferred from the datetime the
-# series was built with (see "Time references" below). Pass it to override.
-# An unrecognized `unit_system` raises InvalidParameterError rather than
-# degrading to unspecified; omitting it leaves the basis unspecified, which is
-# not the same as declaring natural units.
-# `name` comes from the time_series object
-# (e.g. SingleTimeSeries(..., name=...)), not from this call.
+# `features` is the only thing this call adds. `name` and every descriptive
+# attribute -- `units`, `quantity_kind`, `unit_system`, `component_field`,
+# `application_data`, `element_type`, `time_reference` -- come off the
+# time_series object, where they were set at construction. That is what makes a
+# read-then-add lossless: a series read from one store can be added to another
+# unchanged, with nothing to re-supply.
 # A `features` key that shadows a time-series or identity field (`name`,
 # `resolution`, `owner_id`, ...) raises InvalidParameterError.
 
 def add_time_series_bulk(self, items: list[dict]) -> list[int]: ...
 # Each item dict mirrors add_time_series's parameters: required `owner_id`,
-# `owner_type`, `owner_category`, `time_series`; optional `features`, `units`,
-# `element_type`, `application_data`, `quantity_kind`, `unit_system`,
-# `time_reference`, `component_field`.
+# `owner_type`, `owner_category`, `time_series`; optional `features`. Any other
+# key raises, as the misspelled keyword it almost always is.
 # All items commit in ONE metadata transaction (all-or-nothing), which is much
 # faster than looping over add_time_series. Results are in input order.
 
@@ -387,9 +378,10 @@ with store.transaction():
 ```
 
 > **Keyword-only arguments.** Every optional argument in the binding is keyword-only (the `*`
-> marker): filter kwargs, `features=`/`units=`/`application_data=` on the add paths, `time_range=`
-> on the read paths, and so on. Positional use raises `TypeError`. The wheel ships a
-> `infrastore.pyi` stub, so IDEs and type checkers see the full signatures.
+> marker): filter kwargs, `features=` on the add paths, `units=`/`application_data=` and the rest of
+> the descriptors on the value constructors, `time_range=` on the read paths, and so on. Positional
+> use raises `TypeError`. The wheel ships a `infrastore.pyi` stub, so IDEs and type checkers see the
+> full signatures.
 
 #### Return shapes
 
@@ -489,17 +481,50 @@ SingleTimeSeries(
     resolution: timedelta,
     data: numpy.ndarray,   # shape (length,) or (length, k1, ...)
     name: str,
+    *,
+    application_data: str | None = None,
+    element_type: str | None = None,
+    units: str | None = None,
+    quantity_kind: str | None = None,
+    unit_system: str | None = None,      # "natural_units" | "component_base"
+    component_field: str | None = None,  # e.g. "max_active_power"
+    time_reference: str | None = None,   # "utc" | "zoneless" | "-07:00" | "America/Denver"
 )
 ```
 
 Read-only properties: `initial_timestamp -> datetime`, `resolution -> str` (ISO 8601 duration, e.g.
-`PT1H`), `length -> int`, `data -> numpy.ndarray`, `name -> str`, `time_reference -> str | None`.
-`initial_timestamp` comes back spelled the way it was written — see
-[Time references](#time-references). The constructor accepts either a `timedelta` or an ISO 8601
-duration string for `resolution`; the getter always returns the ISO string. `name` is a required
-association attribute (the same array may be stored under different names). It is read off the
-object by `add_time_series` and populated on `read_by_id`. The array's `element_type` and per-step
-element shape are preserved through a round-trip.
+`PT1H`), `length -> int`, `data -> numpy.ndarray`, `name -> str`, plus the seven
+[descriptive attributes](#descriptive-attributes). `initial_timestamp` comes back spelled the way it
+was written — see [Time references](#time-references). The constructor accepts either a `timedelta`
+or an ISO 8601 duration string for `resolution`; the getter always returns the ISO string. `name` is
+a required association attribute (the same array may be stored under different names). It is read
+off the object by `add_time_series` and populated on `read_by_id`. The array's `element_type` and
+per-step element shape are preserved through a round-trip.
+
+### Descriptive attributes
+
+Every value type — the three static ones and all three forecasts — takes the same seven keyword-only
+arguments and exposes each as a read-only property. They describe the values without addressing
+them, so none is part of a series' identity: two series differing only in these are a duplicate, and
+none can be filtered on except `component_field`.
+
+| Argument           | Meaning                                                                                                                    |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------- |
+| `units`            | Free-form label for the values, e.g. `"MW"`. Never interpreted or validated.                                               |
+| `quantity_kind`    | What kind of physical quantity they measure, e.g. `"ActivePower"`. QUDT `QuantityKind` local names are recommended.        |
+| `unit_system`      | `"natural_units"` or `"component_base"`. Omitted leaves the basis **unspecified**, which is not the same as natural units. |
+| `component_field`  | The owning component's field these values are the time-varying form of, e.g. `"max_active_power"`. The one filterable one. |
+| `application_data` | Opaque, package-owned payload (typically JSON) stored verbatim. End users are not expected to set it.                      |
+| `element_type`     | What the array's elements mean, e.g. `"tuple(3,f64)"`. Omit for plain numbers; the property then reports the dtype.        |
+| `time_reference`   | Overrides the spelling otherwise inferred from the timestamps. See [Time references](#time-references).                    |
+
+An unrecognized `unit_system` raises `InvalidParameterError` rather than degrading to unspecified.
+`element_type` is the only property that never returns `None`: it is always concrete, reporting the
+array's own dtype spelling for a plain numeric series.
+
+These live on the object rather than on `add_time_series` so that a read-then-add is lossless — a
+series read from one store can be added to another unchanged, with no descriptor to re-supply and
+none that a write could silently replace.
 
 ## `NonSequentialTimeSeries`
 
@@ -508,13 +533,22 @@ NonSequentialTimeSeries(
     timestamps: list[datetime],
     data: numpy.ndarray,
     name: str,
+    *,
+    application_data: str | None = None,
+    element_type: str | None = None,
+    units: str | None = None,
+    quantity_kind: str | None = None,
+    unit_system: str | None = None,      # "natural_units" | "component_base"
+    component_field: str | None = None,  # e.g. "max_active_power"
+    time_reference: str | None = None,   # "utc" | "zoneless" | "-07:00" | "America/Denver"
 )
 ```
 
-Read-only properties: `timestamps`, `length`, `data`, `name`, and `time_reference`. Timestamps must
-be strictly increasing, match the first data dimension, and agree on one spelling — a vector mixing
-naive and aware values raises `InvalidParameterError`, since one series records one reference.
-`read_by_id` returns this class for a non-sequential row.
+Read-only properties: `timestamps`, `length`, `data`, `name`, and the seven
+[descriptive attributes](#descriptive-attributes). Timestamps must be strictly increasing, match the
+first data dimension, and agree on one spelling — a vector mixing naive and aware values raises
+`InvalidParameterError`, since one series records one reference. `read_by_id` returns this class for
+a non-sequential row.
 
 ## `PersistentTimeSeries`
 
@@ -523,12 +557,22 @@ PersistentTimeSeries(
     timestamps: list[datetime],
     data: numpy.ndarray,
     name: str,
+    *,
+    application_data: str | None = None,
+    element_type: str | None = None,
+    units: str | None = None,
+    quantity_kind: str | None = None,
+    unit_system: str | None = None,      # "natural_units" | "component_base"
+    component_field: str | None = None,  # e.g. "max_active_power"
+    time_reference: str | None = None,   # "utc" | "zoneless" | "-07:00" | "America/Denver"
 )
 ```
 
 A sparse **step function**. Constructed exactly like a `NonSequentialTimeSeries` — same arguments,
 same validation, same spelling inference — with the same read-only properties: `timestamps`,
-`length`, `data`, `name`, and `time_reference`. `timestamps` is the breakpoint vector.
+`length`, `data`, `name`, and the seven [descriptive attributes](#descriptive-attributes).
+`timestamps` is the breakpoint vector. A step function's scalar-collapse policy belongs in
+`application_data`; the store has no column for it.
 
 What differs is the read: the value at breakpoint `i` is in force until breakpoint `i + 1`, and past
 the last one forever, where a `NonSequentialTimeSeries` has no value between its timestamps at all.
@@ -590,15 +634,18 @@ stored `SingleTimeSeries` with [`transform_single_time_series`](#methods).
 [`get_time_series_counts`](#methods) reports the forecast total under `forecasts`.
 
 ```python
-ts = Deterministic(initial_timestamp, resolution, horizon, interval, count, data, "load_fc")
-series_id = store.add_time_series(42, "Generator", OwnerCategory.Component, ts, units="MW")
+ts = Deterministic(
+    initial_timestamp, resolution, horizon, interval, count, data, "load_fc", units="MW"
+)
+series_id = store.add_time_series(42, "Generator", OwnerCategory.Component, ts)
 ```
 
 `data` is a NumPy array in the canonical shape for the forecast type, where `H` is
 `horizon / resolution`. As with `SingleTimeSeries`, every period argument (`resolution`, `horizon`,
 `interval`) accepts either a `timedelta` or an ISO 8601 duration string — the string form is
 required for calendar periods such as `"P1M"` — and the getters always return the ISO string. Every
-forecast also takes a required `name` (after `data`), exposed as a read-only property:
+forecast also takes a required `name` (after `data`), exposed as a read-only property, and the same
+seven keyword-only [descriptive attributes](#descriptive-attributes) as the static types.
 
 | Type            | `data` shape                       | extra constructor arg                 |
 | --------------- | ---------------------------------- | ------------------------------------- |
@@ -617,10 +664,18 @@ Deterministic(
     count: int,
     data: numpy.ndarray,
     name: str,
+    *,
+    application_data: str | None = None,
+    element_type: str | None = None,
+    units: str | None = None,
+    quantity_kind: str | None = None,
+    unit_system: str | None = None,
+    component_field: str | None = None,
+    time_reference: str | None = None,
 )
 ```
 
-Read-only properties:
+Read-only properties (plus the seven [descriptive attributes](#descriptive-attributes)):
 
 ```python
 forecast.initial_timestamp -> datetime
@@ -644,6 +699,14 @@ Probabilistic(
     percentiles: list[float],
     data: numpy.ndarray,
     name: str,
+    *,
+    application_data: str | None = None,
+    element_type: str | None = None,
+    units: str | None = None,
+    quantity_kind: str | None = None,
+    unit_system: str | None = None,
+    component_field: str | None = None,
+    time_reference: str | None = None,
 )
 ```
 
@@ -664,6 +727,14 @@ Scenarios(
     count: int,
     data: numpy.ndarray,   # leading axis is scenario_count
     name: str,
+    *,
+    application_data: str | None = None,
+    element_type: str | None = None,
+    units: str | None = None,
+    quantity_kind: str | None = None,
+    unit_system: str | None = None,
+    component_field: str | None = None,
+    time_reference: str | None = None,
 )
 ```
 
