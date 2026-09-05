@@ -1,0 +1,558 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>gRPC API - infrastore Documentation</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Time-series storage for power-systems and energy simulations, with Rust, Python, and Julia bindings">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../custom.css">
+        <link rel="stylesheet" href="../pagetoc.css">
+        <link rel="stylesheet" href="../version-selector.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">infrastore Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/NatLabRockies/infrastore" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/NatLabRockies/infrastore/tree/v0.12.0/docs/src/reference/grpc-api.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="grpc-api"><a class="header" href="#grpc-api">gRPC API</a></h1>
+<p>The proto contract lives at <code>proto/infrastore/v1/store.proto</code> and is compiled into
+<code>infrastore-proto</code> with <code>tonic</code>. The service is <strong>read-only</strong> — every write operation (add, remove,
+clear, compact) requires local filesystem access and is intentionally absent.</p>
+<p>The <a href="../explanation/data-model.html#associations-between-entities">association catalogs</a> are absent
+too, reads included: no message or RPC covers <code>supplemental_attribute_associations</code> or
+<code>parent_child_associations</code>. Consumers of those tables work against a local <code>Store</code>.</p>
+<ul>
+<li><strong>Package:</strong> <code>infrastore.v1</code></li>
+<li><strong>Service:</strong> <code>CatalogStore</code></li>
+</ul>
+<h2 id="methods"><a class="header" href="#methods">Methods</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>RPC</th><th>Request</th><th>Response</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>ListMetadata</code></td><td><code>ListMetadataReq</code></td><td><code>ListMetadataResp</code></td><td>Catalog rows matching a filter</td></tr>
+<tr><td><code>ListMetadataByIds</code></td><td><code>ListMetadataByIdsReq</code></td><td><code>ListMetadataByIdsResp</code></td><td>Catalog rows for a set of ids</td></tr>
+<tr><td><code>GetMetadataById</code></td><td><code>GetMetadataByIdReq</code></td><td><code>TimeSeriesMetadata</code></td><td>One catalog row by id</td></tr>
+<tr><td><code>AssociationExists</code></td><td><code>AssociationExistsReq</code></td><td><code>AssociationExistsResp</code></td><td>Is an id still filed? (fetches no row)</td></tr>
+<tr><td><code>HasAnyTimeSeries</code></td><td><code>HasAnyTimeSeriesReq</code></td><td><code>HasAnyTimeSeriesResp</code></td><td>Attribute-addressed existence probe</td></tr>
+<tr><td><code>ReadById</code></td><td><code>ReadByIdReq</code></td><td><code>ReadByIdResp</code></td><td>One series' values (opt. range)</td></tr>
+<tr><td><code>ReadByIds</code></td><td><code>ReadByIdsReq</code></td><td><code>ReadByIdsResp</code></td><td>Many series at once (opt. range)</td></tr>
+<tr><td><code>GetResolutions</code></td><td><code>GetResolutionsReq</code></td><td><code>GetResolutionsResp</code></td><td>Distinct resolutions present</td></tr>
+<tr><td><code>GetIntervals</code></td><td><code>GetIntervalsReq</code></td><td><code>GetIntervalsResp</code></td><td>Distinct forecast intervals</td></tr>
+<tr><td><code>GetCounts</code></td><td><code>GetCountsReq</code></td><td><code>GetCountsResp</code></td><td>Aggregate counts</td></tr>
+<tr><td><code>GetDetailedCounts</code></td><td><code>GetDetailedCountsReq</code></td><td><code>GetDetailedCountsResp</code></td><td>Distinct owners/arrays per kind</td></tr>
+<tr><td><code>GetCountsByType</code></td><td><code>GetCountsByTypeReq</code></td><td><code>GetCountsByTypeResp</code></td><td>Association count per type</td></tr>
+<tr><td><code>GetForecastParameters</code></td><td><code>GetForecastParametersReq</code></td><td><code>GetForecastParametersResp</code></td><td>Horizon, interval, count, resolution</td></tr>
+<tr><td><code>ListOwnerIds</code></td><td><code>ListOwnerIdsReq</code></td><td><code>ListOwnerIdsResp</code></td><td>Distinct owner ids in a category</td></tr>
+<tr><td><code>GetStaticSummary</code></td><td><code>GetStaticSummaryReq</code></td><td><code>GetStaticSummaryResp</code></td><td>Grouped static-series summary</td></tr>
+<tr><td><code>GetForecastSummary</code></td><td><code>GetForecastSummaryReq</code></td><td><code>GetForecastSummaryResp</code></td><td>Grouped forecast summary</td></tr>
+<tr><td><code>CheckStaticConsistency</code></td><td><code>CheckStaticConsistencyReq</code></td><td><code>CheckStaticConsistencyResp</code></td><td>Per-resolution static-grid check</td></tr>
+<tr><td><code>VerifyIntegrity</code></td><td><code>VerifyIntegrityReq</code></td><td><code>VerifyIntegrityResp</code></td><td>Recompute and compare stored hashes</td></tr>
+</tbody></table>
+</div>
+<p>Every RPC is named for the <code>Store</code> method it exposes, and its request and response are <code>&lt;Rpc&gt;Req</code> /
+<code>&lt;Rpc&gt;Resp</code> — including the ones that carry no field today, so a later filter lands as an added
+field rather than a new message and a second RPC.</p>
+<p><strong>There is no key on this wire.</strong> A series is addressed by its catalog <strong>association id</strong>, an
+<code>int64</code> that <code>ListMetadata</code> and <code>ListMetadataByIds</code> hand back on every row and that <code>ReadById</code>,
+<code>ReadByIds</code> and <code>GetMetadataById</code> take. The split is <em>identify</em> then <em>act</em>: <code>ListMetadata</code> is the
+flexible half (the filter names attributes), and everything that reads or resolves a single series
+takes the id it returned. There is deliberately no attribute-to-id resolver RPC — a caller that
+wants exactly one row poses the filter and checks that it got one.</p>
+<p><code>GetMetadataById</code> and <code>ListMetadataByIds</code> return <code>NOT_FOUND</code> for an id that names no row, because a
+call already committed to fetching treats a stale reference as a failure. <code>AssociationExists</code> is the
+call that treats it as an answer, and it is a primary-key probe that hydrates nothing — the right
+one for validating a whole model's stored references on load.</p>
+<h2 id="common-messages"><a class="header" href="#common-messages">Common Messages</a></h2>
+<pre><code class="language-proto">enum TimeSeriesType {
+  SINGLE_TIME_SERIES               = 0;
+  NON_SEQUENTIAL_TIME_SERIES       = 1;
+  DETERMINISTIC                    = 2;
+  DETERMINISTIC_SINGLE_TIME_SERIES = 3;
+  PROBABILISTIC                    = 4;
+  SCENARIOS                        = 5;
+}
+
+enum OwnerCategory { COMPONENT = 0; SUPPLEMENTAL_ATTRIBUTE = 1; }
+
+message FeatureValue {
+  oneof value {
+    int64  int_value   = 1;
+    double float_value = 2;
+    bool   bool_value  = 3;
+    string str_value   = 4;
+  }
+}
+
+message Features { map&lt;string, FeatureValue&gt; entries = 1; }
+
+message TimeSeriesMetadata {
+  int64           owner_id                  = 1;
+  string          owner_type                = 2;
+  OwnerCategory   owner_category            = 3;
+  TimeSeriesType  time_series_type          = 4;
+  string          name                      = 5;
+  bytes           data_hash                 = 6;   // 32 bytes
+  // Temporal fields are `optional` so genuine values (e.g. length == 0) decode
+  // correctly rather than colliding with a zero/empty sentinel.
+  optional string initial_timestamp_rfc3339 = 7;
+  optional string resolution                = 8;   // ISO-8601 duration
+  optional uint64 length                    = 9;
+  optional string horizon                   = 10;  // ISO-8601 duration
+  optional string interval                  = 11;  // ISO-8601 duration
+  optional uint64 count                     = 12;
+  repeated string timestamps_rfc3339        = 13;
+  Features        features                  = 14;
+  optional string units                     = 16;
+  string          element_type              = 21;  // canonical element-type string
+  // (17 is reserved: the former int32 dtype code)
+  repeated uint64 element_shape             = 18;  // per-step trailing dims
+  optional string application_data          = 19;  // opaque package-owned payload
+  repeated double percentiles               = 20;  // Probabilistic only
+  optional string quantity_kind             = 22;  // QUDT QuantityKind local name
+  optional string unit_system               = 23;  // "natural_units" | "component_base"
+  optional string component_field           = 24;  // owning component's field, free-form
+  //   `ListMetadataReq.component_field` filters on this. A row that declares none
+  //   matches no value, so it cannot select the rows that left it unset.
+  optional string time_reference            = 25;  // "utc" | "zoneless" | "-07:00" | IANA name
+  //   How this series' timestamps were spelled. Absent means unspecified,
+  //   which is NOT a claim they were written as UTC.
+  optional int64  id                        = 26;  // the catalog association id
+  //   The handle a consumer stores in its own model to reference this series
+  //   later, and what every read RPC takes. Transmitted rather than derived:
+  //   nothing computes it from the attributes, so the serving store is the
+  //   only thing that knows it. Every row a server returns carries one.
+}
+</code></pre>
+<h2 id="request--response-messages"><a class="header" href="#request--response-messages">Request / Response Messages</a></h2>
+<pre><code class="language-proto">message ListMetadataReq {
+  optional int64          owner_id         = 1;
+  optional string         owner_type       = 2;
+  optional TimeSeriesType time_series_type = 3;
+  optional string         name             = 4;
+  optional string         resolution       = 5;   // ISO-8601 duration
+  Features                features         = 6;   // subset match
+  optional OwnerCategory  owner_category   = 7;
+  optional string         interval         = 8;   // ISO-8601 duration
+  optional string         component_field  = 9;   // exact, case-sensitive
+  optional bool           zoneless         = 10;  // coherence predicate; see below
+}
+message ListMetadataResp { repeated TimeSeriesMetadata metadata = 1; }
+
+message ListMetadataByIdsReq  { repeated int64 ids = 1; }        // NOT_FOUND if any is stale
+message ListMetadataByIdsResp { repeated TimeSeriesMetadata metadata = 1; }
+
+message GetMetadataByIdReq   { int64 id = 1; }                   // NOT_FOUND if stale
+message AssociationExistsReq { int64 id = 1; }                   // never NOT_FOUND
+message AssociationExistsResp { bool present = 1; }
+
+message ReadByIdReq {
+  int64           id              = 1;   // catalog association id, from a ListMetadata row
+  optional string start_rfc3339   = 2;   // optional time-axis slice; all-or-nothing with end
+  optional string end_rfc3339     = 3;
+  optional bool   bounds_zoneless = 4;   // how the client spelled those bounds; see below
+}
+message ReadByIdResp {
+  string          initial_timestamp_rfc3339 = 1;
+  string          resolution                = 2;   // ISO-8601 duration
+  uint64          length                    = 3;
+  repeated uint64 shape                     = 4;   // array dimensions (multi-dim supported)
+  reserved 5;                                      // was: repeated double values
+  TimeSeriesType  time_series_type          = 6;
+  repeated string timestamps_rfc3339        = 7;   // set for NonSequentialTimeSeries
+  string          element_type              = 16;  // canonical element-type string
+  // (8 is reserved: the former int32 dtype code)
+  bytes           value_bytes               = 9;   // raw little-endian, row-major
+  string          application_data              = 10;
+  // Forecast-specific fields (populated for Deterministic / Probabilistic / Scenarios).
+  string          horizon                   = 11;  // ISO-8601 duration
+  string          interval                  = 12;  // ISO-8601 duration
+  uint64          count                     = 13;
+  repeated double percentiles               = 14;  // Probabilistic only
+  uint64          scenario_count            = 15;  // Scenarios only
+  optional string time_reference            = 21;  // how the timestamps were spelled
+  string          name                      = 22;  // the series' name
+  //   A read names an id, and an id carries no name, so this is the only place
+  //   a client can get one without a second call.
+}
+
+message ReadByIdsReq {
+  repeated int64  ids             = 1;   // results align with these, repeats in place
+  optional string start_rfc3339   = 2;
+  optional string end_rfc3339     = 3;
+  optional bool   bounds_zoneless = 4;
+}
+message ReadByIdsResp { repeated ReadByIdResp items = 1; }
+
+message GetResolutionsReq  { optional TimeSeriesType time_series_type = 1; }
+message GetResolutionsResp { repeated string resolution = 1; }   // ISO-8601 durations
+
+message GetIntervalsReq  { optional TimeSeriesType time_series_type = 1; }
+message GetIntervalsResp { repeated string interval = 1; }       // ISO-8601 durations
+
+message GetCountsReq  {}
+message GetCountsResp {
+  int64 components_with_time_series = 1;
+  int64 static_time_series          = 2;
+  int64 forecasts                   = 3;
+}
+
+message GetForecastParametersReq  {
+  optional string resolution = 1;   // ISO-8601 duration filter
+  optional string interval   = 2;   // ISO-8601 duration filter
+}
+message GetForecastParametersResp {
+  optional string horizon                   = 1;   // ISO-8601 duration
+  optional string interval                  = 2;   // ISO-8601 duration
+  optional uint64 count                     = 3;
+  optional string resolution                = 4;   // ISO-8601 duration
+  optional string initial_timestamp_rfc3339 = 5;
+}
+
+// An existence probe stays attribute-addressed: it is answered off the catalog
+// indexes without hydrating a row, so posing it through an id lookup would cost
+// more than the question. `features` matches the whole set, not a subset.
+message HasAnyTimeSeriesReq {
+  int64          owner_id       = 1;
+  OwnerCategory  owner_category = 2;
+  string         name           = 3;
+  optional TimeSeriesType time_series_type = 4;
+  optional string resolution    = 5;   // ISO-8601 duration
+  optional string interval      = 6;   // ISO-8601 duration
+  map&lt;string, FeatureValue&gt; features = 7;
+}
+message HasAnyTimeSeriesResp { bool present = 1; }
+
+message VerifyIntegrityReq  {}
+message VerifyIntegrityResp { repeated string errors = 1; }
+</code></pre>
+<h3 id="readbyidreq-time-slice"><a class="header" href="#readbyidreq-time-slice"><code>ReadByIdReq</code> Time Slice</a></h3>
+<p><code>start_rfc3339</code> and <code>end_rfc3339</code> are <strong>all-or-nothing</strong>: supply both to request a time-axis slice,
+or neither to fetch the whole series. Setting exactly one is rejected with <code>InvalidArgument</code>
+(<code>"start_rfc3339 and end_rfc3339 must be supplied together"</code>). Each value must parse as RFC 3339; a
+malformed timestamp is also <code>InvalidArgument</code>.</p>
+<h2 id="time-references"><a class="header" href="#time-references">Time References</a></h2>
+<p><code>TimeSeriesMetadata</code> carries an optional <code>time_reference</code> recording how a series' timestamps were
+<strong>spelled</strong>: <code>"utc"</code>, <code>"zoneless"</code>, a fixed offset (<code>"-07:00"</code>), or an IANA zone name
+(<code>"America/Denver"</code>). Absent means <em>unspecified</em>, which is not a claim they were written as UTC. It
+is descriptive, so it is outside the identity the catalog files a row under. An unparseable value is
+a convert error rather than a silent absence: "unspecified" and "a spelling this build cannot read"
+must not look alike.</p>
+<p>Timestamps stay RFC 3339 UTC on the wire whatever the reference says — the reference is the label,
+applied by the client. <code>ReadByIdReq.bounds_zoneless</code> and <code>ReadByIdsReq.bounds_zoneless</code> carry how
+the client spelled its slice bounds, because the wire form is identical either way: a zoneless
+client sends the wall clock read as if UTC, exactly as the store holds one. The server refuses a
+bound whose spelling the series cannot answer (<code>InvalidArgument</code>) rather than coercing it, and
+refuses a ranged bulk read whose selection mixes zoneless series with instant-bearing ones.
+<code>ListMetadataReq.zoneless</code> is the constructive half — <code>true</code> selects the wall-clock series, <code>false</code>
+selects everything that accepts an instant bound, including the rows that recorded no reference.</p>
+<p>See <a href="../explanation/time-references.html">Time references</a> for the full rules.</p>
+<h2 id="forecasts-over-grpc"><a class="header" href="#forecasts-over-grpc">Forecasts Over gRPC</a></h2>
+<p>The service is read-only, but its read surface covers dense forecasts. Forecast associations created
+through the <a href="./rust-api.html#forecasts">Rust core</a> or <a href="./c-abi.html#forecasts">C ABI</a> appear in
+<code>ListMetadata</code> — <code>TimeSeriesMetadata</code> carries <code>horizon</code>, <code>interval</code> (ISO-8601 durations), <code>count</code>,
+and (for <code>Probabilistic</code>) <code>percentiles</code> — and <code>GetCounts</code> includes them in <code>forecasts</code>.</p>
+<p><code>ReadById</code> returns forecast values too. For a <code>Deterministic</code>, <code>DeterministicSingleTimeSeries</code>
+(synthesized into <code>Deterministic</code>), <code>Probabilistic</code>, or <code>Scenarios</code> row it fills the <code>ReadByIdResp</code>
+array fields (<code>value_bytes</code> + <code>element_type</code>), the window parameters (<code>horizon</code>, <code>interval</code>,
+<code>count</code>), and the <code>percentiles</code> (<code>Probabilistic</code>) or <code>scenario_count</code> (<code>Scenarios</code>); the client
+reconstructs the matching type. Arrays are dtype-generic on the wire — <code>value_bytes</code> is the raw
+little-endian buffer and <code>element_type</code> says both what the elements mean and, through it, their
+physical dtype (<code>f64</code>/<code>f32</code>/<code>i64</code>/…, or a composite kind like <code>piecewise_linear</code>), so non-<code>f64</code>
+arrays survive the round trip without coercion. One caveat:</p>
+<ul>
+<li><strong><code>application_data</code> is not carried in <code>ReadByIdResp</code>.</strong> The opaque package-owned payload is
+returned by <code>ListMetadata</code> (on <code>TimeSeriesMetadata</code>) but left empty by <code>ReadById</code>, so values
+fetched directly by id come back without it. Every other descriptor — <code>name</code>, <code>units</code>,
+<code>quantity_kind</code>, <code>unit_system</code>, <code>component_field</code>, <code>time_reference</code> — is on the response, so a
+read by id returns the same described series a local read does.</li>
+</ul>
+<h2 id="catalog-revision-and-read-only-opens"><a class="header" href="#catalog-revision-and-read-only-opens">Catalog Revision and Read-Only Opens</a></h2>
+<p>The server opens its store <strong>read-only</strong>, which means it cannot upgrade a catalog. A store whose
+catalog is at an older <code>CATALOG_SCHEMA_REVISION</code> is refused with <code>CatalogMigrationRequired</code>.</p>
+<p>That refusal is a <strong>startup failure, not an RPC status</strong>: the store is opened once, by
+<code>CatalogStoreService::from_path</code>, before any service exists to answer a request. The process exits
+with the error on stderr and no client ever connects. Look for it in the server's own output, not in
+a response.</p>
+<p><strong>The store must be opened once for writing before the server can serve it.</strong> The CLI command for
+exactly that is <code>infrastore --store &lt;path&gt; upgrade</code>, which does nothing but the writable open and is
+a no-op on a store that is already current. Every <em>read</em> command, <code>store-info</code> included, opens the
+store read-only and so cannot upgrade it.</p>
+<p><code>infrastore store-info</code> reports <code>catalog_schema_revision</code> beside <code>data_format_version</code> once the
+store is readable, which is how to confirm the upgrade landed.</p>
+<p>A catalog written by a <em>newer</em> build is <code>CatalogTooNew</code> and is refused outright; there is no
+downgrade. See
+<a href="../explanation/design-choices.html#upgrade-a-store-in-place-rather-than-bricking-it">Upgrade a store in place</a>.</p>
+<h2 id="authentication"><a class="header" href="#authentication">Authentication</a></h2>
+<p>When the server is configured with <code>method = "api_key"</code>, clients must send the key in the
+<strong><code>x-api-key</code></strong> request metadata (header). The server checks the supplied key against every
+configured key of the same length without early-exit, so a match is not leaked by timing; the
+comparison is not blinded against the supplied key's <em>length</em>, which is treated as non-secret. A
+missing or wrong key is rejected before the RPC runs. With <code>method = "none"</code> no metadata is
+required. See <a href="./server-config.html">Server Configuration</a>.</p>
+<h2 id="rust-client"><a class="header" href="#rust-client">Rust Client</a></h2>
+<p><code>infrastore-server</code> ships an async <code>RemoteClient</code> that mirrors the read methods and returns core
+types, mapping gRPC <code>Status</code> codes back onto the <code>TimeSeriesError</code> taxonomy:</p>
+<div class="table-wrapper"><table><thead><tr><th>gRPC <code>Code</code></th><th><code>TimeSeriesError</code></th></tr></thead><tbody>
+<tr><td><code>NotFound</code></td><td><code>NotFound</code></td></tr>
+<tr><td><code>AlreadyExists</code></td><td><code>DuplicateTimeSeries</code></td></tr>
+<tr><td><code>InvalidArgument</code></td><td><code>InvalidParameter(message)</code></td></tr>
+<tr><td><code>FailedPrecondition</code></td><td><code>InvalidParameter(message)</code></td></tr>
+<tr><td><code>DataLoss</code></td><td><code>IntegrityError(message)</code></td></tr>
+<tr><td>anything else</td><td><code>ConnectionError(code: message)</code></td></tr>
+</tbody></table>
+</div>
+<p><code>ConnectionError</code> is only the fallback arm, so a remote <code>NotFound</code> or a rejected argument surfaces
+with the same variant a local <code>Store</code> would return.</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use infrastore_core::{ListFilter, OwnerCategory};
+use infrastore_server::client::RemoteClient;
+
+let client = RemoteClient::connect("http://127.0.0.1:50051".into()).await?;
+let counts = client.get_counts().await?;
+
+// Identify, then act: the rows carry the ids every read takes.
+let rows = client
+    .list_metadata(Some(42), Some(OwnerCategory::Component), None, None, None, None, None, None, None, None)
+    .await?;
+let id = rows[0].id.expect("a served row always carries its id");
+let data = client.read_by_id(id, None).await?;
+
+// A model holding ids from an earlier session hydrates them in one round trip,
+// after sifting the ones that no longer resolve.
+let live: Vec&lt;_&gt; = /* ids the model recorded */ vec![id];
+let hydrated = client.list_metadata_by_ids(&amp;live).await?;
+<span class="boring">}</span></code></pre></pre>
+<p><code>RemoteClient</code> methods mirror the RPC table one for one: <code>connect</code>, <code>from_channel</code>, <code>list_metadata</code>,
+<code>list_metadata_by_ids</code>, <code>get_metadata_by_id</code>, <code>association_exists</code>, <code>has_any_time_series</code>,
+<code>read_by_id</code>, <code>read_by_ids</code>, <code>get_resolutions</code>, <code>get_intervals</code>, <code>get_counts</code>, <code>counts_by_type</code>,
+<code>time_series_counts_detailed</code>, <code>get_forecast_parameters</code>, <code>list_owner_ids</code>, <code>static_summary</code>,
+<code>forecast_summary</code>, <code>check_static_consistency</code>, <code>verify_integrity</code>. The id-taking ones accept
+<code>infrastore_core::TimeSeriesId</code>, the same newtype the local <code>Store</code> uses, so an <code>owner_id</code> cannot be
+passed where a series id belongs. See the <a href="../guides/server.html">gRPC Server guide</a> for end-to-end
+usage and adding an API key to client requests.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../reference/c-abi.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../reference/server-config.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../reference/c-abi.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../reference/server-config.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="../mermaid.min.js"></script>
+        <script src="../mermaid-init.js"></script>
+        <script src="../pagetoc.js"></script>
+        <script src="../version-selector.js"></script>
+
+
+
+    </div>
+    </body>
+</html>

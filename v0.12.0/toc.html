@@ -1,0 +1,35 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light" dir="ltr">
+    <head>
+        <!-- sidebar iframe generated using mdBook
+
+        This is a frame, and not included directly in the page, to control the total size of the
+        book. The TOC contains an entry for each page, so if each page includes a copy of the TOC,
+        the total size of the page becomes O(n**2).
+
+        The frame is only used as a fallback when JS is turned off. When it's on, the sidebar is
+        instead added to the main page by `toc.js` instead. The JavaScript mode is better
+        because, when running in a `file:///` URL, the iframed page would not be Same-Origin as
+        the rest of the page, so the sidebar and the main page theme would fall out of sync.
+        -->
+        <meta charset="UTF-8">
+        <meta name="robots" content="noindex">
+        <!-- Custom HTML head -->
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="custom.css">
+        <link rel="stylesheet" href="pagetoc.css">
+        <link rel="stylesheet" href="version-selector.css">
+    </head>
+    <body class="sidebar-iframe-inner">
+        <ol class="chapter"><li class="chapter-item affix "><a href="introduction.html" target="_parent">Introduction</a></li><li class="chapter-item affix "><a href="guides/embedding.html" target="_parent">Embedding in a Parent Package</a></li><li class="chapter-item affix "><li class="part-title">Getting Started</li><li class="chapter-item "><a href="getting-started/installation.html" target="_parent"><strong aria-hidden="true">1.</strong> Installation</a></li><li class="chapter-item "><a href="getting-started/quick-start-python.html" target="_parent"><strong aria-hidden="true">2.</strong> Quick Start (Python)</a></li><li class="chapter-item "><a href="getting-started/quick-start-julia.html" target="_parent"><strong aria-hidden="true">3.</strong> Quick Start (Julia)</a></li><li class="chapter-item "><a href="getting-started/quick-start-cli.html" target="_parent"><strong aria-hidden="true">4.</strong> Quick Start (CLI)</a></li><li class="chapter-item affix "><li class="part-title">Documentation</li><li class="chapter-item "><a href="explanation/index.html" target="_parent"><strong aria-hidden="true">5.</strong> Explanation</a><a class="toggle"><div>❱</div></a></li><li><ol class="section"><li class="chapter-item "><a href="explanation/architecture.html" target="_parent"><strong aria-hidden="true">5.1.</strong> Architecture</a></li><li class="chapter-item "><a href="explanation/design-choices.html" target="_parent"><strong aria-hidden="true">5.2.</strong> Design Choices</a></li><li class="chapter-item "><a href="explanation/time-series-types.html" target="_parent"><strong aria-hidden="true">5.3.</strong> Time-Series Types</a></li><li class="chapter-item "><a href="explanation/data-model.html" target="_parent"><strong aria-hidden="true">5.4.</strong> Data Model</a></li><li class="chapter-item "><a href="explanation/time-references.html" target="_parent"><strong aria-hidden="true">5.5.</strong> Time References</a></li><li class="chapter-item "><a href="explanation/readers.html" target="_parent"><strong aria-hidden="true">5.6.</strong> Readers</a></li><li class="chapter-item "><a href="explanation/storage-model.html" target="_parent"><strong aria-hidden="true">5.7.</strong> Storage Model</a></li><li class="chapter-item "><a href="explanation/content-addressing.html" target="_parent"><strong aria-hidden="true">5.8.</strong> Content Addressing</a></li><li class="chapter-item "><a href="explanation/bindings.html" target="_parent"><strong aria-hidden="true">5.9.</strong> Language Bindings</a></li></ol></li><li class="chapter-item "><a href="guides/index.html" target="_parent"><strong aria-hidden="true">6.</strong> Developer Guides</a><a class="toggle"><div>❱</div></a></li><li><ol class="section"><li class="chapter-item "><a href="guides/rust.html" target="_parent"><strong aria-hidden="true">6.1.</strong> Rust</a></li><li class="chapter-item "><a href="guides/python.html" target="_parent"><strong aria-hidden="true">6.2.</strong> Python</a></li><li class="chapter-item "><a href="guides/julia.html" target="_parent"><strong aria-hidden="true">6.3.</strong> Julia</a></li><li class="chapter-item "><a href="guides/cli.html" target="_parent"><strong aria-hidden="true">6.4.</strong> CLI</a></li><li class="chapter-item "><a href="guides/server.html" target="_parent"><strong aria-hidden="true">6.5.</strong> gRPC Server &amp; Client</a></li><li class="chapter-item "><a href="guides/benchmarks.html" target="_parent"><strong aria-hidden="true">6.6.</strong> Benchmarks</a></li></ol></li><li class="chapter-item "><a href="reference/index.html" target="_parent"><strong aria-hidden="true">7.</strong> Reference</a><a class="toggle"><div>❱</div></a></li><li><ol class="section"><li class="chapter-item "><a href="reference/file-format.html" target="_parent"><strong aria-hidden="true">7.1.</strong> On-Disk File Format</a></li><li class="chapter-item "><a href="reference/element-types.html" target="_parent"><strong aria-hidden="true">7.2.</strong> Element Types</a></li><li class="chapter-item "><a href="reference/rust-api.html" target="_parent"><strong aria-hidden="true">7.3.</strong> Rust API</a></li><li class="chapter-item "><a href="reference/python-api.html" target="_parent"><strong aria-hidden="true">7.4.</strong> Python API</a></li><li class="chapter-item "><a href="reference/julia-api.html" target="_parent"><strong aria-hidden="true">7.5.</strong> Julia API</a></li><li class="chapter-item "><a href="reference/c-abi.html" target="_parent"><strong aria-hidden="true">7.6.</strong> C ABI</a></li><li class="chapter-item "><a href="reference/grpc-api.html" target="_parent"><strong aria-hidden="true">7.7.</strong> gRPC API</a></li><li class="chapter-item "><a href="reference/server-config.html" target="_parent"><strong aria-hidden="true">7.8.</strong> Server Configuration</a></li><li class="chapter-item "><a href="reference/cli.html" target="_parent"><strong aria-hidden="true">7.9.</strong> CLI</a></li></ol></li><li class="chapter-item "><li class="spacer"></li><li class="chapter-item affix "><a href="contributing.html" target="_parent">Contributing</a></li><li class="chapter-item affix "><a href="releasing.html" target="_parent">Releasing</a></li></ol>
+    </body>
+</html>

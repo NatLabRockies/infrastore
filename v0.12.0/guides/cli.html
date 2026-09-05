@@ -1,0 +1,556 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>CLI - infrastore Documentation</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Time-series storage for power-systems and energy simulations, with Rust, Python, and Julia bindings">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../custom.css">
+        <link rel="stylesheet" href="../pagetoc.css">
+        <link rel="stylesheet" href="../version-selector.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">infrastore Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/NatLabRockies/infrastore" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/NatLabRockies/infrastore/tree/v0.12.0/docs/src/guides/cli.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="cli-developer-guide"><a class="header" href="#cli-developer-guide">CLI Developer Guide</a></h1>
+<p><code>infrastore</code> loads time series from CSV files and inspects a store, talking directly to the on-disk
+<code>.h5</code> + <code>.h5.sqlite</code> pair — no gRPC server, and unlike the server it is <strong>not</strong> read-only. This
+guide walks the whole workflow; for every flag, the descriptor schema, and the CSV layouts, see the
+<a href="../reference/cli.html">CLI Reference</a>. For a 60-second round trip, see the
+<a href="../getting-started/quick-start-cli.html">CLI Quick Start</a>.</p>
+<p>It is also the fastest way to see what a consumer package actually wrote: <code>infrastore list</code> and
+<code>infrastore info</code> read any artifact your package produces, and <code>infrastore diff</code> compares two by
+hash without reading arrays.</p>
+<h2 id="install"><a class="header" href="#install">Install</a></h2>
+<p>Grab a prebuilt archive from the
+<a href="https://github.com/NatLabRockies/infrastore/releases">Releases page</a> — the executables inside are
+statically linked against HDF5, so there is nothing else to install:</p>
+<pre><code class="language-sh">VERSION=v0.12.0    # pick a release from the Releases page
+curl -fsSLO https://github.com/NatLabRockies/infrastore/releases/download/$VERSION/infrastore-aarch64-apple-darwin.tar.gz
+tar xzf infrastore-aarch64-apple-darwin.tar.gz
+</code></pre>
+<p>Or install from crates.io, which builds HDF5 from source and so needs <code>cmake</code> and a C compiler:</p>
+<pre><code class="language-sh">cargo install infrastore-cli       # installs the `infrastore` binary
+</code></pre>
+<p>See <a href="../getting-started/installation.html#the-infrastore-cli">Installation</a> for the per-platform
+archive list and checksum verification.</p>
+<p>Working in a checkout instead:</p>
+<pre><code class="language-sh">cargo build -p infrastore-cli      # debug build at target/debug/infrastore
+cargo build -p infrastore-cli --release
+</code></pre>
+<p>The examples below assume <code>infrastore</code> is on your <code>PATH</code> (or use <code>./target/debug/infrastore</code>).</p>
+<h2 id="describe-the-data"><a class="header" href="#describe-the-data">Describe the Data</a></h2>
+<p>Numeric values live in a CSV; everything that does not fit a flat grid (owner, name, type,
+element_type, resolution, initial timestamp, units, features) lives in a <strong>descriptor JSON</strong>. Print
+a starting point for any type with <code>template</code>:</p>
+<pre><code class="language-sh">infrastore template SingleTimeSeries &gt; load.json   # print an example descriptor to edit
+</code></pre>
+<p>Edit it to point at your data and metadata:</p>
+<pre><code class="language-json">{
+  "owner_id": 42,
+  "owner_type": "Generator",
+  "owner_category": "Component",
+  "name": "load",
+  "type": "SingleTimeSeries",
+  "element_type": "f64",
+  "units": "MW",
+  "csv": "load.csv",
+  "initial_timestamp": "2024-01-01T00:00:00Z",
+  "resolution": "PT1H",
+  "features": {
+    "model_year": 2030
+  }
+}
+</code></pre>
+<pre><code class="language-text"># load.csv
+value
+100.0
+101.5
+103.0
+104.2
+102.8
+101.0
+</code></pre>
+<p><strong>Every data CSV needs a header row.</strong> It is not decoration: <code>add</code> reads it to tell a hand-written
+value-only file from one <code>export</code> wrote (see
+<a href="../reference/cli.html#reading-back-and-re-adding">Reading back, and re-adding</a>). A file whose first
+row is data is rejected rather than quietly losing that row to the header.</p>
+<p>The descriptor rejects unknown keys, so a typo (<code>resolutionn</code>) is a hard error rather than a
+silently ignored setting.</p>
+<p><strong>Timestamps must name an instant.</strong> A <code>timestamp</code> column (or <code>initial_timestamp</code>) written as
+<code>2024-01-01 00:00:00</code> — no offset, the way most spreadsheets and databases export — is rejected,
+because it names no instant. Rather than rewrite the file, say what zone it was written in with the
+global <code>--assume-timezone</code> (<code>UTC</code>, or a fixed offset like <code>-07:00</code>; named zones such as
+<code>America/Denver</code> are deliberately not accepted, because a DST fold would make some rows ambiguous):</p>
+<pre><code class="language-sh">infrastore --store demo.h5 --assume-timezone UTC add --descriptor load.json
+</code></pre>
+<p>A timestamp that carries its own offset is never overridden. See
+<a href="../reference/cli.html#zoneless-timestamps">Zoneless timestamps</a>.</p>
+<h2 id="add-it-to-a-store"><a class="header" href="#add-it-to-a-store">Add It to a Store</a></h2>
+<pre><code class="language-sh">infrastore --store demo.h5 add --descriptor load.json --dry-run   # check first
+infrastore --store demo.h5 add --descriptor load.json
+</code></pre>
+<p>The store (<code>demo.h5</code> and its <code>demo.h5.sqlite</code> catalog) is created on first <code>add</code>, or explicitly with
+<code>init</code> when you want to pin a compression policy up front:</p>
+<pre><code class="language-sh">infrastore --store demo.h5 init --compression deflate:6                 # default is deflate:3
+infrastore --store demo.h5 init --compression none --catalog in-memory   # see below
+</code></pre>
+<p>A descriptor may also be a JSON array of objects to add many series in one transaction. <code>--csv</code>
+overrides the descriptor's <code>csv</code> path, but only when the descriptor is a single object: with an
+array of two or more it errors (<code>--csv cannot be used with an array descriptor</code>).</p>
+<p><code>--dry-run</code> is worth running first on anything large. It resolves every descriptor and reads every
+CSV in full, then prints the resolved <code>(owner, type, name, element type, shape)</code> table without
+opening the store — which catches the "I got the shape wrong" class of mistake before a multi-GB
+load starts. <code>--replace</code> makes a re-run after fixing the data idempotent, and <code>--descriptor -</code> reads
+the JSON from stdin so a generator script can pipe descriptors straight in:</p>
+<pre><code class="language-sh">infrastore --store demo.h5 add --descriptor batch.json --replace
+generate.py | infrastore --store demo.h5 add --descriptor - --quiet
+</code></pre>
+<p>For a load too large to hold in one transaction, <code>--batch-size N</code> commits every <code>N</code> series (at the
+cost of the load's atomicity), and <code>--catalog in-memory</code> skips the per-commit journaling of the
+SQLite catalog while the command runs — the CLI writes it out at the end of the command either way:</p>
+<pre><code class="language-sh">infrastore --store demo.h5 add --descriptor batch.json --batch-size 500 --catalog in-memory
+</code></pre>
+<p>Every command carries worked examples in its own help — <code>infrastore add --help</code> — and
+<code>infrastore --help</code> is the grouped index.</p>
+<p>For a one-off, the descriptor fields are also <code>add</code> flags:</p>
+<pre><code class="language-sh">infrastore --store demo.h5 add --csv load.csv --owner-id 42 --owner-type Generator \
+  --name load --type SingleTimeSeries --element-type f64 --units MW \
+  --resolution PT1H --initial-timestamp 2024-01-01T00:00:00Z
+</code></pre>
+<h3 id="one-file-many-components"><a class="header" href="#one-file-many-components">One file, many components</a></h3>
+<p>The canonical power-systems CSV is one column per component, which is the opposite shape from the
+descriptor's one-object-one-series default:</p>
+<pre><code class="language-text"># gen_profiles.csv
+timestamp,gen_001,gen_002,gen_003
+2024-01-01T00:00:00Z,101.5,88.2,44.0
+2024-01-01T01:00:00Z,102.1,87.4,44.6
+</code></pre>
+<p><code>"layout": "wide"</code> loads that as one scalar series per column. The store keys on an integer
+<code>owner_id</code> while the headers are component <em>names</em>, so the mapping is an input — a
+<code>column,owner_id[,owner_type]</code> sidecar CSV, an inline object, or <code>"owner_id_from": "header"</code> when
+the headers already are ids:</p>
+<pre><code class="language-json">{
+  "csv": "gen_profiles.csv",
+  "layout": "wide",
+  "type": "SingleTimeSeries",
+  "name": "max_active_power",
+  "owner_type": "ThermalStandard",
+  "element_type": "f64",
+  "units": "MW",
+  "initial_timestamp": "2024-01-01T00:00:00Z",
+  "resolution": "PT1H",
+  "owner_map": "components.csv"
+}
+</code></pre>
+<p><code>infrastore grid</code> writes that same shape back out, so the two are an inverse pair — see below.</p>
+<h2 id="read-it-back"><a class="header" href="#read-it-back">Read It Back</a></h2>
+<p><code>infrastore</code> follows an output convention: a global <code>-f/--format</code> with <code>table</code> (default), <code>json</code>,
+<code>jsonl</code>, and <code>csv</code>. The read commands render their results in it; the write commands (<code>add</code>,
+<code>remove</code>, <code>transform</code>, …) report their outcome in it — prose under <code>table</code>, a one-object status
+document such as <code>{"added": 3, "store": "demo.h5"}</code> under <code>json</code>/<code>jsonl</code> — so a scripted mutation
+pipes into <code>jq</code> the same way a query does. Only <code>template</code> ignores it. <code>jsonl</code> is <code>json</code>
+line-delimited — one compact object per line, which streams into <code>jq</code> where a single pretty array
+cannot. Under <code>-f json</code> an error is a <code>{"status": "error", "message": …}</code> document on stderr.</p>
+<p>Before you can write a selector you need to know what values exist, which is what the discovery
+commands are for:</p>
+<pre><code class="language-sh">infrastore --store demo.h5 names                                      # distinct series names
+infrastore --store demo.h5 owner-types                                # distinct owner types
+infrastore --store demo.h5 owners --type SingleTimeSeries             # distinct owner ids
+infrastore --store demo.h5 exists --name load                         # exit 0 = yes, 1 = no
+</code></pre>
+<pre><code class="language-sh">infrastore --store demo.h5 list                                       # what's in the store
+infrastore --store demo.h5 list --name-glob 'load_*'                  # name pattern (SQLite GLOB)
+infrastore --store demo.h5 list --limit 20 --wide                     # bounded, all columns
+infrastore --store demo.h5 get  --owner-id 42 --name load             # pretty table
+infrastore --store demo.h5 get  --name load --tail --limit 24         # the last day
+infrastore --store demo.h5 get  --name load --plot                    # a terminal sparkline
+infrastore --store demo.h5 -f csv  get  --owner-id 42 --name load     # timestamped CSV
+infrastore --store demo.h5 -f jsonl list                              # one JSON object per line
+infrastore --store demo.h5 -f json info --owner-id 42 --name load     # metadata + hash + stats
+infrastore --store demo.h5 -f csv  export --dir out/                  # one file per series
+</code></pre>
+<p>To see many series side by side against one time axis — the read-direction inverse of the wide
+ingest above — use <code>grid</code>:</p>
+<pre><code class="language-sh">infrastore --store demo.h5 -f csv grid --name max_active_power --resolution PT1H
+</code></pre>
+<p>Every column in a grid shares one timeline, which is what makes the rows line up without a presence
+mask; that is why <code>SingleTimeSeries</code> needs <code>--resolution</code>. When every column shares one series name
+the headers are bare owner ids, which is exactly the wide form <code>add</code> reads back.</p>
+<p><code>export</code> is the bulk read-direction inverse of <code>add</code>: every series the selector matches is written
+to its own CSV or JSON file under <code>--dir</code> (or to stdout when exactly one matches), optionally sliced
+with <code>--time-range</code>. Setting <code>INFRASTORE_STORE</code> in the environment stands in for <code>--store</code>, every
+destructive command except <code>compact</code> accepts <code>--dry-run</code> to preview its effect, and the global
+<code>-y</code>/<code>--yes</code> answers every confirmation prompt so a script does not have to know which commands ask:</p>
+<pre><code class="language-sh">export INFRASTORE_STORE=demo.h5
+infrastore remove --name-glob 'scratch_*' --dry-run      # what would go
+infrastore -y remove --name-glob 'scratch_*'             # no prompt
+infrastore -f csv export --name load --time-range 2024-01-01T00:00:00Z..2024-01-08T00:00:00Z
+</code></pre>
+<p><code>info</code> reports metadata, the array's content hash and where it lives in the HDF5 file, and stats
+over the values: <code>min</code>/<code>max</code>/<code>mean</code>/<code>stddev</code>, the <code>p5</code>–<code>p95</code> percentiles, <code>first</code>/<code>last</code>, and a
+separate <code>non_finite</code> count — or <code>true_count</code>/<code>false_count</code> when the dtype is <code>bool</code>. The stats are
+the only part that reads the array — <code>--no-stats</code> skips it for a purely catalog-side query.</p>
+<p><code>list</code> shows every field that is part of a series' identity, features included, so two series that
+differ only by a feature never render as the same row. Its <code>Hash</code> column is the first 12 characters
+of the array's content hash: rows with equal hashes share one array on disk.</p>
+<p><code>get</code>/<code>info</code>/<code>remove</code> select a single series with <code>--owner-id</code>, <code>--owner-category</code>, <code>--name</code>,
+<code>--name-glob</code>, <code>--component-field</code>, <code>--type</code>, <code>--resolution</code>, and repeated <code>--feature key=value</code>
+(<code>--feature</code> is the only repeatable one); if more than one series matches, <code>infrastore</code> lists the
+candidates so you can narrow the query. The owner is the <code>(owner_id, owner_category)</code> pair, so a
+component and a supplemental attribute may share a numeric id — add <code>--owner-category</code> (<code>Component</code>
+/ <code>SupplementalAttribute</code>) to disambiguate. Large series truncate in <code>table</code> output — pass
+<code>--limit N</code>, <code>--full</code>, or <code>--tail</code> to read from the end. <code>--stride N</code> keeps every Nth row and,
+unlike the display bounds, applies to a <code>-f csv</code> pipe too: it selects data rather than shortening a
+view, and a silently short pipe is a bug in whatever consumes it.</p>
+<p><code>--time-range START..END</code> on <code>get</code> takes two <em>timestamps</em> (RFC3339 or epoch-ms), not a duration:</p>
+<pre><code class="language-sh">infrastore --store demo.h5 get --owner-id 42 --name load \
+  --time-range 2024-01-01T01:00:00Z..2024-01-01T03:00:00Z
+</code></pre>
+<p>Selectors accept either spelling: <code>--type single</code> and <code>--type SingleTimeSeries</code> mean the same thing,
+as do <code>--owner-category component</code> and <code>--owner-category Component</code>. What the CLI <em>prints</em> — in
+<code>list</code>/<code>get</code>/<code>info</code> output and in what <code>template</code> writes — is always the canonical CamelCase name,
+so descriptors, rendered rows, and <code>-f json</code> output all string-match each other. The lowercase forms
+are a typing shortcut on the command line, not a second vocabulary.</p>
+<h2 id="chart-it"><a class="header" href="#chart-it">Chart It</a></h2>
+<pre><code class="language-sh">infrastore --store demo.h5 get --name load --plot                        # sparkline, no file
+infrastore --store demo.h5 plot --name load --out load.svg               # the profile
+infrastore --store demo.h5 plot --name load --kind duration --out ldc.svg
+infrastore --store demo.h5 plot --name load --kind heatmap --out heat.html
+infrastore --store demo.h5 plot --name load_prob --type Probabilistic --kind fan --window 0 --out fan.svg
+infrastore --store demo.h5 plot --name load --type Deterministic --kind overlay --out forecast.svg
+</code></pre>
+<p><code>plot</code> writes one self-contained file — no external fonts, scripts, or images, and both light and
+dark themes inside it — so it opens in a browser and drops into a report. The five <code>--kind</code> values
+are <code>line</code>, <code>duration</code> (the load duration curve), <code>heatmap</code> (time-of-day against day, which is how
+you catch a timezone or DST shift), <code>fan</code> (percentile bands or scenario traces for one forecast
+window), and <code>overlay</code> (a <code>Deterministic</code>'s windows over the actuals it came from).</p>
+<h2 id="find-the-bytes-on-disk"><a class="header" href="#find-the-bytes-on-disk">Find the Bytes on Disk</a></h2>
+<p>Arrays are content-addressed, so identical values are stored once and shared. <code>arrays</code> shows what
+collapsed onto what, and where each array actually lives:</p>
+<pre><code class="language-sh">infrastore --store demo.h5 store-info    # both file paths, format version, compression
+infrastore --store demo.h5 arrays        # one row per distinct array + the series sharing it
+infrastore --store demo.h5 arrays --data-hash 2018057b   # narrow to one (any prefix, any case)
+</code></pre>
+<p><code>info</code> resolves a single series the same way, reporting <code>data_hash</code>, <code>hdf5_dataset</code>, and
+<code>hdf5_column</code>. You need all three to open the data with an outside tool: a packed array is one
+<em>column</em> of a dataset shared with other same-shaped arrays, and a packed dataset that fills up
+spills into suffixed siblings, so neither the column nor the dataset name can be worked out from
+metadata alone.</p>
+<p>Opening the catalog directly, use the <code>time_series_readable</code> view — <code>sqlite3</code> prints the raw <code>BLOB</code>
+hashes as garbage bytes, and in <code>.mode box</code> it mangles the table borders:</p>
+<pre><code class="language-sh">sqlite3 demo.h5.sqlite 'SELECT name, data_hash FROM time_series_readable;'
+</code></pre>
+<h2 id="associations"><a class="header" href="#associations">Associations</a></h2>
+<p>Two association catalogs live alongside the time series, readable and writable here:</p>
+<pre><code class="language-sh">infrastore --store demo.h5 attributes                 # component &lt;-&gt; supplemental attribute
+infrastore --store demo.h5 attributes --summary       # counts by (component type, attribute type)
+infrastore --store demo.h5 links --parent-id 42       # directed parent -&gt; child edges
+infrastore --store demo.h5 attach --from attachments.csv
+infrastore --store demo.h5 link --parent-id 42 --parent-type Generator \
+  --child-id 7 --child-type Bus
+infrastore --store demo.h5 reassign --old 42 --new 43 # both catalogs follow a renumbered component
+</code></pre>
+<p>The store holds only the <em>relationship</em> — the components and attributes themselves live in the
+consumer's object graph — so the flags are bare ids and type names. <code>attach --from</code> and
+<code>link --from</code> import a whole table in one all-or-nothing transaction; their header is checked,
+because the four columns are two interchangeable-looking <code>(id, type)</code> pairs and a swapped file would
+silently invert every relationship. <code>detach</code> and <code>unlink</code> are the inverses, and take <code>--dry-run</code>.</p>
+<h2 id="forecasts"><a class="header" href="#forecasts">Forecasts</a></h2>
+<p>All five writable types work (<code>SingleTimeSeries</code>, <code>NonSequentialTimeSeries</code>, <code>Deterministic</code>,
+<code>Probabilistic</code>, <code>Scenarios</code>). <code>infrastore template Deterministic</code> prints a descriptor to edit, but
+it is plain JSON and says nothing about the data layout, so here is the rule:</p>
+<p>Forecast CSVs are a flat, <strong>row-major</strong> stream of values with no structure of their own. The count
+must equal the product of the type's shape:</p>
+<div class="table-wrapper"><table><thead><tr><th>Type</th><th>Shape</th></tr></thead><tbody>
+<tr><td><code>Deterministic</code></td><td><code>[H, count, *element_shape]</code></td></tr>
+<tr><td><code>Probabilistic</code></td><td><code>[num_percentiles, H, count, *E]</code></td></tr>
+<tr><td><code>Scenarios</code></td><td><code>[scenario_count, H, count, *E]</code></td></tr>
+</tbody></table>
+</div>
+<p><code>H = horizon / resolution</code> — with the template's <code>"horizon": "PT24H"</code>, <code>"resolution": "PT1H"</code>, and
+<code>"count": 7</code>, a scalar <code>Deterministic</code> needs exactly <code>24 * 7 = 168</code> values, plus the header row. Use
+<code>-f json</code> to read the flat values back at full fidelity. <code>get -f csv</code> and <code>export -f csv</code> on a
+forecast emit <strong>timestamped analysis rows</strong> instead — one row per <code>(window, step)</code> with
+<code>issue_time</code>/<code>target_time</code> columns and one value column per percentile or scenario. <code>add</code> recognizes
+that header too and transposes the rows back, so an exported forecast re-adds exactly (see
+<a href="../reference/cli.html#reading-back-and-re-adding">Reading back, and re-adding</a>).</p>
+<p><code>DeterministicSingleTimeSeries</code> is not added from CSV — store a <code>SingleTimeSeries</code>, then derive it.
+<code>transform</code> takes <strong>no selector</strong>: it rewrites <em>every</em> <code>SingleTimeSeries</code> in the store. <code>--horizon</code>
+must fit inside each one (<code>horizon / resolution</code> steps must not exceed its <code>length</code>), so with the
+6-row hourly <code>load</code> above, a 24-hour horizon fails and a 3-hour one works:</p>
+<pre><code class="language-sh">infrastore --store demo.h5 transform --horizon PT3H --interval PT1H
+</code></pre>
+<p>The derived series keeps the source's owner, name, and resolution, so <code>load</code> now matches two entries
+and a bare selector becomes ambiguous. Disambiguate with <code>--type</code>:</p>
+<pre><code class="language-sh">infrastore --store demo.h5 get --owner-id 42 --name load --type single
+infrastore --store demo.h5 get --owner-id 42 --name load --type deterministic_single
+</code></pre>
+<p>A forecast's table view is the same structured one <code>-f csv</code> writes — <code>issue_time</code>, <code>target_time</code>,
+and one column per percentile or scenario — and <code>--window N</code> (or <code>--issue-time &lt;TS&gt;</code>) narrows it to
+a single window instead of dumping all of them:</p>
+<pre><code class="language-sh">infrastore --store demo.h5 get --name load --type deterministic_single --window 0
+</code></pre>
+<h2 id="compare-and-move-stores"><a class="header" href="#compare-and-move-stores">Compare and Move Stores</a></h2>
+<pre><code class="language-sh">infrastore --store run.h5 diff --against baseline.h5      # exits 1 when they differ
+infrastore --store demo.h5 merge --from other.h5 --name-glob 'load_*'
+infrastore --store demo.h5 persist --dest backup.h5 --force
+</code></pre>
+<p><code>diff</code> compares catalog identities and content hashes without reading either store's arrays, which
+makes it cheap enough for a CI gate: two series hold the same numbers exactly when they carry the
+same hash. <code>merge</code> moves arrays as bytes, so nothing is lost to a CSV round trip. <code>persist</code> is the
+one write that refuses an existing destination without <code>--force</code>: a save that fails partway may
+already have destroyed what was there.</p>
+<h2 id="maintain-it"><a class="header" href="#maintain-it">Maintain It</a></h2>
+<pre><code class="language-sh">infrastore --store demo.h5 verify                 # re-hash every array; exit 1 on a mismatch
+infrastore --store demo.h5 check-consistency      # every SingleTimeSeries of a resolution on one grid
+infrastore --store demo.h5 stats                  # association, owner, and distinct-array counts
+infrastore --store demo.h5 remove --owner-id 42 --name load --dry-run
+infrastore --store demo.h5 compact --force        # rewrite the .h5 so deletions actually shrink it
+</code></pre>
+<p>Deleting frees a column or unlinks a dataset, but HDF5 cannot give the space back in place, so the
+file only shrinks when <code>compact</code> rewrites it from the live set — nothing else may have the store
+open while it runs, and it is the one destructive command with no <code>--dry-run</code>. <code>verify</code> and <code>diff</code>
+use exit status <code>1</code> as an answer, not a failure; <code>2</code> is a usage error
+(<a href="../reference/cli.html#exit-status">Exit Status</a>).</p>
+<p>Shell completion for bash, zsh, fish, elvish, and PowerShell comes from the binary itself:</p>
+<pre><code class="language-sh">infrastore completions zsh &gt; "${fpath[1]}/_infrastore"
+</code></pre>
+<h2 id="notes"><a class="header" href="#notes">Notes</a></h2>
+<ul>
+<li>The CLI writes locally; there is no remote/gRPC mode yet (store access is isolated so one can be
+added later).</li>
+<li>Output is colored (green table headers) only when stdout is a terminal; it is plain when
+piped/redirected or when <code>NO_COLOR</code> is set, so <code>-f json</code>/<code>-f csv</code> stay clean for other tools.</li>
+<li><code>--log-level</code> (or <code>RUST_LOG</code>) controls logging; the default is quiet (<code>warn</code>).</li>
+<li>The <code>.h5</code> and <code>.h5.sqlite</code> files are one artifact — move, copy, and delete them together.</li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../guides/julia.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../guides/server.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../guides/julia.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../guides/server.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="../mermaid.min.js"></script>
+        <script src="../mermaid-init.js"></script>
+        <script src="../pagetoc.js"></script>
+        <script src="../version-selector.js"></script>
+
+
+
+    </div>
+    </body>
+</html>

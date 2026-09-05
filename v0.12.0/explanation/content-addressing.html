@@ -1,0 +1,440 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Content Addressing - infrastore Documentation</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Time-series storage for power-systems and energy simulations, with Rust, Python, and Julia bindings">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../custom.css">
+        <link rel="stylesheet" href="../pagetoc.css">
+        <link rel="stylesheet" href="../version-selector.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">infrastore Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/NatLabRockies/infrastore" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/NatLabRockies/infrastore/tree/v0.12.0/docs/src/explanation/content-addressing.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="content-addressing"><a class="header" href="#content-addressing">Content Addressing</a></h1>
+<p>Every array is identified by the SHA-256 hash of its contents, not by a name or an ID. Two series
+with byte-identical values therefore resolve to the same hash and are stored exactly once. This is
+the mechanism that lets many <a href="./data-model.html#identity">series</a> share one underlying array.</p>
+<h2 id="the-array-hash"><a class="header" href="#the-array-hash">The Array Hash</a></h2>
+<p><code>array_hash</code> produces a deterministic 32-byte digest from a
+<a href="./time-series-types.html#typed-n-dimensional-arrays"><code>TypedArray</code></a>. The hashed byte stream is, in
+order:</p>
+<ol>
+<li>A <strong>dtype tag</strong>: the dtype name (<code>f64</code>, <code>f32</code>, <code>i64</code>, <code>i32</code>, <code>i16</code>, <code>i8</code>, <code>u64</code>, <code>u32</code>, <code>u16</code>,
+<code>u8</code>, <code>bool</code>) followed by a NUL byte.</li>
+<li>The <strong>shape</strong>: the rank as a little-endian <code>u64</code>, then each dimension as a little-endian <code>u64</code>.</li>
+<li>The <strong>elements</strong> in row-major order. Float dtypes canonicalize <code>NaN</code> to a single quiet-<code>NaN</code> bit
+pattern before hashing; integer and <code>bool</code> bytes are hashed verbatim.</li>
+</ol>
+<pre class="mermaid">flowchart LR
+    T[&quot;dtype tag&lt;br/&gt;e.g. f64\\0&quot;] --&gt; S[&quot;rank + dims&lt;br/&gt;(u64 LE each)&quot;]
+    S --&gt; E[&quot;elements&lt;br/&gt;(typed LE, row-major)&quot;]
+    E --&gt; H[&quot;SHA-256&quot;]
+    H --&gt; D[&quot;32-byte hash&quot;]
+
+    style T fill:#6f42c1,color:#fff
+    style S fill:#6f42c1,color:#fff
+    style E fill:#6f42c1,color:#fff
+    style H fill:#4a9eff,color:#fff
+    style D fill:#28a745,color:#fff
+</pre>
+<p>Identity is therefore <code>(dtype, shape, content)</code>:</p>
+<ul>
+<li><strong>dtype and shape are part of the identity.</strong> Two arrays with the same numbers but a different
+dtype, or a different shape, never collide. Reshaping or retyping changes the hash.</li>
+<li><strong><code>NaN</code> is canonicalized</strong> (float dtypes only). Any <code>NaN</code>, regardless of its payload bits, hashes
+as a single canonical quiet-<code>NaN</code> pattern, so semantically equal float arrays never collide on
+<code>NaN</code> representation.</li>
+</ul>
+<h2 id="the-features-hash"><a class="header" href="#the-features-hash">The Features Hash</a></h2>
+<p>Feature maps are hashed by <code>features_hash</code> with the same discipline: a domain tag, the entry count,
+then, in the <code>BTreeMap</code>'s sorted-by-key order, a length-prefixed key plus a kind tag and the value
+bytes for each entry. Because the map is always sorted, insertion order does not affect the hash:</p>
+<pre><code class="language-python">{"model_year": 2030, "scenario": 1}   # hashes identically to
+{"scenario": 1, "model_year": 2030}
+</code></pre>
+<p>The features hash does double duty in the catalog:</p>
+<ul>
+<li><strong>It identifies the association.</strong> It is stored in the <code>features_hash</code> column and is part of the
+metadata uniqueness index — it is how the database distinguishes two otherwise-identical
+associations that differ only in their features.</li>
+<li><strong>It <em>is</em> the key of the feature set.</strong> The <code>feature_sets</code> table is keyed by
+<code>(features_hash, key)</code>, so a feature map is content-addressed exactly as an array is: stored
+<strong>once</strong> and shared by every association whose hash matches. The association row already carries
+that hash, so no join column, foreign key, or association id is needed. An empty map stores no
+rows at all.</li>
+</ul>
+<p>Sharing is not a rare case, it is the common one. Thousands of components typically carry the same
+feature set (often the empty one, or a single scenario tag), and it collapses to one copy. The
+sharpest example is a <code>DeterministicSingleTimeSeries</code>: it is a view over the <code>SingleTimeSeries</code> it
+was derived from and has exactly the same features, so <code>transform_single_time_series</code> writes
+<strong>zero</strong> feature rows — it reuses the set the source series already stored, just as it reuses the
+source's array.</p>
+<h2 id="the-timestamps-hash"><a class="header" href="#the-timestamps-hash">The Timestamps Hash</a></h2>
+<p>A <code>NonSequentialTimeSeries</code> carries its timestamps explicitly, and those are content-addressed too,
+by <code>timestamps_hash</code>: a domain tag, the count, then each instant as a unix millisecond count — the
+same values the store writes, so the hash addresses the stored form rather than a second
+serialization of it. Two vectors hash equal exactly when they hold the same instants in the same
+order.</p>
+<p>Like the features hash, it does double duty:</p>
+<ul>
+<li><strong>It names the stored vector.</strong> Each distinct time axis is one <code>tsv_{timestamps_hash}</code> dataset in
+the HDF5 file, so an axis shared by a thousand irregular series is stored <strong>once</strong>. Sharing is
+again the common case, not the rare one: irregular series in this domain sit on a schedule —
+outage windows, market intervals, event times — that many components observe together. Unlike the
+features hash, this one addresses something in the <em>array</em> half of the artifact: a timestamp
+vector is data, and the catalog holds only its hash.</li>
+<li><strong>It is the cohort key of the packed array layout.</strong> Column-packing is only meaningful for arrays
+on a common time axis, since the chunking is timestamp-major; the interned hash is precisely the
+answer to "do these two series share one?", so the arrays of a cohort pool into one
+<code>nsts_{dtype}_{shape}_{length}_{timestamps_hash}</code> dataset. This is what lets a <code>StaticReader</code>
+sweep irregular series a timestamp at a time, exactly as it does regular ones.</li>
+</ul>
+<h2 id="deduplication-on-write"><a class="header" href="#deduplication-on-write">Deduplication on Write</a></h2>
+<p>All three hashes deduplicate, by the same mechanism, on the same write.</p>
+<p><strong>The array.</strong> <code>Store</code> hashes the array and asks the backend whether that hash is already present:</p>
+<ul>
+<li><strong>Present</strong> → the existing array is reused; no new array bytes are written. Only a new metadata
+association row is inserted.</li>
+<li><strong>Absent</strong> → the array is written. A packed array (either static type) goes into the first free
+column of a compatible <code>sts_…</code> / <code>nsts_…</code> dataset, recording its hash in the companion hash
+variable; a standalone array (a dense forecast, or an irregular series alone on its time axis)
+becomes a new <code>arr_{hash}</code> variable.</li>
+</ul>
+<p><strong>The feature set and the timestamp vector.</strong> The association insert
+(<code>MetadataStore::insert_batched</code>) writes each under its hash with an <code>INSERT OR IGNORE</code>, so one some
+other association already stored is a no-op — equal hash implies equal content, so an ignored
+conflict cannot hide a <em>different</em> set behind the same hash. Within one batch a <code>SharedSetCache</code>
+remembers what has already been written, so a bulk add issues one write per <em>distinct</em> set rather
+than a no-op statement per row. This is what keeps a transform flat in feature count instead of
+linear in it, and a cohort of irregular series flat in timestamp count.</p>
+<p>So storage cost scales with the number of <em>distinct</em> arrays, feature sets, and time axes, while
+metadata cost scales with the number of <em>associations</em>. A profile shared by a thousand generators
+costs one array, one feature set, and a thousand small rows.</p>
+<h2 id="deletion-is-reference-counted"><a class="header" href="#deletion-is-reference-counted">Deletion is Reference-Counted</a></h2>
+<p>Because arrays are shared, deleting an association cannot blindly delete its array. On
+<code>remove_by_ids</code> (and <code>clear_time_series</code>), <code>Store</code>:</p>
+<ol>
+<li>Deletes the matching association rows inside a SQLite transaction, collecting their
+<code>data_hash</code>es.</li>
+<li>For each freed hash, counts how many associations still reference it.</li>
+<li>Only frees the HDF5 column for hashes whose reference count has dropped to zero.</li>
+</ol>
+<p>This keeps shared arrays alive until the last referencing key is gone.</p>
+<h3 id="the-shared-catalog-rows-are-the-deliberate-exception"><a class="header" href="#the-shared-catalog-rows-are-the-deliberate-exception">The shared catalog rows are the deliberate exception</a></h3>
+<p>Feature sets and timestamp vectors are shared by the same mechanism but are <strong>not</strong>
+reference-counted, and the symmetry stops there. Counting references on every delete would make
+deletion pay for a scan the array side already pays for, to reclaim a handful of rows; the schema
+instead accepts unreachable rows and sweeps them in bulk. Concretely:</p>
+<ul>
+<li><strong>No foreign key, no <code>ON DELETE CASCADE</code>.</strong> A cascade would be actively wrong: rows are shared, so
+deleting one association must not delete a set another association still uses.</li>
+<li><strong>Deleting the last user leaves the row unreachable</strong>, rather than deleting it — the same
+end-state as the HDF5 side's freed packed slots and unlinked datasets, whose space also lingers
+until a compaction.</li>
+<li><strong><code>Store::compact</code> sweeps them.</strong> It deletes every feature set and every timestamp vector no
+association references any more, reporting the row counts as <code>feature_sets_reclaimed</code> and
+<code>timestamp_sets_reclaimed</code>. On an on-disk store the same call then rewrites the <code>.h5</code> file, so the
+array side is reclaimed too.</li>
+<li><strong>Clearing the whole store drops them all outright</strong>, since a cleared store orphans every row by
+construction and may never see a compaction.</li>
+</ul>
+<p>The practical consequence: an unreachable row is never <em>read</em> (every lookup goes through an
+association's <code>features_hash</code> or <code>timestamps_hash</code>), so it costs bytes, not correctness — and a
+re-added association with the same features or timestamps silently adopts the row that was still
+sitting there.</p>
+<h2 id="discovering-shared-series"><a class="header" href="#discovering-shared-series">Discovering Shared Series</a></h2>
+<p>Sharing is observable on read, not just an internal write optimization. Every metadata row carries
+its array's <code>data_hash</code>, so a caller can group series by that hash to learn which ones resolve to
+the same stored array — without reading any array bytes. Two cases land in the same group: arrays
+that were deduplicated because their content was identical, and a <code>SingleTimeSeries</code> together with
+any <code>DeterministicSingleTimeSeries</code> derived from it (the DST shares the backing array).</p>
+<p>In the Julia binding, <code>list_metadata</code> returns <code>TimeSeriesMetadata</code> rows, each carrying a <code>data_hash</code>
+field (the 32 raw bytes, which hash and compare by content and so work directly as a <code>Dict</code> key);
+group by it to find the shared sets. <code>count_array_references</code> reports, for one hash, how many
+<code>SingleTimeSeries</code> and <code>DeterministicSingleTimeSeries</code> associations point at it.</p>
+<pre><code class="language-julia">groups = Dict{Vector{UInt8}, Vector{TimeSeriesMetadata}}()
+for row in list_metadata(store)
+    push!(get!(groups, row.data_hash, eltype(values(groups))[]), row)
+end
+shared = filter(((_, rows),) -&gt; length(rows) &gt; 1, groups)   # arrays referenced by &gt;1 series
+</code></pre>
+<p>This read-side view is what lets a downstream caller collapse work across owners that share data.
+The <a href="./readers.html"><code>ForecastReader</code></a> builds on the same grouping internally: forecasts that share an
+array (and read plan) are read from disk <strong>once per timestamp</strong> no matter how many components
+reference them — see
+<a href="../reference/julia-api.html#window-read-deduplication">Window-read deduplication</a>. (This is exactly
+how InfrastructureSystems.jl backs its own <code>get_shared_time_series</code> and forecast reader.)</p>
+<h2 id="stability-is-a-contract"><a class="header" href="#stability-is-a-contract">Stability is a Contract</a></h2>
+<p>These hashes are part of the on-disk format. Any change to a hashing domain above that perturbs a
+stored hash is a format-breaking change and must bump
+<a href="../reference/file-format.html#format-version"><code>DATA_FORMAT_VERSION</code></a>. Treat the hashing rules above
+as fixed, not as an implementation detail.</p>
+<p>The <code>golden_hash_pin</code> integration test guards the array domain by pinning the exact SHA-256 of one
+fixed input (an <code>f64</code> array of <code>[0, 1, 2, 3]</code>). That is a tripwire, not a proof: it covers a single
+dtype, shape, and value set, and it does not pin <code>features_hash</code> at all. A change to the hashing
+rules can therefore break the format without breaking that test — the reasoning above, not the test,
+is the contract.</p>
+<h2 id="integrity-verification"><a class="header" href="#integrity-verification">Integrity Verification</a></h2>
+<p>Because the stored hash and the stored data are independent on disk, they can be cross-checked.
+<code>verify_integrity</code> takes the catalog as the statement of what should be there, then checks the HDF5
+half against it: it collects every array and every explicit timestamp vector the catalog references,
+reads each one back, recomputes <code>array_hash</code> / <code>timestamps_hash</code> from the stored values, and reports
+any mismatch between the recorded hash and the recomputed one — detecting silent corruption. A
+reference the file cannot satisfy is reported too, as a dangling one. See
+<a href="../reference/rust-api.html#store"><code>verify_integrity</code></a>.</p>
+<h3 id="what-it-does-not-cover"><a class="header" href="#what-it-does-not-cover">What it does not cover</a></h3>
+<p>The check runs from the catalog into the HDF5 file, and only in that direction. It never checks the
+catalog against <em>itself</em>, so a clean report is a statement about the stored content, not about the
+store as a whole. Three things fall outside it:</p>
+<ul>
+<li>a catalog row whose <code>dtype</code>, <code>element_shape</code>, or <code>length</code> misdescribes the array it points at. The
+hash addresses the array's own content, so an array that matches its hash passes the check while
+the row goes on lying about it.</li>
+<li>a missing catalog entirely. The two artifacts are one logical store, but nothing enforces that:
+opening read-write with the <code>.sqlite</code> half deleted silently recreates it empty, and the resulting
+store — zero time series, every array still present and now unreachable — verifies clean, because
+a catalog that references nothing is a clean bill of health here.</li>
+<li>anything the catalog does not reference. The sweep never reaches it, whatever state it is in; an
+unreachable array is the expected state after a delete, and <code>compact</code> is what reports it.</li>
+</ul>
+<p>This is a deliberate scope rather than an oversight: content corruption is what happens silently,
+and the catalog has its own purpose-built checks — <code>check_static_consistency</code> for per-resolution
+grid agreement, and <code>compact</code> for the unreachable arrays and feature sets a delete leaves behind,
+which it reclaims and reports (an expected state, documented in the
+<a href="../reference/file-format.html">file format</a>, not corruption). SQLite also enforces a good deal
+itself: the <code>NOT NULL</code> and <code>CHECK</code> constraints, and the two unique indexes that guarantee identity
+uniqueness.</p>
+<p>If you need end-to-end assurance that a copied or restored store is intact, the operational rule in
+the <a href="../reference/file-format.html">file format</a> is the one that matters: move, copy, and delete the
+<code>.h5</code> and its <code>.sqlite</code> together.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../explanation/storage-model.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../explanation/bindings.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../explanation/storage-model.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../explanation/bindings.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="../mermaid.min.js"></script>
+        <script src="../mermaid-init.js"></script>
+        <script src="../pagetoc.js"></script>
+        <script src="../version-selector.js"></script>
+
+
+
+    </div>
+    </body>
+</html>
