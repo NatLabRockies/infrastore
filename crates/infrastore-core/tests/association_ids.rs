@@ -1735,6 +1735,88 @@ fn an_irregular_row_carries_its_axis_and_its_id() {
     );
 }
 
+/// The type does not travel in a document, in either direction, and the two
+/// halves are separate guarantees.
+///
+/// The export omits it: it would otherwise emit a row in the
+/// `NonSequentialTimeSeries` *shape*, down to the `timestamps_uri` locating its
+/// breakpoints, which looks importable and is not — a document is better off
+/// admitting the type is not on the wire than carrying a row nothing takes back.
+/// The import refuses it independently, because a document from anywhere else
+/// can still name the type: it is an infrastore-local extension, outside the six
+/// the vendored `TimeSeriesAssociation.json` is a `oneOf` over, so there is no
+/// schema to check the row against and the discriminator check refuses it by
+/// name.
+#[test]
+fn a_persistent_row_travels_in_neither_direction() {
+    let mut store = create_store(None, true).unwrap();
+    let breakpoints = vec![
+        Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
+        Utc.with_ymd_and_hms(2024, 4, 1, 0, 0, 0).unwrap(),
+    ];
+    let persistent = infrastore_core::PersistentTimeSeries::new(
+        breakpoints,
+        TypedArray::from_f64(vec![2], &[3.5, 4.25]),
+        "fuel_price",
+    )
+    .unwrap();
+    let id = store
+        .add(AddRequest::new(
+            1,
+            "ThermalStandard",
+            OwnerCategory::Component,
+            TimeSeriesData::PersistentTimeSeries(persistent),
+        ))
+        .unwrap();
+    let json = store
+        .export_time_series_associations_openapi(&ListFilter::default())
+        .unwrap();
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+    assert!(
+        rows.is_empty(),
+        "the export carries no persistent row: {rows:#?}"
+    );
+    // The row itself is untouched — omitted from a document, not from the store.
+    assert!(store.get_metadata_by_id(id).unwrap().is_some());
+
+    // A document from elsewhere can still name the type. Importing into the
+    // *same* store, which holds both the array and the axis: having them is
+    // exactly what would let this through if the type check missed.
+    let row = store.get_metadata_by_id(id).unwrap().unwrap();
+    let data_hash = infrastore_core::hash_hex(&row.data_hash);
+    // Any axis locator does: the discriminator check runs before a row's fields
+    // are looked at, let alone resolved against the store.
+    let axis = "00".repeat(32);
+    let document = format!(
+        r#"[{{
+             "association_id": 99,
+             "owner_id": 1,
+             "owner_type": "ThermalStandard",
+             "owner_category": "Component",
+             "time_series_type": "PersistentTimeSeries",
+             "name": "fuel_price",
+             "features": {{}},
+             "uri": "{data_hash}",
+             "data_hash": "{data_hash}",
+             "length": 2,
+             "timestamps_uri": "{axis}"
+           }}]"#
+    );
+    let err = store
+        .import_time_series_associations_openapi(&document)
+        .unwrap_err();
+    match err {
+        TimeSeriesError::InvalidParameter(msg) => {
+            assert!(msg.contains("PersistentTimeSeries"), "{msg}");
+            assert!(
+                msg.contains("one of the six the wire contract defines"),
+                "{msg}"
+            );
+        }
+        other => panic!("expected InvalidParameter, got {other:?}"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Windowed reads by id (`Store::read_by_id`).
 //

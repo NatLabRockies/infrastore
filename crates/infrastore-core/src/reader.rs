@@ -8,19 +8,36 @@
 //!
 //! # Design (locked 2026-06-25)
 //!
-//! * **One timeline per reader.** Every column shares one time axis: for
-//!   `SingleTimeSeries` a regular grid the build filter pins by resolution, for
-//!   `NonSequentialTimeSeries` one explicit timestamp vector — the same cohort
-//!   that pools their arrays on disk. See [`Timeline`].
+//! * **One timeline per reader** — with one exception, below. Every column
+//!   shares one time axis: for `SingleTimeSeries` a regular grid the build
+//!   filter pins by resolution, for `NonSequentialTimeSeries` one explicit
+//!   timestamp vector — the same cohort that pools their arrays on disk. See
+//!   [`Timeline`].
+//! * **The exception: `PersistentTimeSeries` columns may hold independent
+//!   breakpoint vectors.** A persistent series is a step function, so it has a
+//!   value at every instant from its first breakpoint onward — which means a
+//!   reader over several of them does not need them to line up. The motivating
+//!   data is per-fuel monthly price curves whose breakpoints genuinely do not.
+//!   Such a reader interns the distinct vectors and gives each column the id of
+//!   the one it resolves against; its **public axis is the sorted union** of
+//!   every vector, i.e. every instant at which *some* column changes value.
+//!   [`StaticReader::index_at`] reports a position on that union axis and is
+//!   **not** a storage row index — the read path resolves each column on its
+//!   own vector instead. See [`Timeline::Persistent`].
 //! * **Static and forecast are separate readers.** [`StaticReader`] serves the
 //!   static types; [`ForecastReader`] serves dense forecasts (one type per
 //!   reader, with `Deterministic` abstract over `DeterministicSingleTimeSeries`).
 //! * **Columnar batches.** Results are grouped by `(dtype, element_shape)` — the
 //!   same partition the packed datasets already use — so each group is a dense
 //!   `[num_columns, *element_shape]` typed buffer.
-//! * **No presence mask.** A reader is built over series that share one
-//!   timeline, validated at build (a divergent grid, or a second timestamp
-//!   vector, is an error), so every column has a value at every valid timestamp.
+//! * **No presence mask** — still true, including for the persistent exception.
+//!   A reader is built over series that share one timeline, validated at build
+//!   (a divergent grid, or a second timestamp vector, is an error), so every
+//!   column has a value at every valid timestamp. A persistent reader keeps
+//!   that property for a different reason: hold-last always resolves once `at`
+//!   is at or after a column's first breakpoint, and an `at` before some
+//!   column's first breakpoint is a hard error naming that column rather than
+//!   a hole in the result.
 //! * **Buffer reuse.** Each group owns its output buffer; [`Store::static_read`]
 //!   overwrites it in place, so a tight read loop allocates nothing per step.
 //! * **Off-timeline timestamps are a hard error** (see
@@ -60,6 +77,11 @@ pub struct StaticReader {
     time_reference: Option<TimeReference>,
     /// Columnar groups, in a deterministic order (by dtype code then shape).
     groups: Vec<StaticGroup>,
+    /// Scratch for a [`Timeline::Persistent`] read: the storage row in force at
+    /// the read instant, one entry per *interned vector*. Reused across reads
+    /// so a sweep allocates nothing, matching the buffer-reuse discipline the
+    /// groups already follow. Empty and untouched for the other timelines.
+    per_vector: Vec<usize>,
     /// Timestamp of the last successful [`Store::static_read`], for diagnostics.
     last_read: Option<DateTime<Utc>>,
 }
@@ -83,6 +105,25 @@ pub(crate) enum Timeline {
     /// `NonSequentialTimeSeries`: one explicit, strictly increasing vector,
     /// shared by every column (they are one storage cohort).
     Irregular { timestamps: Vec<DateTime<Utc>> },
+    /// `PersistentTimeSeries`: possibly *several* breakpoint vectors, one per
+    /// column, plus their union as the reader's public axis.
+    ///
+    /// The one place the "one timeline per reader" rule bends, and only because
+    /// a step function makes it safe to: every column has a value at every
+    /// instant from its own first breakpoint onward, so columns need not agree
+    /// on where their breakpoints fall for the result to be dense.
+    Persistent {
+        /// The distinct breakpoint vectors, interned. A column carries the
+        /// index of the one it resolves against (`StaticGroup::vector_ids`), so
+        /// a cohort of 50k series sharing one axis holds it once.
+        vectors: Vec<Vec<DateTime<Utc>>>,
+        /// Sorted, deduplicated union of every vector's breakpoints: the
+        /// instants at which *some* column changes value, and therefore the
+        /// only instants a sweep needs to visit. This is the reader's public
+        /// axis — [`StaticReader::length`], [`StaticReader::timestamp_at`] and
+        /// [`StaticReader::timestamps`] all speak in terms of it.
+        union: Vec<DateTime<Utc>>,
+    },
 }
 
 impl Timeline {
@@ -90,6 +131,7 @@ impl Timeline {
         match self {
             Timeline::Regular { length, .. } => *length,
             Timeline::Irregular { timestamps } => timestamps.len(),
+            Timeline::Persistent { union, .. } => union.len(),
         }
     }
 
@@ -99,6 +141,7 @@ impl Timeline {
         match self {
             Timeline::Regular { .. } => TimeSeriesType::SingleTimeSeries,
             Timeline::Irregular { .. } => TimeSeriesType::NonSequentialTimeSeries,
+            Timeline::Persistent { .. } => TimeSeriesType::PersistentTimeSeries,
         }
     }
 }
@@ -116,6 +159,19 @@ pub struct StaticGroup {
     ids: Vec<TimeSeriesId>,
     /// Content hash of each column's array, parallel to `ids`. Drives the read.
     hashes: Vec<[u8; 32]>,
+    /// For a [`Timeline::Persistent`] reader, which interned breakpoint vector
+    /// each column resolves against — parallel to `ids` and `hashes`. Empty
+    /// for the `Regular` and `Irregular` timelines, whose columns all resolve
+    /// on the one axis.
+    ///
+    /// Kept strictly parallel to the other two through the sort in
+    /// [`build_groups`], or a column would silently be resolved on another
+    /// column's breakpoints: plausible numbers, wrong ones.
+    vector_ids: Vec<usize>,
+    /// Scratch for a persistent read: `vector_ids` mapped through the reader's
+    /// per-vector row indices, giving one storage row per column. Sized once at
+    /// build so a read allocates nothing. Empty for the other timelines.
+    rows: Vec<usize>,
     /// Reused output buffer: `num_columns * element_count * dtype.size()` bytes.
     buf: Vec<u8>,
     /// Whether `buf` holds data from the most recent read.
@@ -200,6 +256,45 @@ impl StaticGroup {
         self.filled = true;
         Ok(())
     }
+
+    /// [`Self::fill`] for a [`Timeline::Persistent`] reader, where each column
+    /// reads a row of its own.
+    ///
+    /// `per_vector` is indexed by *interned vector id* — the reader resolved it
+    /// once for the whole read — and this maps it through the group's
+    /// `vector_ids` into one row per column, in key order, before handing the
+    /// pair to the backend.
+    pub(crate) fn fill_per_vector<F>(&mut self, per_vector: &[usize], read: F) -> Result<()>
+    where
+        F: FnOnce(&[[u8; 32]], Dtype, &[usize], &mut Vec<u8>) -> Result<()>,
+    {
+        // Destructured so the immutable read of `vector_ids` and the mutable
+        // fill of `rows` and `buf` are disjoint field borrows, not overlapping
+        // borrows of `self`.
+        let Self {
+            element_type,
+            vector_ids,
+            rows,
+            hashes,
+            buf,
+            filled,
+            ..
+        } = self;
+        rows.clear();
+        for &v in vector_ids.iter() {
+            let row = *per_vector.get(v).ok_or_else(|| {
+                TimeSeriesError::IntegrityError(format!(
+                    "reader column references breakpoint vector {v}, but the timeline \
+                     interned only {}",
+                    per_vector.len()
+                ))
+            })?;
+            rows.push(row);
+        }
+        read(hashes, element_type.physical_dtype(), rows, buf)?;
+        *filled = true;
+        Ok(())
+    }
 }
 
 impl StaticReader {
@@ -217,6 +312,9 @@ impl StaticReader {
             // Non-empty by construction: `build_groups` rejects an empty
             // irregular timeline, which would have no first timestamp to report.
             Timeline::Irregular { timestamps } => timestamps[0],
+            // Non-empty for the same reason: `build_groups` rejects a timeline
+            // of length zero, and the union is the persistent timeline's length.
+            Timeline::Persistent { union, .. } => union[0],
         }
     }
 
@@ -226,7 +324,7 @@ impl StaticReader {
     pub fn resolution(&self) -> Option<Period> {
         match &self.timeline {
             Timeline::Regular { resolution, .. } => Some(*resolution),
-            Timeline::Irregular { .. } => None,
+            Timeline::Irregular { .. } | Timeline::Persistent { .. } => None,
         }
     }
 
@@ -252,14 +350,6 @@ impl StaticReader {
         &self.groups
     }
 
-    pub(crate) fn groups_mut(&mut self) -> &mut [StaticGroup] {
-        &mut self.groups
-    }
-
-    pub(crate) fn mark_read(&mut self, at: DateTime<Utc>) {
-        self.last_read = Some(at);
-    }
-
     /// Drop every group's buffer and the timestamp they were read at.
     ///
     /// A read is one operation over the whole reader, so its failure has to
@@ -273,9 +363,10 @@ impl StaticReader {
     /// Resolving the timestamp can fail before any group is touched at all,
     /// which is the same hazard with none of them updated.
     ///
-    /// [`Store::static_read`] therefore calls this on *every* error path rather
-    /// than once before the loop: invalidating up front handles only the second
-    /// case, and leaves the first exactly as it was.
+    /// [`Store::static_read`] therefore calls this on the error path of
+    /// [`Self::read_at`], which is the one path every failure inside a read
+    /// lands on: invalidating up front handles only the second case, and leaves
+    /// the first exactly as it was.
     ///
     /// Public because a binding can refuse a read before the core sees it — the
     /// Julia wrapper checks the bound's spelling against the reader's timeline,
@@ -289,10 +380,22 @@ impl StaticReader {
         }
     }
 
-    /// Map a wall-clock timestamp to its 0-based array index on the reader's
+    /// Map a wall-clock timestamp to its 0-based index on the reader's
     /// timeline. Errors (never clamps) if `at` is not a point on it — before the
     /// start, off-grid or absent from the vector, or past the end. The
     /// simulation contract is that it only ever reads valid points.
+    ///
+    /// # Not a storage index on a persistent reader
+    ///
+    /// For a [`Timeline::Persistent`] reader this is a position on the reader's
+    /// **union axis** — the merged breakpoints of every column — and is
+    /// emphatically *not* the row to read from any column's array: each column
+    /// sits on its own breakpoint vector and resolves its own row, which
+    /// [`Store::static_read`] does per column. Use this to locate an instant on
+    /// [`Self::timestamps`], never to index storage. (It also holds the last
+    /// value forward rather than requiring an exact hit, since that is what a
+    /// step function means; only an `at` before the very first breakpoint is an
+    /// error.)
     pub fn index_at(&self, at: DateTime<Utc>) -> Result<usize> {
         match &self.timeline {
             Timeline::Regular {
@@ -310,6 +413,19 @@ impl StaticReader {
                     timestamps.len()
                 ))
             }),
+            // Hold-last on the *union*, because a step function has a value
+            // between its breakpoints. Only the lower end is a hard error.
+            Timeline::Persistent { union, .. } => crate::timestamps::index_in_force_at(union, at)
+                .ok_or_else(|| {
+                    TimeSeriesError::InvalidParameter(format!(
+                        "timestamp {at} is before the reader's first breakpoint ({}), where a \
+                         step function is undefined",
+                        union
+                            .first()
+                            .map(|t| t.to_string())
+                            .unwrap_or_else(|| "<none>".into())
+                    ))
+                }),
         }
     }
 
@@ -329,6 +445,12 @@ impl StaticReader {
                 TimeSeriesError::InvalidParameter(format!(
                     "index {index} is past the timeline extent ({})",
                     timestamps.len()
+                ))
+            }),
+            Timeline::Persistent { union, .. } => union.get(index).copied().ok_or_else(|| {
+                TimeSeriesError::InvalidParameter(format!(
+                    "index {index} is past the timeline extent ({})",
+                    union.len()
                 ))
             }),
         }
@@ -357,6 +479,125 @@ impl StaticReader {
             self.timestamp_at(k)
                 .expect("timestamp on the reader timeline is representable")
         })
+    }
+
+    /// Fill every group's buffer with the value of each column at `at`.
+    ///
+    /// The two closures are the backend seam, kept out of this module so the
+    /// reader stays a passive plan that does not borrow the [`Store`]:
+    /// `uniform` reads one row index across a whole batch of hashes
+    /// ([`crate::storage::StorageBackend::read_index_into`]), `scattered` reads
+    /// a row *per column* ([`crate::storage::StorageBackend::read_indices_into`]).
+    ///
+    /// Which one runs is decided by the timeline, once per read:
+    ///
+    /// * `Regular` / `Irregular` — one index for every column, resolved by
+    ///   [`Self::index_at`], so `uniform` handles the whole reader.
+    /// * `Persistent` — one index per *interned breakpoint vector*, resolved
+    ///   into the reusable `per_vector` scratch and then mapped per column by
+    ///   [`StaticGroup::fill_per_vector`], so `scattered` handles it.
+    ///
+    /// Driven by [`Store::static_read`], which supplies the two closures.
+    pub(crate) fn read_at<U, S>(
+        &mut self,
+        at: DateTime<Utc>,
+        uniform: U,
+        scattered: S,
+    ) -> Result<()>
+    where
+        U: Fn(&[[u8; 32]], Dtype, usize, &mut Vec<u8>) -> Result<()>,
+        S: Fn(&[[u8; 32]], Dtype, &[usize], &mut Vec<u8>) -> Result<()>,
+    {
+        // Disjoint field borrows: the timeline is read while the groups and the
+        // scratch are written.
+        let Self {
+            timeline,
+            groups,
+            per_vector,
+            last_read,
+            ..
+        } = self;
+        match timeline {
+            Timeline::Regular { .. } | Timeline::Irregular { .. } => {
+                let index = index_on_timeline(timeline, at)?;
+                for group in groups.iter_mut() {
+                    group.fill(|hashes, dtype, out| uniform(hashes, dtype, index, out))?;
+                }
+            }
+            Timeline::Persistent { vectors, .. } => {
+                per_vector.clear();
+                for (v, breakpoints) in vectors.iter().enumerate() {
+                    let row = crate::timestamps::index_in_force_at(breakpoints, at)
+                        .ok_or_else(|| before_first_breakpoint(groups, v, breakpoints, at))?;
+                    per_vector.push(row);
+                }
+                for group in groups.iter_mut() {
+                    group.fill_per_vector(per_vector, |hashes, dtype, rows, out| {
+                        scattered(hashes, dtype, rows, out)
+                    })?;
+                }
+            }
+        }
+        *last_read = Some(at);
+        Ok(())
+    }
+}
+
+/// [`StaticReader::index_at`] against a borrowed timeline, so [`StaticReader::read_at`]
+/// can call it while holding the groups mutably.
+fn index_on_timeline(timeline: &Timeline, at: DateTime<Utc>) -> Result<usize> {
+    match timeline {
+        Timeline::Regular {
+            initial,
+            resolution,
+            length,
+        } => index_on_grid(*initial, *resolution, *length, at, "grid"),
+        Timeline::Irregular { timestamps } => timestamps.binary_search(&at).map_err(|_| {
+            TimeSeriesError::InvalidParameter(format!(
+                "timestamp {at} is not on the reader's timeline (an irregular timeline has                  no value between its timestamps, so only the {} stored instants are                  readable)",
+                timestamps.len()
+            ))
+        }),
+        Timeline::Persistent { .. } => Err(TimeSeriesError::IntegrityError(
+            "a persistent timeline resolves a row per column, not one for the reader".into(),
+        )),
+    }
+}
+
+/// The error for a persistent read at an instant before interned vector `v`'s
+/// first breakpoint.
+///
+/// Names a *column* that sits on that vector, not just the vector's index: a
+/// reader may hold tens of thousands of columns, and "some column starts later
+/// than this" is not something a caller can act on. A group holds ids rather
+/// than rows, so the id is what the message carries — enough to look the series
+/// up with [`Store::get_metadata_by_id`]. Falls back to the vector's own
+/// description if no column claims it, which cannot happen for a reader built
+/// by [`Store::build_static_reader`] but is not worth panicking over.
+fn before_first_breakpoint(
+    groups: &[StaticGroup],
+    vector: usize,
+    breakpoints: &[DateTime<Utc>],
+    at: DateTime<Utc>,
+) -> TimeSeriesError {
+    let first = breakpoints
+        .first()
+        .map(|t| t.to_string())
+        .unwrap_or_else(|| "<none>".into());
+    let named = groups.iter().find_map(|g| {
+        let column = g.vector_ids.iter().position(|&v| v == vector)?;
+        Some(*g.ids.get(column)?)
+    });
+    match named {
+        Some(id) => TimeSeriesError::InvalidParameter(format!(
+            "timestamp {at} is before the first breakpoint ({first}) of PersistentTimeSeries \
+             association {id}, where a step function is undefined. Start the sweep at or after \
+             that instant, or narrow the reader so it excludes that series."
+        )),
+        None => TimeSeriesError::InvalidParameter(format!(
+            "timestamp {at} is before the first breakpoint ({first}) of one of the reader's \
+             breakpoint vectors, where a step function is undefined"
+        )),
     }
 }
 
@@ -509,8 +750,28 @@ fn cohort_time_reference<'a>(
 /// bounds part-way through a sweep.
 pub(crate) fn build_groups(
     timeline: Timeline,
-    mut rows: Vec<TimeSeriesMetadata>,
+    rows: Vec<TimeSeriesMetadata>,
 ) -> Result<StaticReader> {
+    // Every column resolves on the reader's single axis, so the vector id is a
+    // constant nobody reads. `build_groups_inner` leaves `vector_ids` empty for
+    // these timelines.
+    build_groups_inner(timeline, rows.into_iter().map(|r| (r, 0)).collect())
+}
+
+/// [`build_groups`] for a [`Timeline::Persistent`] reader, where each row
+/// carries the id of the interned breakpoint vector it resolves against.
+pub(crate) fn build_groups_persistent(
+    timeline: Timeline,
+    rows: Vec<(TimeSeriesMetadata, usize)>,
+) -> Result<StaticReader> {
+    build_groups_inner(timeline, rows)
+}
+
+fn build_groups_inner(
+    timeline: Timeline,
+    mut rows: Vec<(TimeSeriesMetadata, usize)>,
+) -> Result<StaticReader> {
+    let persistent = matches!(timeline, Timeline::Persistent { .. });
     if rows.is_empty() {
         return Err(TimeSeriesError::InvalidParameter(format!(
             "build_static_reader: no {} match the filter",
@@ -522,7 +783,7 @@ pub(crate) fn build_groups(
             "build_static_reader: the matched series have no timestamps to read".into(),
         ));
     }
-    for r in &rows {
+    for (r, vector_id) in &rows {
         if r.time_series_type != timeline.time_series_type() {
             return Err(TimeSeriesError::InvalidParameter(format!(
                 "StaticReader for {} cannot hold {} '{}'",
@@ -531,26 +792,53 @@ pub(crate) fn build_groups(
                 r.name
             )));
         }
-        if r.length != Some(timeline.length()) {
+        // A column has to span its whole axis, or a sweep reads out of bounds
+        // part-way through. Which axis that is differs: a uniform reader has
+        // one, and a persistent reader gives each column the length of the
+        // breakpoint vector it was interned against.
+        let expected = match &timeline {
+            Timeline::Persistent { vectors, .. } => {
+                vectors.get(*vector_id).map(Vec::len).ok_or_else(|| {
+                    TimeSeriesError::IntegrityError(format!(
+                        "series '{}' (owner {}) references breakpoint vector {vector_id}, but \
+                         the timeline interned only {}",
+                        r.name,
+                        r.owner_id,
+                        vectors.len()
+                    ))
+                })?
+            }
+            _ => timeline.length(),
+        };
+        if r.length != Some(expected) {
             return Err(TimeSeriesError::InvalidParameter(format!(
                 "StaticReader requires a uniform timeline; series '{}' (owner {}) has length \
-                 {:?} but the reader timeline has {}",
+                 {:?} but {} {expected}",
                 r.name,
                 r.owner_id,
                 r.length,
-                timeline.length()
+                if persistent {
+                    "its breakpoint vector has"
+                } else {
+                    "the reader timeline has"
+                },
             )));
         }
     }
 
-    let time_reference = cohort_time_reference("StaticReader", &rows)?;
+    let time_reference = cohort_time_reference("StaticReader", rows.iter().map(|(r, _)| r))?;
 
     // Deterministic layout: order by element type, then element shape, then key
     // identity, so column positions are stable across processes. Grouping on the
     // logical element type rather than the physical dtype keeps a group uniform
     // in meaning as well as in bytes — a quadratic-cost column never shares a
     // group with a plain 3-tuple column that happens to have the same layout.
-    rows.sort_by(|a, b| {
+    //
+    // The row and its vector id are sorted *together*, as one item: they are
+    // parallel data, and sorting the rows alone would leave every persistent
+    // column resolving on some other column's breakpoints — plausible numbers,
+    // wrong ones, and no error anywhere.
+    rows.sort_by(|(a, _), (b, _)| {
         a.element_type
             .cmp(&b.element_type)
             .then_with(|| a.element_shape.cmp(&b.element_shape))
@@ -558,7 +846,7 @@ pub(crate) fn build_groups(
     });
 
     let mut groups: Vec<StaticGroup> = Vec::new();
-    for r in rows {
+    for (r, vector_id) in rows {
         let want = (r.element_type, r.element_shape.as_slice());
         let push_new = groups
             .last()
@@ -570,6 +858,8 @@ pub(crate) fn build_groups(
                 element_shape: r.element_shape.clone(),
                 ids: Vec::new(),
                 hashes: Vec::new(),
+                vector_ids: Vec::new(),
+                rows: Vec::new(),
                 buf: Vec::new(),
                 filled: false,
             });
@@ -579,6 +869,9 @@ pub(crate) fn build_groups(
             TimeSeriesError::IntegrityError("a reader column carries no catalog id".into())
         })?);
         g.hashes.push(r.data_hash);
+        if persistent {
+            g.vector_ids.push(vector_id);
+        }
     }
 
     // Pre-size each reuse buffer so the read loop never reallocates.
@@ -586,12 +879,21 @@ pub(crate) fn build_groups(
         let bytes = g.num_columns() * g.elements_per_column() * g.dtype().size();
         g.buf = vec![0u8; bytes];
         g.buf.clear();
+        if persistent {
+            g.rows = Vec::with_capacity(g.num_columns());
+        }
     }
+
+    let per_vector = match &timeline {
+        Timeline::Persistent { vectors, .. } => Vec::with_capacity(vectors.len()),
+        _ => Vec::new(),
+    };
 
     Ok(StaticReader {
         timeline,
         time_reference,
         groups,
+        per_vector,
         last_read: None,
     })
 }

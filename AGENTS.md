@@ -15,29 +15,38 @@ SQLite. It exposes multiple bindings over a shared core:
   and inspects a store, talking directly to the on-disk HDF5 + SQLite artifact (read+write; no
   gRPC). Output uses a global `-f/--format table|json|csv`.
 
-**Current feature coverage:** `SingleTimeSeries` and `NonSequentialTimeSeries` are implemented
-end-to-end (read+write in the Rust core, C ABI, Python, and Julia; read-only over gRPC).
-`Deterministic`, `DeterministicSingleTimeSeries`, `Probabilistic`, and `Scenarios` support reading
-values across the Rust core, C ABI, Python, Julia, and gRPC. Dense forecasts (`Deterministic`,
-`Probabilistic`, `Scenarios`) are written through the generic `add_time_series` by passing the
-matching forecast object across the Rust core, Python, and Julia (the C ABI keeps per-type
+**Current feature coverage:** `SingleTimeSeries`, `NonSequentialTimeSeries`, and
+`PersistentTimeSeries` are implemented end-to-end (read+write in the Rust core, C ABI, Python,
+Julia, and the CLI; read-only over gRPC). A `PersistentTimeSeries` is a **sparse step function**:
+breakpoints plus one value each, holding the last value forward, undefined before the first
+breakpoint (an error, not a clamp). It is structurally identical to `NonSequentialTimeSeries` and
+shares its storage — the difference is entirely in read semantics. A `StaticReader` over
+`PersistentTimeSeries` columns is the one exception to "one timeline per reader": its columns may
+sit on independent breakpoint vectors, and the reader's axis is their union. `Deterministic`,
+`DeterministicSingleTimeSeries`, `Probabilistic`, and `Scenarios` support reading values across the
+Rust core, C ABI, Python, Julia, and gRPC. Dense forecasts (`Deterministic`, `Probabilistic`,
+`Scenarios`) are written through the generic `add_time_series` by passing the matching forecast
+object across the Rust core, Python, and Julia (the C ABI keeps per-type
 `infrastore_store_add_forecast` / `infrastore_store_add_probabilistic` as low-level transport);
 `DeterministicSingleTimeSeries` is derived from stored `SingleTimeSeries` via
 `transform_single_time_series` rather than added directly. The gRPC service is read-only — every RPC
 it defines is a read — so no time-series type can be written over it. Arrays are dtype-generic
 (`f64`/`f32`/`i64`/`i32`/`u64`/`bool` in every binding, including Python) and may have
 multidimensional per-timestep values. Auth is `none` (default) or `api_key` via the `x-api-key`
-header. See `README.md` and `docs/src/explanation/data-model.md` for the authoritative feature
-matrix.
+header. See `README.md`, `docs/src/explanation/time-series-types.md`, and
+`docs/src/explanation/bindings.md` for the authoritative feature matrix.
 
 The two association catalogs also round-trip as OpenAPI-row JSON in SiennaSchemas' wire spelling,
 which is what lets an artifact be read back from **arrays plus a document alone**, with no `.sqlite`
 carried along: `Store::open_without_catalog` opens the array half of such a bundle and mints an
 empty catalog stamped to match, and the imports replay the rows into it, association ids preserved.
 Incoming rows are validated against the schemas vendored at `crates/infrastore-core/sienna_schemas/`
-and compiled into the crate. All six time-series types round-trip: a `NonSequentialTimeSeries`
-locates its time axis with `timestamps_uri`, which it needs because content-addressed arrays are
-shared across axes and so cannot imply one.
+and compiled into the crate. All six of the types the wire contract defines round-trip: a
+`NonSequentialTimeSeries` locates its time axis with `timestamps_uri`, which it needs because
+content-addressed arrays are shared across axes and so cannot imply one. A `PersistentTimeSeries`
+does not — it is an infrastore-local extension outside the vendored `oneOf`, so the export omits its
+rows (and refuses a filter that names the type) and the import rejects one a foreign document
+carries.
 
 ## Code Quality Requirements
 

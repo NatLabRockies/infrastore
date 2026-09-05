@@ -273,6 +273,80 @@ function NonSequentialTimeSeries(
     )
 end
 
+# ---- Persistent time series -----------------------------------------------
+#
+# A sparse step function: breakpoints plus one value each, holding the last
+# value forward. Structurally identical to `NonSequentialTimeSeries` above --
+# same fields, same constructor, same spelling inference -- and stored
+# identically. What differs is the read: the value at breakpoint `i` stays in
+# force until breakpoint `i + 1`, and past the last one forever, where a
+# `NonSequentialTimeSeries` has no value between its timestamps at all. There is
+# no value before the first breakpoint, and asking for one is an error rather
+# than a clamp.
+
+struct PersistentTimeSeries{T, N}
+    timestamps::Vector{DateTime}
+    "Values: a 1-D vector (one per breakpoint) or N-D array (dim 1 = time, one entry per breakpoint)."
+    data::Array{T, N}
+    "Association name (required)."
+    name::String
+    "Opaque, package-owned extension payload (typically JSON) the binding writes and reads to reconstruct domain objects; the store never interprets it."
+    application_data::Union{Nothing, String}
+    "Canonical `element_type` string, or `nothing` for plain scalars of `eltype(data)`."
+    element_type::Union{Nothing, String}
+    "User-declared units label for the values (e.g. `\"MW\"`), or `nothing`. Set at construction and returned on read; the store never interprets or validates it, and it is never part of a series' identity."
+    units::Union{Nothing, String}
+    "What kind of physical quantity the values measure (e.g. `\"ActivePower\"`), or `nothing`. Free-form; QUDT `QuantityKind` local names are the recommended vocabulary. It separates active from reactive power, which dimensional analysis alone cannot, and it is the only record of what per-unit values measure."
+    quantity_kind::Union{Nothing, String}
+    "Which basis the values are expressed in (a `UnitSystem`), or `nothing` for unspecified -- which is not the same as `NaturalUnits`."
+    unit_system::Union{Nothing, UnitSystem}
+    "The field on the owning component whose value these values are the time-varying form of (e.g. `\"max_active_power\"`), or `nothing`. Free-form and never interpreted by the store: it names a field in the consumer's own object model. Descriptive, so it is never part of a series' identity."
+    component_field::Union{Nothing, String}
+    "How the timestamps were spelled (a [`TimeReference`](@ref)), or `nothing` for unspecified. Inferred from the timestamp the constructor was handed -- a bare `DateTime` is a wall clock and records `ZonelessReference()`, a `ZonedDateTime` records the spelling its zone names -- unless `time_reference=` overrides it. Passing `time_reference=nothing` explicitly declares *unspecified*, which is what a read hands back for a series that recorded no spelling, and is not the same as a wall clock. Descriptive: it changes nothing about the stored instants, the grid, or either content hash."
+    time_reference::Union{Nothing, TimeReference}
+end
+
+# Infer `{T,N}` from the value array; views/ranges are normalized to a concrete
+# `Array`. Breakpoints are explicit and must be strictly increasing, with one
+# entry per leading-dimension row (`size(data, 1)`).
+function PersistentTimeSeries(
+    timestamps,
+    data::AbstractArray,
+    name::AbstractString;
+    application_data::Union{Nothing, AbstractString}=nothing,
+    element_type::Union{Nothing, AbstractString}=nothing,
+    units::Union{Nothing, AbstractString}=nothing,
+    quantity_kind::Union{Nothing, AbstractString}=nothing,
+    unit_system::Union{Nothing, UnitSystem, AbstractString}=nothing,
+    component_field::Union{Nothing, AbstractString}=nothing,
+    time_reference::TimeReferenceArg=INFERRED,
+)
+    length(timestamps) == size(data, 1) ||
+        throw(InvalidParameterError("breakpoint count must match data length"))
+    # The spelling is read off the vector before it is normalized -- afterwards
+    # every element is a bare `DateTime` and the intent is gone.
+    reference = _vector_time_reference(timestamps)
+    # Normalize first, then check: a vector mixing zones (or `ZonedDateTime`s
+    # from different ones) is ordered by the instants it names, not by the wall
+    # clocks it reads.
+    timestamps = DateTime[_utc_datetime(t) for t in timestamps]
+    all(timestamps[i] < timestamps[i + 1] for i in 1:(length(timestamps) - 1)) ||
+        throw(InvalidParameterError("breakpoints must be strictly increasing"))
+    arr = data isa Array ? data : Array(data)
+    return PersistentTimeSeries{eltype(arr), ndims(arr)}(
+        timestamps,
+        arr,
+        String(name),
+        _maybe_string(application_data),
+        _declared_element_type(element_type, data),
+        _maybe_string(units),
+        _maybe_string(quantity_kind),
+        _unit_system(unit_system),
+        _maybe_string(component_field),
+        time_reference isa _Inferred ? reference : _time_reference(time_reference),
+    )
+end
+
 # ---- Forecast types -------------------------------------------------------
 #
 # Dense forecasts mirror the InfrastructureSystems.jl objects. `data` is a Julia

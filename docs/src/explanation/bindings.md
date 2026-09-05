@@ -118,7 +118,7 @@ pair directly and supports both reads and writes. Its shape:
 
 - **CSV in, store out.** Numeric values come from a CSV; the metadata that does not fit a flat grid
   (owner, name, type, dtype, resolution, timestamps, units, features) is described in a descriptor
-  JSON. All six dtypes and all five writable types are supported, forecasts included.
+  JSON. All six dtypes and all six writable types are supported, forecasts included.
 - **A global `-f/--format` selects `table` (default), `json`, `jsonl`, or `csv`.** Read commands
   render their results in it; write commands report their outcome in it (prose under `table`, a
   one-object status document under `json`/`jsonl`). Only `template` ignores it.
@@ -150,6 +150,7 @@ asymmetry is that the read-only gRPC server does not accept any writes:
 | ----------------------------- | --------- | ----- | ------ | ----- | ------ | ----------- |
 | `SingleTimeSeries` r/w        | ✅        | ✅    | ✅     | ✅    | ✅     | read-only   |
 | `NonSequentialTimeSeries` r/w | ✅        | ✅    | ✅     | ✅    | ✅     | read-only   |
+| `PersistentTimeSeries` r/w    | ✅        | ✅    | ✅     | ✅    | ✅     | read-only   |
 | dtypes beyond `f64`           | ✅        | ✅    | ✅     | ✅    | ✅     | read-only   |
 | Create forecasts              | ✅        | ✅    | ✅     | ✅    | ✅     | ❌          |
 | Read forecast values          | ✅        | ✅    | ✅     | ✅    | ✅     | ✅          |

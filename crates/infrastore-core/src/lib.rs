@@ -56,8 +56,8 @@ pub use types::{
     period::Period,
     time_reference::{TimeRange, TimeReference},
     time_series::{
-        Descriptors, Deterministic, NonSequentialTimeSeries, Probabilistic, Scenarios,
-        SingleTimeSeries, TimeSeriesData, TimeSeriesType,
+        Descriptors, Deterministic, NonSequentialTimeSeries, PersistentTimeSeries, Probabilistic,
+        Scenarios, SingleTimeSeries, TimeSeriesData, TimeSeriesType,
     },
 };
 pub use version::{Compat, DATA_FORMAT_VERSION, MIN_UPGRADABLE_VERSION, compatibility};

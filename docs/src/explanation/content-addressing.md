@@ -69,9 +69,10 @@ source's array.
 
 ## The Timestamps Hash
 
-A `NonSequentialTimeSeries` carries its timestamps explicitly, and those are content-addressed too,
-by `timestamps_hash`: a domain tag, the count, then each instant as a unix millisecond count — the
-same values the store writes, so the hash addresses the stored form rather than a second
+A `NonSequentialTimeSeries` carries its timestamps explicitly — as does a `PersistentTimeSeries`,
+whose breakpoints are the same thing under a different reading — and those are content-addressed
+too, by `timestamps_hash`: a domain tag, the count, then each instant as a unix millisecond count —
+the same values the store writes, so the hash addresses the stored form rather than a second
 serialization of it. Two vectors hash equal exactly when they hold the same instants in the same
 order.
 

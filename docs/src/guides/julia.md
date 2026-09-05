@@ -64,10 +64,10 @@ call, in the same shell that launched Julia. To use the checkout from your own p
 using Dates, InfraStore
 ```
 
-Exported names include `Store`, `SingleTimeSeries`, `NonSequentialTimeSeries`, the forecast structs
-(`Deterministic`, `Probabilistic`, `Scenarios`), `OwnerCategory` (`Component`,
-`SupplementalAttribute`), the `add_time_series!` / `read_by_id` / `list_metadata` family, and
-`transform_single_time_series!`. The store type is named **`Store`**.
+Exported names include `Store`, `SingleTimeSeries`, `NonSequentialTimeSeries`,
+`PersistentTimeSeries`, the forecast structs (`Deterministic`, `Probabilistic`, `Scenarios`),
+`OwnerCategory` (`Component`, `SupplementalAttribute`), the `add_time_series!` / `read_by_id` /
+`list_metadata` family, and `transform_single_time_series!`. The store type is named **`Store`**.
 
 ## Open or Create a Store
 
@@ -130,6 +130,8 @@ Notes:
   `Bool`, `String`). String features are supported and round-trip unchanged.
 - Adding a duplicate [identity](../explanation/data-model.md#identity) throws
   `DuplicateTimeSeriesError`.
+- For a sparse **step function** — a monthly fuel price, say — use `PersistentTimeSeries`, worked
+  through in [Step Functions](#step-functions-persistenttimeseries).
 
 `add_time_series!` returns the catalog row's `id` as an `Int64` (see
 [Association ids](../explanation/data-model.md#association-ids)). Every read, removal and copy takes
@@ -389,13 +391,13 @@ grid = static_grid(reader)                 # StaticGrid: initial_timestamp, reso
 for k in 0:(grid.length - 1)
     static_read!(reader, grid.initial_timestamp + grid.resolution * k)
     for (gi, g) in enumerate(static_groups(reader))
-        vals = static_values(reader, gi)   # (num_columns, element_dims...); column j ↔ g.keys[j]
+        vals = static_values(reader, gi)   # (num_columns, element_dims...); column j ↔ g.ids[j]
     end
 end
 ```
 
 Series are grouped by `(dtype, element_shape)`; each group's `static_values` is one dense array
-whose columns line up with the group's `keys`. All matched series must share one grid
+whose columns line up with the group's `ids`. All matched series must share one grid
 (`initial_timestamp` + `length`), validated at build.
 
 ### Forecasts
@@ -430,6 +432,120 @@ for (i, e) in enumerate(forecast_entries(reader))
     w = get!(() -> forecast_values(reader, i), windows, e.slot)
     # apply w to e.key's owner
 end
+```
+
+## Step Functions (`PersistentTimeSeries`)
+
+A `PersistentTimeSeries` is a sparse **step function**: a strictly increasing vector of
+_breakpoints_ plus one value each, where the value at an arbitrary instant is the one belonging to
+the greatest breakpoint at or before it. The motivating data is a monthly fuel or gas price curve —
+a dozen breakpoints a simulation reads at timestamps that almost never land on one. The same curve
+stored as a `NonSequentialTimeSeries` would throw at nearly every step, because an irregular series
+has **no** value between its timestamps; that difference in read semantics is the whole reason this
+is a separate type. See
+[Time series types](../explanation/time-series-types.md#persistenttimeseries) for the model.
+
+### Build and add
+
+The struct takes the same arguments as `NonSequentialTimeSeries` — and, like every series struct
+here, its descriptors as keywords. A bare `DateTime` is read as a wall clock and a `ZonedDateTime`
+as the instant it names, exactly as for the other types:
+
+```julia
+breakpoints = [DateTime(2024, m, 1) for m in (1, 4, 7, 10)]
+prices = PersistentTimeSeries(
+    breakpoints,
+    [3.5, 4.25, 5.0, 4.75],
+    "gas_price";
+    units = "USD/MMBtu",
+    component_field = "fuel_cost",
+    # Whether a curve is expanded to a full series or collapsed to one scalar is
+    # your application's policy, and rides here where the store never reads it.
+    application_data = """{"as_time_series":false,"force_scalar_mode":"midpoint"}""",
+)
+id = add_time_series!(store, 7, "ThermalStandard", Component, prices)
+
+got = read_by_id(store, id)              # a PersistentTimeSeries; `timestamps` are the breakpoints
+get_metadata_by_id(store, id).time_series_type <: PersistentTimeSeries   # `<:`, not `==`
+```
+
+A metadata row's `time_series_type` is the full parameterized type
+(`PersistentTimeSeries{Float64, 1}`), so ask which kind a row is with `<:`. Every type-taking call —
+a `time_series_type` filter, `has_time_series`, either reader — accepts the bare spelling and the
+parameterized one alike.
+
+### Read a window
+
+`read_by_ids`' `time_range` slices on the step function's own terms: the result begins at the
+breakpoint _in force at_ the start, so it always defines a value at the start of the window you
+asked for.
+
+```julia
+sliced = only(
+    read_by_ids(store, [id]; time_range = (DateTime(2024, 4, 10), DateTime(2024, 9, 1))),
+)
+sliced.timestamps   # [2024-04-01T00:00:00, 2024-07-01T00:00:00] — April, not the first one inside
+sliced.data         # [4.25, 5.0]
+```
+
+Past the last breakpoint the last value holds forever, so a window opening after the end comes back
+with that one row. **Before** the first breakpoint a step function is undefined: a non-empty window
+starting there throws `InvalidParameterError` rather than clamping. (A zero-width range selects
+nothing, here as for every type.) `read_by_id`'s `start_time` + `len` window is _checked_ rather
+than sliced, so it must name one of the breakpoints; reach for the `time_range` form when the
+instant is arbitrary.
+
+### Sweep step functions in the simulation loop
+
+A `StaticReader` filtered to the type is the per-timestamp path, and it is the one place the
+[one-timeline-per-reader](../explanation/readers.md#one-timeline-per-reader) rule bends: a step
+function has a value at every instant from its own first breakpoint on, so the columns need **not**
+share a breakpoint vector. Per-fuel curves whose breakpoints do not line up still build one reader.
+
+```julia
+reader = build_static_reader(
+    store;
+    time_series_type = PersistentTimeSeries,   # no resolution — passing one throws
+    component_field = "fuel_cost",
+)
+grid = static_grid(reader)                 # grid.resolution === nothing: no constant step
+for at in static_timestamps(reader)        # the sorted union of every column's breakpoints
+    static_read!(reader, at)
+    for (gi, g) in enumerate(static_groups(reader))
+        vals = static_values(reader, gi)   # the value in force at `at`; column j ↔ g.ids[j]
+    end
+end
+```
+
+`static_timestamps` is the **union** of the columns' breakpoints, so a position on it is not a
+storage row for any one column — each column independently reports the value in force there. There
+is still no presence mask: reading at an instant before some column's first breakpoint throws
+`InvalidParameterError` naming that column's association id. Either filter the reader down to
+columns that start early enough, or begin the sweep at the latest first breakpoint among them.
+
+The sweep need not follow that union axis at all. `static_read!` accepts any instant every column
+defines a value at, so driving this reader at your `SingleTimeSeries` grid's timestamps — the
+simulation's own clock — works and is usually what an application wants:
+
+```julia
+for at in static_timestamps(load_reader)   # the hourly grid the simulation runs on
+    static_read!(load_reader, at)
+    static_read!(reader, at)               # each fuel price, held forward to this hour
+end
+```
+
+### These rows do not travel in an OpenAPI document
+
+`PersistentTimeSeries` is an infrastore-local extension, and the vendored wire contract is a `oneOf`
+over six canonical Sienna types with no schema for a seventh. So
+`export_time_series_associations_openapi` **omits** persistent rows — a mixed store still exports
+its six-type rows — a filter naming the type throws `InvalidParameterError` rather than answering
+with an empty array, and an import refuses a document that carries one. The series themselves are
+unaffected: they live in the artifact, which holds them in full. Ask the catalog what a document
+leaves behind:
+
+```julia
+left_behind = list_metadata(store; time_series_type = PersistentTimeSeries)
 ```
 
 ## Store-Wide Operations

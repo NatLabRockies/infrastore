@@ -66,9 +66,9 @@ from infrastore import Store, SingleTimeSeries, OwnerCategory, TimeSeriesType
 ```
 
 The module exposes `Store` and `Transaction`; the static series classes `SingleTimeSeries` and
-`NonSequentialTimeSeries`; the forecast classes `Deterministic`, `Probabilistic`, and `Scenarios`;
-the readers `StaticReader` and `ForecastReader`; the association records
-`SupplementalAttributeAssociation` and `ParentChildAssociation`; the `TimeSeriesType` and
+`NonSequentialTimeSeries`, and `PersistentTimeSeries`; the forecast classes `Deterministic`,
+`Probabilistic`, and `Scenarios`; the readers `StaticReader` and `ForecastReader`; the association
+records `SupplementalAttributeAssociation` and `ParentChildAssociation`; the `TimeSeriesType` and
 `OwnerCategory` enums; the `init_tracing` and `decode_element_values` functions; `__version__`; and
 an exception hierarchy rooted at `TimeSeriesError`.
 
@@ -112,7 +112,9 @@ NumPy arrays of `float64`, `float32`, `int64`, `int32`, `int16`, `int8`, `uint64
 multi-dimensional: shape `(length,)` for scalar steps, or `(length, k1, …)` to attach a per-step
 element shape (such as cost-curve coefficients). The required `name` is an association attribute
 carried on the object — the same array can be added under different names. Use
-`NonSequentialTimeSeries(timestamps, data, name)` for explicitly timestamped series.
+`NonSequentialTimeSeries(timestamps, data, name)` for explicitly timestamped series, and
+`PersistentTimeSeries(timestamps, data, name)` for a sparse step function whose value holds forward
+between breakpoints (worked through in [Step Functions](#step-functions-persistenttimeseries)).
 
 ## Add a Series
 
@@ -239,9 +241,9 @@ window = store.read_by_ids_range(ids, (start, end))   # the same clip on every s
 
 Every `datetime` must be timezone-aware (any zone; converted to UTC on the way in, UTC on the way
 out), and a naive one raises `InvalidParameterError`. A **stored** instant — an initial timestamp, a
-`NonSequentialTimeSeries` timestamp — must also be a whole number of milliseconds, so quantize
-`datetime.now(timezone.utc)` before storing it; query bounds such as `time_range` are unconstrained.
-See [Datetimes](../reference/python-api.md#datetimes).
+`NonSequentialTimeSeries` timestamp or `PersistentTimeSeries` breakpoint — must also be a whole
+number of milliseconds, so quantize `datetime.now(timezone.utc)` before storing it; query bounds
+such as `time_range` are unconstrained. See [Datetimes](../reference/python-api.md#datetimes).
 
 ## Per-Timestamp Reads (Simulation Loop)
 
@@ -299,6 +301,116 @@ store.forecast_read(reader, ts)
 windows: dict[int, np.ndarray] = {}
 for i, key in enumerate(entries):
     window = windows.setdefault(reader.entry_slot(i), reader.entry_values(i))
+```
+
+## Step Functions (`PersistentTimeSeries`)
+
+A `PersistentTimeSeries` is a sparse **step function**: a strictly increasing vector of
+_breakpoints_ plus one value each, where the value at an arbitrary instant is the one belonging to
+the greatest breakpoint at or before it. The motivating data is a monthly fuel or gas price curve —
+a dozen breakpoints a simulation reads at timestamps that almost never land on one. The same curve
+stored as a `NonSequentialTimeSeries` would raise at nearly every step, because an irregular series
+has **no** value between its timestamps; that difference in read semantics is the whole reason this
+is a separate type. See
+[Time series types](../explanation/time-series-types.md#persistenttimeseries) for the model.
+
+### Build and add
+
+Construction is identical to `NonSequentialTimeSeries` — same arguments, same validation, same
+spelling inference from `tzinfo`:
+
+```python
+from infrastore import PersistentTimeSeries
+
+breakpoints = [datetime(2024, m, 1, tzinfo=timezone.utc) for m in (1, 4, 7, 10)]
+prices = PersistentTimeSeries(breakpoints, np.array([3.5, 4.25, 5.0, 4.75]), "gas_price")
+
+price_id = store.add_time_series(
+    owner_id=7,
+    owner_type="ThermalStandard",
+    owner_category=OwnerCategory.Component,
+    time_series=prices,
+    units="USD/MMBtu",
+    component_field="fuel_cost",
+    # Whether a curve is expanded to a full series or collapsed to one scalar is
+    # your application's policy, and rides here where the store never reads it.
+    application_data='{"as_time_series": false, "force_scalar_mode": "midpoint"}',
+)
+```
+
+`read_by_id(price_id)` hands back a `PersistentTimeSeries` whose `timestamps` are the breakpoints
+and whose `data` holds one value each — the same dtype and shape rules as every other static series,
+multi-dimensional per-breakpoint values included.
+
+### Read a window
+
+A range read slices on the step function's own terms: the result begins at the breakpoint _in force
+at_ `start`, so it always defines a value at the start of the window you asked for.
+
+```python
+(window,) = store.read_by_ids_range(
+    [price_id],
+    (datetime(2024, 4, 10, tzinfo=timezone.utc), datetime(2024, 9, 1, tzinfo=timezone.utc)),
+)
+window.timestamps   # [2024-04-01, 2024-07-01] — the April step, not the first one inside the window
+window.data         # array([4.25, 5.  ])
+```
+
+Past the last breakpoint the last value holds forever, so a window opening after the end comes back
+with that one row. **Before** the first breakpoint a step function is undefined: a non-empty window
+starting there raises `InvalidParameterError` rather than clamping. (A zero-width range,
+`end == start`, selects nothing — here as for every type.) `read_by_id`'s `start_time` + `len`
+window is _checked_ rather than sliced, so it must name one of the breakpoints; reach for
+`read_by_ids_range` when the instant is arbitrary.
+
+### Sweep step functions in the simulation loop
+
+A `StaticReader` filtered to the type is the per-timestamp path, and it is the one place the
+[one-timeline-per-reader](../explanation/readers.md#one-timeline-per-reader) rule bends: a step
+function has a value at every instant from its own first breakpoint on, so the columns need **not**
+share a breakpoint vector. Per-fuel curves whose breakpoints do not line up still build one reader.
+
+```python
+reader = store.build_static_reader(
+    time_series_type=TimeSeriesType.PersistentTimeSeries,   # no resolution — passing one raises
+    component_field="fuel_cost",
+)
+grid = reader.grid()                   # grid["resolution"] is None: a step function has no step
+groups = reader.groups()
+for at in reader.timestamps():         # the sorted union of every column's breakpoints
+    store.static_read(reader, at)
+    for i, g in enumerate(groups):
+        vals = reader.group_values(i)  # the value in force at `at`; column j ↔ g["ids"][j]
+```
+
+`timestamps()` is the **union** of the columns' breakpoints, so a position on it is not a storage
+row for any one column — each column independently reports the value in force there. There is still
+no presence mask: reading at an instant before some column's first breakpoint raises
+`InvalidParameterError` naming that column's association id. Either filter the reader down to
+columns that start early enough, or begin the sweep at the latest first breakpoint among them.
+
+The sweep need not follow that union axis at all. `static_read` accepts any instant every column
+defines a value at, so driving this reader at your `SingleTimeSeries` grid's timestamps — the
+simulation's own clock — works and is usually what an application wants:
+
+```python
+for at in load_reader.timestamps():        # the hourly grid the simulation runs on
+    store.static_read(load_reader, at)
+    store.static_read(reader, at)          # each fuel price, held forward to this hour
+```
+
+### These rows do not travel in an OpenAPI document
+
+`PersistentTimeSeries` is an infrastore-local extension, and the vendored wire contract is a `oneOf`
+over six canonical Sienna types with no schema for a seventh. So
+`export_time_series_associations_openapi` **omits** persistent rows — a mixed store still exports
+its six-type rows — a filter naming the type raises `InvalidParameterError` rather than answering
+with an empty array, and an import refuses a document that carries one. The series themselves are
+unaffected: they live in the artifact, which holds them in full. Ask the catalog what a document
+leaves behind:
+
+```python
+left_behind = store.list_metadata(time_series_type=TimeSeriesType.PersistentTimeSeries)
 ```
 
 ## Query Metadata

@@ -251,6 +251,14 @@ fn render_csv(meta: &TimeSeriesMetadata, data: &TimeSeriesData) -> Result<String
                 fields::render_timestamps(&ns.timestamps, ns.time_reference.as_ref());
             sequential_rows(&timestamps, &ns.data)
         }
+        // The breakpoints and their values, which is the whole series. The CSV
+        // this writes is exactly what `add` reads back for the type, so the
+        // round trip closes the same way it does for the irregular type above.
+        TimeSeriesData::PersistentTimeSeries(p) => {
+            let timestamps: Vec<String> =
+                fields::render_timestamps(&p.timestamps, p.time_reference.as_ref());
+            sequential_rows(&timestamps, &p.data)
+        }
         _ => show::forecast_csv_rows(meta, data)?,
     };
     let mut writer = csv::Writer::from_writer(Vec::new());
@@ -351,6 +359,16 @@ fn render_json(
             obj.insert(
                 "values".into(),
                 json!(csv_io::array_to_json_values(&ns.data)),
+            );
+        }
+        TimeSeriesData::PersistentTimeSeries(p) => {
+            let timestamps: Vec<String> =
+                fields::render_timestamps(&p.timestamps, p.time_reference.as_ref());
+            obj.insert("timestamps".into(), json!(timestamps));
+            obj.insert("shape".into(), json!(p.data.shape));
+            obj.insert(
+                "values".into(),
+                json!(csv_io::array_to_json_values(&p.data)),
             );
         }
         _ => {

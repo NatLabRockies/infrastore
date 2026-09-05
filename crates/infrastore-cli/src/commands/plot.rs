@@ -560,7 +560,9 @@ fn static_curves(
         .filter(|m| {
             matches!(
                 m.time_series_type,
-                TimeSeriesType::SingleTimeSeries | TimeSeriesType::NonSequentialTimeSeries
+                TimeSeriesType::SingleTimeSeries
+                    | TimeSeriesType::NonSequentialTimeSeries
+                    | TimeSeriesType::PersistentTimeSeries
             )
         })
         .collect();
@@ -605,6 +607,10 @@ fn read_curve(
             (times, &s.data)
         }
         TimeSeriesData::NonSequentialTimeSeries(ns) => (ns.timestamps.clone(), &ns.data),
+        // Drawn as a polyline through its breakpoints, like any other static
+        // series. A true step chart would need its own `--kind`; the points are
+        // where the value actually changes either way.
+        TimeSeriesData::PersistentTimeSeries(p) => (p.timestamps.clone(), &p.data),
         other => {
             return Err(format!(
                 "{} is not a static series",

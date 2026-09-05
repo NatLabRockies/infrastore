@@ -7,7 +7,8 @@ use std::time::Duration as StdDuration;
 use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{
     Dtype, ElementType, FeatureValue, Features, NonSequentialTimeSeries, OwnerCategory, Period,
-    SingleTimeSeries, Store, TimeSeriesData, TimeSeriesType, TypedArray, create_store,
+    PersistentTimeSeries, SingleTimeSeries, Store, TimeSeriesData, TimeSeriesType, TypedArray,
+    create_store,
 };
 use infrastore_server::client::RemoteClient;
 use infrastore_server::service::CatalogStoreService;
@@ -273,6 +274,75 @@ async fn non_sequential_round_trip_over_grpc() {
     let irregular = got.as_non_sequential().unwrap();
     assert_eq!(irregular.timestamps, timestamps[1..]);
     assert_eq!(irregular.data.to_f64_vec().unwrap(), vec![5.0, 6.0]);
+}
+
+#[tokio::test]
+async fn persistent_round_trip_over_grpc() {
+    let mut store = fixture_store();
+    let month = |m: u32| Utc.with_ymd_and_hms(2024, m, 1, 0, 0, 0).unwrap();
+    let breakpoints = vec![month(1), month(4), month(7), month(10)];
+    let series = PersistentTimeSeries::new(
+        breakpoints.clone(),
+        TypedArray::from_f64(vec![4], &[10.0, 40.0, 70.0, 100.0]),
+        "gas_price",
+    )
+    .unwrap()
+    .with_units("USD/MMBtu")
+    .with_component_field("fuel_cost");
+    store
+        .add_time_series(
+            45,
+            "ThermalStandard",
+            OwnerCategory::Component,
+            TimeSeriesData::PersistentTimeSeries(series),
+            Features::new(),
+        )
+        .unwrap();
+
+    let addr = spawn_server(store).await;
+    let client = RemoteClient::connect(addr).await.unwrap();
+    let rows = client
+        .list_metadata(
+            Some(45),
+            Some(OwnerCategory::Component),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    // The type survives the wire, and a step function carries no resolution.
+    assert_eq!(
+        rows[0].time_series_type,
+        TimeSeriesType::PersistentTimeSeries
+    );
+    assert_eq!(rows[0].resolution, None);
+    let id = rows[0].id.expect("a served row carries its catalog id");
+
+    let whole = client.read_by_id(id, None).await.unwrap();
+    let step = whole.as_persistent().unwrap();
+    assert_eq!(step.timestamps, breakpoints);
+    assert_eq!(
+        step.data.to_f64_vec().unwrap(),
+        vec![10.0, 40.0, 70.0, 100.0]
+    );
+    assert_eq!(step.units.as_deref(), Some("USD/MMBtu"));
+    assert_eq!(step.component_field.as_deref(), Some("fuel_cost"));
+
+    // A range whose start is not a breakpoint still yields the value in force
+    // there — the semantic that distinguishes this type — over gRPC too.
+    let sliced = client
+        .read_by_id(id, Some((month(4) + Duration::days(10), month(9)).into()))
+        .await
+        .unwrap();
+    let sliced = sliced.as_persistent().unwrap();
+    assert_eq!(sliced.timestamps, vec![month(4), month(7)]);
+    assert_eq!(sliced.data.to_f64_vec().unwrap(), vec![40.0, 70.0]);
 }
 
 #[tokio::test]

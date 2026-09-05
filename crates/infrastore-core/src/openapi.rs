@@ -90,7 +90,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::error::Result;
+use crate::error::{Result, TimeSeriesError};
 use crate::metadata::{SupplementalAttributeAssociation, SupplementalAttributeFilter};
 use crate::store::{ListFilter, Store};
 use crate::types::id::TimeSeriesId;
@@ -319,7 +319,17 @@ fn ts_row_to_json(meta: &TimeSeriesMetadata) -> Value {
                 row.insert("length".into(), Value::from(l as u64));
             }
         }
-        TimeSeriesType::NonSequentialTimeSeries => {
+        // The two irregular types share an arm because they share a shape —
+        // both are static series on an explicit time axis, so `length` is the
+        // only shape field either has — but only one of them ever reaches it.
+        // `PersistentTimeSeries` is an **infrastore-local extension**, not a
+        // Sienna type: the vendored `TimeSeriesAssociation.json` is a `oneOf`
+        // over a closed set of six canonical types, there is no upstream schema
+        // for a seventh, and inventing one would misrepresent the vendored
+        // contract. So the document does not carry the type at all —
+        // [`export_ts_rows`] drops persistent rows before this mapping runs,
+        // and the arm covers the type only to keep the match total.
+        TimeSeriesType::NonSequentialTimeSeries | TimeSeriesType::PersistentTimeSeries => {
             if let Some(l) = meta.length {
                 row.insert("length".into(), Value::from(l as u64));
             }
@@ -359,10 +369,30 @@ fn ts_row_to_json(meta: &TimeSeriesMetadata) -> Value {
 /// Export `time_series_associations` as a sorted OpenAPI-row JSON array. Pure
 /// mapping over rows [`Store::list_metadata`] already produced — see the
 /// module docs for the wire contract and sort order.
+///
+/// # `PersistentTimeSeries` does not travel
+///
+/// The wire contract is a `oneOf` over six canonical Sienna types and has no
+/// schema for a seventh, so the document has no way to spell one. The type is
+/// therefore **omitted**: a mixed store still exports its six-type rows, and
+/// the rows this drops are exactly the rows no import — this store's included —
+/// would take back.
+///
+/// A filter that names the type *itself* is a different request, and is
+/// refused rather than answered with an empty array: a caller asking for those
+/// rows specifically has asked for something this format cannot express, and
+/// silence would read as "the store holds none".
 fn export_ts_rows(store: &Store, filter: &ListFilter) -> Result<String> {
+    if filter.time_series_type == Some(TimeSeriesType::PersistentTimeSeries) {
+        return Err(TimeSeriesError::InvalidParameter(
+            "cannot export PersistentTimeSeries as OpenAPI rows: the wire contract is a oneOf              over the six canonical types and has no schema for this one, which is an              infrastore-local extension. An unfiltered export omits these rows and emits the              rest"
+                .into(),
+        ));
+    }
     let rows = store.list_with_timestamps(filter.clone())?;
     let mut keyed: Vec<(SortKey, Value)> = rows
         .iter()
+        .filter(|meta| meta.time_series_type != TimeSeriesType::PersistentTimeSeries)
         .map(|meta| (sort_key(meta), ts_row_to_json(meta)))
         .collect();
     keyed.sort_by(|a, b| a.0.cmp(&b.0));
@@ -816,6 +846,13 @@ impl Store {
     /// OpenAPI rows, each carrying `uri` and `data_hash` computed from the
     /// row's own content hash. See the module docs for the wire contract and
     /// sort order.
+    ///
+    /// The document holds only the six types the wire contract defines.
+    /// `PersistentTimeSeries` is an infrastore-local extension with no schema
+    /// to be spelled under, so its rows are omitted — and a `filter` naming
+    /// that type is refused outright rather than answered with an empty array.
+    /// Ask the catalog what an export leaves behind with
+    /// `list_metadata(ListFilter::new().time_series_type(TimeSeriesType::PersistentTimeSeries))`.
     pub fn export_time_series_associations_openapi(&self, filter: &ListFilter) -> Result<String> {
         export_ts_rows(self, filter)
     }
@@ -832,7 +869,9 @@ impl Store {
     /// document pointing at the wrong series.
     ///
     /// See [`Self::import_association_rows`] for what is validated, including
-    /// why a `NonSequentialTimeSeries` row cannot be imported.
+    /// the time axis an irregular row has to name. A `PersistentTimeSeries`
+    /// row is refused before any of that, by the schema check: no export
+    /// writes one, and the wire contract has no schema to check one against.
     pub fn import_time_series_associations_openapi(&mut self, json: &str) -> Result<usize> {
         import_ts_rows(self, json)
     }

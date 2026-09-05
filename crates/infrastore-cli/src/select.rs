@@ -62,9 +62,9 @@ pub struct SelectorArgs {
         long = "type",
         value_name = "TYPE",
         long_help = "Time series type. One of:\n  \
-                     SingleTimeSeries, NonSequentialTimeSeries, Deterministic,\n  \
-                     DeterministicSingleTimeSeries, Probabilistic, Scenarios\n\
-                     The lowercase short forms (single, non_sequential,\n\
+                     SingleTimeSeries, NonSequentialTimeSeries, PersistentTimeSeries,\n  \
+                     Deterministic, DeterministicSingleTimeSeries, Probabilistic, Scenarios\n\
+                     The lowercase short forms (single, non_sequential, persistent,\n\
                      deterministic_single, ...) are accepted too.\n\
                      `deterministic` also matches the DeterministicSingleTimeSeries rows\n\
                      that `transform` produces (they list with their own type); use\n\

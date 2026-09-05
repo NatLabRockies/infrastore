@@ -12,7 +12,7 @@ There are two, and they are described signature-by-signature in each language's 
 
 | Reader           | Sweeps                                                               |
 | ---------------- | -------------------------------------------------------------------- |
-| `StaticReader`   | both static types — one value per column per instant                 |
+| `StaticReader`   | all three static types — one value per column per instant            |
 | `ForecastReader` | the four forecast types — one whole window per column per issue time |
 
 Neither is exposed over gRPC.
@@ -59,12 +59,38 @@ depends on the type the filter names:
 | ------------------------- | ---------- | ------------------------------------------------- |
 | `SingleTimeSeries`        | pinned     | share one grid — `initial_timestamp` and `length` |
 | `NonSequentialTimeSeries` | none       | lie on one timestamp vector (the on-disk cohort)  |
+| `PersistentTimeSeries`    | none       | nothing — each column carries its own breakpoints |
 
 A mismatched cohort is refused at **build** time, where the error can name the series that disagree,
 rather than at the first read. The same applies to
 [time-reference coherence](./time-references.md#query-bounds-and-mixed-selections): a reader whose
 matched series mix wall clocks with instants is refused, because no single axis can be spelled for
 both.
+
+### The one exception: step functions
+
+A [`PersistentTimeSeries`](./time-series-types.md#persistenttimeseries) is the row that does not
+have to agree with its neighbors, and only because a step function makes that safe: it has a value
+at **every** instant from its own first breakpoint onward, so a column need not carry the instant
+being read in order to answer for it. Such a reader interns the distinct breakpoint vectors its
+columns sit on, records for each column the vector it resolves against, and takes their sorted
+**union** as its public axis. A read then resolves hold-last per vector rather than once for the
+whole reader.
+
+Two consequences follow from the union being a public axis rather than a storage layout:
+
+- **A position on it is not a storage row.** `index_at` reports a position on the union, which
+  belongs to no column in particular; the values come from each column's own row in force there.
+  Nothing else in the reader surface indexes this way.
+- **There is still no presence mask.** An instant before some column's first breakpoint has no value
+  that column could report, so the read is a hard error naming that column rather than a gap the
+  caller has to test for. The rule the other two types get from a shared timeline — every column has
+  a value at every readable instant — is preserved, just enforced at read time instead of build
+  time.
+
+The motivating data is per-fuel monthly price curves whose breakpoints do not line up. Forcing them
+onto one cohort would mean either inventing breakpoints or building one reader per fuel, and both
+lose the single chunk-aligned sweep a reader exists to give.
 
 ## Sharing Is Resolved Once
 

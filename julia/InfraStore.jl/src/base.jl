@@ -31,6 +31,15 @@ function Base.show(io::IO, ts::NonSequentialTimeSeries{T, N}) where {T, N}
     )
 end
 
+function Base.show(io::IO, ts::PersistentTimeSeries{T, N}) where {T, N}
+    return print(
+        io,
+        "PersistentTimeSeries{$T,$N}(name=$(repr(ts.name)) " *
+        "breakpoints=$(size(ts.data, 1)) " *
+        "time_reference=$(_reference_label(ts.time_reference)))",
+    )
+end
+
 # ---- Fusing an instant back together with its spelling ---------------------
 #
 # The convenience forms of `zoned_timestamp`, which take the two halves off a
@@ -54,7 +63,8 @@ function zoned_timestamp(m::TimeSeriesMetadata)
     m.initial_timestamp === nothing && throw(
         InvalidParameterError(
             "this metadata row has no initial_timestamp to render " *
-            "(a NonSequentialTimeSeries carries an explicit vector instead)",
+            "(a NonSequentialTimeSeries or PersistentTimeSeries carries an " *
+            "explicit vector instead)",
         ),
     )
     return zoned_timestamp(m.initial_timestamp, m.time_reference)
@@ -63,11 +73,15 @@ end
 """
     zoned_timestamps(series) -> Vector{ZonedDateTime}
 
-Every timestamp of a [`NonSequentialTimeSeries`](@ref), fused with the spelling
-the series recorded. Requires `using TimeZones`; see
-[`zoned_timestamp`](@ref).
+Every timestamp of a [`NonSequentialTimeSeries`](@ref) — or every breakpoint of
+a [`PersistentTimeSeries`](@ref) — fused with the spelling the series recorded.
+Requires `using TimeZones`; see [`zoned_timestamp`](@ref).
 """
 function zoned_timestamps(ts::NonSequentialTimeSeries)
+    return [zoned_timestamp(t, ts.time_reference) for t in ts.timestamps]
+end
+
+function zoned_timestamps(ts::PersistentTimeSeries)
     return [zoned_timestamp(t, ts.time_reference) for t in ts.timestamps]
 end
 
@@ -84,7 +98,7 @@ end
 
 # Container interface: full delegation to `data` (element count, not time
 # steps, for multi-dimensional values — consistent with `iterate`/`getindex`).
-for ST in (:SingleTimeSeries, :NonSequentialTimeSeries)
+for ST in (:SingleTimeSeries, :NonSequentialTimeSeries, :PersistentTimeSeries)
     @eval begin
         Base.length(ts::$ST) = length(ts.data)
         Base.eltype(::Type{$ST{T, N}}) where {T, N} = T

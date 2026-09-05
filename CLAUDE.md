@@ -18,28 +18,50 @@ SQLite. It exposes multiple bindings over a shared core:
   and inspects a store, talking directly to the on-disk HDF5 + SQLite artifact (read+write; no
   gRPC). Output uses a global `-f/--format table|json|jsonl|csv`.
 
-**Current feature coverage:** `SingleTimeSeries` and `NonSequentialTimeSeries` are implemented
-end-to-end (read+write in the Rust core, C ABI, Python, and Julia; read-only over gRPC).
-`Deterministic`, `DeterministicSingleTimeSeries`, `Probabilistic`, and `Scenarios` support reading
-values across the Rust core, C ABI, Python, Julia, and gRPC. Dense forecasts (`Deterministic`,
-`Probabilistic`, `Scenarios`) are written through the generic `add_time_series` by passing the
-matching forecast object across the Rust core, Python, and Julia (the C ABI keeps per-type
+**Current feature coverage:** `SingleTimeSeries`, `NonSequentialTimeSeries`, and
+`PersistentTimeSeries` are implemented end-to-end (read+write in the Rust core, C ABI, Python,
+Julia, and the CLI; read-only over gRPC). A `PersistentTimeSeries` is a **sparse step function**:
+breakpoints plus one value each, where the value at an instant is the one belonging to the greatest
+breakpoint `<= t` — held forward past the last breakpoint and **undefined before the first**, which
+is an error rather than a clamp. It is structurally identical to `NonSequentialTimeSeries` and
+shares its storage (`PackGroup` is keyed by the time axis, never by the type, so the two pool into
+one `nsts_…` dataset and dedup arrays against each other); the difference is entirely in read
+semantics, which is why it is a distinct type rather than a read flag — "an irregular timeline has
+no value between its timestamps" is a guarantee `NonSequentialTimeSeries` leans on. A range read
+begins at the breakpoint _in force at_ `start`, so the result always defines a value there.
+Scalar-collapse policy is the application's and rides in `application_data`; there are no catalog
+columns for it. It is an infrastore-local extension, not a Sienna type: it sits outside the vendored
+six-type `oneOf`, nothing under `conformance/` mentions it, and it does not travel in an OpenAPI
+document in either direction — the export omits its rows (refusing a filter that names the type
+outright) and the import rejects one a foreign document carries. `Deterministic`,
+`DeterministicSingleTimeSeries`, `Probabilistic`, and `Scenarios` support reading values across the
+Rust core, C ABI, Python, Julia, and gRPC. Dense forecasts (`Deterministic`, `Probabilistic`,
+`Scenarios`) are written through the generic `add_time_series` by passing the matching forecast
+object across the Rust core, Python, and Julia (the C ABI keeps per-type
 `infrastore_store_add_forecast` / `infrastore_store_add_probabilistic` as low-level transport);
 `DeterministicSingleTimeSeries` is derived from stored `SingleTimeSeries` via
 `transform_single_time_series` rather than added directly. Forecast writes are not exposed over the
 read-only gRPC server. Arrays are dtype-generic (`f64`/`f32`/`i64`/`i32`/`u64`/`bool` in every
 binding, including Python) and may have multidimensional per-timestep values. The columnar
 simulation readers (`StaticReader`/`ForecastReader`) are bound across the Rust core, C ABI, Julia,
-and Python; `StaticReader` covers both static types, sweeping either a `SingleTimeSeries` grid or a
-cohort of `NonSequentialTimeSeries` sharing one timestamp vector (its `resolution()` is `None` for
-the latter). The discovery/maintenance surface (`get_intervals`, `list_names`, `list_owner_types`,
-name-pattern filtering via `ListFilter::name_glob` (SQLite `GLOB`), `ListFilter::component_field`
-(exact match; served by the partial index `idx_component_field`, so it can never select rows that
-left the field unset), `remove_by_filter`, the time-sliced `read_by_ids_range`,
-`AddRequest`/`Store::add` preserving `application_data`, and serde on the core types) is available
-in the Rust core and threaded through the C ABI/Julia and Python bindings. Two **association
-catalogs** are available in the Rust core, C ABI, Julia, Python, and the CLI (read via `attributes`
-/ `links`, write via `attach` / `detach` / `link` / `unlink` / `reassign`), but not over gRPC:
+and Python; `StaticReader` covers all three static types, sweeping a `SingleTimeSeries` grid, a
+cohort of `NonSequentialTimeSeries` sharing one timestamp vector, or a set of `PersistentTimeSeries`
+(its `resolution()` is `None` for both irregular kinds). The persistent case is the **one exception
+to "one timeline per reader"**: a step function has a value at every instant from its own first
+breakpoint on, so its columns may hold independent breakpoint vectors. Such a reader interns the
+distinct vectors, gives each column the id of the one it resolves against, and takes their sorted
+**union** as its public axis; `index_at` then reports a position on that union and is _not_ a
+storage row index. There is still no presence mask — an instant before some column's first
+breakpoint is a hard error naming that column.
+
+The discovery/maintenance surface (`get_intervals`, `list_names`, `list_owner_types`, name-pattern
+filtering via `ListFilter::name_glob` (SQLite `GLOB`), `ListFilter::component_field` (exact match;
+served by the partial index `idx_component_field`, so it can never select rows that left the field
+unset), `remove_by_filter`, the time-sliced `read_by_ids_range`, `AddRequest`/`Store::add`
+preserving `application_data`, and serde on the core types) is available in the Rust core and
+threaded through the C ABI/Julia and Python bindings. Two **association catalogs** are available in
+the Rust core, C ABI, Julia, Python, and the CLI (read via `attributes` / `links`, write via
+`attach` / `detach` / `link` / `unlink` / `reassign`), but not over gRPC:
 `supplemental_attribute_associations` (component ↔ supplemental attribute, the wider surface —
 counts, counts-by-type, grouped summary) and `parent_child_associations` (directed component ↔
 component edges, e.g. a generator connected to a bus, deliberately narrower until a consumer needs
@@ -61,16 +83,17 @@ takes ids: `read_by_id(id, ReadWindow)` is the single-id read _and_ the sliced o
 of `start`/`len`/`count` resolved against the row the primary-key lookup already returned, checked
 rather than clamped, so a keyed read costs one call); `read_by_ids(ids, ReadWindow)` is its bulk
 form and `read_by_ids_range(ids, TimeRange)` the bounds form that clips instead of checking (what an
-export wants, since it knows the bounds and not the step count) — with two type-specific rules: a
+export wants, since it knows the bounds and not the step count) — with three type-specific rules: a
 `SingleTimeSeries` `start` inside a step is floored onto the grid, because a value covers its step,
-while a `NonSequentialTimeSeries` selects only timestamps at or after `start`; and a forecast's
-`start` must be a window boundary at or before the last window, since there is no partial window to
-return, so only its `end` clips; `remove_by_ids` / `remove_by_ids!` is all-or-nothing;
-`copy_time_series(id, …)` takes one. A series' name is fixed once written — there is no rename, so
-an id and the row it names can never drift apart. Writes return ids and nothing else —
-`TimeSeriesId` / `Vec<TimeSeriesId>` in the Rust core, `int` in Python and Julia, an `out_id` across
-the C ABI — and a caller wanting the rest of the row asks `get_metadata_by_id`. Removals are not on
-the read-only gRPC server.
+while a `NonSequentialTimeSeries` selects only timestamps at or after `start`; a
+`PersistentTimeSeries` begins at the breakpoint _in force at_ `start`, so the result always defines
+a value there; and a forecast's `start` must be a window boundary at or before the last window,
+since there is no partial window to return, so only its `end` clips; `remove_by_ids` /
+`remove_by_ids!` is all-or-nothing; `copy_time_series(id, …)` takes one. A series' name is fixed
+once written — there is no rename, so an id and the row it names can never drift apart. Writes
+return ids and nothing else — `TimeSeriesId` / `Vec<TimeSeriesId>` in the Rust core, `int` in Python
+and Julia, an `out_id` across the C ABI — and a caller wanting the rest of the row asks
+`get_metadata_by_id`. Removals are not on the read-only gRPC server.
 
 The id crosses the gRPC wire and the OpenAPI one — where the schema spells it `association_id`, a
 rename `openapi.rs` applies the same way it maps `unit_system` between the store's snake_case and
@@ -91,9 +114,13 @@ already stored, and an irregular row that does not name its time axis. That last
 are content-addressed, so two irregular series with identical values on different axes share one
 stored array and only the catalog's `timestamps_hash` tells them apart. The wire form therefore
 locates the axis, and the import resolves it against the store (the axis ships in the array file,
-like the arrays). Neither association catalog's wire form carries an id, so both always assign —
-their row types carry an `id` field that a listing populates and an add ignores — with independent
-counters, and equality on both association types deliberately excludes the id.
+like the arrays). A `PersistentTimeSeries` row never gets that far: the type is an infrastore-local
+extension, outside the six the vendored contract defines, so the schema check refuses a document
+naming one — and no export writes one either, which leaves the rows-only
+`Store::import_association_rows` as the only door such a row fits through. Neither association
+catalog's wire form carries an id, so both always assign — their row types carry an `id` field that
+a listing populates and an add ignores — with independent counters, and equality on both association
+types deliberately excludes the id.
 
 Both imports **validate every incoming row against the vendored SiennaSchemas specs** before
 decoding it (`crates/infrastore-core/src/openapi/schema.rs`, schemas at
@@ -381,15 +408,16 @@ cargo run -p infrastore-server -- --config my_server.toml
   interrupted in-place write is unrecoverable. Both shipped consumers already do this by hand.
 - **Timestamps are millisecond-precision.** A `Period` has always been a whole number of
   milliseconds; every _instant_ the store records (a `SingleTimeSeries` or forecast
-  `initial_timestamp`, every entry of a `NonSequentialTimeSeries` vector) is held to the same floor,
-  enforced on the write path in `Store`'s `validate_data` and refused with `InvalidParameter` rather
-  than truncated. A leap second is refused by the same rule: unix milliseconds cannot express one,
-  so storing it would fold it onto the following second and make two distinct instants one. The
-  reason is cross-binding: the C ABI and Julia exchange instants as `i64` Unix milliseconds and
-  Python's `datetime` is microsecond, so a finer instant is silently truncated at some boundaries
-  and not others. Reads stay permissive so a pre-rule artifact still reads back exactly, which is
-  why the rule does not bump `DATA_FORMAT_VERSION`. Query bounds (`time_range`, a reader's `when`)
-  are deliberately unconstrained.
+  `initial_timestamp`, every entry of a `NonSequentialTimeSeries` vector, every breakpoint of a
+  `PersistentTimeSeries`) is held to the same floor, enforced on the write path in `Store`'s
+  `validate_data` and refused with `InvalidParameter` rather than truncated. A leap second is
+  refused by the same rule: unix milliseconds cannot express one, so storing it would fold it onto
+  the following second and make two distinct instants one. The reason is cross-binding: the C ABI
+  and Julia exchange instants as `i64` Unix milliseconds and Python's `datetime` is microsecond, so
+  a finer instant is silently truncated at some boundaries and not others. Reads stay permissive so
+  a pre-rule artifact still reads back exactly, which is why the rule does not bump
+  `DATA_FORMAT_VERSION`. Query bounds (`time_range`, a reader's `when`) are deliberately
+  unconstrained.
 - `DATA_FORMAT_VERSION` in `crates/infrastore-core/src/version.rs` is the on-disk compatibility
   contract, checked in **three tiers** (`Current` / `Upgradable` / `Incompatible`), not by equality.
   Any incompatible HDF5 layout, dtype encoding, timestamp encoding, or hashing change must bump it,
@@ -406,11 +434,11 @@ cargo run -p infrastore-server -- --config my_server.toml
 - Packed arrays use datasets named `sts_{dtype}_{shape}_{length}_{resolution}` for regular series
   and `nsts_{dtype}_{shape}_{length}_{timestamps_hash}` for the irregular ones sharing a time axis,
   each with a companion `<dataset>_h` hash dataset. Standalone arrays use `arr_{hex_hash}`. A
-  `NonSequentialTimeSeries`'s timestamps live in the HDF5 file too, as one `tsv_{hex_hash}` `i64`
-  dataset of unix milliseconds per distinct time axis under `time_series/timestamps/`, keyed by the
-  same content hash that pools its array. See `crates/infrastore-core/src/storage/hdf5.rs` for the
-  implementation and `docs/src/reference/file-format.md` for the user-facing specification; keep
-  them synchronized.
+  `NonSequentialTimeSeries`'s timestamps — and a `PersistentTimeSeries`'s breakpoints — live in the
+  HDF5 file too, as one `tsv_{hex_hash}` `i64` dataset of unix milliseconds per distinct time axis
+  under `time_series/timestamps/`, keyed by the same content hash that pools their arrays. See
+  `crates/infrastore-core/src/storage/hdf5.rs` for the implementation and
+  `docs/src/reference/file-format.md` for the user-facing specification; keep them synchronized.
 - Deletion frees a packed column (slot reusable, hash row and column data zero-filled) or unlinks a
   standalone dataset. HDF5 cannot return the space in place, so the file only shrinks when
   `Store::compact` rewrites it: an on-disk compaction materializes the catalog's live arrays into a

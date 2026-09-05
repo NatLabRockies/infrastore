@@ -10,6 +10,8 @@ function _type_for_code(code::Integer)
         SingleTimeSeries
     elseif code == INFRASTORE_TYPE_NON_SEQUENTIAL
         NonSequentialTimeSeries
+    elseif code == INFRASTORE_TYPE_PERSISTENT
+        PersistentTimeSeries
     elseif code == INFRASTORE_TYPE_DETERMINISTIC
         Deterministic
     elseif code == INFRASTORE_TYPE_DETERMINISTIC_SINGLE
@@ -30,6 +32,7 @@ end
 const _TIME_SERIES_TYPES = (
     SingleTimeSeries,
     NonSequentialTimeSeries,
+    PersistentTimeSeries,
     Deterministic,
     DeterministicSingleTimeSeries,
     Probabilistic,
@@ -42,6 +45,7 @@ const _TIME_SERIES_TYPES = (
 # Rust core, not here.
 _type_code(::Type{SingleTimeSeries}) = INFRASTORE_TYPE_SINGLE
 _type_code(::Type{NonSequentialTimeSeries}) = INFRASTORE_TYPE_NON_SEQUENTIAL
+_type_code(::Type{PersistentTimeSeries}) = INFRASTORE_TYPE_PERSISTENT
 _type_code(::Type{Deterministic}) = INFRASTORE_TYPE_DETERMINISTIC
 _type_code(::Type{DeterministicSingleTimeSeries}) = INFRASTORE_TYPE_DETERMINISTIC_SINGLE
 _type_code(::Type{Probabilistic}) = INFRASTORE_TYPE_PROBABILISTIC
@@ -81,6 +85,8 @@ function _type_for_name(name::AbstractString)
         SingleTimeSeries
     elseif name == "NonSequentialTimeSeries"
         NonSequentialTimeSeries
+    elseif name == "PersistentTimeSeries"
+        PersistentTimeSeries
     elseif name == "Deterministic"
         Deterministic
     elseif name == "DeterministicSingleTimeSeries"
@@ -657,7 +663,8 @@ end
 """
     static_summary(store) -> Vector{StaticSummaryRow}
 
-Grouped static-series (SingleTimeSeries + NonSequentialTimeSeries) summary: one
+Grouped static-series (SingleTimeSeries + NonSequentialTimeSeries +
+PersistentTimeSeries) summary: one
 row per distinct `(owner_type, owner_category, time_series_type, name,
 initial_timestamp, resolution, time_step_count)` with `count` = the number of
 associations in the group. The core does the GROUP BY; callers build any

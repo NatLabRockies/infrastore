@@ -10,7 +10,7 @@ use super::period::Period;
 use super::time_reference::TimeReference;
 use crate::codec::{self, DecodedValues};
 
-/// Discriminator for the six time series types defined in the spec.
+/// Discriminator for the time series types this store models.
 ///
 /// Static series carry runtime variants in [`TimeSeriesData`]. Forecast types
 /// use the forecast-specific store API.
@@ -36,6 +36,12 @@ pub enum TimeSeriesType {
     DeterministicSingleTimeSeries,
     Probabilistic,
     Scenarios,
+    /// A sparse step function: breakpoints plus one value each, holding the
+    /// last value forward. **Appended, not inserted** — the codes are an
+    /// on-disk contract, and the `Deterministic`/`DeterministicSingleTimeSeries`
+    /// adjacency that [`Self::code_span`] relies on must not be disturbed. See
+    /// [`PersistentTimeSeries`].
+    PersistentTimeSeries,
 }
 
 impl TimeSeriesType {
@@ -47,6 +53,7 @@ impl TimeSeriesType {
             TimeSeriesType::DeterministicSingleTimeSeries => "DeterministicSingleTimeSeries",
             TimeSeriesType::Probabilistic => "Probabilistic",
             TimeSeriesType::Scenarios => "Scenarios",
+            TimeSeriesType::PersistentTimeSeries => "PersistentTimeSeries",
         }
     }
 
@@ -58,6 +65,7 @@ impl TimeSeriesType {
             "DeterministicSingleTimeSeries" => TimeSeriesType::DeterministicSingleTimeSeries,
             "Probabilistic" => TimeSeriesType::Probabilistic,
             "Scenarios" => TimeSeriesType::Scenarios,
+            "PersistentTimeSeries" => TimeSeriesType::PersistentTimeSeries,
             _ => return None,
         })
     }
@@ -72,6 +80,7 @@ impl TimeSeriesType {
             TimeSeriesType::DeterministicSingleTimeSeries => 3,
             TimeSeriesType::Probabilistic => 4,
             TimeSeriesType::Scenarios => 5,
+            TimeSeriesType::PersistentTimeSeries => 6,
         }
     }
 
@@ -85,6 +94,7 @@ impl TimeSeriesType {
             3 => TimeSeriesType::DeterministicSingleTimeSeries,
             4 => TimeSeriesType::Probabilistic,
             5 => TimeSeriesType::Scenarios,
+            6 => TimeSeriesType::PersistentTimeSeries,
             _ => return None,
         })
     }
@@ -98,7 +108,9 @@ impl TimeSeriesType {
     /// the codecs — asks here rather than re-deriving the layout.
     pub fn leading_dims(self) -> usize {
         match self {
-            TimeSeriesType::SingleTimeSeries | TimeSeriesType::NonSequentialTimeSeries => 1,
+            TimeSeriesType::SingleTimeSeries
+            | TimeSeriesType::NonSequentialTimeSeries
+            | TimeSeriesType::PersistentTimeSeries => 1,
             TimeSeriesType::Deterministic | TimeSeriesType::DeterministicSingleTimeSeries => 2,
             TimeSeriesType::Probabilistic | TimeSeriesType::Scenarios => 3,
         }
@@ -143,7 +155,9 @@ impl TimeSeriesType {
     /// Is this a forecast (windowed) type rather than a static series?
     pub fn is_forecast(self) -> bool {
         match self {
-            TimeSeriesType::SingleTimeSeries | TimeSeriesType::NonSequentialTimeSeries => false,
+            TimeSeriesType::SingleTimeSeries
+            | TimeSeriesType::NonSequentialTimeSeries
+            | TimeSeriesType::PersistentTimeSeries => false,
             TimeSeriesType::Deterministic
             | TimeSeriesType::DeterministicSingleTimeSeries
             | TimeSeriesType::Probabilistic
@@ -151,21 +165,30 @@ impl TimeSeriesType {
         }
     }
 
-    /// The inclusive code range covering the static types, then the forecast
-    /// types — `(static_lo, static_hi, forecast_lo, forecast_hi)`.
+    /// The storage codes of the static types, for a summary query that wants
+    /// "all static rows".
     ///
-    /// The two groups are contiguous blocks in the code space, so the summary
-    /// queries can select "all static" or "all forecast" rows with one
-    /// `BETWEEN` instead of enumerating names. `code_groups_partition_cleanly`
-    /// asserts the partition, so a renumbering that broke it would fail rather
-    /// than silently mis-scope those queries.
-    pub fn code_groups() -> (i64, i64, i64, i64) {
-        (
-            TimeSeriesType::SingleTimeSeries.code(),
-            TimeSeriesType::NonSequentialTimeSeries.code(),
-            TimeSeriesType::Deterministic.code(),
-            TimeSeriesType::Scenarios.code(),
-        )
+    /// A *list*, not a range. The static types were codes 0-1 and the forecast
+    /// types 2-5, two contiguous blocks a `BETWEEN` could select — until
+    /// `PersistentTimeSeries` was appended as 6 rather than inserted, because
+    /// the codes are an on-disk contract and renumbering is not available. The
+    /// static group is therefore non-contiguous and its consumers render
+    /// `WHERE time_series_type IN (…)`. `idx_ts_type` serves that as happily as
+    /// it served the range.
+    ///
+    /// `code_groups_partition_cleanly` asserts that this and
+    /// [`Self::forecast_codes`] are disjoint and together cover every variant,
+    /// which is the property the old contiguity assertion was really standing
+    /// in for.
+    pub fn static_codes() -> &'static [i64] {
+        // Written out rather than derived from `is_forecast()` at call time:
+        // these are on-disk codes, so seeing the literals here is the point.
+        &[0, 1, 6]
+    }
+
+    /// The storage codes of the forecast types. See [`Self::static_codes`].
+    pub fn forecast_codes() -> &'static [i64] {
+        &[2, 3, 4, 5]
     }
 }
 
@@ -495,6 +518,190 @@ impl NonSequentialTimeSeries {
 
     /// Name the component field these values vary over time (e.g.
     /// `"max_active_power"`).
+    pub fn with_component_field(mut self, component_field: impl Into<String>) -> Self {
+        self.component_field = Some(component_field.into());
+        self
+    }
+
+    /// Set the opaque application payload carried through to the metadata row.
+    pub fn with_application_data(mut self, application_data: impl Into<String>) -> Self {
+        self.application_data = Some(application_data.into());
+        self
+    }
+}
+
+/// A sparse step function: breakpoints plus one value each, holding the last
+/// value forward.
+///
+/// Structurally identical to [`NonSequentialTimeSeries`] — a strictly
+/// increasing `Vec<DateTime<Utc>>` plus a [`TypedArray`] of the same length —
+/// and stored identically (the two pool into the same `nsts_…` dataset when
+/// they share a breakpoint vector, dtype, element shape, and length). They are
+/// separate *types* because they answer the same question differently:
+///
+/// |                                   | `NonSequentialTimeSeries` | `PersistentTimeSeries` |
+/// |-----------------------------------|---------------------------|------------------------|
+/// | value **at** a stored instant     | that instant's value      | that instant's value   |
+/// | value **between** stored instants | a hard error              | the previous value     |
+/// | value **after** the last instant  | a hard error              | the last value         |
+/// | value **before** the first instant| a hard error              | a hard error           |
+///
+/// Put formally, the values define a **right-continuous step function**,
+/// constant on `[b_k, b_{k+1})`, extending to `+∞` past the last breakpoint,
+/// and **undefined before the first**. That last clause is deliberate and is
+/// reported as an error rather than clamped: a value before the first
+/// breakpoint was never declared, and inventing one would be a guess. Look one
+/// up with [`Self::index_in_force_at`].
+///
+/// The motivating data is a monthly fuel or gas price curve: a dozen
+/// breakpoints spanning a year, read at simulation timestamps that almost never
+/// coincide with one. Reading that as a `NonSequentialTimeSeries` would error
+/// at nearly every step, which is exactly the guarantee that type is *for* —
+/// an irregular timeline has no value between its timestamps — so making it
+/// conditional was not an option.
+///
+/// Policy about how a step function collapses for a downstream solver (whether
+/// to expand it to a full series, whether to evaluate it once at a midpoint)
+/// belongs to the application and travels in
+/// [`Self::application_data`](Self#structfield.application_data). The store
+/// records breakpoints and values, and nothing else.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PersistentTimeSeries {
+    /// The breakpoints, strictly increasing. Each one is the instant from which
+    /// the value beside it is in force.
+    pub timestamps: Vec<DateTime<Utc>>,
+    pub length: usize,
+    pub data: TypedArray,
+    pub name: String,
+    /// What the stored elements mean and how one timestep is laid out.
+    ///
+    /// Always concrete: a constructor resolves it to `Scalar(data.dtype)`, which
+    /// is what an ordinary numeric series is, and `with_element_type` replaces
+    /// it. There is deliberately no "undeclared" spelling — it would be a second
+    /// way to say `Scalar(dtype)`, and a series written that way would not
+    /// compare equal to the same series read back.
+    ///
+    /// Assigning a new `data` array without updating this is a mismatch the
+    /// store rejects on write; build the series again instead.
+    pub element_type: ElementType,
+    /// User-declared units label for the values (e.g. `"USD/MMBtu"`), or `None`.
+    ///
+    /// Set by whoever creates the series and returned unchanged on read. The
+    /// store never interprets or validates it, and it is not part of a series'
+    /// identity: it cannot be filtered on, and two series differing only in
+    /// their label are a duplicate.
+    pub units: Option<String>,
+    /// What kind of physical quantity the values measure (e.g. `"ActivePower"`),
+    /// or `None`. Free-form; the recommended vocabulary is a QUDT `QuantityKind`
+    /// local name. See [`crate::TimeSeriesMetadata::quantity_kind`].
+    pub quantity_kind: Option<String>,
+    /// Which basis the values are expressed in, or `None` for unspecified.
+    /// See [`UnitSystem`].
+    pub unit_system: Option<UnitSystem>,
+    /// How this series' breakpoints were spelled, or `None` for unspecified.
+    /// See [`TimeReference`] and [`crate::TimeSeriesMetadata::time_reference`].
+    pub time_reference: Option<TimeReference>,
+    /// The field on the owning component whose value varies over time here
+    /// (e.g. `"fuel_cost"`), or `None`.
+    /// See [`crate::TimeSeriesMetadata::component_field`].
+    pub component_field: Option<String>,
+    /// Opaque, package-owned payload (typically JSON) stored verbatim for an
+    /// application to reconstruct its domain objects; the store never interprets
+    /// it. This is where a consumer's own expansion policy lives — see the type
+    /// docs.
+    pub application_data: Option<String>,
+}
+
+impl PersistentTimeSeries {
+    pub fn new(
+        timestamps: Vec<DateTime<Utc>>,
+        data: TypedArray,
+        name: impl Into<String>,
+    ) -> Result<Self, String> {
+        let length = data.length();
+        if timestamps.len() != length {
+            return Err(format!(
+                "timestamp count {} does not match data length {length}",
+                timestamps.len()
+            ));
+        }
+        if timestamps.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err("timestamps must be strictly increasing".to_string());
+        }
+        let element_type = ElementType::Scalar(data.dtype);
+        Ok(Self {
+            timestamps,
+            length,
+            data,
+            name: name.into(),
+            element_type,
+            units: None,
+            quantity_kind: None,
+            unit_system: None,
+            time_reference: None,
+            component_field: None,
+            application_data: None,
+        })
+    }
+
+    /// The index into [`Self::timestamps`] and [`Self::data`] of the breakpoint
+    /// **in force at** `at` — the greatest breakpoint `<= at`.
+    ///
+    /// `Err` if `at` is strictly before the first breakpoint, where the step
+    /// function is undefined, or if the series is empty. This is the single
+    /// source of truth for the lookup: nothing else should re-derive it.
+    pub fn index_in_force_at(&self, at: DateTime<Utc>) -> Result<usize, String> {
+        crate::timestamps::index_in_force_at(&self.timestamps, at).ok_or_else(|| {
+            match self.timestamps.first() {
+                Some(first) => format!(
+                    "PersistentTimeSeries '{}' has no value at {at}: it is before the \
+                     first breakpoint {first}, where a step function is undefined",
+                    self.name
+                ),
+                None => format!(
+                    "PersistentTimeSeries '{}' has no breakpoints, so it has no value at {at}",
+                    self.name
+                ),
+            }
+        })
+    }
+}
+
+impl PersistentTimeSeries {
+    /// Declare the logical element type of the array. Validated on commit
+    /// against the array's dtype and per-step shape.
+    pub fn with_element_type(mut self, element_type: ElementType) -> Self {
+        self.element_type = element_type;
+        self
+    }
+
+    /// Set the user-declared units label.
+    pub fn with_units(mut self, units: impl Into<String>) -> Self {
+        self.units = Some(units.into());
+        self
+    }
+
+    /// Set the quantity kind the values measure (e.g. `"ActivePower"`).
+    pub fn with_quantity_kind(mut self, quantity_kind: impl Into<String>) -> Self {
+        self.quantity_kind = Some(quantity_kind.into());
+        self
+    }
+
+    /// Declare which unit basis the values are expressed in.
+    pub fn with_unit_system(mut self, unit_system: UnitSystem) -> Self {
+        self.unit_system = Some(unit_system);
+        self
+    }
+
+    /// Declare how this series' breakpoints were spelled. Validated on commit
+    /// (a zone name's *shape* only — see [`TimeReference::validate`]).
+    pub fn with_time_reference(mut self, time_reference: TimeReference) -> Self {
+        self.time_reference = Some(time_reference);
+        self
+    }
+
+    /// Name the component field these values vary over time (e.g.
+    /// `"fuel_cost"`).
     pub fn with_component_field(mut self, component_field: impl Into<String>) -> Self {
         self.component_field = Some(component_field.into());
         self
@@ -1275,6 +1482,7 @@ pub enum TimeSeriesData {
     Deterministic(Deterministic),
     Probabilistic(Probabilistic),
     Scenarios(Scenarios),
+    PersistentTimeSeries(PersistentTimeSeries),
 }
 
 impl TimeSeriesData {
@@ -1285,6 +1493,7 @@ impl TimeSeriesData {
             TimeSeriesData::Deterministic(_) => TimeSeriesType::Deterministic,
             TimeSeriesData::Probabilistic(_) => TimeSeriesType::Probabilistic,
             TimeSeriesData::Scenarios(_) => TimeSeriesType::Scenarios,
+            TimeSeriesData::PersistentTimeSeries(_) => TimeSeriesType::PersistentTimeSeries,
         }
     }
 
@@ -1295,6 +1504,7 @@ impl TimeSeriesData {
             TimeSeriesData::Deterministic(d) => &d.name,
             TimeSeriesData::Probabilistic(p) => &p.name,
             TimeSeriesData::Scenarios(s) => &s.name,
+            TimeSeriesData::PersistentTimeSeries(p) => &p.name,
         }
     }
 
@@ -1306,6 +1516,7 @@ impl TimeSeriesData {
             TimeSeriesData::Deterministic(d) => &d.data,
             TimeSeriesData::Probabilistic(p) => &p.data,
             TimeSeriesData::Scenarios(s) => &s.data,
+            TimeSeriesData::PersistentTimeSeries(p) => &p.data,
         }
     }
 
@@ -1354,6 +1565,7 @@ impl TimeSeriesData {
             TimeSeriesData::Deterministic(d) => d.element_type,
             TimeSeriesData::Probabilistic(p) => p.element_type,
             TimeSeriesData::Scenarios(s) => s.element_type,
+            TimeSeriesData::PersistentTimeSeries(p) => p.element_type,
         }
     }
 
@@ -1365,6 +1577,7 @@ impl TimeSeriesData {
             TimeSeriesData::Deterministic(d) => d.units.as_deref(),
             TimeSeriesData::Probabilistic(p) => p.units.as_deref(),
             TimeSeriesData::Scenarios(s) => s.units.as_deref(),
+            TimeSeriesData::PersistentTimeSeries(p) => p.units.as_deref(),
         }
     }
 
@@ -1376,6 +1589,7 @@ impl TimeSeriesData {
             TimeSeriesData::Deterministic(d) => d.quantity_kind.as_deref(),
             TimeSeriesData::Probabilistic(p) => p.quantity_kind.as_deref(),
             TimeSeriesData::Scenarios(s) => s.quantity_kind.as_deref(),
+            TimeSeriesData::PersistentTimeSeries(p) => p.quantity_kind.as_deref(),
         }
     }
 
@@ -1387,6 +1601,7 @@ impl TimeSeriesData {
             TimeSeriesData::Deterministic(d) => d.unit_system,
             TimeSeriesData::Probabilistic(p) => p.unit_system,
             TimeSeriesData::Scenarios(s) => s.unit_system,
+            TimeSeriesData::PersistentTimeSeries(p) => p.unit_system,
         }
     }
 
@@ -1398,6 +1613,7 @@ impl TimeSeriesData {
             TimeSeriesData::Deterministic(d) => d.time_reference.as_ref(),
             TimeSeriesData::Probabilistic(p) => p.time_reference.as_ref(),
             TimeSeriesData::Scenarios(s) => s.time_reference.as_ref(),
+            TimeSeriesData::PersistentTimeSeries(p) => p.time_reference.as_ref(),
         }
     }
 
@@ -1409,6 +1625,7 @@ impl TimeSeriesData {
             TimeSeriesData::Deterministic(d) => d.component_field.as_deref(),
             TimeSeriesData::Probabilistic(p) => p.component_field.as_deref(),
             TimeSeriesData::Scenarios(s) => s.component_field.as_deref(),
+            TimeSeriesData::PersistentTimeSeries(p) => p.component_field.as_deref(),
         }
     }
 
@@ -1420,6 +1637,7 @@ impl TimeSeriesData {
             TimeSeriesData::Deterministic(d) => d.application_data.as_deref(),
             TimeSeriesData::Probabilistic(p) => p.application_data.as_deref(),
             TimeSeriesData::Scenarios(s) => s.application_data.as_deref(),
+            TimeSeriesData::PersistentTimeSeries(p) => p.application_data.as_deref(),
         }
     }
 
@@ -1473,6 +1691,7 @@ impl TimeSeriesData {
             TimeSeriesData::Deterministic(d) => d.element_type = element_type,
             TimeSeriesData::Probabilistic(p) => p.element_type = element_type,
             TimeSeriesData::Scenarios(s) => s.element_type = element_type,
+            TimeSeriesData::PersistentTimeSeries(p) => p.element_type = element_type,
         }
     }
 
@@ -1484,6 +1703,7 @@ impl TimeSeriesData {
             TimeSeriesData::Deterministic(d) => d.units = units,
             TimeSeriesData::Probabilistic(p) => p.units = units,
             TimeSeriesData::Scenarios(s) => s.units = units,
+            TimeSeriesData::PersistentTimeSeries(p) => p.units = units,
         }
     }
 
@@ -1495,6 +1715,7 @@ impl TimeSeriesData {
             TimeSeriesData::Deterministic(d) => d.quantity_kind = quantity_kind,
             TimeSeriesData::Probabilistic(p) => p.quantity_kind = quantity_kind,
             TimeSeriesData::Scenarios(s) => s.quantity_kind = quantity_kind,
+            TimeSeriesData::PersistentTimeSeries(p) => p.quantity_kind = quantity_kind,
         }
     }
 
@@ -1506,6 +1727,7 @@ impl TimeSeriesData {
             TimeSeriesData::Deterministic(d) => d.unit_system = unit_system,
             TimeSeriesData::Probabilistic(p) => p.unit_system = unit_system,
             TimeSeriesData::Scenarios(s) => s.unit_system = unit_system,
+            TimeSeriesData::PersistentTimeSeries(p) => p.unit_system = unit_system,
         }
     }
 
@@ -1517,6 +1739,7 @@ impl TimeSeriesData {
             TimeSeriesData::Deterministic(d) => d.time_reference = time_reference,
             TimeSeriesData::Probabilistic(p) => p.time_reference = time_reference,
             TimeSeriesData::Scenarios(s) => s.time_reference = time_reference,
+            TimeSeriesData::PersistentTimeSeries(p) => p.time_reference = time_reference,
         }
     }
 
@@ -1528,6 +1751,7 @@ impl TimeSeriesData {
             TimeSeriesData::Deterministic(d) => d.component_field = component_field,
             TimeSeriesData::Probabilistic(p) => p.component_field = component_field,
             TimeSeriesData::Scenarios(s) => s.component_field = component_field,
+            TimeSeriesData::PersistentTimeSeries(p) => p.component_field = component_field,
         }
     }
 
@@ -1539,6 +1763,7 @@ impl TimeSeriesData {
             TimeSeriesData::Deterministic(d) => d.application_data = application_data,
             TimeSeriesData::Probabilistic(p) => p.application_data = application_data,
             TimeSeriesData::Scenarios(s) => s.application_data = application_data,
+            TimeSeriesData::PersistentTimeSeries(p) => p.application_data = application_data,
         }
     }
 
@@ -1603,6 +1828,14 @@ impl TimeSeriesData {
             _ => None,
         }
     }
+
+    /// Access the inner [`PersistentTimeSeries`], if present.
+    pub fn as_persistent(&self) -> Option<&PersistentTimeSeries> {
+        match self {
+            TimeSeriesData::PersistentTimeSeries(p) => Some(p),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1625,14 +1858,7 @@ mod tests {
 
     #[test]
     fn time_series_type_str_round_trip_is_exhaustive() {
-        for t in [
-            TimeSeriesType::SingleTimeSeries,
-            TimeSeriesType::NonSequentialTimeSeries,
-            TimeSeriesType::Deterministic,
-            TimeSeriesType::DeterministicSingleTimeSeries,
-            TimeSeriesType::Probabilistic,
-            TimeSeriesType::Scenarios,
-        ] {
+        for t in ALL_TYPES {
             assert_eq!(TimeSeriesType::parse(t.as_str()), Some(t));
             assert_eq!(t.as_str().parse::<TimeSeriesType>(), Ok(t));
         }
@@ -1683,13 +1909,14 @@ mod tests {
         }
     }
 
-    const ALL_TYPES: [TimeSeriesType; 6] = [
+    const ALL_TYPES: [TimeSeriesType; 7] = [
         TimeSeriesType::SingleTimeSeries,
         TimeSeriesType::NonSequentialTimeSeries,
         TimeSeriesType::Deterministic,
         TimeSeriesType::DeterministicSingleTimeSeries,
         TimeSeriesType::Probabilistic,
         TimeSeriesType::Scenarios,
+        TimeSeriesType::PersistentTimeSeries,
     ];
 
     #[test]
@@ -1702,7 +1929,7 @@ mod tests {
             assert!(!seen.contains(&t.code()), "duplicate code for {t:?}");
             seen.push(t.code());
         }
-        assert_eq!(TimeSeriesType::from_code(6), None);
+        assert_eq!(TimeSeriesType::from_code(7), None);
         assert_eq!(TimeSeriesType::from_code(-1), None);
     }
 
@@ -1738,21 +1965,46 @@ mod tests {
     #[test]
     fn code_groups_partition_cleanly() {
         // The summary queries select "all static" / "all forecast" with one
-        // BETWEEN each, which is only correct while the two groups are
-        // contiguous, disjoint, and cover every type.
-        let (s_lo, s_hi, f_lo, f_hi) = TimeSeriesType::code_groups();
-        assert!(s_lo <= s_hi && f_lo <= f_hi);
-        assert_eq!(s_hi + 1, f_lo, "the groups must be adjacent with no gap");
+        // `IN` list each, which is correct exactly while the two lists are
+        // disjoint and together cover every type. They used to be contiguous
+        // ranges too; appending `PersistentTimeSeries` as code 6 ended that,
+        // and the partition is the property that actually mattered.
+        let statics = TimeSeriesType::static_codes();
+        let forecasts = TimeSeriesType::forecast_codes();
         for t in ALL_TYPES {
             let c = t.code();
-            let in_static = (s_lo..=s_hi).contains(&c);
-            let in_forecast = (f_lo..=f_hi).contains(&c);
+            let in_static = statics.contains(&c);
+            let in_forecast = forecasts.contains(&c);
             assert!(
                 in_static ^ in_forecast,
                 "{t:?} must be in exactly one group"
             );
             assert_eq!(in_forecast, t.is_forecast(), "{t:?}");
         }
+        // ...and neither list names a code no type claims.
+        let known: Vec<i64> = ALL_TYPES.iter().map(|t| t.code()).collect();
+        for c in statics.iter().chain(forecasts) {
+            assert!(known.contains(c), "code {c} belongs to no TimeSeriesType");
+        }
+        assert_eq!(statics.len() + forecasts.len(), ALL_TYPES.len());
+    }
+
+    #[test]
+    fn the_persistent_type_is_static_and_appended() {
+        let p = TimeSeriesType::PersistentTimeSeries;
+        // Appended, not inserted: the codes are an on-disk contract, and
+        // `code_span`'s Deterministic/DST adjacency depends on it.
+        assert_eq!(p.code(), 6);
+        assert_eq!(
+            TimeSeriesType::Deterministic.code() + 1,
+            TimeSeriesType::DeterministicSingleTimeSeries.code()
+        );
+        assert!(!p.is_forecast());
+        assert_eq!(p.leading_dims(), 1);
+        assert_eq!(p.code_span(), (6, 6));
+        assert!(p.accepts(p));
+        assert!(!p.accepts(TimeSeriesType::NonSequentialTimeSeries));
+        assert!(!TimeSeriesType::NonSequentialTimeSeries.accepts(p));
     }
 
     #[test]

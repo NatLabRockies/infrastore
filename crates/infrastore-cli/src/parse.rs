@@ -379,13 +379,14 @@ pub fn parse_element_type(s: &str) -> Result<ElementType, String> {
 /// (`TimeSeriesType::as_str`) and the ones `template` writes. Kept in one place
 /// so the flag help, the error message, and [`parse_ts_type`] cannot drift
 /// apart.
-pub const TS_TYPE_NAMES: &str = "SingleTimeSeries|NonSequentialTimeSeries|Deterministic|\
-                                 DeterministicSingleTimeSeries|Probabilistic|Scenarios";
+pub const TS_TYPE_NAMES: &str = "SingleTimeSeries|NonSequentialTimeSeries|PersistentTimeSeries|\
+                                 Deterministic|DeterministicSingleTimeSeries|Probabilistic|\
+                                 Scenarios";
 
 /// The lowercase shorthands [`parse_ts_type`] also accepts, for the "and these
 /// work too" half of the help and error text.
-pub const TS_TYPE_SHORT_NAMES: &str = "single|non_sequential|deterministic|deterministic_single|\
-                                       probabilistic|scenarios";
+pub const TS_TYPE_SHORT_NAMES: &str = "single|non_sequential|persistent|deterministic|\
+                                       deterministic_single|probabilistic|scenarios";
 
 /// Parse a time-series type, accepting both the canonical spelling
 /// (`SingleTimeSeries`) and the short one (`single`). Matching is
@@ -394,6 +395,7 @@ pub fn parse_ts_type(s: &str) -> Result<TimeSeriesType, String> {
     Ok(match s.to_ascii_lowercase().replace('_', "").as_str() {
         "single" | "singletimeseries" => TimeSeriesType::SingleTimeSeries,
         "nonsequential" | "nonsequentialtimeseries" => TimeSeriesType::NonSequentialTimeSeries,
+        "persistent" | "persistenttimeseries" => TimeSeriesType::PersistentTimeSeries,
         "deterministic" => TimeSeriesType::Deterministic,
         "deterministicsingle" | "deterministicsingletimeseries" => {
             TimeSeriesType::DeterministicSingleTimeSeries
@@ -718,6 +720,14 @@ mod tests {
         assert_eq!(
             parse_ts_type("NonSequentialTimeSeries").unwrap(),
             TimeSeriesType::NonSequentialTimeSeries
+        );
+        assert_eq!(
+            parse_ts_type("PersistentTimeSeries").unwrap(),
+            TimeSeriesType::PersistentTimeSeries
+        );
+        assert_eq!(
+            parse_ts_type("persistent").unwrap(),
+            TimeSeriesType::PersistentTimeSeries
         );
         assert!(parse_ts_type("bogus").is_err());
     }

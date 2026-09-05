@@ -20,7 +20,9 @@ Export `time_series_associations` matching the filter (the same filter
 keywords as [`list_metadata`](@ref)) as a sorted OpenAPI-row JSON array.
 Each row's `uri` and `data_hash` are the hex-encoded content hash the store
 already has for that row — never a caller-supplied locator. With no filter
-this exports the whole catalog.
+this exports the whole catalog, minus `PersistentTimeSeries` rows: the type is
+an infrastore-local extension the wire contract has no schema for, so it is
+omitted, and a filter naming it throws.
 """
 function export_time_series_associations_openapi(
     store::Store;

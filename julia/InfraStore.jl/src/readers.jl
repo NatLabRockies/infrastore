@@ -57,9 +57,10 @@ struct StaticGroup
 end
 
 """
-A prepared reader over the static series matching a build filter — either the
-`SingleTimeSeries` on one grid, or the `NonSequentialTimeSeries` on one timestamp
-vector. Build with [`build_static_reader`], read a timestamp with
+A prepared reader over the static series matching a build filter — the
+`SingleTimeSeries` on one grid, the `NonSequentialTimeSeries` on one timestamp
+vector, or the `PersistentTimeSeries` matched by it, each on breakpoints of its
+own. Build with [`build_static_reader`], read a timestamp with
 [`static_read!`], then pull each group's values with [`static_values`]. Inspect
 the layout via [`static_groups`] / [`static_grid`] / [`static_timestamps`].
 """
@@ -146,6 +147,14 @@ pass no `resolution`: an irregular series has none, and the matched series must
 instead share one timestamp vector (read it with [`static_timestamps`]), which is
 also what pools their arrays on disk.
 
+`time_series_type=PersistentTimeSeries` also takes no `resolution`, and is the
+one case where the matched series need **not** share a timeline: a step function
+has a value at every instant from its first breakpoint onward, so each column
+resolves hold-last on its own breakpoints. The reader's timestamps are then the
+union of every column's breakpoints — every instant at which some column changes
+value. Reading at an instant before some column's first breakpoint is an error
+naming that column.
+
 The remaining keywords are [`list_metadata`](@ref)'s filters, `name_glob` (a
 case-sensitive SQLite `GLOB` pattern over the name) included.
 """
@@ -164,12 +173,13 @@ function build_static_reader(
     # Parameters first, so a metadata row's `time_series_type` names a reader as
     # readily as the bare type does.
     static_type = _base_time_series_type(time_series_type)
-    static_type in (SingleTimeSeries, NonSequentialTimeSeries) || throw(
-        InvalidParameterError(
-            "build_static_reader handles the static types (SingleTimeSeries / " *
-            "NonSequentialTimeSeries); got $time_series_type",
-        ),
-    )
+    static_type in (SingleTimeSeries, NonSequentialTimeSeries, PersistentTimeSeries) ||
+        throw(
+            InvalidParameterError(
+                "build_static_reader handles the static types (SingleTimeSeries / " *
+                "NonSequentialTimeSeries / PersistentTimeSeries); got $time_series_type",
+            ),
+        )
     has_owner = owner_id !== nothing
     owner_arg = has_owner ? Int64(owner_id) : Int64(0)
     has_category = owner_category !== nothing
@@ -223,8 +233,10 @@ end
 
 The reader's timeline. For a `SingleTimeSeries` reader the valid timestamps are
 `initial_timestamp + k·resolution` for `k in 0:length-1`. For a
-`NonSequentialTimeSeries` reader `resolution` is `nothing` — there is no constant
-step — and [`static_timestamps`] gives the instants themselves.
+`NonSequentialTimeSeries` or `PersistentTimeSeries` reader `resolution` is
+`nothing` — there is no constant step — and [`static_timestamps`] gives the
+instants themselves (for a persistent reader, the union of its columns'
+breakpoints).
 """
 function static_grid(reader::StaticReader)
     out_initial = Ref{Int64}(0)

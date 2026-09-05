@@ -149,7 +149,7 @@ Adding series one at a time with `add_time_series` instead packs them incrementa
 default-width datasets; that stays space-efficient but writes each column with a read-modify-write,
 so prefer a bulk insert or session when loading in volume.
 
-### The irregular type
+### The irregular types
 
 `NonSequentialTimeSeries` carries an explicit instant per value instead of a grid. Its constructor
 validates that the timestamps are strictly increasing and match the data length, and returns
@@ -167,8 +167,30 @@ store.add_time_series(
 )?;
 ```
 
+`PersistentTimeSeries` takes the same arguments and stores the same way — the vector is a set of
+_breakpoints_ — but reads as a **step function**: the value at an instant is the one belonging to
+the greatest breakpoint at or before it, held forward past the last. Reaching back before the first
+breakpoint is an error, not a clamp.
+
+```rust
+use infrastore_core::PersistentTimeSeries;
+
+// A monthly fuel price: twelve breakpoints, read at any simulation instant.
+let prices = PersistentTimeSeries::new(month_starts, data, "fuel_price")?;
+
+store.add_time_series(
+    42, "ThermalStandard", OwnerCategory::Component,
+    TimeSeriesData::PersistentTimeSeries(prices), Features::new(),
+)?;
+```
+
+`PersistentTimeSeries::index_in_force_at` resolves one instant to the row in force at it; a
+time-range read begins at the breakpoint in force at `start`, so the slice always defines a value
+there. A columnar sweep is [`StaticReader`](../explanation/readers.md), which for this type alone
+lets its columns sit on independent breakpoint vectors.
+
 See [Choosing a Type](../explanation/time-series-types.md#choosing-a-type) if you are deciding
-between it and a `SingleTimeSeries`.
+between these and a `SingleTimeSeries`.
 
 ## Read a Series
 

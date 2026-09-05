@@ -5,7 +5,7 @@ The PyO3 binding is importable as the `infrastore` module (package `infrastore`)
 
 ```python
 from infrastore import (
-    Store, SingleTimeSeries, NonSequentialTimeSeries,
+    Store, SingleTimeSeries, NonSequentialTimeSeries, PersistentTimeSeries,
     Deterministic, Probabilistic, Scenarios,
     TimeSeriesType, OwnerCategory,
     SupplementalAttributeAssociation, ParentChildAssociation,
@@ -25,8 +25,9 @@ from infrastore import (
 
 ## Datetimes
 
-Every `datetime` argument — an initial timestamp, a `NonSequentialTimeSeries` timestamp vector, a
-`time_range` bound, a reader's `when` — may be aware or naive, and the store records **which**.
+Every `datetime` argument — an initial timestamp, a `NonSequentialTimeSeries` timestamp vector or a
+`PersistentTimeSeries` breakpoint vector, a `time_range` bound, a reader's `when` — may be aware or
+naive, and the store records **which**.
 
 An **aware** datetime names an instant, and any zone will do: `datetime.timezone.utc`, a `ZoneInfo`,
 or a fixed offset. It is converted to UTC on the way in, so two aware datetimes naming the same
@@ -69,9 +70,9 @@ filter-taking methods take a `zoneless` predicate for building a coherent select
 [Time references](../explanation/time-references.md) for the full rules.
 
 A `datetime` that is **stored** — an initial timestamp, or an entry of a `NonSequentialTimeSeries`
-timestamp vector — must also be a whole number of milliseconds; `microsecond` must be a multiple of
-1000. A finer instant raises `InvalidParameterError` rather than being silently truncated, because
-it cannot survive every binding intact (see
+or `PersistentTimeSeries` timestamp vector — must also be a whole number of milliseconds;
+`microsecond` must be a multiple of 1000. A finer instant raises `InvalidParameterError` rather than
+being silently truncated, because it cannot survive every binding intact (see
 [timestamp precision](../explanation/time-series-types.md#timestamp-precision)). Note that
 `datetime.now(timezone.utc)` carries microseconds: quantize it, e.g.
 `now.replace(microsecond=now.microsecond // 1000 * 1000)`. A `datetime` used only as a _query_ bound
@@ -158,7 +159,7 @@ def add_time_series(
     owner_id: int,
     owner_type: str,
     owner_category: OwnerCategory,
-    time_series: SingleTimeSeries | NonSequentialTimeSeries
+    time_series: SingleTimeSeries | NonSequentialTimeSeries | PersistentTimeSeries
         | Deterministic | Probabilistic | Scenarios,
     *,
     features: dict[str, int | float | bool | str] | None = None,
@@ -229,10 +230,12 @@ def count_array_references(self, data_hash: str) -> dict: ...
 # associations sharing that array.
 def read_by_ids_range(
     self, ids: list[int], time_range: tuple[datetime, datetime]
-) -> list[SingleTimeSeries | NonSequentialTimeSeries | Deterministic | Probabilistic | Scenarios]: ...
+) -> list[SingleTimeSeries | NonSequentialTimeSeries | PersistentTimeSeries
+          | Deterministic | Probabilistic | Scenarios]: ...
 # The bounds read: it CLIPS to what falls between the two instants, where
 # read_by_id's window is CHECKED. Both bounds must be spelled the way the series
-# are; a selection spanning both coherence groups is refused.
+# are; a selection spanning both coherence groups is refused. A PersistentTimeSeries
+# clips on its own terms: the result begins at the breakpoint in force at `start`.
 
 def read_by_ids(
     self, ids: list[int]
@@ -390,13 +393,13 @@ with store.transaction():
 
 #### Return shapes
 
-- **`add_time_series`** accepts a `SingleTimeSeries`, a `NonSequentialTimeSeries`, or a dense
-  forecast object (`Deterministic` / `Probabilistic` / `Scenarios`) — see [Forecasts](#forecasts).
-  **`transform_single_time_series`** derives a `DeterministicSingleTimeSeries` from every stored
-  `SingleTimeSeries` (or the subset its `owner_category` / `resolution` arguments select) and
-  returns the count transformed. **`read_by_id`** returns whichever matches the stored type — a read
-  names only an id, so the row's own `time_series_type` decides, with no requested type to disagree
-  with it.
+- **`add_time_series`** accepts a `SingleTimeSeries`, a `NonSequentialTimeSeries`, a
+  `PersistentTimeSeries`, or a dense forecast object (`Deterministic` / `Probabilistic` /
+  `Scenarios`) — see [Forecasts](#forecasts). **`transform_single_time_series`** derives a
+  `DeterministicSingleTimeSeries` from every stored `SingleTimeSeries` (or the subset its
+  `owner_category` / `resolution` arguments select) and returns the count transformed.
+  **`read_by_id`** returns whichever matches the stored type — a read names only an id, so the row's
+  own `time_series_type` decides, with no requested type to disagree with it.
 - **`read_by_ids`** returns one typed object per id, in the order the ids are given, repeats
   included (an empty id list returns an empty list). It is the bulk counterpart to `read_by_id`:
   packed `SingleTimeSeries` are read in one decompress-once pass per dataset instead of one read
@@ -513,11 +516,47 @@ be strictly increasing, match the first data dimension, and agree on one spellin
 naive and aware values raises `InvalidParameterError`, since one series records one reference.
 `read_by_id` returns this class for a non-sequential row.
 
+## `PersistentTimeSeries`
+
+```python
+PersistentTimeSeries(
+    timestamps: list[datetime],
+    data: numpy.ndarray,
+    name: str,
+)
+```
+
+A sparse **step function**. Constructed exactly like a `NonSequentialTimeSeries` — same arguments,
+same validation, same spelling inference — with the same read-only properties: `timestamps`,
+`length`, `data`, `name`, and `time_reference`. `timestamps` is the breakpoint vector.
+
+What differs is the read: the value at breakpoint `i` is in force until breakpoint `i + 1`, and past
+the last one forever, where a `NonSequentialTimeSeries` has no value between its timestamps at all.
+There is no value before the first breakpoint, and asking for one raises `InvalidParameterError`
+rather than clamping.
+
+A range read slices on those terms — the returned series begins at the breakpoint _in force at_
+`start`, so it always defines a value there:
+
+```python
+sliced, = store.read_by_ids_range([id], (mid_april, september))
+# sliced.timestamps[0] is the April breakpoint, not the July one.
+```
+
+A zero-width range (`end == start`) is the exception, and selects nothing — as it does for every
+other type, since `[t, t)` holds no instant for a value to be in force at. That applies before the
+first breakpoint too, where a non-empty window raises.
+
+Policy about how a step function collapses for a downstream solver belongs to the application and
+travels in `application_data`; the store never interprets it. See the
+[data model](../explanation/data-model.md#persistenttimeseries).
+
 ## Enums
 
 ```python
 TimeSeriesType.SingleTimeSeries
 TimeSeriesType.NonSequentialTimeSeries
+TimeSeriesType.PersistentTimeSeries
 TimeSeriesType.Deterministic
 TimeSeriesType.DeterministicSingleTimeSeries
 TimeSeriesType.Probabilistic
@@ -680,9 +719,10 @@ def forecast_read(self, reader: ForecastReader, when: datetime) -> None: ...
 `resolution` is required on `build_forecast_reader`, and on `build_static_reader` for
 `SingleTimeSeries` (one resolution per reader). It must be **omitted** for
 `time_series_type=TimeSeriesType.NonSequentialTimeSeries`: an irregular series has no resolution, so
-its timeline is the timestamp vector its cohort shares instead. `static_read` / `forecast_read` fill
-the reader's buffers in place and return `None`; passing a `when` that is off the reader's timeline
-raises `InvalidParameterError`.
+its timeline is the timestamp vector its cohort shares instead. Likewise for
+`TimeSeriesType.PersistentTimeSeries`, whose timeline is the union of its columns' breakpoints.
+`static_read` / `forecast_read` fill the reader's buffers in place and return `None`; passing a
+`when` that is off the reader's timeline raises `InvalidParameterError`.
 
 ### `StaticReader`
 
@@ -701,13 +741,22 @@ class StaticReader:
 All matched series must share one timeline — one grid (`initial_timestamp` + `length`) for
 `SingleTimeSeries`, one timestamp vector for `NonSequentialTimeSeries`. The build validates this and
 raises on divergence, so there is no presence mask — every column has a value at every valid
-timestamp. `grid()["resolution"]` is `None` for an irregular reader; `timestamps()` is the timeline
-either way, so a read loop written against it works unchanged for both. `group_values(i)` returns a
-`(num_columns, *element_shape)` array whose column `j` corresponds to `groups()[i]["keys"][j]`; it
-is empty until the first `static_read`.
+timestamp.
+
+`PersistentTimeSeries` is the exception: its columns may sit on **different** breakpoint vectors,
+because a step function has a value at every instant from its first breakpoint on. `timestamps()` is
+then the sorted union of every column's breakpoints, and each column reports the value in force
+there. Reading before some column's first breakpoint raises `InvalidParameterError` naming that
+column. There is still no presence mask.
+
+`grid()["resolution"]` is `None` for an irregular or persistent reader; `timestamps()` is the
+timeline in every case, so a read loop written against it works unchanged for all three.
+`group_values(i)` returns a `(num_columns, *element_shape)` array whose column `j` corresponds to
+`groups()[i]["ids"][j]`; it is empty until the first `static_read`.
 
 ```python
 # For irregular series: build_static_reader(time_series_type=TimeSeriesType.NonSequentialTimeSeries)
+# For step functions:   build_static_reader(time_series_type=TimeSeriesType.PersistentTimeSeries)
 reader = store.build_static_reader(timedelta(hours=1))
 grid = reader.grid()
 groups = reader.groups()
@@ -715,7 +764,7 @@ start = datetime.fromisoformat(grid["initial_timestamp"])
 for ts in reader.timestamps():
     store.static_read(reader, ts)
     for i, g in enumerate(groups):
-        vals = reader.group_values(i)   # column j ↔ g["keys"][j]
+        vals = reader.group_values(i)   # column j ↔ g["ids"][j]
 ```
 
 ### `ForecastReader`
@@ -980,7 +1029,10 @@ def open_without_catalog(cls, path: str, *, catalog: str = "attached") -> Store:
 
 `export_time_series_associations_openapi` takes the same filter keywords as `list_metadata`. Every
 row's `uri` and `data_hash` are the hex-encoded content hash the store already has for that row —
-never a caller-supplied locator. With no filter this exports the whole catalog, sorted by identity.
+never a caller-supplied locator. With no filter this exports the whole catalog, sorted by identity —
+except `PersistentTimeSeries` rows, which are omitted: the type is an infrastore-local extension the
+wire contract has no schema for, so it cannot be spelled in a document. A filter naming that type is
+an error rather than an empty array.
 
 `export_supplemental_attribute_associations_openapi` exports the whole
 `supplemental_attribute_associations` table, sorted by `(component_id, attribute_id)`;
@@ -996,7 +1048,9 @@ records pointing at the wrong series. An irregular series locates its time axis 
 `timestamps_uri`, filled from the axis's own content hash: the axis is stored beside the arrays and
 shared across a cohort, and the values cannot imply it — two irregular series with byte-identical
 values on different axes share one content-addressed array. A row missing the locator, or naming an
-axis the store does not hold, is refused. Any of those, or an absent array, raises
+axis the store does not hold, is refused. A `PersistentTimeSeries` row is refused before any of
+that: the type is an infrastore-local extension, outside the six the wire contract defines, so a
+document naming one is rejected by the discriminator check. Any of those, or an absent array, raises
 `InvalidParameterError` and rolls the whole batch back.
 
 Infrastore never modifies the data to make an incoming document agree with what it already holds. A
