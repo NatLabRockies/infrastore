@@ -1717,9 +1717,17 @@ impl PySingleTimeSeries {
     /// constructor infers it from `initial_timestamp`, and the vector must agree
     /// on one spelling.
     ///
+    /// Step on **UTC**, then convert back: adding a `timedelta` to an aware
+    /// `datetime` is wall-clock arithmetic, so stepping in local time skips the
+    /// repeated hour at a fall-back transition and leaves a two-hour gap in the
+    /// instants — which this refuses, correctly, as not a grid.
+    ///
     /// ```python
     /// denver = ZoneInfo("America/Denver")
-    /// hours = [datetime(2024, 11, 3, tzinfo=denver) + timedelta(hours=k) for k in range(6)]
+    /// start = datetime(2024, 11, 3, tzinfo=denver).astimezone(timezone.utc)
+    /// hours = [(start + timedelta(hours=k)).astimezone(denver) for k in range(6)]
+    /// # 00:00 MDT, 01:00 MDT, 01:00 MST, 02:00 MST, ... -- the repeated hour is
+    /// # two distinct instants an hour apart, which is why this is a grid.
     /// SingleTimeSeries.from_timestamps(hours, values, "load")   # -> resolution "PT1H"
     ///
     /// days = [datetime(2024, 11, d, tzinfo=denver) for d in range(1, 6)]

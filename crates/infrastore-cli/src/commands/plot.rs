@@ -145,12 +145,7 @@ fn line(
         .enumerate()
         .map(|(i, c)| svg::Series {
             label: c.label.clone(),
-            points: c
-                .times
-                .iter()
-                .zip(&c.values)
-                .map(|(t, v)| (millis(*t), *v))
-                .collect(),
+            points: c.points(),
             slot: i,
             emphasis: false,
         })
@@ -544,6 +539,35 @@ struct Curve {
     resolution: Option<Period>,
     times: Vec<DateTime<Utc>>,
     values: Vec<f64>,
+    /// Whether the values are a step function, so the line between two points
+    /// is a claim the store does not make. See [`Curve::points`].
+    step: bool,
+}
+
+impl Curve {
+    /// The curve as polyline points.
+    ///
+    /// A `PersistentTimeSeries` holds each value until the next breakpoint, so
+    /// joining its points directly draws a ramp through instants where the
+    /// stored value did not move: `[0, 10]` a day apart reads as a slow rise
+    /// rather than a day at 0 and then a jump. The renderer draws straight
+    /// segments, so the staircase is built here — each value carried across to
+    /// the next breakpoint before it changes.
+    fn points(&self) -> Vec<(f64, f64)> {
+        let mut out = Vec::with_capacity(if self.step {
+            self.times.len() * 2
+        } else {
+            self.times.len()
+        });
+        for (i, (t, v)) in self.times.iter().zip(&self.values).enumerate() {
+            if self.step && i > 0 {
+                // The corner: the previous value, held to this instant.
+                out.push((millis(*t), self.values[i - 1]));
+            }
+            out.push((millis(*t), *v));
+        }
+        out
+    }
 }
 
 /// Every static series the selector matched, decoded and time-stamped.
@@ -607,9 +631,6 @@ fn read_curve(
             (times, &s.data)
         }
         TimeSeriesData::NonSequentialTimeSeries(ns) => (ns.timestamps.clone(), &ns.data),
-        // Drawn as a polyline through its breakpoints, like any other static
-        // series. A true step chart would need its own `--kind`; the points are
-        // where the value actually changes either way.
         TimeSeriesData::PersistentTimeSeries(p) => (p.timestamps.clone(), &p.data),
         other => {
             return Err(format!(
@@ -634,6 +655,7 @@ fn read_curve(
         resolution: meta.resolution,
         times,
         values,
+        step: meta.time_series_type == TimeSeriesType::PersistentTimeSeries,
     })
 }
 

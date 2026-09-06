@@ -4430,3 +4430,94 @@ fn upgrade_is_the_writable_open_and_a_no_op_on_a_current_store() {
     let err = run_err(&missing, &["upgrade"]);
     assert!(err.contains("not found"), "{err}");
 }
+
+/// A step function is drawn as a staircase, not as a ramp through its
+/// breakpoints.
+///
+/// Joining the points of a `PersistentTimeSeries` directly draws values the
+/// store does not hold: two breakpoints a quarter apart at 0 and 10 read as a
+/// slow rise across three months, where the stored value is 0 for all of them
+/// and then jumps. The renderer draws straight segments, so the corner point
+/// carrying each value across to the next breakpoint is what makes the chart
+/// honest — and it is visible in the polyline the SVG contains.
+#[test]
+fn plot_draws_a_step_function_as_a_staircase() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("steps.h5");
+    write(
+        dir.path(),
+        "gas.csv",
+        "timestamp,value\n\
+         2024-01-01T00:00:00Z,0\n\
+         2024-04-01T00:00:00Z,10\n",
+    );
+    let d = write(
+        dir.path(),
+        "gas.json",
+        r#"{"owner_id": 7, "owner_type": "ThermalStandard", "name": "gas_price",
+            "type": "PersistentTimeSeries", "element_type": "f64", "csv": "gas.csv"}"#,
+    );
+    run(&store, &["add", "--descriptor", d.to_str().unwrap()]);
+
+    let out = dir.path().join("step.svg");
+    run(
+        &store,
+        &[
+            "plot",
+            "--name",
+            "gas_price",
+            "--out",
+            out.to_str().unwrap(),
+        ],
+    );
+    let svg = fs::read_to_string(&out).unwrap();
+
+    // Two breakpoints, three path points: the middle one is the corner, sharing
+    // the second breakpoint's x with the first breakpoint's y.
+    let points = line_points(&svg);
+    assert_eq!(points.len(), 3, "expected a staircase, got {points:?}");
+    assert_eq!(points[0].1, points[1].1, "the value is held: {points:?}");
+    assert_eq!(points[1].0, points[2].0, "then it jumps: {points:?}");
+    assert_ne!(points[1].1, points[2].1, "and the jump is real: {points:?}");
+
+    // A SingleTimeSeries is unaffected: one point per timestep, no corners.
+    write(dir.path(), "v.csv", "value\n1\n2\n3\n");
+    let d = write(
+        dir.path(),
+        "load.json",
+        r#"{"owner_id": 1, "owner_type": "G", "name": "load", "type": "SingleTimeSeries",
+            "element_type": "f64", "csv": "v.csv",
+            "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H"}"#,
+    );
+    run(&store, &["add", "--descriptor", d.to_str().unwrap()]);
+    let out = dir.path().join("line.svg");
+    run(
+        &store,
+        &["plot", "--name", "load", "--out", out.to_str().unwrap()],
+    );
+    let svg = fs::read_to_string(&out).unwrap();
+    assert_eq!(
+        line_points(&svg).len(),
+        3,
+        "a regular series keeps one point per step"
+    );
+}
+
+/// The `(x, y)` vertices of a chart's first line path, in order. The SVG
+/// backend writes a line as `<path d="Mx,y Lx,y ...">`.
+fn line_points(svg: &str) -> Vec<(f64, f64)> {
+    svg.split("<path class=\"line")
+        .nth(1)
+        .and_then(|s| s.split("d=\"").nth(1))
+        .and_then(|s| s.split('"').next())
+        .expect("a line path")
+        .split_whitespace()
+        .map(|p| {
+            let (x, y) = p
+                .trim_start_matches(['M', 'L'])
+                .split_once(',')
+                .expect("x,y");
+            (x.parse::<f64>().unwrap(), y.parse::<f64>().unwrap())
+        })
+        .collect()
+}

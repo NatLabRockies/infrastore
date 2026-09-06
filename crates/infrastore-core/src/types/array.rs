@@ -285,8 +285,14 @@ impl TypedArray {
             ));
         }
         let size = T::DTYPE.size();
-        self.bytes
-            .get(index * size..(index + 1) * size)
+        // Checked, because the range is built *before* `get` bounds-checks it:
+        // an oversized index would otherwise overflow the multiply — a panic in
+        // debug, and in release a wrapped range that can land back inside the
+        // array and hand out a different element under an `Ok`.
+        index
+            .checked_mul(size)
+            .zip(index.checked_add(1).and_then(|n| n.checked_mul(size)))
+            .and_then(|(start, end)| self.bytes.get(start..end))
             .map(T::from_le_bytes)
             .ok_or_else(|| {
                 format!(
@@ -423,5 +429,29 @@ mod tests {
     #[test]
     fn from_slice_length_mismatch_errors() {
         assert!(TypedArray::from_slice(vec![2, 2], &[1.0f64, 2.0]).is_err());
+    }
+
+    /// `element_at` builds its byte range before `get` bounds-checks it, so an
+    /// oversized index has to be caught by the arithmetic rather than by the
+    /// slice. Unchecked, `usize::MAX` panics in debug and in release wraps to a
+    /// range that can land back inside the array -- a different element handed
+    /// back under an `Ok`, which is the failure this array type exists to make
+    /// impossible.
+    #[test]
+    fn element_at_rejects_an_oversized_index_without_overflowing() {
+        let a = TypedArray::from_slice(vec![3], &[1.0f64, 2.0, 3.0]).unwrap();
+        assert_eq!(a.element_at::<f64>(2).unwrap(), 3.0);
+        for index in [
+            3,
+            usize::MAX / 8,
+            usize::MAX / 8 + 1,
+            usize::MAX - 1,
+            usize::MAX,
+        ] {
+            let err = a
+                .element_at::<f64>(index)
+                .expect_err("index {index} is past the array");
+            assert!(err.contains("past the array's 3 elements"), "{err}");
+        }
     }
 }
