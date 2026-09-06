@@ -333,6 +333,9 @@ def get_time_series_counts(self) -> dict: ...
 def time_series_counts_detailed(self) -> dict: ...
 def counts_by_type(self) -> dict[str, int]: ...       # {time_series_type name: count}
 def num_distinct_arrays(self) -> int: ...
+def show(self, *, file=None) -> None: ...
+# Prints the above as a summary — see below. `file` is any writable object,
+# defaulting to sys.stdout; it is handed straight to print.
 def static_summary(self) -> list[dict]: ...
 def forecast_summary(self) -> list[dict]: ...
 def check_static_consistency(self, resolution: timedelta | str | None = None) -> list[dict]: ...
@@ -446,6 +449,9 @@ with store.transaction():
   `{"components_with_time_series": int, "static_time_series": int, "forecasts": int}`;
   **`time_series_counts_detailed`** adds `supplemental_attributes_with_time_series` and spells the
   other two `static_time_series_count` / `forecast_count`.
+- **`show`** prints those same counts as a block of text and returns `None`. It is the
+  hand-inspection surface — what a store holds, at a glance, without composing four calls and
+  formatting the result. See [`show()`](#show).
 - **`static_summary`** returns one dict per distinct
   `(owner_type, owner_category, time_series_type, name, initial_timestamp, resolution,
   time_step_count)`
@@ -472,6 +478,38 @@ with store.transaction():
   [content addressing](../explanation/content-addressing.md#what-it-does-not-cover).
 - **`read_by_ids_range`** with `time_range=(start, end)` slices on the time axis; `end` is
   exclusive.
+
+### `show()`
+
+`show()` prints what the store holds. It composes nothing you cannot ask for individually — the
+counts come from `counts_by_type`, `time_series_counts_detailed`, `num_distinct_arrays`, and the two
+association `count_*` methods — but it is the one call to reach for at a REPL or in a log line:
+
+```python
+store.show()
+# Store: system.h5 (read-write)
+# Time series: 128 associations over 128 distinct arrays
+#   SingleTimeSeries      100
+#   PersistentTimeSeries    8
+#   Deterministic          20
+# Owners with time series: 108 components, 0 supplemental attributes
+# Supplemental attribute attachments: 12
+# Parent/child edges: 5
+```
+
+Every number is a catalog aggregate query, so the cost does not grow with how much data the store
+holds; no array is read. The type breakdown lists only the types actually present, static types
+before forecasts — not the numeric type-code order `counts_by_type` returns, which puts
+`PersistentTimeSeries` after the forecasts. An empty store reports `Time series: none` rather than a
+zero, and the header reads `(read-only)` for a store opened that way. Writing elsewhere is the
+`file` argument, handed straight to `print`:
+
+```python
+store.show(file=sys.stderr)
+```
+
+The output is meant for a person to read; parse the `count_*` methods instead if you need the
+numbers.
 
 ## `SingleTimeSeries`
 

@@ -2858,6 +2858,102 @@ impl PyStore {
             .as_mut()
             .ok_or_else(|| TimeSeriesError::new_err("store is closed"))
     }
+
+    /// The text [`PyStore::show`] prints.
+    ///
+    /// Every number here comes from a catalog aggregate query -- no array is
+    /// touched -- so the cost does not grow with how much data the store holds.
+    fn summary_text(&self) -> PyResult<String> {
+        let store = self.store()?;
+        let by_type = store.counts_by_type().map_err(map_err)?;
+        let detailed = store.time_series_counts_detailed().map_err(map_err)?;
+        let arrays = store.num_distinct_arrays().map_err(map_err)?;
+        let attachments = store
+            .count_supplemental_attribute_associations(&Default::default())
+            .map_err(map_err)?;
+        let edges = store
+            .count_parent_child_associations(&Default::default())
+            .map_err(map_err)?;
+
+        let mut out = format!(
+            "Store: {} ({})\n",
+            self.descr,
+            if self.read_only {
+                "read-only"
+            } else {
+                "read-write"
+            }
+        );
+
+        let total: i64 = by_type.iter().map(|(_, n)| n).sum();
+        if total == 0 {
+            out.push_str("Time series: none\n");
+        } else {
+            out.push_str(&format!(
+                "Time series: {} association{} over {} distinct array{}\n",
+                total,
+                plural(total),
+                arrays,
+                plural(arrays),
+            ));
+            // Static types first, then forecasts -- the grouping the docs use.
+            // `counts_by_type` orders by the numeric type code instead, which
+            // puts `PersistentTimeSeries` after the forecasts because it was
+            // appended to a list that is an on-disk contract.
+            let mut rows = by_type;
+            rows.sort_by_key(|(t, _)| type_display_rank(*t));
+            let name_width = rows
+                .iter()
+                .map(|(t, _)| t.as_str().len())
+                .max()
+                .unwrap_or(0);
+            let count_width = rows
+                .iter()
+                .map(|(_, n)| n.to_string().len())
+                .max()
+                .unwrap_or(0);
+            for (t, n) in rows {
+                out.push_str(&format!(
+                    "  {:<name_width$}  {:>count_width$}\n",
+                    t.as_str(),
+                    n,
+                ));
+            }
+        }
+
+        out.push_str(&format!(
+            "Owners with time series: {} component{}, {} supplemental attribute{}\n",
+            detailed.components_with_time_series,
+            plural(detailed.components_with_time_series),
+            detailed.supplemental_attributes_with_time_series,
+            plural(detailed.supplemental_attributes_with_time_series),
+        ));
+        out.push_str(&format!(
+            "Supplemental attribute attachments: {attachments}\n"
+        ));
+        out.push_str(&format!("Parent/child edges: {edges}"));
+        Ok(out)
+    }
+}
+
+/// `"s"` unless `n` is 1, for the counted nouns in a `show()` summary.
+fn plural(n: i64) -> &'static str {
+    if n == 1 { "" } else { "s" }
+}
+
+/// Sort key putting the three static types before the four forecast ones in a
+/// `show()` listing, each group in the order the documentation introduces them.
+fn type_display_rank(t: core_lib::TimeSeriesType) -> u8 {
+    use core_lib::TimeSeriesType::*;
+    match t {
+        SingleTimeSeries => 0,
+        NonSequentialTimeSeries => 1,
+        PersistentTimeSeries => 2,
+        Deterministic => 3,
+        DeterministicSingleTimeSeries => 4,
+        Probabilistic => 5,
+        Scenarios => 6,
+    }
 }
 
 #[pymethods]
@@ -3067,6 +3163,39 @@ impl PyStore {
         let state = if self.inner.is_none() { ", closed" } else { "" };
         let read_only = if self.read_only { "True" } else { "False" };
         format!("Store({}, read_only={}{})", self.descr, read_only, state)
+    }
+
+    /// Print a summary of what this store holds: the time-series associations
+    /// broken down by type, how many distinct arrays back them, how many owners
+    /// have one, and the size of the two association catalogs.
+    ///
+    /// `file` is any writable object, defaulting to `sys.stdout` -- the same
+    /// argument `print` takes, and passed straight to it.
+    ///
+    /// Every number is one catalog aggregate query, so this stays cheap on a
+    /// large store; nothing reads an array.
+    ///
+    /// ```python
+    /// store.show()
+    /// # Store: system.h5 (read-write)
+    /// # Time series: 128 associations over 128 distinct arrays
+    /// #   SingleTimeSeries      100
+    /// #   PersistentTimeSeries    8
+    /// #   Deterministic          20
+    /// # Owners with time series: 108 components, 0 supplemental attributes
+    /// # Supplemental attribute attachments: 12
+    /// # Parent/child edges: 5
+    /// ```
+    #[pyo3(signature = (*, file=None))]
+    fn show(&self, py: Python<'_>, file: Option<Bound<'_, PyAny>>) -> PyResult<()> {
+        let text = self.summary_text()?;
+        let kwargs = PyDict::new(py);
+        if let Some(f) = file {
+            kwargs.set_item("file", f)?;
+        }
+        py.import("builtins")?
+            .call_method("print", (text,), Some(&kwargs))?;
+        Ok(())
     }
 
     /// Add a time series. The association `name` comes from the time series

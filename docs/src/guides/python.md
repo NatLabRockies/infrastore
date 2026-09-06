@@ -491,6 +491,28 @@ resolutions = store.get_resolutions()          # list[str] (ISO 8601 durations)
 counts = store.get_time_series_counts()        # dict
 ```
 
+### What is in here?
+
+Before querying anything in particular, `show()` prints the shape of the whole store — the
+time-series associations by type, the arrays behind them, the owners, and both association catalogs:
+
+```python
+store.show()
+# Store: system.h5 (read-write)
+# Time series: 128 associations over 128 distinct arrays
+#   SingleTimeSeries      100
+#   PersistentTimeSeries    8
+#   Deterministic          20
+# Owners with time series: 108 components, 0 supplemental attributes
+# Supplemental attribute attachments: 12
+# Parent/child edges: 5
+```
+
+It is aggregate catalog queries only, so it stays fast on a large store, and it takes `file=` like
+`print` does. For the numbers themselves rather than the rendering, use `counts_by_type()`,
+`time_series_counts_detailed()`, `num_distinct_arrays()`, and the `count_*` methods — see
+[`show()`](../reference/python-api.md#show).
+
 ## Remove and Maintain
 
 ```python

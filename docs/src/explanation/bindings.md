@@ -151,24 +151,30 @@ types are available everywhere (read+write, except the read-only gRPC server), a
 [forecasts](./time-series-types.md#forecasts) read back across every interface. The remaining
 asymmetry is that the read-only gRPC server does not accept any writes:
 
-| Capability                    | Rust core | C ABI | Python          | Julia | CLI    | gRPC        |
-| ----------------------------- | --------- | ----- | --------------- | ----- | ------ | ----------- |
-| `SingleTimeSeries` r/w        | ✅        | ✅    | ✅              | ✅    | ✅     | read-only   |
-| `NonSequentialTimeSeries` r/w | ✅        | ✅    | ✅              | ✅    | ✅     | read-only   |
-| `PersistentTimeSeries` r/w    | ✅        | ✅    | ✅              | ✅    | ✅     | read-only   |
-| dtypes beyond `f64`           | ✅        | ✅    | ✅              | ✅    | ✅     | read-only   |
-| Create forecasts              | ✅        | ✅    | ✅              | ✅    | ✅     | ❌          |
-| Read forecast values          | ✅        | ✅    | ✅              | ✅    | ✅     | ✅          |
-| Forecast metadata / counts    | ✅        | ✅    | ✅              | ✅    | ✅     | list/counts |
-| Readers (columnar sweep)      | ✅        | ✅    | ✅              | ✅    | `grid` | ❌          |
-| Association catalogs          | ✅        | ✅    | ✅              | ✅    | ✅     | ❌          |
-| Materialized timestamps       | ✅        | ✅    | ✅              | ✅    | ✅     | ❌          |
-| `from_timestamps` (verified)  | ✅        | ✅    | ✅              | ✅    | ❌     | ❌          |
-| Arrow tables (`to_arrow`)     | ❌        | ❌    | ✅              | ❌    | ❌     | ❌          |
-| Forecast windows as Arrow     | ❌        | ❌    | `Deterministic` | ❌    | ❌     | ❌          |
+| Capability                    | Rust core | C ABI | Python          | Julia | CLI          | gRPC        |
+| ----------------------------- | --------- | ----- | --------------- | ----- | ------------ | ----------- |
+| `SingleTimeSeries` r/w        | ✅        | ✅    | ✅              | ✅    | ✅           | read-only   |
+| `NonSequentialTimeSeries` r/w | ✅        | ✅    | ✅              | ✅    | ✅           | read-only   |
+| `PersistentTimeSeries` r/w    | ✅        | ✅    | ✅              | ✅    | ✅           | read-only   |
+| dtypes beyond `f64`           | ✅        | ✅    | ✅              | ✅    | ✅           | read-only   |
+| Create forecasts              | ✅        | ✅    | ✅              | ✅    | ✅           | ❌          |
+| Read forecast values          | ✅        | ✅    | ✅              | ✅    | ✅           | ✅          |
+| Forecast metadata / counts    | ✅        | ✅    | ✅              | ✅    | ✅           | list/counts |
+| Readers (columnar sweep)      | ✅        | ✅    | ✅              | ✅    | `grid`       | ❌          |
+| Association catalogs          | ✅        | ✅    | ✅              | ✅    | ✅           | ❌          |
+| Materialized timestamps       | ✅        | ✅    | ✅              | ✅    | ✅           | ❌          |
+| `from_timestamps` (verified)  | ✅        | ✅    | ✅              | ✅    | ❌           | ❌          |
+| Arrow tables (`to_arrow`)     | ❌        | ❌    | ✅              | ❌    | ❌           | ❌          |
+| Store summary (`show`)        | ❌        | ❌    | ✅              | ❌    | `store-info` | ❌          |
+| Forecast windows as Arrow     | ❌        | ❌    | `Deterministic` | ❌    | ❌           | ❌          |
 
 The only gap is by design: writes (including forecasts added through `add_time_series`) require
 local filesystem access, so the read-only gRPC server serves forecast reads but not writes.
+
+**`show()`** is Python-only for now: it is a REPL affordance, and the REPL each binding is used from
+already has one of its own — Julia has `Base.show`, and the CLI has `store-info` plus the `list`
+family. It composes existing catalog aggregate queries and adds no core API, so any binding that
+wants it can grow one without a change underneath.
 
 **Materialized timestamps** and **`from_timestamps`** both run in the core and reach Julia through
 two stateless ABI entry points, `infrastore_grid_timestamps` and `infrastore_infer_period`. That
