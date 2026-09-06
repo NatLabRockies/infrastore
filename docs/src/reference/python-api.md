@@ -755,7 +755,7 @@ first breakpoint too, where a non-empty window raises.
 
 Policy about how a step function collapses for a downstream solver belongs to the application and
 travels in `application_data`; the store never interprets it. See the
-[data model](../explanation/data-model.md#persistenttimeseries).
+[time-series types](../explanation/time-series-types.md#persistenttimeseries).
 
 ## Enums
 

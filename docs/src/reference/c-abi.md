@@ -218,7 +218,7 @@ starts mid-step begins at the breakpoint _in force_ there, so the returned slice
 value at the caller's start.
 
 The ABI discriminant is `6`, kept numerically equal to the storage code. See the
-[data model](../explanation/data-model.md#persistenttimeseries).
+[time-series types](../explanation/time-series-types.md#persistenttimeseries).
 
 ## Attribute-Based Existence
 

@@ -1114,8 +1114,8 @@ error. `new` validates exactly what `NonSequentialTimeSeries::new` does.
 `[first breakpoint, +∞)`, so it has a genuine value at every instant a caller can ask about. Only
 the _row_ that value came from sits earlier, which is why `index_at` and `breakpoint_at` are the
 pair spelled as lookups. All four go through one definition of the boundary rule — nothing
-re-derives it. See the [data model](../explanation/data-model.md#persistenttimeseries) for the full
-contract and the contrast with `NonSequentialTimeSeries`.
+re-derives it. See [time-series types](../explanation/time-series-types.md#persistenttimeseries) for
+the full contract and the contrast with `NonSequentialTimeSeries`.
 
 ### `Deterministic`
 
