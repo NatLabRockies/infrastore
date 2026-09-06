@@ -112,9 +112,11 @@ Two more identity facts that surface in parent-package code:
 
 ## The Store Lifecycle Inside a System Object
 
-Both consumers follow the same shape, and the API was shaped around it. The arrays are never held in
-RAM — a system with hundreds of thousands of series does not fit — so the working store is on-disk
-from the start, in a scratch directory that lives as long as the system object.
+Both consumers follow the same shape, and the API was shaped around it. The arrays stay on disk
+rather than in RAM — a system with hundreds of thousands of series does not fit — so the working
+store is on-disk from the start, in a scratch directory that lives as long as the system object.
+There _is_ an in-memory backend (`in_memory=True`), but it holds every array in RAM and is meant for
+tests and small stores; see the note below.
 
 ### Build: scratch directory, in-memory catalog
 
