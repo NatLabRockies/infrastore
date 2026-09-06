@@ -194,7 +194,7 @@ concept rather than as two type names.</p>
 <a href="../reference/julia-api.html#readers-per-timestamp-iteration">Julia</a>,
 <a href="../reference/c-abi.html#readers">C ABI</a>):</p>
 <div class="table-wrapper"><table><thead><tr><th>Reader</th><th>Sweeps</th></tr></thead><tbody>
-<tr><td><code>StaticReader</code></td><td>both static types — one value per column per instant</td></tr>
+<tr><td><code>StaticReader</code></td><td>all three static types — one value per column per instant</td></tr>
 <tr><td><code>ForecastReader</code></td><td>the four forecast types — one whole window per column per issue time</td></tr>
 </tbody></table>
 </div>
@@ -230,8 +230,9 @@ outside the loop — never per timestep.</li>
 read a single positional lookup rather than a per-column search. What "one timeline" requires
 depends on the type the filter names:</p>
 <div class="table-wrapper"><table><thead><tr><th>Filtered type</th><th>Resolution</th><th>The columns must…</th></tr></thead><tbody>
-<tr><td><code>SingleTimeSeries</code></td><td>pinned</td><td>share one grid — <code>initial_timestamp</code> and <code>length</code></td></tr>
+<tr><td><code>SingleTimeSeries</code></td><td>pinned</td><td>share one grid — <code>initial_timestamp</code> and <code>length</code>, unless the caller names the span (see below)</td></tr>
 <tr><td><code>NonSequentialTimeSeries</code></td><td>none</td><td>lie on one timestamp vector (the on-disk cohort)</td></tr>
+<tr><td><code>PersistentTimeSeries</code></td><td>none</td><td>nothing — each column carries its own breakpoints</td></tr>
 </tbody></table>
 </div>
 <p>A mismatched cohort is refused at <strong>build</strong> time, where the error can name the series that disagree,
@@ -239,6 +240,83 @@ rather than at the first read. The same applies to
 <a href="./time-references.html#query-bounds-and-mixed-selections">time-reference coherence</a>: a reader whose
 matched series mix wall clocks with instants is refused, because no single axis can be spelled for
 both.</p>
+<h3 id="the-one-exception-step-functions"><a class="header" href="#the-one-exception-step-functions">The one exception: step functions</a></h3>
+<p>A <a href="./time-series-types.html#persistenttimeseries"><code>PersistentTimeSeries</code></a> is the row that does not
+have to agree with its neighbors, and only because a step function makes that safe: it has a value
+at <strong>every</strong> instant from its own first breakpoint onward, so a column need not carry the instant
+being read in order to answer for it. Such a reader interns the distinct breakpoint vectors its
+columns sit on, records for each column the vector it resolves against, and takes their sorted
+<strong>union</strong> as its public axis. A read then carries values forward per vector rather than once for the
+whole reader.</p>
+<p>Two consequences follow from the union being a public axis rather than a storage layout:</p>
+<ul>
+<li><strong>A position on it is not a storage row.</strong> <code>index_at</code> reports a position on the union, which
+belongs to no column in particular; the values come from each column's own row in force there.
+Nothing else in the reader surface indexes this way.</li>
+<li><strong>There is still no presence mask.</strong> An instant before some column's first breakpoint has no value
+that column could report, so the read is a hard error naming that column rather than a gap the
+caller has to test for. The rule the other two types get from a shared timeline — every column has
+a value at every readable instant — is preserved, just enforced at read time instead of build
+time.</li>
+</ul>
+<p>The motivating data is per-fuel monthly price curves whose breakpoints do not line up. Forcing them
+onto one cohort would mean either inventing breakpoints or building one reader per fuel, and both
+lose the single chunk-aligned sweep a reader exists to give.</p>
+<h3 id="naming-the-span-instead-of-inheriting-it"><a class="header" href="#naming-the-span-instead-of-inheriting-it">Naming the span instead of inheriting it</a></h3>
+<p>Sharing a grid is a property of whole series, and a simulation usually wants a span they agree on
+rather than the whole of each. A year of load beside a week of an outage schedule, or one component
+logged from an hour later than the rest, has no shared grid — and under the rule above, no reader at
+all. That refusal was correct and not useful.</p>
+<p>So a <code>SingleTimeSeries</code> reader can be given its axis: a start, and optionally an extent. Each column
+then records how many of its <strong>own</strong> steps precede that anchor, and a read adds that offset to the
+reader's index. The one-timeline rule is untouched — there is still exactly one axis, and every
+column still has a value at every instant on it — but the axis is now the caller's span rather than
+whatever the series happened to have in common. Without an extent the span runs as far from the
+anchor as every matched column reaches, which is the widest one on which nothing has to be dropped.</p>
+<p>The window is where a reader could most easily hand back a full, plausible, wrong row, so all three
+of its edges are checked at build time rather than smoothed over:</p>
+<ul>
+<li><strong>A column that does not cover the span is an error naming it.</strong> Dropping it instead would be
+invisible at read time: the sweep would return a complete row, one column short, and nothing in
+the result would say so. Excluding a series is a decision only the caller can make, and the filter
+is where they make it.</li>
+<li><strong>The anchor is checked against each column's own grid, never floored onto it.</strong> This is the one
+place a reader is stricter than <a href="./data-model.html"><code>read_by_id</code></a>, which floors a start inside a
+step because a value covers its step. A reader answers for a whole cohort at one instant, so
+flooring per column would shift columns against each other by up to a step.</li>
+<li><strong>A calendar period is still not closed under re-anchoring.</strong> A window <em>is</em> a re-anchoring, so it
+meets the same <code>Period::sub_grid_is_anchorable</code> rule a sliced read does: a monthly grid from
+Jan-31 read from its own Feb-29 would report Feb-29, Mar-29, Apr-29 against the values of Feb-29,
+Mar-31, Apr-30 — right values, wrong dates. No anchor fixes it, so the window is refused.</li>
+</ul>
+<p>Mechanically the offsets ride the machinery the persistent case already needed: a per-column row
+index and the scattered backend read. A window whose columns all start at the anchor drops back to
+the single-index read, so the ordinary uniform sweep costs exactly what it did.</p>
+<h3 id="or-dropping-the-series-that-are-not-on-the-grid"><a class="header" href="#or-dropping-the-series-that-are-not-on-the-grid">Or dropping the series that are not on the grid</a></h3>
+<p>A window assumes every matched series belongs in the sweep. Often one does not: a stray day of data
+beside a year of it, under the same name, is usually a different component rather than a shorter
+view of the same thing. Forcing it into a window costs the whole year — the span is capped by the
+shortest column — for a series nobody asked about.</p>
+<p>So the filter vocabulary can name a grid too. <code>ListFilter::initial_timestamp</code> and
+<code>ListFilter::length</code> join <code>resolution</code> to select the cohort on one grid, and the series that are not
+on it are not matched at all. This is the same move
+<a href="./time-references.html#query-bounds-and-mixed-selections"><code>ListFilter::zoneless</code></a> makes for spelling:
+a rule that refuses a divergent selection is only half an answer, and the other half is a way to
+construct a coherent one.</p>
+<p>The two remedies are complementary, not competing, and the question they answer is different:</p>
+<div class="table-wrapper"><table><thead><tr><th></th><th>The window</th><th>The grid filter</th></tr></thead><tbody>
+<tr><td>Ragged series</td><td>all take part, each at its own offset</td><td>only those on the named grid</td></tr>
+<tr><td>The axis</td><td>the span you named</td><td>the grid the matched series share</td></tr>
+<tr><td>Reach</td><td><code>build_static_reader</code> only</td><td>every filter-taking call</td></tr>
+<tr><td>A mismatch</td><td>an error naming the series</td><td>that series is simply not matched</td></tr>
+</tbody></table>
+</div>
+<p>The last row is the one to keep in mind. A window is a bound, so it is checked and a series that
+cannot answer it is an error; a filter is a selection, so a grid no row is on is an empty result. It
+is the same distinction the store draws everywhere between a bound and a predicate.</p>
+<p>Both are descriptive rather than identifying: a grid is not part of <code>KeyIdentity</code>, so two series
+differing only in start or length are one row to the catalog, and an identity probe never narrows by
+either.</p>
 <h2 id="sharing-is-resolved-once"><a class="header" href="#sharing-is-resolved-once">Sharing Is Resolved Once</a></h2>
 <p>Where the static side shares storage by packing many components into one dataset, forecasts share it
 by <a href="./content-addressing.html">content addressing</a>: identical arrays are stored once. A

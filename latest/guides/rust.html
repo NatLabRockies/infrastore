@@ -313,7 +313,7 @@ I/O until <code>commit</code>, which is all-or-nothing. Dropping the session wit
 <p>Adding series one at a time with <code>add_time_series</code> instead packs them incrementally into shared
 default-width datasets; that stays space-efficient but writes each column with a read-modify-write,
 so prefer a bulk insert or session when loading in volume.</p>
-<h3 id="the-irregular-type"><a class="header" href="#the-irregular-type">The irregular type</a></h3>
+<h3 id="the-irregular-types"><a class="header" href="#the-irregular-types">The irregular types</a></h3>
 <p><code>NonSequentialTimeSeries</code> carries an explicit instant per value instead of a grid. Its constructor
 validates that the timestamps are strictly increasing and match the data length, and returns
 <code>Result&lt;Self, String&gt;</code>:</p>
@@ -329,8 +329,30 @@ store.add_time_series(
     TimeSeriesData::NonSequentialTimeSeries(outages), Features::new(),
 )?;
 <span class="boring">}</span></code></pre></pre>
+<p><code>PersistentTimeSeries</code> takes the same arguments and stores the same way — the vector is a set of
+<em>breakpoints</em> — but reads as a <strong>step function</strong>: the value at an instant is the one belonging to
+the greatest breakpoint at or before it, held forward past the last. Reaching back before the first
+breakpoint is an error, not a clamp.</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use infrastore_core::PersistentTimeSeries;
+
+// A monthly fuel price: twelve breakpoints, read at any simulation instant.
+let prices = PersistentTimeSeries::new(month_starts, data, "fuel_price")?;
+
+store.add_time_series(
+    42, "ThermalStandard", OwnerCategory::Component,
+    TimeSeriesData::PersistentTimeSeries(prices), Features::new(),
+)?;
+<span class="boring">}</span></code></pre></pre>
+<p><code>PersistentTimeSeries::value_at</code> reads one instant — <code>prices.value_at::&lt;f64&gt;(t)?</code> — carrying the
+last breakpoint's value forward to it, with <code>row_at</code> as the shape-generic form and <code>index_at</code> /
+<code>breakpoint_at</code> for the row it came from. A time-range read begins at the breakpoint in force at
+<code>start</code>, so the slice always defines a value there. A columnar sweep is
+<a href="../explanation/readers.html"><code>StaticReader</code></a>, which for this type alone lets its columns sit on
+independent breakpoint vectors.</p>
 <p>See <a href="../explanation/time-series-types.html#choosing-a-type">Choosing a Type</a> if you are deciding
-between it and a <code>SingleTimeSeries</code>.</p>
+between these and a <code>SingleTimeSeries</code>.</p>
 <h2 id="read-a-series"><a class="header" href="#read-a-series">Read a Series</a></h2>
 <p>Every read takes a <code>TimeSeriesId</code> — the one an add returned, or one off a <code>list_metadata</code> row. The
 row's own type decides what comes back:</p>
@@ -530,6 +552,28 @@ timestamp vector:</p>
 <p>Whatever the kind, <code>reader.timestamps()</code> walks the timeline, so the loop body above is unchanged.
 Coherence is validated at <strong>build</strong> time, where the error can name the series that disagree — there
 is no presence mask, and <code>static_read</code> errors rather than clamps on an off-grid instant.</p>
+<p>When the matched <code>SingleTimeSeries</code> share no grid, name the span instead of inheriting one.
+<code>build_static_reader_over</code> gives each column an offset of its own, so ragged series sweep together:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use infrastore_core::ReadWindow;
+
+let mut reader = store.build_static_reader_over(
+    ListFilter::new().resolution(Duration::hours(1)),
+    ReadWindow::from(anchor),   // .with_len(n) to pin the extent
+)?;
+<span class="boring">}</span></code></pre></pre>
+<p>Without a <code>len</code> the reader runs as far from the anchor as every matched series reaches. With one, a
+series that does not cover the span is an error naming it.</p>
+<p>When the odd series out should not take part at all, filter to one grid instead —
+<code>ListFilter::initial_timestamp</code> and <code>ListFilter::length</code> match only the series already on it:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let mut reader = store.build_static_reader(
+    ListFilter::new().resolution(Duration::hours(1)).initial_timestamp(anchor).length(8784),
+)?;
+<span class="boring">}</span></code></pre></pre>
+<p>See the <a href="../reference/rust-api.html#readers">Rust API reference</a> for how the two remedies differ.</p>
 <h3 id="forecasts-1"><a class="header" href="#forecasts-1">Forecasts</a></h3>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {

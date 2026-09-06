@@ -262,8 +262,8 @@ declares the element type they imply, and <code>TimeSeriesData::decoded_values</
 rejects the mismatch on write, but deriving both from one set of values means there is none to
 reject.</li>
 <li><strong>Python</strong> — <code>infrastore.decode_element_values(array, element_type, leading_dims)</code> and
-<code>encode_element_values(values, element_type, leading_dims)</code>. A write still passes the encoded
-array and declares <code>element_type=</code>; the encoder is what builds it.</li>
+<code>encode_element_values(values, element_type, leading_dims)</code>. The series is still built from the
+encoded array with <code>element_type=</code> declared on its constructor; the encoder is what builds it.</li>
 <li><strong>TypeScript</strong> — <code>@infrastore/codec</code>, which decodes a gRPC response's <code>value_bytes</code> + <code>shape</code> +
 <code>element_type</code> directly into plottable values.</li>
 <li><strong>Julia</strong> — <code>InfraStore.encode_element_values</code> / <code>decode_element_values</code>, over the value types

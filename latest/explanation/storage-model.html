@@ -253,15 +253,16 @@ regardless of the filter, so stores written with different settings stay mutuall
 data-format version is unaffected. In-memory stores ignore the setting.</li>
 </ul>
 <p>Packed mode holds every <strong>static</strong> series. <code>SingleTimeSeries</code> (and the array behind a
-<code>DeterministicSingleTimeSeries</code>) pool by resolution into <code>sts_…</code> datasets; <code>NonSequentialTimeSeries</code>
-pool by their <em>timestamp vector</em> into <code>nsts_…</code> datasets, because the chunking is timestamp-major and
-so only means something for arrays on a common time axis. An irregular series carries that axis
-explicitly, and the store content-addresses it — one <code>tsv_{hash}</code> dataset of unix milliseconds per
-distinct axis, in the file's own <code>timestamps</code> group — so the interned hash is the cohort key, which
-is what lets a <code>StaticReader</code> sweep irregular series the same way it sweeps regular ones.</p>
+<code>DeterministicSingleTimeSeries</code>) pool by resolution into <code>sts_…</code> datasets; the explicit-time-axis
+types (<code>NonSequentialTimeSeries</code> and <code>PersistentTimeSeries</code>) pool by their <em>timestamp vector</em> into
+<code>nsts_…</code> datasets, because the chunking is timestamp-major and so only means something for arrays on
+a common time axis. Such a series carries that axis explicitly, and the store content-addresses it —
+one <code>tsv_{hash}</code> dataset of unix milliseconds per distinct axis, in the file's own <code>timestamps</code>
+group — so the interned hash is the cohort key, which is what lets a <code>StaticReader</code> sweep irregular
+series the same way it sweeps regular ones.</p>
 <p><strong>Standalone mode</strong> holds the dense forecast arrays (<code>Deterministic</code>, <code>Probabilistic</code>, <code>Scenarios</code>)
-and any <code>NonSequentialTimeSeries</code> alone on its time axis — a pool spreads one array over <code>length</code>
-chunks, so a cohort of one is not worth packing. Each is its own typed, multi-dimensional variable
+and any explicit-time-axis series alone on its axis — a pool spreads one array over <code>length</code> chunks,
+so a cohort of one is not worth packing. Each is its own typed, multi-dimensional variable
 <code>arr_{hex_hash}</code> — no column packing and no companion hash (the variable name carries the hash).
 Lone irregular series are shaped <code>[length, *element_shape]</code> and chunked whole; dense forecasts are
 shaped <code>[H, count, *element_shape]</code> (with extra leading axes for <code>Probabilistic</code> / <code>Scenarios</code>) and
@@ -316,8 +317,9 @@ the <a href="./data-model.html#identity">identity uniqueness</a> invariant at th
 <code>owner_id</code> are independent; <code>interval</code> is part of the key too, so forecasts of one variable that
 differ only by interval are distinct. Because SQLite treats <code>NULL</code> as distinct in a <code>UNIQUE</code> index,
 a second index folds <code>NULL</code> <code>resolution</code> and <code>interval</code> to a sentinel so series without them (e.g.
-<code>NonSequentialTimeSeries</code>, or any static series, which carry no interval) are still constrained.
-Indexes on <code>data_hash</code>, <code>(owner_id, owner_category)</code>, and <code>resolution</code> keep lookups fast.</p>
+<code>NonSequentialTimeSeries</code> and <code>PersistentTimeSeries</code>, or any static series, which carry no interval)
+are still constrained. Indexes on <code>data_hash</code>, <code>(owner_id, owner_category)</code>, and <code>resolution</code> keep
+lookups fast.</p>
 <h2 id="keeping-the-two-files-consistent"><a class="header" href="#keeping-the-two-files-consistent">Keeping the Two Files Consistent</a></h2>
 <p>Because a write touches both files, <code>Store</code> follows a careful ordering so a failure cannot leave a
 dangling reference:</p>

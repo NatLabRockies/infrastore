@@ -338,6 +338,30 @@ the two reach different formats:</p>
 </div>
 <p>So <code>-f csv get --limit 3</code> still writes every row; thin a pipe with <code>--stride</code>, or slice it with
 <code>--time-range</code>. The table's own default cap is 50 rows, lifted by <code>--full</code>.</p>
+<h4 id="grid-over-series-that-share-no-grid"><a class="header" href="#grid-over-series-that-share-no-grid"><code>grid</code> over series that share no grid</a></h4>
+<p>Every column in a <code>grid</code> sits on one timeline, and for <code>SingleTimeSeries</code> that means one
+<code>initial_timestamp</code> and one <code>length</code> — which most real stores do not have. <code>--window-start</code> names
+the span instead of deriving it, and each column then reads at an offset of its own:</p>
+<pre><code class="language-sh">infrastore --store demo.h5 grid --resolution PT1H
+# Error: invalid parameter: StaticReader requires a uniform grid; series 'load' (owner 2) has
+# grid (2024-01-01T02:00:00Z, PT1H, 4) but the reader grid is (2024-01-01T00:00:00Z, PT1H, 4).
+# Build the reader over a window ...
+
+infrastore --store demo.h5 grid --resolution PT1H --window-start 2024-01-01T02:00:00Z
+</code></pre>
+<p><code>--window-length N</code> pins the extent; without it the sweep runs as far from the anchor as <em>every</em>
+matched series reaches. The span is checked, not clamped — a matched series that does not cover it
+is an error naming that series, rather than a column silently missing from the table — and the
+anchor must land on each series' own step boundaries. It is <code>SingleTimeSeries</code>-only: the two
+irregular types carry their timeline rather than deriving it.</p>
+<p><code>--window-start</code> and <code>--time-range</code> do different jobs and compose. The first decides which rows the
+reader has at all; the second filters the rows it already has, and is the one that reaches every
+output format the same way.</p>
+<p>There is a third way to bound a <code>grid</code>, and it is a <em>selector</em> rather than a display bound:
+<code>--initial-timestamp</code> / <code>--length</code> keep only the series already on one grid, so the ones that are
+not never become columns at all. Reach for the window when the ragged series should all take part in
+the sweep, and the selector when they should not — a stray day of data beside a year of it is
+usually a different component, not a shorter view of the same sweep.</p>
 <h3 id="write-data"><a class="header" href="#write-data">Write data</a></h3>
 <div class="table-wrapper"><table><thead><tr><th>Command</th><th>Purpose</th></tr></thead><tbody>
 <tr><td><code>init</code></td><td>Create an empty store with an explicit compression and catalog policy.</td></tr>
@@ -494,7 +518,7 @@ infrastore --store &lt;PATH&gt; add --csv &lt;FILE.csv&gt; --owner-id &lt;I&gt; 
 infrastore --store &lt;PATH&gt; merge --from &lt;PATH.h5&gt; [SELECTOR...] [--replace] [--dry-run]
 infrastore --store &lt;PATH&gt; list    [SELECTOR...] [--limit N] [--wide]
 infrastore --store &lt;PATH&gt; get     [SELECTOR...] [--time-range START..END] [--limit N | --full] [--tail] [--stride N] [--plot [--plot-width COLS]] [--window N | --issue-time &lt;TS&gt;]
-infrastore --store &lt;PATH&gt; grid    [SELECTOR...] [--time-range START..END] [--limit N | --full] [--label &lt;auto|owner|full&gt;]
+infrastore --store &lt;PATH&gt; grid    [SELECTOR...] [--window-start &lt;TS&gt; [--window-length N]] [--time-range START..END] [--limit N | --full] [--label &lt;auto|owner|full&gt;]
 infrastore --store &lt;PATH&gt; plot    [SELECTOR...] [--out &lt;FILE.svg|FILE.html|-&gt;] [--kind &lt;line|duration|heatmap|fan|overlay&gt;] [--time-range START..END] [--title &lt;T&gt;] [--width W] [--height H] [--window N] [--limit N]
 infrastore --store &lt;PATH&gt; info    [SELECTOR...] [--no-stats]
 infrastore --store &lt;PATH&gt; export  [SELECTOR...] [--dir &lt;DIR&gt;] [--time-range START..END]
@@ -527,7 +551,7 @@ infrastore --store &lt;PATH&gt; verify
 infrastore --store &lt;PATH&gt; check-consistency [--resolution &lt;DUR&gt;]
 infrastore --store &lt;PATH&gt; resolutions
 infrastore --store &lt;PATH&gt; params [--resolution &lt;DUR&gt;] [--interval &lt;DUR&gt;]
-infrastore template &lt;SingleTimeSeries|NonSequentialTimeSeries|Deterministic|Probabilistic|Scenarios&gt;
+infrastore template &lt;SingleTimeSeries|NonSequentialTimeSeries|PersistentTimeSeries|Deterministic|Probabilistic|Scenarios&gt;
 </code></pre>
 <p><code>--csv</code> overrides the <code>csv</code> path inside the descriptor, and only works when the descriptor is a
 single object (a wide one that expands to many series included). Passing it alongside a descriptor
@@ -592,10 +616,24 @@ value:</p>
 <tr><td><code>--component-field &lt;F&gt;</code></td><td>Owning component's field, exact and case-sensitive.</td></tr>
 <tr><td><code>--type &lt;T&gt;</code></td><td>See the type spellings below.</td></tr>
 <tr><td><code>--resolution &lt;DUR&gt;</code></td><td>Resolution as an ISO-8601 duration, e.g. <code>PT1H</code>, <code>PT15M</code>, <code>P1M</code>.</td></tr>
+<tr><td><code>--initial-timestamp &lt;TS&gt;</code></td><td>Keep only the series whose own grid starts here (RFC3339 or epoch-ms).</td></tr>
+<tr><td><code>--length &lt;N&gt;</code></td><td>Keep only the series of exactly this many timesteps.</td></tr>
 <tr><td><code>--feature key=value</code></td><td>Feature filter; repeatable. Values are inferred as int/float/bool/string.</td></tr>
 <tr><td><code>--spelling &lt;S&gt;</code></td><td><code>zoned</code> or <code>zoneless</code>: which timestamp spelling to keep.</td></tr>
 </tbody></table>
 </div>
+<p><code>--initial-timestamp</code> and <code>--length</code> join <code>--resolution</code> to name a whole <strong>grid</strong>, which is how a
+store holding several is narrowed to the one you mean. That matters most for <code>grid</code>, whose columns
+must share a timeline: a stray day of data beside a year of it, under the same name, leaves no
+readable selection until one grid is picked. It is the counterpart to <code>grid --window-start</code>, and the
+two answer different questions — the filter drops the series that are not on the grid, the window
+sweeps a span across them all. Like every filter they select rather than assert, so a grid no row is
+on is an empty result rather than an error, and a series that stores no start (the two irregular
+types) matches no value at all.</p>
+<pre><code class="language-sh">infrastore --store system.h5 list --initial-timestamp 2024-01-01T07:00:00Z --length 8784
+infrastore --store system.h5 grid --resolution PT1H --initial-timestamp 2024-01-01T07:00:00Z
+infrastore --store system.h5 --yes remove --initial-timestamp 2024-01-01T00:00:00Z --length 24
+</code></pre>
 <p><code>--id</code> is different in kind from the flags under it. The others narrow a set; <code>--id</code> names exactly
 one row, by the catalog id that <code>add</code>, <code>list</code>, and <code>info</code> report. So it cannot be combined with them
 (the error says as much), and it cannot stand in for them on a command that works over a set —
@@ -626,11 +664,12 @@ Long candidate lists are truncated after ten entries; rerun the same flags under
 all. The owner identity is the pair <code>(owner_id, owner_category)</code>, so a component and a supplemental
 attribute may share a numeric <code>owner_id</code>; add <code>--owner-category</code> to disambiguate when both exist.</p>
 <h3 id="type-spellings"><a class="header" href="#type-spellings">Type Spellings</a></h3>
-<p><code>--type</code> (and the descriptor's <code>type</code> key) accepts six concrete types. Matching is case-insensitive
-and ignores underscores, so each has a short form and a full form:</p>
+<p><code>--type</code> (and the descriptor's <code>type</code> key) accepts seven concrete types. Matching is
+case-insensitive and ignores underscores, so each has a short form and a full form:</p>
 <div class="table-wrapper"><table><thead><tr><th>Type</th><th>Accepted spellings</th></tr></thead><tbody>
 <tr><td><code>SingleTimeSeries</code></td><td><code>single</code>, <code>SingleTimeSeries</code></td></tr>
 <tr><td><code>NonSequentialTimeSeries</code></td><td><code>non_sequential</code>, <code>NonSequentialTimeSeries</code></td></tr>
+<tr><td><code>PersistentTimeSeries</code></td><td><code>persistent</code>, <code>PersistentTimeSeries</code></td></tr>
 <tr><td><code>Deterministic</code></td><td><code>deterministic</code></td></tr>
 <tr><td><code>DeterministicSingleTimeSeries</code></td><td><code>deterministic_single</code>, <code>DeterministicSingleTimeSeries</code></td></tr>
 <tr><td><code>Probabilistic</code></td><td><code>probabilistic</code></td></tr>
@@ -676,8 +715,9 @@ pass is also recorded as the series' <code>time_reference</code>.</p>
 inclusive, <code>END</code> exclusive), where each side is parsed as a timestamp. For example
 <code>--time-range 2024-01-01T01:00:00Z..2024-01-01T03:00:00Z</code>. A duration such as <code>--time-range 1h</code> is
 rejected with <code>invalid --time-range '1h' (expected START..END)</code>. A range bound need not be
-grid-aligned for a static series, and must be a window boundary for a forecast; see
-<a href="rust-api.html#reading-a-time-range">reading a time range</a> for what each type selects. A sliced
+grid-aligned for a static series, and must be a window boundary for a forecast (except one before
+the first window, which clips to it); see <a href="rust-api.html#reading-a-time-range">reading a time range</a>
+for what each type selects, and for the monthly-grid slice that is refused outright. A sliced
 forecast is rendered as the windows it kept — their own issue times, and a <code>count</code> and
 <code>initial_timestamp</code> in <code>-f json</code> that describe the slice — and <code>get</code>'s <code>--window N</code> /
 <code>--issue-time</code> then address those windows: <code>--window 0</code> is the first <em>selected</em> one, and a window
@@ -766,12 +806,13 @@ case for the inline object form, since that carries ids only. A column with no m
 that names the unmapped columns — a 500-column load that stopped at "some column is unmapped" would
 leave you diffing two files by hand. Exactly one of <code>owner_map</code> and <code>owner_id_from</code> may be set, and
 either one in a <code>long</code> descriptor is an error.</p>
-<p>A leading <code>timestamp</code> column is <strong>required</strong> for a wide <code>NonSequentialTimeSeries</code> (whose timestamps
-are explicit rather than a grid). For a wide <code>SingleTimeSeries</code> it is optional, and when present it
-is checked, not ignored — see <a href="#reading-back-and-re-adding">Reading back</a>. The wide layout covers
-the two static types and scalar elements only: a forecast's value block is already three axes deep
-before any per-column split, and a multidimensional element would need a second header row to say
-which column belongs to which <code>(owner, element)</code> pair. Both are rejected rather than guessed at.</p>
+<p>A leading <code>timestamp</code> column is <strong>required</strong> for a wide <code>NonSequentialTimeSeries</code> or
+<code>PersistentTimeSeries</code> (whose instants are explicit rather than a grid). For a wide
+<code>SingleTimeSeries</code> it is optional, and when present it is checked, not ignored — see
+<a href="#reading-back-and-re-adding">Reading back</a>. The wide layout covers the three static types and
+scalar elements only: a forecast's value block is already three axes deep before any per-column
+split, and a multidimensional element would need a second header row to say which column belongs to
+which <code>(owner, element)</code> pair. Both are rejected rather than guessed at.</p>
 <p><code>infrastore grid</code> writes this same shape back out — see below.</p>
 <h2 id="csv-layout"><a class="header" href="#csv-layout">CSV Layout</a></h2>
 <p><code>infrastore</code> computes the full array shape from the descriptor and reads the CSV's value cells in
@@ -779,6 +820,7 @@ which column belongs to which <code>(owner, element)</code> pair. Both are rejec
 <div class="table-wrapper"><table><thead><tr><th>Type</th><th>Shape</th><th>CSV</th></tr></thead><tbody>
 <tr><td><code>SingleTimeSeries</code></td><td><code>[length, *element_shape]</code></td><td>One value column (or <code>prod(element_shape)</code> columns), one row per step.</td></tr>
 <tr><td><code>NonSequentialTimeSeries</code></td><td><code>[length, *element_shape]</code></td><td>First column is the timestamp, then value columns.</td></tr>
+<tr><td><code>PersistentTimeSeries</code></td><td><code>[length, *element_shape]</code></td><td>Same shape: first column is the breakpoint, then value columns.</td></tr>
 <tr><td><code>Deterministic</code></td><td><code>[H, count, *E]</code></td><td>Flat row-major values; <code>H = horizon / resolution</code>.</td></tr>
 <tr><td><code>Probabilistic</code></td><td><code>[num_percentiles, H, count, *E]</code></td><td>Flat row-major values.</td></tr>
 <tr><td><code>Scenarios</code></td><td><code>[scenario_count, H, count, *E]</code></td><td>Flat row-major values.</td></tr>
@@ -799,7 +841,7 @@ header row — add one (e.g. `value`, or `timestamp,value`), or delete the row i
 because a piped file otherwise loses the time axis entirely — <code>initial_timestamp</code> and <code>resolution</code>
 live in the catalog, not in the file.</p>
 <div class="table-wrapper"><table><thead><tr><th>Type</th><th><code>get -f csv</code> / <code>export -f csv</code> header</th></tr></thead><tbody>
-<tr><td><code>SingleTimeSeries</code>, <code>NonSequentialTimeSeries</code></td><td><code>timestamp,value...</code></td></tr>
+<tr><td><code>SingleTimeSeries</code>, <code>NonSequentialTimeSeries</code>, <code>PersistentTimeSeries</code></td><td><code>timestamp,value...</code></td></tr>
 <tr><td><code>Deterministic</code></td><td><code>issue_time,target_time,value...</code></td></tr>
 <tr><td><code>Probabilistic</code></td><td><code>issue_time,target_time,value[p10],...</code> (one column per percentile)</td></tr>
 <tr><td><code>Scenarios</code></td><td><code>issue_time,target_time,value[s0],...</code> (one column per scenario)</td></tr>
@@ -808,10 +850,11 @@ live in the catalog, not in the file.</p>
 <p><code>add</code> reads both layouts. It picks between them from the header row, so a file written by <code>export</code>
 can be handed straight back to <code>add</code> with no column surgery:</p>
 <ul>
-<li>a first column named <code>timestamp</code> is read as the time axis. For a <code>NonSequentialTimeSeries</code> it <em>is</em>
-the data; for a <code>SingleTimeSeries</code> it is <strong>validated</strong> against the descriptor's
-<code>initial_timestamp</code> + <code>resolution</code> grid, row count included, so a file sliced out of an export and
-re-added under the original descriptor fails loudly rather than landing on the wrong instants;</li>
+<li>a first column named <code>timestamp</code> is read as the time axis. For a <code>NonSequentialTimeSeries</code> or a
+<code>PersistentTimeSeries</code> it <em>is</em> the data; for a <code>SingleTimeSeries</code> it is <strong>validated</strong> against the
+descriptor's <code>initial_timestamp</code> + <code>resolution</code> grid, row count included, so a file sliced out of
+an export and re-added under the original descriptor fails loudly rather than landing on the wrong
+instants;</li>
 <li>leading <code>issue_time</code> + <code>target_time</code> columns mark the timestamped forecast layout, whose rows run
 window-major with the percentiles/scenarios spread across columns — <code>add</code> transposes them back
 into the stored <code>[series, horizon, count, element]</code> order;</li>
@@ -832,6 +875,12 @@ timestamp,1,2,3
 a presence mask. For <code>SingleTimeSeries</code> that means one resolution, so <code>--resolution</code> is required;
 for <code>NonSequentialTimeSeries</code> it means one shared timestamp vector, and a selection spanning two is
 an error naming how many were found rather than a padded result.</p>
+<p><code>PersistentTimeSeries</code> is the exception, and it is the core's rather than the CLI's: a step function
+has a value at every instant from its first breakpoint onward, so its columns may hold <strong>different</strong>
+breakpoint vectors. The rows are then the union of every column's breakpoints — every instant at
+which some column changes — and each column shows the value in force there rather than a blank. A
+selection whose earliest row precedes some column's first breakpoint is an error naming that column,
+since a step function has no value before its first breakpoint.</p>
 <p>Columns are named by <code>--label</code>:</p>
 <div class="table-wrapper"><table><thead><tr><th>Value</th><th>Header</th></tr></thead><tbody>
 <tr><td><code>auto</code> (default)</td><td>The bare owner id when every column shares one series name, else</td></tr>

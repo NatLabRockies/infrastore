@@ -349,6 +349,22 @@ ingest above — use <code>grid</code>:</p>
 <p>Every column in a grid shares one timeline, which is what makes the rows line up without a presence
 mask; that is why <code>SingleTimeSeries</code> needs <code>--resolution</code>. When every column shares one series name
 the headers are bare owner ids, which is exactly the wide form <code>add</code> reads back.</p>
+<p>When the matched series do <strong>not</strong> share one — a year of load beside a shorter schedule — the build
+fails, naming the series that diverges. <code>--window-start</code> sweeps a span you name instead, with each
+column reading at an offset of its own:</p>
+<pre><code class="language-sh">infrastore --store demo.h5 -f csv grid --resolution PT1H --window-start 2024-01-01T02:00:00Z
+</code></pre>
+<p>Add <code>--window-length N</code> to pin the extent; without it the sweep runs as far as every matched series
+reaches. A series that does not cover the span is an error naming it, never a column quietly left
+out of the table.</p>
+<p>Sometimes the odd series out should not be a column at all. Then select one grid instead — with
+<code>--resolution</code>, the <code>--initial-timestamp</code> and <code>--length</code> selectors name a whole grid, and every
+series not on it drops out:</p>
+<pre><code class="language-sh">infrastore --store demo.h5 -f csv grid --resolution PT1H \
+    --initial-timestamp 2024-01-01T02:00:00Z --length 6
+</code></pre>
+<p>They are ordinary selectors, so <code>list</code>, <code>remove</code>, and the rest take them too — which is how you find
+the grids a store holds (<code>list --length 24</code>) and retire a stray cohort without naming its owners.</p>
 <p><code>export</code> is the bulk read-direction inverse of <code>add</code>: every series the selector matches is written
 to its own CSV or JSON file under <code>--dir</code> (or to stdout when exactly one matches), optionally sliced
 with <code>--time-range</code>. Setting <code>INFRASTORE_STORE</code> in the environment stands in for <code>--store</code>, every
@@ -429,9 +445,10 @@ consumer's object graph — so the flags are bare ids and type names. <code>atta
 because the four columns are two interchangeable-looking <code>(id, type)</code> pairs and a swapped file would
 silently invert every relationship. <code>detach</code> and <code>unlink</code> are the inverses, and take <code>--dry-run</code>.</p>
 <h2 id="forecasts"><a class="header" href="#forecasts">Forecasts</a></h2>
-<p>All five writable types work (<code>SingleTimeSeries</code>, <code>NonSequentialTimeSeries</code>, <code>Deterministic</code>,
-<code>Probabilistic</code>, <code>Scenarios</code>). <code>infrastore template Deterministic</code> prints a descriptor to edit, but
-it is plain JSON and says nothing about the data layout, so here is the rule:</p>
+<p>All six writable types work (<code>SingleTimeSeries</code>, <code>NonSequentialTimeSeries</code>, <code>PersistentTimeSeries</code>,
+<code>Deterministic</code>, <code>Probabilistic</code>, <code>Scenarios</code>). <code>infrastore template Deterministic</code> prints a
+descriptor to edit, but it is plain JSON and says nothing about the data layout, so here is the
+rule:</p>
 <p>Forecast CSVs are a flat, <strong>row-major</strong> stream of values with no structure of their own. The count
 must equal the product of the type's shape:</p>
 <div class="table-wrapper"><table><thead><tr><th>Type</th><th>Shape</th></tr></thead><tbody>

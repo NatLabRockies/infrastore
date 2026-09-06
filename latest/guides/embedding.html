@@ -280,9 +280,11 @@ special-case it; your catalog displays may.</li>
 a duplicate. Changing a descriptor means remove and re-add.</li>
 </ul>
 <h2 id="the-store-lifecycle-inside-a-system-object"><a class="header" href="#the-store-lifecycle-inside-a-system-object">The Store Lifecycle Inside a System Object</a></h2>
-<p>Both consumers follow the same shape, and the API was shaped around it. The arrays are never held in
-RAM — a system with hundreds of thousands of series does not fit — so the working store is on-disk
-from the start, in a scratch directory that lives as long as the system object.</p>
+<p>Both consumers follow the same shape, and the API was shaped around it. The arrays stay on disk
+rather than in RAM — a system with hundreds of thousands of series does not fit — so the working
+store is on-disk from the start, in a scratch directory that lives as long as the system object.
+There <em>is</em> an in-memory backend (<code>in_memory=True</code>), but it holds every array in RAM and is meant for
+tests and small stores; see the note below.</p>
 <h3 id="build-scratch-directory-in-memory-catalog"><a class="header" href="#build-scratch-directory-in-memory-catalog">Build: scratch directory, in-memory catalog</a></h3>
 <pre><code class="language-python"># Python
 store = Store.create(scratch / "time_series.h5", catalog="memory")

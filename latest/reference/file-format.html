@@ -256,6 +256,11 @@ bump plus an append-only migration</strong>, not a re-created store. A catalog w
 <code>DATA_FORMAT_VERSION</code> bump at all</strong> — nothing in the HDF5 file moves, so a <code>0.19.0</code> store upgrades
 in place on its first writable open. See
 <a href="../explanation/design-choices.html#upgrade-a-store-in-place-rather-than-bricking-it">Upgrade a store in place</a>.</p>
+<p><code>PersistentTimeSeries</code> (storage code 6) is the first <em>type</em> to arrive through that door, and it
+likewise takes no version bump. The HDF5 layout is unchanged — a persistent series pools into the
+same <code>nsts_…</code> datasets as a <code>NonSequentialTimeSeries</code> on the same breakpoints, and its breakpoints
+are an ordinary timestamp vector — so the widened <code>CHECK</code> is the whole of what it needed from the
+catalog, and every <code>0.19.0</code> store already has it.</p>
 <h3 id="version-history"><a class="header" href="#version-history">Version history</a></h3>
 <p>Newest first. Each entry is the change that forced the bump; <code>0.19.0</code> is both the current
 <code>DATA_FORMAT_VERSION</code> and the current <code>MIN_UPGRADABLE_VERSION</code>, so only the top entry describes
@@ -389,11 +394,12 @@ round-trip.</p>
 hex characters as raw bytes — not an HDF5 string dataset. <strong>An all-zero row marks a free slot.</strong></p>
 <h3 id="packed-mode"><a class="header" href="#packed-mode">Packed mode</a></h3>
 <p>Used for every <strong>static</strong> series: <code>SingleTimeSeries</code>, the underlying array of a
-<code>DeterministicSingleTimeSeries</code>, and <code>NonSequentialTimeSeries</code>. Many arrays that share a
-<code>(dtype, element_shape, length)</code> <strong>and a time axis</strong> are column-packed into one dataset:</p>
+<code>DeterministicSingleTimeSeries</code>, <code>NonSequentialTimeSeries</code>, and <code>PersistentTimeSeries</code>. Many arrays
+that share a <code>(dtype, element_shape, length)</code> <strong>and a time axis</strong> are column-packed into one
+dataset:</p>
 <div class="table-wrapper"><table><thead><tr><th>Element</th><th>Meaning</th></tr></thead><tbody>
 <tr><td><code>sts_</code></td><td>Prefix for a packed <code>SingleTimeSeries</code> / DST pool</td></tr>
-<tr><td><code>nsts_</code></td><td>Prefix for a packed <code>NonSequentialTimeSeries</code> cohort</td></tr>
+<tr><td><code>nsts_</code></td><td>Prefix for a packed explicit-time-axis cohort (irregular + persistent)</td></tr>
 <tr><td><code>{dtype}</code></td><td>Element dtype string (<code>f64</code>, <code>i64</code>, …)</td></tr>
 <tr><td><code>{shape}</code></td><td>Element shape: <code>s</code> = scalar, <code>3</code> = <code>[3]</code>, <code>3x2</code> = <code>[3, 2]</code></td></tr>
 <tr><td><code>{length}</code></td><td>Number of timesteps (size of the time axis)</td></tr>
@@ -406,9 +412,12 @@ hex characters as raw bytes — not an HDF5 string dataset. <strong>An all-zero 
 the chunking is timestamp-major, so row <code>t</code> of a dataset is "every column at the same instant". A
 regular series takes its axis from the resolution; an irregular one carries the axis explicitly, and
 two of them share one exactly when their timestamp vectors are equal — which the store already
-answers by content-addressing those vectors (see <a href="#timestamp-vectors">Timestamp vectors</a>). The full
-64-char hash is used, not a prefix: the name is parsed back into the pool key when the index is
-rebuilt at open, so a truncated form could let two distinct time axes collide into one pool.</p>
+answers by content-addressing those vectors (see <a href="#timestamp-vectors">Timestamp vectors</a>). The pool
+key is the time axis and <strong>never the series type</strong>, so a <code>PersistentTimeSeries</code> and a
+<code>NonSequentialTimeSeries</code> on the same instants share one <code>nsts_…</code> dataset, and identical values on
+them share one content-addressed array. The full 64-char hash is used, not a prefix: the name is
+parsed back into the pool key when the index is rebuilt at open, so a truncated form could let two
+distinct time axes collide into one pool.</p>
 <p>The dataset shape is <code>(length, cols, *element_shape)</code> and chunking is <code>(1, cols, *element_shape)</code>,
 so one HDF5 chunk holds a single timestamp across every column — making a read across series by
 timestamp one chunk, and a buffered bulk write fill whole chunks. <code>cols</code> is chosen per dataset: a
@@ -429,17 +438,18 @@ then <code>…__2</code>, and so on.</li>
 </ul>
 <h3 id="standalone-mode"><a class="header" href="#standalone-mode">Standalone mode</a></h3>
 <p>Used for the dense forecast arrays (<strong><code>Deterministic</code></strong>, <strong><code>Probabilistic</code></strong>, <strong><code>Scenarios</code></strong>), and
-for a <strong><code>NonSequentialTimeSeries</code></strong> whose time axis nothing else shares. Each array is its own
-typed, multi-dimensional variable named <code>arr_{hex_hash}</code> in the <code>time_series/single</code> group. There is
-no column packing and no companion hash variable — the variable name carries the hash.</p>
+for a <strong><code>NonSequentialTimeSeries</code></strong> or <strong><code>PersistentTimeSeries</code></strong> whose time axis nothing else
+shares. Each array is its own typed, multi-dimensional variable named <code>arr_{hex_hash}</code> in the
+<code>time_series/single</code> group. There is no column packing and no companion hash variable — the variable
+name carries the hash.</p>
 <ul>
-<li><strong>A lone <code>NonSequentialTimeSeries</code></strong> is shaped <code>[length, *element_shape]</code> and chunked as a single
-whole-array chunk. Its explicit, strictly-increasing timestamps are not in the array: they are a
-shared time axis, stored once in the <code>timestamps</code> group below. Packing is only a win once a cohort
-is several columns wide — a packed dataset spreads one array over <code>length</code> chunks — so a series
-alone on its time axis stays standalone. Whether a given array is packed or standalone is a
-write-time choice with no effect on reads (they resolve by content hash and handle either), and
-one cohort can hold columns of both.</li>
+<li><strong>A lone explicit-time-axis series</strong> (<code>NonSequentialTimeSeries</code> or <code>PersistentTimeSeries</code>) is
+shaped <code>[length, *element_shape]</code> and chunked as a single whole-array chunk. Its explicit,
+strictly-increasing timestamps are not in the array: they are a shared time axis, stored once in
+the <code>timestamps</code> group below. Packing is only a win once a cohort is several columns wide — a
+packed dataset spreads one array over <code>length</code> chunks — so a series alone on its time axis stays
+standalone. Whether a given array is packed or standalone is a write-time choice with no effect on
+reads (they resolve by content hash and handle either), and one cohort can hold columns of both.</li>
 <li><strong>Dense forecasts</strong> are shaped <code>[H, count, *element_shape]</code> (<code>Deterministic</code>),
 <code>[num_percentiles, H, count, *element_shape]</code> (<code>Probabilistic</code>), or
 <code>[num_scenarios, H, count, *element_shape]</code> (<code>Scenarios</code>), where <code>count</code> is the number of forecast
@@ -537,13 +547,13 @@ the error surfaces with the compacting store still open on the original file.</p
 <tr><td><code>owner_category</code></td><td>INTEGER</td><td>Code, <code>CHECK</code> in (0, 1); part of key — see below</td></tr>
 <tr><td><code>time_series_type</code></td><td>INTEGER</td><td>Code, <code>CHECK &gt;= 0</code>; part of key — see below</td></tr>
 <tr><td><code>name</code></td><td>TEXT</td><td>Series name</td></tr>
-<tr><td><code>initial_timestamp</code></td><td>TEXT</td><td>RFC 3339 string; <code>NULL</code> for <code>NonSequentialTimeSeries</code></td></tr>
-<tr><td><code>resolution</code></td><td>TEXT</td><td>ISO-8601 duration (<code>PT1H</code>, <code>P1M</code>, …); <code>NULL</code> for non-sequential</td></tr>
+<tr><td><code>initial_timestamp</code></td><td>TEXT</td><td>RFC 3339 string; <code>NULL</code> for the explicit-time-axis types</td></tr>
+<tr><td><code>resolution</code></td><td>TEXT</td><td>ISO-8601 duration (<code>PT1H</code>, <code>P1M</code>, …); <code>NULL</code> for those types too</td></tr>
 <tr><td><code>length</code></td><td>INTEGER</td><td>Number of timesteps</td></tr>
 <tr><td><code>horizon</code></td><td>TEXT</td><td>ISO-8601 forecast horizon; <code>NULL</code> for non-forecasts</td></tr>
 <tr><td><code>interval</code></td><td>TEXT</td><td>ISO-8601 forecast interval; <code>NULL</code> for non-forecasts</td></tr>
 <tr><td><code>count</code></td><td>INTEGER</td><td>Forecast window count; <code>NULL</code> for non-forecasts</td></tr>
-<tr><td><code>timestamps_hash</code></td><td>BLOB</td><td>32-byte hash of the timestamp vector; see below</td></tr>
+<tr><td><code>timestamps_hash</code></td><td>BLOB</td><td>32-byte hash of the timestamp/breakpoint vector; see below</td></tr>
 <tr><td><code>units</code></td><td>TEXT</td><td>Free-form units label</td></tr>
 <tr><td><code>quantity_kind</code></td><td>TEXT</td><td>What the values measure (QUDT <code>QuantityKind</code> name); <code>NULL</code> if unset</td></tr>
 <tr><td><code>unit_system</code></td><td>TEXT</td><td><code>natural_units</code> or <code>component_base</code>; <code>NULL</code> means <em>unspecified</em></td></tr>
@@ -755,6 +765,7 @@ SELECT id, owner_id, owner_type,
                              WHEN 3 THEN 'DeterministicSingleTimeSeries'
                              WHEN 4 THEN 'Probabilistic'
                              WHEN 5 THEN 'Scenarios'
+                             WHEN 6 THEN 'PersistentTimeSeries'
                              ELSE 'unknown(' || time_series_type || ')' END AS time_series_type,
        name,
        initial_timestamp, resolution, length, horizon, interval, count,
@@ -798,6 +809,7 @@ separate column.</li>
 <tr><td></td><td></td><td></td><td><code>DeterministicSingleTimeSeries</code></td><td>3</td></tr>
 <tr><td></td><td></td><td></td><td><code>Probabilistic</code></td><td>4</td></tr>
 <tr><td></td><td></td><td></td><td><code>Scenarios</code></td><td>5</td></tr>
+<tr><td></td><td></td><td></td><td><code>PersistentTimeSeries</code></td><td>6</td></tr>
 </tbody></table>
 </div>
 <p>Both columns sit in the two wide unique indexes, and <code>time_series_type</code> additionally in

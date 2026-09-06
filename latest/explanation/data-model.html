@@ -329,17 +329,20 @@ opens the array half of an artifact whose catalog is absent and mints an empty o
 array file's <em>own</em> generation stamp, so the rebuilt pair opens normally ever after; an ordinary
 <code>open</code> cannot, because a stamped array file beside an unstamped catalog is exactly the half-finished
 save the paired-stamp check exists to catch.</p>
-<p>All six types make the trip, including <code>NonSequentialTimeSeries</code> — which needs one field the others
-do not. Its timestamp vector lives in the store rather than the document, content-addressed so a
-cohort sharing one axis stores it once, and the values cannot imply which axis a row is on: arrays
-are content-addressed too, so two irregular series with byte-identical values on <em>different</em> axes
-share one stored array and only the catalog's <code>timestamps_hash</code> distinguishes them. An import that
-guessed would hand back another series' timestamps. So the wire form <strong>locates</strong> the axis, as
-<code>timestamps_uri</code> — the same kind of field <code>uri</code> is for the values, and a locator rather than the
-vector itself precisely because the axis is shared, where inlining it would repeat the whole vector
-on every row of the cohort. The axis ships in the array file alongside the arrays, so the import
-resolves the locator against the store; a row missing it, or naming an axis the store does not hold,
-is refused.</p>
+<p>All six of the types the wire contract defines make the trip, including <code>NonSequentialTimeSeries</code> —
+which needs one field the others do not. (A <code>PersistentTimeSeries</code> does not: it is an
+infrastore-local extension outside the vendored <code>oneOf</code>, so the export omits its rows and the import
+refuses them. A store holding them still exports the rest, but a restore from arrays plus a document
+alone will not carry them.) Its timestamp vector lives in the store rather than the document,
+content-addressed so a cohort sharing one axis stores it once, and the values cannot imply which
+axis a row is on: arrays are content-addressed too, so two irregular series with byte-identical
+values on <em>different</em> axes share one stored array and only the catalog's <code>timestamps_hash</code>
+distinguishes them. An import that guessed would hand back another series' timestamps. So the wire
+form <strong>locates</strong> the axis, as <code>timestamps_uri</code> — the same kind of field <code>uri</code> is for the values, and
+a locator rather than the vector itself precisely because the axis is shared, where inlining it
+would repeat the whole vector on every row of the cohort. The axis ships in the array file alongside
+the arrays, so the import resolves the locator against the store; a row missing it, or naming an
+axis the store does not hold, is refused.</p>
 <p>Both imports validate every incoming row against those vendored schemas before decoding it, so a
 document that drifted from the contract is refused in the schema's own terms — the row, the field,
 and what was expected — rather than by whatever the Rust struct happens to notice first. A
@@ -383,8 +386,25 @@ regular series' value covers its step, so a <code>start</code> inside a step sel
 <code>initial_timestamp</code> can precede <code>start</code>; an irregular series' value is an instant, so only
 timestamps at or after <code>start</code> are selected; and a forecast window is a whole array with nothing
 partial to return, so a forecast's <code>start</code> must be a window boundary at or before the last window
-(an error otherwise) and only its <code>end</code> clips. See
+(an error otherwise) and only its <code>end</code> clips. A <code>start</code> earlier than the <em>first</em> window is the one
+exception, and it clips: there is no partial window before the first one, only no window at all, and
+refusing it would fail every export window wider than the data. See
 <a href="../reference/rust-api.html#reading-a-time-range">Reading a time range</a>.</p>
+<h3 id="a-calendar-period-is-not-closed-under-slicing"><a class="header" href="#a-calendar-period-is-not-closed-under-slicing">A calendar period is not closed under slicing</a></h3>
+<p>A <code>SingleTimeSeries</code> and a dense forecast are each stored as an anchor, a period, and a count, so a
+sliced read has to describe its answer the same way — anchored at the slice's own first point. For a
+fixed period that is exact. For a <code>Period::Months</code> it is not, because the end-of-month clamp is not
+associative: a grid stepping monthly from Jan-31 is Jan-31, Feb-29, Mar-31, but re-anchored at its
+own Feb-29 it becomes Feb-29, Mar-29, Apr-29 — the stored values under dates the store does not
+hold. No anchor fixes it, because the sub-grid keeps the <em>original</em> anchor's day of month and no
+instant in the slice carries it.</p>
+<p>So such a slice is <strong>refused</strong> (<code>InvalidParameter</code>) rather than answered with a grid that is not the
+one stored — the values would be right, the dates wrong, and nothing would signal it. The refusal is
+narrow: it needs a calendar period, an anchor on a day some month is too short for, and a slice
+starting at a clamped point and running past it. Read the series whole and slice the materialized
+timestamps, or store the instants explicitly with <code>NonSequentialTimeSeries</code>.
+<code>transform_single_time_series</code> is held to the same rule at <em>write</em> time, since each window of the
+view it derives is a run of the source's own steps described that same way.</p>
 <h3 id="the-owner-guard"><a class="header" href="#the-owner-guard">The owner guard</a></h3>
 <p><code>read_by_id</code> and <code>remove_by_ids</code> each take an optional <strong>expected owner</strong> — <code>read_by_id_for_owner</code> /
 <code>remove_by_ids_for_owner</code> in the Rust core, an <code>owner=(id, category)</code> keyword in Julia, keyword-only
@@ -437,7 +457,10 @@ offset (<code>-07:00</code>), or an IANA zone name (<code>America/Denver</code>)
 <li><strong><code>application_data</code></strong> — an opaque, <strong>package-owned</strong> extension payload stored verbatim (typically
 JSON) that a binding writes and reads for its own purposes. The store never parses or interprets
 it, and end users are not expected to set it. Element typing does <em>not</em> live here: that is
-<code>element_type</code> below, a first-class column the store owns and validates.</li>
+<code>element_type</code> below, a first-class column the store owns and validates. This is also where
+application <em>policy</em> about a series belongs — a consumer's rule for collapsing a
+<a href="./time-series-types.html#persistenttimeseries"><code>PersistentTimeSeries</code></a> to a scalar, say. Such a
+rule is not storage, and it gets no catalog column.</li>
 <li><strong><code>element_type</code></strong> — what the array's elements <em>mean</em>, in the store's own language-neutral
 vocabulary: a dtype spelling (<code>f64</code>, <code>i64</code>, …) for plain numbers, else <code>tuple(N,dtype)</code> or one of
 the function-data kinds (<code>linear_function</code>, <code>quadratic_function</code>, <code>piecewise_linear</code>,

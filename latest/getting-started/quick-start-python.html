@@ -198,23 +198,23 @@ from infrastore import OwnerCategory, SingleTimeSeries, Store
 # HDF5 file plus its SQLite catalog.
 store = Store.create(in_memory=True)
 
-# The name lives on the series object, not on `add_time_series`.
+# The name and the units live on the series object, not on `add_time_series`.
 ts = SingleTimeSeries(
     datetime(2024, 1, 1, tzinfo=timezone.utc),  # initial timestamp (timezone-aware)
     timedelta(hours=1),                         # resolution
     np.arange(24, dtype=np.float64) + 100,      # 24 hourly values
     "load",                                     # name
+    units="MW",                                 # optional, like every descriptor
 )
 
 # The owner is identified by an integer id, an owner type, and a category.
-# Features and units are optional.
+# Features are optional.
 series_id = store.add_time_series(
     owner_id=42,
     owner_type="Generator",
     owner_category=OwnerCategory.Component,
     time_series=ts,
     features={"model_year": 2030},
-    units="MW",
 )
 
 got = store.read_by_id(series_id)
@@ -222,6 +222,34 @@ print(f"read {got.length} values @ {got.resolution} from {got.initial_timestamp}
 # read 24 values @ PT1H from 2024-01-01 00:00:00+00:00
 assert np.array_equal(np.asarray(got.data), np.asarray(ts.data))
 </code></pre>
+<p>A read hands back the values and the timeline side by side. To fuse them into a dataframe, convert
+the series to a <code>pyarrow.Table</code> with <code>to_arrow()</code> and hand it straight to Polars — the two-column
+table is exactly a dataframe's shape, so the conversion is zero-copy and needs no glue:</p>
+<pre><code class="language-python">import polars as pl
+
+df = pl.from_arrow(got.to_arrow())
+print(df.head(3))
+# shape: (3, 2)
+# ┌─────────────────────────┬───────┐
+# │ timestamp               ┆ value │
+# │ ---                     ┆ ---   │
+# │ datetime[ms, UTC]       ┆ f64   │
+# ╞═════════════════════════╪═══════╡
+# │ 2024-01-01 00:00:00 UTC ┆ 100.0 │
+# │ 2024-01-01 01:00:00 UTC ┆ 101.0 │
+# │ 2024-01-01 02:00:00 UTC ┆ 102.0 │
+# └─────────────────────────┴───────┘
+
+print(df.group_by_dynamic("timestamp", every="6h").agg(pl.col("value").mean()))
+# 102.5, 108.5, 114.5, 120.5 — one row per six-hour block
+</code></pre>
+<p>The <code>timestamp</code> column arrives typed in the series' own spelling (<code>datetime[ms, UTC]</code> here; an IANA
+zone or no zone at all for a series written that way), so Polars' time-aware operations work without
+you relabelling anything. The descriptive attributes ride along in <code>got.to_arrow().schema.metadata</code>
+— <code>name</code>, <code>units</code>, <code>resolution</code>, and the rest — which Polars does not carry onto the dataframe, so
+read them off the table when you need them.</p>
+<p><code>to_arrow()</code> needs pyarrow, which the wheel does not install by default:
+<code>pip install 'infrastore[arrow]'</code>.</p>
 <h2 id="what-just-happened"><a class="header" href="#what-just-happened">What Just Happened</a></h2>
 <ol>
 <li><strong><code>Store.create(in_memory=True)</code></strong> built a store backed by an in-memory array backend and an

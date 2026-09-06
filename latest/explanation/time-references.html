@@ -225,19 +225,47 @@ November. This is inexpressible in <code>SingleTimeSeries</code> and the dense f
 explicit instant per value, so the caller derives those days and the data records them rather than
 arithmetic implying them.</li>
 </ul>
+<h3 id="the-store-now-checks-when-you-give-it-something-to-check"><a class="header" href="#the-store-now-checks-when-you-give-it-something-to-check">The store now checks, when you give it something to check</a></h3>
+<p>Asserting <code>initial_timestamp</code> + <code>resolution</code> is a claim the store cannot verify — the vector it
+describes is never supplied. Two rules close that:</p>
+<ul>
+<li><strong>A calendar-scale period on a named zone is refused.</strong> A period of a day or more is a span of
+instants, so on a zone that observes DST it drifts away from the local clock it looks like: a
+<code>P1D</code> series stepped from local midnight in Denver lands on <code>Nov 3 23:00</code> after the November
+transition, on the same calendar day as its predecessor, and stays an hour off forever. <code>P1M</code> is
+worse — it steps the UTC calendar. Both are <code>InvalidParameter</code> at the write.</li>
+<li><strong>Sub-daily periods stay legal</strong>, and that is not a compromise. DST moves the <em>offset</em>, not the
+length of an hour: Denver has 8784 hours in 2024, exactly as UTC does, every gap exactly one hour,
+and the 23- and 25-hour days fall out of instant stepping on their own. An hourly grid in a DST
+zone <em>is</em> the local clock. Refusing it would push callers onto a fixed offset, which is silently
+wrong for half the year.</li>
+</ul>
+<p>A forecast's <code>horizon</code> is exempt: it is a window <em>length</em>, only ever divided
+(<code>H = horizon / resolution</code>) and never added to an instant, so <code>horizon = P1D</code> — the canonical
+day-ahead shape — stays legal in any zone. <code>resolution</code> and <code>interval</code> do step, and are covered.</p>
+<p>The constructive half is
+<a href="../reference/python-api.html#singletimeseriesfrom_timestamps"><code>from_timestamps</code></a>: hand over the
+timeline you actually have and the store infers the period and <strong>proves</strong> the instants lie on it, or
+refuses naming the entry that broke the pattern. This is how a local-clock timeline reaches the
+store — you materialize it in your own date library, where the policy for a nonexistent or ambiguous
+wall clock belongs, and the store records what you have rather than what a resolution implies.</p>
 <p>Someone with 8760 naive Denver timestamps who localizes only the first and passes <code>resolution = 1h</code>
-gets labels shifted by an hour after each transition, and nothing in the data distinguishes that
-from a correct series. The store cannot detect it; the split above is the thing to know.</p>
+still gets labels shifted by an hour after each transition if their file was not a local-clock walk,
+and nothing in the values distinguishes that from a correct series — so hand the vector over rather
+than assert the step.</p>
 <h2 id="months-step-on-the-utc-calendar"><a class="header" href="#months-step-on-the-utc-calendar">Months step on the UTC calendar</a></h2>
 <p><code>Period::Months</code> is calendar arithmetic, so unlike a fixed period it has to be told <em>which</em>
 calendar. It uses the stored <strong>UTC</strong> one, and the reference does not redirect it. TimeZones.jl steps
 the <em>local</em> clock instead, so the two disagree by an hour at every DST transition and by up to a day
 at a month boundary.</p>
-<p>Local-frame stepping is refused for two independent reasons: it is the local → instant direction the
-store deliberately never runs (below), and it would let a spelling decide <em>which instants</em> a series
-contains. A calendar period on a zoned series is warned about on write, so the disagreement is
-findable before it is filed as a bug. A caller who wants months on a local calendar wants a
-local-clock grid, and the answer is the one above: <code>NonSequentialTimeSeries</code>.</p>
+<p>Local-frame stepping is refused for three independent reasons: it is the local → instant direction
+the store deliberately never runs (below); it would let a spelling decide <em>which instants</em> a series
+contains; and it would need a time-zone database in the core, which would make a stored series'
+instants depend on which IANA release built the reader. A calendar period on a <strong>named zone</strong> is
+therefore refused on write, and on a fixed offset — which has no DST to drift against, only a month
+boundary — it is warned about. A caller who wants months on a local calendar wants a local-clock
+grid, and the answer is the one above: <code>NonSequentialTimeSeries</code>, or <code>from_timestamps</code>, which picks
+between the two for you.</p>
 <h2 id="why-a-named-zone-is-safe"><a class="header" href="#why-a-named-zone-is-safe">Why a named zone is safe</a></h2>
 <p>The ambiguity a named zone is feared for lives in the <strong>local → instant</strong> direction, and the core
 never runs it.</p>
