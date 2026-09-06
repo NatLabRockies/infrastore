@@ -60,6 +60,7 @@ enum TimeSeriesType {
   DETERMINISTIC_SINGLE_TIME_SERIES = 3;
   PROBABILISTIC                    = 4;
   SCENARIOS                        = 5;
+  PERSISTENT_TIME_SERIES           = 6;
 }
 
 enum OwnerCategory { COMPONENT = 0; SUPPLEMENTAL_ATTRIBUTE = 1; }
@@ -151,7 +152,7 @@ message ReadByIdResp {
   repeated uint64 shape                     = 4;   // array dimensions (multi-dim supported)
   reserved 5;                                      // was: repeated double values
   TimeSeriesType  time_series_type          = 6;
-  repeated string timestamps_rfc3339        = 7;   // set for NonSequentialTimeSeries
+  repeated string timestamps_rfc3339        = 7;   // set for NonSequentialTimeSeries and PersistentTimeSeries
   string          element_type              = 16;  // canonical element-type string
   // (8 is reserved: the former int32 dtype code)
   bytes           value_bytes               = 9;   // raw little-endian, row-major

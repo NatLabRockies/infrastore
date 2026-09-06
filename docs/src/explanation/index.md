@@ -9,7 +9,7 @@ to build a mental model, not to accomplish a specific task. For the calls that d
   bindings sit on top of a single core.
 - [Design Choices](./design-choices.md) — What infrastore optimizes for and why, written for
   developers of parent packages like IS.jl and infrasys.
-- [Time-Series Types](./time-series-types.md) — The six types, which one your data wants, and the
+- [Time-Series Types](./time-series-types.md) — The seven types, which one your data wants, and the
   vocabulary they share: periods, timestamp precision, typed arrays.
 - [Data Model](./data-model.md) — Owners, features, identity, association ids, and the associations
   between catalog entities.

@@ -5,9 +5,9 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use infrastore_core::{
     Deterministic, ElementType, FeatureValue, Features, ForecastSummaryRow,
-    NonSequentialTimeSeries, OwnerCategory, Period, Probabilistic, Scenarios, SingleTimeSeries,
-    StaticSummaryRow, TimeReference, TimeSeriesData, TimeSeriesId, TimeSeriesMetadata,
-    TimeSeriesType, TypedArray, UnitSystem,
+    NonSequentialTimeSeries, OwnerCategory, Period, PersistentTimeSeries, Probabilistic, Scenarios,
+    SingleTimeSeries, StaticSummaryRow, TimeReference, TimeSeriesData, TimeSeriesId,
+    TimeSeriesMetadata, TimeSeriesType, TypedArray, UnitSystem,
 };
 
 use crate::pb;
@@ -40,6 +40,7 @@ impl From<TimeSeriesType> for pb::TimeSeriesType {
             }
             TimeSeriesType::Probabilistic => pb::TimeSeriesType::Probabilistic,
             TimeSeriesType::Scenarios => pb::TimeSeriesType::Scenarios,
+            TimeSeriesType::PersistentTimeSeries => pb::TimeSeriesType::PersistentTimeSeries,
         }
     }
 }
@@ -55,6 +56,7 @@ impl From<pb::TimeSeriesType> for TimeSeriesType {
             }
             pb::TimeSeriesType::Probabilistic => TimeSeriesType::Probabilistic,
             pb::TimeSeriesType::Scenarios => TimeSeriesType::Scenarios,
+            pb::TimeSeriesType::PersistentTimeSeries => TimeSeriesType::PersistentTimeSeries,
         }
     }
 }
@@ -315,6 +317,32 @@ pub fn time_series_data_to_read_resp(data: &TimeSeriesData) -> pb::ReadByIdResp 
             scenario_count: 0,
             name: name.clone(),
         },
+        // Wire-identical to the `NonSequentialTimeSeries` arm above but for the
+        // type tag: both are static series on an explicit time axis, so both
+        // send `length` plus `timestamps_rfc3339` and nothing else. The
+        // difference between them is a read *semantic*, not a payload shape.
+        TimeSeriesData::PersistentTimeSeries(s) => pb::ReadByIdResp {
+            initial_timestamp_rfc3339: String::new(),
+            resolution: String::new(),
+            length: s.length as u64,
+            shape: s.data.shape.iter().map(|d| *d as u64).collect(),
+            element_type: element_type.to_string(),
+            units: units.clone(),
+            quantity_kind: quantity_kind.clone(),
+            unit_system: unit_system.clone(),
+            time_reference: time_reference.clone(),
+            component_field: component_field.clone(),
+            value_bytes: s.data.bytes.clone(),
+            time_series_type: pb::TimeSeriesType::PersistentTimeSeries as i32,
+            timestamps_rfc3339: s.timestamps.iter().map(|t| t.to_rfc3339()).collect(),
+            application_data: String::new(),
+            horizon: String::new(),
+            interval: String::new(),
+            count: 0,
+            percentiles: Vec::new(),
+            scenario_count: 0,
+            name: name.clone(),
+        },
         TimeSeriesData::Deterministic(d) => pb::ReadByIdResp {
             initial_timestamp_rfc3339: d.initial_timestamp.to_rfc3339(),
             resolution: d.resolution.to_iso8601(),
@@ -464,6 +492,20 @@ pub fn read_resp_to_time_series_data(
                     }
                 })?;
             Ok(TimeSeriesData::NonSequentialTimeSeries(series))
+        }
+        pb::TimeSeriesType::PersistentTimeSeries => {
+            let timestamps = resp
+                .timestamps_rfc3339
+                .iter()
+                .map(|s| DateTime::parse_from_rfc3339(s).map(|d| d.with_timezone(&Utc)))
+                .collect::<Result<Vec<_>, _>>()?;
+            let series = PersistentTimeSeries::new(timestamps, data, name).map_err(|message| {
+                ConvertError::InvalidValue {
+                    field: "timestamps_rfc3339",
+                    message,
+                }
+            })?;
+            Ok(TimeSeriesData::PersistentTimeSeries(series))
         }
         pb::TimeSeriesType::Deterministic | pb::TimeSeriesType::DeterministicSingleTimeSeries => {
             let initial_timestamp = DateTime::parse_from_rfc3339(&resp.initial_timestamp_rfc3339)

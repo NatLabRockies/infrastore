@@ -10,6 +10,9 @@ const INFRASTORE_TYPE_DETERMINISTIC = 2
 const INFRASTORE_TYPE_DETERMINISTIC_SINGLE = 3
 const INFRASTORE_TYPE_PROBABILISTIC = 4
 const INFRASTORE_TYPE_SCENARIOS = 5
+# Appended, never renumbered: these codes are the C ABI's, kept in lockstep with
+# the storage codes in `TimeSeriesType::code` on the Rust side.
+const INFRASTORE_TYPE_PERSISTENT = 6
 
 function _features_arg(features)
     return (features === nothing || isempty(features)) ? C_NULL : JSON.json(features)

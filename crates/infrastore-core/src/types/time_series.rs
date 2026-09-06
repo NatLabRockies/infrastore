@@ -3,14 +3,15 @@ use std::str::FromStr;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::array::TypedArray;
+use super::array::{Element, TypedArray};
 use super::element_type::ElementType;
 use super::metadata::UnitSystem;
 use super::period::Period;
 use super::time_reference::TimeReference;
 use crate::codec::{self, DecodedValues};
+use crate::reader::timestamp_on_grid;
 
-/// Discriminator for the six time series types defined in the spec.
+/// Discriminator for the time series types this store models.
 ///
 /// Static series carry runtime variants in [`TimeSeriesData`]. Forecast types
 /// use the forecast-specific store API.
@@ -36,6 +37,12 @@ pub enum TimeSeriesType {
     DeterministicSingleTimeSeries,
     Probabilistic,
     Scenarios,
+    /// A sparse step function: breakpoints plus one value each, holding the
+    /// last value forward. **Appended, not inserted** — the codes are an
+    /// on-disk contract, and the `Deterministic`/`DeterministicSingleTimeSeries`
+    /// adjacency that [`Self::code_span`] relies on must not be disturbed. See
+    /// [`PersistentTimeSeries`].
+    PersistentTimeSeries,
 }
 
 impl TimeSeriesType {
@@ -47,6 +54,7 @@ impl TimeSeriesType {
             TimeSeriesType::DeterministicSingleTimeSeries => "DeterministicSingleTimeSeries",
             TimeSeriesType::Probabilistic => "Probabilistic",
             TimeSeriesType::Scenarios => "Scenarios",
+            TimeSeriesType::PersistentTimeSeries => "PersistentTimeSeries",
         }
     }
 
@@ -58,6 +66,7 @@ impl TimeSeriesType {
             "DeterministicSingleTimeSeries" => TimeSeriesType::DeterministicSingleTimeSeries,
             "Probabilistic" => TimeSeriesType::Probabilistic,
             "Scenarios" => TimeSeriesType::Scenarios,
+            "PersistentTimeSeries" => TimeSeriesType::PersistentTimeSeries,
             _ => return None,
         })
     }
@@ -72,6 +81,7 @@ impl TimeSeriesType {
             TimeSeriesType::DeterministicSingleTimeSeries => 3,
             TimeSeriesType::Probabilistic => 4,
             TimeSeriesType::Scenarios => 5,
+            TimeSeriesType::PersistentTimeSeries => 6,
         }
     }
 
@@ -85,6 +95,7 @@ impl TimeSeriesType {
             3 => TimeSeriesType::DeterministicSingleTimeSeries,
             4 => TimeSeriesType::Probabilistic,
             5 => TimeSeriesType::Scenarios,
+            6 => TimeSeriesType::PersistentTimeSeries,
             _ => return None,
         })
     }
@@ -98,7 +109,9 @@ impl TimeSeriesType {
     /// the codecs — asks here rather than re-deriving the layout.
     pub fn leading_dims(self) -> usize {
         match self {
-            TimeSeriesType::SingleTimeSeries | TimeSeriesType::NonSequentialTimeSeries => 1,
+            TimeSeriesType::SingleTimeSeries
+            | TimeSeriesType::NonSequentialTimeSeries
+            | TimeSeriesType::PersistentTimeSeries => 1,
             TimeSeriesType::Deterministic | TimeSeriesType::DeterministicSingleTimeSeries => 2,
             TimeSeriesType::Probabilistic | TimeSeriesType::Scenarios => 3,
         }
@@ -143,7 +156,9 @@ impl TimeSeriesType {
     /// Is this a forecast (windowed) type rather than a static series?
     pub fn is_forecast(self) -> bool {
         match self {
-            TimeSeriesType::SingleTimeSeries | TimeSeriesType::NonSequentialTimeSeries => false,
+            TimeSeriesType::SingleTimeSeries
+            | TimeSeriesType::NonSequentialTimeSeries
+            | TimeSeriesType::PersistentTimeSeries => false,
             TimeSeriesType::Deterministic
             | TimeSeriesType::DeterministicSingleTimeSeries
             | TimeSeriesType::Probabilistic
@@ -151,21 +166,30 @@ impl TimeSeriesType {
         }
     }
 
-    /// The inclusive code range covering the static types, then the forecast
-    /// types — `(static_lo, static_hi, forecast_lo, forecast_hi)`.
+    /// The storage codes of the static types, for a summary query that wants
+    /// "all static rows".
     ///
-    /// The two groups are contiguous blocks in the code space, so the summary
-    /// queries can select "all static" or "all forecast" rows with one
-    /// `BETWEEN` instead of enumerating names. `code_groups_partition_cleanly`
-    /// asserts the partition, so a renumbering that broke it would fail rather
-    /// than silently mis-scope those queries.
-    pub fn code_groups() -> (i64, i64, i64, i64) {
-        (
-            TimeSeriesType::SingleTimeSeries.code(),
-            TimeSeriesType::NonSequentialTimeSeries.code(),
-            TimeSeriesType::Deterministic.code(),
-            TimeSeriesType::Scenarios.code(),
-        )
+    /// A *list*, not a range. The static types were codes 0-1 and the forecast
+    /// types 2-5, two contiguous blocks a `BETWEEN` could select — until
+    /// `PersistentTimeSeries` was appended as 6 rather than inserted, because
+    /// the codes are an on-disk contract and renumbering is not available. The
+    /// static group is therefore non-contiguous and its consumers render
+    /// `WHERE time_series_type IN (…)`. `idx_ts_type` serves that as happily as
+    /// it served the range.
+    ///
+    /// `code_groups_partition_cleanly` asserts that this and
+    /// [`Self::forecast_codes`] are disjoint and together cover every variant,
+    /// which is the property the old contiguity assertion was really standing
+    /// in for.
+    pub fn static_codes() -> &'static [i64] {
+        // Written out rather than derived from `is_forecast()` at call time:
+        // these are on-disk codes, so seeing the literals here is the point.
+        &[0, 1, 6]
+    }
+
+    /// The storage codes of the forecast types. See [`Self::static_codes`].
+    pub fn forecast_codes() -> &'static [i64] {
+        &[2, 3, 4, 5]
     }
 }
 
@@ -302,6 +326,63 @@ impl SingleTimeSeries {
         Ok(Self::new(initial_timestamp, resolution, data, name).with_element_type(element_type))
     }
 
+    /// Build from the timeline a caller actually holds, inferring the
+    /// resolution and **proving** the instants lie on it.
+    ///
+    /// [`Self::new`] takes `initial_timestamp` + `resolution` and has no way to
+    /// check the claim — the vector it describes is never supplied, so a caller
+    /// whose values sit on a drifting timeline gets a grid that silently
+    /// disagrees with their data. This constructor closes that gap by taking the
+    /// vector: it either fits a [`Period`] exactly, or it is refused with the
+    /// index that broke the pattern and a pointer at
+    /// [`NonSequentialTimeSeries`].
+    ///
+    /// **This is how a local-clock timeline reaches the store.** The store has
+    /// no time-zone database and never runs local → instant; the caller
+    /// materializes their local grid in their own date library — where the
+    /// policy for a nonexistent or ambiguous wall clock belongs — and hands over
+    /// the instants. An hourly local grid in a DST zone *is* a uniform instant
+    /// grid, so it compacts here; a daily or monthly local grid is not, so it is
+    /// refused and stored explicitly instead. Either way the store records the
+    /// timeline the caller has rather than one a resolution implies.
+    ///
+    /// Timestamps must be strictly increasing and match the array's first axis.
+    /// See [`Period::infer`] for which period wins when more than one fits.
+    ///
+    /// ```
+    /// # use infrastore_core::{SingleTimeSeries, TypedArray, Period};
+    /// # use chrono::{TimeZone, Utc};
+    /// let month_ends = [
+    ///     Utc.with_ymd_and_hms(2024, 1, 31, 0, 0, 0).unwrap(),
+    ///     Utc.with_ymd_and_hms(2024, 2, 29, 0, 0, 0).unwrap(),
+    ///     Utc.with_ymd_and_hms(2024, 3, 31, 0, 0, 0).unwrap(),
+    /// ];
+    /// let series = SingleTimeSeries::from_timestamps(
+    ///     &month_ends,
+    ///     TypedArray::from_f64(vec![3], &[1.0, 2.0, 3.0]),
+    ///     "monthly",
+    /// )?;
+    /// assert_eq!(series.resolution, Period::Months(1));
+    /// assert_eq!(series.initial_timestamp, month_ends[0]);
+    /// # Ok::<(), String>(())
+    /// ```
+    pub fn from_timestamps(
+        timestamps: &[DateTime<Utc>],
+        data: TypedArray,
+        name: impl Into<String>,
+    ) -> std::result::Result<Self, String> {
+        let length = data.length();
+        if timestamps.len() != length {
+            return Err(format!(
+                "SingleTimeSeries::from_timestamps: {} timestamps for {length} value(s); \
+                 the vector must have one entry per time step",
+                timestamps.len()
+            ));
+        }
+        let resolution = Period::infer(timestamps)?;
+        Ok(Self::new(timestamps[0], resolution, data, name))
+    }
+
     /// Declare the logical element type of the array. Validated on commit
     /// against the array's dtype and per-step shape.
     pub fn with_element_type(mut self, element_type: ElementType) -> Self {
@@ -345,6 +426,49 @@ impl SingleTimeSeries {
     pub fn with_application_data(mut self, application_data: impl Into<String>) -> Self {
         self.application_data = Some(application_data.into());
         self
+    }
+
+    /// The timestamp at 0-based `index` — `initial_timestamp + index ·
+    /// resolution`, calendar-aware for a [`Period::Months`] grid. Errors if
+    /// `index >= length` or the date arithmetic overflows.
+    ///
+    /// The instant is UTC, like every instant the core holds; how it was
+    /// *spelled* is `time_reference`, which this does not apply.
+    pub fn timestamp_at(&self, index: usize) -> crate::Result<DateTime<Utc>> {
+        timestamp_on_grid(
+            self.initial_timestamp,
+            self.resolution,
+            self.length,
+            index,
+            "grid",
+        )
+    }
+
+    /// Materialize the whole grid, `[0, length)` in order — the regular
+    /// counterpart of [`NonSequentialTimeSeries::timestamps`], which is a
+    /// stored vector rather than a computed one.
+    ///
+    /// This is the only correct way to reconstruct the timeline: a
+    /// [`Period::Months`] resolution steps on the calendar, so a caller
+    /// multiplying a fixed span by the index gets a month grid wrong.
+    ///
+    /// ```
+    /// # use infrastore_core::{SingleTimeSeries, TypedArray, Period};
+    /// # use chrono::{TimeZone, Utc};
+    /// let series = SingleTimeSeries::new(
+    ///     Utc.with_ymd_and_hms(2024, 1, 31, 0, 0, 0).unwrap(),
+    ///     Period::Months(1),
+    ///     TypedArray::from_f64(vec![3], &[1.0, 2.0, 3.0]),
+    ///     "monthly",
+    /// );
+    /// let grid: Vec<_> = series.timestamps().collect();
+    /// assert_eq!(grid[1], Utc.with_ymd_and_hms(2024, 2, 29, 0, 0, 0).unwrap());
+    /// ```
+    pub fn timestamps(&self) -> impl Iterator<Item = DateTime<Utc>> + '_ {
+        (0..self.length).map(move |k| {
+            self.timestamp_at(k)
+                .expect("timestamp on the series grid is representable")
+        })
     }
 }
 
@@ -507,6 +631,241 @@ impl NonSequentialTimeSeries {
     }
 }
 
+/// A sparse step function: breakpoints plus one value each, holding the last
+/// value forward.
+///
+/// Structurally identical to [`NonSequentialTimeSeries`] — a strictly
+/// increasing `Vec<DateTime<Utc>>` plus a [`TypedArray`] of the same length —
+/// and stored identically (the two pool into the same `nsts_…` dataset when
+/// they share a breakpoint vector, dtype, element shape, and length). They are
+/// separate *types* because they answer the same question differently:
+///
+/// |                                   | `NonSequentialTimeSeries` | `PersistentTimeSeries` |
+/// |-----------------------------------|---------------------------|------------------------|
+/// | value **at** a stored instant     | that instant's value      | that instant's value   |
+/// | value **between** stored instants | a hard error              | the previous value     |
+/// | value **after** the last instant  | a hard error              | the last value         |
+/// | value **before** the first instant| a hard error              | a hard error           |
+///
+/// Put formally, the values define a **right-continuous step function**,
+/// constant on `[b_k, b_{k+1})`, extending to `+∞` past the last breakpoint,
+/// and **undefined before the first**. That last clause is deliberate and is
+/// reported as an error rather than clamped: a value before the first
+/// breakpoint was never declared, and inventing one would be a guess. Read a
+/// value with [`Self::value_at`] (or [`Self::row_at`] for a non-scalar step);
+/// [`Self::index_at`] and [`Self::breakpoint_at`] locate the row it came from.
+///
+/// The motivating data is a monthly fuel or gas price curve: a dozen
+/// breakpoints spanning a year, read at simulation timestamps that almost never
+/// coincide with one. Reading that as a `NonSequentialTimeSeries` would error
+/// at nearly every step, which is exactly the guarantee that type is *for* —
+/// an irregular timeline has no value between its timestamps — so making it
+/// conditional was not an option.
+///
+/// Policy about how a step function collapses for a downstream solver (whether
+/// to expand it to a full series, whether to evaluate it once at a midpoint)
+/// belongs to the application and travels in
+/// [`Self::application_data`](Self#structfield.application_data). The store
+/// records breakpoints and values, and nothing else.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PersistentTimeSeries {
+    /// The breakpoints, strictly increasing. Each one is the instant from which
+    /// the value beside it is in force.
+    pub timestamps: Vec<DateTime<Utc>>,
+    pub length: usize,
+    pub data: TypedArray,
+    pub name: String,
+    /// What the stored elements mean and how one timestep is laid out.
+    ///
+    /// Always concrete: a constructor resolves it to `Scalar(data.dtype)`, which
+    /// is what an ordinary numeric series is, and `with_element_type` replaces
+    /// it. There is deliberately no "undeclared" spelling — it would be a second
+    /// way to say `Scalar(dtype)`, and a series written that way would not
+    /// compare equal to the same series read back.
+    ///
+    /// Assigning a new `data` array without updating this is a mismatch the
+    /// store rejects on write; build the series again instead.
+    pub element_type: ElementType,
+    /// User-declared units label for the values (e.g. `"USD/MMBtu"`), or `None`.
+    ///
+    /// Set by whoever creates the series and returned unchanged on read. The
+    /// store never interprets or validates it, and it is not part of a series'
+    /// identity: it cannot be filtered on, and two series differing only in
+    /// their label are a duplicate.
+    pub units: Option<String>,
+    /// What kind of physical quantity the values measure (e.g. `"ActivePower"`),
+    /// or `None`. Free-form; the recommended vocabulary is a QUDT `QuantityKind`
+    /// local name. See [`crate::TimeSeriesMetadata::quantity_kind`].
+    pub quantity_kind: Option<String>,
+    /// Which basis the values are expressed in, or `None` for unspecified.
+    /// See [`UnitSystem`].
+    pub unit_system: Option<UnitSystem>,
+    /// How this series' breakpoints were spelled, or `None` for unspecified.
+    /// See [`TimeReference`] and [`crate::TimeSeriesMetadata::time_reference`].
+    pub time_reference: Option<TimeReference>,
+    /// The field on the owning component whose value varies over time here
+    /// (e.g. `"fuel_cost"`), or `None`.
+    /// See [`crate::TimeSeriesMetadata::component_field`].
+    pub component_field: Option<String>,
+    /// Opaque, package-owned payload (typically JSON) stored verbatim for an
+    /// application to reconstruct its domain objects; the store never interprets
+    /// it. This is where a consumer's own expansion policy lives — see the type
+    /// docs.
+    pub application_data: Option<String>,
+}
+
+impl PersistentTimeSeries {
+    pub fn new(
+        timestamps: Vec<DateTime<Utc>>,
+        data: TypedArray,
+        name: impl Into<String>,
+    ) -> Result<Self, String> {
+        let length = data.length();
+        if timestamps.len() != length {
+            return Err(format!(
+                "timestamp count {} does not match data length {length}",
+                timestamps.len()
+            ));
+        }
+        if timestamps.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err("timestamps must be strictly increasing".to_string());
+        }
+        let element_type = ElementType::Scalar(data.dtype);
+        Ok(Self {
+            timestamps,
+            length,
+            data,
+            name: name.into(),
+            element_type,
+            units: None,
+            quantity_kind: None,
+            unit_system: None,
+            time_reference: None,
+            component_field: None,
+            application_data: None,
+        })
+    }
+
+    /// The index into [`Self::timestamps`] and [`Self::data`] of the breakpoint
+    /// governing `at` — the greatest breakpoint `<= at`, whose value is carried
+    /// forward to `at`.
+    ///
+    /// `Err` if `at` is strictly before the first breakpoint, where the step
+    /// function is undefined, or if the series is empty. This is the single
+    /// source of truth for the lookup: [`Self::value_at`], [`Self::row_at`] and
+    /// [`Self::breakpoint_at`] all go through it, and nothing else should
+    /// re-derive it.
+    ///
+    /// Note the asymmetry with [`Self::value_at`]: a step function has a genuine
+    /// value *at* `at`, but the row it comes from generally sits earlier, which
+    /// is why only this one is spelled as a lookup.
+    pub fn index_at(&self, at: DateTime<Utc>) -> Result<usize, String> {
+        crate::timestamps::index_at(&self.timestamps, at).ok_or_else(|| {
+            match self.timestamps.first() {
+                Some(first) => format!(
+                    "PersistentTimeSeries '{}' has no value at {at}: it is before the \
+                     first breakpoint {first}, where a step function is undefined",
+                    self.name
+                ),
+                None => format!(
+                    "PersistentTimeSeries '{}' has no breakpoints, so it has no value at {at}",
+                    self.name
+                ),
+            }
+        })
+    }
+
+    /// The breakpoint governing `at` — the greatest one `<= at`, i.e. the
+    /// instant from which the value at `at` has been in force.
+    ///
+    /// Equal to `at` itself exactly when `at` is a stored breakpoint. Errors
+    /// under the same conditions as [`Self::index_at`].
+    pub fn breakpoint_at(&self, at: DateTime<Utc>) -> Result<DateTime<Utc>, String> {
+        Ok(self.timestamps[self.index_at(at)?])
+    }
+
+    /// The value in force at `at`, for a series of scalars.
+    ///
+    /// The step function is total on `[first breakpoint, +∞)`, so this is the
+    /// series' value at `at` in the ordinary sense — not an approximation of one:
+    /// between breakpoints the previous value is carried forward, and past the
+    /// last breakpoint the last value holds indefinitely. Only an `at` strictly
+    /// before the first breakpoint is an error, because no value was ever
+    /// declared there.
+    ///
+    /// `T` must match the array's dtype. A series whose per-step element is not a
+    /// scalar (a non-empty [`TypedArray::element_shape`], e.g. a piecewise curve
+    /// or a vector per step) is an error here — use [`Self::row_at`], which
+    /// returns the whole per-step slice for any shape.
+    pub fn value_at<T: Element>(&self, at: DateTime<Utc>) -> Result<T, String> {
+        let element_shape = self.data.element_shape();
+        if !element_shape.is_empty() {
+            return Err(format!(
+                "PersistentTimeSeries '{}' holds {element_shape:?} per step, not a scalar; \
+                 use row_at to read the whole step",
+                self.name
+            ));
+        }
+        self.data.element_at::<T>(self.index_at(at)?)
+    }
+
+    /// The whole per-step slice in force at `at`, as a [`TypedArray`] of shape
+    /// [`TypedArray::element_shape`] — `[]` for a scalar series.
+    ///
+    /// The shape-generic form of [`Self::value_at`], with the same semantics and
+    /// the same single error case (an `at` before the first breakpoint).
+    pub fn row_at(&self, at: DateTime<Utc>) -> Result<TypedArray, String> {
+        self.data.step(self.index_at(at)?)
+    }
+}
+
+impl PersistentTimeSeries {
+    /// Declare the logical element type of the array. Validated on commit
+    /// against the array's dtype and per-step shape.
+    pub fn with_element_type(mut self, element_type: ElementType) -> Self {
+        self.element_type = element_type;
+        self
+    }
+
+    /// Set the user-declared units label.
+    pub fn with_units(mut self, units: impl Into<String>) -> Self {
+        self.units = Some(units.into());
+        self
+    }
+
+    /// Set the quantity kind the values measure (e.g. `"ActivePower"`).
+    pub fn with_quantity_kind(mut self, quantity_kind: impl Into<String>) -> Self {
+        self.quantity_kind = Some(quantity_kind.into());
+        self
+    }
+
+    /// Declare which unit basis the values are expressed in.
+    pub fn with_unit_system(mut self, unit_system: UnitSystem) -> Self {
+        self.unit_system = Some(unit_system);
+        self
+    }
+
+    /// Declare how this series' breakpoints were spelled. Validated on commit
+    /// (a zone name's *shape* only — see [`TimeReference::validate`]).
+    pub fn with_time_reference(mut self, time_reference: TimeReference) -> Self {
+        self.time_reference = Some(time_reference);
+        self
+    }
+
+    /// Name the component field these values vary over time (e.g.
+    /// `"fuel_cost"`).
+    pub fn with_component_field(mut self, component_field: impl Into<String>) -> Self {
+        self.component_field = Some(component_field.into());
+        self
+    }
+
+    /// Set the opaque application payload carried through to the metadata row.
+    pub fn with_application_data(mut self, application_data: impl Into<String>) -> Self {
+        self.application_data = Some(application_data.into());
+        self
+    }
+}
+
 /// A deterministic forecast: one complete horizon array per count window.
 ///
 /// `data` has shape `[H, count, *E]` in row-major order, where
@@ -626,6 +985,63 @@ impl Deterministic {
             ));
         }
         Ok(())
+    }
+
+    /// Number of steps in one window — the first axis of `data`, which
+    /// [`Self::validate`] holds equal to `horizon / resolution`.
+    pub fn horizon_count(&self) -> usize {
+        self.data.shape.first().copied().unwrap_or(0)
+    }
+
+    /// The issue time of window `index`: `initial_timestamp + index ·
+    /// interval`, calendar-aware for a [`Period::Months`] interval. Errors if
+    /// `index >= count` or the arithmetic overflows.
+    pub fn window_start(&self, index: usize) -> crate::Result<DateTime<Utc>> {
+        timestamp_on_grid(
+            self.initial_timestamp,
+            self.interval,
+            self.count,
+            index,
+            "forecast window",
+        )
+    }
+
+    /// Every timestamp inside window `index` — [`Self::horizon_count`] of them,
+    /// stepping by `resolution` from the window's issue time.
+    ///
+    /// The two grids are distinct and both are needed to place a value: windows
+    /// step by `interval`, and the steps inside one step by `resolution`. They
+    /// are equal only for a forecast whose windows abut without overlapping,
+    /// which is not the common case — a day-ahead forecast reissued hourly
+    /// overlaps 23 of every 24 steps.
+    ///
+    /// ```
+    /// # use infrastore_core::{Deterministic, TypedArray, Period};
+    /// # use chrono::{TimeZone, Utc, Duration};
+    /// let forecast = Deterministic::new(
+    ///     Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
+    ///     Period::Fixed(Duration::hours(1)),   // resolution
+    ///     Period::Fixed(Duration::hours(2)),   // horizon: H = 2
+    ///     Period::Fixed(Duration::hours(1)),   // interval
+    ///     3,
+    ///     TypedArray::from_f64(vec![2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+    ///     "day_ahead",
+    /// )?;
+    /// assert_eq!(
+    ///     forecast.window_timestamps(1)?,
+    ///     vec![
+    ///         Utc.with_ymd_and_hms(2024, 1, 1, 1, 0, 0).unwrap(),
+    ///         Utc.with_ymd_and_hms(2024, 1, 1, 2, 0, 0).unwrap(),
+    ///     ],
+    /// );
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn window_timestamps(&self, index: usize) -> crate::Result<Vec<DateTime<Utc>>> {
+        let start = self.window_start(index)?;
+        let steps = self.horizon_count();
+        (0..steps)
+            .map(|h| timestamp_on_grid(start, self.resolution, steps, h, "forecast horizon"))
+            .collect()
     }
 }
 
@@ -1275,6 +1691,7 @@ pub enum TimeSeriesData {
     Deterministic(Deterministic),
     Probabilistic(Probabilistic),
     Scenarios(Scenarios),
+    PersistentTimeSeries(PersistentTimeSeries),
 }
 
 impl TimeSeriesData {
@@ -1285,6 +1702,7 @@ impl TimeSeriesData {
             TimeSeriesData::Deterministic(_) => TimeSeriesType::Deterministic,
             TimeSeriesData::Probabilistic(_) => TimeSeriesType::Probabilistic,
             TimeSeriesData::Scenarios(_) => TimeSeriesType::Scenarios,
+            TimeSeriesData::PersistentTimeSeries(_) => TimeSeriesType::PersistentTimeSeries,
         }
     }
 
@@ -1295,6 +1713,7 @@ impl TimeSeriesData {
             TimeSeriesData::Deterministic(d) => &d.name,
             TimeSeriesData::Probabilistic(p) => &p.name,
             TimeSeriesData::Scenarios(s) => &s.name,
+            TimeSeriesData::PersistentTimeSeries(p) => &p.name,
         }
     }
 
@@ -1306,6 +1725,7 @@ impl TimeSeriesData {
             TimeSeriesData::Deterministic(d) => &d.data,
             TimeSeriesData::Probabilistic(p) => &p.data,
             TimeSeriesData::Scenarios(s) => &s.data,
+            TimeSeriesData::PersistentTimeSeries(p) => &p.data,
         }
     }
 
@@ -1354,6 +1774,7 @@ impl TimeSeriesData {
             TimeSeriesData::Deterministic(d) => d.element_type,
             TimeSeriesData::Probabilistic(p) => p.element_type,
             TimeSeriesData::Scenarios(s) => s.element_type,
+            TimeSeriesData::PersistentTimeSeries(p) => p.element_type,
         }
     }
 
@@ -1365,6 +1786,7 @@ impl TimeSeriesData {
             TimeSeriesData::Deterministic(d) => d.units.as_deref(),
             TimeSeriesData::Probabilistic(p) => p.units.as_deref(),
             TimeSeriesData::Scenarios(s) => s.units.as_deref(),
+            TimeSeriesData::PersistentTimeSeries(p) => p.units.as_deref(),
         }
     }
 
@@ -1376,6 +1798,7 @@ impl TimeSeriesData {
             TimeSeriesData::Deterministic(d) => d.quantity_kind.as_deref(),
             TimeSeriesData::Probabilistic(p) => p.quantity_kind.as_deref(),
             TimeSeriesData::Scenarios(s) => s.quantity_kind.as_deref(),
+            TimeSeriesData::PersistentTimeSeries(p) => p.quantity_kind.as_deref(),
         }
     }
 
@@ -1387,6 +1810,7 @@ impl TimeSeriesData {
             TimeSeriesData::Deterministic(d) => d.unit_system,
             TimeSeriesData::Probabilistic(p) => p.unit_system,
             TimeSeriesData::Scenarios(s) => s.unit_system,
+            TimeSeriesData::PersistentTimeSeries(p) => p.unit_system,
         }
     }
 
@@ -1398,6 +1822,7 @@ impl TimeSeriesData {
             TimeSeriesData::Deterministic(d) => d.time_reference.as_ref(),
             TimeSeriesData::Probabilistic(p) => p.time_reference.as_ref(),
             TimeSeriesData::Scenarios(s) => s.time_reference.as_ref(),
+            TimeSeriesData::PersistentTimeSeries(p) => p.time_reference.as_ref(),
         }
     }
 
@@ -1409,6 +1834,7 @@ impl TimeSeriesData {
             TimeSeriesData::Deterministic(d) => d.component_field.as_deref(),
             TimeSeriesData::Probabilistic(p) => p.component_field.as_deref(),
             TimeSeriesData::Scenarios(s) => s.component_field.as_deref(),
+            TimeSeriesData::PersistentTimeSeries(p) => p.component_field.as_deref(),
         }
     }
 
@@ -1420,6 +1846,7 @@ impl TimeSeriesData {
             TimeSeriesData::Deterministic(d) => d.application_data.as_deref(),
             TimeSeriesData::Probabilistic(p) => p.application_data.as_deref(),
             TimeSeriesData::Scenarios(s) => s.application_data.as_deref(),
+            TimeSeriesData::PersistentTimeSeries(p) => p.application_data.as_deref(),
         }
     }
 
@@ -1473,6 +1900,7 @@ impl TimeSeriesData {
             TimeSeriesData::Deterministic(d) => d.element_type = element_type,
             TimeSeriesData::Probabilistic(p) => p.element_type = element_type,
             TimeSeriesData::Scenarios(s) => s.element_type = element_type,
+            TimeSeriesData::PersistentTimeSeries(p) => p.element_type = element_type,
         }
     }
 
@@ -1484,6 +1912,7 @@ impl TimeSeriesData {
             TimeSeriesData::Deterministic(d) => d.units = units,
             TimeSeriesData::Probabilistic(p) => p.units = units,
             TimeSeriesData::Scenarios(s) => s.units = units,
+            TimeSeriesData::PersistentTimeSeries(p) => p.units = units,
         }
     }
 
@@ -1495,6 +1924,7 @@ impl TimeSeriesData {
             TimeSeriesData::Deterministic(d) => d.quantity_kind = quantity_kind,
             TimeSeriesData::Probabilistic(p) => p.quantity_kind = quantity_kind,
             TimeSeriesData::Scenarios(s) => s.quantity_kind = quantity_kind,
+            TimeSeriesData::PersistentTimeSeries(p) => p.quantity_kind = quantity_kind,
         }
     }
 
@@ -1506,6 +1936,7 @@ impl TimeSeriesData {
             TimeSeriesData::Deterministic(d) => d.unit_system = unit_system,
             TimeSeriesData::Probabilistic(p) => p.unit_system = unit_system,
             TimeSeriesData::Scenarios(s) => s.unit_system = unit_system,
+            TimeSeriesData::PersistentTimeSeries(p) => p.unit_system = unit_system,
         }
     }
 
@@ -1517,6 +1948,7 @@ impl TimeSeriesData {
             TimeSeriesData::Deterministic(d) => d.time_reference = time_reference,
             TimeSeriesData::Probabilistic(p) => p.time_reference = time_reference,
             TimeSeriesData::Scenarios(s) => s.time_reference = time_reference,
+            TimeSeriesData::PersistentTimeSeries(p) => p.time_reference = time_reference,
         }
     }
 
@@ -1528,6 +1960,7 @@ impl TimeSeriesData {
             TimeSeriesData::Deterministic(d) => d.component_field = component_field,
             TimeSeriesData::Probabilistic(p) => p.component_field = component_field,
             TimeSeriesData::Scenarios(s) => s.component_field = component_field,
+            TimeSeriesData::PersistentTimeSeries(p) => p.component_field = component_field,
         }
     }
 
@@ -1539,6 +1972,7 @@ impl TimeSeriesData {
             TimeSeriesData::Deterministic(d) => d.application_data = application_data,
             TimeSeriesData::Probabilistic(p) => p.application_data = application_data,
             TimeSeriesData::Scenarios(s) => s.application_data = application_data,
+            TimeSeriesData::PersistentTimeSeries(p) => p.application_data = application_data,
         }
     }
 
@@ -1603,6 +2037,14 @@ impl TimeSeriesData {
             _ => None,
         }
     }
+
+    /// Access the inner [`PersistentTimeSeries`], if present.
+    pub fn as_persistent(&self) -> Option<&PersistentTimeSeries> {
+        match self {
+            TimeSeriesData::PersistentTimeSeries(p) => Some(p),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1621,18 +2063,160 @@ mod tests {
         TypedArray::from_f64(shape, &values)
     }
 
+    // ---- Materialized timelines -------------------------------------------
+
+    fn hourly(length: usize) -> SingleTimeSeries {
+        SingleTimeSeries::new(
+            t0(),
+            Period::Fixed(Duration::hours(1)),
+            arr(vec![length]),
+            "s",
+        )
+    }
+
+    #[test]
+    fn single_time_series_timestamps_walk_the_fixed_grid() {
+        let series = hourly(3);
+        assert_eq!(
+            series.timestamps().collect::<Vec<_>>(),
+            vec![t0(), t0() + Duration::hours(1), t0() + Duration::hours(2)]
+        );
+    }
+
+    #[test]
+    fn single_time_series_timestamps_step_a_month_grid_on_the_calendar() {
+        // The reason this lives in the core rather than in each binding: a
+        // month is not a span, so no multiplication reproduces this.
+        let jan31 = Utc.with_ymd_and_hms(2024, 1, 31, 0, 0, 0).unwrap();
+        let series = SingleTimeSeries::new(jan31, Period::Months(1), arr(vec![4]), "monthly");
+        assert_eq!(
+            series.timestamps().collect::<Vec<_>>(),
+            vec![
+                jan31,
+                Utc.with_ymd_and_hms(2024, 2, 29, 0, 0, 0).unwrap(),
+                Utc.with_ymd_and_hms(2024, 3, 31, 0, 0, 0).unwrap(),
+                Utc.with_ymd_and_hms(2024, 4, 30, 0, 0, 0).unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn single_time_series_timestamps_agree_with_timestamp_at() {
+        let series = hourly(5);
+        for (k, t) in series.timestamps().enumerate() {
+            assert_eq!(series.timestamp_at(k).unwrap(), t);
+        }
+    }
+
+    #[test]
+    fn single_time_series_timestamp_at_rejects_an_index_past_the_grid() {
+        let series = hourly(3);
+        assert!(series.timestamp_at(2).is_ok());
+        let err = series.timestamp_at(3).unwrap_err().to_string();
+        assert!(err.contains("past the grid extent"), "{err}");
+    }
+
+    #[test]
+    fn single_time_series_with_no_steps_has_no_timestamps() {
+        assert_eq!(hourly(0).timestamps().count(), 0);
+        assert!(hourly(0).timestamp_at(0).is_err());
+    }
+
+    fn forecast(horizon_hours: i64, interval_hours: i64, count: usize) -> Deterministic {
+        let h = horizon_hours as usize;
+        Deterministic::new(
+            t0(),
+            Period::Fixed(Duration::hours(1)),
+            Period::Fixed(Duration::hours(horizon_hours)),
+            Period::Fixed(Duration::hours(interval_hours)),
+            count,
+            arr(vec![h, count]),
+            "f",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn deterministic_horizon_count_is_the_first_axis() {
+        let f = forecast(3, 1, 4);
+        assert_eq!(f.horizon_count(), 3);
+        assert_eq!(f.horizon_count(), f.data.shape[0]);
+        assert_eq!(
+            f.horizon_count(),
+            compute_h(f.horizon, f.resolution).unwrap()
+        );
+    }
+
+    #[test]
+    fn deterministic_window_starts_step_by_interval() {
+        let f = forecast(2, 3, 3);
+        let starts: Vec<_> = (0..f.count).map(|k| f.window_start(k).unwrap()).collect();
+        assert_eq!(
+            starts,
+            vec![t0(), t0() + Duration::hours(3), t0() + Duration::hours(6)]
+        );
+    }
+
+    #[test]
+    fn deterministic_window_timestamps_step_by_resolution() {
+        // The two grids are independent: windows every 3h, rows every 1h.
+        let f = forecast(2, 3, 3);
+        assert_eq!(
+            f.window_timestamps(1).unwrap(),
+            vec![t0() + Duration::hours(3), t0() + Duration::hours(4)]
+        );
+    }
+
+    #[test]
+    fn deterministic_windows_overlap_when_reissued_faster_than_the_horizon() {
+        // The property the Arrow binding leans on: neighbouring windows share
+        // instants, so they cannot be flattened onto one timeline.
+        let f = forecast(3, 1, 4);
+        let first = f.window_timestamps(0).unwrap();
+        let second = f.window_timestamps(1).unwrap();
+        assert_eq!(first[1..], second[..second.len() - 1]);
+    }
+
+    #[test]
+    fn deterministic_window_accessors_reject_an_index_past_the_count() {
+        let f = forecast(2, 1, 3);
+        assert!(f.window_start(2).is_ok());
+        let err = f.window_start(3).unwrap_err().to_string();
+        assert!(err.contains("past the forecast window extent"), "{err}");
+        assert!(f.window_timestamps(3).is_err());
+    }
+
+    #[test]
+    fn deterministic_window_starts_step_a_month_interval_on_the_calendar() {
+        let jan31 = Utc.with_ymd_and_hms(2024, 1, 31, 0, 0, 0).unwrap();
+        let f = Deterministic::new(
+            jan31,
+            Period::Months(1),
+            Period::Months(2),
+            Period::Months(1),
+            3,
+            arr(vec![2, 3]),
+            "monthly",
+        )
+        .unwrap();
+        assert_eq!(
+            f.window_start(1).unwrap(),
+            Utc.with_ymd_and_hms(2024, 2, 29, 0, 0, 0).unwrap()
+        );
+        assert_eq!(
+            f.window_timestamps(1).unwrap(),
+            vec![
+                Utc.with_ymd_and_hms(2024, 2, 29, 0, 0, 0).unwrap(),
+                Utc.with_ymd_and_hms(2024, 3, 29, 0, 0, 0).unwrap(),
+            ]
+        );
+    }
+
     // ---- TimeSeriesType round trip ----------------------------------------
 
     #[test]
     fn time_series_type_str_round_trip_is_exhaustive() {
-        for t in [
-            TimeSeriesType::SingleTimeSeries,
-            TimeSeriesType::NonSequentialTimeSeries,
-            TimeSeriesType::Deterministic,
-            TimeSeriesType::DeterministicSingleTimeSeries,
-            TimeSeriesType::Probabilistic,
-            TimeSeriesType::Scenarios,
-        ] {
+        for t in ALL_TYPES {
             assert_eq!(TimeSeriesType::parse(t.as_str()), Some(t));
             assert_eq!(t.as_str().parse::<TimeSeriesType>(), Ok(t));
         }
@@ -1683,13 +2267,14 @@ mod tests {
         }
     }
 
-    const ALL_TYPES: [TimeSeriesType; 6] = [
+    const ALL_TYPES: [TimeSeriesType; 7] = [
         TimeSeriesType::SingleTimeSeries,
         TimeSeriesType::NonSequentialTimeSeries,
         TimeSeriesType::Deterministic,
         TimeSeriesType::DeterministicSingleTimeSeries,
         TimeSeriesType::Probabilistic,
         TimeSeriesType::Scenarios,
+        TimeSeriesType::PersistentTimeSeries,
     ];
 
     #[test]
@@ -1702,7 +2287,7 @@ mod tests {
             assert!(!seen.contains(&t.code()), "duplicate code for {t:?}");
             seen.push(t.code());
         }
-        assert_eq!(TimeSeriesType::from_code(6), None);
+        assert_eq!(TimeSeriesType::from_code(7), None);
         assert_eq!(TimeSeriesType::from_code(-1), None);
     }
 
@@ -1738,21 +2323,46 @@ mod tests {
     #[test]
     fn code_groups_partition_cleanly() {
         // The summary queries select "all static" / "all forecast" with one
-        // BETWEEN each, which is only correct while the two groups are
-        // contiguous, disjoint, and cover every type.
-        let (s_lo, s_hi, f_lo, f_hi) = TimeSeriesType::code_groups();
-        assert!(s_lo <= s_hi && f_lo <= f_hi);
-        assert_eq!(s_hi + 1, f_lo, "the groups must be adjacent with no gap");
+        // `IN` list each, which is correct exactly while the two lists are
+        // disjoint and together cover every type. They used to be contiguous
+        // ranges too; appending `PersistentTimeSeries` as code 6 ended that,
+        // and the partition is the property that actually mattered.
+        let statics = TimeSeriesType::static_codes();
+        let forecasts = TimeSeriesType::forecast_codes();
         for t in ALL_TYPES {
             let c = t.code();
-            let in_static = (s_lo..=s_hi).contains(&c);
-            let in_forecast = (f_lo..=f_hi).contains(&c);
+            let in_static = statics.contains(&c);
+            let in_forecast = forecasts.contains(&c);
             assert!(
                 in_static ^ in_forecast,
                 "{t:?} must be in exactly one group"
             );
             assert_eq!(in_forecast, t.is_forecast(), "{t:?}");
         }
+        // ...and neither list names a code no type claims.
+        let known: Vec<i64> = ALL_TYPES.iter().map(|t| t.code()).collect();
+        for c in statics.iter().chain(forecasts) {
+            assert!(known.contains(c), "code {c} belongs to no TimeSeriesType");
+        }
+        assert_eq!(statics.len() + forecasts.len(), ALL_TYPES.len());
+    }
+
+    #[test]
+    fn the_persistent_type_is_static_and_appended() {
+        let p = TimeSeriesType::PersistentTimeSeries;
+        // Appended, not inserted: the codes are an on-disk contract, and
+        // `code_span`'s Deterministic/DST adjacency depends on it.
+        assert_eq!(p.code(), 6);
+        assert_eq!(
+            TimeSeriesType::Deterministic.code() + 1,
+            TimeSeriesType::DeterministicSingleTimeSeries.code()
+        );
+        assert!(!p.is_forecast());
+        assert_eq!(p.leading_dims(), 1);
+        assert_eq!(p.code_span(), (6, 6));
+        assert!(p.accepts(p));
+        assert!(!p.accepts(TimeSeriesType::NonSequentialTimeSeries));
+        assert!(!TimeSeriesType::NonSequentialTimeSeries.accepts(p));
     }
 
     #[test]

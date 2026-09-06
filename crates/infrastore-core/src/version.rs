@@ -115,6 +115,13 @@
 /// write. Nothing in the HDF5 file changes, so there is nothing to bump: the
 /// table rebuild is entirely on the catalog side, and a 0.19.0 store upgrades
 /// in place on its first writable open.
+///
+/// `PersistentTimeSeries` (storage code 6) is the first *type* to arrive
+/// through that door, and it likewise takes no bump. The HDF5 layout is
+/// untouched — a persistent series pools into the same `nsts_…` datasets as a
+/// `NonSequentialTimeSeries` on the same breakpoints, and its breakpoints are
+/// an ordinary timestamp vector — so the widened CHECK is the whole of what it
+/// needed from the catalog, and every 0.19.0 store already has it.
 pub const DATA_FORMAT_VERSION: &str = "0.19.0";
 
 /// The oldest [`DATA_FORMAT_VERSION`] this build can open and upgrade in place.

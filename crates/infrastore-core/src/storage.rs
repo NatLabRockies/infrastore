@@ -356,6 +356,46 @@ pub(crate) trait StorageBackend: Send + Sync {
         Ok(())
     }
 
+    /// [`Self::read_index_into`] with a **row index per column**: `indices[i]`
+    /// is the row to read from `hashes[i]`. The two slices must be the same
+    /// length.
+    ///
+    /// Serves a [`Timeline::Persistent`](crate::reader) static reader, whose
+    /// columns sit on independent breakpoint vectors and therefore resolve to
+    /// different rows at one read instant. Every other reader shape uses
+    /// [`Self::read_index_into`], which is the same call with one index for the
+    /// whole batch.
+    ///
+    /// All `hashes` share one `(dtype, element_shape)`; the caller guarantees
+    /// this by grouping. `out` is cleared first and then filled with
+    /// `hashes.len() * element_count * dtype.size()` bytes laid out row-major
+    /// as `[column, *element_shape]`, in `hashes` order.
+    ///
+    /// The default reads each column's one-step slice individually; the on-disk
+    /// backend overrides this to share a hyperslab between columns that want
+    /// the same row of the same packed dataset.
+    fn read_indices_into(
+        &self,
+        hashes: &[[u8; 32]],
+        dtype: Dtype,
+        indices: &[usize],
+        out: &mut Vec<u8>,
+    ) -> Result<()> {
+        if hashes.len() != indices.len() {
+            return Err(TimeSeriesError::IntegrityError(format!(
+                "read_indices_into got {} hashes and {} indices",
+                hashes.len(),
+                indices.len()
+            )));
+        }
+        out.clear();
+        for (hash, &index) in hashes.iter().zip(indices) {
+            let step = self.get_slice(hash, dtype, index..index + 1)?;
+            out.extend_from_slice(&step.bytes);
+        }
+        Ok(())
+    }
+
     /// The stored shape of an array, ideally without reading its data. Used by
     /// the forecast reader to plan window slicing. Needs no `dtype`: a shape is
     /// element-count-per-axis, which every backend records independently of how

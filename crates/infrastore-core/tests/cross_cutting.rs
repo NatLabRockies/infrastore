@@ -369,15 +369,26 @@ fn a_forecast_on_a_millisecond_offset_grid_reads_at_its_own_boundaries() {
     assert_eq!(fc.count, 2);
 
     // The same instant rounded down to the second is not a window boundary.
-    for rounded in [t0() + Duration::hours(1), t0()] {
-        assert!(
-            store
-                .read_by_ids_range(&[key], (rounded, rounded + Duration::hours(2)).into())
-                .map(|mut v| v.remove(0))
-                .is_err(),
-            "a second-rounded bound is off a millisecond-offset grid"
-        );
-    }
+    let rounded = t0() + Duration::hours(1);
+    assert!(
+        store
+            .read_by_ids_range(&[key], (rounded, rounded + Duration::hours(2)).into())
+            .map(|mut v| v.remove(0))
+            .is_err(),
+        "a second-rounded bound is off a millisecond-offset grid"
+    );
+
+    // `t0()` rounds down past the *first* window, which is a different case: it
+    // is not an off-phase bound between two windows but a bound before every
+    // window, and there is no partial window there to refuse. The bounds form
+    // clips to the first window rather than failing a range wider than the data.
+    let before = store
+        .read_by_ids_range(&[key], (t0(), t0() + Duration::hours(2)).into())
+        .map(|mut v| v.remove(0))
+        .unwrap();
+    let before = before.as_deterministic().unwrap();
+    assert_eq!(before.initial_timestamp, initial);
+    assert_eq!(before.count, 2);
 
     // A forecast whose phase is finer than a millisecond never gets stored.
     let sub_ms = Deterministic::new(

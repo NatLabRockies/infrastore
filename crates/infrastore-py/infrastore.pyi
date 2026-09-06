@@ -16,8 +16,19 @@ from numpy.typing import NDArray
 # A period is passed as an ISO-8601 duration string (e.g. "PT1H", "P1M") or a
 # datetime.timedelta; it is always returned as an ISO-8601 string.
 Period = str | timedelta
+# What `to_arrow()` returns: a `pyarrow.Table`. Spelled as an alias rather than
+# the class itself because pyarrow is an optional extra (`infrastore[arrow]`)
+# that ships no `py.typed` -- naming it here would make type-checking this stub
+# depend on a package most callers have not installed and that has no stubs of
+# its own. The docstrings name the real type.
+ArrowTable = Any
 TimeSeriesData = (
-    SingleTimeSeries | NonSequentialTimeSeries | Deterministic | Probabilistic | Scenarios
+    SingleTimeSeries
+    | NonSequentialTimeSeries
+    | PersistentTimeSeries
+    | Deterministic
+    | Probabilistic
+    | Scenarios
 )
 
 __version__: str
@@ -49,6 +60,7 @@ class CatalogTooNewError(TimeSeriesError): ...
 class TimeSeriesType:
     SingleTimeSeries: TimeSeriesType
     NonSequentialTimeSeries: TimeSeriesType
+    PersistentTimeSeries: TimeSeriesType
     Deterministic: TimeSeriesType
     DeterministicSingleTimeSeries: TimeSeriesType
     Probabilistic: TimeSeriesType
@@ -66,6 +78,13 @@ class OwnerCategory:
     def __hash__(self) -> int: ...
 
 # ---- Time-series value types ----------------------------------------------
+#
+# Every value type carries the same seven descriptive attributes as keyword-only
+# constructor arguments and read-only properties: `application_data`,
+# `element_type`, `units`, `quantity_kind`, `unit_system`, `component_field`, and
+# `time_reference`. They describe the values without addressing them, so none is
+# part of a series' identity, and `Store.add_time_series` does not take them --
+# they belong to the object, which is what makes a read-then-re-add lossless.
 
 @final
 class SingleTimeSeries:
@@ -75,7 +94,30 @@ class SingleTimeSeries:
         resolution: Period,
         data: NDArray[Any],
         name: str,
+        *,
+        application_data: str | None = None,
+        element_type: str | None = None,
+        units: str | None = None,
+        quantity_kind: str | None = None,
+        unit_system: str | None = None,  # "natural_units" | "component_base"
+        component_field: str | None = None,
+        time_reference: str | None = None,
     ) -> None: ...
+    @classmethod
+    def from_timestamps(
+        cls,
+        timestamps: Sequence[datetime],
+        data: NDArray[Any],
+        name: str,
+        *,
+        application_data: str | None = None,
+        element_type: str | None = None,
+        units: str | None = None,
+        quantity_kind: str | None = None,
+        unit_system: str | None = None,
+        component_field: str | None = None,
+        time_reference: str | None = None,
+    ) -> SingleTimeSeries: ...
     @property
     def name(self) -> str: ...
     @property
@@ -88,6 +130,21 @@ class SingleTimeSeries:
     def resolution(self) -> str: ...
     @property
     def data(self) -> NDArray[Any]: ...
+    @property
+    def application_data(self) -> str | None: ...
+    @property
+    def element_type(self) -> str: ...
+    @property
+    def units(self) -> str | None: ...
+    @property
+    def quantity_kind(self) -> str | None: ...
+    @property
+    def unit_system(self) -> str | None: ...
+    @property
+    def component_field(self) -> str | None: ...
+    @property
+    def timestamps(self) -> list[datetime]: ...
+    def to_arrow(self) -> ArrowTable: ...
     def __eq__(self, value: object) -> bool: ...
     def __len__(self) -> int: ...
 
@@ -98,6 +155,14 @@ class NonSequentialTimeSeries:
         timestamps: list[datetime],
         data: NDArray[Any],
         name: str,
+        *,
+        application_data: str | None = None,
+        element_type: str | None = None,
+        units: str | None = None,
+        quantity_kind: str | None = None,
+        unit_system: str | None = None,
+        component_field: str | None = None,
+        time_reference: str | None = None,
     ) -> None: ...
     @property
     def name(self) -> str: ...
@@ -109,6 +174,64 @@ class NonSequentialTimeSeries:
     def length(self) -> int: ...
     @property
     def data(self) -> NDArray[Any]: ...
+    @property
+    def application_data(self) -> str | None: ...
+    @property
+    def element_type(self) -> str: ...
+    @property
+    def units(self) -> str | None: ...
+    @property
+    def quantity_kind(self) -> str | None: ...
+    @property
+    def unit_system(self) -> str | None: ...
+    @property
+    def component_field(self) -> str | None: ...
+    def to_arrow(self) -> ArrowTable: ...
+    def __eq__(self, value: object) -> bool: ...
+    def __len__(self) -> int: ...
+
+@final
+class PersistentTimeSeries:
+    def __init__(
+        self,
+        timestamps: list[datetime],
+        data: NDArray[Any],
+        name: str,
+        *,
+        application_data: str | None = None,
+        element_type: str | None = None,
+        units: str | None = None,
+        quantity_kind: str | None = None,
+        unit_system: str | None = None,
+        component_field: str | None = None,
+        time_reference: str | None = None,
+    ) -> None: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def timestamps(self) -> list[datetime]: ...
+    @property
+    def time_reference(self) -> str | None: ...
+    @property
+    def length(self) -> int: ...
+    @property
+    def data(self) -> NDArray[Any]: ...
+    @property
+    def application_data(self) -> str | None: ...
+    @property
+    def element_type(self) -> str: ...
+    @property
+    def units(self) -> str | None: ...
+    @property
+    def quantity_kind(self) -> str | None: ...
+    @property
+    def unit_system(self) -> str | None: ...
+    @property
+    def component_field(self) -> str | None: ...
+    def value_at(self, at: datetime) -> Any: ...
+    def index_at(self, at: datetime) -> int: ...
+    def breakpoint_at(self, at: datetime) -> datetime: ...
+    def to_arrow(self) -> ArrowTable: ...
     def __eq__(self, value: object) -> bool: ...
     def __len__(self) -> int: ...
 
@@ -123,6 +246,14 @@ class Deterministic:
         count: int,
         data: NDArray[Any],
         name: str,
+        *,
+        application_data: str | None = None,
+        element_type: str | None = None,
+        units: str | None = None,
+        quantity_kind: str | None = None,
+        unit_system: str | None = None,
+        component_field: str | None = None,
+        time_reference: str | None = None,
     ) -> None: ...
     @property
     def name(self) -> str: ...
@@ -140,6 +271,19 @@ class Deterministic:
     def count(self) -> int: ...
     @property
     def data(self) -> NDArray[Any]: ...
+    @property
+    def application_data(self) -> str | None: ...
+    @property
+    def element_type(self) -> str: ...
+    @property
+    def units(self) -> str | None: ...
+    @property
+    def quantity_kind(self) -> str | None: ...
+    @property
+    def unit_system(self) -> str | None: ...
+    @property
+    def component_field(self) -> str | None: ...
+    def to_arrow_windows(self) -> dict[datetime, ArrowTable]: ...
     def __eq__(self, value: object) -> bool: ...
     def __len__(self) -> int: ...
 
@@ -155,6 +299,14 @@ class Probabilistic:
         percentiles: list[float],
         data: NDArray[Any],
         name: str,
+        *,
+        application_data: str | None = None,
+        element_type: str | None = None,
+        units: str | None = None,
+        quantity_kind: str | None = None,
+        unit_system: str | None = None,
+        component_field: str | None = None,
+        time_reference: str | None = None,
     ) -> None: ...
     @property
     def name(self) -> str: ...
@@ -174,6 +326,18 @@ class Probabilistic:
     def percentiles(self) -> list[float]: ...
     @property
     def data(self) -> NDArray[Any]: ...
+    @property
+    def application_data(self) -> str | None: ...
+    @property
+    def element_type(self) -> str: ...
+    @property
+    def units(self) -> str | None: ...
+    @property
+    def quantity_kind(self) -> str | None: ...
+    @property
+    def unit_system(self) -> str | None: ...
+    @property
+    def component_field(self) -> str | None: ...
     def __eq__(self, value: object) -> bool: ...
     def __len__(self) -> int: ...
 
@@ -188,6 +352,14 @@ class Scenarios:
         count: int,
         data: NDArray[Any],
         name: str,
+        *,
+        application_data: str | None = None,
+        element_type: str | None = None,
+        units: str | None = None,
+        quantity_kind: str | None = None,
+        unit_system: str | None = None,
+        component_field: str | None = None,
+        time_reference: str | None = None,
     ) -> None: ...
     @property
     def name(self) -> str: ...
@@ -207,6 +379,18 @@ class Scenarios:
     def scenario_count(self) -> int: ...
     @property
     def data(self) -> NDArray[Any]: ...
+    @property
+    def application_data(self) -> str | None: ...
+    @property
+    def element_type(self) -> str: ...
+    @property
+    def units(self) -> str | None: ...
+    @property
+    def quantity_kind(self) -> str | None: ...
+    @property
+    def unit_system(self) -> str | None: ...
+    @property
+    def component_field(self) -> str | None: ...
     def __eq__(self, value: object) -> bool: ...
     def __len__(self) -> int: ...
 
@@ -323,6 +507,7 @@ class Store:
     @property
     def catalog(self) -> str: ...
     def close(self) -> None: ...
+    def show(self, *, file: Any = None) -> None: ...
     def __enter__(self) -> Store: ...
     def __exit__(
         self,
@@ -340,13 +525,6 @@ class Store:
         time_series: TimeSeriesData,
         *,
         features: dict[str, int | float | bool | str] | None = None,
-        units: str | None = None,
-        element_type: str | None = None,
-        application_data: str | None = None,
-        quantity_kind: str | None = None,
-        unit_system: str | None = None,
-        time_reference: str | None = None,
-        component_field: str | None = None,
     ) -> int: ...
     def add_time_series_bulk(self, items: list[dict[str, Any]]) -> list[int]: ...
     def get_metadata_by_id(self, id: int) -> dict[str, Any] | None: ...
@@ -394,6 +572,8 @@ class Store:
         zoneless: bool | None = None,
         resolution: Period | None = None,
         interval: Period | None = None,
+        initial_timestamp: datetime | None = None,
+        length: int | None = None,
         features: dict[str, int | float | bool | str] | None = None,
     ) -> int: ...
     def clear_time_series(
@@ -442,6 +622,8 @@ class Store:
         self,
         resolution: Period | None = None,
         *,
+        window_start: datetime | None = None,
+        window_length: int | None = None,
         time_series_type: TimeSeriesType | str | None = None,
         owner_id: int | None = None,
         owner_category: OwnerCategory | None = None,
@@ -450,6 +632,8 @@ class Store:
         name_glob: str | None = None,
         component_field: str | None = None,
         zoneless: bool | None = None,
+        initial_timestamp: datetime | None = None,
+        length: int | None = None,
         features: dict[str, int | float | bool | str] | None = None,
     ) -> StaticReader: ...
     def static_read(self, reader: StaticReader, when: datetime) -> None: ...
@@ -465,6 +649,8 @@ class Store:
         name_glob: str | None = None,
         component_field: str | None = None,
         zoneless: bool | None = None,
+        initial_timestamp: datetime | None = None,
+        length: int | None = None,
         features: dict[str, int | float | bool | str] | None = None,
     ) -> ForecastReader: ...
     def forecast_read(self, reader: ForecastReader, when: datetime) -> None: ...
@@ -488,6 +674,8 @@ class Store:
         zoneless: bool | None = None,
         resolution: Period | None = None,
         interval: Period | None = None,
+        initial_timestamp: datetime | None = None,
+        length: int | None = None,
         features: dict[str, int | float | bool | str] | None = None,
     ) -> list[dict[str, Any]]: ...
     def list_names(
@@ -503,6 +691,8 @@ class Store:
         zoneless: bool | None = None,
         resolution: Period | None = None,
         interval: Period | None = None,
+        initial_timestamp: datetime | None = None,
+        length: int | None = None,
         features: dict[str, int | float | bool | str] | None = None,
     ) -> list[str]: ...
     def list_owner_types(
@@ -518,6 +708,8 @@ class Store:
         zoneless: bool | None = None,
         resolution: Period | None = None,
         interval: Period | None = None,
+        initial_timestamp: datetime | None = None,
+        length: int | None = None,
         features: dict[str, int | float | bool | str] | None = None,
     ) -> list[str]: ...
     def has_any_time_series(
@@ -533,6 +725,8 @@ class Store:
         zoneless: bool | None = None,
         resolution: Period | None = None,
         interval: Period | None = None,
+        initial_timestamp: datetime | None = None,
+        length: int | None = None,
         features: dict[str, int | float | bool | str] | None = None,
     ) -> bool: ...
     def is_empty(self) -> bool: ...
@@ -716,6 +910,8 @@ class Store:
         zoneless: bool | None = None,
         resolution: Period | None = None,
         interval: Period | None = None,
+        initial_timestamp: datetime | None = None,
+        length: int | None = None,
         features: dict[str, int | float | bool | str] | None = None,
     ) -> str: ...
     def import_time_series_associations_openapi(self, json: str) -> int: ...

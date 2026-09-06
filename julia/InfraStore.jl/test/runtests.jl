@@ -50,7 +50,7 @@ end
     initial = DateTime(2024, 1, 1)
     resolution = Hour(1)
     values = collect(100.0:123.0)
-    ts = SingleTimeSeries(initial, resolution, values, "load")
+    ts = SingleTimeSeries(initial, resolution, values, "load"; units="MW")
 
     key = add_time_series!(
         store,
@@ -59,7 +59,6 @@ end
         Component,
         ts;
         features=Dict("model_year" => 2030),
-        units="MW",
     )
 
     @test association_exists(store, key) == true
@@ -160,6 +159,189 @@ end
     @test length(list_metadata(store; owner_id=7, features=nothing)) == 1
 end
 
+@testset "timestamps() over the three static types" begin
+    # The grid is materialized rather than assumed: a Month resolution steps on
+    # the calendar, so index * a fixed span would land on the wrong days.
+    monthly = SingleTimeSeries(DateTime(2024, 1, 31), Month(1), [1.0, 2.0, 3.0, 4.0], "m")
+    @test timestamps(monthly) == [
+        DateTime(2024, 1, 31),
+        DateTime(2024, 2, 29),
+        DateTime(2024, 3, 31),
+        DateTime(2024, 4, 30),
+    ]
+
+    hourly = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), [1.0, 2.0, 3.0], "h")
+    @test timestamps(hourly) == [DateTime(2024, 1, 1, k) for k in 0:2]
+
+    # One entry per time step, not per element: `length` counts elements.
+    multidim = SingleTimeSeries(
+        DateTime(2024, 1, 1), Hour(1), reshape(collect(1.0:6.0), 3, 2), "md"
+    )
+    @test length(timestamps(multidim)) == 3
+
+    @test isempty(
+        timestamps(SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), Float64[], "e"))
+    )
+
+    # The irregular types hand back their stored vector -- and a copy of it, so
+    # a caller mutating the result cannot reach into the series.
+    explicit = [DateTime(2024, 1, 1), DateTime(2024, 3, 9)]
+    for T in (NonSequentialTimeSeries, PersistentTimeSeries)
+        series = T(explicit, [1.0, 2.0], "s")
+        @test timestamps(series) == explicit
+        got = timestamps(series)
+        got[1] = DateTime(1999, 1, 1)
+        @test series.timestamps == explicit
+    end
+end
+
+@testset "persistent round-trip and step semantics" begin
+    store = Store(in_memory=true)
+    breakpoints = [DateTime(2024, 1, 1), DateTime(2024, 4, 1), DateTime(2024, 7, 1)]
+    series = PersistentTimeSeries(
+        breakpoints,
+        [3.5, 4.25, 5.0],
+        "gas_price";
+        units="USD/MMBtu",
+        component_field="fuel_cost",
+        application_data="{\"as_time_series\":false}",
+    )
+    id = add_time_series!(store, 7, "ThermalStandard", Component, series)
+    got = read_by_id(store, id)
+    @test got isa PersistentTimeSeries
+    @test got.timestamps == breakpoints
+    @test got.data == [3.5, 4.25, 5.0]
+    @test got.name == "gas_price"
+    @test got.units == "USD/MMBtu"
+    @test got.component_field == "fuel_cost"
+    @test got.application_data == "{\"as_time_series\":false}"
+    # A persistent series is static, so it counts as one.
+    @test get_counts(store).static_time_series == 1
+
+    # The catalog row reports the new type, and resolving it by attributes is
+    # how a caller gets from a name to the id that addresses it.
+    @test get_metadata_by_id(store, id).time_series_type <: PersistentTimeSeries
+    @test resolve_id(PersistentTimeSeries, store, 7, Component, "gas_price") == id
+
+    # A range whose start is not a breakpoint still yields the value in force
+    # there: the slice begins one breakpoint earlier than the window does. This
+    # is the case where a NonSequentialTimeSeries would start at July instead.
+    sliced = only(
+        read_by_ids(
+            store, [id]; time_range=(DateTime(2024, 4, 10), DateTime(2024, 9, 1))
+        ),
+    )
+    @test sliced.timestamps == [DateTime(2024, 4, 1), DateTime(2024, 7, 1)]
+    @test sliced.data == [4.25, 5.0]
+
+    # Before the first breakpoint a step function is undefined, and the store
+    # says so rather than clamping.
+    @test_throws InfraStore.InvalidParameterError read_by_ids(
+        store, [id]; time_range=(DateTime(2023, 12, 1), DateTime(2024, 6, 1))
+    )
+
+    # A bulk read reconstructs the right type too.
+    round_tripped = read_by_ids(store, [id])
+    @test length(round_tripped) == 1
+    @test round_tripped[1] isa PersistentTimeSeries
+    @test round_tripped[1].data == [3.5, 4.25, 5.0]
+end
+
+@testset "value_at / index_at / breakpoint_at on a step function" begin
+    bps = [DateTime(2024, 1, 1), DateTime(2024, 4, 1), DateTime(2024, 7, 1)]
+    curve = PersistentTimeSeries(bps, [10.0, 40.0, 70.0], "gas")
+
+    # 1. exactly at a breakpoint -> that breakpoint's value (right-continuous).
+    @test value_at(curve, DateTime(2024, 1, 1)) == 10.0
+    @test value_at(curve, DateTime(2024, 4, 1)) == 40.0
+
+    # 2. between breakpoints -> the previous value carried forward. This is the
+    #    case where a NonSequentialTimeSeries has no value at all.
+    @test value_at(curve, DateTime(2024, 5, 17)) == 40.0
+
+    # 3. after the last breakpoint -> the last value, forever.
+    @test value_at(curve, DateTime(2099, 1, 1)) == 70.0
+
+    # 4. before the first -> an error naming the series, never a clamp.
+    @test_throws InfraStore.InvalidParameterError value_at(
+        curve, DateTime(2023, 12, 31)
+    )
+
+    # The three agree on the row they resolve.
+    for (at, i) in
+        [(DateTime(2024, 1, 1), 1), (DateTime(2024, 5, 17), 2), (DateTime(2099), 3)]
+        @test index_at(curve, at) == i
+        @test breakpoint_at(curve, at) == bps[i]
+        @test value_at(curve, at) == curve.data[i]
+    end
+
+    # A shaped per-step element comes back whole, as a copy: mutating the result
+    # must not reach into the series.
+    shaped = PersistentTimeSeries(
+        bps[1:2], [1.0 2.0 3.0; 4.0 5.0 6.0], "shaped"
+    )
+    step = value_at(shaped, DateTime(2024, 2, 1))
+    @test step == [1.0, 2.0, 3.0]
+    step[1] = -1.0
+    @test shaped.data[1, 1] == 1.0
+    @test value_at(shaped, DateTime(2024, 9, 1)) == [4.0, 5.0, 6.0]
+end
+
+@testset "StaticReader over persistent columns on different breakpoints" begin
+    store = Store(in_memory=true)
+    months(ms) = [DateTime(2024, m, 1) for m in ms]
+    quarterly = [1, 4, 7, 10]
+    semi = [1, 6]
+    add_time_series!(
+        store,
+        1,
+        "Gen",
+        Component,
+        PersistentTimeSeries(months(quarterly), Float64[10, 40, 70, 100], "price"),
+    )
+    add_time_series!(
+        store,
+        2,
+        "Gen",
+        Component,
+        PersistentTimeSeries(months(semi), Float64[1, 6], "price"),
+    )
+
+    r = build_static_reader(store; time_series_type=PersistentTimeSeries)
+    grid = static_grid(r)
+    # No constant step, and the axis is the union of both columns' breakpoints.
+    @test grid.resolution === nothing
+    @test static_timestamps(r) == months([1, 4, 6, 7, 10])
+    @test grid.length == 5
+
+    carried_forward(bps, values, at) = values[findlast(<=(at), bps)]
+    for t in static_timestamps(r)
+        static_read!(r, t)
+        @test static_values(r, 1) == [
+            carried_forward(months(quarterly), Float64[10, 40, 70, 100], t),
+            carried_forward(months(semi), Float64[1, 6], t),
+        ]
+    end
+
+    # A resolution filter makes no sense for a step function either.
+    @test_throws InfraStore.InvalidParameterError build_static_reader(
+        store; time_series_type=PersistentTimeSeries, resolution=Hour(1)
+    )
+
+    # A column that starts later than the union's first instant makes that
+    # instant unreadable, and the error names the column.
+    add_time_series!(
+        store,
+        3,
+        "Gen",
+        Component,
+        PersistentTimeSeries(months([9]), Float64[999], "late"),
+    )
+    r2 = build_static_reader(store; time_series_type=PersistentTimeSeries)
+    @test_throws InfraStore.InvalidParameterError static_read!(r2, DateTime(2024, 1, 1))
+    static_read!(r2, DateTime(2024, 9, 1))
+end
+
 @testset "non-sequential N-D + application_data round-trip" begin
     store = Store(in_memory=true)
     timestamps = [DateTime(2024, 1, 1), DateTime(2024, 1, 1, 4), DateTime(2024, 1, 3)]
@@ -208,11 +390,11 @@ end
     initial = DateTime(2024, 1, 1)
     resolution = Hour(1)
     values = collect(100.0:123.0)
-    ts = SingleTimeSeries(initial, resolution, values, "load")
+    ts = SingleTimeSeries(initial, resolution, values, "load"; units="MW")
 
     owner = 11
     feats = Dict("model_year" => 2030, "scenario" => "high")  # string feature value
-    add_time_series!(store, owner, "Generator", Component, ts; features=feats, units="MW")
+    add_time_series!(store, owner, "Generator", Component, ts; features=feats)
 
     @test has_time_series(
         store, owner, Component, "load"; resolution=resolution, features=feats
@@ -1248,9 +1430,11 @@ end
     batch = AddBatch()
     @test length(batch) == 0
     for i in 1:10
-        ts = SingleTimeSeries(initial, resolution, collect(Float64.(i:(i + 23))), "load")
+        ts = SingleTimeSeries(
+            initial, resolution, collect(Float64.(i:(i + 23))), "load"; units="MW"
+        )
         add_time_series!(
-            batch, i, "Generator", Component, ts; features=Dict("scenario" => i), units="MW"
+            batch, i, "Generator", Component, ts; features=Dict("scenario" => i)
         )
     end
     # A forecast and a non-sequential series in the same batch.
@@ -1907,10 +2091,10 @@ end
     res = Hour(1)
 
     # units round-trips through get_metadata (previously write-only).
-    sts = SingleTimeSeries(t0, res, collect(1.0:8.0), "load")
-    k = add_time_series!(
-        store, 1, "Generator", Component, sts; units="MW", application_data="Profile"
+    sts = SingleTimeSeries(
+        t0, res, collect(1.0:8.0), "load"; units="MW", application_data="Profile"
     )
+    k = add_time_series!(store, 1, "Generator", Component, sts)
     md = resolve_metadata(SingleTimeSeries, store, 1, Component, "load"; resolution=res)
     @test md.units == "MW"
     @test md.application_data == "Profile"
@@ -1952,9 +2136,10 @@ end
         3,
         [0.1, 0.5, 0.9],
         Float64[p + h + c for p in 1:3, h in 1:2, c in 1:3],
-        "pf",
+        "pf";
+        units="MWp",
     )
-    add_time_series!(store, 3, "Generator", Component, prob; units="MWp")
+    add_time_series!(store, 3, "Generator", Component, prob)
     pmd = resolve_metadata(Probabilistic, store, 3, Component, "pf")
     @test pmd.percentiles == [0.1, 0.5, 0.9]
     @test pmd.units == "MWp"
@@ -3110,8 +3295,7 @@ end
         2900,
         "Générateur",
         Component,
-        SingleTimeSeries(t0, Hour(1), Float64[1, 2, 3], name);
-        units="MW·h⁻¹",
+        SingleTimeSeries(t0, Hour(1), Float64[1, 2, 3], name; units="MW·h⁻¹"),
     )
     # `get_metadata` returns the array-side fields; the name and owner type come
     # back through the catalog row.
@@ -3427,9 +3611,9 @@ end
         "Generator",
         Component,
         SingleTimeSeries(
-            t0, Hour(1), Float64[1, 2, 3, 4], "load"; application_data="Profile"
+            t0, Hour(1), Float64[1, 2, 3, 4], "load";
+            application_data="Profile", units="MW",
         );
-        units="MW",
         features=Dict("scenario" => "high"),
     )
     add_time_series!(
@@ -4133,11 +4317,12 @@ end
     )
     @test read_by_id(store, ks).units == "MW"
 
-    # An explicit kwarg still wins over the struct's field: the kwarg is the
-    # lower-level write API and predates the field.
+    # The struct is the only place a label can be set: `add_time_series!` takes
+    # no `units=`, so a write can neither restate nor quietly replace it.
     over = SingleTimeSeries(t0, res, collect(1.0:8.0), "override"; units="MW")
-    ko = add_time_series!(store, 6, "Generator", Component, over; units="kW")
-    @test read_by_id(store, ko).units == "kW"
+    @test_throws MethodError add_time_series!(
+        store, 6, "Generator", Component, over; units="kW"
+    )
 
     # units is not identity: two series differing only in their label collide.
     a = SingleTimeSeries(t0, res, collect(1.0:8.0), "dup"; units="MW")
@@ -5226,4 +5411,146 @@ end
         store, InfraStore.JSON.json(rows)
     )
     close!(store)
+end
+
+@testset "the grid comes from the core, not from Julia's Dates" begin
+    # `timestamps` ccalls `infrastore_grid_timestamps` rather than computing
+    # `initial + k * resolution` here. The two agree today, but Julia is the one
+    # binding whose date library has calendar arithmetic of its own -- and whose
+    # TimeZones overload steps a local clock the core deliberately does not -- so
+    # a second implementation would agree only by luck.
+    for (start, res) in [
+        (DateTime(2024, 1, 31), Month(1)),
+        (DateTime(2024, 2, 29), Year(1)),
+        (DateTime(2024, 8, 31), Month(6)),
+        (DateTime(2024, 1, 1), Hour(1)),
+        (DateTime(2024, 1, 1), Day(7)),
+    ]
+        s = SingleTimeSeries(start, res, collect(1.0:6.0), "x")
+        @test timestamps(s) == [start + k * res for k in 0:5]
+    end
+end
+
+@testset "infer_resolution proves a timeline is a grid" begin
+    @test infer_resolution([DateTime(2024, 1, 1, h) for h in 0:3]) == Millisecond(Hour(1))
+    @test infer_resolution([
+        DateTime(2024, 1, 31), DateTime(2024, 2, 29), DateTime(2024, 3, 31)
+    ]) ==
+        Month(1)
+
+    # Denver local midnights across the November transition, as the UTC instants
+    # they land on. The 25-hour step is what no period reproduces.
+    denver_midnights = [
+        DateTime(2024, 11, 1, 6), DateTime(2024, 11, 2, 6),
+        DateTime(2024, 11, 3, 6), DateTime(2024, 11, 4, 7),
+    ]
+    @test_throws InfraStore.InvalidParameterError infer_resolution(denver_midnights)
+
+    # The hourly walk across the same transition *is* a grid.
+    @test infer_resolution([DateTime(2024, 11, 3, h) for h in 6:9]) == Millisecond(Hour(1))
+end
+
+@testset "SingleTimeSeries from a timeline, and the calendar-scale refusal" begin
+    hours = [DateTime(2024, 11, 3, h) for h in 6:9]
+    s = SingleTimeSeries(hours, collect(1.0:4.0), "load"; units="MW")
+    @test s.resolution == Millisecond(Hour(1))
+    @test s.initial_timestamp == first(hours)
+    @test s.units == "MW"
+    @test timestamps(s) == hours
+
+    # Length must match the value array's time axis.
+    @test_throws InfraStore.InvalidParameterError SingleTimeSeries(
+        hours, collect(1.0:3.0), "load"
+    )
+
+    # A calendar-scale period on a named zone is refused at the write.
+    store = Store(in_memory=true)
+    zoned = SingleTimeSeries(
+        DateTime(2024, 11, 1), Day(1), collect(1.0:4.0), "peak";
+        time_reference=ZoneReference("America/Denver"),
+    )
+    @test_throws InfraStore.InvalidParameterError add_time_series!(
+        store, 1, "Generator", Component, zoned
+    )
+
+    # Sub-daily on the same zone stays legal.
+    sub_daily = SingleTimeSeries(
+        DateTime(2024, 11, 1), Hour(1), collect(1.0:4.0), "load";
+        time_reference=ZoneReference("America/Denver"),
+    )
+    @test add_time_series!(store, 1, "Generator", Component, sub_daily) isa Integer
+end
+
+@testset "StaticReader over a caller-named window" begin
+    # Without a window a reader takes its grid from the series it matched, so a
+    # store whose `SingleTimeSeries` start at different instants -- the usual
+    # shape of a real system -- has no reader at all. Naming a window makes them
+    # sweep together, each column reading at an offset of its own.
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+    # Values equal their own hour offset, so a read proves which row it hit.
+    add_time_series!(
+        store, 1, "Gen", Component,
+        SingleTimeSeries(t0, res, collect(0.0:23.0), "short"),
+    )
+    add_time_series!(
+        store, 2, "Gen", Component,
+        SingleTimeSeries(t0 + Hour(7), res, collect(7.0:54.0), "long"),
+    )
+
+    @test_throws InfraStore.InvalidParameterError build_static_reader(
+        store; resolution=res
+    )
+
+    # Anchored at hour 7 with no length: as far as both series reach.
+    r = build_static_reader(store; resolution=res, window_start=t0 + Hour(7))
+    grid = static_grid(r)
+    @test grid.initial_timestamp == t0 + Hour(7)
+    @test grid.length == 17
+    @test Base.length(static_groups(r)[1].ids) == 2
+
+    static_read!(r, t0 + Hour(7))
+    @test static_values(r, 1) == [7.0, 7.0]
+    static_read!(r, t0 + Hour(23))
+    @test static_values(r, 1) == [23.0, 23.0]
+
+    # An explicit length the shorter series cannot serve names it.
+    @test_throws InfraStore.InvalidParameterError build_static_reader(
+        store; resolution=res, window_start=t0 + Hour(7), window_length=48
+    )
+    # An anchor before one series' start, and one part-way through a step.
+    @test_throws InfraStore.InvalidParameterError build_static_reader(
+        store; resolution=res, window_start=t0 + Hour(3), window_length=2
+    )
+    @test_throws InfraStore.InvalidParameterError build_static_reader(
+        store; resolution=res, window_start=t0 + Hour(7) + Minute(30), window_length=2
+    )
+    # A length with nothing to anchor it.
+    @test_throws InfraStore.InvalidParameterError build_static_reader(
+        store; resolution=res, window_length=4
+    )
+    # The irregular types carry their timeline; there is nothing to re-anchor.
+    @test_throws InfraStore.InvalidParameterError build_static_reader(
+        store; time_series_type=NonSequentialTimeSeries, window_start=t0
+    )
+
+    # The other answer to the same store: select the cohort on one grid, and the
+    # odd series out is not there to constrain the sweep at all.
+    add_time_series!(
+        store, 3, "Gen", Component,
+        SingleTimeSeries(t0 + Hour(7), res, collect(7.0:54.0), "long2"),
+    )
+    r2 = build_static_reader(
+        store; resolution=res, initial_timestamp=t0 + Hour(7), length=48
+    )
+    @test static_grid(r2).length == 48
+    @test Base.length(static_groups(r2)[1].ids) == 2
+    static_read!(r2, t0 + Hour(54))
+    @test static_values(r2, 1) == [54.0, 54.0]
+
+    # The same predicate on a listing, which is how a caller finds the grid.
+    @test Base.length(list_metadata(store; initial_timestamp=t0 + Hour(7))) == 2
+    @test Base.length(list_metadata(store; initial_timestamp=t0, length=24)) == 1
+    @test isempty(list_metadata(store; initial_timestamp=t0, length=99))
 end

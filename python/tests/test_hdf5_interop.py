@@ -45,7 +45,8 @@ def _netcdf4_roundtrip(path):
 def _infrastore_roundtrip(path):
     values = np.arange(24, dtype=np.float64) + 100
     ts = SingleTimeSeries(
-        datetime(2024, 1, 1, tzinfo=timezone.utc), timedelta(hours=1), values, "load"
+        datetime(2024, 1, 1, tzinfo=timezone.utc), timedelta(hours=1), values, "load",
+        units="MW",
     )
     store = Store.create(str(path))
     key = store.add_time_series(
@@ -53,7 +54,6 @@ def _infrastore_roundtrip(path):
         owner_type="Generator",
         owner_category=OwnerCategory.Component,
         time_series=ts,
-        units="MW",
     )
     assert np.array_equal(np.asarray(store.read_by_id(key).data), values)
     del store

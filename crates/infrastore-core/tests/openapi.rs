@@ -12,7 +12,8 @@ use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{
     Dtype, ElementType, FeatureValue, Features, ListFilter, OwnerCategory, Period, Scenarios,
     SingleTimeSeries, Store, SupplementalAttributeAssociation, TimeReference, TimeSeriesData,
-    TimeSeriesError, TimeSeriesId, TransformPolicy, TypedArray, UnitSystem, create_store,
+    TimeSeriesError, TimeSeriesId, TimeSeriesType, TransformPolicy, TypedArray, UnitSystem,
+    create_store,
 };
 
 // ---- shared helpers ---------------------------------------------------------
@@ -295,6 +296,83 @@ fn export_reproduces_every_time_series_fixture() {
             content.contains(&want),
             "export does not contain the {name} fixture row; export was {rows:#?}"
         );
+    }
+}
+
+/// A `PersistentTimeSeries` does not travel in an OpenAPI document at all.
+///
+/// The vendored `TimeSeriesAssociation.json` is a `oneOf` over a closed set of
+/// six canonical Sienna types, and there is no upstream schema for a seventh;
+/// inventing one would misrepresent the vendored contract. So the type is not a
+/// fixture in `build_fixture_store`, `openapi_schema_conformance.rs::time_series_cases`
+/// stays at exactly six entries, and an export emits nothing for it — a
+/// document that carried a row no import would take back is worse than one that
+/// admits the type is not on the wire.
+///
+/// The rest of the store still exports: dropping these rows is not refusing the
+/// call.
+#[test]
+fn a_persistent_row_is_omitted_from_the_export_while_the_rest_travels() {
+    let mut store = create_store(None, true).expect("in-memory store should initialize");
+    let persistent = infrastore_core::PersistentTimeSeries::new(
+        (0..4).map(|i| ts(2030, 1 + i * 3, 1, 0, 0, 0)).collect(),
+        TypedArray::from_f64(vec![4], &[3.5, 4.25, 5.0, 4.75]),
+        "fuel_price",
+    )
+    .expect("persistent row should construct")
+    .with_units("USD/MMBtu")
+    .with_component_field("fuel_cost");
+    store
+        .add_time_series(
+            7,
+            "ThermalStandard",
+            OwnerCategory::Component,
+            TimeSeriesData::PersistentTimeSeries(persistent),
+            Features::new(),
+        )
+        .expect("persistent row should add");
+
+    // A `SingleTimeSeries` beside it, so this pins omission rather than an
+    // export that happens to fail on a store it cannot handle.
+    store
+        .add_time_series(
+            7,
+            "ThermalStandard",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+                ts(2030, 1, 1, 0, 0, 0),
+                Duration::hours(1),
+                TypedArray::from_f64(vec![3], &[1.0, 2.0, 3.0]),
+                "load",
+            )),
+            Features::new(),
+        )
+        .expect("single row should add");
+
+    let json = store
+        .export_time_series_associations_openapi(&ListFilter::new())
+        .expect("export should succeed");
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&json).expect("export is a JSON array");
+    assert_eq!(
+        rows.len(),
+        1,
+        "only the SingleTimeSeries travels: {rows:#?}"
+    );
+    assert_eq!(rows[0]["time_series_type"], "SingleTimeSeries");
+
+    // Asking for the type by name is a different request: it cannot be
+    // honored, and an empty array would read as "the store holds none".
+    let err = store
+        .export_time_series_associations_openapi(
+            &ListFilter::new().time_series_type(TimeSeriesType::PersistentTimeSeries),
+        )
+        .expect_err("an export filtered to the type should be refused");
+    match err {
+        TimeSeriesError::InvalidParameter(msg) => {
+            assert!(msg.contains("PersistentTimeSeries"), "{msg}");
+            assert!(msg.contains("no schema"), "{msg}");
+        }
+        other => panic!("expected InvalidParameter, got {other:?}"),
     }
 }
 

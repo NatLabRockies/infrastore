@@ -179,17 +179,20 @@ array file's _own_ generation stamp, so the rebuilt pair opens normally ever aft
 `open` cannot, because a stamped array file beside an unstamped catalog is exactly the half-finished
 save the paired-stamp check exists to catch.
 
-All six types make the trip, including `NonSequentialTimeSeries` — which needs one field the others
-do not. Its timestamp vector lives in the store rather than the document, content-addressed so a
-cohort sharing one axis stores it once, and the values cannot imply which axis a row is on: arrays
-are content-addressed too, so two irregular series with byte-identical values on _different_ axes
-share one stored array and only the catalog's `timestamps_hash` distinguishes them. An import that
-guessed would hand back another series' timestamps. So the wire form **locates** the axis, as
-`timestamps_uri` — the same kind of field `uri` is for the values, and a locator rather than the
-vector itself precisely because the axis is shared, where inlining it would repeat the whole vector
-on every row of the cohort. The axis ships in the array file alongside the arrays, so the import
-resolves the locator against the store; a row missing it, or naming an axis the store does not hold,
-is refused.
+All six of the types the wire contract defines make the trip, including `NonSequentialTimeSeries` —
+which needs one field the others do not. (A `PersistentTimeSeries` does not: it is an
+infrastore-local extension outside the vendored `oneOf`, so the export omits its rows and the import
+refuses them. A store holding them still exports the rest, but a restore from arrays plus a document
+alone will not carry them.) Its timestamp vector lives in the store rather than the document,
+content-addressed so a cohort sharing one axis stores it once, and the values cannot imply which
+axis a row is on: arrays are content-addressed too, so two irregular series with byte-identical
+values on _different_ axes share one stored array and only the catalog's `timestamps_hash`
+distinguishes them. An import that guessed would hand back another series' timestamps. So the wire
+form **locates** the axis, as `timestamps_uri` — the same kind of field `uri` is for the values, and
+a locator rather than the vector itself precisely because the axis is shared, where inlining it
+would repeat the whole vector on every row of the cohort. The axis ships in the array file alongside
+the arrays, so the import resolves the locator against the store; a row missing it, or naming an
+axis the store does not hold, is refused.
 
 Both imports validate every incoming row against those vendored schemas before decoding it, so a
 document that drifted from the contract is refused in the schema's own terms — the row, the field,
@@ -240,8 +243,28 @@ regular series' value covers its step, so a `start` inside a step selects that s
 `initial_timestamp` can precede `start`; an irregular series' value is an instant, so only
 timestamps at or after `start` are selected; and a forecast window is a whole array with nothing
 partial to return, so a forecast's `start` must be a window boundary at or before the last window
-(an error otherwise) and only its `end` clips. See
+(an error otherwise) and only its `end` clips. A `start` earlier than the _first_ window is the one
+exception, and it clips: there is no partial window before the first one, only no window at all, and
+refusing it would fail every export window wider than the data. See
 [Reading a time range](../reference/rust-api.md#reading-a-time-range).
+
+### A calendar period is not closed under slicing
+
+A `SingleTimeSeries` and a dense forecast are each stored as an anchor, a period, and a count, so a
+sliced read has to describe its answer the same way — anchored at the slice's own first point. For a
+fixed period that is exact. For a `Period::Months` it is not, because the end-of-month clamp is not
+associative: a grid stepping monthly from Jan-31 is Jan-31, Feb-29, Mar-31, but re-anchored at its
+own Feb-29 it becomes Feb-29, Mar-29, Apr-29 — the stored values under dates the store does not
+hold. No anchor fixes it, because the sub-grid keeps the _original_ anchor's day of month and no
+instant in the slice carries it.
+
+So such a slice is **refused** (`InvalidParameter`) rather than answered with a grid that is not the
+one stored — the values would be right, the dates wrong, and nothing would signal it. The refusal is
+narrow: it needs a calendar period, an anchor on a day some month is too short for, and a slice
+starting at a clamped point and running past it. Read the series whole and slice the materialized
+timestamps, or store the instants explicitly with `NonSequentialTimeSeries`.
+`transform_single_time_series` is held to the same rule at _write_ time, since each window of the
+view it derives is a run of the source's own steps described that same way.
 
 ### The owner guard
 
@@ -299,7 +322,10 @@ Each association can also carry:
 - **`application_data`** — an opaque, **package-owned** extension payload stored verbatim (typically
   JSON) that a binding writes and reads for its own purposes. The store never parses or interprets
   it, and end users are not expected to set it. Element typing does _not_ live here: that is
-  `element_type` below, a first-class column the store owns and validates.
+  `element_type` below, a first-class column the store owns and validates. This is also where
+  application _policy_ about a series belongs — a consumer's rule for collapsing a
+  [`PersistentTimeSeries`](./time-series-types.md#persistenttimeseries) to a scalar, say. Such a
+  rule is not storage, and it gets no catalog column.
 - **`element_type`** — what the array's elements _mean_, in the store's own language-neutral
   vocabulary: a dtype spelling (`f64`, `i64`, …) for plain numbers, else `tuple(N,dtype)` or one of
   the function-data kinds (`linear_function`, `quadratic_function`, `piecewise_linear`,

@@ -3841,15 +3841,16 @@ fn a_csv_whose_rows_disagree_about_their_offset_says_so_and_names_the_fix() {
     );
 }
 
-/// A calendar period steps on the UTC calendar whatever the series' spelling
-/// says, and that is warned about — but only where it can actually bite.
+/// A calendar-scale period steps in instants whatever the series' spelling says.
+/// On a named zone that is refused; on the spellings that cannot drift it is
+/// allowed, and on a fixed offset it is warned about.
 ///
 /// The gate used to be `is_zoned()`, which is true for `utc` as well, so every
 /// UTC series with a monthly period was warned about DST drift against the very
 /// calendar it steps on. A warning that cannot come true, on the most common
 /// spelling there is, is how a real one gets ignored.
 #[test]
-fn the_calendar_period_warning_fires_only_where_the_calendars_can_disagree() {
+fn a_calendar_scale_period_is_refused_on_a_named_zone_and_allowed_where_it_cannot_drift() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("cal.h5");
     write(dir.path(), "m.csv", "value\n1\n2\n3\n");
@@ -3875,7 +3876,6 @@ fn the_calendar_period_warning_fires_only_where_the_calendars_can_disagree() {
                 d.to_str().unwrap(),
             ],
         );
-        assert!(out.status.success(), "{name} should still be stored");
         String::from_utf8_lossy(&out.stderr).into_owned()
     };
 
@@ -3890,16 +3890,33 @@ fn the_calendar_period_warning_fires_only_where_the_calendars_can_disagree() {
         "a wall clock is held as if UTC, so it steps on its own calendar"
     );
 
-    // A named zone genuinely can disagree -- both at a month boundary and at a
-    // DST transition -- so it is warned about, and the remedy is named.
-    let warned = add_monthly(3, "zone_monthly", Some("America/Denver"));
-    assert!(warned.contains("calendar period"), "{warned}");
-    assert!(warned.contains("NonSequentialTimeSeries"), "{warned}");
+    // A named zone genuinely disagrees -- at a month boundary and at every DST
+    // transition -- so the combination is refused, and both remedies are named.
+    let refused = add_monthly(3, "zone_monthly", Some("America/Denver"));
+    assert!(refused.contains("cannot be combined"), "{refused}");
+    assert!(refused.contains("from_timestamps"), "{refused}");
+    assert!(refused.contains("NonSequentialTimeSeries"), "{refused}");
 
-    // So can a fixed offset, at a month boundary.
+    // A fixed offset has no DST to drift against, so it is stored -- but a
+    // calendar month still steps the UTC calendar rather than the offset's.
     assert!(
         add_monthly(4, "offset_monthly", Some("-07:00")).contains("calendar period"),
         "a fixed offset can still disagree at a month boundary"
+    );
+
+    // Sub-daily is the case that must stay legal: an hourly grid in a DST zone
+    // *is* the local clock, so refusing it would push callers onto a fixed
+    // offset that is silently wrong for half the year.
+    let hourly = r#"{"owner_id": 5, "owner_type": "G", "name": "zone_hourly",
+             "type": "SingleTimeSeries", "element_type": "f64", "csv": "m.csv",
+             "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H",
+             "time_reference": "America/Denver"}"#;
+    let d = write(dir.path(), "zone_hourly.json", hourly);
+    let out = raw(&store, &["add", "--descriptor", d.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "an hourly grid in a DST zone must stay storable: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }
 
@@ -4114,6 +4131,193 @@ fn a_strided_composite_read_decodes_the_rows_it_kept() {
     assert!(steps[1].as_array().unwrap().is_empty(), "{out}");
 }
 
+// ---------------------------------------------------------------------------
+// PersistentTimeSeries
+// ---------------------------------------------------------------------------
+
+/// The step-function type end to end through the CLI: ingest from a
+/// `timestamp,value` CSV, read back, export, and re-ingest the export.
+///
+/// The CSV shape is the irregular one — the two types say the same thing on the
+/// ingest side, and differ only in what a read between those instants means —
+/// so this also pins that `export` stays `add`'s inverse for the new type.
+#[test]
+fn a_persistent_time_series_round_trips_through_add_get_and_export() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("steps.h5");
+    write(
+        dir.path(),
+        "gas.csv",
+        "timestamp,value\n\
+         2024-01-01T00:00:00Z,3.5\n\
+         2024-04-01T00:00:00Z,4.25\n\
+         2024-07-01T00:00:00Z,5.0\n",
+    );
+    let descriptor = write(
+        dir.path(),
+        "gas.json",
+        r#"{"owner_id": 7, "owner_type": "ThermalStandard", "name": "gas_price",
+            "type": "PersistentTimeSeries", "element_type": "f64",
+            "units": "USD/MMBtu", "component_field": "fuel_cost",
+            "application_data": "{\"as_time_series\": false}",
+            "csv": "gas.csv"}"#,
+    );
+    run(
+        &store,
+        &["add", "--descriptor", descriptor.to_str().unwrap()],
+    );
+
+    // The catalog reports the new type, and no resolution — a step function has
+    // no constant step.
+    let listed = run(&store, &["-f", "json", "list"]);
+    assert!(listed.contains("PersistentTimeSeries"), "{listed}");
+    assert!(listed.contains("gas_price"), "{listed}");
+
+    // `get` renders the breakpoints and their values, unchanged.
+    let got = run(&store, &["-f", "csv", "get", "--name", "gas_price"]);
+    let rows = data_lines(&got);
+    assert_eq!(rows.len(), 3, "{got}");
+    assert!(rows[0].starts_with("2024-01-01T00:00:00"), "{got}");
+    assert!(rows[2].contains('5'), "{got}");
+
+    // The short `--type` spelling selects it too.
+    let filtered = run(&store, &["-f", "json", "list", "--type", "persistent"]);
+    assert!(filtered.contains("gas_price"), "{filtered}");
+
+    // `export` writes a timestamped CSV that `add` reads back, which is what
+    // makes the two commands inverses for this type as for the others.
+    let exported = dir.path().join("out");
+    fs::create_dir_all(&exported).unwrap();
+    run(
+        &store,
+        &[
+            "-f",
+            "csv",
+            "export",
+            "--name",
+            "gas_price",
+            "--dir",
+            exported.to_str().unwrap(),
+        ],
+    );
+    let written: Vec<_> = fs::read_dir(&exported)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(written.len(), 1, "{written:?}");
+
+    let second = dir.path().join("second.h5");
+    run(&second, &["init"]);
+    // Relative to the descriptor's own directory, and spelled with a forward
+    // slash: an absolute Windows path interpolated into a JSON string literal
+    // is `C:\Users\...`, whose `\U` is not a valid JSON escape.
+    let exported_csv = written[0].file_name().unwrap().to_str().unwrap();
+    let round_trip = write(
+        dir.path(),
+        "round.json",
+        &format!(
+            r#"{{"owner_id": 7, "owner_type": "ThermalStandard", "name": "gas_price",
+                "type": "PersistentTimeSeries", "element_type": "f64",
+                "csv": "out/{exported_csv}"}}"#
+        ),
+    );
+    run(
+        &second,
+        &["add", "--descriptor", round_trip.to_str().unwrap()],
+    );
+    let reread = run(&second, &["-f", "csv", "get", "--name", "gas_price"]);
+    assert_eq!(
+        data_lines(&reread),
+        rows,
+        "the export re-ingests identically"
+    );
+}
+
+/// `template` hands back a descriptor for the new type, and it is one `add`
+/// actually accepts.
+#[test]
+fn the_persistent_template_is_a_working_descriptor() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("t.h5");
+    let out = Command::new(env!("CARGO_BIN_EXE_infrastore"))
+        .args(["template", "PersistentTimeSeries"])
+        .stdin(Stdio::null())
+        .output()
+        .expect("failed to spawn infrastore");
+    assert!(out.status.success());
+    let body = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        body.contains("\"type\": \"PersistentTimeSeries\""),
+        "{body}"
+    );
+
+    write(
+        dir.path(),
+        "gas_price.csv",
+        "timestamp,value\n2024-01-01T00:00:00Z,3.5\n2024-06-01T00:00:00Z,4.0\n",
+    );
+    let descriptor = write(dir.path(), "t.json", &body);
+    run(
+        &store,
+        &["add", "--descriptor", descriptor.to_str().unwrap()],
+    );
+    assert!(run(&store, &["-f", "json", "list"]).contains("gas_price"));
+}
+
+/// `grid` over persistent columns that sit on *different* breakpoint vectors.
+///
+/// This is the CLI face of the reader exception: the rows are the union of
+/// every column's breakpoints, and each column shows the value in force there
+/// rather than a blank.
+#[test]
+fn grid_over_persistent_columns_on_different_breakpoints_holds_each_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("grid.h5");
+    // Quarterly and semi-annual curves: their breakpoints do not line up.
+    write(
+        dir.path(),
+        "q.csv",
+        "timestamp,value\n2024-01-01T00:00:00Z,10\n2024-04-01T00:00:00Z,40\n\
+         2024-07-01T00:00:00Z,70\n2024-10-01T00:00:00Z,100\n",
+    );
+    write(
+        dir.path(),
+        "s.csv",
+        "timestamp,value\n2024-01-01T00:00:00Z,1\n2024-06-01T00:00:00Z,6\n",
+    );
+    for (owner, name, csv) in [(1, "q", "q.csv"), (2, "s", "s.csv")] {
+        let descriptor = write(
+            dir.path(),
+            &format!("{name}.json"),
+            &format!(
+                r#"{{"owner_id": {owner}, "owner_type": "G", "name": "price",
+                    "type": "PersistentTimeSeries", "element_type": "f64",
+                    "csv": "{csv}"}}"#
+            ),
+        );
+        run(
+            &store,
+            &["add", "--descriptor", descriptor.to_str().unwrap()],
+        );
+    }
+
+    let grid = run(
+        &store,
+        &["-f", "csv", "grid", "--type", "PersistentTimeSeries"],
+    );
+    let rows = data_lines(&grid);
+    // The union of {Jan, Apr, Jul, Oct} and {Jan, Jun}.
+    assert_eq!(rows.len(), 5, "{grid}");
+    // At June the quarterly column still holds April's value, and the
+    // semi-annual one has just stepped to 6.
+    let june = rows
+        .iter()
+        .find(|r| r.starts_with("2024-06-01"))
+        .unwrap_or_else(|| panic!("no June row in\n{grid}"));
+    assert!(june.contains("40"), "quarterly holds April's value: {june}");
+    assert!(june.contains('6'), "semi-annual has stepped: {june}");
+}
+
 /// `store-info` reports the catalog revision beside the artifact's format
 /// version — the two move independently, and this is where a user looks after a
 /// read-only open reports that a store needs upgrading.
@@ -4225,4 +4429,95 @@ fn upgrade_is_the_writable_open_and_a_no_op_on_a_current_store() {
     let missing = dir.path().join("nope.h5");
     let err = run_err(&missing, &["upgrade"]);
     assert!(err.contains("not found"), "{err}");
+}
+
+/// A step function is drawn as a staircase, not as a ramp through its
+/// breakpoints.
+///
+/// Joining the points of a `PersistentTimeSeries` directly draws values the
+/// store does not hold: two breakpoints a quarter apart at 0 and 10 read as a
+/// slow rise across three months, where the stored value is 0 for all of them
+/// and then jumps. The renderer draws straight segments, so the corner point
+/// carrying each value across to the next breakpoint is what makes the chart
+/// honest — and it is visible in the polyline the SVG contains.
+#[test]
+fn plot_draws_a_step_function_as_a_staircase() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("steps.h5");
+    write(
+        dir.path(),
+        "gas.csv",
+        "timestamp,value\n\
+         2024-01-01T00:00:00Z,0\n\
+         2024-04-01T00:00:00Z,10\n",
+    );
+    let d = write(
+        dir.path(),
+        "gas.json",
+        r#"{"owner_id": 7, "owner_type": "ThermalStandard", "name": "gas_price",
+            "type": "PersistentTimeSeries", "element_type": "f64", "csv": "gas.csv"}"#,
+    );
+    run(&store, &["add", "--descriptor", d.to_str().unwrap()]);
+
+    let out = dir.path().join("step.svg");
+    run(
+        &store,
+        &[
+            "plot",
+            "--name",
+            "gas_price",
+            "--out",
+            out.to_str().unwrap(),
+        ],
+    );
+    let svg = fs::read_to_string(&out).unwrap();
+
+    // Two breakpoints, three path points: the middle one is the corner, sharing
+    // the second breakpoint's x with the first breakpoint's y.
+    let points = line_points(&svg);
+    assert_eq!(points.len(), 3, "expected a staircase, got {points:?}");
+    assert_eq!(points[0].1, points[1].1, "the value is held: {points:?}");
+    assert_eq!(points[1].0, points[2].0, "then it jumps: {points:?}");
+    assert_ne!(points[1].1, points[2].1, "and the jump is real: {points:?}");
+
+    // A SingleTimeSeries is unaffected: one point per timestep, no corners.
+    write(dir.path(), "v.csv", "value\n1\n2\n3\n");
+    let d = write(
+        dir.path(),
+        "load.json",
+        r#"{"owner_id": 1, "owner_type": "G", "name": "load", "type": "SingleTimeSeries",
+            "element_type": "f64", "csv": "v.csv",
+            "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H"}"#,
+    );
+    run(&store, &["add", "--descriptor", d.to_str().unwrap()]);
+    let out = dir.path().join("line.svg");
+    run(
+        &store,
+        &["plot", "--name", "load", "--out", out.to_str().unwrap()],
+    );
+    let svg = fs::read_to_string(&out).unwrap();
+    assert_eq!(
+        line_points(&svg).len(),
+        3,
+        "a regular series keeps one point per step"
+    );
+}
+
+/// The `(x, y)` vertices of a chart's first line path, in order. The SVG
+/// backend writes a line as `<path d="Mx,y Lx,y ...">`.
+fn line_points(svg: &str) -> Vec<(f64, f64)> {
+    svg.split("<path class=\"line")
+        .nth(1)
+        .and_then(|s| s.split("d=\"").nth(1))
+        .and_then(|s| s.split('"').next())
+        .expect("a line path")
+        .split_whitespace()
+        .map(|p| {
+            let (x, y) = p
+                .trim_start_matches(['M', 'L'])
+                .split_once(',')
+                .expect("x,y");
+            (x.parse::<f64>().unwrap(), y.parse::<f64>().unwrap())
+        })
+        .collect()
 }

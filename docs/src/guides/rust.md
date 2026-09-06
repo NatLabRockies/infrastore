@@ -149,7 +149,7 @@ Adding series one at a time with `add_time_series` instead packs them incrementa
 default-width datasets; that stays space-efficient but writes each column with a read-modify-write,
 so prefer a bulk insert or session when loading in volume.
 
-### The irregular type
+### The irregular types
 
 `NonSequentialTimeSeries` carries an explicit instant per value instead of a grid. Its constructor
 validates that the timestamps are strictly increasing and match the data length, and returns
@@ -167,8 +167,32 @@ store.add_time_series(
 )?;
 ```
 
+`PersistentTimeSeries` takes the same arguments and stores the same way — the vector is a set of
+_breakpoints_ — but reads as a **step function**: the value at an instant is the one belonging to
+the greatest breakpoint at or before it, held forward past the last. Reaching back before the first
+breakpoint is an error, not a clamp.
+
+```rust
+use infrastore_core::PersistentTimeSeries;
+
+// A monthly fuel price: twelve breakpoints, read at any simulation instant.
+let prices = PersistentTimeSeries::new(month_starts, data, "fuel_price")?;
+
+store.add_time_series(
+    42, "ThermalStandard", OwnerCategory::Component,
+    TimeSeriesData::PersistentTimeSeries(prices), Features::new(),
+)?;
+```
+
+`PersistentTimeSeries::value_at` reads one instant — `prices.value_at::<f64>(t)?` — carrying the
+last breakpoint's value forward to it, with `row_at` as the shape-generic form and `index_at` /
+`breakpoint_at` for the row it came from. A time-range read begins at the breakpoint in force at
+`start`, so the slice always defines a value there. A columnar sweep is
+[`StaticReader`](../explanation/readers.md), which for this type alone lets its columns sit on
+independent breakpoint vectors.
+
 See [Choosing a Type](../explanation/time-series-types.md#choosing-a-type) if you are deciding
-between it and a `SingleTimeSeries`.
+between these and a `SingleTimeSeries`.
 
 ## Read a Series
 
@@ -390,6 +414,32 @@ let mut reader = store.build_static_reader(
 Whatever the kind, `reader.timestamps()` walks the timeline, so the loop body above is unchanged.
 Coherence is validated at **build** time, where the error can name the series that disagree — there
 is no presence mask, and `static_read` errors rather than clamps on an off-grid instant.
+
+When the matched `SingleTimeSeries` share no grid, name the span instead of inheriting one.
+`build_static_reader_over` gives each column an offset of its own, so ragged series sweep together:
+
+```rust
+use infrastore_core::ReadWindow;
+
+let mut reader = store.build_static_reader_over(
+    ListFilter::new().resolution(Duration::hours(1)),
+    ReadWindow::from(anchor),   // .with_len(n) to pin the extent
+)?;
+```
+
+Without a `len` the reader runs as far from the anchor as every matched series reaches. With one, a
+series that does not cover the span is an error naming it.
+
+When the odd series out should not take part at all, filter to one grid instead —
+`ListFilter::initial_timestamp` and `ListFilter::length` match only the series already on it:
+
+```rust
+let mut reader = store.build_static_reader(
+    ListFilter::new().resolution(Duration::hours(1)).initial_timestamp(anchor).length(8784),
+)?;
+```
+
+See the [Rust API reference](../reference/rust-api.md#readers) for how the two remedies differ.
 
 ### Forecasts
 

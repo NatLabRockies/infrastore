@@ -20,7 +20,9 @@ Export `time_series_associations` matching the filter (the same filter
 keywords as [`list_metadata`](@ref)) as a sorted OpenAPI-row JSON array.
 Each row's `uri` and `data_hash` are the hex-encoded content hash the store
 already has for that row — never a caller-supplied locator. With no filter
-this exports the whole catalog.
+this exports the whole catalog, minus `PersistentTimeSeries` rows: the type is
+an infrastore-local extension the wire contract has no schema for, so it is
+omitted, and a filter naming it throws.
 """
 function export_time_series_associations_openapi(
     store::Store;
@@ -32,10 +34,12 @@ function export_time_series_associations_openapi(
     interval=nothing,
     features::Union{Nothing, AbstractDict}=nothing,
     component_field=nothing,
+    initial_timestamp=nothing,
+    length=nothing,
 )
-    (has_owner, owner_arg, has_category, category_arg, has_type, type_arg, name_arg, _name_glob_arg, resolution_iso, interval_iso, features_json, component_field_arg, zoneless_arg) = _filter_args(
+    (has_owner, owner_arg, has_category, category_arg, has_type, type_arg, name_arg, _name_glob_arg, resolution_iso, interval_iso, features_json, component_field_arg, zoneless_arg, has_initial, initial_arg, has_length, length_arg) = _filter_args(
         owner_id, owner_category, time_series_type, name, resolution, interval, features,
-        component_field, nothing, nothing,
+        component_field, nothing, nothing, initial_timestamp, length,
     )
     return _owned_str(
         (out_json, out_len) ->
@@ -53,6 +57,10 @@ function export_time_series_associations_openapi(
                 features_json::Cstring,
                 component_field_arg::Cstring,
                 zoneless_arg::Int32,
+                has_initial::Bool,
+                initial_arg::Int64,
+                has_length::Bool,
+                length_arg::UInt64,
                 out_json::Ref{Ptr{Cchar}},
                 out_len::Ref{UInt64},
             )::Int32

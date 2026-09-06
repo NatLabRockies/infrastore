@@ -46,9 +46,38 @@ That is the difference between two things "store this in Denver time" can mean:
   explicit instant per value, so the caller derives those days and the data records them rather than
   arithmetic implying them.
 
+### The store now checks, when you give it something to check
+
+Asserting `initial_timestamp` + `resolution` is a claim the store cannot verify — the vector it
+describes is never supplied. Two rules close that:
+
+- **A calendar-scale period on a named zone is refused.** A period of a day or more is a span of
+  instants, so on a zone that observes DST it drifts away from the local clock it looks like: a
+  `P1D` series stepped from local midnight in Denver lands on `Nov 3 23:00` after the November
+  transition, on the same calendar day as its predecessor, and stays an hour off forever. `P1M` is
+  worse — it steps the UTC calendar. Both are `InvalidParameter` at the write.
+- **Sub-daily periods stay legal**, and that is not a compromise. DST moves the _offset_, not the
+  length of an hour: Denver has 8784 hours in 2024, exactly as UTC does, every gap exactly one hour,
+  and the 23- and 25-hour days fall out of instant stepping on their own. An hourly grid in a DST
+  zone _is_ the local clock. Refusing it would push callers onto a fixed offset, which is silently
+  wrong for half the year.
+
+A forecast's `horizon` is exempt: it is a window _length_, only ever divided
+(`H = horizon /
+resolution`) and never added to an instant, so `horizon = P1D` — the canonical
+day-ahead shape — stays legal in any zone. `resolution` and `interval` do step, and are covered.
+
+The constructive half is
+[`from_timestamps`](../reference/python-api.md#singletimeseriesfrom_timestamps): hand over the
+timeline you actually have and the store infers the period and **proves** the instants lie on it, or
+refuses naming the entry that broke the pattern. This is how a local-clock timeline reaches the
+store — you materialize it in your own date library, where the policy for a nonexistent or ambiguous
+wall clock belongs, and the store records what you have rather than what a resolution implies.
+
 Someone with 8760 naive Denver timestamps who localizes only the first and passes `resolution = 1h`
-gets labels shifted by an hour after each transition, and nothing in the data distinguishes that
-from a correct series. The store cannot detect it; the split above is the thing to know.
+still gets labels shifted by an hour after each transition if their file was not a local-clock walk,
+and nothing in the values distinguishes that from a correct series — so hand the vector over rather
+than assert the step.
 
 ## Months step on the UTC calendar
 
@@ -57,11 +86,14 @@ calendar. It uses the stored **UTC** one, and the reference does not redirect it
 the _local_ clock instead, so the two disagree by an hour at every DST transition and by up to a day
 at a month boundary.
 
-Local-frame stepping is refused for two independent reasons: it is the local → instant direction the
-store deliberately never runs (below), and it would let a spelling decide _which instants_ a series
-contains. A calendar period on a zoned series is warned about on write, so the disagreement is
-findable before it is filed as a bug. A caller who wants months on a local calendar wants a
-local-clock grid, and the answer is the one above: `NonSequentialTimeSeries`.
+Local-frame stepping is refused for three independent reasons: it is the local → instant direction
+the store deliberately never runs (below); it would let a spelling decide _which instants_ a series
+contains; and it would need a time-zone database in the core, which would make a stored series'
+instants depend on which IANA release built the reader. A calendar period on a **named zone** is
+therefore refused on write, and on a fixed offset — which has no DST to drift against, only a month
+boundary — it is warned about. A caller who wants months on a local calendar wants a local-clock
+grid, and the answer is the one above: `NonSequentialTimeSeries`, or `from_timestamps`, which picks
+between the two for you.
 
 ## Why a named zone is safe
 

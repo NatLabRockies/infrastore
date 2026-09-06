@@ -438,6 +438,48 @@ int32_t infrastore_store_add_non_sequential(struct InfraStore *handle,
                                             int64_t *out_id);
 
 /**
+ * Add a `PersistentTimeSeries` to the store.
+ *
+ * The arguments are exactly those of `infrastore_store_add_non_sequential`,
+ * because the two types carry the same payload: `timestamps_unix_ms` is a
+ * strictly increasing vector of breakpoints and the array holds one value per
+ * breakpoint. What differs is what a *read* of the result means — the value at
+ * breakpoint `i` stays in force until breakpoint `i + 1`, and past the last
+ * one forever, while a `NonSequentialTimeSeries` has no value between its
+ * timestamps at all. There is no value before the first breakpoint, and asking
+ * for one is an error rather than a clamp.
+ *
+ * # Safety
+ *
+ * `handle` must be a live mutable store handle. `owner_id` is a plain integer. Required string
+ * pointers must reference null-terminated UTF-8 strings; optional string pointers may be null.
+ * `timestamps_unix_ms` must reference `timestamps_len` elements, `dims_ptr` must reference `ndims`
+ * elements when `ndims` is nonzero, and `data_ptr` must reference `data_byte_len` bytes.
+ * `out_id`, when non-null, must be valid for writing one `i64`, and receives the catalog id the
+ * row was filed under.
+ */
+int32_t infrastore_store_add_persistent(struct InfraStore *handle,
+                                        int64_t owner_id,
+                                        const char *owner_type,
+                                        int32_t owner_category,
+                                        const char *name,
+                                        const int64_t *timestamps_unix_ms,
+                                        uint64_t timestamps_len,
+                                        const char *element_type,
+                                        uint64_t ndims,
+                                        const uint64_t *dims_ptr,
+                                        const uint8_t *data_ptr,
+                                        uint64_t data_byte_len,
+                                        const char *application_data,
+                                        const char *features_json,
+                                        const char *units,
+                                        const char *quantity_kind,
+                                        const char *unit_system,
+                                        const char *time_reference,
+                                        const char *component_field,
+                                        int64_t *out_id);
+
+/**
  * Remove many associations named by their catalog `id`, in one all-or-nothing
  * transaction. On success `*out_removed` receives the number removed.
  *
@@ -985,6 +1027,10 @@ int32_t infrastore_store_has_any_by_filter(const struct InfraStore *handle,
                                            const char *features_json,
                                            const char *component_field,
                                            int32_t zoneless,
+                                           bool has_initial_timestamp,
+                                           int64_t initial_timestamp_ms,
+                                           bool has_length,
+                                           uint64_t length,
                                            bool *out_present);
 
 /**
@@ -1182,6 +1228,38 @@ int32_t infrastore_batch_add_non_sequential(struct InfraStoreBatch *batch,
                                             const char *unit_system,
                                             const char *time_reference,
                                             const char *component_field);
+
+/**
+ * Append a `PersistentTimeSeries` to a batch. Arguments match
+ * `infrastore_store_add_persistent` (minus the store handle and `out_id`).
+ *
+ * # Safety
+ *
+ * `batch` must be a live batch handle. `owner_id` is a plain integer. Required
+ * string pointers must reference null-terminated UTF-8 strings; optional string
+ * pointers may be null. `timestamps_unix_ms` must reference `timestamps_len`
+ * elements, `dims_ptr` must reference `ndims` elements when `ndims` is nonzero,
+ * and `data_ptr` must reference `data_byte_len` bytes.
+ */
+int32_t infrastore_batch_add_persistent(struct InfraStoreBatch *batch,
+                                        int64_t owner_id,
+                                        const char *owner_type,
+                                        int32_t owner_category,
+                                        const char *name,
+                                        const int64_t *timestamps_unix_ms,
+                                        uint64_t timestamps_len,
+                                        const char *element_type,
+                                        uint64_t ndims,
+                                        const uint64_t *dims_ptr,
+                                        const uint8_t *data_ptr,
+                                        uint64_t data_byte_len,
+                                        const char *application_data,
+                                        const char *features_json,
+                                        const char *units,
+                                        const char *quantity_kind,
+                                        const char *unit_system,
+                                        const char *time_reference,
+                                        const char *component_field);
 
 /**
  * Append a dense forecast (`ts_type` 2=Deterministic or 5=Scenarios) to a
@@ -1451,6 +1529,7 @@ int32_t infrastore_bulk_result_item_name(const struct InfraStoreBulkReadHandle *
 /**
  * Write the [`time_series_type_to_int`] discriminant of bulk-read item `index` into
  * `out_type` (`0`=SingleTimeSeries, `1`=NonSequentialTimeSeries,
+ * `6`=PersistentTimeSeries,
  * `2`=Deterministic, `4`=Probabilistic, `5`=Scenarios — a bulk read never
  * returns the synthesized `DeterministicSingleTimeSeries`). Lets a caller pick
  * the right `infrastore_bulk_result_get_*` before reading.
@@ -1498,6 +1577,37 @@ int32_t infrastore_bulk_result_get_non_sequential(const struct InfraStoreBulkRea
                                                   char **out_unit_system,
                                                   char **out_time_reference,
                                                   char **out_component_field);
+
+/**
+ * Read a `PersistentTimeSeries` element out of a bulk-read result. The
+ * out-params, the ownership rules, and the descriptor handling are exactly
+ * those of [`infrastore_bulk_result_get_non_sequential`]; `out_timestamps` is
+ * the breakpoint vector, with the value at index `i` in force from
+ * `out_timestamps[i]` until the next breakpoint and past the last one forever.
+ *
+ * # Safety
+ *
+ * `result` must be a live bulk-read handle and `index` less than its length.
+ * Every output pointer must be valid for writing its indicated value. The
+ * returned buffers must each be released with the matching free function, and
+ * each non-null owned string exactly once with `infrastore_string_free`.
+ */
+int32_t infrastore_bulk_result_get_persistent(const struct InfraStoreBulkReadHandle *result,
+                                              uint64_t index,
+                                              int64_t **out_timestamps,
+                                              uint64_t *out_timestamps_len,
+                                              int32_t *out_dtype,
+                                              int64_t **out_shape,
+                                              uint64_t *out_shape_len,
+                                              uint8_t **out_data,
+                                              uint64_t *out_data_byte_len,
+                                              char **out_application_data,
+                                              char **out_element_type,
+                                              char **out_units,
+                                              char **out_quantity_kind,
+                                              char **out_unit_system,
+                                              char **out_time_reference,
+                                              char **out_component_field);
 
 /**
  * Read a forecast element (`Deterministic`, `Probabilistic`, or `Scenarios`)
@@ -1695,6 +1805,10 @@ int32_t infrastore_store_list_metadata(const struct InfraStore *handle,
                                        const char *features_json,
                                        const char *component_field,
                                        int32_t zoneless,
+                                       bool has_initial_timestamp,
+                                       int64_t initial_timestamp_ms,
+                                       bool has_length,
+                                       uint64_t length,
                                        char **out_json,
                                        uint64_t *out_len);
 
@@ -1721,6 +1835,10 @@ int32_t infrastore_store_list_names(const struct InfraStore *handle,
                                     const char *features_json,
                                     const char *component_field,
                                     int32_t zoneless,
+                                    bool has_initial_timestamp,
+                                    int64_t initial_timestamp_ms,
+                                    bool has_length,
+                                    uint64_t length,
                                     char **out_json,
                                     uint64_t *out_len);
 
@@ -1747,6 +1865,10 @@ int32_t infrastore_store_list_owner_types(const struct InfraStore *handle,
                                           const char *features_json,
                                           const char *component_field,
                                           int32_t zoneless,
+                                          bool has_initial_timestamp,
+                                          int64_t initial_timestamp_ms,
+                                          bool has_length,
+                                          uint64_t length,
                                           char **out_json,
                                           uint64_t *out_len);
 
@@ -1773,6 +1895,10 @@ int32_t infrastore_store_remove_by_filter(struct InfraStore *handle,
                                           const char *features_json,
                                           const char *component_field,
                                           int32_t zoneless,
+                                          bool has_initial_timestamp,
+                                          int64_t initial_timestamp_ms,
+                                          bool has_length,
+                                          uint64_t length,
                                           uint64_t *out_removed);
 
 /**
@@ -2181,6 +2307,11 @@ int32_t infrastore_store_count_parent_child_associations(const struct InfraStore
  * Returns the JSON through `out_json` as an **owned** allocation the caller
  * releases with `infrastore_string_free`; `out_len` is its byte length.
  *
+ * `PersistentTimeSeries` rows are omitted: the type is an infrastore-local
+ * extension the wire contract has no schema for, so it cannot be spelled in a
+ * document. A filter naming that type is `INFRASTORE_ERR_INVALID_PARAMETER`
+ * rather than an empty array.
+ *
  * # Safety
  *
  * The scalar filter flags/values are plain scalars; `name`, `resolution`, `interval`,
@@ -2201,6 +2332,10 @@ int32_t infrastore_store_export_time_series_associations_openapi(const struct In
                                                                  const char *features_json,
                                                                  const char *component_field,
                                                                  int32_t zoneless,
+                                                                 bool has_initial_timestamp,
+                                                                 int64_t initial_timestamp_ms,
+                                                                 bool has_length,
+                                                                 uint64_t length,
                                                                  char **out_json,
                                                                  uint64_t *out_len);
 
@@ -2227,10 +2362,12 @@ int32_t infrastore_store_export_supplemental_attribute_associations_openapi(cons
  *
  * Rows only: the document carries locators, never values, so every row must
  * name an array this store already holds, and each row keeps the
- * `association_id` it carries. A row whose array is absent, or a
- * `NonSequentialTimeSeries` row (whose timestamp vector is not on the wire),
- * is refused with `INFRASTORE_ERR_INVALID_PARAMETER`; an `association_id`
- * already in use is `INFRASTORE_ERR_DUPLICATE_ASSOCIATION_ID`.
+ * `association_id` it carries. A row whose array is absent, an irregular row
+ * that does not name a time axis this store holds (`timestamps_uri`), or a
+ * `PersistentTimeSeries` row (a type outside the six the wire contract
+ * defines) is refused with `INFRASTORE_ERR_INVALID_PARAMETER`; an
+ * `association_id` already in use is
+ * `INFRASTORE_ERR_DUPLICATE_ASSOCIATION_ID`.
  *
  * # Safety
  *
@@ -2311,12 +2448,40 @@ int32_t infrastore_last_error_message(char *buf, uint64_t buf_len, uint64_t *nee
  * * `SingleTimeSeries` (0): `resolution` must be a non-empty ISO-8601 period —
  *   one resolution per reader — and the matched series must share one grid
  *   (`initial_timestamp` + `length`).
+ * * `PersistentTimeSeries` (6): `resolution` must be null, for the same
+ *   reason -- a step function has no constant step. Unlike the type above, its
+ *   columns may sit on *different* breakpoint vectors; the reader's timeline
+ *   is their union, and each column carries its own values forward on its own
+ *   vector.
  * * `NonSequentialTimeSeries` (1): `resolution` must be null (an irregular
  *   series has none); the matched series must instead share one timestamp
  *   vector, which is also what pools their arrays on disk. Read that timeline
  *   with `infrastore_static_reader_timestamps`.
  *
  * Any other discriminant is rejected.
+ *
+ * `has_window_start` lifts the shared-grid requirement for `SingleTimeSeries`:
+ * the reader then sweeps the window `window_start_ms` (+ `window_length` steps,
+ * or as far as *every* matched series reaches when `has_window_length` is
+ * false) instead of the grid the series happen to share, and each column reads
+ * at an offset of its own. It is checked, never clamped -- a matched series
+ * that does not cover the window is an error naming it, the anchor must fall on
+ * each series' own step boundaries, and a calendar resolution is refused where
+ * re-anchoring would move the dates. `window_start_zoneless` carries how the
+ * caller *spelled* the anchor, the same convention as
+ * `infrastore_store_read_by_ids_range`'s bounds: the wire form is Unix
+ * milliseconds either way, and this flag is what tells a wall clock from an
+ * instant. The window belongs to `SingleTimeSeries` alone; the two irregular
+ * types carry their timeline rather than deriving it, so passing one with them
+ * is an error. `has_window_length` without `has_window_start` is rejected too:
+ * a length alone does not say where to begin.
+ *
+ * The window is **not** the `has_initial_timestamp` / `has_length` filter pair
+ * above it. A window sweeps a named span across whatever matched, letting each
+ * column read at an offset of its own; the filter matches only the series that
+ * already begin at `initial_timestamp_ms` and run for `length` steps. Use the
+ * window when the ragged series should all take part, the filter when they
+ * should not.
  *
  * # Safety
  *
@@ -2336,6 +2501,15 @@ int32_t infrastore_store_build_static_reader(const struct InfraStore *handle,
                                              const char *features_json,
                                              const char *component_field,
                                              int32_t zoneless,
+                                             bool has_initial_timestamp,
+                                             int64_t initial_timestamp_ms,
+                                             bool has_length,
+                                             uint64_t length,
+                                             bool has_window_start,
+                                             int64_t window_start_ms,
+                                             bool window_start_zoneless,
+                                             bool has_window_length,
+                                             uint64_t window_length,
                                              struct InfraStoreStaticReaderHandle **out_reader);
 
 /**
@@ -2343,7 +2517,8 @@ int32_t infrastore_store_build_static_reader(const struct InfraStore *handle,
  * owned ISO-8601 duration string, e.g. `PT1H` / `P1M`), and the number of
  * timestamps on it.
  *
- * `*out_resolution` is **null** for a `NonSequentialTimeSeries` reader: an
+ * `*out_resolution` is **null** for a `NonSequentialTimeSeries` or
+ * `PersistentTimeSeries` reader: an
  * irregular timeline has no constant step, so read it with
  * `infrastore_static_reader_timestamps` instead.
  *
@@ -2401,6 +2576,49 @@ int32_t infrastore_static_reader_timestamps(const struct InfraStoreStaticReaderH
                                             int64_t *buf,
                                             uint64_t cap,
                                             uint64_t *out_len);
+
+/**
+ * Materialize a regular grid: `initial + k · resolution` for `k` in
+ * `[0, length)`, as unix milliseconds.
+ *
+ * Probe-then-fetch like `infrastore_static_reader_timestamps`: call with `buf`
+ * null and `cap` 0 to learn the length (always reported through `out_len`),
+ * then again with a buffer that size. Calendar-aware for a `P1M`/`P1Y`
+ * resolution, which steps the **UTC** calendar — the reference a series records
+ * is a spelling, not a grid.
+ *
+ * # Safety
+ *
+ * `resolution_iso` must be a valid null-terminated UTF-8 ISO-8601 duration and
+ * stay readable for the call. When non-null, `buf` must be valid for writing
+ * `cap` `i64` values. `out_len` must be non-null.
+ */
+int32_t infrastore_grid_timestamps(int64_t initial_unix_ms,
+                                   const char *resolution_iso,
+                                   uint64_t length,
+                                   int64_t *buf,
+                                   uint64_t cap,
+                                   uint64_t *out_len);
+
+/**
+ * The ISO-8601 period that reproduces `timestamps_unix_ms` exactly, or an error
+ * naming the entry that breaks the pattern.
+ *
+ * The inverse of [`infrastore_grid_timestamps`], and the check a caller wants
+ * before claiming a resolution they cannot verify. A local-clock timeline that
+ * drifts against every period — a daily or monthly grid in a DST zone — is
+ * refused here with `INFRASTORE_ERR_INVALID_PARAMETER`, and the message names
+ * `NonSequentialTimeSeries` as the remedy.
+ *
+ * On success `out_iso` receives an owned C string the caller frees with
+ * `infrastore_string_free`.
+ *
+ * # Safety
+ *
+ * `timestamps_unix_ms` must reference `len` `i64` values and stay readable for
+ * the call. `out_iso` must be non-null and is only written on success.
+ */
+int32_t infrastore_infer_period(const int64_t *timestamps_unix_ms, uint64_t len, char **out_iso);
 
 /**
  * Number of columnar groups in the reader.
@@ -2532,6 +2750,10 @@ int32_t infrastore_store_build_forecast_reader(const struct InfraStore *handle,
                                                const char *features_json,
                                                const char *component_field,
                                                int32_t zoneless,
+                                               bool has_initial_timestamp,
+                                               int64_t initial_timestamp_ms,
+                                               bool has_length,
+                                               uint64_t length,
                                                struct InfraStoreForecastReaderHandle **out_reader);
 
 /**

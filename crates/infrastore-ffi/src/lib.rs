@@ -1182,12 +1182,48 @@ pub unsafe extern "C" fn infrastore_store_add_single(
     }
 }
 
-// ---- add_non_sequential --------------------------------------------------
+// ---- add_non_sequential / add_persistent ----------------------------------
 
-/// Parse the `infrastore_store_add_non_sequential` / `infrastore_batch_add_non_sequential`
-/// argument list into an [`core_lib::AddRequest`].
+/// The descriptive attributes of a `NonSequentialTimeSeries`, gathered so the
+/// bulk element readers can emit them without knowing which of the two
+/// irregular static types they hold.
+fn descriptors_of_irregular_nsts(s: &core_lib::NonSequentialTimeSeries) -> core_lib::Descriptors {
+    core_lib::Descriptors {
+        element_type: s.element_type,
+        units: s.units.clone(),
+        quantity_kind: s.quantity_kind.clone(),
+        unit_system: s.unit_system,
+        time_reference: s.time_reference.clone(),
+        component_field: s.component_field.clone(),
+        application_data: s.application_data.clone(),
+    }
+}
+
+/// [`descriptors_of_irregular_nsts`] for a `PersistentTimeSeries`.
+fn descriptors_of_irregular_pts(s: &core_lib::PersistentTimeSeries) -> core_lib::Descriptors {
+    core_lib::Descriptors {
+        element_type: s.element_type,
+        units: s.units.clone(),
+        quantity_kind: s.quantity_kind.clone(),
+        unit_system: s.unit_system,
+        time_reference: s.time_reference.clone(),
+        component_field: s.component_field.clone(),
+        application_data: s.application_data.clone(),
+    }
+}
+
+/// Parse the argument list shared by the two irregular static types into an
+/// [`core_lib::AddRequest`].
+///
+/// `NonSequentialTimeSeries` and `PersistentTimeSeries` take byte-for-byte the
+/// same inputs — a strictly increasing `i64` unix-millisecond vector plus one
+/// value per entry — and differ only in what a read of the result *means*. So
+/// `kind` picks the core constructor and nothing else varies. Serves
+/// `infrastore_store_add_non_sequential` / `infrastore_batch_add_non_sequential`
+/// and their `_persistent` twins.
 #[allow(clippy::too_many_arguments)]
-unsafe fn build_non_sequential_request(
+unsafe fn build_irregular_request(
+    kind: core_lib::TimeSeriesType,
     owner_id: i64,
     owner_type: *const c_char,
     owner_category: i32,
@@ -1236,8 +1272,16 @@ unsafe fn build_non_sequential_request(
     let element_type = unsafe { cstr_to_element_type(element_type) }?;
     let array =
         unsafe { build_typed_array(element_type, ndims, dims_ptr, data_ptr, data_byte_len) }?;
-    let series = match core_lib::NonSequentialTimeSeries::new(timestamps, array, name) {
-        Ok(series) => series,
+    let built = match kind {
+        core_lib::TimeSeriesType::PersistentTimeSeries => {
+            core_lib::PersistentTimeSeries::new(timestamps, array, name)
+                .map(core_lib::TimeSeriesData::PersistentTimeSeries)
+        }
+        _ => core_lib::NonSequentialTimeSeries::new(timestamps, array, name)
+            .map(core_lib::TimeSeriesData::NonSequentialTimeSeries),
+    };
+    let mut data = match built {
+        Ok(data) => data,
         Err(error) => {
             set_error(error);
             return Err(INFRASTORE_ERR_INVALID_PARAMETER);
@@ -1250,7 +1294,6 @@ unsafe fn build_non_sequential_request(
     let time_reference = unsafe { cstr_to_optional_time_reference(time_reference) }?;
     let component_field = unsafe { cstr_to_optional_string(component_field) }?;
     let application_data = unsafe { cstr_to_optional_string(application_data) }?;
-    let mut data = core_lib::TimeSeriesData::NonSequentialTimeSeries(series);
     // The descriptors describe the series, so they travel on it rather than
     // on the request.
     data.set_descriptors(core_lib::Descriptors {
@@ -1315,7 +1358,97 @@ pub unsafe extern "C" fn infrastore_store_add_non_sequential(
         }
     };
     let request = match unsafe {
-        build_non_sequential_request(
+        build_irregular_request(
+            core_lib::TimeSeriesType::NonSequentialTimeSeries,
+            owner_id,
+            owner_type,
+            owner_category,
+            name,
+            timestamps_unix_ms,
+            timestamps_len,
+            element_type,
+            ndims,
+            dims_ptr,
+            data_ptr,
+            data_byte_len,
+            application_data,
+            features_json,
+            units,
+            quantity_kind,
+            unit_system,
+            time_reference,
+            component_field,
+        )
+    } {
+        Ok(r) => r,
+        Err(c) => return c,
+    };
+    match store.inner.add_time_series_bulk(vec![request]) {
+        Ok(mut added) => {
+            let id = added.remove(0);
+            if !out_id.is_null() {
+                unsafe { *out_id = id.get() };
+            }
+            INFRASTORE_OK
+        }
+        Err(error) => map_core_error(error),
+    }
+}
+
+/// Add a `PersistentTimeSeries` to the store.
+///
+/// The arguments are exactly those of `infrastore_store_add_non_sequential`,
+/// because the two types carry the same payload: `timestamps_unix_ms` is a
+/// strictly increasing vector of breakpoints and the array holds one value per
+/// breakpoint. What differs is what a *read* of the result means — the value at
+/// breakpoint `i` stays in force until breakpoint `i + 1`, and past the last
+/// one forever, while a `NonSequentialTimeSeries` has no value between its
+/// timestamps at all. There is no value before the first breakpoint, and asking
+/// for one is an error rather than a clamp.
+///
+/// # Safety
+///
+/// `handle` must be a live mutable store handle. `owner_id` is a plain integer. Required string
+/// pointers must reference null-terminated UTF-8 strings; optional string pointers may be null.
+/// `timestamps_unix_ms` must reference `timestamps_len` elements, `dims_ptr` must reference `ndims`
+/// elements when `ndims` is nonzero, and `data_ptr` must reference `data_byte_len` bytes.
+/// `out_id`, when non-null, must be valid for writing one `i64`, and receives the catalog id the
+/// row was filed under.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn infrastore_store_add_persistent(
+    handle: *mut InfraStoreHandle,
+    owner_id: i64,
+    owner_type: *const c_char,
+    owner_category: i32,
+    name: *const c_char,
+    timestamps_unix_ms: *const i64,
+    timestamps_len: u64,
+    element_type: *const c_char,
+    ndims: u64,
+    dims_ptr: *const u64,
+    data_ptr: *const u8,
+    data_byte_len: u64,
+    application_data: *const c_char,
+    features_json: *const c_char,
+    units: *const c_char,
+    quantity_kind: *const c_char,
+    unit_system: *const c_char,
+    time_reference: *const c_char,
+    component_field: *const c_char,
+    out_id: *mut i64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_mut() } {
+        Some(s) => s,
+        None => {
+            set_error("store handle is null");
+            return INFRASTORE_ERR_NULL_POINTER;
+        }
+    };
+    let request = match unsafe {
+        build_irregular_request(
+            core_lib::TimeSeriesType::PersistentTimeSeries,
             owner_id,
             owner_type,
             owner_category,
@@ -2624,6 +2757,10 @@ pub unsafe extern "C" fn infrastore_store_has_any_by_filter(
     features_json: *const c_char,
     component_field: *const c_char,
     zoneless: i32,
+    has_initial_timestamp: bool,
+    initial_timestamp_ms: i64,
+    has_length: bool,
+    length: u64,
     out_present: *mut bool,
 ) -> i32 {
     clear_error();
@@ -2646,6 +2783,10 @@ pub unsafe extern "C" fn infrastore_store_has_any_by_filter(
             features_json,
             component_field,
             zoneless,
+            has_initial_timestamp,
+            initial_timestamp_ms,
+            has_length,
+            length,
         )
     } {
         Ok(f) => f,
@@ -2755,6 +2896,7 @@ fn time_series_type_from_int(i: i32) -> Option<core_lib::TimeSeriesType> {
         3 => T::DeterministicSingleTimeSeries,
         4 => T::Probabilistic,
         5 => T::Scenarios,
+        6 => T::PersistentTimeSeries,
         _ => return None,
     })
 }
@@ -2773,8 +2915,9 @@ fn resolve_requested_type_from_int(i: i32) -> Option<core_lib::TimeSeriesType> {
 }
 
 /// Map a forecast read request's `ts_type` code to a [`core_lib::TimeSeriesType`].
-/// The non-forecast types `SingleTimeSeries` (0) and `NonSequentialTimeSeries`
-/// (1) are rejected here so the forecast API reports a clear "invalid
+/// The non-forecast types `SingleTimeSeries` (0), `NonSequentialTimeSeries`
+/// (1) and `PersistentTimeSeries` (6) are rejected here so the forecast API
+/// reports a clear "invalid
 /// time_series_type" error up front rather than failing later in
 /// `emit_forecast_data` after a key is resolved and data is read.
 fn requested_type_from_int(i: i32) -> Option<core_lib::TimeSeriesType> {
@@ -2792,6 +2935,12 @@ fn requested_type_from_int(i: i32) -> Option<core_lib::TimeSeriesType> {
 
 /// Inverse of [`time_series_type_from_int`]: the integer discriminant for a
 /// `TimeSeriesType` (must stay in sync with that mapping).
+///
+/// This mapping is the ABI's own and is *not* read from
+/// `TimeSeriesType::code`; the two are nonetheless kept numerically identical
+/// on purpose. Divergence would be legal — the ABI code never reaches disk —
+/// but it would give one type two numbers for no benefit, and every error
+/// message and doc comment on both sides would have to say which one it meant.
 fn time_series_type_to_int(t: core_lib::TimeSeriesType) -> i32 {
     use core_lib::TimeSeriesType as T;
     match t {
@@ -2801,6 +2950,7 @@ fn time_series_type_to_int(t: core_lib::TimeSeriesType) -> i32 {
         T::DeterministicSingleTimeSeries => 3,
         T::Probabilistic => 4,
         T::Scenarios => 5,
+        T::PersistentTimeSeries => 6,
     }
 }
 
@@ -3402,7 +3552,80 @@ pub unsafe extern "C" fn infrastore_batch_add_non_sequential(
         }
     };
     match unsafe {
-        build_non_sequential_request(
+        build_irregular_request(
+            core_lib::TimeSeriesType::NonSequentialTimeSeries,
+            owner_id,
+            owner_type,
+            owner_category,
+            name,
+            timestamps_unix_ms,
+            timestamps_len,
+            element_type,
+            ndims,
+            dims_ptr,
+            data_ptr,
+            data_byte_len,
+            application_data,
+            features_json,
+            units,
+            quantity_kind,
+            unit_system,
+            time_reference,
+            component_field,
+        )
+    } {
+        Ok(req) => {
+            batch.items.push(req);
+            INFRASTORE_OK
+        }
+        Err(c) => c,
+    }
+}
+
+/// Append a `PersistentTimeSeries` to a batch. Arguments match
+/// `infrastore_store_add_persistent` (minus the store handle and `out_id`).
+///
+/// # Safety
+///
+/// `batch` must be a live batch handle. `owner_id` is a plain integer. Required
+/// string pointers must reference null-terminated UTF-8 strings; optional string
+/// pointers may be null. `timestamps_unix_ms` must reference `timestamps_len`
+/// elements, `dims_ptr` must reference `ndims` elements when `ndims` is nonzero,
+/// and `data_ptr` must reference `data_byte_len` bytes.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn infrastore_batch_add_persistent(
+    batch: *mut InfraStoreBatchHandle,
+    owner_id: i64,
+    owner_type: *const c_char,
+    owner_category: i32,
+    name: *const c_char,
+    timestamps_unix_ms: *const i64,
+    timestamps_len: u64,
+    element_type: *const c_char,
+    ndims: u64,
+    dims_ptr: *const u64,
+    data_ptr: *const u8,
+    data_byte_len: u64,
+    application_data: *const c_char,
+    features_json: *const c_char,
+    units: *const c_char,
+    quantity_kind: *const c_char,
+    unit_system: *const c_char,
+    time_reference: *const c_char,
+    component_field: *const c_char,
+) -> i32 {
+    clear_error();
+    let batch = match unsafe { batch.as_mut() } {
+        Some(b) => b,
+        None => {
+            set_error("batch handle is null");
+            return INFRASTORE_ERR_NULL_POINTER;
+        }
+    };
+    match unsafe {
+        build_irregular_request(
+            core_lib::TimeSeriesType::PersistentTimeSeries,
             owner_id,
             owner_type,
             owner_category,
@@ -4183,6 +4406,7 @@ pub unsafe extern "C" fn infrastore_bulk_result_item_name(
 
 /// Write the [`time_series_type_to_int`] discriminant of bulk-read item `index` into
 /// `out_type` (`0`=SingleTimeSeries, `1`=NonSequentialTimeSeries,
+/// `6`=PersistentTimeSeries,
 /// `2`=Deterministic, `4`=Probabilistic, `5`=Scenarios — a bulk read never
 /// returns the synthesized `DeterministicSingleTimeSeries`). Lets a caller pick
 /// the right `infrastore_bulk_result_get_*` before reading.
@@ -4256,6 +4480,111 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_non_sequential(
     out_time_reference: *mut *mut c_char,
     out_component_field: *mut *mut c_char,
 ) -> i32 {
+    unsafe {
+        bulk_result_get_irregular(
+            core_lib::TimeSeriesType::NonSequentialTimeSeries,
+            result,
+            index,
+            out_timestamps,
+            out_timestamps_len,
+            out_dtype,
+            out_shape,
+            out_shape_len,
+            out_data,
+            out_data_byte_len,
+            out_application_data,
+            out_element_type,
+            out_units,
+            out_quantity_kind,
+            out_unit_system,
+            out_time_reference,
+            out_component_field,
+        )
+    }
+}
+
+/// Read a `PersistentTimeSeries` element out of a bulk-read result. The
+/// out-params, the ownership rules, and the descriptor handling are exactly
+/// those of [`infrastore_bulk_result_get_non_sequential`]; `out_timestamps` is
+/// the breakpoint vector, with the value at index `i` in force from
+/// `out_timestamps[i]` until the next breakpoint and past the last one forever.
+///
+/// # Safety
+///
+/// `result` must be a live bulk-read handle and `index` less than its length.
+/// Every output pointer must be valid for writing its indicated value. The
+/// returned buffers must each be released with the matching free function, and
+/// each non-null owned string exactly once with `infrastore_string_free`.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn infrastore_bulk_result_get_persistent(
+    result: *const InfraStoreBulkReadHandle,
+    index: u64,
+    out_timestamps: *mut *mut i64,
+    out_timestamps_len: *mut u64,
+    out_dtype: *mut i32,
+    out_shape: *mut *mut i64,
+    out_shape_len: *mut u64,
+    out_data: *mut *mut u8,
+    out_data_byte_len: *mut u64,
+    out_application_data: *mut *mut c_char,
+    out_element_type: *mut *mut c_char,
+    out_units: *mut *mut c_char,
+    out_quantity_kind: *mut *mut c_char,
+    out_unit_system: *mut *mut c_char,
+    out_time_reference: *mut *mut c_char,
+    out_component_field: *mut *mut c_char,
+) -> i32 {
+    unsafe {
+        bulk_result_get_irregular(
+            core_lib::TimeSeriesType::PersistentTimeSeries,
+            result,
+            index,
+            out_timestamps,
+            out_timestamps_len,
+            out_dtype,
+            out_shape,
+            out_shape_len,
+            out_data,
+            out_data_byte_len,
+            out_application_data,
+            out_element_type,
+            out_units,
+            out_quantity_kind,
+            out_unit_system,
+            out_time_reference,
+            out_component_field,
+        )
+    }
+}
+
+/// Shared body of the two irregular-static bulk element readers. `want` selects
+/// which stored type is accepted; the payload is identical.
+///
+/// # Safety
+///
+/// See [`infrastore_bulk_result_get_non_sequential`], whose contract this
+/// implements.
+#[allow(clippy::too_many_arguments)]
+unsafe fn bulk_result_get_irregular(
+    want: core_lib::TimeSeriesType,
+    result: *const InfraStoreBulkReadHandle,
+    index: u64,
+    out_timestamps: *mut *mut i64,
+    out_timestamps_len: *mut u64,
+    out_dtype: *mut i32,
+    out_shape: *mut *mut i64,
+    out_shape_len: *mut u64,
+    out_data: *mut *mut u8,
+    out_data_byte_len: *mut u64,
+    out_application_data: *mut *mut c_char,
+    out_element_type: *mut *mut c_char,
+    out_units: *mut *mut c_char,
+    out_quantity_kind: *mut *mut c_char,
+    out_unit_system: *mut *mut c_char,
+    out_time_reference: *mut *mut c_char,
+    out_component_field: *mut *mut c_char,
+) -> i32 {
     clear_error();
     let result = match unsafe { result.as_ref() } {
         Some(r) => r,
@@ -4275,12 +4604,29 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_non_sequential(
         set_error("an out pointer is null");
         return INFRASTORE_ERR_NULL_POINTER;
     }
-    let series = match result.items.get(index as usize) {
-        Some(core_lib::TimeSeriesData::NonSequentialTimeSeries(s)) => s,
+    // Borrowed as a tuple of the fields the two variants share, so the emit
+    // path below is written once.
+    #[allow(clippy::type_complexity)]
+    let (timestamps, array, descriptors): (
+        &[chrono::DateTime<chrono::Utc>],
+        &core_lib::TypedArray,
+        core_lib::Descriptors,
+    ) = match result.items.get(index as usize) {
+        Some(core_lib::TimeSeriesData::NonSequentialTimeSeries(s))
+            if want == core_lib::TimeSeriesType::NonSequentialTimeSeries =>
+        {
+            (&s.timestamps, &s.data, descriptors_of_irregular_nsts(s))
+        }
+        Some(core_lib::TimeSeriesData::PersistentTimeSeries(s))
+            if want == core_lib::TimeSeriesType::PersistentTimeSeries =>
+        {
+            (&s.timestamps, &s.data, descriptors_of_irregular_pts(s))
+        }
         Some(other) => {
             set_error(format!(
-                "bulk-read item {index} is a {}, not a NonSequentialTimeSeries",
-                other.time_series_type().as_str()
+                "bulk-read item {index} is a {}, not a {}",
+                other.time_series_type().as_str(),
+                want.as_str()
             ));
             return INFRASTORE_ERR_INVALID_PARAMETER;
         }
@@ -4293,13 +4639,13 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_non_sequential(
     // failure, so no other handed-out buffer can be orphaned by it.
     let code = unsafe {
         emit_descriptors(
-            series.application_data.as_deref(),
-            series.element_type,
-            series.units.as_deref(),
-            series.quantity_kind.as_deref(),
-            series.unit_system,
-            series.time_reference.as_ref(),
-            series.component_field.as_deref(),
+            descriptors.application_data.as_deref(),
+            descriptors.element_type,
+            descriptors.units.as_deref(),
+            descriptors.quantity_kind.as_deref(),
+            descriptors.unit_system,
+            descriptors.time_reference.as_ref(),
+            descriptors.component_field.as_deref(),
             out_application_data,
             out_element_type,
             out_units,
@@ -4312,16 +4658,12 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_non_sequential(
     if code != INFRASTORE_OK {
         return code;
     }
-    let timestamps: Vec<i64> = series
-        .timestamps
-        .iter()
-        .map(|t| datetime_to_unix_ms(*t))
-        .collect();
+    let timestamps: Vec<i64> = timestamps.iter().map(|t| datetime_to_unix_ms(*t)).collect();
     let (timestamps_ptr, timestamps_len) = vec_into_raw(timestamps);
-    let shape: Vec<i64> = series.data.shape.iter().map(|&d| d as i64).collect();
+    let shape: Vec<i64> = array.shape.iter().map(|&d| d as i64).collect();
     let (shape_ptr, shape_len) = vec_into_raw(shape);
-    let dtype = series.data.dtype.code();
-    let (data_ptr, data_byte_len) = vec_into_raw(series.data.bytes.clone());
+    let dtype = array.dtype.code();
+    let (data_ptr, data_byte_len) = vec_into_raw(array.bytes.clone());
     unsafe {
         *out_timestamps = timestamps_ptr;
         *out_timestamps_len = timestamps_len;
@@ -4983,6 +5325,10 @@ pub unsafe extern "C" fn infrastore_store_list_metadata(
     features_json: *const c_char,
     component_field: *const c_char,
     zoneless: i32,
+    has_initial_timestamp: bool,
+    initial_timestamp_ms: i64,
+    has_length: bool,
+    length: u64,
     out_json: *mut *mut c_char,
     out_len: *mut u64,
 ) -> i32 {
@@ -5007,6 +5353,10 @@ pub unsafe extern "C" fn infrastore_store_list_metadata(
             features_json,
             component_field,
             zoneless,
+            has_initial_timestamp,
+            initial_timestamp_ms,
+            has_length,
+            length,
         )
     } {
         Ok(f) => f,
@@ -5044,6 +5394,10 @@ pub unsafe extern "C" fn infrastore_store_list_names(
     features_json: *const c_char,
     component_field: *const c_char,
     zoneless: i32,
+    has_initial_timestamp: bool,
+    initial_timestamp_ms: i64,
+    has_length: bool,
+    length: u64,
     out_json: *mut *mut c_char,
     out_len: *mut u64,
 ) -> i32 {
@@ -5068,6 +5422,10 @@ pub unsafe extern "C" fn infrastore_store_list_names(
             features_json,
             component_field,
             zoneless,
+            has_initial_timestamp,
+            initial_timestamp_ms,
+            has_length,
+            length,
         )
     } {
         Ok(f) => f,
@@ -5105,6 +5463,10 @@ pub unsafe extern "C" fn infrastore_store_list_owner_types(
     features_json: *const c_char,
     component_field: *const c_char,
     zoneless: i32,
+    has_initial_timestamp: bool,
+    initial_timestamp_ms: i64,
+    has_length: bool,
+    length: u64,
     out_json: *mut *mut c_char,
     out_len: *mut u64,
 ) -> i32 {
@@ -5129,6 +5491,10 @@ pub unsafe extern "C" fn infrastore_store_list_owner_types(
             features_json,
             component_field,
             zoneless,
+            has_initial_timestamp,
+            initial_timestamp_ms,
+            has_length,
+            length,
         )
     } {
         Ok(f) => f,
@@ -5166,6 +5532,10 @@ pub unsafe extern "C" fn infrastore_store_remove_by_filter(
     features_json: *const c_char,
     component_field: *const c_char,
     zoneless: i32,
+    has_initial_timestamp: bool,
+    initial_timestamp_ms: i64,
+    has_length: bool,
+    length: u64,
     out_removed: *mut u64,
 ) -> i32 {
     clear_error();
@@ -5189,6 +5559,10 @@ pub unsafe extern "C" fn infrastore_store_remove_by_filter(
             features_json,
             component_field,
             zoneless,
+            has_initial_timestamp,
+            initial_timestamp_ms,
+            has_length,
+            length,
         )
     } {
         Ok(f) => f,
@@ -5228,6 +5602,10 @@ unsafe fn build_list_filter(
     features_json: *const c_char,
     component_field: *const c_char,
     zoneless: i32,
+    has_initial_timestamp: bool,
+    initial_timestamp_ms: i64,
+    has_length: bool,
+    length: u64,
 ) -> std::result::Result<core_lib::ListFilter, i32> {
     let mut filter = core_lib::ListFilter::new();
     if has_owner {
@@ -5294,6 +5672,13 @@ unsafe fn build_list_filter(
     if !features.is_empty() {
         filter = filter.features(features);
     }
+    filter = apply_grid_filter(
+        filter,
+        has_initial_timestamp,
+        initial_timestamp_ms,
+        has_length,
+        length,
+    )?;
     Ok(filter)
 }
 
@@ -6317,6 +6702,11 @@ pub unsafe extern "C" fn infrastore_store_count_parent_child_associations(
 /// Returns the JSON through `out_json` as an **owned** allocation the caller
 /// releases with `infrastore_string_free`; `out_len` is its byte length.
 ///
+/// `PersistentTimeSeries` rows are omitted: the type is an infrastore-local
+/// extension the wire contract has no schema for, so it cannot be spelled in a
+/// document. A filter naming that type is `INFRASTORE_ERR_INVALID_PARAMETER`
+/// rather than an empty array.
+///
 /// # Safety
 ///
 /// The scalar filter flags/values are plain scalars; `name`, `resolution`, `interval`,
@@ -6339,6 +6729,10 @@ pub unsafe extern "C" fn infrastore_store_export_time_series_associations_openap
     features_json: *const c_char,
     component_field: *const c_char,
     zoneless: i32,
+    has_initial_timestamp: bool,
+    initial_timestamp_ms: i64,
+    has_length: bool,
+    length: u64,
     out_json: *mut *mut c_char,
     out_len: *mut u64,
 ) -> i32 {
@@ -6363,6 +6757,10 @@ pub unsafe extern "C" fn infrastore_store_export_time_series_associations_openap
             features_json,
             component_field,
             zoneless,
+            has_initial_timestamp,
+            initial_timestamp_ms,
+            has_length,
+            length,
         )
     } {
         Ok(f) => f,
@@ -6413,10 +6811,12 @@ pub unsafe extern "C" fn infrastore_store_export_supplemental_attribute_associat
 ///
 /// Rows only: the document carries locators, never values, so every row must
 /// name an array this store already holds, and each row keeps the
-/// `association_id` it carries. A row whose array is absent, or a
-/// `NonSequentialTimeSeries` row (whose timestamp vector is not on the wire),
-/// is refused with `INFRASTORE_ERR_INVALID_PARAMETER`; an `association_id`
-/// already in use is `INFRASTORE_ERR_DUPLICATE_ASSOCIATION_ID`.
+/// `association_id` it carries. A row whose array is absent, an irregular row
+/// that does not name a time axis this store holds (`timestamps_uri`), or a
+/// `PersistentTimeSeries` row (a type outside the six the wire contract
+/// defines) is refused with `INFRASTORE_ERR_INVALID_PARAMETER`; an
+/// `association_id` already in use is
+/// `INFRASTORE_ERR_DUPLICATE_ASSOCIATION_ID`.
 ///
 /// # Safety
 ///
@@ -6681,6 +7081,36 @@ pub struct InfraStoreForecastReaderHandle {
     inner: core_lib::ForecastReader,
 }
 
+/// Apply the grid-filter pair — a static series' own `initial_timestamp` and
+/// `length` — to a filter under construction.
+///
+/// Shared by both FFI filter builders because it is one predicate wherever a
+/// filter is taken. Deliberately *not* spelling-checked: a filter selects rather
+/// than reads, so an anchor no row was written with is an empty result, not an
+/// error. Pair it with `zoneless` to pick a coherence group.
+fn apply_grid_filter(
+    filter: core_lib::ListFilter,
+    has_initial_timestamp: bool,
+    initial_timestamp_ms: i64,
+    has_length: bool,
+    length: u64,
+) -> Result<core_lib::ListFilter, i32> {
+    let mut filter = filter;
+    if has_initial_timestamp {
+        let Some(t) = unix_ms_to_datetime(initial_timestamp_ms) else {
+            set_error(format!(
+                "invalid initial_timestamp_ms: {initial_timestamp_ms}"
+            ));
+            return Err(INFRASTORE_ERR_INVALID_PARAMETER);
+        };
+        filter = filter.initial_timestamp(t);
+    }
+    if has_length {
+        filter = filter.length(length as usize);
+    }
+    Ok(filter)
+}
+
 /// Build a [`core_lib::ListFilter`] from the reader build arguments shared by
 /// both readers (owner / category / name / name_glob / resolution / features /
 /// component_field). The time-series type is set by the caller, not here.
@@ -6702,6 +7132,10 @@ unsafe fn reader_filter(
     features_json: *const c_char,
     component_field: *const c_char,
     zoneless: i32,
+    has_initial_timestamp: bool,
+    initial_timestamp_ms: i64,
+    has_length: bool,
+    length: u64,
 ) -> Result<core_lib::ListFilter, i32> {
     let mut filter = core_lib::ListFilter::new();
     if has_owner {
@@ -6752,6 +7186,13 @@ unsafe fn reader_filter(
     if !features.is_empty() {
         filter = filter.features(features);
     }
+    filter = apply_grid_filter(
+        filter,
+        has_initial_timestamp,
+        initial_timestamp_ms,
+        has_length,
+        length,
+    )?;
     Ok(filter)
 }
 
@@ -6784,12 +7225,40 @@ unsafe fn write_i64_slice_out(values: &[i64], buf: *mut i64, cap: u64, out_len: 
 /// * `SingleTimeSeries` (0): `resolution` must be a non-empty ISO-8601 period —
 ///   one resolution per reader — and the matched series must share one grid
 ///   (`initial_timestamp` + `length`).
+/// * `PersistentTimeSeries` (6): `resolution` must be null, for the same
+///   reason -- a step function has no constant step. Unlike the type above, its
+///   columns may sit on *different* breakpoint vectors; the reader's timeline
+///   is their union, and each column carries its own values forward on its own
+///   vector.
 /// * `NonSequentialTimeSeries` (1): `resolution` must be null (an irregular
 ///   series has none); the matched series must instead share one timestamp
 ///   vector, which is also what pools their arrays on disk. Read that timeline
 ///   with `infrastore_static_reader_timestamps`.
 ///
 /// Any other discriminant is rejected.
+///
+/// `has_window_start` lifts the shared-grid requirement for `SingleTimeSeries`:
+/// the reader then sweeps the window `window_start_ms` (+ `window_length` steps,
+/// or as far as *every* matched series reaches when `has_window_length` is
+/// false) instead of the grid the series happen to share, and each column reads
+/// at an offset of its own. It is checked, never clamped -- a matched series
+/// that does not cover the window is an error naming it, the anchor must fall on
+/// each series' own step boundaries, and a calendar resolution is refused where
+/// re-anchoring would move the dates. `window_start_zoneless` carries how the
+/// caller *spelled* the anchor, the same convention as
+/// `infrastore_store_read_by_ids_range`'s bounds: the wire form is Unix
+/// milliseconds either way, and this flag is what tells a wall clock from an
+/// instant. The window belongs to `SingleTimeSeries` alone; the two irregular
+/// types carry their timeline rather than deriving it, so passing one with them
+/// is an error. `has_window_length` without `has_window_start` is rejected too:
+/// a length alone does not say where to begin.
+///
+/// The window is **not** the `has_initial_timestamp` / `has_length` filter pair
+/// above it. A window sweeps a named span across whatever matched, letting each
+/// column read at an offset of its own; the filter matches only the series that
+/// already begin at `initial_timestamp_ms` and run for `length` steps. Use the
+/// window when the ragged series should all take part, the filter when they
+/// should not.
 ///
 /// # Safety
 ///
@@ -6811,6 +7280,15 @@ pub unsafe extern "C" fn infrastore_store_build_static_reader(
     features_json: *const c_char,
     component_field: *const c_char,
     zoneless: i32,
+    has_initial_timestamp: bool,
+    initial_timestamp_ms: i64,
+    has_length: bool,
+    length: u64,
+    has_window_start: bool,
+    window_start_ms: i64,
+    window_start_zoneless: bool,
+    has_window_length: bool,
+    window_length: u64,
     out_reader: *mut *mut InfraStoreStaticReaderHandle,
 ) -> i32 {
     clear_error();
@@ -6844,13 +7322,34 @@ pub unsafe extern "C" fn infrastore_store_build_static_reader(
             features_json,
             component_field,
             zoneless,
+            has_initial_timestamp,
+            initial_timestamp_ms,
+            has_length,
+            length,
         )
     } {
         Ok(f) => f,
         Err(c) => return c,
     };
     let filter = filter.time_series_type(ts_type);
-    let reader = match store.inner.build_static_reader(filter) {
+    let start = if has_window_start {
+        match unix_ms_to_datetime(window_start_ms) {
+            Some(t) => Some(t),
+            None => {
+                set_error(format!("invalid window_start_ms: {window_start_ms}"));
+                return INFRASTORE_ERR_INVALID_PARAMETER;
+            }
+        }
+    } else {
+        None
+    };
+    let window = core_lib::ReadWindow {
+        start,
+        zoneless: has_window_start && window_start_zoneless,
+        len: has_window_length.then_some(window_length as usize),
+        count: None,
+    };
+    let reader = match store.inner.build_static_reader_over(filter, window) {
         Ok(r) => r,
         Err(e) => return map_core_error(e),
     };
@@ -6864,7 +7363,8 @@ pub unsafe extern "C" fn infrastore_store_build_static_reader(
 /// owned ISO-8601 duration string, e.g. `PT1H` / `P1M`), and the number of
 /// timestamps on it.
 ///
-/// `*out_resolution` is **null** for a `NonSequentialTimeSeries` reader: an
+/// `*out_resolution` is **null** for a `NonSequentialTimeSeries` or
+/// `PersistentTimeSeries` reader: an
 /// irregular timeline has no constant step, so read it with
 /// `infrastore_static_reader_timestamps` instead.
 ///
@@ -6981,6 +7481,133 @@ pub unsafe extern "C" fn infrastore_static_reader_timestamps(
     let millis: Vec<i64> = reader.inner.timestamps().map(datetime_to_unix_ms).collect();
     unsafe { write_i64_slice_out(&millis, buf, cap, out_len) };
     INFRASTORE_OK
+}
+
+// ---- Grid arithmetic ------------------------------------------------------
+//
+// Stateless entry points into the core's own period arithmetic, for bindings
+// that hold a series as a native struct and would otherwise reimplement the
+// grid. There is one implementation of "what instants does this series contain"
+// in the project, and it is `Period::add_to`; a binding that computes its own
+// agrees only by luck, and the two date libraries most likely to disagree are
+// the ones that *do* have calendar arithmetic (Julia's `Dates`, whose TimeZones
+// overload steps a local clock the core deliberately does not).
+
+/// Materialize a regular grid: `initial + k · resolution` for `k` in
+/// `[0, length)`, as unix milliseconds.
+///
+/// Probe-then-fetch like `infrastore_static_reader_timestamps`: call with `buf`
+/// null and `cap` 0 to learn the length (always reported through `out_len`),
+/// then again with a buffer that size. Calendar-aware for a `P1M`/`P1Y`
+/// resolution, which steps the **UTC** calendar — the reference a series records
+/// is a spelling, not a grid.
+///
+/// # Safety
+///
+/// `resolution_iso` must be a valid null-terminated UTF-8 ISO-8601 duration and
+/// stay readable for the call. When non-null, `buf` must be valid for writing
+/// `cap` `i64` values. `out_len` must be non-null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_grid_timestamps(
+    initial_unix_ms: i64,
+    resolution_iso: *const c_char,
+    length: u64,
+    buf: *mut i64,
+    cap: u64,
+    out_len: *mut u64,
+) -> i32 {
+    clear_error();
+    if out_len.is_null() {
+        set_error("out_len is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let resolution = match unsafe { cstr_to_optional_period(resolution_iso) } {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            set_error("resolution is required");
+            return INFRASTORE_ERR_INVALID_PARAMETER;
+        }
+        Err(code) => return code,
+    };
+    let Some(initial) = unix_ms_to_datetime(initial_unix_ms) else {
+        set_error("initial timestamp is out of range");
+        return INFRASTORE_ERR_INVALID_PARAMETER;
+    };
+    let mut millis = Vec::with_capacity(length as usize);
+    for k in 0..length {
+        match resolution.add_to(initial, k as i64) {
+            Some(t) => millis.push(datetime_to_unix_ms(t)),
+            None => {
+                set_error(format!(
+                    "timestamp at index {k} on the {res} grid is out of range",
+                    res = resolution.to_iso8601()
+                ));
+                return INFRASTORE_ERR_INVALID_PARAMETER;
+            }
+        }
+    }
+    unsafe { write_i64_slice_out(&millis, buf, cap, out_len) };
+    INFRASTORE_OK
+}
+
+/// The ISO-8601 period that reproduces `timestamps_unix_ms` exactly, or an error
+/// naming the entry that breaks the pattern.
+///
+/// The inverse of [`infrastore_grid_timestamps`], and the check a caller wants
+/// before claiming a resolution they cannot verify. A local-clock timeline that
+/// drifts against every period — a daily or monthly grid in a DST zone — is
+/// refused here with `INFRASTORE_ERR_INVALID_PARAMETER`, and the message names
+/// `NonSequentialTimeSeries` as the remedy.
+///
+/// On success `out_iso` receives an owned C string the caller frees with
+/// `infrastore_string_free`.
+///
+/// # Safety
+///
+/// `timestamps_unix_ms` must reference `len` `i64` values and stay readable for
+/// the call. `out_iso` must be non-null and is only written on success.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_infer_period(
+    timestamps_unix_ms: *const i64,
+    len: u64,
+    out_iso: *mut *mut c_char,
+) -> i32 {
+    clear_error();
+    if out_iso.is_null() {
+        set_error("out_iso is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    if timestamps_unix_ms.is_null() && len > 0 {
+        set_error("timestamps_unix_ms is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let raw: &[i64] = if len == 0 {
+        &[]
+    } else {
+        unsafe { slice::from_raw_parts(timestamps_unix_ms, len as usize) }
+    };
+    let mut instants = Vec::with_capacity(raw.len());
+    for (k, ms) in raw.iter().enumerate() {
+        match unix_ms_to_datetime(*ms) {
+            Some(t) => instants.push(t),
+            None => {
+                set_error(format!(
+                    "timestamp at index {k} is out of range at the ABI boundary"
+                ));
+                return INFRASTORE_ERR_INVALID_PARAMETER;
+            }
+        }
+    }
+    match core_lib::Period::infer(&instants) {
+        Ok(period) => {
+            unsafe { *out_iso = owned_cstr(&period.to_iso8601()) };
+            INFRASTORE_OK
+        }
+        Err(message) => {
+            set_error(&message);
+            INFRASTORE_ERR_INVALID_PARAMETER
+        }
+    }
 }
 
 /// Number of columnar groups in the reader.
@@ -7260,6 +7887,10 @@ pub unsafe extern "C" fn infrastore_store_build_forecast_reader(
     features_json: *const c_char,
     component_field: *const c_char,
     zoneless: i32,
+    has_initial_timestamp: bool,
+    initial_timestamp_ms: i64,
+    has_length: bool,
+    length: u64,
     out_reader: *mut *mut InfraStoreForecastReaderHandle,
 ) -> i32 {
     clear_error();
@@ -7293,6 +7924,10 @@ pub unsafe extern "C" fn infrastore_store_build_forecast_reader(
             features_json,
             component_field,
             zoneless,
+            has_initial_timestamp,
+            initial_timestamp_ms,
+            has_length,
+            length,
         )
     } {
         Ok(f) => f,
@@ -7729,6 +8364,15 @@ mod reader_ffi_tests {
                 ptr::null(),
                 ptr::null(),
                 -1,
+                false,
+                0,
+                false,
+                0,
+                false,
+                0,
+                false,
+                false,
+                0,
                 &mut reader,
             )
         };
@@ -7811,6 +8455,146 @@ mod reader_ffi_tests {
         unsafe { infrastore_static_reader_free(reader) };
     }
 
+    /// Whether the thread-local error message mentions `needle` — the ABI's only
+    /// channel for *why* a call was refused, and the half of a refusal a caller
+    /// can act on.
+    fn last_error_contains(needle: &str) -> bool {
+        let mut needed = 0u64;
+        assert_eq!(
+            unsafe { infrastore_last_error_message(ptr::null_mut(), 0, &mut needed) },
+            INFRASTORE_OK
+        );
+        let mut buf = vec![0u8; needed as usize + 1];
+        assert_eq!(
+            unsafe {
+                infrastore_last_error_message(
+                    buf.as_mut_ptr() as *mut c_char,
+                    buf.len() as u64,
+                    &mut needed,
+                )
+            },
+            INFRASTORE_OK
+        );
+        let msg = unsafe { CStr::from_ptr(buf.as_ptr() as *const c_char) }
+            .to_string_lossy()
+            .into_owned();
+        msg.contains(needle)
+    }
+
+    /// A `SingleTimeSeries` starting `start_hours` after `t0`, whose value at
+    /// each step is its own hour offset — so a read proves which row it landed on.
+    fn add_sts_from(store: &mut Store, owner_id: i64, name: &str, start_hours: i64, len: usize) {
+        let vals: Vec<f64> = (0..len).map(|k| (start_hours + k as i64) as f64).collect();
+        let ts = SingleTimeSeries::new(
+            t0() + ChronoDuration::hours(start_hours),
+            ChronoDuration::hours(1),
+            TypedArray::from_f64(vec![len], &vals),
+            name,
+        );
+        store
+            .add_time_series(
+                owner_id,
+                "Gen",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(ts),
+                Default::default(),
+            )
+            .unwrap();
+    }
+
+    /// The window arguments across the ABI: two series that share no grid sweep
+    /// together once the caller names a span, and a span one of them does not
+    /// cover is refused rather than silently dropping its column.
+    #[test]
+    fn static_reader_ffi_window() {
+        let mut store = Store::create(None, true).unwrap();
+        add_sts_from(&mut store, 1, "short", 0, 24);
+        add_sts_from(&mut store, 2, "long", 7, 48);
+        let handle = InfraStoreHandle { inner: store };
+        let hour = std::ffi::CString::new("PT1H").unwrap();
+
+        // Without a window the grids disagree and nothing builds.
+        let mut reader: *mut InfraStoreStaticReaderHandle = ptr::null_mut();
+        let build = |has_ts: bool,
+                     ms: i64,
+                     has_len: bool,
+                     len: u64,
+                     out: &mut *mut InfraStoreStaticReaderHandle| unsafe {
+            infrastore_store_build_static_reader(
+                &handle,
+                0,
+                false,
+                0,
+                false,
+                0,
+                ptr::null(),
+                ptr::null(),
+                hour.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+                -1,
+                false,
+                0,
+                false,
+                0,
+                has_ts,
+                ms,
+                false,
+                has_len,
+                len,
+                out,
+            )
+        };
+        assert_eq!(
+            build(false, 0, false, 0, &mut reader),
+            INFRASTORE_ERR_INVALID_PARAMETER
+        );
+
+        // Anchored at hour 7, with no length: as far as both reach, which is
+        // where the 24-hour series ends.
+        assert_eq!(
+            build(true, T0_MS + 7 * HOUR_MS, false, 0, &mut reader),
+            INFRASTORE_OK
+        );
+        let (mut initial, mut len) = (0i64, 0u64);
+        let mut res: *mut c_char = ptr::null_mut();
+        assert_eq!(
+            unsafe { infrastore_static_reader_grid(reader, &mut initial, &mut res, &mut len) },
+            INFRASTORE_OK
+        );
+        assert_eq!((initial, len), (T0_MS + 7 * HOUR_MS, 17));
+        unsafe { infrastore_string_free(res) };
+
+        // Both columns report hour 7, each from a row of its own.
+        assert_eq!(
+            unsafe { infrastore_static_reader_read(reader, &handle, T0_MS + 7 * HOUR_MS) },
+            INFRASTORE_OK
+        );
+        let (mut p, mut blen) = (ptr::null::<u8>(), 0u64);
+        assert_eq!(
+            unsafe { infrastore_static_reader_group_values(reader, 0, &mut p, &mut blen) },
+            INFRASTORE_OK
+        );
+        assert_eq!(
+            unsafe { slice::from_raw_parts(p as *const f64, 2) },
+            &[7.0, 7.0]
+        );
+        unsafe { infrastore_static_reader_free(reader) };
+
+        // A span the shorter series cannot cover, and a length with no anchor.
+        let mut other: *mut InfraStoreStaticReaderHandle = ptr::null_mut();
+        assert_eq!(
+            build(true, T0_MS + 7 * HOUR_MS, true, 48, &mut other),
+            INFRASTORE_ERR_INVALID_PARAMETER
+        );
+        assert!(last_error_contains("does not cover"));
+        assert_eq!(
+            build(false, 0, true, 4, &mut other),
+            INFRASTORE_ERR_INVALID_PARAMETER
+        );
+        assert!(last_error_contains("needs a start"));
+    }
+
     #[test]
     fn forecast_reader_ffi_roundtrip() {
         use core_lib::Deterministic;
@@ -7856,6 +8640,10 @@ mod reader_ffi_tests {
                 ptr::null(),
                 ptr::null(),
                 -1,
+                false,
+                0,
+                false,
+                0,
                 &mut reader,
             )
         };
@@ -8185,6 +8973,10 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     -1,
+                    false,
+                    0,
+                    false,
+                    0,
                     &mut out,
                     &mut len,
                 )
@@ -8641,6 +9433,15 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     -1,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    false,
+                    0,
                     &mut reader,
                 )
             },
@@ -8669,6 +9470,15 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     -1,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    false,
+                    0,
                     &mut reader,
                 )
             },
@@ -8782,6 +9592,10 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     -1,
+                    false,
+                    0,
+                    false,
+                    0,
                     ptr::null_mut(),
                     ptr::null_mut(),
                 )
@@ -8861,6 +9675,10 @@ mod abi_tests {
             *const c_char,
             *const c_char,
             i32,
+            bool,
+            i64,
+            bool,
+            u64,
             *mut *mut c_char,
             *mut u64,
         ) -> i32;
@@ -8890,6 +9708,10 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     -1,
+                    false,
+                    0,
+                    false,
+                    0,
                     &mut out,
                     &mut len,
                 )
@@ -8950,6 +9772,10 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     -1,
+                    false,
+                    0,
+                    false,
+                    0,
                     &mut present,
                 )
             },
@@ -8977,6 +9803,15 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     -1,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    false,
+                    0,
                     &mut reader,
                 )
             },
@@ -9029,6 +9864,10 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     -1,
+                    false,
+                    0,
+                    false,
+                    0,
                     &mut removed,
                 )
             },
@@ -9156,6 +9995,10 @@ mod abi_tests {
                 ptr::null(),
                 ptr::null(),
                 -1,
+                false,
+                0,
+                false,
+                0,
                 &mut out,
                 &mut len,
             )
@@ -9185,6 +10028,15 @@ mod abi_tests {
                 ptr::null(),
                 ptr::null(),
                 -1,
+                false,
+                0,
+                false,
+                0,
+                false,
+                0,
+                false,
+                false,
+                0,
                 &mut reader,
             )
         };
@@ -9214,6 +10066,10 @@ mod abi_tests {
                 ptr::null(),
                 ptr::null(),
                 -1,
+                false,
+                0,
+                false,
+                0,
                 &mut out,
                 &mut len,
             )
@@ -9630,6 +10486,15 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     -1,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    false,
+                    0,
                     &mut reader,
                 )
             },
@@ -9704,6 +10569,15 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     -1,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    false,
+                    0,
                     &mut reader,
                 )
             },
@@ -9775,6 +10649,10 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     -1,
+                    false,
+                    0,
+                    false,
+                    0,
                     &mut freader,
                 )
             },
@@ -9957,6 +10835,10 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     -1,
+                    false,
+                    0,
+                    false,
+                    0,
                     &mut out,
                     &mut len,
                 )
@@ -10545,6 +11427,10 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     -1,
+                    false,
+                    0,
+                    false,
+                    0,
                     &mut json,
                     &mut json_len,
                 )

@@ -409,6 +409,7 @@ SELECT id, owner_id, owner_type,
                              WHEN 3 THEN 'DeterministicSingleTimeSeries'
                              WHEN 4 THEN 'Probabilistic'
                              WHEN 5 THEN 'Scenarios'
+                             WHEN 6 THEN 'PersistentTimeSeries'
                              ELSE 'unknown(' || time_series_type || ')' END AS time_series_type,
        name,
        initial_timestamp, resolution, length, horizon, interval, count,

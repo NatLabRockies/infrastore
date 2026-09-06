@@ -80,16 +80,17 @@ flowchart TB
   data-format version is unaffected. In-memory stores ignore the setting.
 
 Packed mode holds every **static** series. `SingleTimeSeries` (and the array behind a
-`DeterministicSingleTimeSeries`) pool by resolution into `sts_…` datasets; `NonSequentialTimeSeries`
-pool by their _timestamp vector_ into `nsts_…` datasets, because the chunking is timestamp-major and
-so only means something for arrays on a common time axis. An irregular series carries that axis
-explicitly, and the store content-addresses it — one `tsv_{hash}` dataset of unix milliseconds per
-distinct axis, in the file's own `timestamps` group — so the interned hash is the cohort key, which
-is what lets a `StaticReader` sweep irregular series the same way it sweeps regular ones.
+`DeterministicSingleTimeSeries`) pool by resolution into `sts_…` datasets; the explicit-time-axis
+types (`NonSequentialTimeSeries` and `PersistentTimeSeries`) pool by their _timestamp vector_ into
+`nsts_…` datasets, because the chunking is timestamp-major and so only means something for arrays on
+a common time axis. Such a series carries that axis explicitly, and the store content-addresses it —
+one `tsv_{hash}` dataset of unix milliseconds per distinct axis, in the file's own `timestamps`
+group — so the interned hash is the cohort key, which is what lets a `StaticReader` sweep irregular
+series the same way it sweeps regular ones.
 
 **Standalone mode** holds the dense forecast arrays (`Deterministic`, `Probabilistic`, `Scenarios`)
-and any `NonSequentialTimeSeries` alone on its time axis — a pool spreads one array over `length`
-chunks, so a cohort of one is not worth packing. Each is its own typed, multi-dimensional variable
+and any explicit-time-axis series alone on its axis — a pool spreads one array over `length` chunks,
+so a cohort of one is not worth packing. Each is its own typed, multi-dimensional variable
 `arr_{hex_hash}` — no column packing and no companion hash (the variable name carries the hash).
 Lone irregular series are shaped `[length, *element_shape]` and chunked whole; dense forecasts are
 shaped `[H, count, *element_shape]` (with extra leading axes for `Probabilistic` / `Scenarios`) and
@@ -148,8 +149,9 @@ the [identity uniqueness](./data-model.md#identity) invariant at the database le
 `owner_id` are independent; `interval` is part of the key too, so forecasts of one variable that
 differ only by interval are distinct. Because SQLite treats `NULL` as distinct in a `UNIQUE` index,
 a second index folds `NULL` `resolution` and `interval` to a sentinel so series without them (e.g.
-`NonSequentialTimeSeries`, or any static series, which carry no interval) are still constrained.
-Indexes on `data_hash`, `(owner_id, owner_category)`, and `resolution` keep lookups fast.
+`NonSequentialTimeSeries` and `PersistentTimeSeries`, or any static series, which carry no interval)
+are still constrained. Indexes on `data_hash`, `(owner_id, owner_category)`, and `resolution` keep
+lookups fast.
 
 ## Keeping the Two Files Consistent
 

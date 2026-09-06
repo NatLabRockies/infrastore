@@ -35,6 +35,11 @@ importable as `infrastore`. The binding:
   `TimeSeriesError` (`NotFoundError`, `DuplicateTimeSeriesError`, `InvalidParameterError`,
   `IntegrityError`, `ReadOnlyStoreError`).
 - Builds an `abi3-py311` wheel, so one wheel works across CPython 3.11+ without recompiling.
+- Converts a static series to a `pyarrow.Table` with `to_arrow()`, behind the optional `arrow`
+  extra. This is the one place a binding reaches past numpy, and it is optional for that reason:
+  pyarrow is several times the size of the wheel that would pull it in. What makes Arrow worth the
+  seam is that its `timestamp(unit, tz)` is the same shape as the store's own model — an instant
+  plus the spelling it was written in — so a table keeps a distinction pandas would flatten.
 
 The metadata side is owned entirely by Rust; Python never touches SQLite directly. See the
 [Python guide](../guides/python.md) and [Python API reference](../reference/python-api.md).
@@ -118,7 +123,7 @@ pair directly and supports both reads and writes. Its shape:
 
 - **CSV in, store out.** Numeric values come from a CSV; the metadata that does not fit a flat grid
   (owner, name, type, dtype, resolution, timestamps, units, features) is described in a descriptor
-  JSON. All six dtypes and all five writable types are supported, forecasts included.
+  JSON. All six dtypes and all six writable types are supported, forecasts included.
 - **A global `-f/--format` selects `table` (default), `json`, `jsonl`, or `csv`.** Read commands
   render their results in it; write commands report their outcome in it (prose under `table`, a
   one-object status document under `json`/`jsonl`). Only `template` ignores it.
@@ -146,16 +151,39 @@ types are available everywhere (read+write, except the read-only gRPC server), a
 [forecasts](./time-series-types.md#forecasts) read back across every interface. The remaining
 asymmetry is that the read-only gRPC server does not accept any writes:
 
-| Capability                    | Rust core | C ABI | Python | Julia | CLI    | gRPC        |
-| ----------------------------- | --------- | ----- | ------ | ----- | ------ | ----------- |
-| `SingleTimeSeries` r/w        | ✅        | ✅    | ✅     | ✅    | ✅     | read-only   |
-| `NonSequentialTimeSeries` r/w | ✅        | ✅    | ✅     | ✅    | ✅     | read-only   |
-| dtypes beyond `f64`           | ✅        | ✅    | ✅     | ✅    | ✅     | read-only   |
-| Create forecasts              | ✅        | ✅    | ✅     | ✅    | ✅     | ❌          |
-| Read forecast values          | ✅        | ✅    | ✅     | ✅    | ✅     | ✅          |
-| Forecast metadata / counts    | ✅        | ✅    | ✅     | ✅    | ✅     | list/counts |
-| Readers (columnar sweep)      | ✅        | ✅    | ✅     | ✅    | `grid` | ❌          |
-| Association catalogs          | ✅        | ✅    | ✅     | ✅    | ✅     | ❌          |
+| Capability                    | Rust core | C ABI | Python          | Julia | CLI          | gRPC        |
+| ----------------------------- | --------- | ----- | --------------- | ----- | ------------ | ----------- |
+| `SingleTimeSeries` r/w        | ✅        | ✅    | ✅              | ✅    | ✅           | read-only   |
+| `NonSequentialTimeSeries` r/w | ✅        | ✅    | ✅              | ✅    | ✅           | read-only   |
+| `PersistentTimeSeries` r/w    | ✅        | ✅    | ✅              | ✅    | ✅           | read-only   |
+| dtypes beyond `f64`           | ✅        | ✅    | ✅              | ✅    | ✅           | read-only   |
+| Create forecasts              | ✅        | ✅    | ✅              | ✅    | ✅           | ❌          |
+| Read forecast values          | ✅        | ✅    | ✅              | ✅    | ✅           | ✅          |
+| Forecast metadata / counts    | ✅        | ✅    | ✅              | ✅    | ✅           | list/counts |
+| Readers (columnar sweep)      | ✅        | ✅    | ✅              | ✅    | `grid`       | ❌          |
+| Association catalogs          | ✅        | ✅    | ✅              | ✅    | ✅           | ❌          |
+| Materialized timestamps       | ✅        | ✅    | ✅              | ✅    | ✅           | ❌          |
+| `from_timestamps` (verified)  | ✅        | ✅    | ✅              | ✅    | ❌           | ❌          |
+| Arrow tables (`to_arrow`)     | ❌        | ❌    | ✅              | ❌    | ❌           | ❌          |
+| Store summary (`show`)        | ❌        | ❌    | ✅              | ❌    | `store-info` | ❌          |
+| Forecast windows as Arrow     | ❌        | ❌    | `Deterministic` | ❌    | ❌           | ❌          |
 
 The only gap is by design: writes (including forecasts added through `add_time_series`) require
 local filesystem access, so the read-only gRPC server serves forecast reads but not writes.
+
+**`show()`** is Python-only for now: it is a REPL affordance, and the REPL each binding is used from
+already has one of its own — Julia has `Base.show`, and the CLI has `store-info` plus the `list`
+family. It composes existing catalog aggregate queries and adds no core API, so any binding that
+wants it can grow one without a change underneath.
+
+**Materialized timestamps** and **`from_timestamps`** both run in the core and reach Julia through
+two stateless ABI entry points, `infrastore_grid_timestamps` and `infrastore_infer_period`. That
+matters more than it looks: Julia is the one binding whose date library has calendar arithmetic of
+its own, and whose TimeZones overload steps a _local_ clock the core deliberately does not — so a
+binding-side reimplementation would agree with the core only by luck. There is one implementation of
+"which instants does this series contain" in the project, and it is `Period::add_to`. **Arrow
+tables** are Python-only because Arrow is where the Python data ecosystem meets; the Julia
+counterpart would be a `Tables.jl` interface, which is a different contract and not yet asked for. A
+`Deterministic` converts through `to_arrow_windows()` into one table per window rather than one
+table, because its two grids — windows stepping by `interval`, rows stepping by `resolution` —
+overlap; `Probabilistic` and `Scenarios` wait on a decision about how to spell their third axis.

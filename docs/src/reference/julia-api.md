@@ -14,19 +14,20 @@ Exported names (types first, then functions):
 `AddBatch`, `ArrayReferenceCounts`, `CompactionReport`, `Component`, `CompressionSettings`,
 `Deterministic`, `DeterministicSingleTimeSeries`, `FixedOffsetReference`, `ForecastEntry`,
 `ForecastParameters`, `ForecastReader`, `ForecastSummaryRow`, `ForecastTimeline`,
-`NonSequentialTimeSeries`, `OwnerCategory`, `ParentChildAssociation`, `Probabilistic`, `Scenarios`,
-`SingleTimeSeries`, `StaticGrid`, `StaticGroup`, `StaticReader`, `StaticSummaryRow`, `Store`,
-`SupplementalAttribute`, `SupplementalAttributeAssociation`, `SupplementalAttributeSummaryRow`,
-`SupplementalAttributeTypeCount`, `TimeReference`, `TimeSeriesCounts`, `TimeSeriesCountsDetailed`,
-`TimeSeriesMetadata`, `TimeSeriesTypeCount`, `TransformOutcome`, `UTCReference`, `UnitSystem`
-(`NaturalUnits`, `ComponentBase`), `ZoneReference`, `ZonelessReference`,
-`add_parent_child_association!`, `add_parent_child_associations!`,
+`NonSequentialTimeSeries`, `OwnerCategory`, `ParentChildAssociation`, `PersistentTimeSeries`,
+`Probabilistic`, `Scenarios`, `SingleTimeSeries`, `StaticGrid`, `StaticGroup`, `StaticReader`,
+`StaticSummaryRow`, `Store`, `SupplementalAttribute`, `SupplementalAttributeAssociation`,
+`SupplementalAttributeSummaryRow`, `SupplementalAttributeTypeCount`, `TimeReference`,
+`TimeSeriesCounts`, `TimeSeriesCountsDetailed`, `TimeSeriesMetadata`, `TimeSeriesTypeCount`,
+`TransformOutcome`, `UTCReference`, `UnitSystem` (`NaturalUnits`, `ComponentBase`), `ZoneReference`,
+`ZonelessReference`, `add_parent_child_association!`, `add_parent_child_associations!`,
 `add_supplemental_attribute_association!`, `add_supplemental_attribute_associations!`,
 `add_time_series!`, `add_time_series_bulk!`, `association_exists`, `begin_transaction!`,
-`build_forecast_reader`, `build_static_reader`, `catalog_mode`, `check_static_consistency`,
-`clear!`, `close!`, `commit_transaction!`, `compact!`, `copy_time_series!`,
-`count_array_references`, `count_components_with_attributes`, `count_parent_child_associations`,
-`count_supplemental_attribute_associations`, `count_supplemental_attributes`, `counts_by_type`,
+`breakpoint_at`, `build_forecast_reader`, `build_static_reader`, `catalog_mode`,
+`check_static_consistency`, `clear!`, `close!`, `commit_transaction!`, `compact!`,
+`copy_time_series!`, `count_array_references`, `count_components_with_attributes`,
+`count_parent_child_associations`, `count_supplemental_attribute_associations`,
+`count_supplemental_attributes`, `counts_by_type`,
 `export_supplemental_attribute_associations_openapi`, `export_time_series_associations_openapi`,
 `flush!`, `forecast_entries`, `forecast_num_slots`, `forecast_read!`, `forecast_summary`,
 `forecast_timeline`, `forecast_values`, `get_array_by_hash`, `get_compression`, `get_counts`,
@@ -34,7 +35,7 @@ Exported names (types first, then functions):
 `has_any_time_series`, `has_for_owner`, `has_parent_child_association`,
 `has_supplemental_attribute_association`, `has_time_series`,
 `import_supplemental_attribute_associations_openapi!`, `import_time_series_associations_openapi!`,
-`in_transaction`, `init_logging`, `is_empty`, `is_zoneless`, `list_children`,
+`in_transaction`, `index_at`, `init_logging`, `is_empty`, `is_zoneless`, `list_children`,
 `list_components_with_attributes`, `list_metadata`, `list_metadata_by_ids`, `list_names`,
 `list_owner_ids`, `list_owner_types`, `list_parent_child_associations`, `list_parents`,
 `list_supplemental_attribute_associations`, `list_supplemental_attribute_ids`,
@@ -45,8 +46,8 @@ Exported names (types first, then functions):
 `replace_supplemental_attribute_component_id!`, `rollback_transaction!`, `static_grid`,
 `static_groups`, `static_read!`, `static_summary`, `static_timestamps`, `static_values`,
 `supplemental_attribute_counts_by_type`, `supplemental_attribute_summary`, `time_series_counts`,
-`transaction`, `transform_single_time_series!`, `verify_integrity`, `zoned_timestamp`,
-`zoned_timestamps`.
+`timestamps`, `transaction`, `transform_single_time_series!`, `value_at`, `verify_integrity`,
+`zoned_timestamp`, `zoned_timestamps`.
 
 ## Constructors
 
@@ -142,6 +143,21 @@ end
 NonSequentialTimeSeries(timestamps, data, name; application_data=nothing, element_type=nothing, units=nothing,
     quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=<inferred>)
 
+struct PersistentTimeSeries{T,N}
+    timestamps   :: Vector{DateTime}     # breakpoints, strictly increasing; one per row of dim 1
+    data         :: Array{T,N}
+    name         :: String
+    application_data  :: Union{Nothing,String}
+    element_type      :: Union{Nothing,String}   # canonical element_type, or nothing for plain scalars
+    units             :: Union{Nothing,String}
+    quantity_kind     :: Union{Nothing,String}
+    unit_system       :: Union{Nothing,UnitSystem}   # nothing = unspecified, not NaturalUnits
+    component_field   :: Union{Nothing,String}
+    time_reference    :: Union{Nothing,TimeReference}  # inferred from the timestamp; see below
+end
+PersistentTimeSeries(timestamps, data, name; application_data=nothing, element_type=nothing, units=nothing,
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=<inferred>)
+
 struct Deterministic{T,N}
     initial_timestamp :: DateTime
     resolution        :: Period
@@ -202,8 +218,9 @@ Scenarios(initial_timestamp, resolution, horizon, interval, count, data, name; a
     quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=<inferred>)
 # note: scenario_count is NOT a constructor argument
 
-# The seven descriptors after `name` are carried on the struct and become the
-# add_time_series! defaults, so a series built with units="MW" keeps them on add.
+# The seven descriptors after `name` are carried on the struct and are the only
+# place they can be set: add_time_series! takes none of them, so a series built
+# with units="MW" reaches the store with them and comes back with them.
 # `unit_system` is a `UnitSystem`: `NaturalUnits` (the units named by `units`)
 # or `ComponentBase` (per-unit against the owning component's own base). The
 # store records the declaration only — it holds no base and rescales nothing —
@@ -233,12 +250,11 @@ end
 `application_data` is an opaque, package-owned payload (typically JSON) the binding can use to
 reconstruct a domain object on read; the store stores it verbatim and never interprets it.
 `add_time_series!` reads `name` off the object (it is not a call argument), so the same array can be
-stored under different names; its `application_data=` keyword defaults to the object's
-`application_data`. `data` keeps its Julia element type: the binding maps `T` to a stored dtype
-(`Float64`, `Float32`, the signed and unsigned integer widths, `Bool`) and converts to row-major
-bytes on the way down. An `element_type=` keyword declares what the elements _mean_ when they are
-not plain numbers (`"tuple(3,f64)"`, `"piecewise_linear"`, … — see
-[Element types](./element-types.md)); it defaults to the object's own `element_type`, which is
+stored under different names; the same is true of `application_data` and every other descriptor.
+`data` keeps its Julia element type: the binding maps `T` to a stored dtype (`Float64`, `Float32`,
+the signed and unsigned integer widths, `Bool`) and converts to row-major bytes on the way down. The
+constructor's `element_type=` keyword declares what the elements _mean_ when they are not plain
+numbers (`"tuple(3,f64)"`, `"piecewise_linear"`, … — see [Element types](./element-types.md)); it is
 `nothing` for plain scalars.
 
 ## Element values
@@ -260,7 +276,8 @@ get_metadata_by_id(store, id).time_series_type       # SingleTimeSeries{Piecewis
 
 The constructor names the `element_type` from the values, so `element_type=` is only for the numeric
 case where the numbers alone cannot say what they mean; declaring one that contradicts the values is
-an error rather than an override.
+an error rather than an override. The constructor is the only door: `add_time_series!` takes no
+`element_type=`, so a write can neither restate nor contradict what the struct settled.
 
 `raw = true` on a read hands back the packing instead — one axis more, held as the physical dtype —
 for a caller that wants the bytes as stored:
@@ -443,8 +460,8 @@ values and a row read back has to equal the one that wrote it.
 
 `StaticGrid` is shared by `static_grid` (a reader's timeline) and `check_static_consistency` (one
 per resolution present) — the same concept, so the same type. Its `resolution` is `nothing` only for
-a `NonSequentialTimeSeries` reader, whose timeline is an explicit list of instants rather than a
-grid; enumerate it with `static_timestamps`.
+a `NonSequentialTimeSeries` or `PersistentTimeSeries` reader, whose timeline is an explicit list of
+instants rather than a grid; enumerate it with `static_timestamps`.
 
 `time_reference` is the one spelling the axis carries — a reader spans one timeline, so a cohort
 whose columns agree reports their reference, one whose columns merely agree on naming instants
@@ -459,12 +476,17 @@ that the timestamps are wall clocks. Three- and four-argument constructors (`Sta
 ```julia
 add_time_series!(
     store::Store, owner_id, owner_type, owner_category::OwnerCategory,
-    ts;   # SingleTimeSeries, NonSequentialTimeSeries, or any dense forecast struct
-    features::AbstractDict = Dict(), element_type = ts.element_type, units = ts.units,
-    quantity_kind = ts.quantity_kind, unit_system = ts.unit_system,
-    component_field = ts.component_field, application_data = ts.application_data,
-    id = nothing,   # file under this catalog id (imports); `nothing` lets the catalog assign
+    ts;   # SingleTimeSeries, NonSequentialTimeSeries, PersistentTimeSeries, or a forecast struct
+    features::AbstractDict = Dict(),
 ) -> Int64   # the catalog row's id -- what every read and removal takes
+
+# `features` is the only thing the call adds. `name` and all seven descriptors
+# (`element_type`, `units`, `quantity_kind`, `unit_system`, `component_field`,
+# `application_data`, `time_reference`) come off `ts`, set where it was built.
+# The call does NOT take an `id`: the catalog assigns and the write reports what
+# it chose, because "never reissued" is a guarantee of AUTOINCREMENT that a
+# caller free to name an id could break. Replaying the ids a document recorded
+# is import_time_series_associations_openapi, a different door.
 
 read_by_id(store::Store, id::Integer;
           start_time=nothing, len=nothing, count=nothing,
@@ -473,9 +495,14 @@ read_by_ids(store::Store, ids::AbstractVector{<:Integer};
            time_range=nothing) -> Vector
 ```
 
-A read names only an id, so the row's own stored type decides what comes back. Every read populates
-the returned struct's `application_data` field from the stored association, so a binding's
-reconstruction tag comes back with the data — no separate `get_metadata_by_id` call is needed.
+A read names only an id, so the row's own stored type decides what comes back — including a
+`PersistentTimeSeries`, whose `time_range` slices on the step function's own terms: the result
+begins at the breakpoint _in force at_ `start`, so it always defines a value there, and a `start`
+before the first breakpoint is an error rather than a clamp. A zero-width range (`end == start`) is
+the exception and selects nothing, as it does for every other type — including before the first
+breakpoint, where a non-empty window errors. Every read populates the returned struct's
+`application_data` field from the stored association, so a binding's reconstruction tag comes back
+with the data — no separate `get_metadata_by_id` call is needed.
 
 `owner_id` is an integer identifier (`Int64`) and `owner_category` (`Component` /
 `SupplementalAttribute`) completes the owner identity — the owner is the pair
@@ -505,11 +532,11 @@ read_by_ids(store::Store, ids::AbstractVector{<:Integer};
 
 Reads many whole series in one call, returning one per id **in the order the ids are given**,
 repeats included, each as the struct matching its stored type (`SingleTimeSeries`,
-`NonSequentialTimeSeries`, `Deterministic`, `Probabilistic`, or `Scenarios`) — the result is a
-`Vector{Any}`, so narrow it yourself when every id is one type. Packed `SingleTimeSeries` are read
-and decompressed once per dataset instead of per series, so this is the efficient way to load many
-complete series (exploration, plotting). An empty id vector returns an empty vector without touching
-the store.
+`NonSequentialTimeSeries`, `PersistentTimeSeries`, `Deterministic`, `Probabilistic`, or `Scenarios`)
+— the result is a `Vector{Any}`, so narrow it yourself when every id is one type. Packed
+`SingleTimeSeries` are read and decompressed once per dataset instead of per series, so this is the
+efficient way to load many complete series (exploration, plotting). An empty id vector returns an
+empty vector without touching the store.
 
 An id naming no row throws `NotFoundError` (the whole call fails; the error does not say which id
 dangled — sift them with `association_exists` when that matters).
@@ -670,14 +697,12 @@ The forecast `name` comes from the struct, e.g.
 add_time_series!(
     store, owner_id, owner_type, owner_category::OwnerCategory,
     ts::Union{Deterministic,Probabilistic,Scenarios};
-    features=Dict(), element_type=ts.element_type, units=ts.units,
-    quantity_kind=ts.quantity_kind, unit_system=ts.unit_system,
-    component_field=ts.component_field, application_data=ts.application_data,
+    features=Dict(),
 ) -> Int64
 ```
 
-The descriptor keywords default to the struct's own fields, so a label set at construction survives
-the add; pass a keyword to override it for one association.
+The descriptors come off the struct, exactly as for the static types: a label set at construction is
+what the row records, and the add has no say in it.
 
 A `DeterministicSingleTimeSeries` is not added directly. Derive one from every stored
 `SingleTimeSeries` (sharing the backing array) with:
@@ -825,40 +850,93 @@ are partitioned into `(dtype, element_shape)` groups, and each group's values co
 
 ```julia
 build_static_reader(store; resolution::Union{Nothing,Period}=nothing,
+                    window_start=nothing, window_length=nothing,
                     time_series_type::Type=SingleTimeSeries, owner_id=nothing,
                     owner_category=nothing, name=nothing, name_glob=nothing,
-                    features=Dict(), component_field=nothing) -> StaticReader
+                    features=Dict(), component_field=nothing,
+                    initial_timestamp=nothing, length=nothing) -> StaticReader
 
 static_grid(reader)       -> StaticGrid  # .initial_timestamp, .resolution (or nothing), .length
 static_timestamps(reader) -> Vector{DateTime}  # every instant on the timeline, in order
-static_groups(reader)     -> Vector{StaticGroup}  # each: .dtype, .element_shape, .keys
+static_groups(reader)     -> Vector{StaticGroup}  # each: .dtype, .element_shape, .ids
 static_read!(reader, t) -> reader  # fills buffers; errors if t is off the timeline
        # t is spelled like the axis: a bare DateTime (a wall clock) for a zoneless one,
        # a ZonedDateTime (TimeZones loaded) for one recording instants or unspecified
 static_values(reader, group_index::Integer) -> Array
-       # (num_columns, element_dims...); column j is static_groups(reader)[group_index].keys[j]
+       # (num_columns, element_dims...); column j is static_groups(reader)[group_index].ids[j]
 ```
 
 All matched series must share one timeline — one grid (`initial_timestamp` + `length`) for
 `SingleTimeSeries`, one timestamp vector for `NonSequentialTimeSeries`. The build validates this and
 errors on divergence, so there is no presence mask — every column has a value at every valid
-timestamp.
+timestamp. When they do not share one there are two remedies below, answering different questions: a
+window sweeps a span across the ragged series, a grid filter drops the ones that are not on the grid
+you want.
+
+`PersistentTimeSeries` is the exception: its columns may sit on **different** breakpoint vectors,
+because a step function has a value at every instant from its first breakpoint on. The reader's
+timeline is then the union of every column's breakpoints, and each column reports the value in force
+there. Reading before some column's first breakpoint errors, naming that column. There is still no
+presence mask.
 
 `resolution` is required for `SingleTimeSeries` (one resolution per reader) and must be omitted for
-`time_series_type=NonSequentialTimeSeries`, which has none; `static_grid(reader).resolution` is then
-`nothing`. Iterating `static_timestamps` covers either kind, so one loop serves both:
+`time_series_type=NonSequentialTimeSeries` and `time_series_type=PersistentTimeSeries`, which have
+none; `static_grid(reader).resolution` is then `nothing`. Iterating `static_timestamps` covers every
+kind, so one loop serves all three:
 
 ```julia
 reader = build_static_reader(store; resolution = Hour(1))
 # ...or, for irregular series:
 # reader = build_static_reader(store; time_series_type = NonSequentialTimeSeries)
+# ...or, for step functions:
+# reader = build_static_reader(store; time_series_type = PersistentTimeSeries)
 for t in static_timestamps(reader)
     static_read!(reader, t)
     for (gi, g) in enumerate(static_groups(reader))
-        vals = static_values(reader, gi)   # column j ↔ g.keys[j]
+        vals = static_values(reader, gi)   # column j ↔ g.ids[j]
     end
 end
 ```
+
+#### Reader windows
+
+Passing `window_start` (a `DateTime`, or a `ZonedDateTime` with TimeZones loaded) drops the
+shared-grid requirement. The reader's axis becomes the span you named, and each column reads at an
+**offset of its own**, so `SingleTimeSeries` that begin at different instants, or run for different
+lengths, sweep together as long as they all cover the span. `window_length` pins the extent in
+timesteps; without one the reader runs as far from the anchor as _every_ matched series reaches.
+
+```julia
+reader = build_static_reader(store; resolution = Hour(1),
+                             window_start = DateTime(2024, 1, 1, 7))
+static_grid(reader).length    # as far as every matched series reaches from 07:00
+```
+
+The span is checked, never clamped: a matched series that does not cover it is an
+`InvalidParameterError` **naming that series** rather than a column quietly left out; the anchor
+must fall at or after each series' start and on one of its own step boundaries; and a monthly
+resolution is refused where re-anchoring would move the dates, by the same rule that governs a
+sliced read. The anchor's spelling must match the series' (a `DateTime` is a wall clock, a
+`ZonedDateTime` an instant), and the window belongs to `SingleTimeSeries` alone — the two irregular
+types carry their timeline rather than deriving it. `window_length` without `window_start` is
+refused.
+
+#### Selecting one grid
+
+`initial_timestamp` and `length` are the window's counterpart: **filter** keywords that match only
+the series already on that grid, so the ones that are not on it never become columns.
+
+```julia
+build_static_reader(store; resolution = Hour(1), window_start = t7)        # 3 columns, 17 steps
+build_static_reader(store; resolution = Hour(1), initial_timestamp = t7)   # 2 columns, 8784 steps
+```
+
+Use the window when the ragged series should all take part in the sweep, the filter when they should
+not; they compose. With `resolution` the two complete the grid triple, which is what lets a filter
+name a whole grid rather than only be refused a divergent one. They are ordinary filter keywords, so
+they reach [`list_metadata`](#list_metadata), [`remove_by_filter!`](#remove_by_filter), and the rest
+— and like every filter they select rather than assert: a grid no row is on is an empty result, not
+an error.
 
 ### ForecastReader
 
@@ -1211,7 +1289,10 @@ open_store_without_catalog(path; catalog=:attached) -> Store
 
 `export_time_series_associations_openapi` takes the same filter keywords as `list_metadata`. Every
 row's `uri` and `data_hash` are the hex-encoded content hash the store already has for that row —
-never a caller-supplied locator. With no filter this exports the whole catalog, sorted by identity.
+never a caller-supplied locator. With no filter this exports the whole catalog, sorted by identity —
+except `PersistentTimeSeries` rows, which are omitted: the type is an infrastore-local extension the
+wire contract has no schema for, so it cannot be spelled in a document. A filter naming that type is
+an error rather than an empty array.
 
 `export_supplemental_attribute_associations_openapi` exports the whole
 `supplemental_attribute_associations` table, sorted by `(component_id, attribute_id)`;
@@ -1227,7 +1308,9 @@ records pointing at the wrong series. An irregular series locates its time axis 
 `timestamps_uri`, filled from the axis's own content hash: the axis is stored beside the arrays and
 shared across a cohort, and the values cannot imply it — two irregular series with byte-identical
 values on different axes share one content-addressed array. A row missing the locator, or naming an
-axis the store does not hold, is refused. Any of those, or an absent array, throws
+axis the store does not hold, is refused. A `PersistentTimeSeries` row is refused before any of
+that: the type is an infrastore-local extension, outside the six the wire contract defines, so a
+document naming one is rejected by the discriminator check. Any of those, or an absent array, throws
 `InvalidParameterError` and rolls the whole batch back.
 
 Infrastore never modifies the data to make an incoming document agree with what it already holds. A
@@ -1285,12 +1368,12 @@ The message text comes from the FFI layer's thread-local error buffer.
 
 The package overloads `Base` so the wrapped types behave like native Julia values:
 
-- `show` renders compact one-liners for `Store` and the five value types; every result struct
+- `show` renders compact one-liners for `Store` and the value types; every result struct
   (`TimeSeriesMetadata`, `StaticSummaryRow`, …) gets generated `==`/`hash`/`show`, so results work
   as `Dict`/`Set` members, and `AddBatch` defines `length`.
-- `length`, `eltype`, `getindex`, and `iterate` on `SingleTimeSeries` / `NonSequentialTimeSeries`
-  delegate to the wrapped `data` array (element count, not time steps, for multi-dimensional
-  values). Forecast types define `length` = window count.
+- `length`, `eltype`, `getindex`, and `iterate` on `SingleTimeSeries` / `NonSequentialTimeSeries` /
+  `PersistentTimeSeries` delegate to the wrapped `data` array (element count, not time steps, for
+  multi-dimensional values). Forecast types define `length` = window count.
 - Do-block forms guarantee `close!` even on throw:
 
 ```julia
@@ -1367,10 +1450,45 @@ place every instant identically forever, and telling them apart is the point of 
 at all.
 
 ```julia
+timestamps(series::SingleTimeSeries)         -> Vector{DateTime}
+timestamps(series::NonSequentialTimeSeries)  -> Vector{DateTime}
+timestamps(series::PersistentTimeSeries)     -> Vector{DateTime}
+
+infer_resolution(timestamps) -> Period
+SingleTimeSeries(timestamps::AbstractVector, data, name; kwargs...)
+```
+
+Every timestamp of a static series, in order. For the two irregular types this is a copy of the
+stored vector; for a `SingleTimeSeries` it walks the grid from `initial_timestamp` by `resolution`.
+That one method is the reason the function exists: a `Month` or `Year` resolution steps on the
+**calendar**, so a series starting January 31st lands on February 29th, and a caller multiplying a
+fixed span by the index would get it wrong. One entry per _time step_, so a multidimensional
+per-step value gives fewer timestamps than `length(series)` counts elements.
+
+The instants are the ones stored; the spelling beside them is `series.time_reference`.
+
+The `SingleTimeSeries` grid is computed **in the core**, through `infrastore_grid_timestamps`, not
+with `initial_timestamp + k * resolution` here. Julia is the one binding whose date library has
+calendar arithmetic of its own — and whose TimeZones overload steps a _local_ clock the core
+deliberately does not — so computing it here would be a second implementation of which instants a
+series contains, agreeing with the core only by luck.
+
+`infer_resolution` is the inverse: the period that reproduces a timeline exactly, or an
+`InvalidParameterError` naming the entry that breaks the pattern. The three-argument
+`SingleTimeSeries(timestamps, data, name)` constructor uses it to build from the timeline you hold
+rather than a resolution you assert — which is **how a local-clock grid reaches the store**. An
+hourly local grid in a DST zone is a uniform instant grid and compacts; a daily or monthly one is
+not, and is refused so you store it as a `NonSequentialTimeSeries` instead. A calendar-scale period
+(`Day(1)` or coarser, and any `Month`/`Year`) on a `ZoneReference` is refused at the write for the
+same reason; sub-daily periods are unaffected.
+
+```julia
 zoned_timestamp(instant::DateTime, reference::TimeReference) -> ZonedDateTime
 zoned_timestamp(series) -> ZonedDateTime          # SingleTimeSeries / the three forecasts
 zoned_timestamp(metadata::TimeSeriesMetadata) -> ZonedDateTime
+zoned_timestamps(series::SingleTimeSeries)        -> Vector{ZonedDateTime}
 zoned_timestamps(series::NonSequentialTimeSeries) -> Vector{ZonedDateTime}
+zoned_timestamps(series::PersistentTimeSeries)    -> Vector{ZonedDateTime}
 ```
 
 Fuses a read instant back together with the spelling it was written in. Requires `using TimeZones`
@@ -1385,6 +1503,41 @@ zoned_timestamp(series)   # 2024-01-01T00:00:00-07:00
 
 Throws for a `ZonelessReference()` series, whose timestamps name no instant, and for one that
 recorded no reference at all.
+
+### Reading a step function at an instant
+
+```julia
+value_at(series::PersistentTimeSeries, at)      -> value
+index_at(series::PersistentTimeSeries, at)      -> Int
+breakpoint_at(series::PersistentTimeSeries, at) -> DateTime
+```
+
+The value in force at `at`, the 1-based row it came from, and the breakpoint it has been in force
+since. `at` is a `DateTime` or — with `using TimeZones` — a `ZonedDateTime`, and must be spelled the
+way the series' breakpoints are; a mismatch throws the same `InvalidParameterError` a read bound
+earns.
+
+`value_at` is the everyday call, and it is not an approximation: a step function is defined at
+_every_ instant from its first breakpoint onward, so it has a genuine value at `at`. Between
+breakpoints the previous value is carried forward, and past the last breakpoint the last value holds
+indefinitely. Only an `at` strictly _before_ the first breakpoint throws — no value was ever
+declared there, and inventing one would be a guess. A scalar series returns a scalar; one with a
+shaped per-step element returns that step as an array (a copy, so mutating it leaves the series
+alone).
+
+```julia
+curve = PersistentTimeSeries(
+    [DateTime(2024, 1), DateTime(2024, 4), DateTime(2024, 7)],
+    [10.0, 40.0, 70.0],
+    "gas",
+)
+value_at(curve, DateTime(2024, 5, 17))       # 40.0, carried forward from April
+breakpoint_at(curve, DateTime(2024, 5, 17))  # 2024-04-01T00:00:00
+index_at(curve, DateTime(2024, 5, 17))       # 2
+```
+
+These answer for one series in hand. A columnar sweep over many is [`StaticReader`](#staticreader),
+which resolves the same rule per column.
 
 A **query bound must be spelled the way the series is**: a bare `DateTime` bound against a series
 that records instants, or a `ZonedDateTime` bound against a zoneless one, raises

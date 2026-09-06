@@ -57,9 +57,10 @@ struct StaticGroup
 end
 
 """
-A prepared reader over the static series matching a build filter — either the
-`SingleTimeSeries` on one grid, or the `NonSequentialTimeSeries` on one timestamp
-vector. Build with [`build_static_reader`], read a timestamp with
+A prepared reader over the static series matching a build filter — the
+`SingleTimeSeries` on one grid, the `NonSequentialTimeSeries` on one timestamp
+vector, or the `PersistentTimeSeries` matched by it, each on breakpoints of its
+own. Build with [`build_static_reader`], read a timestamp with
 [`static_read!`], then pull each group's values with [`static_values`]. Inspect
 the layout via [`static_groups`] / [`static_grid`] / [`static_timestamps`].
 """
@@ -132,10 +133,11 @@ function _static_group_layout(reader::StaticReader, gi::Integer)
 end
 
 """
-    build_static_reader(store; resolution=nothing, time_series_type=SingleTimeSeries,
+    build_static_reader(store; resolution=nothing, window_start=nothing,
+                        window_length=nothing, time_series_type=SingleTimeSeries,
                         owner_id=nothing, owner_category=nothing, name=nothing,
                         name_glob=nothing, features=nothing, component_field=nothing,
-                        zoneless=nothing)
+                        zoneless=nothing, initial_timestamp=nothing, length=nothing)
 
 Build a [`StaticReader`] over the static series matching the filter.
 
@@ -146,12 +148,47 @@ pass no `resolution`: an irregular series has none, and the matched series must
 instead share one timestamp vector (read it with [`static_timestamps`]), which is
 also what pools their arrays on disk.
 
+`window_start` lifts that shared-grid requirement. Give one (a `DateTime`, or a
+`ZonedDateTime` with TimeZones loaded) and the reader sweeps the span you name
+instead: each column reads at an offset of its own, so `SingleTimeSeries` that
+begin at different instants, or run for different lengths, read together as long
+as they all cover the window. `window_length` gives the span an extent in
+timesteps; without one the reader runs as far from the anchor as *every* matched
+series reaches.
+
+The window is checked rather than clamped, in the three ways that would
+otherwise return a full, plausible, wrong row: a matched series that does not
+cover it is an `InvalidParameterError` naming that series rather than a column
+quietly dropped; the anchor must fall at or after each series' start and on one
+of its own step boundaries; and a monthly resolution is refused where
+re-anchoring would move the dates, by the same rule that governs a sliced read.
+Its spelling must match the series' (a `DateTime` is a wall clock, a
+`ZonedDateTime` an instant), and it belongs to `SingleTimeSeries` alone — the two
+irregular types carry their timeline rather than deriving it, so there is nothing
+to re-anchor.
+
+The window is not the `initial_timestamp` / `length` *filter* pair, which selects
+only the series already on that grid. The window sweeps a named span across
+whatever matched, letting each column read at an offset of its own; the filter
+matches only the series that already begin there. Use the window when the ragged
+series should all take part, the filter when they should not.
+
+`time_series_type=PersistentTimeSeries` also takes no `resolution`, and is the
+one case where the matched series need **not** share a timeline: a step function
+has a value at every instant from its first breakpoint onward, so each column
+carries its values forward on its own breakpoints. The reader's timestamps are then the
+union of every column's breakpoints — every instant at which some column changes
+value. Reading at an instant before some column's first breakpoint is an error
+naming that column.
+
 The remaining keywords are [`list_metadata`](@ref)'s filters, `name_glob` (a
 case-sensitive SQLite `GLOB` pattern over the name) included.
 """
 function build_static_reader(
     store::Store;
     resolution::Union{Nothing, Period}=nothing,
+    window_start=nothing,
+    window_length::Union{Nothing, Integer}=nothing,
     time_series_type::Type=SingleTimeSeries,
     owner_id::Union{Nothing, Integer}=nothing,
     owner_category::Union{Nothing, OwnerCategory}=nothing,
@@ -160,16 +197,19 @@ function build_static_reader(
     features::Union{Nothing, AbstractDict}=nothing,
     component_field::Union{Nothing, AbstractString}=nothing,
     zoneless::Union{Nothing, Bool}=nothing,
+    initial_timestamp=nothing,
+    length::Union{Nothing, Integer}=nothing,
 )
     # Parameters first, so a metadata row's `time_series_type` names a reader as
     # readily as the bare type does.
     static_type = _base_time_series_type(time_series_type)
-    static_type in (SingleTimeSeries, NonSequentialTimeSeries) || throw(
-        InvalidParameterError(
-            "build_static_reader handles the static types (SingleTimeSeries / " *
-            "NonSequentialTimeSeries); got $time_series_type",
-        ),
-    )
+    static_type in (SingleTimeSeries, NonSequentialTimeSeries, PersistentTimeSeries) ||
+        throw(
+            InvalidParameterError(
+                "build_static_reader handles the static types (SingleTimeSeries / " *
+                "NonSequentialTimeSeries / PersistentTimeSeries); got $time_series_type",
+            ),
+        )
     has_owner = owner_id !== nothing
     owner_arg = has_owner ? Int64(owner_id) : Int64(0)
     has_category = owner_category !== nothing
@@ -185,6 +225,16 @@ function build_static_reader(
     # cohort that spans both coherence groups either way, naming the series that
     # disagree.
     zoneless_arg = zoneless === nothing ? Int32(-1) : Int32(zoneless ? 1 : 0)
+    # The anchor is a query bound like any other: the wire form is Unix
+    # milliseconds either way, and the spelling flag is the only thing that tells
+    # a wall clock from an instant.
+    has_anchor = window_start !== nothing
+    anchor_ms = has_anchor ? _to_unix_ms(window_start) : Int64(0)
+    anchor_zoneless = has_anchor && is_zoneless(_time_reference_of(window_start))
+    # The grid *filter*: matched on the instant a row stores, so it carries no
+    # spelling flag of its own.
+    has_initial = initial_timestamp !== nothing
+    initial_arg = has_initial ? _to_unix_ms(initial_timestamp) : Int64(0)
     out = Ref{Ptr{Cvoid}}(C_NULL)
     code = @ccall lib_path().infrastore_store_build_static_reader(
         store::Ptr{Cvoid},
@@ -199,6 +249,15 @@ function build_static_reader(
         features_arg::Cstring,
         component_field_arg::Cstring,
         zoneless_arg::Int32,
+        has_initial::Bool,
+        initial_arg::Int64,
+        (length !== nothing)::Bool,
+        UInt64(length === nothing ? 0 : length)::UInt64,
+        has_anchor::Bool,
+        anchor_ms::Int64,
+        anchor_zoneless::Bool,
+        (window_length !== nothing)::Bool,
+        UInt64(window_length === nothing ? 0 : window_length)::UInt64,
         out::Ref{Ptr{Cvoid}},
     )::Int32
     _check(code)
@@ -223,8 +282,10 @@ end
 
 The reader's timeline. For a `SingleTimeSeries` reader the valid timestamps are
 `initial_timestamp + k·resolution` for `k in 0:length-1`. For a
-`NonSequentialTimeSeries` reader `resolution` is `nothing` — there is no constant
-step — and [`static_timestamps`] gives the instants themselves.
+`NonSequentialTimeSeries` or `PersistentTimeSeries` reader `resolution` is
+`nothing` — there is no constant step — and [`static_timestamps`] gives the
+instants themselves (for a persistent reader, the union of its columns'
+breakpoints).
 """
 function static_grid(reader::StaticReader)
     out_initial = Ref{Int64}(0)
@@ -495,6 +556,8 @@ function build_forecast_reader(
     features::Union{Nothing, AbstractDict}=nothing,
     component_field::Union{Nothing, AbstractString}=nothing,
     zoneless::Union{Nothing, Bool}=nothing,
+    initial_timestamp=nothing,
+    length::Union{Nothing, Integer}=nothing,
 )
     type_code = _int_for_type(time_series_type)
     has_owner = owner_id !== nothing
@@ -512,6 +575,8 @@ function build_forecast_reader(
     # cohort that spans both coherence groups either way, naming the series that
     # disagree.
     zoneless_arg = zoneless === nothing ? Int32(-1) : Int32(zoneless ? 1 : 0)
+    has_initial = initial_timestamp !== nothing
+    initial_arg = has_initial ? _to_unix_ms(initial_timestamp) : Int64(0)
     out = Ref{Ptr{Cvoid}}(C_NULL)
     code = @ccall lib_path().infrastore_store_build_forecast_reader(
         store::Ptr{Cvoid},
@@ -526,6 +591,10 @@ function build_forecast_reader(
         features_arg::Cstring,
         component_field_arg::Cstring,
         zoneless_arg::Int32,
+        has_initial::Bool,
+        initial_arg::Int64,
+        (length !== nothing)::Bool,
+        UInt64(length === nothing ? 0 : length)::UInt64,
         out::Ref{Ptr{Cvoid}},
     )::Int32
     _check(code)

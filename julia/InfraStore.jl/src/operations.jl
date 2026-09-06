@@ -256,21 +256,26 @@ end
 # `DeterministicSingleTimeSeries` is derived in-store via
 # `transform_single_time_series!`, never added directly).
 const _AddableTimeSeries = Union{
-    SingleTimeSeries, NonSequentialTimeSeries, Deterministic, Probabilistic, Scenarios
+    SingleTimeSeries, NonSequentialTimeSeries, PersistentTimeSeries, Deterministic,
+    Probabilistic, Scenarios,
 }
 
 """
     add_time_series!(store, owner_id, owner_type, owner_category, ts;
-                     features=nothing, element_type=ts.element_type,
-                     units=ts.units, application_data=ts.application_data) -> Int64
+                     features=nothing) -> Int64
 
 Add a time series (`SingleTimeSeries`, `NonSequentialTimeSeries`,
-`Deterministic`, `Probabilistic`, or `Scenarios`) and return the catalog `id`
-its row was filed under — the handle every read and removal takes, and
-the one a caller records in its own object model. `owner_id` identifies the
-owning component / supplemental attribute (a signed 64-bit integer). The
-association `name` comes from the time series object (`ts.name`), as do its
-`element_type` and `units` labels.
+`PersistentTimeSeries`, `Deterministic`, `Probabilistic`, or `Scenarios`) and
+return the catalog `id` its row was filed under — the handle every read and
+removal takes, and the one a caller records in its own object model. `owner_id`
+identifies the owning component / supplemental attribute (a signed 64-bit integer).
+
+`features` is the only thing this call adds to the series. Everything the row
+records about the values themselves comes off the object: its `name`, and its
+`element_type`, `units`, `quantity_kind`, `unit_system`, `component_field`,
+`application_data` and `time_reference` descriptors, each set where the series
+was constructed. That is what makes a read-then-add lossless — a series read
+from one store can be added to another unchanged, with nothing to re-supply.
 
 A `features` key that shadows a field of a time series or of the identity a row
 is filed under (`name`, `resolution`, `owner_id`, …) is rejected: those names
@@ -641,6 +646,78 @@ function _bulk_non_sequential(
     end
 end
 
+# Reconstruct one PersistentTimeSeries from a bulk-read result slot. Identical
+# to `_bulk_non_sequential` above -- the two types have the same payload (carrying
+# `application_data` / `element_type` / `units`, as `_bulk_single` does), and the
+# same element-type decoding applies.
+function _bulk_persistent(
+    result::Ptr{Cvoid}, idx::Integer, name::AbstractString, raw::Bool,
+    types::NamedTuple,
+)
+    out_ts = Ref{Ptr{Int64}}(C_NULL)
+    out_ts_len = Ref{UInt64}(0)
+    out_dtype = Ref{Int32}(0)
+    out_shape = Ref{Ptr{Int64}}(C_NULL)
+    out_shape_len = Ref{UInt64}(0)
+    out_data = Ref{Ptr{UInt8}}(C_NULL)
+    out_data_len = Ref{UInt64}(0)
+    out_application_data = Ref{Ptr{Cchar}}(C_NULL)
+    out_element_type = Ref{Ptr{Cchar}}(C_NULL)
+    out_units = Ref{Ptr{Cchar}}(C_NULL)
+    out_quantity_kind = Ref{Ptr{Cchar}}(C_NULL)
+    out_unit_system = Ref{Ptr{Cchar}}(C_NULL)
+    out_time_reference = Ref{Ptr{Cchar}}(C_NULL)
+    out_component_field = Ref{Ptr{Cchar}}(C_NULL)
+    _check(
+        @ccall lib_path().infrastore_bulk_result_get_persistent(
+            result::Ptr{Cvoid},
+            UInt64(idx)::UInt64,
+            out_ts::Ref{Ptr{Int64}},
+            out_ts_len::Ref{UInt64},
+            out_dtype::Ref{Int32},
+            out_shape::Ref{Ptr{Int64}},
+            out_shape_len::Ref{UInt64},
+            out_data::Ref{Ptr{UInt8}},
+            out_data_len::Ref{UInt64},
+            out_application_data::Ref{Ptr{Cchar}},
+            out_element_type::Ref{Ptr{Cchar}},
+            out_units::Ref{Ptr{Cchar}},
+            out_quantity_kind::Ref{Ptr{Cchar}},
+            out_unit_system::Ref{Ptr{Cchar}},
+            out_time_reference::Ref{Ptr{Cchar}},
+            out_component_field::Ref{Ptr{Cchar}},
+        )::Int32
+    )
+    try
+        ts_ms = copy(unsafe_wrap(Array, out_ts[], Int(out_ts_len[]); own=false))
+        dims = Int.(unsafe_wrap(Array, out_shape[], Int(out_shape_len[]); own=false))
+        bytes = copy(unsafe_wrap(Array, out_data[], Int(out_data_len[]); own=false))
+        raw_data = _decode_array(bytes, out_dtype[], dims)
+        element_type = _peek_cstr(out_element_type[])
+        return PersistentTimeSeries(
+            _from_unix_ms.(ts_ms), _read_values(raw_data, element_type, raw, types), name;
+            application_data=_peek_cstr(out_application_data[]),
+            element_type=element_type,
+            units=_peek_cstr(out_units[]),
+            quantity_kind=_peek_cstr(out_quantity_kind[]),
+            unit_system=_unit_system(_peek_cstr(out_unit_system[])),
+            time_reference=_time_reference(_peek_cstr(out_time_reference[])),
+            component_field=_peek_cstr(out_component_field[]),
+        )
+    finally
+        _free_i64(out_ts[], out_ts_len[])
+        _free_i64(out_shape[], out_shape_len[])
+        _free_u8(out_data[], out_data_len[])
+        _free_cstr(out_application_data[])
+        _free_cstr(out_element_type[])
+        _free_cstr(out_units[])
+        _free_cstr(out_quantity_kind[])
+        _free_cstr(out_unit_system[])
+        _free_cstr(out_time_reference[])
+        _free_cstr(out_component_field[])
+    end
+end
+
 # Reconstruct one forecast (Deterministic / Probabilistic / Scenarios) from a
 # bulk-read result slot; `type_code` is the ts_type discriminant. As above, the
 # descriptive attributes come back with the data.
@@ -796,6 +873,8 @@ function _decode_bulk_result(
                 _bulk_single(result, i - 1, name, raw, types)
             elseif t == INFRASTORE_TYPE_NON_SEQUENTIAL
                 _bulk_non_sequential(result, i - 1, name, raw, types)
+            elseif t == INFRASTORE_TYPE_PERSISTENT
+                _bulk_persistent(result, i - 1, name, raw, types)
             else
                 _bulk_forecast(result, i - 1, t, name, raw, types)
             end
@@ -893,6 +972,15 @@ A window is *checked*, not clamped: a `start_time` off the series' own grid, or 
 `time_range` on [`read_by_ids`](@ref) would quietly
 hand back the smaller answer that fits. Throws `NotFoundError` if `id` names no
 row, following [`read_by_ids`](@ref).
+
+One slice is refused by both forms. A series whose resolution is a calendar
+period (`P1M`, `P1Y`) is stored as an anchor plus a count, and month-end
+arithmetic clamps: a monthly grid from Jan-31 is Jan-31, Feb-29, Mar-31, but
+re-anchored at its own Feb-29 it would read Feb-29, Mar-29, Apr-29. A slice that
+would have to describe itself that way throws `InvalidParameterError` rather than
+returning the stored values under dates the store does not hold. Read the series
+whole and slice its `timestamps`, or store the instants with
+[`NonSequentialTimeSeries`](@ref).
 
 Pass `owner = (owner_id, category)` to hold the row to that owner, and get
 [`OwnerMismatchError`](@ref) when it belongs to someone else. The owner comes off

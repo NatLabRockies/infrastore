@@ -4,7 +4,7 @@
 //!
 //! ```python
 //! from infrastore import (
-//!     Store, SingleTimeSeries, NonSequentialTimeSeries,
+//!     Store, SingleTimeSeries, NonSequentialTimeSeries, PersistentTimeSeries,
 //!     TimeSeriesType, OwnerCategory,
 //!     SupplementalAttributeAssociation, ParentChildAssociation,
 //!     TimeSeriesError, NotFoundError, OwnerMismatchError, DuplicateTimeSeriesError,
@@ -25,7 +25,7 @@ use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use pyo3::types::{
-    PyAny, PyBool, PyBytes, PyDateTime, PyDict, PyFloat, PyInt, PyList, PyString, PyTzInfo,
+    PyAny, PyBool, PyBytes, PyDateTime, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple, PyTzInfo,
 };
 
 // ---- Exceptions -----------------------------------------------------------
@@ -441,6 +441,7 @@ fn catalog_name(catalog: core_lib::CatalogMode) -> &'static str {
 pub enum PyTimeSeriesType {
     SingleTimeSeries,
     NonSequentialTimeSeries,
+    PersistentTimeSeries,
     Deterministic,
     DeterministicSingleTimeSeries,
     Probabilistic,
@@ -453,6 +454,9 @@ impl From<PyTimeSeriesType> for core_lib::TimeSeriesType {
             PyTimeSeriesType::SingleTimeSeries => core_lib::TimeSeriesType::SingleTimeSeries,
             PyTimeSeriesType::NonSequentialTimeSeries => {
                 core_lib::TimeSeriesType::NonSequentialTimeSeries
+            }
+            PyTimeSeriesType::PersistentTimeSeries => {
+                core_lib::TimeSeriesType::PersistentTimeSeries
             }
             PyTimeSeriesType::Deterministic => core_lib::TimeSeriesType::Deterministic,
             PyTimeSeriesType::DeterministicSingleTimeSeries => {
@@ -470,6 +474,9 @@ impl From<core_lib::TimeSeriesType> for PyTimeSeriesType {
             core_lib::TimeSeriesType::SingleTimeSeries => PyTimeSeriesType::SingleTimeSeries,
             core_lib::TimeSeriesType::NonSequentialTimeSeries => {
                 PyTimeSeriesType::NonSequentialTimeSeries
+            }
+            core_lib::TimeSeriesType::PersistentTimeSeries => {
+                PyTimeSeriesType::PersistentTimeSeries
             }
             core_lib::TimeSeriesType::Deterministic => PyTimeSeriesType::Deterministic,
             core_lib::TimeSeriesType::DeterministicSingleTimeSeries => {
@@ -696,6 +703,281 @@ fn numpy_from_typed<'py>(
     shaped.call_method0("copy")
 }
 
+// ---- Arrow export ---------------------------------------------------------
+
+/// Import `pyarrow`, or explain which extra provides it.
+///
+/// Deliberately not a runtime dependency of the wheel: pyarrow is several times
+/// the size of everything else installed, and the binding's own currency is
+/// numpy arrays. Only `to_arrow` needs it, so only `to_arrow` asks for it.
+fn pyarrow(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
+    py.import("pyarrow").map_err(|_| {
+        pyo3::exceptions::PyImportError::new_err(
+            "to_arrow() requires pyarrow, which infrastore does not install by default. \
+             Install it with `pip install 'infrastore[arrow]'` (or `pip install pyarrow`).",
+        )
+    })
+}
+
+/// The pyarrow timestamp type that spells `reference`.
+///
+/// Arrow's `timestamp(unit, tz)` is the same shape as the store's own model — an
+/// instant plus the spelling it was written in — so the mapping is total and
+/// lossless. Millisecond unit throughout, which is the precision every instant
+/// the store records is held to, so nothing is widened or truncated:
+///
+/// | reference | Arrow type |
+/// | --- | --- |
+/// | `None`, `utc` | `timestamp[ms, tz=UTC]` |
+/// | `zoneless` | `timestamp[ms]` (no zone) |
+/// | `-07:00` | `timestamp[ms, tz=-07:00]` |
+/// | `America/Denver` | `timestamp[ms, tz=America/Denver]` |
+///
+/// A zone this interpreter's tz database does not know warns and falls back to
+/// UTC, matching [`spell_instant`]: the instants are intact either way, and
+/// failing a read over a label nobody can resolve would be worse.
+fn arrow_timestamp_type<'py>(
+    pa: &Bound<'py, PyModule>,
+    reference: Option<&core_lib::TimeReference>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let py = pa.py();
+    let zone: Option<String> = match reference {
+        None | Some(core_lib::TimeReference::Utc) => Some("UTC".to_string()),
+        Some(core_lib::TimeReference::Zoneless) => None,
+        Some(r @ core_lib::TimeReference::FixedOffset(_)) => Some(r.as_storage_string()),
+        Some(core_lib::TimeReference::Zone(name)) => {
+            // pyarrow builds the type from any string, so probe the zone the way
+            // the datetime path does rather than trusting it to complain later.
+            if zone_info(py, name).is_err() {
+                warn_unknown_zone(py, name)?;
+                Some("UTC".to_string())
+            } else {
+                Some(name.clone())
+            }
+        }
+    };
+    match zone {
+        Some(tz) => pa.call_method1("timestamp", ("ms", tz)),
+        None => pa.call_method1("timestamp", ("ms",)),
+    }
+}
+
+/// `instants` as a pyarrow `timestamp[ms, …]` array.
+///
+/// Built from the raw milliseconds through numpy rather than from a list of
+/// `datetime` objects: an 8760-row year should not allocate 8760 Python objects
+/// on its way out, and `pa.array` reads a `datetime64[ms]` buffer as the UTC
+/// instants they are before labelling them with the zone.
+fn arrow_timestamp_array<'py>(
+    pa: &Bound<'py, PyModule>,
+    instants: &[DateTime<Utc>],
+    reference: Option<&core_lib::TimeReference>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let py = pa.py();
+    let mut raw = Vec::with_capacity(instants.len() * 8);
+    for t in instants {
+        raw.extend_from_slice(&t.timestamp_millis().to_le_bytes());
+    }
+    let np = py.import("numpy")?;
+    let millis = np.call_method1("frombuffer", (PyBytes::new(py, &raw), "<i8"))?;
+    let as_dt64 = millis.call_method1("astype", ("datetime64[ms]",))?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("type", arrow_timestamp_type(pa, reference)?)?;
+    pa.call_method("array", (as_dt64,), Some(&kwargs))
+}
+
+/// A numpy array shaped `(entries, *element_shape)` as one pyarrow column.
+///
+/// A scalar element gives a primitive array. A multidimensional one gives nested
+/// `fixed_size_list`s — one level per element dimension, innermost first, which
+/// is the order the flat C-ordered buffer is already in.
+fn arrow_column<'py>(
+    pa: &Bound<'py, PyModule>,
+    values: &Bound<'py, PyAny>,
+    element_shape: &[usize],
+) -> PyResult<Bound<'py, PyAny>> {
+    // The stored bytes are little-endian; pyarrow wants the platform's order. A
+    // no-op everywhere infrastore is built today.
+    let native = values.call_method1(
+        "astype",
+        (values
+            .getattr("dtype")?
+            .call_method1("newbyteorder", ("=",))?,),
+    )?;
+    let flat = native.call_method1("reshape", ((-1i64,),))?;
+    let mut column = pa.call_method1("array", (flat,))?;
+    for dim in element_shape.iter().rev() {
+        column = pa
+            .getattr("FixedSizeListArray")?
+            .call_method1("from_arrays", (column, *dim))?;
+    }
+    Ok(column)
+}
+
+/// `data` as one pyarrow column, one entry per timestep.
+fn arrow_value_array<'py>(
+    pa: &Bound<'py, PyModule>,
+    data: &core_lib::TypedArray,
+) -> PyResult<Bound<'py, PyAny>> {
+    let values = numpy_from_typed(pa.py(), data)?;
+    arrow_column(pa, &values, data.element_shape())
+}
+
+/// A two-column `pyarrow.Table` — `timestamp` and `value` — carrying the
+/// series' descriptive attributes as schema metadata.
+///
+/// The value column is named `value` rather than after the series so that tables
+/// from different components concatenate without renaming; the series' own name
+/// rides in the metadata along with everything else that describes the values
+/// but does not address them. Schema metadata is the right home for those: it
+/// survives a Parquet round trip, so the table is not lossy against the object
+/// it came from.
+fn arrow_table<'py>(
+    py: Python<'py>,
+    instants: &[DateTime<Utc>],
+    reference: Option<&core_lib::TimeReference>,
+    data: &core_lib::TypedArray,
+    metadata: BTreeMap<String, String>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let pa = pyarrow(py)?;
+    let column = arrow_value_array(&pa, data)?;
+    arrow_table_from_column(&pa, instants, reference, column, metadata)
+}
+
+/// [`arrow_table`] over a value column that is already built — the forecast
+/// path, where one window is a slice of the stored array rather than the whole
+/// of it.
+fn arrow_table_from_column<'py>(
+    pa: &Bound<'py, PyModule>,
+    instants: &[DateTime<Utc>],
+    reference: Option<&core_lib::TimeReference>,
+    column: Bound<'py, PyAny>,
+    metadata: BTreeMap<String, String>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let columns = PyDict::new(pa.py());
+    columns.set_item("timestamp", arrow_timestamp_array(pa, instants, reference)?)?;
+    columns.set_item("value", column)?;
+    let kwargs = PyDict::new(pa.py());
+    kwargs.set_item("metadata", metadata)?;
+    pa.call_method("table", (columns,), Some(&kwargs))
+}
+
+/// The descriptive attributes a `to_arrow` table carries as schema metadata.
+///
+/// A macro for the same reason as `apply_descriptors!`: the three static types
+/// name these fields identically but share no trait. Absent values are left out
+/// rather than written as an empty string, so `b"units" in table.schema.metadata`
+/// answers "was a label declared?".
+macro_rules! arrow_metadata {
+    ($inner:expr, $type_name:literal) => {{
+        let mut meta: BTreeMap<String, String> = BTreeMap::new();
+        meta.insert("time_series_type".to_string(), $type_name.to_string());
+        meta.insert("name".to_string(), $inner.name.clone());
+        meta.insert("element_type".to_string(), $inner.element_type.to_string());
+        if let Some(v) = &$inner.units {
+            meta.insert("units".to_string(), v.clone());
+        }
+        if let Some(v) = &$inner.quantity_kind {
+            meta.insert("quantity_kind".to_string(), v.clone());
+        }
+        if let Some(v) = $inner.unit_system {
+            meta.insert("unit_system".to_string(), v.as_str().to_string());
+        }
+        if let Some(v) = &$inner.component_field {
+            meta.insert("component_field".to_string(), v.clone());
+        }
+        if let Some(v) = &$inner.application_data {
+            meta.insert("application_data".to_string(), v.clone());
+        }
+        if let Some(v) = &$inner.time_reference {
+            meta.insert(
+                "time_reference".to_string(),
+                core_lib::TimeReference::as_storage_string(v),
+            );
+        }
+        meta
+    }};
+}
+
+// ---- Descriptive attributes -----------------------------------------------
+
+/// The descriptive keyword arguments every time-series constructor accepts.
+///
+/// These describe the values without addressing them: none is part of a series'
+/// identity, so two series differing only in these are a duplicate. They belong
+/// to the value object rather than to `Store.add_time_series`, which is what
+/// makes a read-then-re-add lossless — a write path that took them as its own
+/// arguments could only default them to `None`, and then either clobbered
+/// whatever the object already carried or, guarding against that, quietly kept a
+/// stale label the caller thought they had replaced.
+struct DescriptorArgs {
+    application_data: Option<String>,
+    element_type: Option<String>,
+    units: Option<String>,
+    quantity_kind: Option<String>,
+    unit_system: Option<String>,
+    component_field: Option<String>,
+    time_reference: Option<String>,
+}
+
+impl DescriptorArgs {
+    /// Resolve the raw keyword strings into core descriptors.
+    ///
+    /// `element_type` falls back to what the core constructor derived from the
+    /// array's own dtype, and `time_reference` to the spelling `inferred` from
+    /// the timestamps the caller handed in. Omitting `time_reference` therefore
+    /// means *infer*, not *unspecified*; a series that records no spelling comes
+    /// from a store that never had one, not from this constructor.
+    fn resolve(
+        self,
+        py: Python<'_>,
+        element_type: core_lib::ElementType,
+        inferred: Option<core_lib::TimeReference>,
+    ) -> PyResult<core_lib::Descriptors> {
+        Ok(core_lib::Descriptors {
+            element_type: match self.element_type {
+                Some(declared) => parse_element_type(&declared)?,
+                None => element_type,
+            },
+            units: self.units,
+            quantity_kind: self.quantity_kind,
+            unit_system: parse_unit_system(self.unit_system.as_deref())?,
+            time_reference: match self.time_reference {
+                Some(spelling) => Some(parse_time_reference(py, &spelling)?),
+                None => inferred,
+            },
+            component_field: self.component_field,
+            application_data: self.application_data,
+        })
+    }
+}
+
+/// Write resolved descriptors onto a concrete core time-series value.
+///
+/// A macro rather than a function because the six types name these fields
+/// identically but share no trait, and `TimeSeriesData::set_descriptors` is out
+/// of reach here — a constructor holds the concrete type, not the enum.
+macro_rules! apply_descriptors {
+    ($inner:expr, $descriptors:expr) => {{
+        let core_lib::Descriptors {
+            element_type,
+            units,
+            quantity_kind,
+            unit_system,
+            time_reference,
+            component_field,
+            application_data,
+        } = $descriptors;
+        $inner.element_type = element_type;
+        $inner.units = units;
+        $inner.quantity_kind = quantity_kind;
+        $inner.unit_system = unit_system;
+        $inner.time_reference = time_reference;
+        $inner.component_field = component_field;
+        $inner.application_data = application_data;
+    }};
+}
+
 // ---- Deterministic --------------------------------------------------------
 
 #[pyclass(name = "Deterministic", module = "infrastore", from_py_object)]
@@ -708,12 +990,19 @@ pub struct PyDeterministic {
 impl PyDeterministic {
     /// Build a `Deterministic` forecast. `data` is a numpy array of shape
     /// `[H, count, *E]`. `name` is required.
+    ///
+    /// The keyword-only arguments are the descriptive attributes documented on
+    /// `SingleTimeSeries`; they travel with the forecast into the store and
+    /// come back on a read.
     #[new]
     #[pyo3(signature = (
-        initial_timestamp, resolution, horizon, interval, count, data, name
+        initial_timestamp, resolution, horizon, interval, count, data, name, *,
+        application_data=None, element_type=None, units=None, quantity_kind=None,
+        unit_system=None, component_field=None, time_reference=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
+        py: Python<'_>,
         initial_timestamp: PyInstant,
         resolution: Bound<'_, PyAny>,
         horizon: Bound<'_, PyAny>,
@@ -721,12 +1010,19 @@ impl PyDeterministic {
         count: usize,
         data: &Bound<'_, PyAny>,
         name: String,
+        application_data: Option<String>,
+        element_type: Option<String>,
+        units: Option<String>,
+        quantity_kind: Option<String>,
+        unit_system: Option<String>,
+        component_field: Option<String>,
+        time_reference: Option<String>,
     ) -> PyResult<Self> {
         let resolution = pyany_to_period(&resolution)?;
         let horizon = pyany_to_period(&horizon)?;
         let interval = pyany_to_period(&interval)?;
         let typed = typed_array_from_numpy(data)?;
-        let inner = core_lib::Deterministic::new(
+        let mut inner = core_lib::Deterministic::new(
             initial_timestamp.instant,
             resolution,
             horizon,
@@ -736,17 +1032,63 @@ impl PyDeterministic {
             name,
         )
         .map_err(InvalidParameterError::new_err)?;
-        // The spelling is inferred from the timestamp the caller handed us, not
-        // asked for separately: the intent is in the object, and it is erased
-        // the moment the instant reaches the core.
-        let mut inner = inner;
-        inner.time_reference = Some(initial_timestamp.reference);
+        // The spelling is inferred from the timestamp the caller handed us
+        // rather than asked for separately: the intent is in the object, and it
+        // is erased the moment the instant reaches the core. `time_reference=`
+        // is the override for a caller who means a different one.
+        let descriptors = DescriptorArgs {
+            application_data,
+            element_type,
+            units,
+            quantity_kind,
+            unit_system,
+            component_field,
+            time_reference,
+        }
+        .resolve(py, inner.element_type, Some(initial_timestamp.reference))?;
+        apply_descriptors!(inner, descriptors);
         Ok(Self { inner })
     }
 
     #[getter]
     fn name(&self) -> String {
         self.inner.name.clone()
+    }
+
+    /// Opaque, package-owned payload stored verbatim, or `None`.
+    #[getter]
+    fn application_data(&self) -> Option<String> {
+        self.inner.application_data.clone()
+    }
+
+    /// What the stored elements mean, in the store's own vocabulary.
+    #[getter]
+    fn element_type(&self) -> String {
+        self.inner.element_type.to_string()
+    }
+
+    /// User-declared units label for the values (e.g. `"MW"`), or `None`.
+    #[getter]
+    fn units(&self) -> Option<String> {
+        self.inner.units.clone()
+    }
+
+    /// What kind of physical quantity the values measure, or `None`.
+    #[getter]
+    fn quantity_kind(&self) -> Option<String> {
+        self.inner.quantity_kind.clone()
+    }
+
+    /// `"natural_units"`, `"component_base"`, or `None` for unspecified.
+    #[getter]
+    fn unit_system(&self) -> Option<&'static str> {
+        self.inner.unit_system.map(|u| u.as_str())
+    }
+
+    /// The owning component's field these values vary, or `None`.
+    #[getter]
+    fn component_field(&self) -> Option<String> {
+        self.inner.component_field.clone()
     }
 
     /// The first window's timestamp, spelled the way it was written.
@@ -795,6 +1137,80 @@ impl PyDeterministic {
     }
 
     /// Value equality: all fields including the data array (bitwise).
+    /// The forecast as `{issue_time: pyarrow.Table}`, one entry per window.
+    ///
+    /// Requires pyarrow, which is not installed with infrastore — use
+    /// `pip install 'infrastore[arrow]'`.
+    ///
+    /// The key is the window's issue time — `initial_timestamp + k · interval`,
+    /// spelled the way the series was written. Each value is a two-column
+    /// `timestamp`/`value` table over that window's horizon, shaped exactly like
+    /// a `SingleTimeSeries.to_arrow()`: `horizon / resolution` rows stepping by
+    /// `resolution` from the issue time.
+    ///
+    /// **The dict is in window order**, which Python's insertion-ordered `dict`
+    /// makes an ordering you can rely on: `next(iter(windows))` is the earliest
+    /// issue time and iteration is chronological. It is not a sorted *container*
+    /// — there is no O(log n) range lookup — so `bisect` over `list(windows)` is
+    /// the way to select a span of issue times.
+    ///
+    /// ```python
+    /// windows = forecast.to_arrow_windows()
+    /// windows[datetime(2024, 1, 2, tzinfo=timezone.utc)]   # that day's forecast
+    /// for issue_time, table in windows.items(): ...        # chronological
+    /// ```
+    ///
+    /// Note that the two grids differ and both are needed to place a value:
+    /// windows step by `interval`, the rows inside one step by `resolution`.
+    /// They coincide only for a forecast whose windows abut, which is not the
+    /// common case — a day-ahead forecast reissued hourly overlaps 23 of every
+    /// 24 rows, so the tables deliberately repeat those values rather than
+    /// pretending one timeline covers them.
+    ///
+    /// Each table carries the forecast's descriptive attributes as schema
+    /// metadata, plus its own `issue_time`, so a window written to Parquet on
+    /// its own still knows which one it is.
+    ///
+    /// This materializes every window. The stored array is `[H, count, *E]` —
+    /// window index innermost — so it is transposed once here; for a
+    /// per-timestamp sweep the cheap path is `Store.build_forecast_reader`,
+    /// which reads on the axis the data is already laid out along.
+    fn to_arrow_windows<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let pa = pyarrow(py)?;
+        let inner = &self.inner;
+        let reference = inner.time_reference.as_ref();
+        // `[H, count, *E]` -> `[count, H, *E]`, once and contiguous, so each
+        // window below is a view rather than its own gather.
+        let np = py.import("numpy")?;
+        let stored = numpy_from_typed(py, &inner.data)?;
+        let by_window = np.call_method1(
+            "ascontiguousarray",
+            (stored.call_method1("swapaxes", (0, 1))?,),
+        )?;
+        // The element shape is what follows `[H, count]`; `TypedArray`'s own
+        // `element_shape` drops one axis, which is the static layout's rule.
+        let element_shape: Vec<usize> = inner.data.shape.get(2..).unwrap_or(&[]).to_vec();
+
+        let windows = PyDict::new(py);
+        for k in 0..inner.count {
+            let stamps = inner.window_timestamps(k).map_err(map_err)?;
+            let start = inner.window_start(k).map_err(map_err)?;
+            let mut metadata = arrow_metadata!(inner, "Deterministic");
+            metadata.insert("resolution".to_string(), inner.resolution.to_iso8601());
+            metadata.insert("horizon".to_string(), inner.horizon.to_iso8601());
+            metadata.insert("interval".to_string(), inner.interval.to_iso8601());
+            metadata.insert("count".to_string(), inner.count.to_string());
+            metadata.insert(
+                "issue_time".to_string(),
+                render_catalog_timestamp(start, reference),
+            );
+            let column = arrow_column(&pa, &by_window.get_item(k)?, &element_shape)?;
+            let table = arrow_table_from_column(&pa, &stamps, reference, column, metadata)?;
+            windows.set_item(spell_instant(py, start, reference)?, table)?;
+        }
+        Ok(windows)
+    }
+
     fn __eq__(&self, other: &Self) -> bool {
         self.inner == other.inner
     }
@@ -831,12 +1247,19 @@ pub struct PyProbabilistic {
 impl PyProbabilistic {
     /// Build a `Probabilistic` forecast. `data` is a numpy array of shape
     /// `[num_percentiles, H, count, *E]`. `name` is required.
+    ///
+    /// The keyword-only arguments are the descriptive attributes documented on
+    /// `SingleTimeSeries`; they travel with the forecast into the store and
+    /// come back on a read.
     #[new]
     #[pyo3(signature = (
-        initial_timestamp, resolution, horizon, interval, count, percentiles, data, name
+        initial_timestamp, resolution, horizon, interval, count, percentiles, data, name, *,
+        application_data=None, element_type=None, units=None, quantity_kind=None,
+        unit_system=None, component_field=None, time_reference=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
+        py: Python<'_>,
         initial_timestamp: PyInstant,
         resolution: Bound<'_, PyAny>,
         horizon: Bound<'_, PyAny>,
@@ -845,12 +1268,19 @@ impl PyProbabilistic {
         percentiles: Vec<f64>,
         data: &Bound<'_, PyAny>,
         name: String,
+        application_data: Option<String>,
+        element_type: Option<String>,
+        units: Option<String>,
+        quantity_kind: Option<String>,
+        unit_system: Option<String>,
+        component_field: Option<String>,
+        time_reference: Option<String>,
     ) -> PyResult<Self> {
         let resolution = pyany_to_period(&resolution)?;
         let horizon = pyany_to_period(&horizon)?;
         let interval = pyany_to_period(&interval)?;
         let typed = typed_array_from_numpy(data)?;
-        let inner = core_lib::Probabilistic::new(
+        let mut inner = core_lib::Probabilistic::new(
             initial_timestamp.instant,
             resolution,
             horizon,
@@ -861,17 +1291,63 @@ impl PyProbabilistic {
             name,
         )
         .map_err(InvalidParameterError::new_err)?;
-        // The spelling is inferred from the timestamp the caller handed us, not
-        // asked for separately: the intent is in the object, and it is erased
-        // the moment the instant reaches the core.
-        let mut inner = inner;
-        inner.time_reference = Some(initial_timestamp.reference);
+        // The spelling is inferred from the timestamp the caller handed us
+        // rather than asked for separately: the intent is in the object, and it
+        // is erased the moment the instant reaches the core. `time_reference=`
+        // is the override for a caller who means a different one.
+        let descriptors = DescriptorArgs {
+            application_data,
+            element_type,
+            units,
+            quantity_kind,
+            unit_system,
+            component_field,
+            time_reference,
+        }
+        .resolve(py, inner.element_type, Some(initial_timestamp.reference))?;
+        apply_descriptors!(inner, descriptors);
         Ok(Self { inner })
     }
 
     #[getter]
     fn name(&self) -> String {
         self.inner.name.clone()
+    }
+
+    /// Opaque, package-owned payload stored verbatim, or `None`.
+    #[getter]
+    fn application_data(&self) -> Option<String> {
+        self.inner.application_data.clone()
+    }
+
+    /// What the stored elements mean, in the store's own vocabulary.
+    #[getter]
+    fn element_type(&self) -> String {
+        self.inner.element_type.to_string()
+    }
+
+    /// User-declared units label for the values (e.g. `"MW"`), or `None`.
+    #[getter]
+    fn units(&self) -> Option<String> {
+        self.inner.units.clone()
+    }
+
+    /// What kind of physical quantity the values measure, or `None`.
+    #[getter]
+    fn quantity_kind(&self) -> Option<String> {
+        self.inner.quantity_kind.clone()
+    }
+
+    /// `"natural_units"`, `"component_base"`, or `None` for unspecified.
+    #[getter]
+    fn unit_system(&self) -> Option<&'static str> {
+        self.inner.unit_system.map(|u| u.as_str())
+    }
+
+    /// The owning component's field these values vary, or `None`.
+    #[getter]
+    fn component_field(&self) -> Option<String> {
+        self.inner.component_field.clone()
     }
 
     /// The first window's timestamp, spelled the way it was written.
@@ -963,12 +1439,19 @@ impl PyScenarios {
     /// Build a `Scenarios` forecast. `data` is a numpy array of shape
     /// `[scenario_count, H, count, *E]`; `scenario_count` is taken from the
     /// leading axis. `name` is required.
+    ///
+    /// The keyword-only arguments are the descriptive attributes documented on
+    /// `SingleTimeSeries`; they travel with the forecast into the store and
+    /// come back on a read.
     #[new]
     #[pyo3(signature = (
-        initial_timestamp, resolution, horizon, interval, count, data, name
+        initial_timestamp, resolution, horizon, interval, count, data, name, *,
+        application_data=None, element_type=None, units=None, quantity_kind=None,
+        unit_system=None, component_field=None, time_reference=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
+        py: Python<'_>,
         initial_timestamp: PyInstant,
         resolution: Bound<'_, PyAny>,
         horizon: Bound<'_, PyAny>,
@@ -976,6 +1459,13 @@ impl PyScenarios {
         count: usize,
         data: &Bound<'_, PyAny>,
         name: String,
+        application_data: Option<String>,
+        element_type: Option<String>,
+        units: Option<String>,
+        quantity_kind: Option<String>,
+        unit_system: Option<String>,
+        component_field: Option<String>,
+        time_reference: Option<String>,
     ) -> PyResult<Self> {
         let resolution = pyany_to_period(&resolution)?;
         let horizon = pyany_to_period(&horizon)?;
@@ -984,7 +1474,7 @@ impl PyScenarios {
         let scenario_count = *typed.shape.first().ok_or_else(|| {
             InvalidParameterError::new_err("Scenarios: data must have at least one axis")
         })?;
-        let inner = core_lib::Scenarios::new(
+        let mut inner = core_lib::Scenarios::new(
             initial_timestamp.instant,
             resolution,
             horizon,
@@ -995,17 +1485,63 @@ impl PyScenarios {
             name,
         )
         .map_err(InvalidParameterError::new_err)?;
-        // The spelling is inferred from the timestamp the caller handed us, not
-        // asked for separately: the intent is in the object, and it is erased
-        // the moment the instant reaches the core.
-        let mut inner = inner;
-        inner.time_reference = Some(initial_timestamp.reference);
+        // The spelling is inferred from the timestamp the caller handed us
+        // rather than asked for separately: the intent is in the object, and it
+        // is erased the moment the instant reaches the core. `time_reference=`
+        // is the override for a caller who means a different one.
+        let descriptors = DescriptorArgs {
+            application_data,
+            element_type,
+            units,
+            quantity_kind,
+            unit_system,
+            component_field,
+            time_reference,
+        }
+        .resolve(py, inner.element_type, Some(initial_timestamp.reference))?;
+        apply_descriptors!(inner, descriptors);
         Ok(Self { inner })
     }
 
     #[getter]
     fn name(&self) -> String {
         self.inner.name.clone()
+    }
+
+    /// Opaque, package-owned payload stored verbatim, or `None`.
+    #[getter]
+    fn application_data(&self) -> Option<String> {
+        self.inner.application_data.clone()
+    }
+
+    /// What the stored elements mean, in the store's own vocabulary.
+    #[getter]
+    fn element_type(&self) -> String {
+        self.inner.element_type.to_string()
+    }
+
+    /// User-declared units label for the values (e.g. `"MW"`), or `None`.
+    #[getter]
+    fn units(&self) -> Option<String> {
+        self.inner.units.clone()
+    }
+
+    /// What kind of physical quantity the values measure, or `None`.
+    #[getter]
+    fn quantity_kind(&self) -> Option<String> {
+        self.inner.quantity_kind.clone()
+    }
+
+    /// `"natural_units"`, `"component_base"`, or `None` for unspecified.
+    #[getter]
+    fn unit_system(&self) -> Option<&'static str> {
+        self.inner.unit_system.map(|u| u.as_str())
+    }
+
+    /// The owning component's field these values vary, or `None`.
+    #[getter]
+    fn component_field(&self) -> Option<String> {
+        self.inner.component_field.clone()
     }
 
     /// The first window's timestamp, spelled the way it was written.
@@ -1095,26 +1631,189 @@ pub struct PySingleTimeSeries {
 #[pymethods]
 impl PySingleTimeSeries {
     /// `name` is required.
+    ///
+    /// The keyword-only arguments are the series' descriptive attributes. They
+    /// describe the values without addressing them, so none is part of a
+    /// series' identity: two series differing only in these are a duplicate,
+    /// and none can be filtered on except `component_field`. Each is stored on
+    /// the association and handed back on a read.
+    ///
+    /// `units` labels the values (`"MW"`). `quantity_kind` names what kind of
+    /// physical quantity they measure (`"ActivePower"`) — free-form, with QUDT
+    /// `QuantityKind` local names the recommended vocabulary; it separates
+    /// active from reactive power, which dimensional analysis cannot.
+    /// `unit_system` is `"natural_units"` or `"component_base"`; omitting it
+    /// leaves the basis unspecified, which is not the same as declaring natural
+    /// units. `component_field` names the field on the owning component whose
+    /// value these values are the time-varying form of
+    /// (`"max_active_power"`) — free-form and never interpreted by the store.
+    /// `application_data` is an opaque, package-owned payload (typically JSON)
+    /// stored verbatim; end users are not expected to set it. `element_type`
+    /// declares what the array's elements mean in the store's own vocabulary
+    /// (`"tuple(3,f64)"`, `"piecewise_linear"`, …); omit it for plain numbers,
+    /// where it defaults to the array's own dtype spelling.
+    ///
+    /// `time_reference` overrides the timestamp spelling, which is otherwise
+    /// inferred from `initial_timestamp` (naive is zoneless; a `ZoneInfo` with
+    /// a `key` names its zone). It takes `"utc"`, `"zoneless"`, a fixed offset
+    /// (`"-07:00"`), or an IANA zone name.
     #[new]
-    #[pyo3(signature = (initial_timestamp, resolution, data, name))]
+    #[pyo3(signature = (
+        initial_timestamp, resolution, data, name, *, application_data=None,
+        element_type=None, units=None, quantity_kind=None, unit_system=None,
+        component_field=None, time_reference=None
+    ))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
+        py: Python<'_>,
         initial_timestamp: PyInstant,
         resolution: Bound<'_, PyAny>,
         data: &Bound<'_, PyAny>,
         name: String,
+        application_data: Option<String>,
+        element_type: Option<String>,
+        units: Option<String>,
+        quantity_kind: Option<String>,
+        unit_system: Option<String>,
+        component_field: Option<String>,
+        time_reference: Option<String>,
     ) -> PyResult<Self> {
         let resolution = pyany_to_period(&resolution)?;
         let typed = typed_array_from_numpy(data)?;
         let mut inner =
             core_lib::SingleTimeSeries::new(initial_timestamp.instant, resolution, typed, name);
         // See the forecast constructors: the spelling rides in on the timestamp.
-        inner.time_reference = Some(initial_timestamp.reference);
+        let descriptors = DescriptorArgs {
+            application_data,
+            element_type,
+            units,
+            quantity_kind,
+            unit_system,
+            component_field,
+            time_reference,
+        }
+        .resolve(py, inner.element_type, Some(initial_timestamp.reference))?;
+        apply_descriptors!(inner, descriptors);
+        Ok(Self { inner })
+    }
+
+    /// Build from the timeline you actually hold, inferring `resolution` and
+    /// **proving** the instants lie on it.
+    ///
+    /// The constructor takes `initial_timestamp` + `resolution` and the store
+    /// cannot check the claim — the vector it describes is never supplied. This
+    /// takes the vector: it either fits a period exactly, or raises
+    /// `InvalidParameterError` naming the entry that broke the pattern and
+    /// pointing at `NonSequentialTimeSeries`.
+    ///
+    /// **This is how a local-clock timeline reaches the store.** The store has
+    /// no time-zone database and never runs local → instant; you materialize the
+    /// grid with `zoneinfo` — where the policy for a nonexistent or ambiguous
+    /// wall clock belongs — and hand over the instants. An hourly local grid in
+    /// a DST zone *is* a uniform instant grid, so it compacts here; a daily or
+    /// monthly one is not, and is refused so you store it explicitly.
+    ///
+    /// The timestamp spelling is inferred from the vector exactly as the
+    /// constructor infers it from `initial_timestamp`, and the vector must agree
+    /// on one spelling.
+    ///
+    /// Step on **UTC**, then convert back: adding a `timedelta` to an aware
+    /// `datetime` is wall-clock arithmetic, so stepping in local time skips the
+    /// repeated hour at a fall-back transition and leaves a two-hour gap in the
+    /// instants — which this refuses, correctly, as not a grid.
+    ///
+    /// ```python
+    /// denver = ZoneInfo("America/Denver")
+    /// start = datetime(2024, 11, 3, tzinfo=denver).astimezone(timezone.utc)
+    /// hours = [(start + timedelta(hours=k)).astimezone(denver) for k in range(6)]
+    /// # 00:00 MDT, 01:00 MDT, 01:00 MST, 02:00 MST, ... -- the repeated hour is
+    /// # two distinct instants an hour apart, which is why this is a grid.
+    /// SingleTimeSeries.from_timestamps(hours, values, "load")   # -> resolution "PT1H"
+    ///
+    /// days = [datetime(2024, 11, d, tzinfo=denver) for d in range(1, 6)]
+    /// SingleTimeSeries.from_timestamps(days, values, "peak")    # InvalidParameterError
+    /// ```
+    #[classmethod]
+    #[pyo3(signature = (
+        timestamps, data, name, *, application_data=None, element_type=None, units=None,
+        quantity_kind=None, unit_system=None, component_field=None, time_reference=None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn from_timestamps(
+        _cls: &Bound<'_, pyo3::types::PyType>,
+        py: Python<'_>,
+        timestamps: Vec<PyInstant>,
+        data: &Bound<'_, PyAny>,
+        name: String,
+        application_data: Option<String>,
+        element_type: Option<String>,
+        units: Option<String>,
+        quantity_kind: Option<String>,
+        unit_system: Option<String>,
+        component_field: Option<String>,
+        time_reference: Option<String>,
+    ) -> PyResult<Self> {
+        // One vector, one spelling -- the same rule the irregular constructors
+        // apply, and for the same reason: a series records one reference.
+        let inferred = vector_reference(&timestamps)?;
+        let instants: Vec<DateTime<Utc>> = timestamps.iter().map(|t| t.instant).collect();
+        let typed = typed_array_from_numpy(data)?;
+        let mut inner = core_lib::SingleTimeSeries::from_timestamps(&instants, typed, name)
+            .map_err(InvalidParameterError::new_err)?;
+        let descriptors = DescriptorArgs {
+            application_data,
+            element_type,
+            units,
+            quantity_kind,
+            unit_system,
+            component_field,
+            time_reference,
+        }
+        .resolve(py, inner.element_type, inferred)?;
+        apply_descriptors!(inner, descriptors);
         Ok(Self { inner })
     }
 
     #[getter]
     fn name(&self) -> String {
         self.inner.name.clone()
+    }
+
+    /// Opaque, package-owned payload stored verbatim, or `None`.
+    #[getter]
+    fn application_data(&self) -> Option<String> {
+        self.inner.application_data.clone()
+    }
+
+    /// What the stored elements mean, in the store's own vocabulary. Always
+    /// concrete: a plain numeric series reports the array's dtype spelling.
+    #[getter]
+    fn element_type(&self) -> String {
+        self.inner.element_type.to_string()
+    }
+
+    /// User-declared units label for the values (e.g. `"MW"`), or `None`.
+    #[getter]
+    fn units(&self) -> Option<String> {
+        self.inner.units.clone()
+    }
+
+    /// What kind of physical quantity the values measure, or `None`.
+    #[getter]
+    fn quantity_kind(&self) -> Option<String> {
+        self.inner.quantity_kind.clone()
+    }
+
+    /// `"natural_units"`, `"component_base"`, or `None` for unspecified.
+    #[getter]
+    fn unit_system(&self) -> Option<&'static str> {
+        self.inner.unit_system.map(|u| u.as_str())
+    }
+
+    /// The owning component's field these values vary, or `None`.
+    #[getter]
+    fn component_field(&self) -> Option<String> {
+        self.inner.component_field.clone()
     }
 
     /// The grid's first timestamp, spelled the way it was written.
@@ -1150,6 +1849,56 @@ impl PySingleTimeSeries {
     #[getter]
     fn data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         numpy_from_typed(py, &self.inner.data)
+    }
+
+    /// The whole grid materialized, `initial_timestamp` first, spelled the way
+    /// it was written — the regular counterpart of the explicit vector
+    /// `NonSequentialTimeSeries` and `PersistentTimeSeries` carry.
+    ///
+    /// This is the only correct way to rebuild the timeline. A `P1M` resolution
+    /// steps on the calendar, so multiplying a fixed span by the index gets a
+    /// monthly series wrong.
+    #[getter]
+    fn timestamps<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyAny>>> {
+        let grid: Vec<DateTime<Utc>> = self.inner.timestamps().collect();
+        spell_instants(py, &grid, self.inner.time_reference.as_ref())
+    }
+
+    /// This series as a two-column `pyarrow.Table`: `timestamp` and `value`.
+    ///
+    /// Requires pyarrow, which is not installed with infrastore — use
+    /// `pip install 'infrastore[arrow]'`.
+    ///
+    /// The timestamp column materializes the grid (calendar-aware for a monthly
+    /// resolution) and is typed `timestamp[ms, tz=…]` in the series' own
+    /// spelling: UTC, a fixed offset, an IANA zone, or no zone at all for a
+    /// zoneless series. The value column is the array — a primitive type for a
+    /// scalar series, nested `fixed_size_list` for a multidimensional
+    /// per-timestep value. Composite element types stay in their stored
+    /// packing; `element_type` in the schema metadata names what they are, and
+    /// `decode_element_values` unpacks them.
+    ///
+    /// The series' descriptive attributes (`name`, `units`, `quantity_kind`,
+    /// `unit_system`, `component_field`, `element_type`, `time_reference`,
+    /// `resolution`, `application_data`) ride in `table.schema.metadata`, so the
+    /// table is not lossy against the object and survives a Parquet round trip.
+    ///
+    /// ```python
+    /// table = series.to_arrow()
+    /// table.to_pandas()          # if pandas is installed
+    /// polars.from_arrow(table)   # if polars is
+    /// ```
+    fn to_arrow<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let grid: Vec<DateTime<Utc>> = self.inner.timestamps().collect();
+        let mut metadata = arrow_metadata!(self.inner, "SingleTimeSeries");
+        metadata.insert("resolution".to_string(), self.inner.resolution.to_iso8601());
+        arrow_table(
+            py,
+            &grid,
+            self.inner.time_reference.as_ref(),
+            &self.inner.data,
+            metadata,
+        )
     }
 
     /// Value equality: all fields including the data array (bitwise).
@@ -1190,22 +1939,88 @@ pub struct PyNonSequentialTimeSeries {
 #[pymethods]
 impl PyNonSequentialTimeSeries {
     /// `name` is required.
+    ///
+    /// The keyword-only arguments are the descriptive attributes documented on
+    /// `SingleTimeSeries`; they travel with the series into the store and come
+    /// back on a read.
     #[new]
-    #[pyo3(signature = (timestamps, data, name))]
-    fn new(timestamps: Vec<PyInstant>, data: &Bound<'_, PyAny>, name: String) -> PyResult<Self> {
+    #[pyo3(signature = (
+        timestamps, data, name, *, application_data=None, element_type=None, units=None,
+        quantity_kind=None, unit_system=None, component_field=None, time_reference=None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        py: Python<'_>,
+        timestamps: Vec<PyInstant>,
+        data: &Bound<'_, PyAny>,
+        name: String,
+        application_data: Option<String>,
+        element_type: Option<String>,
+        units: Option<String>,
+        quantity_kind: Option<String>,
+        unit_system: Option<String>,
+        component_field: Option<String>,
+        time_reference: Option<String>,
+    ) -> PyResult<Self> {
         let typed = typed_array_from_numpy(data)?;
         // One series records one spelling, so the vector has to agree on one.
         let reference = vector_reference(&timestamps)?;
         let mut inner =
             core_lib::NonSequentialTimeSeries::new(instants_to_utc(&timestamps), typed, name)
                 .map_err(InvalidParameterError::new_err)?;
-        inner.time_reference = reference;
+        let descriptors = DescriptorArgs {
+            application_data,
+            element_type,
+            units,
+            quantity_kind,
+            unit_system,
+            component_field,
+            time_reference,
+        }
+        .resolve(py, inner.element_type, reference)?;
+        apply_descriptors!(inner, descriptors);
         Ok(Self { inner })
     }
 
     #[getter]
     fn name(&self) -> String {
         self.inner.name.clone()
+    }
+
+    /// Opaque, package-owned payload stored verbatim, or `None`.
+    #[getter]
+    fn application_data(&self) -> Option<String> {
+        self.inner.application_data.clone()
+    }
+
+    /// What the stored elements mean, in the store's own vocabulary.
+    #[getter]
+    fn element_type(&self) -> String {
+        self.inner.element_type.to_string()
+    }
+
+    /// User-declared units label for the values (e.g. `"MW"`), or `None`.
+    #[getter]
+    fn units(&self) -> Option<String> {
+        self.inner.units.clone()
+    }
+
+    /// What kind of physical quantity the values measure, or `None`.
+    #[getter]
+    fn quantity_kind(&self) -> Option<String> {
+        self.inner.quantity_kind.clone()
+    }
+
+    /// `"natural_units"`, `"component_base"`, or `None` for unspecified.
+    #[getter]
+    fn unit_system(&self) -> Option<&'static str> {
+        self.inner.unit_system.map(|u| u.as_str())
+    }
+
+    /// The owning component's field these values vary, or `None`.
+    #[getter]
+    fn component_field(&self) -> Option<String> {
+        self.inner.component_field.clone()
     }
 
     /// The explicit timestamp vector, spelled the way it was written.
@@ -1238,6 +2053,26 @@ impl PyNonSequentialTimeSeries {
         numpy_from_typed(py, &self.inner.data)
     }
 
+    /// This series as a two-column `pyarrow.Table`: `timestamp` and `value`.
+    ///
+    /// Requires pyarrow, which is not installed with infrastore — use
+    /// `pip install 'infrastore[arrow]'`. Identical in shape to
+    /// `SingleTimeSeries.to_arrow`, except that the timestamp column is the
+    /// stored vector rather than a computed grid, and the metadata carries no
+    /// `resolution` because an irregular timeline has no constant step.
+    ///
+    /// The rows are the timestamps and nothing else: an irregular series has no
+    /// value *between* two of them, so nothing is filled in.
+    fn to_arrow<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        arrow_table(
+            py,
+            &self.inner.timestamps,
+            self.inner.time_reference.as_ref(),
+            &self.inner.data,
+            arrow_metadata!(self.inner, "NonSequentialTimeSeries"),
+        )
+    }
+
     /// Value equality: all fields including the data array (bitwise).
     fn __eq__(&self, other: &Self) -> bool {
         self.inner == other.inner
@@ -1251,6 +2086,241 @@ impl PyNonSequentialTimeSeries {
     fn __repr__(&self) -> String {
         format!(
             "NonSequentialTimeSeries(name={:?}, length={}, shape={:?}, time_reference={})",
+            self.inner.name,
+            self.inner.length,
+            self.inner.data.shape,
+            reference_label(self.inner.time_reference.as_ref()),
+        )
+    }
+}
+
+// ---- PersistentTimeSeries -------------------------------------------------
+
+/// A sparse step function: breakpoints plus one value each, holding the last
+/// value forward.
+///
+/// Constructed exactly like a `NonSequentialTimeSeries` — a strictly increasing
+/// list of timestamps and an array with one value per timestamp — and the
+/// timestamp spelling is inferred from the input the same way (naive datetimes
+/// are zoneless, a `ZoneInfo` with a `key` names its zone). The difference is
+/// what a read *between* the breakpoints means: the value at breakpoint `i`
+/// stays in force until breakpoint `i + 1`, and past the last one forever,
+/// where a `NonSequentialTimeSeries` has no value there at all. There is no
+/// value before the first breakpoint.
+#[pyclass(name = "PersistentTimeSeries", module = "infrastore", from_py_object)]
+#[derive(Clone)]
+pub struct PyPersistentTimeSeries {
+    inner: core_lib::PersistentTimeSeries,
+}
+
+#[pymethods]
+impl PyPersistentTimeSeries {
+    /// `name` is required.
+    ///
+    /// The keyword-only arguments are the descriptive attributes documented on
+    /// `SingleTimeSeries`; they travel with the series into the store and come
+    /// back on a read. A step function's scalar-collapse policy belongs in
+    /// `application_data` — the store has no column for it.
+    #[new]
+    #[pyo3(signature = (
+        timestamps, data, name, *, application_data=None, element_type=None, units=None,
+        quantity_kind=None, unit_system=None, component_field=None, time_reference=None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        py: Python<'_>,
+        timestamps: Vec<PyInstant>,
+        data: &Bound<'_, PyAny>,
+        name: String,
+        application_data: Option<String>,
+        element_type: Option<String>,
+        units: Option<String>,
+        quantity_kind: Option<String>,
+        unit_system: Option<String>,
+        component_field: Option<String>,
+        time_reference: Option<String>,
+    ) -> PyResult<Self> {
+        let typed = typed_array_from_numpy(data)?;
+        // One series records one spelling, so the vector has to agree on one.
+        let reference = vector_reference(&timestamps)?;
+        let mut inner =
+            core_lib::PersistentTimeSeries::new(instants_to_utc(&timestamps), typed, name)
+                .map_err(InvalidParameterError::new_err)?;
+        let descriptors = DescriptorArgs {
+            application_data,
+            element_type,
+            units,
+            quantity_kind,
+            unit_system,
+            component_field,
+            time_reference,
+        }
+        .resolve(py, inner.element_type, reference)?;
+        apply_descriptors!(inner, descriptors);
+        Ok(Self { inner })
+    }
+
+    #[getter]
+    fn name(&self) -> String {
+        self.inner.name.clone()
+    }
+
+    /// Opaque, package-owned payload stored verbatim, or `None`.
+    #[getter]
+    fn application_data(&self) -> Option<String> {
+        self.inner.application_data.clone()
+    }
+
+    /// What the stored elements mean, in the store's own vocabulary.
+    #[getter]
+    fn element_type(&self) -> String {
+        self.inner.element_type.to_string()
+    }
+
+    /// User-declared units label for the values (e.g. `"MW"`), or `None`.
+    #[getter]
+    fn units(&self) -> Option<String> {
+        self.inner.units.clone()
+    }
+
+    /// What kind of physical quantity the values measure, or `None`.
+    #[getter]
+    fn quantity_kind(&self) -> Option<String> {
+        self.inner.quantity_kind.clone()
+    }
+
+    /// `"natural_units"`, `"component_base"`, or `None` for unspecified.
+    #[getter]
+    fn unit_system(&self) -> Option<&'static str> {
+        self.inner.unit_system.map(|u| u.as_str())
+    }
+
+    /// The owning component's field these values vary, or `None`.
+    #[getter]
+    fn component_field(&self) -> Option<String> {
+        self.inner.component_field.clone()
+    }
+
+    /// The breakpoint vector, spelled the way it was written.
+    #[getter]
+    fn timestamps<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyAny>>> {
+        spell_instants(
+            py,
+            &self.inner.timestamps,
+            self.inner.time_reference.as_ref(),
+        )
+    }
+
+    /// How this series' breakpoints were spelled: `"utc"`, `"zoneless"`, a fixed
+    /// offset (`"-07:00"`), an IANA zone name, or `None` for unspecified.
+    #[getter]
+    fn time_reference(&self) -> Option<String> {
+        self.inner
+            .time_reference
+            .as_ref()
+            .map(core_lib::TimeReference::as_storage_string)
+    }
+
+    #[getter]
+    fn length(&self) -> usize {
+        self.inner.length
+    }
+
+    #[getter]
+    fn data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        numpy_from_typed(py, &self.inner.data)
+    }
+
+    /// The value in force at `at`.
+    ///
+    /// A step function is defined at *every* instant from its first breakpoint
+    /// onward, so this is the series' value at `at` in the ordinary sense, not an
+    /// approximation of one: between breakpoints the previous value is carried
+    /// forward, and past the last breakpoint the last value holds indefinitely.
+    /// The single error is an `at` strictly *before* the first breakpoint, where
+    /// no value was ever declared — `InvalidParameterError`, never a clamp.
+    ///
+    /// Returns exactly what indexing `data` returns: a numpy scalar of the
+    /// series' own dtype for a scalar series, or the per-step subarray for a
+    /// series with a shaped element. `at` must be spelled the way the series'
+    /// breakpoints are (both aware or both naive).
+    fn value_at<'py>(&self, py: Python<'py>, at: PyInstant) -> PyResult<Bound<'py, PyAny>> {
+        check_point_spelling(&at, self.inner.time_reference.as_ref(), "this series")?;
+        let row = self
+            .inner
+            .row_at(at.instant)
+            .map_err(InvalidParameterError::new_err)?;
+        let array = numpy_from_typed(py, &row)?;
+        if row.shape.is_empty() {
+            // A scalar step is a 0-d array; `arr[()]` is numpy's own spelling
+            // for the scalar inside one, and keeps the dtype that `.item()`
+            // would discard.
+            array.get_item(PyTuple::empty(py))
+        } else {
+            Ok(array)
+        }
+    }
+
+    /// The 0-based index into `timestamps` and `data` of the breakpoint
+    /// governing `at` — the greatest breakpoint `<= at`.
+    ///
+    /// `value_at` is the usual way to ask; this is for a caller that wants the
+    /// row itself (to look up a parallel array, say). Errors like `value_at`.
+    fn index_at(&self, at: PyInstant) -> PyResult<usize> {
+        check_point_spelling(&at, self.inner.time_reference.as_ref(), "this series")?;
+        self.inner
+            .index_at(at.instant)
+            .map_err(InvalidParameterError::new_err)
+    }
+
+    /// The breakpoint governing `at` — the instant from which the value at `at`
+    /// has been in force, spelled the way the series' breakpoints are.
+    ///
+    /// Equal to `at` exactly when `at` is itself a breakpoint. Errors like
+    /// `value_at`.
+    fn breakpoint_at<'py>(&self, py: Python<'py>, at: PyInstant) -> PyResult<Bound<'py, PyAny>> {
+        let index = self.index_at(at)?;
+        spell_instant(
+            py,
+            self.inner.timestamps[index],
+            self.inner.time_reference.as_ref(),
+        )
+    }
+
+    /// This series as a two-column `pyarrow.Table`: `timestamp` and `value`.
+    ///
+    /// Requires pyarrow, which is not installed with infrastore — use
+    /// `pip install 'infrastore[arrow]'`.
+    ///
+    /// **One row per breakpoint, not per instant.** A step function is stored
+    /// sparsely and the table is that sparse form: the value at a row stays in
+    /// force until the next row, and past the last one forever. Resampling it
+    /// onto a dense grid is the caller's to do, and needs a grid the series
+    /// itself does not carry — there is no value before the first breakpoint, so
+    /// a grid starting earlier has no answer to give.
+    fn to_arrow<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        arrow_table(
+            py,
+            &self.inner.timestamps,
+            self.inner.time_reference.as_ref(),
+            &self.inner.data,
+            arrow_metadata!(self.inner, "PersistentTimeSeries"),
+        )
+    }
+
+    /// Value equality: all fields including the data array (bitwise).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    /// Number of breakpoints (`length`).
+    fn __len__(&self) -> usize {
+        self.inner.length
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "PersistentTimeSeries(name={:?}, length={}, shape={:?}, time_reference={})",
             self.inner.name,
             self.inner.length,
             self.inner.data.shape,
@@ -1458,12 +2528,15 @@ fn required_item<'py, T: pyo3::conversion::FromPyObjectOwned<'py>>(
 }
 
 /// Pull the core data off a Python time-series object (`SingleTimeSeries`,
-/// `NonSequentialTimeSeries`, `Deterministic`, `Probabilistic`, or `Scenarios`).
+/// `NonSequentialTimeSeries`, `PersistentTimeSeries`, `Deterministic`,
+/// `Probabilistic`, or `Scenarios`).
 fn extract_time_series_data(time_series: &Bound<'_, PyAny>) -> PyResult<core_lib::TimeSeriesData> {
     if let Ok(single) = time_series.extract::<PySingleTimeSeries>() {
         Ok(core_lib::TimeSeriesData::SingleTimeSeries(single.inner))
     } else if let Ok(ns) = time_series.extract::<PyNonSequentialTimeSeries>() {
         Ok(core_lib::TimeSeriesData::NonSequentialTimeSeries(ns.inner))
+    } else if let Ok(p) = time_series.extract::<PyPersistentTimeSeries>() {
+        Ok(core_lib::TimeSeriesData::PersistentTimeSeries(p.inner))
     } else if let Ok(det) = time_series.extract::<PyDeterministic>() {
         Ok(core_lib::TimeSeriesData::Deterministic(det.inner))
     } else if let Ok(prob) = time_series.extract::<PyProbabilistic>() {
@@ -1473,7 +2546,7 @@ fn extract_time_series_data(time_series: &Bound<'_, PyAny>) -> PyResult<core_lib
     } else {
         Err(InvalidParameterError::new_err(
             "time_series must be SingleTimeSeries, NonSequentialTimeSeries, \
-                 Deterministic, Probabilistic, or Scenarios",
+                 PersistentTimeSeries, Deterministic, Probabilistic, or Scenarios",
         ))
     }
 }
@@ -1485,6 +2558,9 @@ fn time_series_data_to_py(py: Python<'_>, data: core_lib::TimeSeriesData) -> PyR
     match data {
         core_lib::TimeSeriesData::SingleTimeSeries(s) => {
             Ok(Py::new(py, PySingleTimeSeries { inner: s })?.into_any())
+        }
+        core_lib::TimeSeriesData::PersistentTimeSeries(s) => {
+            Ok(Py::new(py, PyPersistentTimeSeries { inner: s })?.into_any())
         }
         core_lib::TimeSeriesData::NonSequentialTimeSeries(s) => {
             Ok(Py::new(py, PyNonSequentialTimeSeries { inner: s })?.into_any())
@@ -1531,7 +2607,8 @@ impl PyStaticReader {
     /// "initial_timestamp": rfc3339 str, "resolution": ISO-8601 str | None,
     /// "length": int, "time_reference": str | None}`.
     ///
-    /// `resolution` is `None` for a `NonSequentialTimeSeries` reader: an
+    /// `resolution` is `None` for a `NonSequentialTimeSeries` or
+    /// `PersistentTimeSeries` reader: an
     /// irregular timeline has no constant step, so walk `timestamps()` instead.
     ///
     /// `time_reference` is the one spelling the axis carries. A reader whose
@@ -1789,6 +2866,102 @@ impl PyStore {
             .as_mut()
             .ok_or_else(|| TimeSeriesError::new_err("store is closed"))
     }
+
+    /// The text [`PyStore::show`] prints.
+    ///
+    /// Every number here comes from a catalog aggregate query -- no array is
+    /// touched -- so the cost does not grow with how much data the store holds.
+    fn summary_text(&self) -> PyResult<String> {
+        let store = self.store()?;
+        let by_type = store.counts_by_type().map_err(map_err)?;
+        let detailed = store.time_series_counts_detailed().map_err(map_err)?;
+        let arrays = store.num_distinct_arrays().map_err(map_err)?;
+        let attachments = store
+            .count_supplemental_attribute_associations(&Default::default())
+            .map_err(map_err)?;
+        let edges = store
+            .count_parent_child_associations(&Default::default())
+            .map_err(map_err)?;
+
+        let mut out = format!(
+            "Store: {} ({})\n",
+            self.descr,
+            if self.read_only {
+                "read-only"
+            } else {
+                "read-write"
+            }
+        );
+
+        let total: i64 = by_type.iter().map(|(_, n)| n).sum();
+        if total == 0 {
+            out.push_str("Time series: none\n");
+        } else {
+            out.push_str(&format!(
+                "Time series: {} association{} over {} distinct array{}\n",
+                total,
+                plural(total),
+                arrays,
+                plural(arrays),
+            ));
+            // Static types first, then forecasts -- the grouping the docs use.
+            // `counts_by_type` orders by the numeric type code instead, which
+            // puts `PersistentTimeSeries` after the forecasts because it was
+            // appended to a list that is an on-disk contract.
+            let mut rows = by_type;
+            rows.sort_by_key(|(t, _)| type_display_rank(*t));
+            let name_width = rows
+                .iter()
+                .map(|(t, _)| t.as_str().len())
+                .max()
+                .unwrap_or(0);
+            let count_width = rows
+                .iter()
+                .map(|(_, n)| n.to_string().len())
+                .max()
+                .unwrap_or(0);
+            for (t, n) in rows {
+                out.push_str(&format!(
+                    "  {:<name_width$}  {:>count_width$}\n",
+                    t.as_str(),
+                    n,
+                ));
+            }
+        }
+
+        out.push_str(&format!(
+            "Owners with time series: {} component{}, {} supplemental attribute{}\n",
+            detailed.components_with_time_series,
+            plural(detailed.components_with_time_series),
+            detailed.supplemental_attributes_with_time_series,
+            plural(detailed.supplemental_attributes_with_time_series),
+        ));
+        out.push_str(&format!(
+            "Supplemental attribute attachments: {attachments}\n"
+        ));
+        out.push_str(&format!("Parent/child edges: {edges}"));
+        Ok(out)
+    }
+}
+
+/// `"s"` unless `n` is 1, for the counted nouns in a `show()` summary.
+fn plural(n: i64) -> &'static str {
+    if n == 1 { "" } else { "s" }
+}
+
+/// Sort key putting the three static types before the four forecast ones in a
+/// `show()` listing, each group in the order the documentation introduces them.
+fn type_display_rank(t: core_lib::TimeSeriesType) -> u8 {
+    use core_lib::TimeSeriesType::*;
+    match t {
+        SingleTimeSeries => 0,
+        NonSequentialTimeSeries => 1,
+        PersistentTimeSeries => 2,
+        Deterministic => 3,
+        DeterministicSingleTimeSeries => 4,
+        Probabilistic => 5,
+        Scenarios => 6,
+    }
 }
 
 #[pymethods]
@@ -2000,27 +3173,53 @@ impl PyStore {
         format!("Store({}, read_only={}{})", self.descr, read_only, state)
     }
 
+    /// Print a summary of what this store holds: the time-series associations
+    /// broken down by type, how many distinct arrays back them, how many owners
+    /// have one, and the size of the two association catalogs.
+    ///
+    /// `file` is any writable object, defaulting to `sys.stdout` -- the same
+    /// argument `print` takes, and passed straight to it.
+    ///
+    /// Every number is one catalog aggregate query, so this stays cheap on a
+    /// large store; nothing reads an array.
+    ///
+    /// ```python
+    /// store.show()
+    /// # Store: system.h5 (read-write)
+    /// # Time series: 128 associations over 128 distinct arrays
+    /// #   SingleTimeSeries      100
+    /// #   PersistentTimeSeries    8
+    /// #   Deterministic          20
+    /// # Owners with time series: 108 components, 0 supplemental attributes
+    /// # Supplemental attribute attachments: 12
+    /// # Parent/child edges: 5
+    /// ```
+    #[pyo3(signature = (*, file=None))]
+    fn show(&self, py: Python<'_>, file: Option<Bound<'_, PyAny>>) -> PyResult<()> {
+        let text = self.summary_text()?;
+        let kwargs = PyDict::new(py);
+        if let Some(f) = file {
+            kwargs.set_item("file", f)?;
+        }
+        py.import("builtins")?
+            .call_method("print", (text,), Some(&kwargs))?;
+        Ok(())
+    }
+
     /// Add a time series. The association `name` comes from the time series
     /// object (`time_series.name`).
     ///
     /// `features` is a `dict[str, int|float|bool|str]`. A feature name that
     /// shadows a time-series or key field (`name`, `resolution`, `owner_id`,
-    /// …) is rejected with `InvalidParameterError`. `units`, `quantity_kind`,
-    /// `component_field`, and `application_data` are optional strings
-    /// (`application_data` is an opaque, package-owned payload — typically JSON
-    /// — stored verbatim on the association). `quantity_kind` names what the
-    /// values measure, e.g. `"ActivePower"`. `unit_system` is `"natural_units"`
-    /// or `"component_base"`; omitting it leaves the basis unspecified, which is
-    /// not the same as declaring natural units. `component_field` names the
-    /// field on the owning component whose value these values are the
-    /// time-varying form of, e.g. `"max_active_power"`; it is free-form and
-    /// never interpreted by the store.
+    /// …) is rejected with `InvalidParameterError`.
     ///
-    /// `element_type` declares what the array's elements mean in the store's own
-    /// vocabulary (`"tuple(3,f64)"`, `"piecewise_linear"`, …). Omit it for plain
-    /// numbers, where it defaults to the array's own dtype spelling.
-    #[pyo3(signature = (owner_id, owner_type, owner_category, time_series, *, features=None, units=None, element_type=None, application_data=None, quantity_kind=None, unit_system=None, time_reference=None, component_field=None))]
-    #[allow(clippy::too_many_arguments)]
+    /// `features` is the only thing this call adds to the series. Everything
+    /// that *describes* the values — `units`, `quantity_kind`, `unit_system`,
+    /// `component_field`, `application_data`, `element_type`,
+    /// `time_reference` — is set on the time-series object itself, because that
+    /// is what a read hands back: a series read from one store can be added to
+    /// another unchanged, and no descriptor can be lost between the two calls.
+    #[pyo3(signature = (owner_id, owner_type, owner_category, time_series, *, features=None))]
     fn add_time_series(
         &mut self,
         owner_id: i64,
@@ -2028,48 +3227,9 @@ impl PyStore {
         owner_category: PyOwnerCategory,
         time_series: &Bound<'_, PyAny>,
         features: Option<&Bound<'_, PyDict>>,
-        units: Option<String>,
-        element_type: Option<String>,
-        application_data: Option<String>,
-        quantity_kind: Option<String>,
-        unit_system: Option<String>,
-        time_reference: Option<String>,
-        component_field: Option<String>,
     ) -> PyResult<i64> {
         let features = features_from_dict(features)?;
-        let mut data = extract_time_series_data(time_series)?;
-        // These describe the series, so they are set on it, not on the request —
-        // and each is applied only when the caller actually supplied it, the way
-        // `element_type` always has been. Setting them unconditionally from
-        // arguments that default to `None` meant a read-then-re-add silently
-        // dropped five of the six descriptors that `get_time_series` had just
-        // populated, while keeping the sixth; the value classes expose no
-        // properties for them, so the caller could neither notice nor re-supply
-        // what was lost. Omitting one now keeps whatever the series carries.
-        if let Some(units) = units {
-            data.set_units(Some(units));
-        }
-        if let Some(application_data) = application_data {
-            data.set_application_data(Some(application_data));
-        }
-        if let Some(quantity_kind) = quantity_kind {
-            data.set_quantity_kind(Some(quantity_kind));
-        }
-        if let Some(unit_system) = unit_system {
-            data.set_unit_system(parse_unit_system(Some(unit_system.as_str()))?);
-        }
-        if let Some(time_reference) = time_reference {
-            data.set_time_reference(Some(parse_time_reference(
-                time_series.py(),
-                &time_reference,
-            )?));
-        }
-        if let Some(component_field) = component_field {
-            data.set_component_field(Some(component_field));
-        }
-        if let Some(et) = element_type {
-            data.set_element_type(parse_element_type(&et)?);
-        }
+        let data = extract_time_series_data(time_series)?;
         let request = core_lib::AddRequest::new(owner_id, owner_type, owner_category.into(), data)
             .with_features(features);
         let added = self.store_mut()?.add(request).map_err(map_err)?;
@@ -2082,23 +3242,23 @@ impl PyStore {
     /// series.
     ///
     /// `items` is a list of dicts whose keys mirror `add_time_series`'s
-    /// parameters: `owner_id`, `owner_type`, `owner_category`,
-    /// `time_series`, and optionally `features`, `units`, `element_type`,
-    /// `application_data`, `quantity_kind`, `unit_system`, and
-    /// `component_field`. Any other key raises, as the misspelled keyword it
-    /// almost always is: `add_time_series` rejects one for free, and reading
-    /// only the keys it knows made the bulk path silently drop `unit_sytem` and
-    /// every other typo, along with whatever it was carrying.
+    /// parameters: `owner_id`, `owner_type`, `owner_category`, `time_series`,
+    /// and optionally `features`. Any other key raises, as the misspelled
+    /// keyword it almost always is: `add_time_series` rejects one for free, and
+    /// reading only the keys it knows made the bulk path silently drop
+    /// `feautres` and every other typo, along with whatever it was carrying.
+    /// The descriptive attributes ride on each item's `time_series` object, as
+    /// they do on the single-series path.
     ///
     /// All-or-nothing: if any item fails, the entire batch is rolled back.
     /// Returns the catalog `id` of each new row, in input order.
     ///
-    /// An item may carry `id` to file its association under a specific catalog
-    /// id, for a writer replaying a document that recorded one. Either every
-    /// item supplies an id or none does; a mixed batch is refused, because an
-    /// assigned id is drawn from the same counter an explicit one advances, so
-    /// whether the two collide would depend on the order the items happen to be
-    /// in.
+    /// No item may name its own `id`: the catalog assigns, and the write reports
+    /// what it chose. "Never reissued" is a guarantee of `AUTOINCREMENT`, and a
+    /// caller free to name an id could re-file a retired one. The one writer
+    /// that files rows under supplied ids is
+    /// `import_time_series_associations_openapi`, which replays a document that
+    /// recorded them.
     fn add_time_series_bulk(&mut self, items: Vec<Bound<'_, PyDict>>) -> PyResult<Vec<i64>> {
         let mut requests = Vec::with_capacity(items.len());
         for (index, item) in items.iter().enumerate() {
@@ -2118,58 +3278,7 @@ impl PyStore {
                 }
                 _ => features_from_dict(None)?,
             };
-            let units: Option<String> = match item.get_item("units")? {
-                Some(u) if !u.is_none() => Some(u.extract()?),
-                _ => None,
-            };
-            let application_data: Option<String> = match item.get_item("application_data")? {
-                Some(l) if !l.is_none() => Some(l.extract()?),
-                _ => None,
-            };
-            let quantity_kind: Option<String> = match item.get_item("quantity_kind")? {
-                Some(q) if !q.is_none() => Some(q.extract()?),
-                _ => None,
-            };
-            let unit_system: Option<String> = match item.get_item("unit_system")? {
-                Some(u) if !u.is_none() => Some(u.extract()?),
-                _ => None,
-            };
-            let time_reference: Option<String> = match item.get_item("time_reference")? {
-                Some(t) if !t.is_none() => Some(t.extract()?),
-                _ => None,
-            };
-            let component_field: Option<String> = match item.get_item("component_field")? {
-                Some(c) if !c.is_none() => Some(c.extract()?),
-                _ => None,
-            };
-            let element_type = match item.get_item("element_type")? {
-                Some(e) if !e.is_none() => Some(parse_element_type(&e.extract::<String>()?)?),
-                _ => None,
-            };
-            let mut data = extract_time_series_data(&time_series)?;
-            // As in `add_time_series`: a key the item omits leaves the series'
-            // own descriptor alone rather than clearing it.
-            if let Some(units) = units {
-                data.set_units(Some(units));
-            }
-            if let Some(application_data) = application_data {
-                data.set_application_data(Some(application_data));
-            }
-            if let Some(quantity_kind) = quantity_kind {
-                data.set_quantity_kind(Some(quantity_kind));
-            }
-            if let Some(unit_system) = unit_system {
-                data.set_unit_system(parse_unit_system(Some(unit_system.as_str()))?);
-            }
-            if let Some(time_reference) = time_reference {
-                data.set_time_reference(Some(parse_time_reference(item.py(), &time_reference)?));
-            }
-            if let Some(component_field) = component_field {
-                data.set_component_field(Some(component_field));
-            }
-            if let Some(et) = element_type {
-                data.set_element_type(et);
-            }
+            let data = extract_time_series_data(&time_series)?;
             requests.push(core_lib::AddRequest {
                 owner_id,
                 owner_type,
@@ -2281,7 +3390,7 @@ impl PyStore {
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
         name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
-        interval=None, features=None
+        interval=None, initial_timestamp=None, length=None, features=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn list_metadata<'py>(
@@ -2297,6 +3406,8 @@ impl PyStore {
         zoneless: Option<bool>,
         resolution: Option<Bound<'_, PyAny>>,
         interval: Option<Bound<'_, PyAny>>,
+        initial_timestamp: Option<PyInstant>,
+        length: Option<usize>,
         features: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Vec<Bound<'py, PyDict>>> {
         let filter = build_list_filter(
@@ -2309,6 +3420,8 @@ impl PyStore {
             component_field,
             zoneless,
             resolution,
+            initial_timestamp,
+            length,
             interval,
             features,
         )?;
@@ -2328,7 +3441,7 @@ impl PyStore {
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
         name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
-        interval=None, features=None
+        interval=None, initial_timestamp=None, length=None, features=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn has_any_time_series(
@@ -2343,6 +3456,8 @@ impl PyStore {
         zoneless: Option<bool>,
         resolution: Option<Bound<'_, PyAny>>,
         interval: Option<Bound<'_, PyAny>>,
+        initial_timestamp: Option<PyInstant>,
+        length: Option<usize>,
         features: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<bool> {
         let filter = build_list_filter(
@@ -2355,6 +3470,8 @@ impl PyStore {
             component_field,
             zoneless,
             resolution,
+            initial_timestamp,
+            length,
             interval,
             features,
         )?;
@@ -2560,13 +3677,63 @@ impl PyStore {
     /// resolution per reader — and all matched series must share one grid. For
     /// `time_series_type="NonSequentialTimeSeries"` pass no resolution (an
     /// irregular series has none): all matched series must instead lie on one
-    /// timestamp vector, which is also what pools their arrays on disk. Drive it
-    /// with `static_read`.
-    #[pyo3(signature = (resolution=None, *, time_series_type=None, owner_id=None, owner_category=None, owner_type=None, name=None, name_glob=None, component_field=None, zoneless=None, features=None))]
+    /// timestamp vector, which is also what pools their arrays on disk.
+    ///
+    /// `time_series_type="PersistentTimeSeries"` also takes no resolution, and
+    /// is the one case whose columns need **not** share a timeline: a step
+    /// function has a value at every instant from its first breakpoint on, so
+    /// each column carries its values forward on breakpoints of its own.
+    /// `timestamps()`
+    /// is then the sorted union of every column's breakpoints, and reading
+    /// before some column's first breakpoint raises `InvalidParameterError`
+    /// naming that column.
+    ///
+    /// Drive any of them with `static_read`.
+    ///
+    /// **`window_start` lifts the shared-grid requirement.** Pass one and the
+    /// reader sweeps the span you name rather than the grid the series happen to
+    /// share: each column then reads at an offset of its own, so
+    /// `SingleTimeSeries` that begin at different instants, or run for different
+    /// lengths, read together as long as they all cover the window.
+    /// `window_length` gives it an extent in timesteps; without one the reader
+    /// runs as far from the anchor as *every* matched series reaches.
+    ///
+    /// It is distinct from the `initial_timestamp` / `length` *filter*
+    /// arguments, which select only the series already on a given grid. The
+    /// window says "sweep this span across whatever matched"; the filter says
+    /// "match only the series on this grid".
+    ///
+    /// The window is checked, not clamped, in the three ways that would
+    /// otherwise return plausible wrong numbers:
+    ///
+    /// * a matched series that does not cover it raises `InvalidParameterError`
+    ///   naming that series, rather than being dropped from the columns;
+    /// * the anchor must fall at or after each series' start and on one of its
+    ///   own step boundaries — a timestamp part-way through a step is an error,
+    ///   not a floor;
+    /// * a monthly resolution is refused where re-anchoring would move the
+    ///   dates, by the same rule that governs a sliced read.
+    ///
+    /// `window_start` must be spelled the way the series are (aware for a zoned
+    /// series, naive for a zoneless one), and belongs to `SingleTimeSeries`
+    /// alone: the two irregular types carry their timeline rather than deriving
+    /// it, so there is nothing to re-anchor.
+    ///
+    /// ```python
+    /// # a year of load and a shorter series, swept over the span they share
+    /// reader = store.build_static_reader(
+    ///     "PT1H",
+    ///     window_start=datetime(2024, 1, 1, 7, tzinfo=timezone.utc),
+    /// )
+    /// reader.grid()["length"]
+    /// ```
+    #[pyo3(signature = (resolution=None, *, window_start=None, window_length=None, time_series_type=None, owner_id=None, owner_category=None, owner_type=None, name=None, name_glob=None, component_field=None, zoneless=None, initial_timestamp=None, length=None, features=None))]
     #[allow(clippy::too_many_arguments)]
     fn build_static_reader(
         &self,
         resolution: Option<Bound<'_, PyAny>>,
+        window_start: Option<PyInstant>,
+        window_length: Option<usize>,
         time_series_type: Option<&Bound<'_, PyAny>>,
         owner_id: Option<i64>,
         owner_category: Option<PyOwnerCategory>,
@@ -2575,6 +3742,8 @@ impl PyStore {
         name_glob: Option<String>,
         component_field: Option<String>,
         zoneless: Option<bool>,
+        initial_timestamp: Option<PyInstant>,
+        length: Option<usize>,
         features: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyStaticReader> {
         let filter = build_list_filter(
@@ -2587,10 +3756,21 @@ impl PyStore {
             component_field,
             zoneless,
             resolution,
+            initial_timestamp,
+            length,
             None,
             features,
         )?;
-        let reader = self.store()?.build_static_reader(filter).map_err(map_err)?;
+        let window = core_lib::ReadWindow {
+            start: window_start.as_ref().map(|s| s.instant),
+            zoneless: window_start.as_ref().is_some_and(|s| s.is_zoneless()),
+            len: window_length,
+            count: None,
+        };
+        let reader = self
+            .store()?
+            .build_static_reader_over(filter, window)
+            .map_err(map_err)?;
         Ok(PyStaticReader { inner: reader })
     }
 
@@ -2611,7 +3791,7 @@ impl PyStore {
     /// the filter. A `resolution` is required; a `Deterministic` reader also
     /// includes `DeterministicSingleTimeSeries`, matching the read request rule.
     /// Drive it with `forecast_read`.
-    #[pyo3(signature = (time_series_type, resolution, *, owner_id=None, owner_category=None, owner_type=None, name=None, name_glob=None, component_field=None, zoneless=None, features=None))]
+    #[pyo3(signature = (time_series_type, resolution, *, owner_id=None, owner_category=None, owner_type=None, name=None, name_glob=None, component_field=None, zoneless=None, initial_timestamp=None, length=None, features=None))]
     #[allow(clippy::too_many_arguments)]
     fn build_forecast_reader(
         &self,
@@ -2624,6 +3804,8 @@ impl PyStore {
         name_glob: Option<String>,
         component_field: Option<String>,
         zoneless: Option<bool>,
+        initial_timestamp: Option<PyInstant>,
+        length: Option<usize>,
         features: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyForecastReader> {
         let filter = build_list_filter(
@@ -2636,6 +3818,8 @@ impl PyStore {
             component_field,
             zoneless,
             Some(resolution),
+            initial_timestamp,
+            length,
             None,
             features,
         )?;
@@ -2785,6 +3969,16 @@ impl PyStore {
     /// the smaller answer that fits. Raises `NotFoundError` if the id names no
     /// row.
     ///
+    /// One slice is refused by both forms. A series whose resolution is a
+    /// calendar period (`P1M`, `P1Y`) is stored as an anchor plus a count, and
+    /// month-end arithmetic clamps: a monthly grid from Jan-31 is Jan-31,
+    /// Feb-29, Mar-31, but re-anchored at its own Feb-29 it would read Feb-29,
+    /// Mar-29, Apr-29. A slice that would have to describe itself that way
+    /// raises `InvalidParameterError` rather than returning the stored values
+    /// under dates the store does not hold. Read the series whole and slice
+    /// `timestamps` yourself, or store the instants with
+    /// `NonSequentialTimeSeries`.
+    ///
     /// Pass `owner_id` and `owner_category` together to hold the row to that
     /// owner, and get `OwnerMismatchError` when it belongs to someone else. The
     /// owner comes off the very row the values are materialized from, so the
@@ -2876,7 +4070,7 @@ impl PyStore {
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
         name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
-        interval=None, features=None
+        interval=None, initial_timestamp=None, length=None, features=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn list_names(
@@ -2891,6 +4085,8 @@ impl PyStore {
         zoneless: Option<bool>,
         resolution: Option<Bound<'_, PyAny>>,
         interval: Option<Bound<'_, PyAny>>,
+        initial_timestamp: Option<PyInstant>,
+        length: Option<usize>,
         features: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Vec<String>> {
         let filter = build_list_filter(
@@ -2903,6 +4099,8 @@ impl PyStore {
             component_field,
             zoneless,
             resolution,
+            initial_timestamp,
+            length,
             interval,
             features,
         )?;
@@ -2913,7 +4111,7 @@ impl PyStore {
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
         name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
-        interval=None, features=None
+        interval=None, initial_timestamp=None, length=None, features=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn list_owner_types(
@@ -2928,6 +4126,8 @@ impl PyStore {
         zoneless: Option<bool>,
         resolution: Option<Bound<'_, PyAny>>,
         interval: Option<Bound<'_, PyAny>>,
+        initial_timestamp: Option<PyInstant>,
+        length: Option<usize>,
         features: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Vec<String>> {
         let filter = build_list_filter(
@@ -2940,6 +4140,8 @@ impl PyStore {
             component_field,
             zoneless,
             resolution,
+            initial_timestamp,
+            length,
             interval,
             features,
         )?;
@@ -2951,7 +4153,7 @@ impl PyStore {
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
         name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
-        interval=None, features=None
+        interval=None, initial_timestamp=None, length=None, features=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn remove_by_filter(
@@ -2966,6 +4168,8 @@ impl PyStore {
         zoneless: Option<bool>,
         resolution: Option<Bound<'_, PyAny>>,
         interval: Option<Bound<'_, PyAny>>,
+        initial_timestamp: Option<PyInstant>,
+        length: Option<usize>,
         features: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<usize> {
         let filter = build_list_filter(
@@ -2978,6 +4182,8 @@ impl PyStore {
             component_field,
             zoneless,
             resolution,
+            initial_timestamp,
+            length,
             interval,
             features,
         )?;
@@ -3604,11 +4810,14 @@ impl PyStore {
     /// keywords as `list_metadata`) as a sorted OpenAPI-row JSON array.
     /// Each row's `uri` and `data_hash` are the hex-encoded content hash the
     /// store already has for that row — never a caller-supplied locator.
-    /// With no filter this exports the whole catalog.
+    /// With no filter this exports the whole catalog, minus `PersistentTimeSeries`
+    /// rows: the type is an infrastore-local extension the wire contract has no
+    /// schema for, so it is omitted, and a filter naming it raises
+    /// `InvalidParameterError`.
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
         name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
-        interval=None, features=None
+        interval=None, initial_timestamp=None, length=None, features=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn export_time_series_associations_openapi(
@@ -3623,6 +4832,8 @@ impl PyStore {
         zoneless: Option<bool>,
         resolution: Option<Bound<'_, PyAny>>,
         interval: Option<Bound<'_, PyAny>>,
+        initial_timestamp: Option<PyInstant>,
+        length: Option<usize>,
         features: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<String> {
         let filter = build_list_filter(
@@ -3635,6 +4846,8 @@ impl PyStore {
             component_field,
             zoneless,
             resolution,
+            initial_timestamp,
+            length,
             interval,
             features,
         )?;
@@ -3744,9 +4957,10 @@ fn pyany_to_requested_type(
 /// Every `TimeSeriesType` spelling, for the messages above. Held here rather
 /// than derived, so a new variant shows up as a failing test rather than a
 /// silently short list.
-const TIME_SERIES_TYPE_NAMES: [&str; 6] = [
+const TIME_SERIES_TYPE_NAMES: [&str; 7] = [
     "SingleTimeSeries",
     "NonSequentialTimeSeries",
+    "PersistentTimeSeries",
     "Deterministic",
     "DeterministicSingleTimeSeries",
     "Probabilistic",
@@ -3767,20 +4981,12 @@ fn pyany_to_requested_type_opt(
 
 /// Decode a 64-character lowercase-or-uppercase hex string into a 32-byte hash.
 /// Every key `add_time_series_bulk` reads out of one item dict.
-const BULK_ITEM_KEYS: [&str; 13] = [
+const BULK_ITEM_KEYS: [&str; 5] = [
     "owner_id",
     "owner_type",
     "owner_category",
     "time_series",
     "features",
-    "units",
-    "element_type",
-    "application_data",
-    "quantity_kind",
-    "unit_system",
-    "time_reference",
-    "component_field",
-    "id",
 ];
 
 /// Refuse an item carrying a key the bulk add does not read.
@@ -3849,6 +5055,8 @@ fn build_list_filter(
     component_field: Option<String>,
     zoneless: Option<bool>,
     resolution: Option<Bound<'_, PyAny>>,
+    initial_timestamp: Option<PyInstant>,
+    length: Option<usize>,
     interval: Option<Bound<'_, PyAny>>,
     features: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<core_lib::ListFilter> {
@@ -3879,6 +5087,16 @@ fn build_list_filter(
     }
     if let Some(r) = resolution {
         filter = filter.resolution(pyany_to_period(&r)?);
+    }
+    if let Some(t) = initial_timestamp {
+        // Matched on the instant the row stores. No spelling check: a filter
+        // selects rather than reads, so a bound the rows cannot answer is an
+        // empty result, not an error -- pair it with `zoneless=` to pick the
+        // coherence group.
+        filter = filter.initial_timestamp(t.instant);
+    }
+    if let Some(n) = length {
+        filter = filter.length(n);
     }
     if let Some(i) = interval {
         filter = filter.interval(pyany_to_period(&i)?);
@@ -4288,6 +5506,7 @@ fn infrastore(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyTransaction>()?;
     m.add_class::<PySingleTimeSeries>()?;
     m.add_class::<PyNonSequentialTimeSeries>()?;
+    m.add_class::<PyPersistentTimeSeries>()?;
     m.add_class::<PyDeterministic>()?;
     m.add_class::<PyProbabilistic>()?;
     m.add_class::<PyScenarios>()?;

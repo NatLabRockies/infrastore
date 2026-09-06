@@ -28,12 +28,13 @@ ts = SingleTimeSeries(
     timedelta(hours=1),
     np.arange(24, dtype=np.float64) + 100,
     "load",   # name (required)
+    units="MW",
 )
 series_id = store.add_time_series(
     owner_id=42, owner_type="Generator",
     owner_category=OwnerCategory.Component,
-    time_series=ts,   # name comes from ts
-    features={"model_year": 2030}, units="MW",
+    time_series=ts,   # name and units come from ts
+    features={"model_year": 2030},
 )
 got = store.read_by_id(series_id)
 assert np.array_equal(np.asarray(got.data), np.asarray(ts.data))
@@ -45,7 +46,8 @@ assert np.array_equal(np.asarray(got.data), np.asarray(ts.data))
   across components is written to disk a single time.
 - **Typed, N-dimensional values** — `f64`, `f32`, `i64`, `i32`, `u64`, and `bool`, with an optional
   per-timestep element shape.
-- **Six time-series types** — `SingleTimeSeries` and `NonSequentialTimeSeries` read+write;
+- **Seven time-series types** — `SingleTimeSeries`, `NonSequentialTimeSeries`, and
+  `PersistentTimeSeries` (a sparse step function: breakpoints, values carried forward) read+write;
   `Deterministic`, `DeterministicSingleTimeSeries`, `Probabilistic`, and `Scenarios` for forecasts.
 - **Columnar simulation readers** — `StaticReader` / `ForecastReader` serve every series' value at
   one timestamp.

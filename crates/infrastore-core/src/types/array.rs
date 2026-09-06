@@ -270,6 +270,56 @@ impl TypedArray {
             .collect())
     }
 
+    /// Decode the single element at flat (row-major) index `index`, without
+    /// decoding the rest of the array.
+    ///
+    /// Errors if the array's dtype is not `T`'s, or if `index` is past the
+    /// element count. This is [`Self::to_vec`] for one element: a point lookup
+    /// on a long series should not allocate a `Vec` of the whole thing.
+    pub fn element_at<T: Element>(&self, index: usize) -> Result<T, String> {
+        if self.dtype != T::DTYPE {
+            return Err(format!(
+                "expected {}, got {}",
+                T::DTYPE.as_str(),
+                self.dtype.as_str()
+            ));
+        }
+        let size = T::DTYPE.size();
+        // Checked, because the range is built *before* `get` bounds-checks it:
+        // an oversized index would otherwise overflow the multiply — a panic in
+        // debug, and in release a wrapped range that can land back inside the
+        // array and hand out a different element under an `Ok`.
+        index
+            .checked_mul(size)
+            .zip(index.checked_add(1).and_then(|n| n.checked_mul(size)))
+            .and_then(|(start, end)| self.bytes.get(start..end))
+            .map(T::from_le_bytes)
+            .ok_or_else(|| {
+                format!(
+                    "element index {index} is past the array's {} elements",
+                    self.num_elements()
+                )
+            })
+    }
+
+    /// The per-step slice at time step `index`, as its own `TypedArray` of shape
+    /// [`Self::element_shape`] — `[]` (a single element) for a scalar series.
+    ///
+    /// Errors if `index >= length()`. The dtype and byte order are the array's
+    /// own, so a step round-trips through [`Self::to_vec`] like any other array.
+    pub fn step(&self, index: usize) -> Result<Self, String> {
+        let length = self.length();
+        if index >= length {
+            return Err(format!(
+                "step index {index} is past the array's {length} steps"
+            ));
+        }
+        let shape = self.element_shape().to_vec();
+        let width = expected_bytes(self.dtype, &shape)?;
+        let start = index * width;
+        Self::new(self.dtype, shape, self.bytes[start..start + width].to_vec())
+    }
+
     /// Build an `f64` `TypedArray` from values + shape. Convenience over
     /// [`Self::from_slice`]; panics on a shape/length mismatch (callers that
     /// build the shape from the values never hit this).
@@ -379,5 +429,29 @@ mod tests {
     #[test]
     fn from_slice_length_mismatch_errors() {
         assert!(TypedArray::from_slice(vec![2, 2], &[1.0f64, 2.0]).is_err());
+    }
+
+    /// `element_at` builds its byte range before `get` bounds-checks it, so an
+    /// oversized index has to be caught by the arithmetic rather than by the
+    /// slice. Unchecked, `usize::MAX` panics in debug and in release wraps to a
+    /// range that can land back inside the array -- a different element handed
+    /// back under an `Ok`, which is the failure this array type exists to make
+    /// impossible.
+    #[test]
+    fn element_at_rejects_an_oversized_index_without_overflowing() {
+        let a = TypedArray::from_slice(vec![3], &[1.0f64, 2.0, 3.0]).unwrap();
+        assert_eq!(a.element_at::<f64>(2).unwrap(), 3.0);
+        for index in [
+            3,
+            usize::MAX / 8,
+            usize::MAX / 8 + 1,
+            usize::MAX - 1,
+            usize::MAX,
+        ] {
+            let err = a
+                .element_at::<f64>(index)
+                .expect_err("index {index} is past the array");
+            assert!(err.contains("past the array's 3 elements"), "{err}");
+        }
     }
 }

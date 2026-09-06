@@ -46,15 +46,8 @@ function add_time_series!(
     owner_category::OwnerCategory,
     ts::SingleTimeSeries;
     features::Union{Nothing, AbstractDict}=nothing,
-    units::Union{Nothing, AbstractString}=ts.units,
-    quantity_kind::Union{Nothing, AbstractString}=ts.quantity_kind,
-    unit_system::Union{Nothing, UnitSystem, AbstractString}=ts.unit_system,
-    time_reference::Union{Nothing, TimeReference, AbstractString}=ts.time_reference,
-    component_field::Union{Nothing, AbstractString}=ts.component_field,
-    application_data::Union{Nothing, AbstractString}=ts.application_data,
-    element_type::Union{Nothing, AbstractString}=ts.element_type,
 )
-    element_type_arg, dims, bytes = _wire_array(element_type, ts.data)
+    element_type_arg, dims, bytes = _wire_array(ts.element_type, ts.data)
     code = @ccall lib_path().infrastore_batch_add_single(
         batch::Ptr{Cvoid},
         Int64(owner_id)::Int64,
@@ -68,15 +61,13 @@ function add_time_series!(
         dims::Ptr{UInt64},
         bytes::Ptr{UInt8},
         UInt64(length(bytes))::UInt64,
-        _opt_string_arg(application_data)::Cstring,
+        _opt_string_arg(ts.application_data)::Cstring,
         _features_arg(features)::Cstring,
-        _opt_string_arg(units)::Cstring,
-        _opt_string_arg(quantity_kind)::Cstring,
-        _opt_string_arg(_unit_system_str(_unit_system(unit_system)))::Cstring,
-        _opt_string_arg(
-            _time_reference_str(_audit_zone(_time_reference(time_reference)))
-        )::Cstring,
-        _opt_string_arg(component_field)::Cstring,
+        _opt_string_arg(ts.units)::Cstring,
+        _opt_string_arg(ts.quantity_kind)::Cstring,
+        _opt_string_arg(_unit_system_str(ts.unit_system))::Cstring,
+        _opt_string_arg(_time_reference_str(_audit_zone(ts.time_reference)))::Cstring,
+        _opt_string_arg(ts.component_field)::Cstring,
     )::Int32
     _check(code)
     batch.count += 1
@@ -90,16 +81,9 @@ function add_time_series!(
     owner_category::OwnerCategory,
     ts::NonSequentialTimeSeries;
     features::Union{Nothing, AbstractDict}=nothing,
-    units::Union{Nothing, AbstractString}=ts.units,
-    quantity_kind::Union{Nothing, AbstractString}=ts.quantity_kind,
-    unit_system::Union{Nothing, UnitSystem, AbstractString}=ts.unit_system,
-    time_reference::Union{Nothing, TimeReference, AbstractString}=ts.time_reference,
-    component_field::Union{Nothing, AbstractString}=ts.component_field,
-    application_data::Union{Nothing, AbstractString}=ts.application_data,
-    element_type::Union{Nothing, AbstractString}=ts.element_type,
 )
     timestamps = Int64[_to_unix_ms(timestamp) for timestamp in ts.timestamps]
-    element_type_arg, dims, bytes = _wire_array(element_type, ts.data)
+    element_type_arg, dims, bytes = _wire_array(ts.element_type, ts.data)
     code = @ccall lib_path().infrastore_batch_add_non_sequential(
         batch::Ptr{Cvoid},
         Int64(owner_id)::Int64,
@@ -113,15 +97,52 @@ function add_time_series!(
         dims::Ptr{UInt64},
         bytes::Ptr{UInt8},
         UInt64(length(bytes))::UInt64,
-        _opt_string_arg(application_data)::Cstring,
+        _opt_string_arg(ts.application_data)::Cstring,
         _features_arg(features)::Cstring,
-        _opt_string_arg(units)::Cstring,
-        _opt_string_arg(quantity_kind)::Cstring,
-        _opt_string_arg(_unit_system_str(_unit_system(unit_system)))::Cstring,
-        _opt_string_arg(
-            _time_reference_str(_audit_zone(_time_reference(time_reference)))
-        )::Cstring,
-        _opt_string_arg(component_field)::Cstring,
+        _opt_string_arg(ts.units)::Cstring,
+        _opt_string_arg(ts.quantity_kind)::Cstring,
+        _opt_string_arg(_unit_system_str(ts.unit_system))::Cstring,
+        _opt_string_arg(_time_reference_str(_audit_zone(ts.time_reference)))::Cstring,
+        _opt_string_arg(ts.component_field)::Cstring,
+    )::Int32
+    _check(code)
+    batch.count += 1
+    return batch
+end
+
+# Byte-for-byte the `NonSequentialTimeSeries` method above: the two types send
+# the same payload -- a strictly increasing unix-millisecond vector plus one
+# value each -- and differ only in what a read between those instants means.
+function add_time_series!(
+    batch::AddBatch,
+    owner_id::Integer,
+    owner_type::AbstractString,
+    owner_category::OwnerCategory,
+    ts::PersistentTimeSeries;
+    features::Union{Nothing, AbstractDict}=nothing,
+)
+    timestamps = Int64[_to_unix_ms(timestamp) for timestamp in ts.timestamps]
+    element_type_arg, dims, bytes = _wire_array(ts.element_type, ts.data)
+    code = @ccall lib_path().infrastore_batch_add_persistent(
+        batch::Ptr{Cvoid},
+        Int64(owner_id)::Int64,
+        owner_type::Cstring,
+        _category_int(owner_category)::Int32,
+        ts.name::Cstring,
+        timestamps::Ptr{Int64},
+        UInt64(length(timestamps))::UInt64,
+        element_type_arg::Cstring,
+        UInt64(length(dims))::UInt64,
+        dims::Ptr{UInt64},
+        bytes::Ptr{UInt8},
+        UInt64(length(bytes))::UInt64,
+        _opt_string_arg(ts.application_data)::Cstring,
+        _features_arg(features)::Cstring,
+        _opt_string_arg(ts.units)::Cstring,
+        _opt_string_arg(ts.quantity_kind)::Cstring,
+        _opt_string_arg(_unit_system_str(ts.unit_system))::Cstring,
+        _opt_string_arg(_time_reference_str(_audit_zone(ts.time_reference)))::Cstring,
+        _opt_string_arg(ts.component_field)::Cstring,
     )::Int32
     _check(code)
     batch.count += 1
@@ -135,35 +156,15 @@ function add_time_series!(
     owner_category::OwnerCategory,
     ts::Deterministic;
     features::Union{Nothing, AbstractDict}=nothing,
-    units::Union{Nothing, AbstractString}=ts.units,
-    quantity_kind::Union{Nothing, AbstractString}=ts.quantity_kind,
-    unit_system::Union{Nothing, UnitSystem, AbstractString}=ts.unit_system,
-    time_reference::Union{Nothing, TimeReference, AbstractString}=ts.time_reference,
-    component_field::Union{Nothing, AbstractString}=ts.component_field,
-    application_data::Union{Nothing, AbstractString}=ts.application_data,
-    element_type::Union{Nothing, AbstractString}=ts.element_type,
 )
     return _batch_add_dense_forecast!(
         batch,
         owner_id,
         owner_type,
         owner_category,
-        ts.name,
         INFRASTORE_TYPE_DETERMINISTIC,
-        ts.initial_timestamp,
-        ts.resolution,
-        ts.horizon,
-        ts.interval,
-        ts.count,
-        ts.data;
+        ts;
         features=features,
-        units=units,
-        quantity_kind=quantity_kind,
-        unit_system=unit_system,
-        time_reference=time_reference,
-        component_field=component_field,
-        application_data=application_data,
-        element_type=element_type,
     )
 end
 
@@ -174,87 +175,54 @@ function add_time_series!(
     owner_category::OwnerCategory,
     ts::Scenarios;
     features::Union{Nothing, AbstractDict}=nothing,
-    units::Union{Nothing, AbstractString}=ts.units,
-    quantity_kind::Union{Nothing, AbstractString}=ts.quantity_kind,
-    unit_system::Union{Nothing, UnitSystem, AbstractString}=ts.unit_system,
-    time_reference::Union{Nothing, TimeReference, AbstractString}=ts.time_reference,
-    component_field::Union{Nothing, AbstractString}=ts.component_field,
-    application_data::Union{Nothing, AbstractString}=ts.application_data,
-    element_type::Union{Nothing, AbstractString}=ts.element_type,
 )
     return _batch_add_dense_forecast!(
         batch,
         owner_id,
         owner_type,
         owner_category,
-        ts.name,
         INFRASTORE_TYPE_SCENARIOS,
-        ts.initial_timestamp,
-        ts.resolution,
-        ts.horizon,
-        ts.interval,
-        ts.count,
-        ts.data;
+        ts;
         features=features,
-        units=units,
-        quantity_kind=quantity_kind,
-        unit_system=unit_system,
-        time_reference=time_reference,
-        component_field=component_field,
-        application_data=application_data,
-        element_type=element_type,
     )
 end
 
+# `Deterministic` and `Scenarios` go down the same ABI call, distinguished only
+# by the type tag; `Probabilistic` has its own because it carries percentiles.
 function _batch_add_dense_forecast!(
     batch::AddBatch,
     owner_id::Integer,
     owner_type::AbstractString,
     owner_category::OwnerCategory,
-    name::AbstractString,
     ts_type::Integer,
-    initial_timestamp::DateTime,
-    resolution::Period,
-    horizon::Period,
-    interval::Period,
-    count::Integer,
-    data::AbstractArray;
+    ts::Union{Deterministic, Scenarios};
     features::Union{Nothing, AbstractDict}=nothing,
-    units::Union{Nothing, AbstractString}=nothing,
-    quantity_kind::Union{Nothing, AbstractString}=nothing,
-    unit_system::Union{Nothing, UnitSystem, AbstractString}=nothing,
-    time_reference::Union{Nothing, TimeReference, AbstractString}=nothing,
-    component_field::Union{Nothing, AbstractString}=nothing,
-    application_data::Union{Nothing, AbstractString}=nothing,
-    element_type::Union{Nothing, AbstractString}=nothing,
 )
-    element_type_arg, dims, bytes = _wire_array(element_type, data)
+    element_type_arg, dims, bytes = _wire_array(ts.element_type, ts.data)
     code = @ccall lib_path().infrastore_batch_add_forecast(
         batch::Ptr{Cvoid},
         Int64(owner_id)::Int64,
         owner_type::Cstring,
         _category_int(owner_category)::Int32,
-        name::Cstring,
+        ts.name::Cstring,
         Int32(ts_type)::Int32,
-        _to_unix_ms(initial_timestamp)::Int64,
-        _period_to_iso(resolution)::Cstring,
-        _period_to_iso(horizon)::Cstring,
-        _period_to_iso(interval)::Cstring,
-        UInt64(count)::UInt64,
+        _to_unix_ms(ts.initial_timestamp)::Int64,
+        _period_to_iso(ts.resolution)::Cstring,
+        _period_to_iso(ts.horizon)::Cstring,
+        _period_to_iso(ts.interval)::Cstring,
+        UInt64(ts.count)::UInt64,
         element_type_arg::Cstring,
         UInt64(length(dims))::UInt64,
         dims::Ptr{UInt64},
         bytes::Ptr{UInt8},
         UInt64(length(bytes))::UInt64,
-        _opt_string_arg(application_data)::Cstring,
+        _opt_string_arg(ts.application_data)::Cstring,
         _features_arg(features)::Cstring,
-        _opt_string_arg(units)::Cstring,
-        _opt_string_arg(quantity_kind)::Cstring,
-        _opt_string_arg(_unit_system_str(_unit_system(unit_system)))::Cstring,
-        _opt_string_arg(
-            _time_reference_str(_audit_zone(_time_reference(time_reference)))
-        )::Cstring,
-        _opt_string_arg(component_field)::Cstring,
+        _opt_string_arg(ts.units)::Cstring,
+        _opt_string_arg(ts.quantity_kind)::Cstring,
+        _opt_string_arg(_unit_system_str(ts.unit_system))::Cstring,
+        _opt_string_arg(_time_reference_str(_audit_zone(ts.time_reference)))::Cstring,
+        _opt_string_arg(ts.component_field)::Cstring,
     )::Int32
     _check(code)
     batch.count += 1
@@ -268,15 +236,8 @@ function add_time_series!(
     owner_category::OwnerCategory,
     ts::Probabilistic;
     features::Union{Nothing, AbstractDict}=nothing,
-    units::Union{Nothing, AbstractString}=ts.units,
-    quantity_kind::Union{Nothing, AbstractString}=ts.quantity_kind,
-    unit_system::Union{Nothing, UnitSystem, AbstractString}=ts.unit_system,
-    time_reference::Union{Nothing, TimeReference, AbstractString}=ts.time_reference,
-    component_field::Union{Nothing, AbstractString}=ts.component_field,
-    application_data::Union{Nothing, AbstractString}=ts.application_data,
-    element_type::Union{Nothing, AbstractString}=ts.element_type,
 )
-    element_type_arg, dims, bytes = _wire_array(element_type, ts.data)
+    element_type_arg, dims, bytes = _wire_array(ts.element_type, ts.data)
     code = @ccall lib_path().infrastore_batch_add_probabilistic(
         batch::Ptr{Cvoid},
         Int64(owner_id)::Int64,
@@ -295,15 +256,13 @@ function add_time_series!(
         dims::Ptr{UInt64},
         bytes::Ptr{UInt8},
         UInt64(length(bytes))::UInt64,
-        _opt_string_arg(application_data)::Cstring,
+        _opt_string_arg(ts.application_data)::Cstring,
         _features_arg(features)::Cstring,
-        _opt_string_arg(units)::Cstring,
-        _opt_string_arg(quantity_kind)::Cstring,
-        _opt_string_arg(_unit_system_str(_unit_system(unit_system)))::Cstring,
-        _opt_string_arg(
-            _time_reference_str(_audit_zone(_time_reference(time_reference)))
-        )::Cstring,
-        _opt_string_arg(component_field)::Cstring,
+        _opt_string_arg(ts.units)::Cstring,
+        _opt_string_arg(ts.quantity_kind)::Cstring,
+        _opt_string_arg(_unit_system_str(ts.unit_system))::Cstring,
+        _opt_string_arg(_time_reference_str(_audit_zone(ts.time_reference)))::Cstring,
+        _opt_string_arg(ts.component_field)::Cstring,
     )::Int32
     _check(code)
     batch.count += 1

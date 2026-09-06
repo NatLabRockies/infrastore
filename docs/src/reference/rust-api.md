@@ -5,7 +5,8 @@ The public surface of `infrastore-core`. Import paths below are relative to the 
 ```rust
 use infrastore_core::{
     create_store, open_store, Store, BulkAdd, TimeSeriesId, KeyIdentity,
-    SingleTimeSeries, NonSequentialTimeSeries, Deterministic, Probabilistic, Scenarios,
+    SingleTimeSeries, NonSequentialTimeSeries, PersistentTimeSeries,
+    Deterministic, Probabilistic, Scenarios,
     TimeSeriesData, TimeSeriesType, Period,
     TypedArray, Dtype, Compression, OwnerCategory, FeatureValue, Features, TimeSeriesMetadata,
     ListFilter, AddRequest,
@@ -232,6 +233,12 @@ impl Store {
 
     // Per-timestamp readers (see "Readers" below).
     pub fn build_static_reader(&self, filter: ListFilter) -> Result<StaticReader>;
+    // The same, over a caller-named span rather than the grid the series share.
+    pub fn build_static_reader_over(
+        &self,
+        filter: ListFilter,
+        window: ReadWindow,
+    ) -> Result<StaticReader>;
     pub fn static_read(&self, reader: &mut StaticReader, at: DateTime<Utc>) -> Result<()>;
     pub fn build_forecast_reader(&self, filter: ListFilter) -> Result<ForecastReader>;
     pub fn forecast_read(&self, reader: &mut ForecastReader, at: DateTime<Utc>) -> Result<()>;
@@ -344,10 +351,10 @@ can be moved between threads, but sharing one requires external synchronization 
 ### Method notes
 
 - **`add_time_series`** — Accepts any [`TimeSeriesData`](#timeseriesdata) variant —
-  `SingleTimeSeries`, `NonSequentialTimeSeries`, or a dense forecast (`Deterministic`,
-  `Probabilistic`, `Scenarios`). Hashes the array, stores it (deduplicating on the hash), inserts a
-  metadata association, and returns its key. Errors with `DuplicateTimeSeries` if the key already
-  exists or `ReadOnlyStore` on a read-only store. It is a convenience wrapper over
+  `SingleTimeSeries`, `NonSequentialTimeSeries`, `PersistentTimeSeries`, or a dense forecast
+  (`Deterministic`, `Probabilistic`, `Scenarios`). Hashes the array, stores it (deduplicating on the
+  hash), inserts a metadata association, and returns its key. Errors with `DuplicateTimeSeries` if
+  the key already exists or `ReadOnlyStore` on a read-only store. It is a convenience wrapper over
   `add_time_series_bulk`.
 - **`transform_single_time_series`** — Derives a `DeterministicSingleTimeSeries` from every stored
   `SingleTimeSeries`, sharing the underlying array (with `count` derived from the series length),
@@ -414,12 +421,13 @@ can be moved between threads, but sharing one requires external synchronization 
 ### Reading a time range
 
 `read_by_ids_range(ids, TimeRange::new(start, end))` selects on the time axis. The rule is the same
-for all six types — **`start` is inclusive, `end` is exclusive** — but what it is applied _to_
+for all seven types — **`start` is inclusive, `end` is exclusive** — but what it is applied _to_
 differs, because the types disagree about what a stored value is:
 
 | Type                                                                              | Selected                                                                                         |
 | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
 | `NonSequentialTimeSeries`                                                         | every timestamp `t` with `start <= t < end`                                                      |
+| `PersistentTimeSeries`                                                            | the breakpoint **in force at** `start`, then every one with `start < b < end`                    |
 | `SingleTimeSeries`                                                                | every step whose **covered interval** `[t, t + resolution)` overlaps the range                   |
 | `Deterministic` / `Probabilistic` / `Scenarios` / `DeterministicSingleTimeSeries` | every window whose **start** `w` has `start <= w < end`, and `start` must _be_ a window boundary |
 
@@ -427,19 +435,39 @@ The two static rows differ only at the `start` bound, and only when `start` fall
 step. An irregular series pairs a value with an _instant_, so a value at `t < start` is outside the
 range. A regular series pairs a value with the _step it covers_, so the step containing `start` does
 overlap the range and is returned — which means the sliced series' `initial_timestamp` can be
-earlier than the `start` that was asked for. The bounds need not be grid-aligned; `start` is floored
-and `end` is ceiled onto the grid (calendar-aware for a monthly resolution). The `end` bound behaves
-identically under either reading: a step at or after `end` cannot overlap `[start, end)`.
+earlier than the `start` that was asked for. A `PersistentTimeSeries` goes one step further for the
+same reason: a step function defines a value at `start` itself — the one carried by the breakpoint
+in force there — so the slice begins at that breakpoint even though it precedes the window. A
+`start` before the very first breakpoint is an `InvalidParameter` error, not a clamp: a step
+function is undefined there. The bounds need not be grid-aligned; `start` is floored and `end` is
+ceiled onto the grid (calendar-aware for a monthly resolution). The `end` bound behaves identically
+under either reading: a step at or after `end` cannot overlap `[start, end)`.
+
+A zero-width range (`end == start`) selects nothing, for every one of the seven types — `[t, t)`
+contains no instant, so there is none for a value to be attached to. That is an answer, not a fault.
+It holds for `PersistentTimeSeries` too, and takes precedence over the row above: an empty window
+has no `start` to be in force at, so an empty window before the first breakpoint is empty rather
+than an error.
 
 Forecasts are stricter on purpose. A window is a whole array, not a point, so there is no partial
 window to return: an off-grid `start` is rejected with `InvalidParameter` rather than snapped, at
 any magnitude — including one finer than a millisecond, which [`Period::steps_between`](#period)
 checks the exact landing for. A `start` that is aligned but at or past the last window is rejected
-too, rather than returning an empty selection.
+too, rather than returning an empty selection. A `start` _before the first_ window is the exception
+and clips to it: nothing partial lies there, only nothing at all, and rejecting it would fail every
+range wider than the data — which is the range a bulk export asks for.
 
 `end < start` is `InvalidParameter` for every type. Query bounds themselves are unconstrained: they
 may be finer than the millisecond every _stored_ instant is held to (see
 [timestamp precision](../explanation/time-series-types.md#timestamp-precision)).
+
+One slice is refused whatever the bounds say. A `SingleTimeSeries` or forecast whose period is a
+calendar month is stored as an anchor plus a count, and the end-of-month clamp is not associative —
+a monthly grid from Jan-31 is Jan-31, Feb-29, Mar-31, but re-anchored at its own Feb-29 it reads
+Feb-29, Mar-29, Apr-29. A slice that would have to describe itself that way is an
+`InvalidParameter`, because the shape cannot express the instants the store holds and the wrong
+answer would be silent. See
+[A calendar period is not closed under slicing](../explanation/data-model.md#a-calendar-period-is-not-closed-under-slicing).
 
 A [reader](#readers) is exact rather than range-based: `index_at` maps a timestamp to its index and
 errors if that instant is not on the timeline — for both the regular and the irregular case. It
@@ -558,11 +586,11 @@ for k in 0..reader.count() {
 }
 ```
 
-`build_static_reader` covers both static types, and which one the filter names decides what must
-hold. For `SingleTimeSeries` (the default) the filter must pin a resolution and all matched series
-must share one grid (`initial_timestamp` + `length`). For `NonSequentialTimeSeries` it must pin _no_
-resolution — an irregular series has none — and all matched series must instead lie on one timestamp
-vector, the same cohort that pools their arrays on disk:
+`build_static_reader` covers all three static types, and which one the filter names decides what
+must hold. For `SingleTimeSeries` (the default) the filter must pin a resolution and all matched
+series must share one grid (`initial_timestamp` + `length`). For `NonSequentialTimeSeries` it must
+pin _no_ resolution — an irregular series has none — and all matched series must instead lie on one
+timestamp vector, the same cohort that pools their arrays on disk:
 
 ```rust
 let mut reader = store.build_static_reader(
@@ -571,11 +599,69 @@ let mut reader = store.build_static_reader(
 assert!(reader.resolution().is_none());     // no constant step to report
 ```
 
-Either way the uniformity is validated at build, so there is no presence mask.
-`build_forecast_reader` requires a forecast type and a resolution; a `Deterministic` reader is
-abstract (also matches `DeterministicSingleTimeSeries`), and all matched forecasts must share one
-window timeline (`initial_timestamp` + `interval` + `count`). `static_read` / `forecast_read` error
-(never clamp) if `at` is off the grid/timeline.
+For `PersistentTimeSeries` the filter must likewise pin no resolution, but this is the one case
+whose columns need **not** share a timeline: a step function has a value at every instant from its
+first breakpoint onward, so each column carries its values forward on breakpoints of its own. The
+reader's timeline is then the sorted **union** of every column's breakpoints — every instant at
+which some column changes value — and `index_at` reports a position on that union axis, never a
+storage row index. Reading at an instant before some column's first breakpoint is an error naming
+that column.
+
+```rust
+let mut reader = store.build_static_reader(
+    ListFilter::new().time_series_type(TimeSeriesType::PersistentTimeSeries),
+)?;
+// Columns may sit on different breakpoint vectors; the timeline merges them.
+for t in reader.timestamps().collect::<Vec<_>>() {
+    store.static_read(&mut reader, t)?;
+}
+```
+
+When the matched `SingleTimeSeries` do _not_ share a grid — the usual shape of a real system —
+`build_static_reader_over` takes the span instead of deriving it. Each column then reads at an
+offset of its own, so series that begin at different instants, or run for different lengths, sweep
+together as long as they all cover the span:
+
+```rust
+let mut reader = store.build_static_reader_over(
+    ListFilter::new().resolution(Duration::hours(1)),
+    ReadWindow::from(anchor).with_len(8760),   // len optional: without it, as far as all reach
+)?;
+```
+
+The window is checked, never clamped, in the three ways that would otherwise return a full,
+plausible, wrong row: a matched series that does not cover it is an error **naming that series**
+rather than a column silently dropped; the anchor must fall at or after each series' start and on
+one of its own step boundaries (unlike `read_by_id`, which floors a start inside a step, because
+there a value covers its step); and a calendar resolution is refused where re-anchoring would move
+the dates, by `Period::sub_grid_is_anchorable` — the same rule that governs a sliced read. The
+window belongs to `SingleTimeSeries` alone, and `ReadWindow::count` (which counts forecast windows)
+and a `len` with no `start` are both errors.
+
+The window's counterpart is a filter: `ListFilter::initial_timestamp` and `ListFilter::length` match
+only the series already on one grid, so the ones that are not on it never become columns.
+
+```rust
+// three series named "active_power": one stray day, two full leap years
+store.build_static_reader(ListFilter::new().resolution(hour))?;                  // Err: no shared grid
+store.build_static_reader_over(filter, ReadWindow::from(t7))?;                    // 3 columns, 17 steps
+store.build_static_reader(ListFilter::new().resolution(hour).initial_timestamp(t7))?; // 2 columns, 8784
+```
+
+Use the window when the ragged series should all take part in the sweep, the filter when they should
+not; the two compose. With `resolution` they complete the grid triple, which is what lets a filter
+_name_ a grid rather than only be refused a divergent one — the role `ListFilter::zoneless` plays
+for time-reference coherence. Being ordinary filter fields they reach every filter-taking call, and
+like every filter they select rather than assert: a grid no row is on is an empty result, not an
+error, and a row that stores no `initial_timestamp` (the two irregular types) matches no value at
+all. They are not part of `KeyIdentity`, so an identity probe never narrows by them: two series
+differing only in start or length are the same row to the catalog.
+
+Uniformity — where it is required — is validated at build, so there is no presence mask in any of
+the three cases. `build_forecast_reader` requires a forecast type and a resolution; a
+`Deterministic` reader is abstract (also matches `DeterministicSingleTimeSeries`), and all matched
+forecasts must share one window timeline (`initial_timestamp` + `interval` + `count`). `static_read`
+/ `forecast_read` error (never clamp) if `at` is off the grid/timeline.
 
 **A read is all-or-nothing.** It spans every group (or slot), so a failure anywhere leaves the
 reader wholly empty rather than holding the new timestamp's values in the groups it reached and the
@@ -763,6 +849,15 @@ would hand back another series' timestamps.
 Incoming rows are validated against the vendored [SiennaSchemas](#the-wire-contract) specs before
 anything is decoded, so a document that drifted is refused in the schema's own terms.
 
+**What does not travel.** A `PersistentTimeSeries` is an infrastore-local extension, and the wire
+contract is a `oneOf` over six canonical types with no schema for a seventh — so the export omits
+those rows and the import refuses one a foreign document carries. A store holding them still exports
+everything else; an export whose filter _names_ the type is an error rather than an empty array,
+since that request cannot be honored at all. Those series live in the artifact and are read from it
+directly, so the gap is in the document round trip, not in the store: ask
+`list_metadata(ListFilter::new().time_series_type(TimeSeriesType::PersistentTimeSeries))` for what a
+restore would leave behind.
+
 ### The wire contract
 
 The JSON spelling both directions use is SiennaSchemas' own, vendored at
@@ -799,7 +894,7 @@ it `association_id`) are unchanged by the wrapper, and every binding exchanges a
 `KeyIdentity` is the tuple the catalog files a row under, matching its uniqueness constraint. It is
 **not an address**: it stays internal to the write path, and nothing takes one. `interval` is part
 of the identity (`Some` for every forecast type, `None` for the static types); `resolution` is
-`Option` because `NonSequentialTimeSeries` has none.
+`Option` because neither `NonSequentialTimeSeries` nor `PersistentTimeSeries` has one.
 
 ```rust
 pub struct KeyIdentity {
@@ -846,10 +941,33 @@ impl SingleTimeSeries {
     pub fn with_time_reference(self, time_reference: TimeReference) -> Self;
     pub fn with_component_field(self, component_field: impl Into<String>) -> Self;
     pub fn with_application_data(self, application_data: impl Into<String>) -> Self;
+
+    pub fn timestamp_at(&self, index: usize) -> Result<DateTime<Utc>>;
+    pub fn timestamps(&self) -> impl Iterator<Item = DateTime<Utc>> + '_;
+
+    pub fn from_timestamps(
+        timestamps: &[DateTime<Utc>], data: TypedArray, name: impl Into<String>,
+    ) -> Result<Self, String>;
 }
 ```
 
+`from_timestamps` builds from the timeline a caller holds, inferring the resolution with
+[`Period::infer`] and **proving** the instants lie on it. `new` takes `initial_timestamp` +
+`resolution` and cannot check the claim — the vector it describes is never supplied — so a caller
+whose values sit on a drifting timeline gets a grid that silently disagrees with their data.
+`from_timestamps` either fits a `Period` exactly or errors naming the index that broke the pattern
+and pointing at `NonSequentialTimeSeries`. It is also **how a local-clock timeline reaches the
+store**: the core has no time-zone database and never runs local → instant, so the caller
+materializes their local grid in their own date library and hands over the instants.
+
 `length` is derived from the array's first axis (`data.length()`) by `new`.
+
+`timestamps` materializes the grid, `[0, length)` in order — the regular counterpart of the explicit
+vector `NonSequentialTimeSeries` and `PersistentTimeSeries` carry as a field, and the only correct
+way to rebuild the timeline: a `Period::Months` resolution steps on the **calendar**, so a series
+starting January 31st lands on February 29th, and multiplying a fixed span by the index gets it
+wrong. `timestamp_at` is the single-index form, erroring past `length` or on date overflow. Both
+report UTC instants; how they were _spelled_ is `time_reference`, which neither applies.
 
 The descriptors travel on the series rather than on the write request, so a read returns what a
 write declared. `element_type` is **not** an `Option`: `new` resolves it to `Scalar(data.dtype)` —
@@ -955,6 +1073,50 @@ impl NonSequentialTimeSeries {
 
 `new` validates that timestamps are strictly increasing and match the data length.
 
+### `PersistentTimeSeries`
+
+```rust
+pub struct PersistentTimeSeries {
+    pub timestamps: Vec<DateTime<Utc>>,   // breakpoints, strictly increasing
+    pub length: usize,
+    pub data: TypedArray,
+    pub name: String,
+}
+
+impl PersistentTimeSeries {
+    pub fn new(
+        timestamps: Vec<DateTime<Utc>>, data: TypedArray, name: impl Into<String>,
+    ) -> Result<Self, String>;
+
+    /// The value in force at `at`, for a series of scalars. `T` must match the
+    /// array's dtype; a shaped per-step element is an error (use `row_at`).
+    pub fn value_at<T: Element>(&self, at: DateTime<Utc>) -> Result<T, String>;
+
+    /// The whole per-step slice in force at `at`, shape-generic. `[]` for a
+    /// scalar series.
+    pub fn row_at(&self, at: DateTime<Utc>) -> Result<TypedArray, String>;
+
+    /// The index of the breakpoint governing `at` — the greatest one `<= at`.
+    /// `Err` if `at` precedes the first breakpoint.
+    pub fn index_at(&self, at: DateTime<Utc>) -> Result<usize, String>;
+
+    /// That breakpoint itself: the instant from which the value at `at` has
+    /// been in force. Equal to `at` when `at` is itself a breakpoint.
+    pub fn breakpoint_at(&self, at: DateTime<Utc>) -> Result<DateTime<Utc>, String>;
+}
+```
+
+A sparse **step function**: the value at breakpoint `i` is in force until breakpoint `i + 1`, and
+past the last one forever; before the first breakpoint it is undefined and asking for it is an
+error. `new` validates exactly what `NonSequentialTimeSeries::new` does.
+
+`value_at` is the everyday call, and it is not an approximation: the step function is total on
+`[first breakpoint, +∞)`, so it has a genuine value at every instant a caller can ask about. Only
+the _row_ that value came from sits earlier, which is why `index_at` and `breakpoint_at` are the
+pair spelled as lookups. All four go through one definition of the boundary rule — nothing
+re-derives it. See [time-series types](../explanation/time-series-types.md#persistenttimeseries) for
+the full contract and the contrast with `NonSequentialTimeSeries`.
+
 ### `Deterministic`
 
 ```rust
@@ -974,10 +1136,20 @@ impl Deterministic {
         horizon: impl Into<Period>, interval: impl Into<Period>, count: usize, data: TypedArray,
         name: impl Into<String>,
     ) -> Result<Self, String>;
+
+    pub fn horizon_count(&self) -> usize;
+    pub fn window_start(&self, index: usize) -> Result<DateTime<Utc>>;
+    pub fn window_timestamps(&self, index: usize) -> Result<Vec<DateTime<Utc>>>;
 }
 ```
 
 `new` validates `data.shape` against `[H, count, *E]` where `H = horizon / resolution`.
+
+A forecast has **two grids** and both are needed to place a value: windows step by `interval`
+(`window_start`), and the steps inside one window step by `resolution` (`window_timestamps`, which
+returns `horizon_count()` of them from that window's issue time). They coincide only where windows
+abut without overlapping — a day-ahead forecast reissued hourly overlaps 23 of every 24 steps.
+`horizon_count` is `data.shape[0]`, which `validate` holds equal to `horizon / resolution`.
 
 `validate` re-checks those same invariants against the values the struct currently holds, and
 returns the same `Err(String)`. Every field is `pub` and the type derives `Deserialize`, so a struct
@@ -1042,7 +1214,7 @@ type. `values()` is empty until the first `Store::static_read`, and empty again 
 impl StaticReader {
     pub fn time_series_type(&self) -> TimeSeriesType;  // which static type, hence which timeline
     pub fn initial_timestamp(&self) -> DateTime<Utc>;
-    pub fn resolution(&self) -> Option<Period>;        // None for NonSequentialTimeSeries
+    pub fn resolution(&self) -> Option<Period>;        // None for the explicit-axis types
     pub fn length(&self) -> usize;                     // timeline points
     pub fn groups(&self) -> &[StaticGroup];
     pub fn index_at(&self, at: DateTime<Utc>) -> Result<usize>;
@@ -1096,6 +1268,7 @@ impl WindowSlot {
 pub enum TimeSeriesData {
     SingleTimeSeries(SingleTimeSeries),
     NonSequentialTimeSeries(NonSequentialTimeSeries),
+    PersistentTimeSeries(PersistentTimeSeries),
     Deterministic(Deterministic),
     Probabilistic(Probabilistic),
     Scenarios(Scenarios),
@@ -1105,6 +1278,7 @@ impl TimeSeriesData {
     pub fn time_series_type(&self) -> TimeSeriesType;
     pub fn as_single(&self) -> Option<&SingleTimeSeries>;
     pub fn as_non_sequential(&self) -> Option<&NonSequentialTimeSeries>;
+    pub fn as_persistent(&self) -> Option<&PersistentTimeSeries>;
     pub fn as_deterministic(&self) -> Option<&Deterministic>;
     pub fn as_probabilistic(&self) -> Option<&Probabilistic>;
     pub fn as_scenarios(&self) -> Option<&Scenarios>;
@@ -1124,10 +1298,15 @@ pub enum TimeSeriesType {
     DeterministicSingleTimeSeries,
     Probabilistic,
     Scenarios,
+    PersistentTimeSeries,
 }
 ```
 
 `as_str()` / `parse(&str)` convert to and from the canonical string names used on disk.
+`PersistentTimeSeries` is **appended** rather than inserted: the storage codes are an on-disk
+contract, and the `Deterministic`/`DeterministicSingleTimeSeries` adjacency that `code_span` relies
+on must not be disturbed. That makes the static group non-contiguous in the code space, which is why
+`static_codes()` / `forecast_codes()` return lists rather than ranges.
 
 ### `OwnerCategory`
 

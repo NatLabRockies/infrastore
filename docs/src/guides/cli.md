@@ -229,6 +229,30 @@ Every column in a grid shares one timeline, which is what makes the rows line up
 mask; that is why `SingleTimeSeries` needs `--resolution`. When every column shares one series name
 the headers are bare owner ids, which is exactly the wide form `add` reads back.
 
+When the matched series do **not** share one — a year of load beside a shorter schedule — the build
+fails, naming the series that diverges. `--window-start` sweeps a span you name instead, with each
+column reading at an offset of its own:
+
+```sh
+infrastore --store demo.h5 -f csv grid --resolution PT1H --window-start 2024-01-01T02:00:00Z
+```
+
+Add `--window-length N` to pin the extent; without it the sweep runs as far as every matched series
+reaches. A series that does not cover the span is an error naming it, never a column quietly left
+out of the table.
+
+Sometimes the odd series out should not be a column at all. Then select one grid instead — with
+`--resolution`, the `--initial-timestamp` and `--length` selectors name a whole grid, and every
+series not on it drops out:
+
+```sh
+infrastore --store demo.h5 -f csv grid --resolution PT1H \
+    --initial-timestamp 2024-01-01T02:00:00Z --length 6
+```
+
+They are ordinary selectors, so `list`, `remove`, and the rest take them too — which is how you find
+the grids a store holds (`list --length 24`) and retire a stray cohort without naming its owners.
+
 `export` is the bulk read-direction inverse of `add`: every series the selector matches is written
 to its own CSV or JSON file under `--dir` (or to stdout when exactly one matches), optionally sliced
 with `--time-range`. Setting `INFRASTORE_STORE` in the environment stands in for `--store`, every
@@ -337,9 +361,10 @@ silently invert every relationship. `detach` and `unlink` are the inverses, and 
 
 ## Forecasts
 
-All five writable types work (`SingleTimeSeries`, `NonSequentialTimeSeries`, `Deterministic`,
-`Probabilistic`, `Scenarios`). `infrastore template Deterministic` prints a descriptor to edit, but
-it is plain JSON and says nothing about the data layout, so here is the rule:
+All six writable types work (`SingleTimeSeries`, `NonSequentialTimeSeries`, `PersistentTimeSeries`,
+`Deterministic`, `Probabilistic`, `Scenarios`). `infrastore template Deterministic` prints a
+descriptor to edit, but it is plain JSON and says nothing about the data layout, so here is the
+rule:
 
 Forecast CSVs are a flat, **row-major** stream of values with no structure of their own. The count
 must equal the product of the type's shape:

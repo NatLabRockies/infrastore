@@ -98,8 +98,8 @@ Each binding ships a reference codec between the stored bytes and per-timestep v
   rejects the mismatch on write, but deriving both from one set of values means there is none to
   reject.
 - **Python** — `infrastore.decode_element_values(array, element_type, leading_dims)` and
-  `encode_element_values(values, element_type, leading_dims)`. A write still passes the encoded
-  array and declares `element_type=`; the encoder is what builds it.
+  `encode_element_values(values, element_type, leading_dims)`. The series is still built from the
+  encoded array with `element_type=` declared on its constructor; the encoder is what builds it.
 - **TypeScript** — `@infrastore/codec`, which decodes a gRPC response's `value_bytes` + `shape` +
   `element_type` directly into plottable values.
 - **Julia** — `InfraStore.encode_element_values` / `decode_element_values`, over the value types

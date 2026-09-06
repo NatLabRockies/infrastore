@@ -5,7 +5,7 @@ The PyO3 binding is importable as the `infrastore` module (package `infrastore`)
 
 ```python
 from infrastore import (
-    Store, SingleTimeSeries, NonSequentialTimeSeries,
+    Store, SingleTimeSeries, NonSequentialTimeSeries, PersistentTimeSeries,
     Deterministic, Probabilistic, Scenarios,
     TimeSeriesType, OwnerCategory,
     SupplementalAttributeAssociation, ParentChildAssociation,
@@ -20,13 +20,14 @@ from infrastore import (
 > and unsigned integer widths (`int64`/`int32`/`int16`/`int8`/`uint64`/`uint32`/`uint16`/`uint8`),
 > or `bool`; whatever dtype is given round-trips unchanged. What those elements _mean_ is the
 > association's `element_type` (see [Element types](./element-types.md)), declared with the
-> `element_type=` keyword on `add_time_series` and decoded with `decode_element_values`.
+> `element_type=` keyword on the value constructor and decoded with `decode_element_values`.
 > Multi-dimensional arrays (a per-step element shape) are supported via the NumPy array's shape.
 
 ## Datetimes
 
-Every `datetime` argument — an initial timestamp, a `NonSequentialTimeSeries` timestamp vector, a
-`time_range` bound, a reader's `when` — may be aware or naive, and the store records **which**.
+Every `datetime` argument — an initial timestamp, a `NonSequentialTimeSeries` timestamp vector or a
+`PersistentTimeSeries` breakpoint vector, a `time_range` bound, a reader's `when` — may be aware or
+naive, and the store records **which**.
 
 An **aware** datetime names an instant, and any zone will do: `datetime.timezone.utc`, a `ZoneInfo`,
 or a fixed offset. It is converted to UTC on the way in, so two aware datetimes naming the same
@@ -69,9 +70,9 @@ filter-taking methods take a `zoneless` predicate for building a coherent select
 [Time references](../explanation/time-references.md) for the full rules.
 
 A `datetime` that is **stored** — an initial timestamp, or an entry of a `NonSequentialTimeSeries`
-timestamp vector — must also be a whole number of milliseconds; `microsecond` must be a multiple of
-1000. A finer instant raises `InvalidParameterError` rather than being silently truncated, because
-it cannot survive every binding intact (see
+or `PersistentTimeSeries` timestamp vector — must also be a whole number of milliseconds;
+`microsecond` must be a multiple of 1000. A finer instant raises `InvalidParameterError` rather than
+being silently truncated, because it cannot survive every binding intact (see
 [timestamp precision](../explanation/time-series-types.md#timestamp-precision)). Note that
 `datetime.now(timezone.utc)` carries microseconds: quantize it, e.g.
 `now.replace(microsecond=now.microsecond // 1000 * 1000)`. A `datetime` used only as a _query_ bound
@@ -158,33 +159,24 @@ def add_time_series(
     owner_id: int,
     owner_type: str,
     owner_category: OwnerCategory,
-    time_series: SingleTimeSeries | NonSequentialTimeSeries
+    time_series: SingleTimeSeries | NonSequentialTimeSeries | PersistentTimeSeries
         | Deterministic | Probabilistic | Scenarios,
     *,
     features: dict[str, int | float | bool | str] | None = None,
-    units: str | None = None,
-    element_type: str | None = None,
-    application_data: str | None = None,
-    quantity_kind: str | None = None,
-    unit_system: str | None = None,   # "natural_units" | "component_base"
-    time_reference: str | None = None,   # "utc" | "zoneless" | "-07:00" | "America/Denver"
-    component_field: str | None = None,  # e.g. "max_active_power"
 ) -> int: ...   # the catalog id its row was filed under
-# `time_reference` is normally omitted: it is inferred from the datetime the
-# series was built with (see "Time references" below). Pass it to override.
-# An unrecognized `unit_system` raises InvalidParameterError rather than
-# degrading to unspecified; omitting it leaves the basis unspecified, which is
-# not the same as declaring natural units.
-# `name` comes from the time_series object
-# (e.g. SingleTimeSeries(..., name=...)), not from this call.
+# `features` is the only thing this call adds. `name` and every descriptive
+# attribute -- `units`, `quantity_kind`, `unit_system`, `component_field`,
+# `application_data`, `element_type`, `time_reference` -- come off the
+# time_series object, where they were set at construction. That is what makes a
+# read-then-add lossless: a series read from one store can be added to another
+# unchanged, with nothing to re-supply.
 # A `features` key that shadows a time-series or identity field (`name`,
 # `resolution`, `owner_id`, ...) raises InvalidParameterError.
 
 def add_time_series_bulk(self, items: list[dict]) -> list[int]: ...
 # Each item dict mirrors add_time_series's parameters: required `owner_id`,
-# `owner_type`, `owner_category`, `time_series`; optional `features`, `units`,
-# `element_type`, `application_data`, `quantity_kind`, `unit_system`,
-# `time_reference`, `component_field`.
+# `owner_type`, `owner_category`, `time_series`; optional `features`. Any other
+# key raises, as the misspelled keyword it almost always is.
 # All items commit in ONE metadata transaction (all-or-nothing), which is much
 # faster than looping over add_time_series. Results are in input order.
 
@@ -229,10 +221,12 @@ def count_array_references(self, data_hash: str) -> dict: ...
 # associations sharing that array.
 def read_by_ids_range(
     self, ids: list[int], time_range: tuple[datetime, datetime]
-) -> list[SingleTimeSeries | NonSequentialTimeSeries | Deterministic | Probabilistic | Scenarios]: ...
+) -> list[SingleTimeSeries | NonSequentialTimeSeries | PersistentTimeSeries
+          | Deterministic | Probabilistic | Scenarios]: ...
 # The bounds read: it CLIPS to what falls between the two instants, where
 # read_by_id's window is CHECKED. Both bounds must be spelled the way the series
-# are; a selection spanning both coherence groups is refused.
+# are; a selection spanning both coherence groups is refused. A PersistentTimeSeries
+# clips on its own terms: the result begins at the breakpoint in force at `start`.
 
 def read_by_ids(
     self, ids: list[int]
@@ -339,6 +333,9 @@ def get_time_series_counts(self) -> dict: ...
 def time_series_counts_detailed(self) -> dict: ...
 def counts_by_type(self) -> dict[str, int]: ...       # {time_series_type name: count}
 def num_distinct_arrays(self) -> int: ...
+def show(self, *, file=None) -> None: ...
+# Prints the above as a summary — see below. `file` is any writable object,
+# defaulting to sys.stdout; it is handed straight to print.
 def static_summary(self) -> list[dict]: ...
 def forecast_summary(self) -> list[dict]: ...
 def check_static_consistency(self, resolution: timedelta | str | None = None) -> list[dict]: ...
@@ -384,19 +381,20 @@ with store.transaction():
 ```
 
 > **Keyword-only arguments.** Every optional argument in the binding is keyword-only (the `*`
-> marker): filter kwargs, `features=`/`units=`/`application_data=` on the add paths, `time_range=`
-> on the read paths, and so on. Positional use raises `TypeError`. The wheel ships a
-> `infrastore.pyi` stub, so IDEs and type checkers see the full signatures.
+> marker): filter kwargs, `features=` on the add paths, `units=`/`application_data=` and the rest of
+> the descriptors on the value constructors, `time_range=` on the read paths, and so on. Positional
+> use raises `TypeError`. The wheel ships a `infrastore.pyi` stub, so IDEs and type checkers see the
+> full signatures.
 
 #### Return shapes
 
-- **`add_time_series`** accepts a `SingleTimeSeries`, a `NonSequentialTimeSeries`, or a dense
-  forecast object (`Deterministic` / `Probabilistic` / `Scenarios`) — see [Forecasts](#forecasts).
-  **`transform_single_time_series`** derives a `DeterministicSingleTimeSeries` from every stored
-  `SingleTimeSeries` (or the subset its `owner_category` / `resolution` arguments select) and
-  returns the count transformed. **`read_by_id`** returns whichever matches the stored type — a read
-  names only an id, so the row's own `time_series_type` decides, with no requested type to disagree
-  with it.
+- **`add_time_series`** accepts a `SingleTimeSeries`, a `NonSequentialTimeSeries`, a
+  `PersistentTimeSeries`, or a dense forecast object (`Deterministic` / `Probabilistic` /
+  `Scenarios`) — see [Forecasts](#forecasts). **`transform_single_time_series`** derives a
+  `DeterministicSingleTimeSeries` from every stored `SingleTimeSeries` (or the subset its
+  `owner_category` / `resolution` arguments select) and returns the count transformed.
+  **`read_by_id`** returns whichever matches the stored type — a read names only an id, so the row's
+  own `time_series_type` decides, with no requested type to disagree with it.
 - **`read_by_ids`** returns one typed object per id, in the order the ids are given, repeats
   included (an empty id list returns an empty list). It is the bulk counterpart to `read_by_id`:
   packed `SingleTimeSeries` are read in one decompress-once pass per dataset instead of one read
@@ -451,6 +449,9 @@ with store.transaction():
   `{"components_with_time_series": int, "static_time_series": int, "forecasts": int}`;
   **`time_series_counts_detailed`** adds `supplemental_attributes_with_time_series` and spells the
   other two `static_time_series_count` / `forecast_count`.
+- **`show`** prints those same counts as a block of text and returns `None`. It is the
+  hand-inspection surface — what a store holds, at a glance, without composing four calls and
+  formatting the result. See [`show()`](#show).
 - **`static_summary`** returns one dict per distinct
   `(owner_type, owner_category, time_series_type, name, initial_timestamp, resolution,
   time_step_count)`
@@ -478,6 +479,38 @@ with store.transaction():
 - **`read_by_ids_range`** with `time_range=(start, end)` slices on the time axis; `end` is
   exclusive.
 
+### `show()`
+
+`show()` prints what the store holds. It composes nothing you cannot ask for individually — the
+counts come from `counts_by_type`, `time_series_counts_detailed`, `num_distinct_arrays`, and the two
+association `count_*` methods — but it is the one call to reach for at a REPL or in a log line:
+
+```python
+store.show()
+# Store: system.h5 (read-write)
+# Time series: 128 associations over 128 distinct arrays
+#   SingleTimeSeries      100
+#   PersistentTimeSeries    8
+#   Deterministic          20
+# Owners with time series: 108 components, 0 supplemental attributes
+# Supplemental attribute attachments: 12
+# Parent/child edges: 5
+```
+
+Every number is a catalog aggregate query, so the cost does not grow with how much data the store
+holds; no array is read. The type breakdown lists only the types actually present, static types
+before forecasts — not the numeric type-code order `counts_by_type` returns, which puts
+`PersistentTimeSeries` after the forecasts. An empty store reports `Time series: none` rather than a
+zero, and the header reads `(read-only)` for a store opened that way. Writing elsewhere is the
+`file` argument, handed straight to `print`:
+
+```python
+store.show(file=sys.stderr)
+```
+
+The output is meant for a person to read; parse the `count_*` methods instead if you need the
+numbers.
+
 ## `SingleTimeSeries`
 
 ```python
@@ -486,17 +519,148 @@ SingleTimeSeries(
     resolution: timedelta,
     data: numpy.ndarray,   # shape (length,) or (length, k1, ...)
     name: str,
+    *,
+    application_data: str | None = None,
+    element_type: str | None = None,
+    units: str | None = None,
+    quantity_kind: str | None = None,
+    unit_system: str | None = None,      # "natural_units" | "component_base"
+    component_field: str | None = None,  # e.g. "max_active_power"
+    time_reference: str | None = None,   # "utc" | "zoneless" | "-07:00" | "America/Denver"
 )
 ```
 
 Read-only properties: `initial_timestamp -> datetime`, `resolution -> str` (ISO 8601 duration, e.g.
-`PT1H`), `length -> int`, `data -> numpy.ndarray`, `name -> str`, `time_reference -> str | None`.
-`initial_timestamp` comes back spelled the way it was written — see
-[Time references](#time-references). The constructor accepts either a `timedelta` or an ISO 8601
-duration string for `resolution`; the getter always returns the ISO string. `name` is a required
-association attribute (the same array may be stored under different names). It is read off the
-object by `add_time_series` and populated on `read_by_id`. The array's `element_type` and per-step
-element shape are preserved through a round-trip.
+`PT1H`), `length -> int`, `data -> numpy.ndarray`, `timestamps -> list[datetime]`, `name -> str`,
+plus the seven [descriptive attributes](#descriptive-attributes). `initial_timestamp` comes back
+spelled the way it was written — see [Time references](#time-references). The constructor accepts
+either a `timedelta` or an ISO 8601 duration string for `resolution`; the getter always returns the
+ISO string. `name` is a required association attribute (the same array may be stored under different
+names). It is read off the object by `add_time_series` and populated on `read_by_id`. The array's
+`element_type` and per-step element shape are preserved through a round-trip.
+
+### `SingleTimeSeries.from_timestamps`
+
+```python
+@classmethod
+def from_timestamps(
+    cls, timestamps: Sequence[datetime], data: numpy.ndarray, name: str, **descriptors
+) -> SingleTimeSeries: ...
+```
+
+Build from the timeline you actually hold, inferring `resolution` and **proving** the instants lie
+on it. The constructor takes `initial_timestamp` + `resolution` and the store cannot check that
+claim — the vector it describes is never supplied. This takes the vector: it either fits a period
+exactly, or raises `InvalidParameterError` naming the entry that broke the pattern and pointing at
+`NonSequentialTimeSeries`.
+
+**This is how a local-clock timeline reaches the store.** The core has no time-zone database and
+never runs local → instant; you materialize the grid with `zoneinfo` — where the policy for a
+nonexistent or ambiguous wall clock belongs — and hand over the instants.
+
+```python
+denver = ZoneInfo("America/Denver")
+
+# An hourly local grid IS a uniform instant grid, so it compacts.
+hours = local_hourly_walk(datetime(2024, 11, 3, tzinfo=denver), 6)
+SingleTimeSeries.from_timestamps(hours, values, "load").resolution   # "PT1H"
+
+# A daily one is not, and says so.
+days = [datetime(2024, 11, d, tzinfo=denver) for d in range(1, 6)]
+SingleTimeSeries.from_timestamps(days, values, "peak")               # InvalidParameterError
+```
+
+> **Step the timeline in instants, not wall clocks.** `aware_datetime + timedelta(hours=1)` is
+> **wall-clock** arithmetic in Python: on a fall-back day it jumps 01:00 straight to 02:00 and
+> silently drops a real hour. Go through UTC —
+> `(t.astimezone(timezone.utc) + step).astimezone(zone)` — or `from_timestamps` will (correctly)
+> refuse the result.
+
+A fixed span wins when both a fixed and a calendar reading fit; two entries always fit some fixed
+span, so pass an explicit `"P1M"` to the constructor if you mean calendar months on a short vector.
+
+`timestamps` materializes the grid — `initial_timestamp + k · resolution`, spelled the way the
+series was written. It is the only correct way to rebuild the timeline: a `P1M` resolution steps on
+the **calendar**, so a January 31st series lands on February 29th, and multiplying a fixed span by
+the index would get it wrong.
+
+### Descriptive attributes
+
+Every value type — the three static ones and all three forecasts — takes the same seven keyword-only
+arguments and exposes each as a read-only property. They describe the values without addressing
+them, so none is part of a series' identity: two series differing only in these are a duplicate, and
+none can be filtered on except `component_field`.
+
+| Argument           | Meaning                                                                                                                    |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------- |
+| `units`            | Free-form label for the values, e.g. `"MW"`. Never interpreted or validated.                                               |
+| `quantity_kind`    | What kind of physical quantity they measure, e.g. `"ActivePower"`. QUDT `QuantityKind` local names are recommended.        |
+| `unit_system`      | `"natural_units"` or `"component_base"`. Omitted leaves the basis **unspecified**, which is not the same as natural units. |
+| `component_field`  | The owning component's field these values are the time-varying form of, e.g. `"max_active_power"`. The one filterable one. |
+| `application_data` | Opaque, package-owned payload (typically JSON) stored verbatim. End users are not expected to set it.                      |
+| `element_type`     | What the array's elements mean, e.g. `"tuple(3,f64)"`. Omit for plain numbers; the property then reports the dtype.        |
+| `time_reference`   | Overrides the spelling otherwise inferred from the timestamps. See [Time references](#time-references).                    |
+
+An unrecognized `unit_system` raises `InvalidParameterError` rather than degrading to unspecified.
+`element_type` is the only property that never returns `None`: it is always concrete, reporting the
+array's own dtype spelling for a plain numeric series.
+
+These live on the object rather than on `add_time_series` so that a read-then-add is lossless — a
+series read from one store can be added to another unchanged, with no descriptor to re-supply and
+none that a write could silently replace.
+
+### `to_arrow()`
+
+All three static types — `SingleTimeSeries`, `NonSequentialTimeSeries`, and `PersistentTimeSeries` —
+convert to a two-column `pyarrow.Table` of `timestamp` and `value`:
+
+```python
+table = series.to_arrow()
+table.to_pandas()           # if pandas is installed
+polars.from_arrow(table)    # if polars is
+pyarrow.parquet.write_table(table, "series.parquet")
+```
+
+**pyarrow is an optional extra.** It is not installed with infrastore — it is several times the size
+of the wheel that would pull it in, and the binding's own currency is numpy arrays. Install it with
+`pip install 'infrastore[arrow]'`; calling `to_arrow()` without it raises `ImportError` naming the
+extra. Nothing else in the package imports pyarrow.
+
+**The timestamp column carries the series' spelling.** Arrow's `timestamp(unit, tz)` is the same
+shape as the store's own model — an instant plus how it was spelled — so the mapping is total, and
+millisecond unit throughout means nothing is widened or truncated:
+
+| `time_reference`   | Arrow column type                  |
+| ------------------ | ---------------------------------- |
+| unset, or `"utc"`  | `timestamp[ms, tz=UTC]`            |
+| `"zoneless"`       | `timestamp[ms]` (no zone)          |
+| `"-07:00"`         | `timestamp[ms, tz=-07:00]`         |
+| `"America/Denver"` | `timestamp[ms, tz=America/Denver]` |
+
+A zone this interpreter's tz database does not know warns and falls back to UTC, exactly as reading
+`initial_timestamp` does: the instants are intact either way. For a `SingleTimeSeries` the column is
+the materialized grid (calendar-aware for a monthly resolution); for the two irregular types it is
+the stored vector.
+
+**The value column is the array.** A scalar series gives an Arrow primitive (`double`, `int64`,
+`bool`, …); a multidimensional per-timestep value gives nested `fixed_size_list`, one level per
+element dimension. Composite element types stay in their stored packing — `decode_element_values`
+unpacks them, and `element_type` in the metadata says which.
+
+**The descriptive attributes ride in `table.schema.metadata`**, so the table is not lossy against
+the object it came from and survives a Parquet round trip: `name`, `time_series_type`,
+`element_type`, `time_reference`, `resolution` (a `SingleTimeSeries` only — an irregular timeline
+has no constant step), and whichever of `units`, `quantity_kind`, `unit_system`, `component_field`,
+and `application_data` were declared. An undeclared one is **absent** rather than empty, so
+`b"units" in table.schema.metadata` answers "was a label declared?".
+
+The value column is named `value` rather than after the series so that tables from different
+components concatenate without renaming; the series' own name is in the metadata.
+
+A `PersistentTimeSeries` table has **one row per breakpoint, not per instant** — it is the sparse
+step function as stored. Resampling onto a dense grid is the caller's to do, and needs a grid the
+series does not carry: there is no value before the first breakpoint, so a grid starting earlier has
+no answer to give.
 
 ## `NonSequentialTimeSeries`
 
@@ -505,19 +669,100 @@ NonSequentialTimeSeries(
     timestamps: list[datetime],
     data: numpy.ndarray,
     name: str,
+    *,
+    application_data: str | None = None,
+    element_type: str | None = None,
+    units: str | None = None,
+    quantity_kind: str | None = None,
+    unit_system: str | None = None,      # "natural_units" | "component_base"
+    component_field: str | None = None,  # e.g. "max_active_power"
+    time_reference: str | None = None,   # "utc" | "zoneless" | "-07:00" | "America/Denver"
 )
 ```
 
-Read-only properties: `timestamps`, `length`, `data`, `name`, and `time_reference`. Timestamps must
+Read-only properties: `timestamps`, `length`, `data`, `name`, and the seven
+[descriptive attributes](#descriptive-attributes), plus [`to_arrow()`](#to_arrow). Timestamps must
 be strictly increasing, match the first data dimension, and agree on one spelling — a vector mixing
 naive and aware values raises `InvalidParameterError`, since one series records one reference.
 `read_by_id` returns this class for a non-sequential row.
+
+## `PersistentTimeSeries`
+
+```python
+PersistentTimeSeries(
+    timestamps: list[datetime],
+    data: numpy.ndarray,
+    name: str,
+    *,
+    application_data: str | None = None,
+    element_type: str | None = None,
+    units: str | None = None,
+    quantity_kind: str | None = None,
+    unit_system: str | None = None,      # "natural_units" | "component_base"
+    component_field: str | None = None,  # e.g. "max_active_power"
+    time_reference: str | None = None,   # "utc" | "zoneless" | "-07:00" | "America/Denver"
+)
+```
+
+A sparse **step function**. Constructed exactly like a `NonSequentialTimeSeries` — same arguments,
+same validation, same spelling inference — with the same read-only properties: `timestamps`,
+`length`, `data`, `name`, and the seven [descriptive attributes](#descriptive-attributes), plus
+[`to_arrow()`](#to_arrow). `timestamps` is the breakpoint vector, and so are the rows of the Arrow
+table — one per breakpoint, not per instant. A step function's scalar-collapse policy belongs in
+`application_data`; the store has no column for it.
+
+What differs is the read: the value at breakpoint `i` is in force until breakpoint `i + 1`, and past
+the last one forever, where a `NonSequentialTimeSeries` has no value between its timestamps at all.
+There is no value before the first breakpoint, and asking for one raises `InvalidParameterError`
+rather than clamping.
+
+Three methods ask that question of a series in hand:
+
+```python
+value_at(at: datetime) -> Any        # the value in force at `at`
+index_at(at: datetime) -> int        # the row it came from
+breakpoint_at(at: datetime) -> datetime  # the instant it has been in force since
+```
+
+`value_at` is the everyday call, and it is not an approximation: a step function is defined at
+_every_ instant from its first breakpoint onward, so it has a genuine value at `at`. It returns
+exactly what indexing `data` returns — a numpy scalar of the series' own dtype, or the per-step
+subarray for a series with a shaped element. `at` must be spelled the way the breakpoints are (both
+aware or both naive), the same rule a `time_range` bound follows. Only an `at` strictly _before_ the
+first breakpoint raises.
+
+```python
+curve = PersistentTimeSeries(
+    [datetime(2024, 1, 1), datetime(2024, 4, 1), datetime(2024, 7, 1)],
+    np.array([10.0, 40.0, 70.0]),
+    "gas",
+)
+curve.value_at(datetime(2024, 5, 17))       # 40.0, carried forward from April
+curve.breakpoint_at(datetime(2024, 5, 17))  # datetime(2024, 4, 1)
+```
+
+A range read slices on those terms — the returned series begins at the breakpoint _in force at_
+`start`, so it always defines a value there:
+
+```python
+sliced, = store.read_by_ids_range([id], (mid_april, september))
+# sliced.timestamps[0] is the April breakpoint, not the July one.
+```
+
+A zero-width range (`end == start`) is the exception, and selects nothing — as it does for every
+other type, since `[t, t)` holds no instant for a value to be in force at. That applies before the
+first breakpoint too, where a non-empty window raises.
+
+Policy about how a step function collapses for a downstream solver belongs to the application and
+travels in `application_data`; the store never interprets it. See the
+[time-series types](../explanation/time-series-types.md#persistenttimeseries).
 
 ## Enums
 
 ```python
 TimeSeriesType.SingleTimeSeries
 TimeSeriesType.NonSequentialTimeSeries
+TimeSeriesType.PersistentTimeSeries
 TimeSeriesType.Deterministic
 TimeSeriesType.DeterministicSingleTimeSeries
 TimeSeriesType.Probabilistic
@@ -551,15 +796,18 @@ stored `SingleTimeSeries` with [`transform_single_time_series`](#methods).
 [`get_time_series_counts`](#methods) reports the forecast total under `forecasts`.
 
 ```python
-ts = Deterministic(initial_timestamp, resolution, horizon, interval, count, data, "load_fc")
-series_id = store.add_time_series(42, "Generator", OwnerCategory.Component, ts, units="MW")
+ts = Deterministic(
+    initial_timestamp, resolution, horizon, interval, count, data, "load_fc", units="MW"
+)
+series_id = store.add_time_series(42, "Generator", OwnerCategory.Component, ts)
 ```
 
 `data` is a NumPy array in the canonical shape for the forecast type, where `H` is
 `horizon / resolution`. As with `SingleTimeSeries`, every period argument (`resolution`, `horizon`,
 `interval`) accepts either a `timedelta` or an ISO 8601 duration string — the string form is
 required for calendar periods such as `"P1M"` — and the getters always return the ISO string. Every
-forecast also takes a required `name` (after `data`), exposed as a read-only property:
+forecast also takes a required `name` (after `data`), exposed as a read-only property, and the same
+seven keyword-only [descriptive attributes](#descriptive-attributes) as the static types.
 
 | Type            | `data` shape                       | extra constructor arg                 |
 | --------------- | ---------------------------------- | ------------------------------------- |
@@ -578,10 +826,18 @@ Deterministic(
     count: int,
     data: numpy.ndarray,
     name: str,
+    *,
+    application_data: str | None = None,
+    element_type: str | None = None,
+    units: str | None = None,
+    quantity_kind: str | None = None,
+    unit_system: str | None = None,
+    component_field: str | None = None,
+    time_reference: str | None = None,
 )
 ```
 
-Read-only properties:
+Read-only properties (plus the seven [descriptive attributes](#descriptive-attributes)):
 
 ```python
 forecast.initial_timestamp -> datetime
@@ -592,6 +848,48 @@ forecast.count             -> int
 forecast.data              -> numpy.ndarray
 forecast.name              -> str
 ```
+
+#### `to_arrow_windows()`
+
+```python
+Deterministic.to_arrow_windows() -> dict[datetime, pyarrow.Table]
+```
+
+The forecast as one `pyarrow.Table` per window, keyed by **issue time** —
+`initial_timestamp + k · interval`, spelled the way the series was written. Requires the same
+[`arrow` extra](#to_arrow) as the static types.
+
+```python
+windows = forecast.to_arrow_windows()
+windows[datetime(2024, 1, 2, tzinfo=timezone.utc)]   # that window's forecast
+for issue_time, table in windows.items(): ...        # chronological
+```
+
+Each value is a two-column `timestamp`/`value` table shaped **exactly like a
+`SingleTimeSeries.to_arrow()`** — `horizon / resolution` rows stepping by `resolution` from the
+issue time — so one window drops into anything that already consumes a static table.
+
+The dict is in window order, which Python's insertion-ordered `dict` makes an ordering you can rely
+on: `next(iter(windows))` is the earliest issue time and iteration is chronological. It is not a
+sorted _container_, so there is no O(log n) range lookup; `bisect` over `list(windows)` selects a
+span of issue times.
+
+**Two grids, both needed to place a value.** Windows step by `interval`; the rows inside one window
+step by `resolution`. They coincide only for a forecast whose windows abut without overlapping,
+which is not the common case — a day-ahead forecast reissued hourly overlaps 23 of every 24 rows.
+The tables repeat those instants rather than pretending one timeline covers them, which is why this
+is a dict of tables rather than a single table.
+
+Each table carries the forecast's descriptive attributes as schema metadata, plus `resolution`,
+`horizon`, `interval`, `count`, and its own `issue_time` — so a window written to Parquet on its own
+still knows which one it is.
+
+This materializes every window. The stored array is `[H, count, *E]` — window index innermost — so
+it is transposed once on the way out; for a per-timestamp sweep the cheap path is
+[`build_forecast_reader`](#readers), which reads along the axis the data is already laid out on.
+`DeterministicSingleTimeSeries` rows read back as a `Deterministic`, so they convert the same way.
+`Probabilistic` and `Scenarios` do not have this yet — their windows carry a third axis, and how to
+spell it is an open question.
 
 ### `Probabilistic`
 
@@ -605,6 +903,14 @@ Probabilistic(
     percentiles: list[float],
     data: numpy.ndarray,
     name: str,
+    *,
+    application_data: str | None = None,
+    element_type: str | None = None,
+    units: str | None = None,
+    quantity_kind: str | None = None,
+    unit_system: str | None = None,
+    component_field: str | None = None,
+    time_reference: str | None = None,
 )
 ```
 
@@ -625,6 +931,14 @@ Scenarios(
     count: int,
     data: numpy.ndarray,   # leading axis is scenario_count
     name: str,
+    *,
+    application_data: str | None = None,
+    element_type: str | None = None,
+    units: str | None = None,
+    quantity_kind: str | None = None,
+    unit_system: str | None = None,
+    component_field: str | None = None,
+    time_reference: str | None = None,
 )
 ```
 
@@ -650,6 +964,8 @@ def build_static_reader(
     self,
     resolution: timedelta | str | None = None,
     *,
+    window_start: datetime | None = None,             # sweep a named span instead of
+    window_length: int | None = None,                 # inheriting the shared grid
     time_series_type: TimeSeriesType | None = None,   # default: SingleTimeSeries
     owner_id: int | None = None,
     owner_category: OwnerCategory | None = None,
@@ -657,6 +973,8 @@ def build_static_reader(
     name: str | None = None,
     name_glob: str | None = None,
     component_field: str | None = None,
+    initial_timestamp: datetime | None = None,        # select one grid, dropping
+    length: int | None = None,                        # the series not on it
     features: dict[str, int | float | bool | str] | None = None,
 ) -> StaticReader: ...
 def static_read(self, reader: StaticReader, when: datetime) -> None: ...
@@ -680,9 +998,10 @@ def forecast_read(self, reader: ForecastReader, when: datetime) -> None: ...
 `resolution` is required on `build_forecast_reader`, and on `build_static_reader` for
 `SingleTimeSeries` (one resolution per reader). It must be **omitted** for
 `time_series_type=TimeSeriesType.NonSequentialTimeSeries`: an irregular series has no resolution, so
-its timeline is the timestamp vector its cohort shares instead. `static_read` / `forecast_read` fill
-the reader's buffers in place and return `None`; passing a `when` that is off the reader's timeline
-raises `InvalidParameterError`.
+its timeline is the timestamp vector its cohort shares instead. Likewise for
+`TimeSeriesType.PersistentTimeSeries`, whose timeline is the union of its columns' breakpoints.
+`static_read` / `forecast_read` fill the reader's buffers in place and return `None`; passing a
+`when` that is off the reader's timeline raises `InvalidParameterError`.
 
 ### `StaticReader`
 
@@ -701,13 +1020,25 @@ class StaticReader:
 All matched series must share one timeline — one grid (`initial_timestamp` + `length`) for
 `SingleTimeSeries`, one timestamp vector for `NonSequentialTimeSeries`. The build validates this and
 raises on divergence, so there is no presence mask — every column has a value at every valid
-timestamp. `grid()["resolution"]` is `None` for an irregular reader; `timestamps()` is the timeline
-either way, so a read loop written against it works unchanged for both. `group_values(i)` returns a
-`(num_columns, *element_shape)` array whose column `j` corresponds to `groups()[i]["keys"][j]`; it
-is empty until the first `static_read`.
+timestamp. When they do not share one there are two remedies, and they answer different questions:
+[a reader window](#reader-windows) sweeps a span across the ragged series, while the
+[`initial_timestamp` / `length` filter](#selecting-one-grid) drops the ones that are not on the grid
+you want.
+
+`PersistentTimeSeries` is the exception: its columns may sit on **different** breakpoint vectors,
+because a step function has a value at every instant from its first breakpoint on. `timestamps()` is
+then the sorted union of every column's breakpoints, and each column reports the value in force
+there. Reading before some column's first breakpoint raises `InvalidParameterError` naming that
+column. There is still no presence mask.
+
+`grid()["resolution"]` is `None` for an irregular or persistent reader; `timestamps()` is the
+timeline in every case, so a read loop written against it works unchanged for all three.
+`group_values(i)` returns a `(num_columns, *element_shape)` array whose column `j` corresponds to
+`groups()[i]["ids"][j]`; it is empty until the first `static_read`.
 
 ```python
 # For irregular series: build_static_reader(time_series_type=TimeSeriesType.NonSequentialTimeSeries)
+# For step functions:   build_static_reader(time_series_type=TimeSeriesType.PersistentTimeSeries)
 reader = store.build_static_reader(timedelta(hours=1))
 grid = reader.grid()
 groups = reader.groups()
@@ -715,7 +1046,79 @@ start = datetime.fromisoformat(grid["initial_timestamp"])
 for ts in reader.timestamps():
     store.static_read(reader, ts)
     for i, g in enumerate(groups):
-        vals = reader.group_values(i)   # column j ↔ g["keys"][j]
+        vals = reader.group_values(i)   # column j ↔ g["ids"][j]
+```
+
+#### Reader windows
+
+A shared grid is a strong requirement, and a real system rarely meets it: a year of load sits beside
+a week of an outage schedule, or one component's data begins an hour later than the rest. Passing
+`window_start` (and optionally `window_length`) drops the requirement. The reader's axis becomes the
+span you named, and each column reads at an **offset of its own** — how many of its own steps
+precede the anchor — so series that begin at different instants, or run for different lengths, sweep
+together as long as they all cover the span.
+
+```python
+# 24 hours of one series, a leap year of another: no shared grid, so no reader.
+store.build_static_reader("PT1H")
+# InvalidParameterError: StaticReader requires a uniform grid; series 'load' (owner 7)
+# has grid (2024-01-01T00:00:00Z, PT1H, 24) but the reader grid is
+# (2024-01-01T07:00:00Z, PT1H, 8784). Build the reader over a window ...
+
+reader = store.build_static_reader("PT1H", window_start=datetime(2024, 1, 1, 7, tzinfo=utc))
+reader.grid()["length"]   # 17 -- as far as *every* matched series reaches from 07:00
+```
+
+Without `window_length` the reader runs as far from the anchor as every matched series reaches,
+which is the widest span on which no column has to be dropped. With one, the span is exactly what
+you asked for and is **checked**, in the three ways that would otherwise return a full, plausible,
+wrong row:
+
+- a matched series that does not cover the span raises `InvalidParameterError` **naming that
+  series**, rather than quietly leaving its column out — an absent column is invisible at read time;
+- the anchor must fall at or after each series' start and on one of its own step boundaries. A
+  timestamp part-way through a step is an error, not a floor. (`read_by_id` floors, because there a
+  value covers its step; a reader hands back a whole cohort at one instant, so flooring per column
+  would shift columns against each other by up to a step.)
+- a monthly resolution is refused where re-anchoring would move the dates, by the same rule that
+  governs a sliced `read_by_id` — a monthly grid from Jan-31 re-anchored at its own Feb-29 would
+  read Feb-29, Mar-29, Apr-29.
+
+`window_start` must be spelled the way the series are (aware for a zoned series, naive for a
+zoneless one), like every other query bound, and belongs to `SingleTimeSeries` alone: the two
+irregular types carry their timeline rather than deriving it, so there is nothing to re-anchor.
+`window_length` without `window_start` is refused — a span with no anchor is the ambiguity this
+argument exists to remove.
+
+Everything downstream is unchanged: `grid()` reports the window, `timestamps()` walks it, and
+`groups()` still lists every matched column.
+
+#### Selecting one grid
+
+The window's counterpart. `initial_timestamp` and `length` are **filter** arguments — they match
+only the series already on that grid, so the ones that are not on it never become columns:
+
+```python
+# 24 hours of stray data beside two full leap years, all named active_power
+store.build_static_reader("PT1H")                                # InvalidParameterError
+store.build_static_reader("PT1H", window_start=t7).grid()        # 3 columns, 17 steps
+store.build_static_reader("PT1H", initial_timestamp=t7).grid()   # 2 columns, 8784 steps
+```
+
+Use the **window** when the ragged series should all take part in the sweep, and the **filter** when
+they should not. They compose: filter to a cohort, then window a span inside it.
+
+With `resolution` these two complete the grid triple, which is what lets a filter name a whole grid
+rather than only be refused a divergent one — the role `zoneless` plays for time-reference
+coherence. They are ordinary filter arguments, so they reach every filter-taking call
+(`list_metadata`, `list_names`, `has_any_time_series`, `remove_by_filter`, …), and like every filter
+they _select_ rather than assert: a grid no row is on is an empty result, not an error. A row that
+stores no `initial_timestamp` — the two irregular types — matches no value at all, the same
+SQL-equality trap [`component_field`](#methods) has.
+
+```python
+store.list_metadata(initial_timestamp=t7, length=8784)   # the cohort
+store.remove_by_filter(initial_timestamp=t0, length=24)  # retire the stray one
 ```
 
 ### `ForecastReader`
@@ -980,7 +1383,10 @@ def open_without_catalog(cls, path: str, *, catalog: str = "attached") -> Store:
 
 `export_time_series_associations_openapi` takes the same filter keywords as `list_metadata`. Every
 row's `uri` and `data_hash` are the hex-encoded content hash the store already has for that row —
-never a caller-supplied locator. With no filter this exports the whole catalog, sorted by identity.
+never a caller-supplied locator. With no filter this exports the whole catalog, sorted by identity —
+except `PersistentTimeSeries` rows, which are omitted: the type is an infrastore-local extension the
+wire contract has no schema for, so it cannot be spelled in a document. A filter naming that type is
+an error rather than an empty array.
 
 `export_supplemental_attribute_associations_openapi` exports the whole
 `supplemental_attribute_associations` table, sorted by `(component_id, attribute_id)`;
@@ -996,7 +1402,9 @@ records pointing at the wrong series. An irregular series locates its time axis 
 `timestamps_uri`, filled from the axis's own content hash: the axis is stored beside the arrays and
 shared across a cohort, and the values cannot imply it — two irregular series with byte-identical
 values on different axes share one content-addressed array. A row missing the locator, or naming an
-axis the store does not hold, is refused. Any of those, or an absent array, raises
+axis the store does not hold, is refused. A `PersistentTimeSeries` row is refused before any of
+that: the type is an infrastore-local extension, outside the six the wire contract defines, so a
+document naming one is rejected by the discriminator check. Any of those, or an absent array, raises
 `InvalidParameterError` and rolls the whole batch back.
 
 Infrastore never modifies the data to make an incoming document agree with what it already holds. A

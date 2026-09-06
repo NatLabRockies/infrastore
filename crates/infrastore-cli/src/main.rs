@@ -361,10 +361,21 @@ enum Commands {
     Grid {
         #[command(flatten)]
         selector: SelectorArgs,
+        /// Sweep this span instead of the grid the matched series share, so
+        /// SingleTimeSeries that start at different instants or run for different
+        /// lengths line up. Each column reads at an offset of its own; a series that
+        /// does not cover the span is an error naming it. RFC3339 or epoch-ms.
+        #[arg(long, value_name = "TIMESTAMP")]
+        window_start: Option<String>,
+        /// Timesteps to sweep from --window-start; without it, as far as every matched
+        /// series reaches.
+        #[arg(long, value_name = "N", requires = "window_start")]
+        window_length: Option<usize>,
         /// Restrict to a time range START..END (RFC3339 or epoch-ms; END exclusive). A
         /// regular series' START inside a step selects that step, an irregular series
         /// keeps only timestamps at or after START, and a forecast's START must be a
-        /// window boundary (only its END clips).
+        /// window boundary (only its END clips). Filters the rows a reader already has;
+        /// --window-start decides which rows it has at all.
         #[arg(long)]
         time_range: Option<String>,
         /// Max rows to show in table output (default 50).
@@ -782,7 +793,8 @@ enum Commands {
     /// `list` / `info` / `export -f json` output for the series it creates.
     #[command(after_help = help::TEMPLATE)]
     Template {
-        /// SingleTimeSeries|NonSequentialTimeSeries|Deterministic|Probabilistic|Scenarios
+        /// SingleTimeSeries|NonSequentialTimeSeries|PersistentTimeSeries|Deterministic|
+        /// Probabilistic|Scenarios
         #[arg(value_name = "TYPE")]
         ts_type: String,
     },
@@ -929,6 +941,8 @@ fn run(cli: &Cli) -> Result<(), String> {
         ),
         Commands::Grid {
             selector,
+            window_start,
+            window_length,
             time_range,
             limit,
             full,
@@ -936,6 +950,8 @@ fn run(cli: &Cli) -> Result<(), String> {
         } => commands::grid::run(
             &require_store(cli)?,
             selector,
+            window_start.as_deref(),
+            *window_length,
             time_range.as_deref(),
             *limit,
             *full,

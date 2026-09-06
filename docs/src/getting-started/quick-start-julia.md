@@ -13,16 +13,17 @@ using Dates, InfraStore
 # to write an HDF5 file plus its SQLite catalog.
 store = Store(in_memory=true)
 
-# The name lives on the series struct, not on `add_time_series!`.
+# The name and the units live on the series struct, not on `add_time_series!`.
 ts = SingleTimeSeries(
     DateTime(2024, 1, 1),    # initial timestamp
     Hour(1),                 # resolution
     collect(100.0:123.0),    # 24 hourly values
-    "load",                  # name
+    "load";                  # name
+    units = "MW",            # optional, like every other descriptor
 )
 
 # The owner is identified by an integer id, an owner type, and a category.
-# Features and units are optional.
+# Features are optional.
 id = add_time_series!(
     store,
     42,             # owner_id
@@ -30,7 +31,6 @@ id = add_time_series!(
     Component,      # owner_category
     ts;
     features = Dict("model_year" => 2030),
-    units = "MW",
 )
 
 got = read_by_id(store, id)
@@ -84,7 +84,7 @@ Swap the constructor to persist. The do-block form closes the store on exit, inc
 
 ```julia
 Store(in_memory=false, path="system.h5") do store
-    add_time_series!(store, 42, "Generator", Component, ts; units = "MW")
+    add_time_series!(store, 42, "Generator", Component, ts)
     flush!(store)   # sync buffered HDF5 writes to disk
 end
 ```

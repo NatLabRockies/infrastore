@@ -11,6 +11,15 @@
 //! means one shared timestamp vector. The core reports a divergent selection as
 //! an error rather than padding it, and that error is passed through unchanged.
 //!
+//! `PersistentTimeSeries` is the exception, and it is the core's, not the
+//! CLI's: a step function has a value at every instant from its first
+//! breakpoint onward, so its columns may hold *different* breakpoint vectors.
+//! The rows written are then the union of every column's breakpoints — every
+//! instant at which some column changes — and each column shows the value in
+//! force there. A selection whose earliest union instant precedes some column's
+//! first breakpoint is an error naming that column, since a step function has
+//! no value before its first breakpoint.
+//!
 //! One timeline also means one *spelling* for it, so a selection mixing
 //! wall-clock series with instant-bearing ones is refused on the same terms.
 //! `--spelling zoned|zoneless` narrows it to one of the two groups.
@@ -44,9 +53,12 @@ pub enum ColumnLabel {
     Full,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     store_path: &Path,
     selector: &SelectorArgs,
+    window_start: Option<&str>,
+    window_length: Option<usize>,
     time_range: Option<&str>,
     limit: Option<usize>,
     full: bool,
@@ -54,8 +66,23 @@ pub fn run(
     format: Format,
 ) -> Result<(), String> {
     let store = store_access::open_readonly(store_path)?;
+    // `--window-start` builds a different reader; `--time-range` filters the
+    // rows of whichever reader was built. They compose, and only the first can
+    // rescue a selection whose series share no grid.
+    let window = match window_start {
+        None => infrastore_core::ReadWindow::full(),
+        Some(text) => {
+            let (instant, reference) = crate::parse::parse_timestamp_with_reference(text)?;
+            infrastore_core::ReadWindow {
+                start: Some(instant),
+                zoneless: reference.is_zoneless(),
+                len: window_length,
+                count: None,
+            }
+        }
+    };
     let mut reader = store
-        .build_static_reader(selector.to_filter()?)
+        .build_static_reader_over(selector.to_filter()?, window)
         .map_err(|e| e.to_string())?;
 
     let headers = column_headers(&store, &reader, label)?;
