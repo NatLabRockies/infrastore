@@ -385,7 +385,10 @@ fn ts_row_to_json(meta: &TimeSeriesMetadata) -> Value {
 fn export_ts_rows(store: &Store, filter: &ListFilter) -> Result<String> {
     if filter.time_series_type == Some(TimeSeriesType::PersistentTimeSeries) {
         return Err(TimeSeriesError::InvalidParameter(
-            "cannot export PersistentTimeSeries as OpenAPI rows: the wire contract is a oneOf              over the six canonical types and has no schema for this one, which is an              infrastore-local extension. An unfiltered export omits these rows and emits the              rest"
+            "cannot export PersistentTimeSeries as OpenAPI rows: the wire contract is a \
+             oneOf over the six canonical types and has no schema for this one, which is an \
+             infrastore-local extension. An unfiltered export omits these rows and emits the \
+             rest"
                 .into(),
         ));
     }

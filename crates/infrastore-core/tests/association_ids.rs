@@ -1779,6 +1779,22 @@ fn a_persistent_row_travels_in_neither_direction() {
     // The row itself is untouched — omitted from a document, not from the store.
     assert!(store.get_metadata_by_id(id).unwrap().is_some());
 
+    // Naming the type outright is the other request: refused rather than
+    // answered with an empty array, since silence would read as "the store holds
+    // none". The message is prose a caller reads, so the source's own wrapping
+    // must not survive into it.
+    let err = store
+        .export_time_series_associations_openapi(
+            &ListFilter::default().time_series_type(TimeSeriesType::PersistentTimeSeries),
+        )
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("cannot export PersistentTimeSeries"), "{msg}");
+    assert!(
+        !msg.contains("  "),
+        "the message carries the source's own indentation: {msg}"
+    );
+
     // A document from elsewhere can still name the type. Importing into the
     // *same* store, which holds both the array and the axis: having them is
     // exactly what would let this through if the type check missed.

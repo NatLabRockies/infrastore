@@ -611,7 +611,9 @@ fn index_on_timeline(timeline: &Timeline, at: DateTime<Utc>) -> Result<usize> {
         } => index_on_grid(*initial, *resolution, *length, at, "grid"),
         Timeline::Irregular { timestamps } => timestamps.binary_search(&at).map_err(|_| {
             TimeSeriesError::InvalidParameter(format!(
-                "timestamp {at} is not on the reader's timeline (an irregular timeline has                  no value between its timestamps, so only the {} stored instants are                  readable)",
+                "timestamp {at} is not on the reader's timeline (an irregular timeline has \
+                 no value between its timestamps, so only the {} stored instants are \
+                 readable)",
                 timestamps.len()
             ))
         }),
@@ -2218,6 +2220,21 @@ mod tests {
         assert!(
             err.to_string().contains("not on the reader's timeline"),
             "{err}"
+        );
+        // The message is prose a caller reads, so the source wrapping must not
+        // survive into it. This one exists twice -- `StaticReader::index_at` and
+        // `index_on_timeline` -- and only one copy had its continuations.
+        assert!(
+            !err.to_string().contains("  "),
+            "the message carries the source's own indentation: {err}"
+        );
+        assert_eq!(
+            err.to_string(),
+            reader
+                .index_at(stamps[0] + Duration::minutes(1))
+                .unwrap_err()
+                .to_string(),
+            "the two copies of this message must stay identical"
         );
         // Before the first and after the last, too.
         assert!(
