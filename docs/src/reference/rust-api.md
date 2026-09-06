@@ -447,11 +447,21 @@ Forecasts are stricter on purpose. A window is a whole array, not a point, so th
 window to return: an off-grid `start` is rejected with `InvalidParameter` rather than snapped, at
 any magnitude — including one finer than a millisecond, which [`Period::steps_between`](#period)
 checks the exact landing for. A `start` that is aligned but at or past the last window is rejected
-too, rather than returning an empty selection.
+too, rather than returning an empty selection. A `start` _before the first_ window is the exception
+and clips to it: nothing partial lies there, only nothing at all, and rejecting it would fail every
+range wider than the data — which is the range a bulk export asks for.
 
 `end < start` is `InvalidParameter` for every type. Query bounds themselves are unconstrained: they
 may be finer than the millisecond every _stored_ instant is held to (see
 [timestamp precision](../explanation/time-series-types.md#timestamp-precision)).
+
+One slice is refused whatever the bounds say. A `SingleTimeSeries` or forecast whose period is a
+calendar month is stored as an anchor plus a count, and the end-of-month clamp is not associative —
+a monthly grid from Jan-31 is Jan-31, Feb-29, Mar-31, but re-anchored at its own Feb-29 it reads
+Feb-29, Mar-29, Apr-29. A slice that would have to describe itself that way is an
+`InvalidParameter`, because the shape cannot express the instants the store holds and the wrong
+answer would be silent. See
+[A calendar period is not closed under slicing](../explanation/data-model.md#a-calendar-period-is-not-closed-under-slicing).
 
 A [reader](#readers) is exact rather than range-based: `index_at` maps a timestamp to its index and
 errors if that instant is not on the timeline — for both the regular and the irregular case. It
@@ -585,10 +595,11 @@ assert!(reader.resolution().is_none());     // no constant step to report
 
 For `PersistentTimeSeries` the filter must likewise pin no resolution, but this is the one case
 whose columns need **not** share a timeline: a step function has a value at every instant from its
-first breakpoint onward, so each column resolves hold-last on breakpoints of its own. The reader's
-timeline is then the sorted **union** of every column's breakpoints — every instant at which some
-column changes value — and `index_at` reports a position on that union axis, never a storage row
-index. Reading at an instant before some column's first breakpoint is an error naming that column.
+first breakpoint onward, so each column carries its values forward on breakpoints of its own. The
+reader's timeline is then the sorted **union** of every column's breakpoints — every instant at
+which some column changes value — and `index_at` reports a position on that union axis, never a
+storage row index. Reading at an instant before some column's first breakpoint is an error naming
+that column.
 
 ```rust
 let mut reader = store.build_static_reader(
@@ -1031,18 +1042,34 @@ impl PersistentTimeSeries {
         timestamps: Vec<DateTime<Utc>>, data: TypedArray, name: impl Into<String>,
     ) -> Result<Self, String>;
 
-    /// The index of the breakpoint in force at `at` — the greatest one `<= at`.
+    /// The value in force at `at`, for a series of scalars. `T` must match the
+    /// array's dtype; a shaped per-step element is an error (use `row_at`).
+    pub fn value_at<T: Element>(&self, at: DateTime<Utc>) -> Result<T, String>;
+
+    /// The whole per-step slice in force at `at`, shape-generic. `[]` for a
+    /// scalar series.
+    pub fn row_at(&self, at: DateTime<Utc>) -> Result<TypedArray, String>;
+
+    /// The index of the breakpoint governing `at` — the greatest one `<= at`.
     /// `Err` if `at` precedes the first breakpoint.
-    pub fn index_in_force_at(&self, at: DateTime<Utc>) -> Result<usize, String>;
+    pub fn index_at(&self, at: DateTime<Utc>) -> Result<usize, String>;
+
+    /// That breakpoint itself: the instant from which the value at `at` has
+    /// been in force. Equal to `at` when `at` is itself a breakpoint.
+    pub fn breakpoint_at(&self, at: DateTime<Utc>) -> Result<DateTime<Utc>, String>;
 }
 ```
 
 A sparse **step function**: the value at breakpoint `i` is in force until breakpoint `i + 1`, and
 past the last one forever; before the first breakpoint it is undefined and asking for it is an
-error. `new` validates exactly what `NonSequentialTimeSeries::new` does. `index_in_force_at` is the
-single definition of the lookup — nothing else re-derives it. See the
-[data model](../explanation/data-model.md#persistenttimeseries) for the full contract and the
-contrast with `NonSequentialTimeSeries`.
+error. `new` validates exactly what `NonSequentialTimeSeries::new` does.
+
+`value_at` is the everyday call, and it is not an approximation: the step function is total on
+`[first breakpoint, +∞)`, so it has a genuine value at every instant a caller can ask about. Only
+the _row_ that value came from sits earlier, which is why `index_at` and `breakpoint_at` are the
+pair spelled as lookups. All four go through one definition of the boundary rule — nothing
+re-derives it. See the [data model](../explanation/data-model.md#persistenttimeseries) for the full
+contract and the contrast with `NonSequentialTimeSeries`.
 
 ### `Deterministic`
 

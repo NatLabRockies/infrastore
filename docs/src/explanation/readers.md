@@ -74,7 +74,7 @@ have to agree with its neighbors, and only because a step function makes that sa
 at **every** instant from its own first breakpoint onward, so a column need not carry the instant
 being read in order to answer for it. Such a reader interns the distinct breakpoint vectors its
 columns sit on, records for each column the vector it resolves against, and takes their sorted
-**union** as its public axis. A read then resolves hold-last per vector rather than once for the
+**union** as its public axis. A read then carries values forward per vector rather than once for the
 whole reader.
 
 Two consequences follow from the union being a public axis rather than a storage layout:

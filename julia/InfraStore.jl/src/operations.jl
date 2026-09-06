@@ -973,6 +973,15 @@ A window is *checked*, not clamped: a `start_time` off the series' own grid, or 
 hand back the smaller answer that fits. Throws `NotFoundError` if `id` names no
 row, following [`read_by_ids`](@ref).
 
+One slice is refused by both forms. A series whose resolution is a calendar
+period (`P1M`, `P1Y`) is stored as an anchor plus a count, and month-end
+arithmetic clamps: a monthly grid from Jan-31 is Jan-31, Feb-29, Mar-31, but
+re-anchored at its own Feb-29 it would read Feb-29, Mar-29, Apr-29. A slice that
+would have to describe itself that way throws `InvalidParameterError` rather than
+returning the stored values under dates the store does not hold. Read the series
+whole and slice its `timestamps`, or store the instants with
+[`NonSequentialTimeSeries`](@ref).
+
 Pass `owner = (owner_id, category)` to hold the row to that owner, and get
 [`OwnerMismatchError`](@ref) when it belongs to someone else. The owner comes off
 the same row the values are materialized from, so the guarded read costs exactly

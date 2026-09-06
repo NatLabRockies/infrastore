@@ -594,8 +594,9 @@ another. The lowercase forms are a command-line shorthand, not a second vocabula
   inclusive, `END` exclusive), where each side is parsed as a timestamp. For example
   `--time-range 2024-01-01T01:00:00Z..2024-01-01T03:00:00Z`. A duration such as `--time-range 1h` is
   rejected with `invalid --time-range '1h' (expected START..END)`. A range bound need not be
-  grid-aligned for a static series, and must be a window boundary for a forecast; see
-  [reading a time range](rust-api.md#reading-a-time-range) for what each type selects. A sliced
+  grid-aligned for a static series, and must be a window boundary for a forecast (except one before
+  the first window, which clips to it); see [reading a time range](rust-api.md#reading-a-time-range)
+  for what each type selects, and for the monthly-grid slice that is refused outright. A sliced
   forecast is rendered as the windows it kept — their own issue times, and a `count` and
   `initial_timestamp` in `-f json` that describe the slice — and `get`'s `--window N` /
   `--issue-time` then address those windows: `--window 0` is the first _selected_ one, and a window

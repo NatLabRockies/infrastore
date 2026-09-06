@@ -39,7 +39,7 @@ def add(store: Store, owner_id: int, series: PersistentTimeSeries) -> int:
     )
 
 
-def hold_last(months: list[int], at: datetime) -> float:
+def carried_forward(months: list[int], at: datetime) -> float:
     """The value in force at `at`, computed without the store."""
     return max(m for m in months if month(m) <= at) * 10.0
 
@@ -80,6 +80,83 @@ def test_round_trip_and_descriptors():
         meta["application_data"]
         == '{"as_time_series": false, "force_scalar_mode": "midpoint"}'
     )
+
+
+def test_value_at_covers_the_four_boundary_cases():
+    c = curve("gas", [1, 4, 7])
+
+    # 1. exactly at a breakpoint -> that breakpoint's value (right-continuous).
+    assert c.value_at(month(1)) == 10.0
+    assert c.value_at(month(4)) == 40.0
+    assert c.value_at(month(7)) == 70.0
+
+    # 2. between breakpoints -> the previous value carried forward. This is the
+    #    case that diverges from NonSequentialTimeSeries, where it is an error.
+    assert c.value_at(month(2)) == 10.0
+    assert c.value_at(month(4) + timedelta(seconds=1)) == 40.0
+
+    # 3. after the last breakpoint -> the last value, forever.
+    assert c.value_at(month(12)) == 70.0
+    assert c.value_at(datetime(2099, 1, 1, tzinfo=timezone.utc)) == 70.0
+
+    # 4. before the first -> an error naming the series, never a clamp.
+    with pytest.raises(InvalidParameterError, match="before the first breakpoint"):
+        c.value_at(month(1) - timedelta(milliseconds=1))
+
+
+def test_the_three_lookups_agree_and_value_at_keeps_the_dtype():
+    c = curve("gas", [1, 4, 7])
+
+    for at, index, breakpoint, value in [
+        (month(1), 0, month(1), 10.0),
+        (month(2), 0, month(1), 10.0),
+        (month(4) + timedelta(seconds=1), 1, month(4), 40.0),
+        (month(12), 2, month(7), 70.0),
+    ]:
+        assert c.index_at(at) == index
+        assert c.breakpoint_at(at) == breakpoint
+        assert c.value_at(at) == value
+        # The everyday call is exactly indexing `data` at the row the other two
+        # report -- and it keeps the array's dtype rather than widening to a
+        # Python float.
+        assert c.value_at(at) == c.data[c.index_at(at)]
+        assert c.value_at(at).dtype == c.data.dtype
+
+    before = month(1) - timedelta(milliseconds=1)
+    with pytest.raises(InvalidParameterError):
+        c.index_at(before)
+    with pytest.raises(InvalidParameterError):
+        c.breakpoint_at(before)
+
+
+def test_value_at_hands_back_a_shaped_step_whole():
+    c = PersistentTimeSeries(
+        [month(1), month(4)],
+        np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
+        "shaped",
+    )
+    np.testing.assert_array_equal(c.value_at(month(2)), [1.0, 2.0, 3.0])
+    np.testing.assert_array_equal(c.value_at(month(9)), [4.0, 5.0, 6.0])
+
+
+def test_a_lookup_bound_must_be_spelled_like_the_breakpoints():
+    """A point lookup follows the same spelling rule as a `time_range` bound.
+
+    A naive wall clock does not name an instant, so reinterpreting one against an
+    instant-bearing series would silently return a row rather than refuse.
+    """
+    c = curve("gas", [1, 4, 7])  # UTC-aware breakpoints
+    with pytest.raises(InvalidParameterError, match="carry no zone"):
+        c.value_at(datetime(2024, 5, 1))
+
+    naive = PersistentTimeSeries(
+        [datetime(2024, 1, 1), datetime(2024, 4, 1)],
+        np.array([10.0, 40.0]),
+        "zoneless",
+    )
+    assert naive.value_at(datetime(2024, 5, 1)) == 40.0
+    with pytest.raises(InvalidParameterError, match="zoneless"):
+        naive.value_at(month(5))
 
 
 def test_a_range_read_starts_at_the_breakpoint_in_force():
@@ -193,13 +270,13 @@ def test_static_reader_over_columns_with_independent_breakpoints():
     vectors = {"monthly": monthly, "quarterly": quarterly, "semi": semi}
 
     # Sweep every union instant and compare each column against an
-    # independently computed hold-last reference. This is what catches a
+    # independently computed carried-forward reference. This is what catches a
     # desynchronized column-to-vector mapping, which otherwise produces
     # plausible wrong numbers rather than an error.
     for at in reader.timestamps():
         store.static_read(reader, at)
         got = np.concatenate([reader.group_values(g) for g in range(len(groups))])
-        want = np.array([hold_last(vectors[n], at) for n in names])
+        want = np.array([carried_forward(vectors[n], at) for n in names])
         np.testing.assert_array_equal(got, want, err_msg=f"at {at}")
 
 

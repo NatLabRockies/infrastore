@@ -88,12 +88,20 @@ export wants, since it knows the bounds and not the step count) — with three t
 while a `NonSequentialTimeSeries` selects only timestamps at or after `start`; a
 `PersistentTimeSeries` begins at the breakpoint _in force at_ `start`, so the result always defines
 a value there; and a forecast's `start` must be a window boundary at or before the last window,
-since there is no partial window to return, so only its `end` clips; `remove_by_ids` /
-`remove_by_ids!` is all-or-nothing; `copy_time_series(id, …)` takes one. A series' name is fixed
-once written — there is no rename, so an id and the row it names can never drift apart. Writes
-return ids and nothing else — `TimeSeriesId` / `Vec<TimeSeriesId>` in the Rust core, `int` in Python
-and Julia, an `out_id` across the C ABI — and a caller wanting the rest of the row asks
-`get_metadata_by_id`. Removals are not on the read-only gRPC server.
+since there is no partial window to return, so only its `end` clips — except a `start` before the
+_first_ window, which clips too, because nothing partial lies there and refusing it failed every
+export window wider than the data. Cutting across all of them: a **calendar period is not closed
+under slicing**. A series is stored as an anchor plus a period and a count, and `Period::Months`
+clamps to month end non-associatively, so a monthly grid from Jan-31 (Jan-31, Feb-29, Mar-31)
+re-anchored at its own Feb-29 reads Feb-29, Mar-29, Apr-29 — right values, wrong dates, no signal.
+No anchor fixes it, so such a slice is refused (`InvalidParameter`) by both read forms, and
+`transform_single_time_series` is held to the same rule at write time since each derived window is a
+run of the source's own steps described that same way. `Period::sub_grid_is_anchorable` is the
+predicate. `remove_by_ids` / `remove_by_ids!` is all-or-nothing; `copy_time_series(id, …)` takes
+one. A series' name is fixed once written — there is no rename, so an id and the row it names can
+never drift apart. Writes return ids and nothing else — `TimeSeriesId` / `Vec<TimeSeriesId>` in the
+Rust core, `int` in Python and Julia, an `out_id` across the C ABI — and a caller wanting the rest
+of the row asks `get_metadata_by_id`. Removals are not on the read-only gRPC server.
 
 The id crosses the gRPC wire and the OpenAPI one — where the schema spells it `association_id`, a
 rename `openapi.rs` applies the same way it maps `unit_system` between the store's snake_case and

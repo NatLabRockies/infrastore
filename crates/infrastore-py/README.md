@@ -47,7 +47,7 @@ assert np.array_equal(np.asarray(got.data), np.asarray(ts.data))
 - **Typed, N-dimensional values** — `f64`, `f32`, `i64`, `i32`, `u64`, and `bool`, with an optional
   per-timestep element shape.
 - **Seven time-series types** — `SingleTimeSeries`, `NonSequentialTimeSeries`, and
-  `PersistentTimeSeries` (a sparse step function: breakpoints plus hold-last) read+write;
+  `PersistentTimeSeries` (a sparse step function: breakpoints, values carried forward) read+write;
   `Deterministic`, `DeterministicSingleTimeSeries`, `Probabilistic`, and `Scenarios` for forecasts.
 - **Columnar simulation readers** — `StaticReader` / `ForecastReader` serve every series' value at
   one timestamp.

@@ -2427,7 +2427,8 @@ int32_t infrastore_last_error_message(char *buf, uint64_t buf_len, uint64_t *nee
  * * `PersistentTimeSeries` (6): `resolution` must be null, for the same
  *   reason -- a step function has no constant step. Unlike the type above, its
  *   columns may sit on *different* breakpoint vectors; the reader's timeline
- *   is their union, and each column resolves hold-last on its own vector.
+ *   is their union, and each column carries its own values forward on its own
+ *   vector.
  * * `NonSequentialTimeSeries` (1): `resolution` must be null (an irregular
  *   series has none); the matched series must instead share one timestamp
  *   vector, which is also what pools their arrays on disk. Read that timeline

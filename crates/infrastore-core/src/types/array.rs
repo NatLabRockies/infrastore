@@ -270,6 +270,50 @@ impl TypedArray {
             .collect())
     }
 
+    /// Decode the single element at flat (row-major) index `index`, without
+    /// decoding the rest of the array.
+    ///
+    /// Errors if the array's dtype is not `T`'s, or if `index` is past the
+    /// element count. This is [`Self::to_vec`] for one element: a point lookup
+    /// on a long series should not allocate a `Vec` of the whole thing.
+    pub fn element_at<T: Element>(&self, index: usize) -> Result<T, String> {
+        if self.dtype != T::DTYPE {
+            return Err(format!(
+                "expected {}, got {}",
+                T::DTYPE.as_str(),
+                self.dtype.as_str()
+            ));
+        }
+        let size = T::DTYPE.size();
+        self.bytes
+            .get(index * size..(index + 1) * size)
+            .map(T::from_le_bytes)
+            .ok_or_else(|| {
+                format!(
+                    "element index {index} is past the array's {} elements",
+                    self.num_elements()
+                )
+            })
+    }
+
+    /// The per-step slice at time step `index`, as its own `TypedArray` of shape
+    /// [`Self::element_shape`] — `[]` (a single element) for a scalar series.
+    ///
+    /// Errors if `index >= length()`. The dtype and byte order are the array's
+    /// own, so a step round-trips through [`Self::to_vec`] like any other array.
+    pub fn step(&self, index: usize) -> Result<Self, String> {
+        let length = self.length();
+        if index >= length {
+            return Err(format!(
+                "step index {index} is past the array's {length} steps"
+            ));
+        }
+        let shape = self.element_shape().to_vec();
+        let width = expected_bytes(self.dtype, &shape)?;
+        let start = index * width;
+        Self::new(self.dtype, shape, self.bytes[start..start + width].to_vec())
+    }
+
     /// Build an `f64` `TypedArray` from values + shape. Convenience over
     /// [`Self::from_slice`]; panics on a shape/length mismatch (callers that
     /// build the shape from the values never hit this).

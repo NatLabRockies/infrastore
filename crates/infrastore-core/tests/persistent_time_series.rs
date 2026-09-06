@@ -67,9 +67,9 @@ fn column_names(store: &Store, reader: &StaticReader) -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn index_in_force_at_covers_the_four_boundary_cases() {
+fn value_at_covers_the_four_boundary_cases() {
     let c = curve("gas", &[1, 4, 7]);
-    let value_at = |t| c.data.to_vec::<f64>().unwrap()[c.index_in_force_at(t).unwrap()];
+    let value_at = |t| c.value_at::<f64>(t).unwrap();
 
     // 1. exactly at a breakpoint -> that breakpoint's value (right-continuous).
     assert_eq!(value_at(month(1)), 10.0);
@@ -91,10 +91,74 @@ fn index_in_force_at_covers_the_four_boundary_cases() {
     // 4. before the first breakpoint -> an error naming the series, never a
     //    clamp. A value there was never declared.
     let err = c
-        .index_in_force_at(month(1) - Duration::milliseconds(1))
+        .value_at::<f64>(month(1) - Duration::milliseconds(1))
         .unwrap_err();
     assert!(err.contains("gas"), "{err}");
     assert!(err.contains("before the first breakpoint"), "{err}");
+}
+
+/// `value_at` is the convenience; the other three answer the same question
+/// about the same row, so they must agree with it at every instant.
+#[test]
+fn the_four_lookups_agree_on_the_row_they_resolve() {
+    let c = curve("gas", &[1, 4, 7]);
+
+    for (at, index, breakpoint, value) in [
+        (month(1), 0, month(1), 10.0),
+        (month(2), 0, month(1), 10.0),
+        (month(4) + Duration::seconds(1), 1, month(4), 40.0),
+        (month(12), 2, month(7), 70.0),
+    ] {
+        assert_eq!(c.index_at(at).unwrap(), index, "index_at({at})");
+        assert_eq!(
+            c.breakpoint_at(at).unwrap(),
+            breakpoint,
+            "breakpoint_at({at})"
+        );
+        assert_eq!(c.value_at::<f64>(at).unwrap(), value, "value_at({at})");
+        // row_at is the shape-generic form: a scalar series' step is a 0-d
+        // array holding the one value.
+        let row = c.row_at(at).unwrap();
+        assert!(row.shape.is_empty(), "{:?}", row.shape);
+        assert_eq!(row.to_vec::<f64>().unwrap(), vec![value]);
+    }
+
+    let before = month(1) - Duration::milliseconds(1);
+    assert!(c.index_at(before).is_err());
+    assert!(c.breakpoint_at(before).is_err());
+    assert!(c.row_at(before).is_err());
+}
+
+/// A scalar-only `value_at` on a series with a shaped element says so rather
+/// than handing back the first component of the step.
+#[test]
+fn value_at_refuses_a_non_scalar_step_and_row_at_serves_it() {
+    let timestamps = vec![month(1), month(4)];
+    let data = TypedArray::from_slice(vec![2, 3], &[1.0f64, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+    let c = PersistentTimeSeries::new(timestamps, data, "shaped").unwrap();
+
+    let err = c.value_at::<f64>(month(2)).unwrap_err();
+    assert!(err.contains("shaped"), "{err}");
+    assert!(err.contains("row_at"), "{err}");
+
+    let row = c.row_at(month(2)).unwrap();
+    assert_eq!(row.shape, vec![3]);
+    assert_eq!(row.to_vec::<f64>().unwrap(), vec![1.0, 2.0, 3.0]);
+    assert_eq!(
+        c.row_at(month(9)).unwrap().to_vec::<f64>().unwrap(),
+        vec![4.0, 5.0, 6.0]
+    );
+}
+
+/// The dtype is checked, not assumed: reading an `i64` series as `f64` is an
+/// error rather than a reinterpretation of the bytes.
+#[test]
+fn value_at_checks_the_dtype() {
+    let data = TypedArray::from_slice(vec![2], &[10i64, 40]).unwrap();
+    let c = PersistentTimeSeries::new(vec![month(1), month(4)], data, "counts").unwrap();
+
+    assert_eq!(c.value_at::<i64>(month(2)).unwrap(), 10);
+    assert!(c.value_at::<f64>(month(2)).is_err());
 }
 
 // ---------------------------------------------------------------------------
@@ -185,7 +249,7 @@ fn a_range_read_starts_at_the_breakpoint_in_force_not_the_next_one() {
 
 /// A zero-width range selects nothing, as it does for every other type.
 ///
-/// The hold-last rule and the half-open rule pull in opposite directions here:
+/// The carried-forward rule and the half-open rule pull in opposite directions here:
 /// a step function has a value in force at any instant from its first
 /// breakpoint on, but `[t, t)` contains no instant for that value to attach to.
 /// The half-open rule wins, which keeps `PersistentTimeSeries` consistent with
@@ -215,7 +279,7 @@ fn a_zero_width_range_read_selects_no_breakpoints() {
     empty(month(5));
     // On a breakpoint, where the greatest `<= t` lookup lands exactly.
     empty(month(4));
-    // After the last, where hold-last extends indefinitely.
+    // After the last, where the last value extends indefinitely.
     empty(month(11));
     // Before the first, where a *non-empty* window is an error. An empty one is
     // not: the undefined-before-the-first rule is about an instant the caller
@@ -370,7 +434,7 @@ fn a_reader_resolves_each_column_on_its_own_breakpoints() {
         .collect();
 
     // Sweep every union instant and compare every column against the
-    // independently computed hold-last reference. This is the assertion that
+    // independently computed carried-forward reference. This is the assertion that
     // catches a `vector_ids` desync or a bad scatter-back in the HDF5 override,
     // both of which produce plausible wrong numbers rather than a failure.
     for at in axis {

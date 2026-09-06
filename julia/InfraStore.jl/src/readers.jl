@@ -150,7 +150,7 @@ also what pools their arrays on disk.
 `time_series_type=PersistentTimeSeries` also takes no `resolution`, and is the
 one case where the matched series need **not** share a timeline: a step function
 has a value at every instant from its first breakpoint onward, so each column
-resolves hold-last on its own breakpoints. The reader's timestamps are then the
+carries its values forward on its own breakpoints. The reader's timestamps are then the
 union of every column's breakpoints — every instant at which some column changes
 value. Reading at an instant before some column's first breakpoint is an error
 naming that column.

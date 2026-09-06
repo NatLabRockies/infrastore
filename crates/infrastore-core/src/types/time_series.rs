@@ -3,7 +3,7 @@ use std::str::FromStr;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::array::TypedArray;
+use super::array::{Element, TypedArray};
 use super::element_type::ElementType;
 use super::metadata::UnitSystem;
 use super::period::Period;
@@ -651,8 +651,9 @@ impl NonSequentialTimeSeries {
 /// constant on `[b_k, b_{k+1})`, extending to `+∞` past the last breakpoint,
 /// and **undefined before the first**. That last clause is deliberate and is
 /// reported as an error rather than clamped: a value before the first
-/// breakpoint was never declared, and inventing one would be a guess. Look one
-/// up with [`Self::index_in_force_at`].
+/// breakpoint was never declared, and inventing one would be a guess. Read a
+/// value with [`Self::value_at`] (or [`Self::row_at`] for a non-scalar step);
+/// [`Self::index_at`] and [`Self::breakpoint_at`] locate the row it came from.
 ///
 /// The motivating data is a monthly fuel or gas price curve: a dozen
 /// breakpoints spanning a year, read at simulation timestamps that almost never
@@ -746,13 +747,20 @@ impl PersistentTimeSeries {
     }
 
     /// The index into [`Self::timestamps`] and [`Self::data`] of the breakpoint
-    /// **in force at** `at` — the greatest breakpoint `<= at`.
+    /// governing `at` — the greatest breakpoint `<= at`, whose value is carried
+    /// forward to `at`.
     ///
     /// `Err` if `at` is strictly before the first breakpoint, where the step
     /// function is undefined, or if the series is empty. This is the single
-    /// source of truth for the lookup: nothing else should re-derive it.
-    pub fn index_in_force_at(&self, at: DateTime<Utc>) -> Result<usize, String> {
-        crate::timestamps::index_in_force_at(&self.timestamps, at).ok_or_else(|| {
+    /// source of truth for the lookup: [`Self::value_at`], [`Self::row_at`] and
+    /// [`Self::breakpoint_at`] all go through it, and nothing else should
+    /// re-derive it.
+    ///
+    /// Note the asymmetry with [`Self::value_at`]: a step function has a genuine
+    /// value *at* `at`, but the row it comes from generally sits earlier, which
+    /// is why only this one is spelled as a lookup.
+    pub fn index_at(&self, at: DateTime<Utc>) -> Result<usize, String> {
+        crate::timestamps::index_at(&self.timestamps, at).ok_or_else(|| {
             match self.timestamps.first() {
                 Some(first) => format!(
                     "PersistentTimeSeries '{}' has no value at {at}: it is before the \
@@ -765,6 +773,49 @@ impl PersistentTimeSeries {
                 ),
             }
         })
+    }
+
+    /// The breakpoint governing `at` — the greatest one `<= at`, i.e. the
+    /// instant from which the value at `at` has been in force.
+    ///
+    /// Equal to `at` itself exactly when `at` is a stored breakpoint. Errors
+    /// under the same conditions as [`Self::index_at`].
+    pub fn breakpoint_at(&self, at: DateTime<Utc>) -> Result<DateTime<Utc>, String> {
+        Ok(self.timestamps[self.index_at(at)?])
+    }
+
+    /// The value in force at `at`, for a series of scalars.
+    ///
+    /// The step function is total on `[first breakpoint, +∞)`, so this is the
+    /// series' value at `at` in the ordinary sense — not an approximation of one:
+    /// between breakpoints the previous value is carried forward, and past the
+    /// last breakpoint the last value holds indefinitely. Only an `at` strictly
+    /// before the first breakpoint is an error, because no value was ever
+    /// declared there.
+    ///
+    /// `T` must match the array's dtype. A series whose per-step element is not a
+    /// scalar (a non-empty [`TypedArray::element_shape`], e.g. a piecewise curve
+    /// or a vector per step) is an error here — use [`Self::row_at`], which
+    /// returns the whole per-step slice for any shape.
+    pub fn value_at<T: Element>(&self, at: DateTime<Utc>) -> Result<T, String> {
+        let element_shape = self.data.element_shape();
+        if !element_shape.is_empty() {
+            return Err(format!(
+                "PersistentTimeSeries '{}' holds {element_shape:?} per step, not a scalar; \
+                 use row_at to read the whole step",
+                self.name
+            ));
+        }
+        self.data.element_at::<T>(self.index_at(at)?)
+    }
+
+    /// The whole per-step slice in force at `at`, as a [`TypedArray`] of shape
+    /// [`TypedArray::element_shape`] — `[]` for a scalar series.
+    ///
+    /// The shape-generic form of [`Self::value_at`], with the same semantics and
+    /// the same single error case (an `at` before the first breakpoint).
+    pub fn row_at(&self, at: DateTime<Utc>) -> Result<TypedArray, String> {
+        self.data.step(self.index_at(at)?)
     }
 }
 

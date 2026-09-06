@@ -23,10 +23,11 @@ Exported names (types first, then functions):
 `ZonelessReference`, `add_parent_child_association!`, `add_parent_child_associations!`,
 `add_supplemental_attribute_association!`, `add_supplemental_attribute_associations!`,
 `add_time_series!`, `add_time_series_bulk!`, `association_exists`, `begin_transaction!`,
-`build_forecast_reader`, `build_static_reader`, `catalog_mode`, `check_static_consistency`,
-`clear!`, `close!`, `commit_transaction!`, `compact!`, `copy_time_series!`,
-`count_array_references`, `count_components_with_attributes`, `count_parent_child_associations`,
-`count_supplemental_attribute_associations`, `count_supplemental_attributes`, `counts_by_type`,
+`breakpoint_at`, `build_forecast_reader`, `build_static_reader`, `catalog_mode`,
+`check_static_consistency`, `clear!`, `close!`, `commit_transaction!`, `compact!`,
+`copy_time_series!`, `count_array_references`, `count_components_with_attributes`,
+`count_parent_child_associations`, `count_supplemental_attribute_associations`,
+`count_supplemental_attributes`, `counts_by_type`,
 `export_supplemental_attribute_associations_openapi`, `export_time_series_associations_openapi`,
 `flush!`, `forecast_entries`, `forecast_num_slots`, `forecast_read!`, `forecast_summary`,
 `forecast_timeline`, `forecast_values`, `get_array_by_hash`, `get_compression`, `get_counts`,
@@ -34,7 +35,7 @@ Exported names (types first, then functions):
 `has_any_time_series`, `has_for_owner`, `has_parent_child_association`,
 `has_supplemental_attribute_association`, `has_time_series`,
 `import_supplemental_attribute_associations_openapi!`, `import_time_series_associations_openapi!`,
-`in_transaction`, `init_logging`, `is_empty`, `is_zoneless`, `list_children`,
+`in_transaction`, `index_at`, `init_logging`, `is_empty`, `is_zoneless`, `list_children`,
 `list_components_with_attributes`, `list_metadata`, `list_metadata_by_ids`, `list_names`,
 `list_owner_ids`, `list_owner_types`, `list_parent_child_associations`, `list_parents`,
 `list_supplemental_attribute_associations`, `list_supplemental_attribute_ids`,
@@ -45,8 +46,8 @@ Exported names (types first, then functions):
 `replace_supplemental_attribute_component_id!`, `rollback_transaction!`, `static_grid`,
 `static_groups`, `static_read!`, `static_summary`, `static_timestamps`, `static_values`,
 `supplemental_attribute_counts_by_type`, `supplemental_attribute_summary`, `time_series_counts`,
-`timestamps`, `transaction`, `transform_single_time_series!`, `verify_integrity`, `zoned_timestamp`,
-`zoned_timestamps`.
+`timestamps`, `transaction`, `transform_single_time_series!`, `value_at`, `verify_integrity`,
+`zoned_timestamp`, `zoned_timestamps`.
 
 ## Constructors
 
@@ -1458,6 +1459,41 @@ zoned_timestamp(series)   # 2024-01-01T00:00:00-07:00
 
 Throws for a `ZonelessReference()` series, whose timestamps name no instant, and for one that
 recorded no reference at all.
+
+### Reading a step function at an instant
+
+```julia
+value_at(series::PersistentTimeSeries, at)      -> value
+index_at(series::PersistentTimeSeries, at)      -> Int
+breakpoint_at(series::PersistentTimeSeries, at) -> DateTime
+```
+
+The value in force at `at`, the 1-based row it came from, and the breakpoint it has been in force
+since. `at` is a `DateTime` or — with `using TimeZones` — a `ZonedDateTime`, and must be spelled the
+way the series' breakpoints are; a mismatch throws the same `InvalidParameterError` a read bound
+earns.
+
+`value_at` is the everyday call, and it is not an approximation: a step function is defined at
+_every_ instant from its first breakpoint onward, so it has a genuine value at `at`. Between
+breakpoints the previous value is carried forward, and past the last breakpoint the last value holds
+indefinitely. Only an `at` strictly _before_ the first breakpoint throws — no value was ever
+declared there, and inventing one would be a guess. A scalar series returns a scalar; one with a
+shaped per-step element returns that step as an array (a copy, so mutating it leaves the series
+alone).
+
+```julia
+curve = PersistentTimeSeries(
+    [DateTime(2024, 1), DateTime(2024, 4), DateTime(2024, 7)],
+    [10.0, 40.0, 70.0],
+    "gas",
+)
+value_at(curve, DateTime(2024, 5, 17))       # 40.0, carried forward from April
+breakpoint_at(curve, DateTime(2024, 5, 17))  # 2024-04-01T00:00:00
+index_at(curve, DateTime(2024, 5, 17))       # 2
+```
+
+These answer for one series in hand. A columnar sweep over many is [`StaticReader`](#staticreader),
+which resolves the same rule per column.
 
 A **query bound must be spelled the way the series is**: a bare `DateTime` bound against a series
 that records instants, or a `ZonedDateTime` bound against a zoneless one, raises

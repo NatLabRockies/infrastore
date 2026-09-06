@@ -369,7 +369,7 @@ impl ReadWindow {
     /// instants and one value each, so a window is a run of stored rows.
     ///
     /// A `PersistentTimeSeries` still has to *start* on a stored breakpoint
-    /// here. The hold-last rule that lets a step function answer at an
+    /// here. The carried-forward rule that lets a step function answer at an
     /// arbitrary instant needs a bound to hold back to, and a `ReadWindow`
     /// names a row count rather than a bound — a window silently rewound to an
     /// earlier breakpoint would return `len` rows the caller did not ask for.
@@ -718,7 +718,7 @@ impl TransformPlan {
             };
             interval_normalized |= normalized;
 
-            let count = if interval.is_zero() {
+            let (count, interval_steps) = if interval.is_zero() {
                 // A zero interval is the explicit single-window request (the
                 // encoding InfrastructureSystems.jl writes for directly-added
                 // single-window forecasts): the one window must cover the whole
@@ -734,7 +734,7 @@ impl TransformPlan {
                         grid.resolution.to_iso8601()
                     )));
                 }
-                1
+                (1, 1)
             } else {
                 let interval_steps = grid.resolution.divide_into(&interval).map_err(|_| {
                     TimeSeriesError::InvalidParameter(format!(
@@ -744,8 +744,37 @@ impl TransformPlan {
                         grid.resolution.to_iso8601()
                     ))
                 })?;
-                (grid.length - h) / interval_steps + 1
+                ((grid.length - h) / interval_steps + 1, interval_steps)
             };
+
+            // Every window of the derived view is a run of the source's own
+            // steps, described by that run's first instant plus `resolution` --
+            // so the view inherits the re-anchoring rule that governs a sliced
+            // read (see `require_anchorable_slice`). A calendar resolution
+            // whose grid clamps onto a shorter month cannot describe those runs
+            // that way, and unlike a slice this is a *write*: the row would be
+            // stored mislabelling steps it never touches again. Refused here,
+            // before anything is written, rather than at every later read.
+            if grid.resolution.is_irregular()
+                && let Some(k) = (0..count).find(|k| {
+                    !grid.resolution.sub_grid_is_anchorable(
+                        grid.initial_timestamp,
+                        k * interval_steps,
+                        h,
+                    )
+                })
+            {
+                return Err(TimeSeriesError::InvalidParameter(format!(
+                    "cannot derive DeterministicSingleTimeSeries at resolution {}: the source \
+                     grid steps from {}, whose day of month is clamped by shorter months, so \
+                     window {k} could not describe the source's own timestamps -- it would \
+                     carry their values under different dates. Anchor the series on a day \
+                     every month has, or store its instants explicitly with \
+                     NonSequentialTimeSeries.",
+                    grid.resolution.to_iso8601(),
+                    grid.initial_timestamp,
+                )));
+            }
 
             // Under `require_uniform_forecast_grid` one transform produces one
             // forecast grid, so resolutions deriving different window counts or
@@ -2670,6 +2699,14 @@ impl Store {
                             .ceil_steps(initial, end)
                             .min(length)
                             .max(start_idx);
+                        require_anchorable_slice(
+                            resolution,
+                            initial,
+                            start_idx,
+                            end_idx - start_idx,
+                            &meta.name,
+                            "timestep",
+                        )?;
                         let data = self.backend.get_slice(
                             &meta.data_hash,
                             meta.element_type.physical_dtype(),
@@ -2802,23 +2839,20 @@ impl Store {
                             // caller's window opens on an interval the returned
                             // series says nothing about. Do not "fix" the
                             // asymmetry.
-                            let start_idx = crate::timestamps::index_in_force_at(
-                                &timestamps,
-                                start,
-                            )
-                            .ok_or_else(|| {
-                                TimeSeriesError::InvalidParameter(format!(
-                                    "PersistentTimeSeries {:?} on owner {} has no value at the \
+                            let start_idx = crate::timestamps::index_at(&timestamps, start)
+                                .ok_or_else(|| {
+                                    TimeSeriesError::InvalidParameter(format!(
+                                        "PersistentTimeSeries {:?} on owner {} has no value at the \
                                      range start {start}: it is before the first breakpoint {}, \
                                      where a step function is undefined",
-                                    meta.name,
-                                    meta.owner_id,
-                                    timestamps
-                                        .first()
-                                        .map(|t| t.to_string())
-                                        .unwrap_or_else(|| "<none>".into()),
-                                ))
-                            })?;
+                                        meta.name,
+                                        meta.owner_id,
+                                        timestamps
+                                            .first()
+                                            .map(|t| t.to_string())
+                                            .unwrap_or_else(|| "<none>".into()),
+                                    ))
+                                })?;
                             // The upper bound is unchanged: a breakpoint at or
                             // after `end` is in force only outside the window.
                             // No lower clamp is needed — every breakpoint up to
@@ -2850,8 +2884,9 @@ impl Store {
                 let h = compute_h(horizon, resolution).map_err(TimeSeriesError::IntegrityError)?;
                 // Validate stored shape: [H, count, *E].
                 validate_forecast_shape(&arr, &[h, count], "Deterministic")?;
-                let (w0, w1, window_initial) =
-                    resolve_windows(initial, resolution, horizon, interval, count, time_range)?;
+                let (w0, w1, window_initial) = resolve_windows(
+                    initial, resolution, horizon, interval, count, time_range, &meta.name,
+                )?;
                 let windowed = if w0 == 0 && w1 == count {
                     arr
                 } else {
@@ -2886,8 +2921,9 @@ impl Store {
                 let p = percentiles.len();
                 // Validate stored shape: [P, H, count, *E].
                 validate_forecast_shape(&arr, &[p, h, count], "Probabilistic")?;
-                let (w0, w1, window_initial) =
-                    resolve_windows(initial, resolution, horizon, interval, count, time_range)?;
+                let (w0, w1, window_initial) = resolve_windows(
+                    initial, resolution, horizon, interval, count, time_range, &meta.name,
+                )?;
                 let windowed = if w0 == 0 && w1 == count {
                     arr
                 } else {
@@ -2926,8 +2962,9 @@ impl Store {
                 }
                 let scenario_count = arr.shape[0];
                 validate_forecast_shape(&arr, &[scenario_count, h, count], "Scenarios")?;
-                let (w0, w1, window_initial) =
-                    resolve_windows(initial, resolution, horizon, interval, count, time_range)?;
+                let (w0, w1, window_initial) = resolve_windows(
+                    initial, resolution, horizon, interval, count, time_range, &meta.name,
+                )?;
                 let windowed = if w0 == 0 && w1 == count {
                     arr
                 } else {
@@ -2991,8 +3028,9 @@ impl Store {
                 let elem_shape: Vec<usize> = arr.shape[1..].to_vec();
                 let elem_factor: usize = elem_shape.iter().product::<usize>() * arr.dtype.size();
 
-                let (w0, w1, window_initial) =
-                    resolve_windows(initial, resolution, horizon, interval, count, time_range)?;
+                let (w0, w1, window_initial) = resolve_windows(
+                    initial, resolution, horizon, interval, count, time_range, &meta.name,
+                )?;
                 let selected = w1 - w0;
 
                 // Build output array [H, selected, *E].
@@ -6564,6 +6602,59 @@ pub(crate) fn slice_count_axis(arr: &TypedArray, axis: usize, w0: usize, w1: usi
     }
 }
 
+/// Refuse a slice whose instants a re-anchored grid would not reproduce.
+///
+/// A sliced read hands back a series of the same shape as the stored one —
+/// `(initial_timestamp, period, length)` — anchored at the slice's own first
+/// point. For a [`Period::Fixed`] that is exact. For a [`Period::Months`] the
+/// end-of-month clamp is not associative, so from a clamped anchor the
+/// re-anchored grid walks off the stored one: a monthly series from Jan-31 is
+/// Jan-31, Feb-29, Mar-31, but the slice from Feb-29 would describe itself as
+/// Feb-29, Mar-29, Apr-29. The values would be right and the dates wrong, with
+/// nothing to signal it — so the read is refused instead.
+///
+/// There is no anchor that would work: the sub-grid keeps the *original*
+/// anchor's day of month, and no instant in the slice carries it. Widening the
+/// stored shape is the only alternative, and an irregular timeline already has
+/// a type — see the remedies in the message.
+///
+/// `unit` names what the caller is slicing ("timestep" / "window"), so the
+/// message speaks the vocabulary of the type that raised it.
+fn require_anchorable_slice(
+    period: Period,
+    initial: chrono::DateTime<chrono::Utc>,
+    offset: usize,
+    len: usize,
+    name: &str,
+    unit: &str,
+) -> Result<()> {
+    if period.sub_grid_is_anchorable(initial, offset, len) {
+        return Ok(());
+    }
+    // The first divergence is the useful thing to show: it is the {unit} whose
+    // date would have moved.
+    let anchor = period.add_to(initial, offset as i64);
+    let divergence = (1..len).find_map(|j| {
+        let stored = period.add_to(initial, (offset + j) as i64)?;
+        let drifted = anchor.and_then(|a| period.add_to(a, j as i64))?;
+        (stored != drifted).then_some((stored, drifted))
+    });
+    let detail = match (anchor, divergence) {
+        (Some(anchor), Some((stored, drifted))) => format!(
+            " Re-anchored at {anchor} it would report {drifted} where the series stores {stored}."
+        ),
+        _ => String::new(),
+    };
+    Err(TimeSeriesError::InvalidParameter(format!(
+        "series {name:?}: a {} slice starting at {unit} {offset} cannot be expressed as a grid \
+         of its own. The stored grid steps from {initial}, whose day of month is clamped by \
+         shorter months, so the slice does not begin on a day that regenerates it.{detail} \
+         Read the series whole and slice the materialized timestamps, or store an explicit \
+         instant per value with NonSequentialTimeSeries.",
+        period.to_iso8601(),
+    )))
+}
+
 /// Resolve the window range `[w0, w1)` from an optional `time_range`.
 ///
 /// Implements the IS.jl rule: `start_time` must be the first timestamp of a
@@ -6575,6 +6666,20 @@ pub(crate) fn slice_count_axis(arr: &TypedArray, axis: usize, w0: usize, w1: usi
 /// [`TimeSeriesError::InvalidParameter`] rather than returning an empty
 /// selection. A zero-width range (`end == start`) over an in-range `start`
 /// legitimately selects nothing and returns `(0, 0, start)`.
+///
+/// A `start` *before* the first window is clipped to it, not rejected. This is
+/// the bounds form, and the rule it enforces — a start must be a window
+/// boundary, because there is no partial window to return — has nothing to say
+/// about a bound that precedes every window: there is no partial window there,
+/// only no window at all. Rejecting it made a range wider than the data fail,
+/// which is exactly the range a bulk export asks for. The [`ReadWindow`] form
+/// still *checks* its start, in `ReadWindow::resolve_forecast`, and never
+/// reaches here with one it has not already held to a boundary.
+///
+/// The selected run is finally held to [`Period::sub_grid_is_anchorable`]: a
+/// window range the returned forecast could not describe with its own anchor is
+/// refused rather than answered with drifted issue times. See
+/// [`require_anchorable_slice`].
 fn resolve_windows(
     initial: chrono::DateTime<chrono::Utc>,
     _resolution: Period,
@@ -6582,6 +6687,7 @@ fn resolve_windows(
     interval: Period,
     count: usize,
     time_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+    name: &str,
 ) -> Result<(usize, usize, chrono::DateTime<chrono::Utc>)> {
     let window_start = |k: usize| -> Result<chrono::DateTime<chrono::Utc>> {
         interval
@@ -6599,7 +6705,7 @@ fn resolve_windows(
                 // no second window to step to); its only window starts at
                 // `initial`, which is also the only valid `start`.
                 if count == 1 && interval.is_zero() {
-                    if start != initial {
+                    if start > initial {
                         return Err(TimeSeriesError::InvalidParameter(
                             "forecast start_time must align to a window boundary \
                              (initial_timestamp + k·interval)"
@@ -6617,14 +6723,19 @@ fn resolve_windows(
                 ));
             }
             // `start` must be a window boundary: `initial + k·interval`
-            // (calendar-aware for monthly intervals).
-            let start_k = interval.steps_between(initial, start).map_err(|_| {
-                TimeSeriesError::InvalidParameter(
-                    "forecast start_time must align to a window boundary \
-                     (initial_timestamp + k·interval)"
-                        .into(),
-                )
-            })?;
+            // (calendar-aware for monthly intervals) -- or earlier than every
+            // window, which selects from the first one.
+            let start_k = if start <= initial {
+                0
+            } else {
+                interval.steps_between(initial, start).map_err(|_| {
+                    TimeSeriesError::InvalidParameter(
+                        "forecast start_time must align to a window boundary \
+                         (initial_timestamp + k·interval)"
+                            .into(),
+                    )
+                })?
+            };
 
             // A start aligned to the grid but at or beyond the window count
             // refers to windows that do not exist; reject it rather than
@@ -6659,6 +6770,7 @@ fn resolve_windows(
                 return Ok((0, 0, window_start(start_k)?));
             }
 
+            require_anchorable_slice(interval, initial, start_k, w1 - start_k, name, "window")?;
             Ok((start_k, w1, window_start(start_k)?))
         }
     }
@@ -6855,6 +6967,7 @@ mod resolve_windows_tests {
             interval,
             4,
             Some((t(start_h), t(end_h))),
+            "fc",
         )
     }
 
@@ -6865,7 +6978,7 @@ mod resolve_windows_tests {
         let horizon = Period::Fixed(Duration::hours(6));
         // `None` selects every window.
         assert_eq!(
-            resolve_windows(t(0), res, horizon, interval, 4, None).unwrap(),
+            resolve_windows(t(0), res, horizon, interval, 4, None, "fc").unwrap(),
             (0, 4, t(0))
         );
         // Middle range [12h, 36h) -> windows 1 and 2.
@@ -6928,7 +7041,7 @@ mod resolve_windows_tests {
                 let end = start + Duration::hours(end_h);
                 let range = Some((start, end));
                 let (w0, w1, first) =
-                    resolve_windows(t(0), res, horizon, interval, count, range).unwrap();
+                    resolve_windows(t(0), res, horizon, interval, count, range, "fc").unwrap();
                 assert_eq!(
                     (w0, w1),
                     linear_scan(at, count, (start, end)),
@@ -6961,7 +7074,8 @@ mod resolve_windows_tests {
                     }
                     let range = Some((start, end));
                     let (w0, w1, first) =
-                        resolve_windows(initial, res, horizon, interval, count, range).unwrap();
+                        resolve_windows(initial, res, horizon, interval, count, range, "fc")
+                            .unwrap();
                     assert_eq!(
                         (w0, w1),
                         linear_scan(at, count, (start, end)),

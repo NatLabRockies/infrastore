@@ -42,7 +42,7 @@ one type is never written directly at all:
 | ------------------------------- | ----------------------------------------- | --------------------------------------------------- |
 | `SingleTimeSeries`              | `add_time_series`                         | One array sampled at a fixed resolution             |
 | `NonSequentialTimeSeries`       | `add_time_series`                         | Values at explicit, irregular timestamps            |
-| `PersistentTimeSeries`          | `add_time_series`                         | Sparse step function: breakpoints, hold-last        |
+| `PersistentTimeSeries`          | `add_time_series`                         | Sparse step function: breakpoints carried forward   |
 | `Deterministic`                 | `add_time_series`                         | Forecast: a `(horizon × count)` window matrix       |
 | `DeterministicSingleTimeSeries` | derived by `transform_single_time_series` | Forecast view over an underlying `SingleTimeSeries` |
 | `Probabilistic`                 | `add_time_series`                         | Forecast with percentile bands                      |
@@ -124,6 +124,12 @@ Formally the values define a **right-continuous step function**:
 - **undefined before the first breakpoint** — a read there is an error, never a clamp. A value there
   was never declared, and inventing one would be a guess.
 
+Because the function is total on `[b_0, +∞)`, asking a series in hand for its value at an instant is
+spelled plainly: `value_at` in every binding (`PersistentTimeSeries::value_at::<f64>(t)` in Rust,
+with `row_at` for a shaped per-step element). It is not an approximation of a value — it _is_ the
+value. Only the row that value came from sits earlier, which is what `index_at` and `breakpoint_at`
+report.
+
 Structurally it is **identical** to a `NonSequentialTimeSeries` — same fields, same validation, same
 storage. The two even share arrays: a persistent series and an irregular one on the same
 breakpoints, dtype, element shape, and values occupy one content-addressed array in one `nsts_…`
@@ -181,9 +187,9 @@ breakpoints do not line up.
 Such a reader interns the distinct vectors and gives each column the one it resolves against. Its
 public axis is the **sorted union** of every column's breakpoints — every instant at which _some_
 column changes value — so a sweep over `reader.timestamps()` sees every distinct combination of
-column values. There is still **no presence mask**: hold-last always resolves once the read instant
-is at or after a column's first breakpoint, and an instant before some column's first breakpoint is
-a hard error naming that column rather than a hole in the result.
+column values. There is still **no presence mask**: a carried-forward value always resolves once the
+read instant is at or after a column's first breakpoint, and an instant before some column's first
+breakpoint is a hard error naming that column rather than a hole in the result.
 
 `index_at` on such a reader reports a position on the union axis and is **not** a storage row index
 for any column; the read path resolves each column on its own vector instead.

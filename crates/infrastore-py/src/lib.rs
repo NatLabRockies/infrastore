@@ -25,7 +25,7 @@ use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use pyo3::types::{
-    PyAny, PyBool, PyBytes, PyDateTime, PyDict, PyFloat, PyInt, PyList, PyString, PyTzInfo,
+    PyAny, PyBool, PyBytes, PyDateTime, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple, PyTzInfo,
 };
 
 // ---- Exceptions -----------------------------------------------------------
@@ -2223,6 +2223,62 @@ impl PyPersistentTimeSeries {
         numpy_from_typed(py, &self.inner.data)
     }
 
+    /// The value in force at `at`.
+    ///
+    /// A step function is defined at *every* instant from its first breakpoint
+    /// onward, so this is the series' value at `at` in the ordinary sense, not an
+    /// approximation of one: between breakpoints the previous value is carried
+    /// forward, and past the last breakpoint the last value holds indefinitely.
+    /// The single error is an `at` strictly *before* the first breakpoint, where
+    /// no value was ever declared — `InvalidParameterError`, never a clamp.
+    ///
+    /// Returns exactly what indexing `data` returns: a numpy scalar of the
+    /// series' own dtype for a scalar series, or the per-step subarray for a
+    /// series with a shaped element. `at` must be spelled the way the series'
+    /// breakpoints are (both aware or both naive).
+    fn value_at<'py>(&self, py: Python<'py>, at: PyInstant) -> PyResult<Bound<'py, PyAny>> {
+        check_point_spelling(&at, self.inner.time_reference.as_ref(), "this series")?;
+        let row = self
+            .inner
+            .row_at(at.instant)
+            .map_err(InvalidParameterError::new_err)?;
+        let array = numpy_from_typed(py, &row)?;
+        if row.shape.is_empty() {
+            // A scalar step is a 0-d array; `arr[()]` is numpy's own spelling
+            // for the scalar inside one, and keeps the dtype that `.item()`
+            // would discard.
+            array.get_item(PyTuple::empty(py))
+        } else {
+            Ok(array)
+        }
+    }
+
+    /// The 0-based index into `timestamps` and `data` of the breakpoint
+    /// governing `at` — the greatest breakpoint `<= at`.
+    ///
+    /// `value_at` is the usual way to ask; this is for a caller that wants the
+    /// row itself (to look up a parallel array, say). Errors like `value_at`.
+    fn index_at(&self, at: PyInstant) -> PyResult<usize> {
+        check_point_spelling(&at, self.inner.time_reference.as_ref(), "this series")?;
+        self.inner
+            .index_at(at.instant)
+            .map_err(InvalidParameterError::new_err)
+    }
+
+    /// The breakpoint governing `at` — the instant from which the value at `at`
+    /// has been in force, spelled the way the series' breakpoints are.
+    ///
+    /// Equal to `at` exactly when `at` is itself a breakpoint. Errors like
+    /// `value_at`.
+    fn breakpoint_at<'py>(&self, py: Python<'py>, at: PyInstant) -> PyResult<Bound<'py, PyAny>> {
+        let index = self.index_at(at)?;
+        spell_instant(
+            py,
+            self.inner.timestamps[index],
+            self.inner.time_reference.as_ref(),
+        )
+    }
+
     /// This series as a two-column `pyarrow.Table`: `timestamp` and `value`.
     ///
     /// Requires pyarrow, which is not installed with infrastore — use
@@ -3481,7 +3537,8 @@ impl PyStore {
     /// `time_series_type="PersistentTimeSeries"` also takes no resolution, and
     /// is the one case whose columns need **not** share a timeline: a step
     /// function has a value at every instant from its first breakpoint on, so
-    /// each column resolves hold-last on breakpoints of its own. `timestamps()`
+    /// each column carries its values forward on breakpoints of its own.
+    /// `timestamps()`
     /// is then the sorted union of every column's breakpoints, and reading
     /// before some column's first breakpoint raises `InvalidParameterError`
     /// naming that column.
@@ -3709,6 +3766,16 @@ impl PyStore {
     /// where the `time_range` on `get_time_series` and `bulk_read` hands back
     /// the smaller answer that fits. Raises `NotFoundError` if the id names no
     /// row.
+    ///
+    /// One slice is refused by both forms. A series whose resolution is a
+    /// calendar period (`P1M`, `P1Y`) is stored as an anchor plus a count, and
+    /// month-end arithmetic clamps: a monthly grid from Jan-31 is Jan-31,
+    /// Feb-29, Mar-31, but re-anchored at its own Feb-29 it would read Feb-29,
+    /// Mar-29, Apr-29. A slice that would have to describe itself that way
+    /// raises `InvalidParameterError` rather than returning the stored values
+    /// under dates the store does not hold. Read the series whole and slice
+    /// `timestamps` yourself, or store the instants with
+    /// `NonSequentialTimeSeries`.
     ///
     /// Pass `owner_id` and `owner_category` together to hold the row to that
     /// owner, and get `OwnerMismatchError` when it belongs to someone else. The

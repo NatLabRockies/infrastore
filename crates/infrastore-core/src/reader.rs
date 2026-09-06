@@ -34,7 +34,8 @@
 //!   A reader is built over series that share one timeline, validated at build
 //!   (a divergent grid, or a second timestamp vector, is an error), so every
 //!   column has a value at every valid timestamp. A persistent reader keeps
-//!   that property for a different reason: hold-last always resolves once `at`
+//!   that property for a different reason: a carried-forward value always
+//!   resolves once `at`
 //!   is at or after a column's first breakpoint, and an `at` before some
 //!   column's first breakpoint is a hard error naming that column rather than
 //!   a hole in the result.
@@ -413,9 +414,9 @@ impl StaticReader {
                     timestamps.len()
                 ))
             }),
-            // Hold-last on the *union*, because a step function has a value
-            // between its breakpoints. Only the lower end is a hard error.
-            Timeline::Persistent { union, .. } => crate::timestamps::index_in_force_at(union, at)
+            // Carried forward on the *union*, because a step function has a
+            // value between its breakpoints. Only the lower end is a hard error.
+            Timeline::Persistent { union, .. } => crate::timestamps::index_at(union, at)
                 .ok_or_else(|| {
                     TimeSeriesError::InvalidParameter(format!(
                         "timestamp {at} is before the reader's first breakpoint ({}), where a \
@@ -527,7 +528,7 @@ impl StaticReader {
             Timeline::Persistent { vectors, .. } => {
                 per_vector.clear();
                 for (v, breakpoints) in vectors.iter().enumerate() {
-                    let row = crate::timestamps::index_in_force_at(breakpoints, at)
+                    let row = crate::timestamps::index_at(breakpoints, at)
                         .ok_or_else(|| before_first_breakpoint(groups, v, breakpoints, at))?;
                     per_vector.push(row);
                 }

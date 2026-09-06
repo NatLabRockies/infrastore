@@ -78,6 +78,28 @@ end
         reader, DateTime(2024, 1, 1, 9)
     )
 
+    # A step function's point lookups take a ZonedDateTime too, and hold the
+    # same spelling rule: the breakpoints below record an instant-bearing
+    # spelling, so a wall clock cannot address them.
+    curve = PersistentTimeSeries(
+        [ZonedDateTime(DateTime(2024, 1, 1, h), denver) for h in (0, 6, 12)],
+        [10.0, 40.0, 70.0],
+        "gas",
+    )
+    @test value_at(curve, ZonedDateTime(DateTime(2024, 1, 1, 9), denver)) == 40.0
+    @test index_at(curve, ZonedDateTime(DateTime(2024, 1, 1, 9), denver)) == 2
+    # The breakpoint comes back as the instant it names; `zoned_timestamp`
+    # fuses it with the spelling beside it.
+    @test breakpoint_at(curve, ZonedDateTime(DateTime(2024, 1, 1, 9), denver)) ==
+        DateTime(2024, 1, 1, 13)
+    @test zoned_timestamp(
+        breakpoint_at(curve, ZonedDateTime(DateTime(2024, 1, 1, 9), denver)),
+        curve.time_reference,
+    ) == ZonedDateTime(DateTime(2024, 1, 1, 6), denver)
+    @test_throws InfraStore.InvalidParameterError value_at(
+        curve, DateTime(2024, 1, 1, 9)
+    )
+
     # An axis that recorded no spelling (`time_reference=nothing`, the shape a
     # legacy row arrives in) groups with the zoned ones, as in the core: a
     # ZonedDateTime reads it, and a bare DateTime is refused -- the same verdict

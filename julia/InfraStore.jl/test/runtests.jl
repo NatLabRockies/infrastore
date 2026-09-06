@@ -247,6 +247,46 @@ end
     @test round_tripped[1].data == [3.5, 4.25, 5.0]
 end
 
+@testset "value_at / index_at / breakpoint_at on a step function" begin
+    bps = [DateTime(2024, 1, 1), DateTime(2024, 4, 1), DateTime(2024, 7, 1)]
+    curve = PersistentTimeSeries(bps, [10.0, 40.0, 70.0], "gas")
+
+    # 1. exactly at a breakpoint -> that breakpoint's value (right-continuous).
+    @test value_at(curve, DateTime(2024, 1, 1)) == 10.0
+    @test value_at(curve, DateTime(2024, 4, 1)) == 40.0
+
+    # 2. between breakpoints -> the previous value carried forward. This is the
+    #    case where a NonSequentialTimeSeries has no value at all.
+    @test value_at(curve, DateTime(2024, 5, 17)) == 40.0
+
+    # 3. after the last breakpoint -> the last value, forever.
+    @test value_at(curve, DateTime(2099, 1, 1)) == 70.0
+
+    # 4. before the first -> an error naming the series, never a clamp.
+    @test_throws InfraStore.InvalidParameterError value_at(
+        curve, DateTime(2023, 12, 31)
+    )
+
+    # The three agree on the row they resolve.
+    for (at, i) in
+        [(DateTime(2024, 1, 1), 1), (DateTime(2024, 5, 17), 2), (DateTime(2099), 3)]
+        @test index_at(curve, at) == i
+        @test breakpoint_at(curve, at) == bps[i]
+        @test value_at(curve, at) == curve.data[i]
+    end
+
+    # A shaped per-step element comes back whole, as a copy: mutating the result
+    # must not reach into the series.
+    shaped = PersistentTimeSeries(
+        bps[1:2], [1.0 2.0 3.0; 4.0 5.0 6.0], "shaped"
+    )
+    step = value_at(shaped, DateTime(2024, 2, 1))
+    @test step == [1.0, 2.0, 3.0]
+    step[1] = -1.0
+    @test shaped.data[1, 1] == 1.0
+    @test value_at(shaped, DateTime(2024, 9, 1)) == [4.0, 5.0, 6.0]
+end
+
 @testset "StaticReader over persistent columns on different breakpoints" begin
     store = Store(in_memory=true)
     months(ms) = [DateTime(2024, m, 1) for m in ms]
@@ -274,12 +314,12 @@ end
     @test static_timestamps(r) == months([1, 4, 6, 7, 10])
     @test grid.length == 5
 
-    hold_last(bps, values, at) = values[findlast(<=(at), bps)]
+    carried_forward(bps, values, at) = values[findlast(<=(at), bps)]
     for t in static_timestamps(r)
         static_read!(r, t)
         @test static_values(r, 1) == [
-            hold_last(months(quarterly), Float64[10, 40, 70, 100], t),
-            hold_last(months(semi), Float64[1, 6], t),
+            carried_forward(months(quarterly), Float64[10, 40, 70, 100], t),
+            carried_forward(months(semi), Float64[1, 6], t),
         ]
     end
 

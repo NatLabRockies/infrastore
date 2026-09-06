@@ -27,7 +27,7 @@ Under development, unstable API, integrating with parent packages
   per-timestep element shape (a cost curve's coefficient tuple, say). Dtype, shape, byte order,
   timestamps, features, and hashes survive every binding and round trip.
 - **Seven time-series types** — `SingleTimeSeries`, `NonSequentialTimeSeries`, and
-  `PersistentTimeSeries` (a sparse step function: breakpoints plus hold-last) read+write;
+  `PersistentTimeSeries` (a sparse step function: breakpoints, values carried forward) read+write;
   `Deterministic`, `DeterministicSingleTimeSeries`, `Probabilistic`, and `Scenarios` for forecasts.
 - **Feature-tagged associations** — each association carries a map of typed features
   (`int`/`float`/`bool`/`str`), so several variants of a series can coexist under one owner.

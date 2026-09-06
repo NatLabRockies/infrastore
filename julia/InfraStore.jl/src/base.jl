@@ -143,6 +143,83 @@ function zoned_timestamps(ts::SingleTimeSeries)
     return [zoned_timestamp(t, ts.time_reference) for t in timestamps(ts)]
 end
 
+"""
+    value_at(ts::PersistentTimeSeries, at) -> value
+
+The value in force at `at`.
+
+A step function is defined at *every* instant from its first breakpoint onward,
+so this is the series' value at `at` in the ordinary sense, not an approximation
+of one: between breakpoints the previous value is carried forward, and past the
+last breakpoint the last value holds indefinitely. The single error is an `at`
+strictly *before* the first breakpoint, where no value was ever declared — an
+`InvalidParameterError`, never a clamp.
+
+A scalar series returns a scalar; one with a shaped per-step element returns that
+step as an array (a copy, so mutating it leaves the series alone). `at` is a
+`DateTime` or, with `using TimeZones`, a `ZonedDateTime`, and must be spelled the
+way the series' breakpoints are. [`index_at`](@ref) and [`breakpoint_at`](@ref)
+locate the row the value came from.
+
+```julia
+curve = PersistentTimeSeries(
+    [DateTime(2024, 1), DateTime(2024, 4), DateTime(2024, 7)],
+    [10.0, 40.0, 70.0],
+    "gas",
+)
+value_at(curve, DateTime(2024, 5, 17))  # 40.0, carried forward from April
+```
+"""
+function value_at(ts::PersistentTimeSeries, at)
+    i = index_at(ts, at)
+    ndims(ts.data) == 1 && return ts.data[i]
+    return copy(selectdim(ts.data, 1, i))
+end
+
+"""
+    index_at(ts::PersistentTimeSeries, at) -> Int
+
+The 1-based index into `ts.timestamps` and the first dimension of `ts.data` of
+the breakpoint governing `at` — the greatest breakpoint `<= at`.
+
+[`value_at`](@ref) is the usual way to ask; this is for a caller that wants the
+row itself, to index a parallel array of its own. Errors like `value_at`.
+"""
+function index_at(ts::PersistentTimeSeries, at)
+    _check_point_spelling(ts.time_reference, at, "this series")
+    t = _utc_datetime(at)
+    isempty(ts.timestamps) && throw(
+        InvalidParameterError(
+            "PersistentTimeSeries \"$(ts.name)\" has no breakpoints, so it has no " *
+            "value at $t",
+        ),
+    )
+    # `searchsortedlast` is the greatest index whose breakpoint is `<= t`, which
+    # is the carried-forward rule exactly; the vector is strictly increasing
+    # (the constructor checks it), so the search is well defined.
+    i = searchsortedlast(ts.timestamps, t)
+    i == 0 && throw(
+        InvalidParameterError(
+            "PersistentTimeSeries \"$(ts.name)\" has no value at $t: it is before " *
+            "the first breakpoint $(first(ts.timestamps)), where a step function " *
+            "is undefined",
+        ),
+    )
+    return i
+end
+
+"""
+    breakpoint_at(ts::PersistentTimeSeries, at) -> DateTime
+
+The breakpoint governing `at` — the instant from which the value at `at` has been
+in force. Equal to `at` exactly when `at` is itself a breakpoint; errors like
+[`value_at`](@ref).
+
+The instant is the one stored; the spelling beside it is `ts.time_reference`, and
+[`zoned_timestamp`](@ref) fuses the two.
+"""
+breakpoint_at(ts::PersistentTimeSeries, at) = ts.timestamps[index_at(ts, at)]
+
 for FT in (:Deterministic, :Probabilistic, :Scenarios)
     @eval function Base.show(io::IO, ts::$FT{T, N}) where {T, N}
         return print(

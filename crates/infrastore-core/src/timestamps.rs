@@ -113,14 +113,14 @@ pub(crate) fn to_millis(timestamps: &[DateTime<Utc>]) -> Vec<i64> {
 /// The single definition of the `PersistentTimeSeries` lookup. It lives here
 /// rather than on the type because the columnar reader resolves the same
 /// question against an *interned* breakpoint vector with no series struct in
-/// hand — see [`crate::reader::StaticReader`]; two implementations of a
-/// hold-last rule would be two chances to get the boundary wrong.
+/// hand — see [`crate::reader::StaticReader`]; two implementations of the
+/// carried-forward rule would be two chances to get the boundary wrong.
 ///
 /// The boundary is `<=`, not `<`: a read exactly at a breakpoint gets that
 /// breakpoint's own value, which is what "right-continuous" means and what
 /// makes a persistent read agree with a `NonSequentialTimeSeries` read at every
 /// instant both types define.
-pub(crate) fn index_in_force_at(breakpoints: &[DateTime<Utc>], at: DateTime<Utc>) -> Option<usize> {
+pub(crate) fn index_at(breakpoints: &[DateTime<Utc>], at: DateTime<Utc>) -> Option<usize> {
     breakpoints.partition_point(|b| *b <= at).checked_sub(1)
 }
 

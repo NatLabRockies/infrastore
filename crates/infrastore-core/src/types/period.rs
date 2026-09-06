@@ -253,6 +253,57 @@ impl Period {
         }
     }
 
+    /// Whether the run of `len` grid points starting at step `offset` can be
+    /// *re-anchored* — described as a grid of this same period starting at its
+    /// own first point, which is what every slicing read has to produce.
+    ///
+    /// The question is whether `add_to` is associative over the run:
+    ///
+    /// ```text
+    /// add_to(add_to(initial, offset), j) == add_to(initial, offset + j)
+    /// ```
+    ///
+    /// for every `j` in `0..len`. A [`Period::Fixed`] is a count of
+    /// milliseconds, so this always holds. A [`Period::Months`] lands on
+    /// `min(day_of(initial), days_in_month(target))`, and that clamp is **not**
+    /// associative: a grid stepping monthly from Jan-31 is Jan-31, Feb-29,
+    /// Mar-31, …, but re-anchored at its own Feb-29 it becomes Feb-29, Mar-29,
+    /// Apr-29 — the same values under different dates.
+    ///
+    /// So a slice of a month-anchored series is not always representable as a
+    /// `SingleTimeSeries` (or a forecast) of its own, and the store refuses the
+    /// read rather than handing back a grid that is not the one it stored.
+    /// Callers that need those instants read the series whole and slice the
+    /// materialized timestamps.
+    ///
+    /// A run of fewer than two points is trivially anchorable, as is one whose
+    /// anchor kept `initial`'s day of month: nothing was clamped away, so every
+    /// later landing is computed from the same day.
+    pub fn sub_grid_is_anchorable(
+        &self,
+        initial: DateTime<Utc>,
+        offset: usize,
+        len: usize,
+    ) -> bool {
+        match self {
+            Period::Fixed(_) => true,
+            Period::Months(_) => {
+                if offset == 0 || len < 2 {
+                    return true;
+                }
+                let Some(anchor) = self.add_to(initial, offset as i64) else {
+                    return true;
+                };
+                if anchor.day() == initial.day() {
+                    return true;
+                }
+                (1..len).all(|j| {
+                    self.add_to(anchor, j as i64) == self.add_to(initial, (offset + j) as i64)
+                })
+            }
+        }
+    }
+
     /// The period that reproduces `timestamps` exactly, or an error naming the
     /// first entry that breaks the pattern.
     ///
@@ -1018,5 +1069,40 @@ mod tests {
         // Mixed kinds are rejected.
         assert!(month.divide_into(&hour).is_err());
         assert!(hour.divide_into(&month).is_err());
+    }
+
+    #[test]
+    fn sub_grid_is_anchorable() {
+        let month = Period::Months(1);
+        let hour = Period::Fixed(Duration::hours(1));
+
+        // A fixed period is a count of milliseconds, so re-anchoring is exact
+        // wherever the slice starts.
+        let any = ts(2024, 1, 31, 0);
+        assert!(hour.sub_grid_is_anchorable(any, 7, 100));
+
+        // Monthly from Jan-31: Jan-31, Feb-29, Mar-31, Apr-30, May-31, ...
+        // Index 1 is clamped, so re-anchoring there drifts from the second
+        // point on -- but a single-point run has no second point.
+        assert!(!month.sub_grid_is_anchorable(any, 1, 2));
+        assert!(month.sub_grid_is_anchorable(any, 1, 1));
+        // Index 0 is the anchor itself; there is nothing to re-anchor.
+        assert!(month.sub_grid_is_anchorable(any, 0, 12));
+        // Index 2 is Mar-31, which kept the anchor's day of month.
+        assert!(month.sub_grid_is_anchorable(any, 2, 2));
+        // Index 3 is Apr-30, clamped, and May has 31 days.
+        assert!(!month.sub_grid_is_anchorable(any, 3, 2));
+
+        // A day every month has is never clamped, so every run re-anchors.
+        let safe = ts(2024, 1, 15, 0);
+        assert!((0..24).all(|k| month.sub_grid_is_anchorable(safe, k, 24 - k)));
+
+        // A leap-day anchor stepping by years: 2024-02-29, then 2025..2027-02-28,
+        // then 2028-02-29 again. Re-anchoring on a Feb-28 loses the leap day.
+        let leap = ts(2024, 2, 29, 0);
+        let year = Period::Months(12);
+        assert!(!year.sub_grid_is_anchorable(leap, 1, 4));
+        // Within the three non-leap years there is nothing longer to clamp to.
+        assert!(year.sub_grid_is_anchorable(leap, 1, 3));
     }
 }

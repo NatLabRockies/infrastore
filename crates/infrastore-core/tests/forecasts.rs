@@ -1563,14 +1563,32 @@ fn monthly_deterministic_end_of_month_initial_timestamp() {
         .unwrap();
 
     let feb29 = Utc.with_ymd_and_hms(2024, 2, 29, 0, 0, 0).unwrap();
+    let mar31 = Utc.with_ymd_and_hms(2024, 3, 31, 0, 0, 0).unwrap();
     let apr = Utc.with_ymd_and_hms(2024, 4, 30, 0, 0, 0).unwrap();
+
+    // The clamped boundary is addressable: one window needs no grid past its own
+    // start, so it re-anchors exactly.
     let got = store
-        .read_by_ids_range(&[key], (feb29, apr).into())
+        .read_by_ids_range(&[key], (feb29, mar31).into())
         .map(|mut v| v.remove(0))
         .unwrap();
     let det = got.as_deterministic().unwrap();
     assert_eq!(det.initial_timestamp, feb29, "clamped boundary is window 1");
-    assert_eq!(det.count, 2);
+    assert_eq!(det.count, 1);
+
+    // Two windows from that boundary are a different matter: `Deterministic`
+    // describes them as `feb29 + k·P1M`, which is 03-29, not the 03-31 the
+    // forecast stores. There is no anchor that says otherwise, so the read is
+    // refused rather than answered with dates the store does not hold.
+    let err = store
+        .read_by_ids_range(&[key], (feb29, apr).into())
+        .map(|mut v| v.remove(0))
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("cannot be expressed as a grid of its own"),
+        "a re-anchored monthly window run must be refused, got {err:?}"
+    );
 
     // 2024-03-29 is not on the grid (window 2 is 03-31).
     let mar29 = Utc.with_ymd_and_hms(2024, 3, 29, 0, 0, 0).unwrap();

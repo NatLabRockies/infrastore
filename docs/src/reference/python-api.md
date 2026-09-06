@@ -678,6 +678,31 @@ the last one forever, where a `NonSequentialTimeSeries` has no value between its
 There is no value before the first breakpoint, and asking for one raises `InvalidParameterError`
 rather than clamping.
 
+Three methods ask that question of a series in hand:
+
+```python
+value_at(at: datetime) -> Any        # the value in force at `at`
+index_at(at: datetime) -> int        # the row it came from
+breakpoint_at(at: datetime) -> datetime  # the instant it has been in force since
+```
+
+`value_at` is the everyday call, and it is not an approximation: a step function is defined at
+_every_ instant from its first breakpoint onward, so it has a genuine value at `at`. It returns
+exactly what indexing `data` returns — a numpy scalar of the series' own dtype, or the per-step
+subarray for a series with a shaped element. `at` must be spelled the way the breakpoints are (both
+aware or both naive), the same rule a `time_range` bound follows. Only an `at` strictly _before_ the
+first breakpoint raises.
+
+```python
+curve = PersistentTimeSeries(
+    [datetime(2024, 1, 1), datetime(2024, 4, 1), datetime(2024, 7, 1)],
+    np.array([10.0, 40.0, 70.0]),
+    "gas",
+)
+curve.value_at(datetime(2024, 5, 17))       # 40.0, carried forward from April
+curve.breakpoint_at(datetime(2024, 5, 17))  # datetime(2024, 4, 1)
+```
+
 A range read slices on those terms — the returned series begins at the breakpoint _in force at_
 `start`, so it always defines a value there:
 

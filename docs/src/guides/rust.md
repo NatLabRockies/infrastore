@@ -184,10 +184,12 @@ store.add_time_series(
 )?;
 ```
 
-`PersistentTimeSeries::index_in_force_at` resolves one instant to the row in force at it; a
-time-range read begins at the breakpoint in force at `start`, so the slice always defines a value
-there. A columnar sweep is [`StaticReader`](../explanation/readers.md), which for this type alone
-lets its columns sit on independent breakpoint vectors.
+`PersistentTimeSeries::value_at` reads one instant — `prices.value_at::<f64>(t)?` — carrying the
+last breakpoint's value forward to it, with `row_at` as the shape-generic form and `index_at` /
+`breakpoint_at` for the row it came from. A time-range read begins at the breakpoint in force at
+`start`, so the slice always defines a value there. A columnar sweep is
+[`StaticReader`](../explanation/readers.md), which for this type alone lets its columns sit on
+independent breakpoint vectors.
 
 See [Choosing a Type](../explanation/time-series-types.md#choosing-a-type) if you are deciding
 between these and a `SingleTimeSeries`.

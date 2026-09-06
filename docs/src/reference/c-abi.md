@@ -557,9 +557,9 @@ share one timestamp vector; `infrastore_static_reader_grid` then reports `*out_r
 and `infrastore_static_reader_timestamps` is how the timeline is read. For `PersistentTimeSeries`
 (`6`), `resolution` must likewise be null — but this is the one case whose columns need **not**
 share a timeline: a step function has a value at every instant from its first breakpoint on, so each
-column resolves hold-last on breakpoints of its own, and the reader's timeline is the union of them
-all. Reading at an instant before some column's first breakpoint is an error naming that column. Any
-other discriminant is rejected.
+column carries its values forward on breakpoints of its own, and the reader's timeline is the union
+of them all. Reading at an instant before some column's first breakpoint is an error naming that
+column. Any other discriminant is rejected.
 
 Uniformity — where it is required — is validated at build and errors on divergence, so in every case
 each column has a value at every valid timestamp (no presence mask).
