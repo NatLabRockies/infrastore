@@ -41,6 +41,39 @@ print(f"read {got.length} values @ {got.resolution} from {got.initial_timestamp}
 assert np.array_equal(np.asarray(got.data), np.asarray(ts.data))
 ```
 
+A read hands back the values and the timeline side by side. To fuse them into a dataframe, convert
+the series to a `pyarrow.Table` with `to_arrow()` and hand it straight to Polars — the two-column
+table is exactly a dataframe's shape, so the conversion is zero-copy and needs no glue:
+
+```python
+import polars as pl
+
+df = pl.from_arrow(got.to_arrow())
+print(df.head(3))
+# shape: (3, 2)
+# ┌─────────────────────────┬───────┐
+# │ timestamp               ┆ value │
+# │ ---                     ┆ ---   │
+# │ datetime[ms, UTC]       ┆ f64   │
+# ╞═════════════════════════╪═══════╡
+# │ 2024-01-01 00:00:00 UTC ┆ 100.0 │
+# │ 2024-01-01 01:00:00 UTC ┆ 101.0 │
+# │ 2024-01-01 02:00:00 UTC ┆ 102.0 │
+# └─────────────────────────┴───────┘
+
+print(df.group_by_dynamic("timestamp", every="6h").agg(pl.col("value").mean()))
+# 102.5, 108.5, 114.5, 120.5 — one row per six-hour block
+```
+
+The `timestamp` column arrives typed in the series' own spelling (`datetime[ms, UTC]` here; an IANA
+zone or no zone at all for a series written that way), so Polars' time-aware operations work without
+you relabelling anything. The descriptive attributes ride along in `got.to_arrow().schema.metadata`
+— `name`, `units`, `resolution`, and the rest — which Polars does not carry onto the dataframe, so
+read them off the table when you need them.
+
+`to_arrow()` needs pyarrow, which the wheel does not install by default:
+`pip install 'infrastore[arrow]'`.
+
 ## What Just Happened
 
 1. **`Store.create(in_memory=True)`** built a store backed by an in-memory array backend and an
