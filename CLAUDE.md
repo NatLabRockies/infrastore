@@ -52,7 +52,27 @@ breakpoint on, so its columns may hold independent breakpoint vectors. Such a re
 distinct vectors, gives each column the id of the one it resolves against, and takes their sorted
 **union** as its public axis; `index_at` then reports a position on that union and is _not_ a
 storage row index. There is still no presence mask — an instant before some column's first
-breakpoint is a hard error naming that column.
+breakpoint is a hard error naming that column. A `SingleTimeSeries` reader need not inherit its grid
+either: `Store::build_static_reader_over(filter, ReadWindow)` (`window_start=` / `window_length=` in
+Python and Julia, `--window-start` / `--window-length` on the CLI's `grid`, `has_window_start` and
+friends across the C ABI) takes a caller-named span, and each column then reads at a row offset of
+its own — so series with different starts or lengths sweep together. The axis is still single; only
+its provenance changes. All three edges are checked at build: a matched series that does not cover
+the span is an error **naming it** rather than a column silently dropped, the anchor is checked
+against each column's grid rather than floored onto it (unlike `read_by_id`, which floors because a
+value covers its step), and a calendar period meets the same `Period::sub_grid_is_anchorable` rule a
+slice does, since a window is a re-anchoring. A window whose columns all start at the anchor falls
+back to the single-index backend read, so the uniform sweep is unchanged. The **other** remedy for a
+divergent selection is `ListFilter::initial_timestamp` + `ListFilter::length`, which with
+`resolution` name a whole grid and match only the series already on it (`initial_timestamp=` /
+`length=` in Python and Julia, `--initial-timestamp` / `--length` as CLI selectors, a `has_`-flagged
+pair on every filter-taking C ABI export). It is the constructive half of the grid-coherence rule,
+the role `ListFilter::zoneless` plays for spelling. The two answer different questions and compose:
+a window sweeps a named span across the ragged series, the filter drops the ones that are not on the
+grid. Being a filter it _selects_ rather than asserts — a grid no row is on is an empty result, not
+an error, and a row storing no `initial_timestamp` (the two irregular types) matches no value at
+all. Neither is part of `KeyIdentity`, so an identity probe never narrows by them: two series
+differing only in start or length are the same row to the catalog.
 
 The discovery/maintenance surface (`get_intervals`, `list_names`, `list_owner_types`, name-pattern
 filtering via `ListFilter::name_glob` (SQLite `GLOB`), `ListFilter::component_field` (exact match;

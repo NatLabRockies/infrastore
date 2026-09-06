@@ -322,6 +322,42 @@ for ts in reader.timestamps():
         vals = reader.group_values(i)   # (num_columns, *element_shape); column j ↔ g["ids"][j]
 ```
 
+#### When the series do not share a grid
+
+Most real systems do not meet that requirement — a year of load beside a week of an outage schedule,
+or one component logged from an hour later than the rest — and the build then raises, naming the
+series that diverges. Give the reader a span instead of letting it inherit one:
+
+```python
+reader = store.build_static_reader(
+    timedelta(hours=1),
+    window_start=datetime(2024, 1, 1, 7, tzinfo=timezone.utc),
+    window_length=8760,   # optional: without it, as far as *every* matched series reaches
+)
+```
+
+Each column then reads at an offset of its own, so ragged series sweep together. The span is
+checked, not clamped: a matched series that does not cover it raises `InvalidParameterError` naming
+that series rather than dropping its column, and the anchor must land on each series' own step
+boundaries. See [reader windows](../reference/python-api.md#reader-windows).
+
+Sometimes the odd series out should not take part at all — a stray day of data beside a year of it
+is a different component, not a shorter view of the same sweep. Then filter to one grid instead,
+with `initial_timestamp` and `length`:
+
+```python
+reader = store.build_static_reader(
+    timedelta(hours=1),
+    initial_timestamp=datetime(2024, 1, 1, 7, tzinfo=timezone.utc),
+    length=8784,
+)
+```
+
+The window sweeps a span across whatever matched; the filter matches only the series already on that
+grid. `static_summary()` shows which grids a store holds, and the filter reaches every other
+filter-taking call too — `list_metadata`, `remove_by_filter`, and the rest. See
+[selecting one grid](../reference/python-api.md#selecting-one-grid).
+
 ### Forecasts
 
 `entry_values(i)` returns the window backing `entries()[i]`, shaped `(horizon, *element_shape)` for

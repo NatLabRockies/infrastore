@@ -3382,7 +3382,7 @@ impl PyStore {
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
         name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
-        interval=None, features=None
+        interval=None, initial_timestamp=None, length=None, features=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn list_metadata<'py>(
@@ -3398,6 +3398,8 @@ impl PyStore {
         zoneless: Option<bool>,
         resolution: Option<Bound<'_, PyAny>>,
         interval: Option<Bound<'_, PyAny>>,
+        initial_timestamp: Option<PyInstant>,
+        length: Option<usize>,
         features: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Vec<Bound<'py, PyDict>>> {
         let filter = build_list_filter(
@@ -3410,6 +3412,8 @@ impl PyStore {
             component_field,
             zoneless,
             resolution,
+            initial_timestamp,
+            length,
             interval,
             features,
         )?;
@@ -3429,7 +3433,7 @@ impl PyStore {
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
         name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
-        interval=None, features=None
+        interval=None, initial_timestamp=None, length=None, features=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn has_any_time_series(
@@ -3444,6 +3448,8 @@ impl PyStore {
         zoneless: Option<bool>,
         resolution: Option<Bound<'_, PyAny>>,
         interval: Option<Bound<'_, PyAny>>,
+        initial_timestamp: Option<PyInstant>,
+        length: Option<usize>,
         features: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<bool> {
         let filter = build_list_filter(
@@ -3456,6 +3462,8 @@ impl PyStore {
             component_field,
             zoneless,
             resolution,
+            initial_timestamp,
+            length,
             interval,
             features,
         )?;
@@ -3673,11 +3681,51 @@ impl PyStore {
     /// naming that column.
     ///
     /// Drive any of them with `static_read`.
-    #[pyo3(signature = (resolution=None, *, time_series_type=None, owner_id=None, owner_category=None, owner_type=None, name=None, name_glob=None, component_field=None, zoneless=None, features=None))]
+    ///
+    /// **`window_start` lifts the shared-grid requirement.** Pass one and the
+    /// reader sweeps the span you name rather than the grid the series happen to
+    /// share: each column then reads at an offset of its own, so
+    /// `SingleTimeSeries` that begin at different instants, or run for different
+    /// lengths, read together as long as they all cover the window.
+    /// `window_length` gives it an extent in timesteps; without one the reader
+    /// runs as far from the anchor as *every* matched series reaches.
+    ///
+    /// It is distinct from the `initial_timestamp` / `length` *filter*
+    /// arguments, which select only the series already on a given grid. The
+    /// window says "sweep this span across whatever matched"; the filter says
+    /// "match only the series on this grid".
+    ///
+    /// The window is checked, not clamped, in the three ways that would
+    /// otherwise return plausible wrong numbers:
+    ///
+    /// * a matched series that does not cover it raises `InvalidParameterError`
+    ///   naming that series, rather than being dropped from the columns;
+    /// * the anchor must fall at or after each series' start and on one of its
+    ///   own step boundaries — a timestamp part-way through a step is an error,
+    ///   not a floor;
+    /// * a monthly resolution is refused where re-anchoring would move the
+    ///   dates, by the same rule that governs a sliced read.
+    ///
+    /// `window_start` must be spelled the way the series are (aware for a zoned
+    /// series, naive for a zoneless one), and belongs to `SingleTimeSeries`
+    /// alone: the two irregular types carry their timeline rather than deriving
+    /// it, so there is nothing to re-anchor.
+    ///
+    /// ```python
+    /// # a year of load and a shorter series, swept over the span they share
+    /// reader = store.build_static_reader(
+    ///     "PT1H",
+    ///     window_start=datetime(2024, 1, 1, 7, tzinfo=timezone.utc),
+    /// )
+    /// reader.grid()["length"]
+    /// ```
+    #[pyo3(signature = (resolution=None, *, window_start=None, window_length=None, time_series_type=None, owner_id=None, owner_category=None, owner_type=None, name=None, name_glob=None, component_field=None, zoneless=None, initial_timestamp=None, length=None, features=None))]
     #[allow(clippy::too_many_arguments)]
     fn build_static_reader(
         &self,
         resolution: Option<Bound<'_, PyAny>>,
+        window_start: Option<PyInstant>,
+        window_length: Option<usize>,
         time_series_type: Option<&Bound<'_, PyAny>>,
         owner_id: Option<i64>,
         owner_category: Option<PyOwnerCategory>,
@@ -3686,6 +3734,8 @@ impl PyStore {
         name_glob: Option<String>,
         component_field: Option<String>,
         zoneless: Option<bool>,
+        initial_timestamp: Option<PyInstant>,
+        length: Option<usize>,
         features: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyStaticReader> {
         let filter = build_list_filter(
@@ -3698,10 +3748,21 @@ impl PyStore {
             component_field,
             zoneless,
             resolution,
+            initial_timestamp,
+            length,
             None,
             features,
         )?;
-        let reader = self.store()?.build_static_reader(filter).map_err(map_err)?;
+        let window = core_lib::ReadWindow {
+            start: window_start.as_ref().map(|s| s.instant),
+            zoneless: window_start.as_ref().is_some_and(|s| s.is_zoneless()),
+            len: window_length,
+            count: None,
+        };
+        let reader = self
+            .store()?
+            .build_static_reader_over(filter, window)
+            .map_err(map_err)?;
         Ok(PyStaticReader { inner: reader })
     }
 
@@ -3722,7 +3783,7 @@ impl PyStore {
     /// the filter. A `resolution` is required; a `Deterministic` reader also
     /// includes `DeterministicSingleTimeSeries`, matching the read request rule.
     /// Drive it with `forecast_read`.
-    #[pyo3(signature = (time_series_type, resolution, *, owner_id=None, owner_category=None, owner_type=None, name=None, name_glob=None, component_field=None, zoneless=None, features=None))]
+    #[pyo3(signature = (time_series_type, resolution, *, owner_id=None, owner_category=None, owner_type=None, name=None, name_glob=None, component_field=None, zoneless=None, initial_timestamp=None, length=None, features=None))]
     #[allow(clippy::too_many_arguments)]
     fn build_forecast_reader(
         &self,
@@ -3735,6 +3796,8 @@ impl PyStore {
         name_glob: Option<String>,
         component_field: Option<String>,
         zoneless: Option<bool>,
+        initial_timestamp: Option<PyInstant>,
+        length: Option<usize>,
         features: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyForecastReader> {
         let filter = build_list_filter(
@@ -3747,6 +3810,8 @@ impl PyStore {
             component_field,
             zoneless,
             Some(resolution),
+            initial_timestamp,
+            length,
             None,
             features,
         )?;
@@ -3997,7 +4062,7 @@ impl PyStore {
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
         name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
-        interval=None, features=None
+        interval=None, initial_timestamp=None, length=None, features=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn list_names(
@@ -4012,6 +4077,8 @@ impl PyStore {
         zoneless: Option<bool>,
         resolution: Option<Bound<'_, PyAny>>,
         interval: Option<Bound<'_, PyAny>>,
+        initial_timestamp: Option<PyInstant>,
+        length: Option<usize>,
         features: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Vec<String>> {
         let filter = build_list_filter(
@@ -4024,6 +4091,8 @@ impl PyStore {
             component_field,
             zoneless,
             resolution,
+            initial_timestamp,
+            length,
             interval,
             features,
         )?;
@@ -4034,7 +4103,7 @@ impl PyStore {
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
         name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
-        interval=None, features=None
+        interval=None, initial_timestamp=None, length=None, features=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn list_owner_types(
@@ -4049,6 +4118,8 @@ impl PyStore {
         zoneless: Option<bool>,
         resolution: Option<Bound<'_, PyAny>>,
         interval: Option<Bound<'_, PyAny>>,
+        initial_timestamp: Option<PyInstant>,
+        length: Option<usize>,
         features: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Vec<String>> {
         let filter = build_list_filter(
@@ -4061,6 +4132,8 @@ impl PyStore {
             component_field,
             zoneless,
             resolution,
+            initial_timestamp,
+            length,
             interval,
             features,
         )?;
@@ -4072,7 +4145,7 @@ impl PyStore {
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
         name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
-        interval=None, features=None
+        interval=None, initial_timestamp=None, length=None, features=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn remove_by_filter(
@@ -4087,6 +4160,8 @@ impl PyStore {
         zoneless: Option<bool>,
         resolution: Option<Bound<'_, PyAny>>,
         interval: Option<Bound<'_, PyAny>>,
+        initial_timestamp: Option<PyInstant>,
+        length: Option<usize>,
         features: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<usize> {
         let filter = build_list_filter(
@@ -4099,6 +4174,8 @@ impl PyStore {
             component_field,
             zoneless,
             resolution,
+            initial_timestamp,
+            length,
             interval,
             features,
         )?;
@@ -4732,7 +4809,7 @@ impl PyStore {
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
         name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
-        interval=None, features=None
+        interval=None, initial_timestamp=None, length=None, features=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn export_time_series_associations_openapi(
@@ -4747,6 +4824,8 @@ impl PyStore {
         zoneless: Option<bool>,
         resolution: Option<Bound<'_, PyAny>>,
         interval: Option<Bound<'_, PyAny>>,
+        initial_timestamp: Option<PyInstant>,
+        length: Option<usize>,
         features: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<String> {
         let filter = build_list_filter(
@@ -4759,6 +4838,8 @@ impl PyStore {
             component_field,
             zoneless,
             resolution,
+            initial_timestamp,
+            length,
             interval,
             features,
         )?;
@@ -4966,6 +5047,8 @@ fn build_list_filter(
     component_field: Option<String>,
     zoneless: Option<bool>,
     resolution: Option<Bound<'_, PyAny>>,
+    initial_timestamp: Option<PyInstant>,
+    length: Option<usize>,
     interval: Option<Bound<'_, PyAny>>,
     features: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<core_lib::ListFilter> {
@@ -4996,6 +5079,16 @@ fn build_list_filter(
     }
     if let Some(r) = resolution {
         filter = filter.resolution(pyany_to_period(&r)?);
+    }
+    if let Some(t) = initial_timestamp {
+        // Matched on the instant the row stores. No spelling check: a filter
+        // selects rather than reads, so a bound the rows cannot answer is an
+        // empty result, not an error -- pair it with `zoneless=` to pick the
+        // coherence group.
+        filter = filter.initial_timestamp(t.instant);
+    }
+    if let Some(n) = length {
+        filter = filter.length(n);
     }
     if let Some(i) = interval {
         filter = filter.interval(pyany_to_period(&i)?);

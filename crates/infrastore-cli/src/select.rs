@@ -74,6 +74,15 @@ pub struct SelectorArgs {
     /// Resolution as an ISO-8601 duration, e.g. PT1H or PT15M.
     #[arg(long)]
     pub resolution: Option<String>,
+    /// Keep only the series whose own grid starts here (RFC3339 or epoch-ms).
+    /// With --resolution and --length this names a whole grid, which is how a
+    /// selection spanning several is narrowed to one `grid` can sweep. Distinct
+    /// from `grid --window-start`, which sweeps a span across whatever matched.
+    #[arg(long, value_name = "TIMESTAMP")]
+    pub initial_timestamp: Option<String>,
+    /// Keep only the series of exactly this many timesteps.
+    #[arg(long, value_name = "N")]
+    pub length: Option<usize>,
     /// Feature filter, repeatable: key=value.
     #[arg(long = "feature", value_name = "KEY=VALUE")]
     pub feature: Vec<String>,
@@ -96,6 +105,8 @@ impl SelectorArgs {
             || self.component_field.is_some()
             || self.ts_type.is_some()
             || self.resolution.is_some()
+            || self.initial_timestamp.is_some()
+            || self.length.is_some()
             || self.spelling.is_some()
             || !self.feature.is_empty()
     }
@@ -133,6 +144,12 @@ impl SelectorArgs {
         }
         if let Some(r) = &self.resolution {
             filter = filter.resolution(parse::parse_period(r)?);
+        }
+        if let Some(t) = &self.initial_timestamp {
+            filter = filter.initial_timestamp(parse::parse_timestamp(t)?);
+        }
+        if let Some(n) = self.length {
+            filter = filter.length(n);
         }
         if let Some(s) = self.spelling {
             filter = filter.zoneless(s == Spelling::Zoneless);

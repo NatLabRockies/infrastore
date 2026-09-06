@@ -964,6 +964,8 @@ def build_static_reader(
     self,
     resolution: timedelta | str | None = None,
     *,
+    window_start: datetime | None = None,             # sweep a named span instead of
+    window_length: int | None = None,                 # inheriting the shared grid
     time_series_type: TimeSeriesType | None = None,   # default: SingleTimeSeries
     owner_id: int | None = None,
     owner_category: OwnerCategory | None = None,
@@ -971,6 +973,8 @@ def build_static_reader(
     name: str | None = None,
     name_glob: str | None = None,
     component_field: str | None = None,
+    initial_timestamp: datetime | None = None,        # select one grid, dropping
+    length: int | None = None,                        # the series not on it
     features: dict[str, int | float | bool | str] | None = None,
 ) -> StaticReader: ...
 def static_read(self, reader: StaticReader, when: datetime) -> None: ...
@@ -1016,7 +1020,10 @@ class StaticReader:
 All matched series must share one timeline — one grid (`initial_timestamp` + `length`) for
 `SingleTimeSeries`, one timestamp vector for `NonSequentialTimeSeries`. The build validates this and
 raises on divergence, so there is no presence mask — every column has a value at every valid
-timestamp.
+timestamp. When they do not share one there are two remedies, and they answer different questions:
+[a reader window](#reader-windows) sweeps a span across the ragged series, while the
+[`initial_timestamp` / `length` filter](#selecting-one-grid) drops the ones that are not on the grid
+you want.
 
 `PersistentTimeSeries` is the exception: its columns may sit on **different** breakpoint vectors,
 because a step function has a value at every instant from its first breakpoint on. `timestamps()` is
@@ -1040,6 +1047,78 @@ for ts in reader.timestamps():
     store.static_read(reader, ts)
     for i, g in enumerate(groups):
         vals = reader.group_values(i)   # column j ↔ g["ids"][j]
+```
+
+#### Reader windows
+
+A shared grid is a strong requirement, and a real system rarely meets it: a year of load sits beside
+a week of an outage schedule, or one component's data begins an hour later than the rest. Passing
+`window_start` (and optionally `window_length`) drops the requirement. The reader's axis becomes the
+span you named, and each column reads at an **offset of its own** — how many of its own steps
+precede the anchor — so series that begin at different instants, or run for different lengths, sweep
+together as long as they all cover the span.
+
+```python
+# 24 hours of one series, a leap year of another: no shared grid, so no reader.
+store.build_static_reader("PT1H")
+# InvalidParameterError: StaticReader requires a uniform grid; series 'load' (owner 7)
+# has grid (2024-01-01T00:00:00Z, PT1H, 24) but the reader grid is
+# (2024-01-01T07:00:00Z, PT1H, 8784). Build the reader over a window ...
+
+reader = store.build_static_reader("PT1H", window_start=datetime(2024, 1, 1, 7, tzinfo=utc))
+reader.grid()["length"]   # 17 -- as far as *every* matched series reaches from 07:00
+```
+
+Without `window_length` the reader runs as far from the anchor as every matched series reaches,
+which is the widest span on which no column has to be dropped. With one, the span is exactly what
+you asked for and is **checked**, in the three ways that would otherwise return a full, plausible,
+wrong row:
+
+- a matched series that does not cover the span raises `InvalidParameterError` **naming that
+  series**, rather than quietly leaving its column out — an absent column is invisible at read time;
+- the anchor must fall at or after each series' start and on one of its own step boundaries. A
+  timestamp part-way through a step is an error, not a floor. (`read_by_id` floors, because there a
+  value covers its step; a reader hands back a whole cohort at one instant, so flooring per column
+  would shift columns against each other by up to a step.)
+- a monthly resolution is refused where re-anchoring would move the dates, by the same rule that
+  governs a sliced `read_by_id` — a monthly grid from Jan-31 re-anchored at its own Feb-29 would
+  read Feb-29, Mar-29, Apr-29.
+
+`window_start` must be spelled the way the series are (aware for a zoned series, naive for a
+zoneless one), like every other query bound, and belongs to `SingleTimeSeries` alone: the two
+irregular types carry their timeline rather than deriving it, so there is nothing to re-anchor.
+`window_length` without `window_start` is refused — a span with no anchor is the ambiguity this
+argument exists to remove.
+
+Everything downstream is unchanged: `grid()` reports the window, `timestamps()` walks it, and
+`groups()` still lists every matched column.
+
+#### Selecting one grid
+
+The window's counterpart. `initial_timestamp` and `length` are **filter** arguments — they match
+only the series already on that grid, so the ones that are not on it never become columns:
+
+```python
+# 24 hours of stray data beside two full leap years, all named active_power
+store.build_static_reader("PT1H")                                # InvalidParameterError
+store.build_static_reader("PT1H", window_start=t7).grid()        # 3 columns, 17 steps
+store.build_static_reader("PT1H", initial_timestamp=t7).grid()   # 2 columns, 8784 steps
+```
+
+Use the **window** when the ragged series should all take part in the sweep, and the **filter** when
+they should not. They compose: filter to a cohort, then window a span inside it.
+
+With `resolution` these two complete the grid triple, which is what lets a filter name a whole grid
+rather than only be refused a divergent one — the role `zoneless` plays for time-reference
+coherence. They are ordinary filter arguments, so they reach every filter-taking call
+(`list_metadata`, `list_names`, `has_any_time_series`, `remove_by_filter`, …), and like every filter
+they _select_ rather than assert: a grid no row is on is an empty result, not an error. A row that
+stores no `initial_timestamp` — the two irregular types — matches no value at all, the same
+SQL-equality trap [`component_field`](#methods) has.
+
+```python
+store.list_metadata(initial_timestamp=t7, length=8784)   # the cohort
+store.remove_by_filter(initial_timestamp=t0, length=24)  # retire the stray one
 ```
 
 ### `ForecastReader`

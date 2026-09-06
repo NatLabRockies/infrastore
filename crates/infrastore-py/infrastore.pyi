@@ -572,6 +572,8 @@ class Store:
         zoneless: bool | None = None,
         resolution: Period | None = None,
         interval: Period | None = None,
+        initial_timestamp: datetime | None = None,
+        length: int | None = None,
         features: dict[str, int | float | bool | str] | None = None,
     ) -> int: ...
     def clear_time_series(
@@ -620,6 +622,8 @@ class Store:
         self,
         resolution: Period | None = None,
         *,
+        window_start: datetime | None = None,
+        window_length: int | None = None,
         time_series_type: TimeSeriesType | str | None = None,
         owner_id: int | None = None,
         owner_category: OwnerCategory | None = None,
@@ -628,6 +632,8 @@ class Store:
         name_glob: str | None = None,
         component_field: str | None = None,
         zoneless: bool | None = None,
+        initial_timestamp: datetime | None = None,
+        length: int | None = None,
         features: dict[str, int | float | bool | str] | None = None,
     ) -> StaticReader: ...
     def static_read(self, reader: StaticReader, when: datetime) -> None: ...
@@ -643,6 +649,8 @@ class Store:
         name_glob: str | None = None,
         component_field: str | None = None,
         zoneless: bool | None = None,
+        initial_timestamp: datetime | None = None,
+        length: int | None = None,
         features: dict[str, int | float | bool | str] | None = None,
     ) -> ForecastReader: ...
     def forecast_read(self, reader: ForecastReader, when: datetime) -> None: ...
@@ -666,6 +674,8 @@ class Store:
         zoneless: bool | None = None,
         resolution: Period | None = None,
         interval: Period | None = None,
+        initial_timestamp: datetime | None = None,
+        length: int | None = None,
         features: dict[str, int | float | bool | str] | None = None,
     ) -> list[dict[str, Any]]: ...
     def list_names(
@@ -681,6 +691,8 @@ class Store:
         zoneless: bool | None = None,
         resolution: Period | None = None,
         interval: Period | None = None,
+        initial_timestamp: datetime | None = None,
+        length: int | None = None,
         features: dict[str, int | float | bool | str] | None = None,
     ) -> list[str]: ...
     def list_owner_types(
@@ -696,6 +708,8 @@ class Store:
         zoneless: bool | None = None,
         resolution: Period | None = None,
         interval: Period | None = None,
+        initial_timestamp: datetime | None = None,
+        length: int | None = None,
         features: dict[str, int | float | bool | str] | None = None,
     ) -> list[str]: ...
     def has_any_time_series(
@@ -711,6 +725,8 @@ class Store:
         zoneless: bool | None = None,
         resolution: Period | None = None,
         interval: Period | None = None,
+        initial_timestamp: datetime | None = None,
+        length: int | None = None,
         features: dict[str, int | float | bool | str] | None = None,
     ) -> bool: ...
     def is_empty(self) -> bool: ...
@@ -894,6 +910,8 @@ class Store:
         zoneless: bool | None = None,
         resolution: Period | None = None,
         interval: Period | None = None,
+        initial_timestamp: datetime | None = None,
+        length: int | None = None,
         features: dict[str, int | float | bool | str] | None = None,
     ) -> str: ...
     def import_time_series_associations_openapi(self, json: str) -> int: ...

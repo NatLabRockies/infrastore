@@ -415,6 +415,32 @@ Whatever the kind, `reader.timestamps()` walks the timeline, so the loop body ab
 Coherence is validated at **build** time, where the error can name the series that disagree — there
 is no presence mask, and `static_read` errors rather than clamps on an off-grid instant.
 
+When the matched `SingleTimeSeries` share no grid, name the span instead of inheriting one.
+`build_static_reader_over` gives each column an offset of its own, so ragged series sweep together:
+
+```rust
+use infrastore_core::ReadWindow;
+
+let mut reader = store.build_static_reader_over(
+    ListFilter::new().resolution(Duration::hours(1)),
+    ReadWindow::from(anchor),   // .with_len(n) to pin the extent
+)?;
+```
+
+Without a `len` the reader runs as far from the anchor as every matched series reaches. With one, a
+series that does not cover the span is an error naming it.
+
+When the odd series out should not take part at all, filter to one grid instead —
+`ListFilter::initial_timestamp` and `ListFilter::length` match only the series already on it:
+
+```rust
+let mut reader = store.build_static_reader(
+    ListFilter::new().resolution(Duration::hours(1)).initial_timestamp(anchor).length(8784),
+)?;
+```
+
+See the [Rust API reference](../reference/rust-api.md#readers) for how the two remedies differ.
+
 ### Forecasts
 
 ```rust

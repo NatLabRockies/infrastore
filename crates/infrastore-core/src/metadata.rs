@@ -549,6 +549,14 @@ pub struct MetadataFilter {
     /// group, not an oversight.
     pub zoneless: Option<bool>,
     pub resolution: Option<Period>,
+    /// Exact match on a static series' `initial_timestamp`. With `resolution`
+    /// and `length` this names a whole grid — see
+    /// [`crate::ListFilter::initial_timestamp`], which is where the reasoning
+    /// lives. Compared as text against the column, which every writer fills
+    /// with `DateTime<Utc>::to_rfc3339`, so equal instants are equal strings.
+    pub initial_timestamp: Option<DateTime<Utc>>,
+    /// Exact match on a static series' step count; the third of the grid triple.
+    pub length: Option<usize>,
     /// Forecast window interval. When set, restricts to rows with exactly this
     /// interval (part of the identity); `None` does not filter on interval.
     pub interval: Option<Period>,
@@ -809,6 +817,19 @@ impl MetadataFilter {
         if let Some(resolution) = self.resolution {
             sql.push_str(" AND resolution = ?");
             params_vec.push(Box::new(period_to_iso(resolution)));
+        }
+        if let Some(initial_timestamp) = self.initial_timestamp {
+            // The column is TEXT, written by `to_rfc3339` from a `DateTime<Utc>`
+            // on every write path, so the same rendering here compares equal
+            // exactly when the instants do -- and a row that stores none (the
+            // two irregular types) matches nothing, as SQL equality never holds
+            // against NULL.
+            sql.push_str(" AND initial_timestamp = ?");
+            params_vec.push(Box::new(initial_timestamp.to_rfc3339()));
+        }
+        if let Some(length) = self.length {
+            sql.push_str(" AND length = ?");
+            params_vec.push(Box::new(length as i64));
         }
         if let Some(interval) = self.interval {
             sql.push_str(" AND interval = ?");

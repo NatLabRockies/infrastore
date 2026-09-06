@@ -169,9 +169,25 @@ pub struct StaticGroup {
     /// [`build_groups`], or a column would silently be resolved on another
     /// column's breakpoints: plausible numbers, wrong ones.
     vector_ids: Vec<usize>,
+    /// For a *windowed* [`Timeline::Regular`] reader, how many of a column's own
+    /// steps lie before the reader's anchor — parallel to `ids` and `hashes`, so
+    /// column `j` reads storage row `index + row_offsets[j]`.
+    ///
+    /// Empty means every column reads the reader's index unshifted, which is the
+    /// case for every reader that inherits its grid from the series it matched,
+    /// and for a windowed one whose columns all start at the anchor. That is not
+    /// merely a space saving: an empty vector selects the uniform backend read,
+    /// which fetches one index across a packed dataset in a single pass, where a
+    /// shifted group has to scatter like a persistent one.
+    ///
+    /// Kept parallel through the same sort as `vector_ids`, and for the same
+    /// reason: a column resolved at another column's offset would read plausible
+    /// numbers from the wrong rows.
+    row_offsets: Vec<usize>,
     /// Scratch for a persistent read: `vector_ids` mapped through the reader's
     /// per-vector row indices, giving one storage row per column. Sized once at
-    /// build so a read allocates nothing. Empty for the other timelines.
+    /// build so a read allocates nothing. Also the scratch a windowed group
+    /// shifts `row_offsets` into. Empty for a reader that needs neither.
     rows: Vec<usize>,
     /// Reused output buffer: `num_columns * element_count * dtype.size()` bytes.
     buf: Vec<u8>,
@@ -292,6 +308,35 @@ impl StaticGroup {
             })?;
             rows.push(row);
         }
+        read(hashes, element_type.physical_dtype(), rows, buf)?;
+        *filled = true;
+        Ok(())
+    }
+
+    /// [`Self::fill`] for a windowed [`Timeline::Regular`] group, where the
+    /// reader resolved one index on its own axis and each column sits at a
+    /// different place in its own array.
+    ///
+    /// `index` is the position on the reader's window; adding the column's
+    /// offset lands on its storage row. The addition cannot overflow the array:
+    /// [`build_groups_inner`] refused any column whose extent does not cover
+    /// `offset + length`, and `index < length`.
+    pub(crate) fn fill_at_offsets<F>(&mut self, index: usize, read: F) -> Result<()>
+    where
+        F: FnOnce(&[[u8; 32]], Dtype, &[usize], &mut Vec<u8>) -> Result<()>,
+    {
+        // Destructured for the same disjoint-borrow reason as `fill_per_vector`.
+        let Self {
+            element_type,
+            row_offsets,
+            rows,
+            hashes,
+            buf,
+            filled,
+            ..
+        } = self;
+        rows.clear();
+        rows.extend(row_offsets.iter().map(|off| index + off));
         read(hashes, element_type.physical_dtype(), rows, buf)?;
         *filled = true;
         Ok(())
@@ -522,7 +567,18 @@ impl StaticReader {
             Timeline::Regular { .. } | Timeline::Irregular { .. } => {
                 let index = index_on_timeline(timeline, at)?;
                 for group in groups.iter_mut() {
-                    group.fill(|hashes, dtype, out| uniform(hashes, dtype, index, out))?;
+                    // A group whose columns all sit at the reader's own index
+                    // takes the uniform read; one shifted by a window scatters,
+                    // exactly as a persistent group does. `row_offsets` is empty
+                    // for every non-windowed reader, so this is the same single
+                    // branch the hot path always took.
+                    if group.row_offsets.is_empty() {
+                        group.fill(|hashes, dtype, out| uniform(hashes, dtype, index, out))?;
+                    } else {
+                        group.fill_at_offsets(index, |hashes, dtype, rows, out| {
+                            scattered(hashes, dtype, rows, out)
+                        })?;
+                    }
                 }
             }
             Timeline::Persistent { vectors, .. } => {
@@ -563,6 +619,23 @@ fn index_on_timeline(timeline: &Timeline, at: DateTime<Utc>) -> Result<usize> {
             "a persistent timeline resolves a row per column, not one for the reader".into(),
         )),
     }
+}
+
+/// A `(initial, resolution, length)` grid as it reads in an error message —
+/// RFC 3339 and ISO 8601, not the `Debug` of a `TimeDelta`.
+fn describe_grid((initial, resolution, length): (DateTime<Utc>, Period, usize)) -> String {
+    format!(
+        "({}, {}, {length})",
+        initial.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        resolution.to_iso8601()
+    )
+}
+
+/// A row's `initial_timestamp` as it reads in a reader error message.
+fn describe_grid_start(initial: Option<DateTime<Utc>>) -> String {
+    initial
+        .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .unwrap_or_else(|| "?".into())
 }
 
 /// The error for a persistent read at an instant before interned vector `v`'s
@@ -676,9 +749,14 @@ pub(crate) fn regular_timeline(rows: &[TimeSeriesMetadata]) -> Result<Timeline> 
         let g = grid_of(r)?;
         if g != grid {
             return Err(TimeSeriesError::InvalidParameter(format!(
-                "StaticReader requires a uniform grid; series '{}' (owner {}) has grid {:?} \
-                 but the reader grid is {:?}",
-                r.name, r.owner_id, g, grid
+                "StaticReader requires a uniform grid; series '{}' (owner {}) has grid {} \
+                 but the reader grid is {}. Either build the reader over a window (a start, \
+                 plus a length if you want one) to sweep a span they share, or filter to one \
+                 grid with initial_timestamp + length.",
+                r.name,
+                r.owner_id,
+                describe_grid(g),
+                describe_grid(grid)
             )));
         }
     }
@@ -688,6 +766,112 @@ pub(crate) fn regular_timeline(rows: &[TimeSeriesMetadata]) -> Result<Timeline> 
         resolution,
         length,
     })
+}
+
+/// Place each row against a caller-named window: the reader's own axis, plus
+/// the offset at which every column starts reading.
+///
+/// The counterpart of [`regular_timeline`] for
+/// [`Store::build_static_reader_over`], and pure for the same reason. Where
+/// `regular_timeline` derives one grid and demands every row match it, this is
+/// given the grid and asks of each row only that the anchor lie on it —
+/// coverage is then checked by [`build_groups_windowed`], which is where a
+/// column's extent is already in hand.
+///
+/// With `len` unset the extent is the largest every column can serve: the
+/// minimum, over the columns, of what each has left after its own offset. That
+/// is the widest span on which no column has to be dropped or masked, which is
+/// the same invariant the uniform reader keeps — arrived at by shortening the
+/// axis rather than by refusing the call.
+pub(crate) fn window_timeline(
+    rows: Vec<TimeSeriesMetadata>,
+    resolution: Period,
+    anchor: DateTime<Utc>,
+    zoneless_bound: bool,
+    len: Option<usize>,
+) -> Result<(Timeline, Vec<(TimeSeriesMetadata, usize)>)> {
+    if rows.is_empty() {
+        return Err(TimeSeriesError::InvalidParameter(
+            "build_static_reader: no SingleTimeSeries match the filter".into(),
+        ));
+    }
+    let mut placed: Vec<(TimeSeriesMetadata, usize)> = Vec::with_capacity(rows.len());
+    for r in rows {
+        let what = format!("series '{}' (owner {})", r.name, r.owner_id);
+        // The anchor is a query bound like any other: it has to be spelled the
+        // way the series is, and the store will not coerce one into the other.
+        crate::types::time_reference::TimeRange::spelled(anchor, anchor, zoneless_bound)
+            .check_against(r.time_reference.as_ref(), &what)?;
+        let initial = r.initial_timestamp.ok_or_else(|| {
+            TimeSeriesError::IntegrityError(format!("{what} is a SingleTimeSeries with no start"))
+        })?;
+        // Checked, never floored -- unlike `read_by_id`, which floors a start
+        // inside a step because a value covers its step. A reader hands back a
+        // whole cohort at one instant, so an anchor floored per column would
+        // shift columns against each other by up to a step.
+        let offset = resolution.steps_between(initial, anchor).map_err(|_| {
+            TimeSeriesError::InvalidParameter(format!(
+                "the reader window starts at {}, which is not on the grid of {what} \
+                 ({}, {}, {}). An anchor must fall at or after a series' start, on one of \
+                 its own step boundaries.",
+                anchor.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                describe_grid_start(r.initial_timestamp),
+                resolution.to_iso8601(),
+                r.length.unwrap_or(0),
+            ))
+        })?;
+        placed.push((r, offset));
+    }
+    let length = match len {
+        Some(n) => n,
+        None => placed
+            .iter()
+            .map(|(r, offset)| r.length.unwrap_or(0).saturating_sub(*offset))
+            .min()
+            .unwrap_or(0),
+    };
+    if length == 0 {
+        return Err(TimeSeriesError::InvalidParameter(format!(
+            "the reader window at {} is empty: {}",
+            anchor.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            match len {
+                Some(_) => "a length of 0 reads nothing".to_string(),
+                None => "at least one matched series ends there, so there is no step every \
+                         column can serve"
+                    .to_string(),
+            }
+        )));
+    }
+    // A calendar grid is not closed under re-anchoring, and a reader window is
+    // exactly a re-anchoring: `Period::Months` clamps to month end
+    // non-associatively, so a monthly grid from Jan-31 read from its own Feb-29
+    // would report Feb-29, Mar-29, Apr-29 against the values of Feb-29, Mar-31,
+    // Apr-30. No anchor fixes it, so the window is refused -- the same rule
+    // `read_by_id` and `transform_single_time_series` are held to.
+    for (r, offset) in &placed {
+        let initial = r.initial_timestamp.expect("checked above");
+        if !resolution.sub_grid_is_anchorable(initial, *offset, length) {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "a reader window over a {} grid cannot be re-anchored at {}: series '{}' \
+                 (owner {}) starts at {}, and stepping from the window's own anchor lands on \
+                 different dates than stepping from that start. Read the series whole and \
+                 slice the materialized timestamps.",
+                resolution.to_iso8601(),
+                anchor.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                r.name,
+                r.owner_id,
+                initial.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            )));
+        }
+    }
+    Ok((
+        Timeline::Regular {
+            initial: anchor,
+            resolution,
+            length,
+        },
+        placed,
+    ))
 }
 
 /// The one spelling a reader's shared timestamp axis can carry.
@@ -753,10 +937,14 @@ pub(crate) fn build_groups(
     timeline: Timeline,
     rows: Vec<TimeSeriesMetadata>,
 ) -> Result<StaticReader> {
-    // Every column resolves on the reader's single axis, so the vector id is a
-    // constant nobody reads. `build_groups_inner` leaves `vector_ids` empty for
-    // these timelines.
-    build_groups_inner(timeline, rows.into_iter().map(|r| (r, 0)).collect())
+    // Every column resolves on the reader's single axis, so the companion is a
+    // constant nobody reads. `build_groups_inner` leaves both per-column
+    // vectors empty for this role.
+    build_groups_inner(
+        timeline,
+        rows.into_iter().map(|r| (r, 0)).collect(),
+        ColumnRole::Shared,
+    )
 }
 
 /// [`build_groups`] for a [`Timeline::Persistent`] reader, where each row
@@ -765,12 +953,43 @@ pub(crate) fn build_groups_persistent(
     timeline: Timeline,
     rows: Vec<(TimeSeriesMetadata, usize)>,
 ) -> Result<StaticReader> {
-    build_groups_inner(timeline, rows)
+    build_groups_inner(timeline, rows, ColumnRole::Vector)
+}
+
+/// [`build_groups`] for a *windowed* [`Timeline::Regular`] reader, where each
+/// row carries the offset of the reader's anchor within its own array.
+///
+/// The rows need not share a grid — that is the whole point of a window — so
+/// this checks *coverage* instead of equality: a column must have a row for
+/// every step of the reader's axis, counting from its own offset.
+/// [`Store::build_static_reader_over`] computed those offsets against each row's
+/// grid, so a column is here at all only because the anchor lies on it.
+pub(crate) fn build_groups_windowed(
+    timeline: Timeline,
+    rows: Vec<(TimeSeriesMetadata, usize)>,
+) -> Result<StaticReader> {
+    build_groups_inner(timeline, rows, ColumnRole::Offset)
+}
+
+/// What the `usize` beside each row in [`build_groups_inner`] means, and
+/// therefore how a column finds its storage row at read time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ColumnRole {
+    /// Nothing: every column reads the reader's own index. The companion is
+    /// ignored.
+    Shared,
+    /// The interned breakpoint vector this column resolves against
+    /// ([`Timeline::Persistent`]).
+    Vector,
+    /// How many of this column's own steps precede the reader's anchor; its
+    /// storage row is `index + offset` (a windowed [`Timeline::Regular`]).
+    Offset,
 }
 
 fn build_groups_inner(
     timeline: Timeline,
     mut rows: Vec<(TimeSeriesMetadata, usize)>,
+    role: ColumnRole,
 ) -> Result<StaticReader> {
     let persistent = matches!(timeline, Timeline::Persistent { .. });
     if rows.is_empty() {
@@ -784,7 +1003,7 @@ fn build_groups_inner(
             "build_static_reader: the matched series have no timestamps to read".into(),
         ));
     }
-    for (r, vector_id) in &rows {
+    for (r, companion) in &rows {
         if r.time_series_type != timeline.time_series_type() {
             return Err(TimeSeriesError::InvalidParameter(format!(
                 "StaticReader for {} cannot hold {} '{}'",
@@ -794,14 +1013,43 @@ fn build_groups_inner(
             )));
         }
         // A column has to span its whole axis, or a sweep reads out of bounds
-        // part-way through. Which axis that is differs: a uniform reader has
-        // one, and a persistent reader gives each column the length of the
-        // breakpoint vector it was interned against.
+        // part-way through. A windowed reader is the one case where that is
+        // *coverage* rather than equality -- see below -- so it is checked
+        // apart from the two that demand the whole extent.
+        if role == ColumnRole::Offset {
+            let Timeline::Regular {
+                initial,
+                resolution,
+                length,
+            } = &timeline
+            else {
+                return Err(TimeSeriesError::IntegrityError(
+                    "a reader window applies to a regular grid only".into(),
+                ));
+            };
+            let have = r.length.unwrap_or(0);
+            if have < companion + length {
+                return Err(TimeSeriesError::InvalidParameter(format!(
+                    "series '{}' (owner {}) spans ({}, {}, {have}) and does not cover the \
+                     reader window ({}, {}, {length}). Narrow the filter, or shorten the \
+                     window.",
+                    r.name,
+                    r.owner_id,
+                    describe_grid_start(r.initial_timestamp),
+                    r.resolution
+                        .map(|p| p.to_iso8601())
+                        .unwrap_or_else(|| "?".into()),
+                    initial.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    resolution.to_iso8601(),
+                )));
+            }
+            continue;
+        }
         let expected = match &timeline {
             Timeline::Persistent { vectors, .. } => {
-                vectors.get(*vector_id).map(Vec::len).ok_or_else(|| {
+                vectors.get(*companion).map(Vec::len).ok_or_else(|| {
                     TimeSeriesError::IntegrityError(format!(
-                        "series '{}' (owner {}) references breakpoint vector {vector_id}, but \
+                        "series '{}' (owner {}) references breakpoint vector {companion}, but \
                          the timeline interned only {}",
                         r.name,
                         r.owner_id,
@@ -814,7 +1062,9 @@ fn build_groups_inner(
         if r.length != Some(expected) {
             return Err(TimeSeriesError::InvalidParameter(format!(
                 "StaticReader requires a uniform timeline; series '{}' (owner {}) has length \
-                 {:?} but {} {expected}",
+                 {:?} but {} {expected}. Either build the reader over a window (a start, \
+                 plus a length if you want one) to sweep a span the series share, or filter \
+                 to one grid with initial_timestamp + length.",
                 r.name,
                 r.owner_id,
                 r.length,
@@ -835,10 +1085,11 @@ fn build_groups_inner(
     // in meaning as well as in bytes — a quadratic-cost column never shares a
     // group with a plain 3-tuple column that happens to have the same layout.
     //
-    // The row and its vector id are sorted *together*, as one item: they are
+    // The row and its companion are sorted *together*, as one item: they are
     // parallel data, and sorting the rows alone would leave every persistent
-    // column resolving on some other column's breakpoints — plausible numbers,
-    // wrong ones, and no error anywhere.
+    // column resolving on some other column's breakpoints, or every windowed
+    // column reading at another column's offset — plausible numbers, wrong
+    // ones, and no error anywhere.
     rows.sort_by(|(a, _), (b, _)| {
         a.element_type
             .cmp(&b.element_type)
@@ -847,7 +1098,7 @@ fn build_groups_inner(
     });
 
     let mut groups: Vec<StaticGroup> = Vec::new();
-    for (r, vector_id) in rows {
+    for (r, companion) in rows {
         let want = (r.element_type, r.element_shape.as_slice());
         let push_new = groups
             .last()
@@ -860,6 +1111,7 @@ fn build_groups_inner(
                 ids: Vec::new(),
                 hashes: Vec::new(),
                 vector_ids: Vec::new(),
+                row_offsets: Vec::new(),
                 rows: Vec::new(),
                 buf: Vec::new(),
                 filled: false,
@@ -870,8 +1122,20 @@ fn build_groups_inner(
             TimeSeriesError::IntegrityError("a reader column carries no catalog id".into())
         })?);
         g.hashes.push(r.data_hash);
-        if persistent {
-            g.vector_ids.push(vector_id);
+        match role {
+            ColumnRole::Shared => {}
+            ColumnRole::Vector => g.vector_ids.push(companion),
+            ColumnRole::Offset => g.row_offsets.push(companion),
+        }
+    }
+
+    // A window whose columns all start at the anchor is the ordinary uniform
+    // reader wearing different clothes: dropping the all-zero offsets puts it
+    // back on the single-index backend read, which is the whole reason the
+    // empty vector means "unshifted" rather than "not a window".
+    for g in &mut groups {
+        if g.row_offsets.iter().all(|&o| o == 0) {
+            g.row_offsets.clear();
         }
     }
 
@@ -880,7 +1144,7 @@ fn build_groups_inner(
         let bytes = g.num_columns() * g.elements_per_column() * g.dtype().size();
         g.buf = vec![0u8; bytes];
         g.buf.clear();
-        if persistent {
+        if persistent || !g.row_offsets.is_empty() {
             g.rows = Vec::with_capacity(g.num_columns());
         }
     }

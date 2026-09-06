@@ -523,6 +523,11 @@ int32_t infrastore_store_build_static_reader(const struct InfraStore *handle,
                                      const char *name, const char *name_glob,
                                      const char *resolution,
                                      const char *features_json, const char *component_field, int32_t zoneless,
+                                     bool has_initial_timestamp, int64_t initial_timestamp_ms,
+                                     bool has_length, uint64_t length,
+                                     bool has_window_start, int64_t window_start_ms,
+                                     bool window_start_zoneless,
+                                     bool has_window_length, uint64_t window_length,
                                      struct InfraStoreStaticReaderHandle **out_reader);
 
 int32_t infrastore_static_reader_grid(const struct InfraStoreStaticReaderHandle *reader,
@@ -548,6 +553,26 @@ int32_t infrastore_static_reader_group_values(const struct InfraStoreStaticReade
                                       uint64_t *out_byte_len);
 void infrastore_static_reader_free(struct InfraStoreStaticReaderHandle *reader);
 ```
+
+`has_window_start` lifts the shared-grid requirement for `SingleTimeSeries`: the reader then sweeps
+the window `window_start_ms` (plus `window_length` steps, or as far as _every_ matched series
+reaches when `has_window_length` is false) rather than the grid the series happen to share, and each
+column reads at an offset of its own. It is checked, never clamped — a matched series that does not
+cover the window is `INFRASTORE_ERR_INVALID_PARAMETER` with a message naming it, the anchor must
+fall on each series' own step boundaries, and a calendar resolution is refused where re-anchoring
+would move the dates. `window_start_zoneless` carries how the caller _spelled_ the anchor, the same
+convention as the ranged reads' bounds: the wire form is Unix milliseconds either way, and the flag
+is what tells a wall clock from an instant. The window belongs to `SingleTimeSeries` alone, and
+`has_window_length` without `has_window_start` is an error.
+
+`has_initial_timestamp` / `has_length` are something else: the **grid filter**, which every
+filter-taking export now carries (`infrastore_store_list_metadata`, `list_names`,
+`list_owner_types`, `has_any_by_filter`, `remove_by_filter`,
+`export_time_series_associations_openapi`, and both reader builders). They match only the series
+already on that grid, so the ones that are not never become columns — where a window sweeps a named
+span across whatever matched. Use the window when the ragged series should all take part, the filter
+when they should not; they compose. The filter carries no spelling flag because it selects rather
+than reads: a grid no row is on is an empty result, not an error.
 
 `time_series_type` picks the three shapes a reader can take. For `SingleTimeSeries` (`0`),
 `resolution` must be a non-empty ISO-8601 period — one resolution per reader — and all matched

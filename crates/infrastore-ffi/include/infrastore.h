@@ -1027,6 +1027,10 @@ int32_t infrastore_store_has_any_by_filter(const struct InfraStore *handle,
                                            const char *features_json,
                                            const char *component_field,
                                            int32_t zoneless,
+                                           bool has_initial_timestamp,
+                                           int64_t initial_timestamp_ms,
+                                           bool has_length,
+                                           uint64_t length,
                                            bool *out_present);
 
 /**
@@ -1801,6 +1805,10 @@ int32_t infrastore_store_list_metadata(const struct InfraStore *handle,
                                        const char *features_json,
                                        const char *component_field,
                                        int32_t zoneless,
+                                       bool has_initial_timestamp,
+                                       int64_t initial_timestamp_ms,
+                                       bool has_length,
+                                       uint64_t length,
                                        char **out_json,
                                        uint64_t *out_len);
 
@@ -1827,6 +1835,10 @@ int32_t infrastore_store_list_names(const struct InfraStore *handle,
                                     const char *features_json,
                                     const char *component_field,
                                     int32_t zoneless,
+                                    bool has_initial_timestamp,
+                                    int64_t initial_timestamp_ms,
+                                    bool has_length,
+                                    uint64_t length,
                                     char **out_json,
                                     uint64_t *out_len);
 
@@ -1853,6 +1865,10 @@ int32_t infrastore_store_list_owner_types(const struct InfraStore *handle,
                                           const char *features_json,
                                           const char *component_field,
                                           int32_t zoneless,
+                                          bool has_initial_timestamp,
+                                          int64_t initial_timestamp_ms,
+                                          bool has_length,
+                                          uint64_t length,
                                           char **out_json,
                                           uint64_t *out_len);
 
@@ -1879,6 +1895,10 @@ int32_t infrastore_store_remove_by_filter(struct InfraStore *handle,
                                           const char *features_json,
                                           const char *component_field,
                                           int32_t zoneless,
+                                          bool has_initial_timestamp,
+                                          int64_t initial_timestamp_ms,
+                                          bool has_length,
+                                          uint64_t length,
                                           uint64_t *out_removed);
 
 /**
@@ -2312,6 +2332,10 @@ int32_t infrastore_store_export_time_series_associations_openapi(const struct In
                                                                  const char *features_json,
                                                                  const char *component_field,
                                                                  int32_t zoneless,
+                                                                 bool has_initial_timestamp,
+                                                                 int64_t initial_timestamp_ms,
+                                                                 bool has_length,
+                                                                 uint64_t length,
                                                                  char **out_json,
                                                                  uint64_t *out_len);
 
@@ -2436,6 +2460,29 @@ int32_t infrastore_last_error_message(char *buf, uint64_t buf_len, uint64_t *nee
  *
  * Any other discriminant is rejected.
  *
+ * `has_window_start` lifts the shared-grid requirement for `SingleTimeSeries`:
+ * the reader then sweeps the window `window_start_ms` (+ `window_length` steps,
+ * or as far as *every* matched series reaches when `has_window_length` is
+ * false) instead of the grid the series happen to share, and each column reads
+ * at an offset of its own. It is checked, never clamped -- a matched series
+ * that does not cover the window is an error naming it, the anchor must fall on
+ * each series' own step boundaries, and a calendar resolution is refused where
+ * re-anchoring would move the dates. `window_start_zoneless` carries how the
+ * caller *spelled* the anchor, the same convention as
+ * `infrastore_store_read_by_ids_range`'s bounds: the wire form is Unix
+ * milliseconds either way, and this flag is what tells a wall clock from an
+ * instant. The window belongs to `SingleTimeSeries` alone; the two irregular
+ * types carry their timeline rather than deriving it, so passing one with them
+ * is an error. `has_window_length` without `has_window_start` is rejected too:
+ * a length alone does not say where to begin.
+ *
+ * The window is **not** the `has_initial_timestamp` / `has_length` filter pair
+ * above it. A window sweeps a named span across whatever matched, letting each
+ * column read at an offset of its own; the filter matches only the series that
+ * already begin at `initial_timestamp_ms` and run for `length` steps. Use the
+ * window when the ragged series should all take part, the filter when they
+ * should not.
+ *
  * # Safety
  *
  * `name` / `name_glob` / `resolution` / `features_json` / `component_field` -- every string
@@ -2454,6 +2501,15 @@ int32_t infrastore_store_build_static_reader(const struct InfraStore *handle,
                                              const char *features_json,
                                              const char *component_field,
                                              int32_t zoneless,
+                                             bool has_initial_timestamp,
+                                             int64_t initial_timestamp_ms,
+                                             bool has_length,
+                                             uint64_t length,
+                                             bool has_window_start,
+                                             int64_t window_start_ms,
+                                             bool window_start_zoneless,
+                                             bool has_window_length,
+                                             uint64_t window_length,
                                              struct InfraStoreStaticReaderHandle **out_reader);
 
 /**
@@ -2694,6 +2750,10 @@ int32_t infrastore_store_build_forecast_reader(const struct InfraStore *handle,
                                                const char *features_json,
                                                const char *component_field,
                                                int32_t zoneless,
+                                               bool has_initial_timestamp,
+                                               int64_t initial_timestamp_ms,
+                                               bool has_length,
+                                               uint64_t length,
                                                struct InfraStoreForecastReaderHandle **out_reader);
 
 /**

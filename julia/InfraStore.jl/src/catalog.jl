@@ -211,6 +211,7 @@ end
 function _filter_args(
     owner_id, owner_category, time_series_type, name, resolution, interval, features,
     component_field=nothing, name_glob=nothing, zoneless=nothing,
+    initial_timestamp=nothing, length=nothing,
 )
     has_owner = owner_id !== nothing
     has_category = owner_category !== nothing
@@ -231,6 +232,13 @@ function _filter_args(
         # Tri-state: negative is "no filter", which is what a caller that does
         # not care passes. The two coherence groups are 0 and 1.
         zoneless === nothing ? Int32(-1) : Int32(zoneless ? 1 : 0),
+        # The grid pair. Matched on the instant a row stores, so no spelling flag
+        # rides along: a filter selects rather than reads, and an anchor no row
+        # was written with is an empty listing, not an error.
+        initial_timestamp !== nothing,
+        initial_timestamp === nothing ? Int64(0) : _to_unix_ms(initial_timestamp),
+        length !== nothing,
+        length === nothing ? UInt64(0) : UInt64(length),
     )
 end
 
@@ -254,11 +262,13 @@ function _filter_list_json(
     component_field=nothing,
     name_glob=nothing,
     zoneless=nothing,
+    initial_timestamp=nothing,
+    length=nothing,
 )
     fptr = _cached_dlsym(fname)
-    (has_owner, owner_arg, has_category, category_arg, has_type, type_arg, name_arg, name_glob_arg, resolution_iso, interval_iso, features_json, component_field_arg, zoneless_arg) = _filter_args(
+    (has_owner, owner_arg, has_category, category_arg, has_type, type_arg, name_arg, name_glob_arg, resolution_iso, interval_iso, features_json, component_field_arg, zoneless_arg, has_initial, initial_arg, has_length, length_arg) = _filter_args(
         owner_id, owner_category, time_series_type, name, resolution, interval, features,
-        component_field, name_glob, zoneless,
+        component_field, name_glob, zoneless, initial_timestamp, length,
     )
     return _owned_str(
         (out_json, out_len) -> @ccall $fptr(
@@ -276,6 +286,10 @@ function _filter_list_json(
             features_json::Cstring,
             component_field_arg::Cstring,
             zoneless_arg::Int32,
+            has_initial::Bool,
+            initial_arg::Int64,
+            has_length::Bool,
+            length_arg::UInt64,
             out_json::Ref{Ptr{Cchar}},
             out_len::Ref{UInt64},
         )::Int32
@@ -393,10 +407,12 @@ function remove_by_filter!(
     component_field::Union{Nothing, AbstractString}=nothing,
     name_glob::Union{Nothing, AbstractString}=nothing,
     zoneless::Union{Nothing, Bool}=nothing,
+    initial_timestamp=nothing,
+    length::Union{Nothing, Integer}=nothing,
 )
-    (has_owner, owner_arg, has_category, category_arg, has_type, type_arg, name_arg, name_glob_arg, resolution_iso, interval_iso, features_json, component_field_arg, zoneless_arg) = _filter_args(
+    (has_owner, owner_arg, has_category, category_arg, has_type, type_arg, name_arg, name_glob_arg, resolution_iso, interval_iso, features_json, component_field_arg, zoneless_arg, has_initial, initial_arg, has_length, length_arg) = _filter_args(
         owner_id, owner_category, time_series_type, name, resolution, interval, features,
-        component_field, name_glob, zoneless,
+        component_field, name_glob, zoneless, initial_timestamp, length,
     )
     out_removed = Ref{UInt64}(0)
     code = @ccall lib_path().infrastore_store_remove_by_filter(
@@ -414,6 +430,10 @@ function remove_by_filter!(
         features_json::Cstring,
         component_field_arg::Cstring,
         zoneless_arg::Int32,
+        has_initial::Bool,
+        initial_arg::Int64,
+        has_length::Bool,
+        length_arg::UInt64,
         out_removed::Ref{UInt64},
     )::Int32
     _check(code)
@@ -501,10 +521,12 @@ function has_any_time_series(
     component_field=nothing,
     name_glob=nothing,
     zoneless=nothing,
+    initial_timestamp=nothing,
+    length=nothing,
 )
-    (has_owner, owner_arg, has_category, category_arg, has_type, type_arg, name_arg, name_glob_arg, resolution_iso, interval_iso, features_json, component_field_arg, zoneless_arg) = _filter_args(
+    (has_owner, owner_arg, has_category, category_arg, has_type, type_arg, name_arg, name_glob_arg, resolution_iso, interval_iso, features_json, component_field_arg, zoneless_arg, has_initial, initial_arg, has_length, length_arg) = _filter_args(
         owner_id, owner_category, time_series_type, name, resolution, interval, features,
-        component_field, name_glob, zoneless,
+        component_field, name_glob, zoneless, initial_timestamp, length,
     )
     out = Ref{Bool}(false)
     code = @ccall lib_path().infrastore_store_has_any_by_filter(
@@ -522,6 +544,10 @@ function has_any_time_series(
         features_json::Cstring,
         component_field_arg::Cstring,
         zoneless_arg::Int32,
+        has_initial::Bool,
+        initial_arg::Int64,
+        has_length::Bool,
+        length_arg::UInt64,
         out::Ref{Bool},
     )::Int32
     _check(code)

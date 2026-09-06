@@ -850,9 +850,11 @@ are partitioned into `(dtype, element_shape)` groups, and each group's values co
 
 ```julia
 build_static_reader(store; resolution::Union{Nothing,Period}=nothing,
+                    window_start=nothing, window_length=nothing,
                     time_series_type::Type=SingleTimeSeries, owner_id=nothing,
                     owner_category=nothing, name=nothing, name_glob=nothing,
-                    features=Dict(), component_field=nothing) -> StaticReader
+                    features=Dict(), component_field=nothing,
+                    initial_timestamp=nothing, length=nothing) -> StaticReader
 
 static_grid(reader)       -> StaticGrid  # .initial_timestamp, .resolution (or nothing), .length
 static_timestamps(reader) -> Vector{DateTime}  # every instant on the timeline, in order
@@ -867,7 +869,9 @@ static_values(reader, group_index::Integer) -> Array
 All matched series must share one timeline — one grid (`initial_timestamp` + `length`) for
 `SingleTimeSeries`, one timestamp vector for `NonSequentialTimeSeries`. The build validates this and
 errors on divergence, so there is no presence mask — every column has a value at every valid
-timestamp.
+timestamp. When they do not share one there are two remedies below, answering different questions: a
+window sweeps a span across the ragged series, a grid filter drops the ones that are not on the grid
+you want.
 
 `PersistentTimeSeries` is the exception: its columns may sit on **different** breakpoint vectors,
 because a step function has a value at every instant from its first breakpoint on. The reader's
@@ -893,6 +897,46 @@ for t in static_timestamps(reader)
     end
 end
 ```
+
+#### Reader windows
+
+Passing `window_start` (a `DateTime`, or a `ZonedDateTime` with TimeZones loaded) drops the
+shared-grid requirement. The reader's axis becomes the span you named, and each column reads at an
+**offset of its own**, so `SingleTimeSeries` that begin at different instants, or run for different
+lengths, sweep together as long as they all cover the span. `window_length` pins the extent in
+timesteps; without one the reader runs as far from the anchor as _every_ matched series reaches.
+
+```julia
+reader = build_static_reader(store; resolution = Hour(1),
+                             window_start = DateTime(2024, 1, 1, 7))
+static_grid(reader).length    # as far as every matched series reaches from 07:00
+```
+
+The span is checked, never clamped: a matched series that does not cover it is an
+`InvalidParameterError` **naming that series** rather than a column quietly left out; the anchor
+must fall at or after each series' start and on one of its own step boundaries; and a monthly
+resolution is refused where re-anchoring would move the dates, by the same rule that governs a
+sliced read. The anchor's spelling must match the series' (a `DateTime` is a wall clock, a
+`ZonedDateTime` an instant), and the window belongs to `SingleTimeSeries` alone — the two irregular
+types carry their timeline rather than deriving it. `window_length` without `window_start` is
+refused.
+
+#### Selecting one grid
+
+`initial_timestamp` and `length` are the window's counterpart: **filter** keywords that match only
+the series already on that grid, so the ones that are not on it never become columns.
+
+```julia
+build_static_reader(store; resolution = Hour(1), window_start = t7)        # 3 columns, 17 steps
+build_static_reader(store; resolution = Hour(1), initial_timestamp = t7)   # 2 columns, 8784 steps
+```
+
+Use the window when the ragged series should all take part in the sweep, the filter when they should
+not; they compose. With `resolution` the two complete the grid triple, which is what lets a filter
+name a whole grid rather than only be refused a divergent one. They are ordinary filter keywords, so
+they reach [`list_metadata`](#list_metadata), [`remove_by_filter!`](#remove_by_filter), and the rest
+— and like every filter they select rather than assert: a grid no row is on is an empty result, not
+an error.
 
 ### ForecastReader
 

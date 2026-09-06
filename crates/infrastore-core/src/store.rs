@@ -70,6 +70,31 @@ pub struct ListFilter {
     /// [`Self::component_field`] for the same trap).
     pub zoneless: Option<bool>,
     pub resolution: Option<Period>,
+    /// Exact match on a static series' own `initial_timestamp`.
+    ///
+    /// With [`Self::resolution`] and [`Self::length`] this completes the grid
+    /// triple, which is what makes it possible to *select* a coherent cohort
+    /// rather than only to be refused a divergent one. Two `SingleTimeSeries`
+    /// on different owners may share a name and a resolution and still start at
+    /// different instants — perfectly legal, since the catalog files them under
+    /// distinct owners — and a [`StaticReader`] over both cannot be built. This
+    /// is the constructive remedy, in the same role
+    /// [`Self::zoneless`](Self::zoneless) plays for the spelling rule.
+    ///
+    /// Distinct from [`Store::build_static_reader_over`]'s window, which the
+    /// two answer different questions: a window sweeps a named span across
+    /// whatever matched, letting each column read at an offset of its own; this
+    /// matches only the series that already begin here. Use the window when the
+    /// ragged series should all take part, the filter when they should not.
+    ///
+    /// Matched on the instant, so the spelling a row was written in does not
+    /// affect it. Rows with no `initial_timestamp` — the two irregular types —
+    /// match no value at all, the same SQL-equality trap
+    /// [`Self::component_field`] documents.
+    pub initial_timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    /// Exact match on a static series' step count. The third of the grid triple;
+    /// see [`Self::initial_timestamp`].
+    pub length: Option<usize>,
     pub interval: Option<Period>,
     pub features: Option<Features>,
     /// Whether `features` names the series' *whole* feature set rather than a
@@ -118,6 +143,18 @@ impl ListFilter {
     }
     /// Keep only the zoneless series (`true`) or only those that accept a zoned
     /// bound (`false`). See [`Self::zoneless`].
+    /// Keep only the series whose grid starts at `initial_timestamp`. See
+    /// [`Self::initial_timestamp`].
+    pub fn initial_timestamp(mut self, initial_timestamp: chrono::DateTime<chrono::Utc>) -> Self {
+        self.initial_timestamp = Some(initial_timestamp);
+        self
+    }
+    /// Keep only the series of exactly `length` timesteps. See
+    /// [`Self::initial_timestamp`].
+    pub fn length(mut self, length: usize) -> Self {
+        self.length = Some(length);
+        self
+    }
     pub fn zoneless(mut self, zoneless: bool) -> Self {
         self.zoneless = Some(zoneless);
         self
@@ -156,6 +193,8 @@ impl From<ListFilter> for MetadataFilter {
             component_field: value.component_field,
             zoneless: value.zoneless,
             resolution: value.resolution,
+            initial_timestamp: value.initial_timestamp,
+            length: value.length,
             interval: value.interval,
             features_hash: if value.features_exact {
                 Some(crate::hash::features_hash(
@@ -3173,23 +3212,105 @@ impl Store {
     /// Divergence is an error either way, which is what lets the per-read path
     /// skip presence checks. Drive the reader with [`Self::static_read`]. See
     /// [`crate::reader`].
-    pub fn build_static_reader(&self, mut filter: ListFilter) -> Result<StaticReader> {
+    ///
+    /// A store whose `SingleTimeSeries` do *not* share one grid is not out of
+    /// reach: name the span you want with [`Self::build_static_reader_over`].
+    pub fn build_static_reader(&self, filter: ListFilter) -> Result<StaticReader> {
+        self.build_static_reader_over(filter, ReadWindow::full())
+    }
+
+    /// [`Self::build_static_reader`] over a caller-named span of the timeline
+    /// rather than the one the matched series happen to share.
+    ///
+    /// `window.start` is the reader's anchor and `window.len` its extent; with
+    /// `len` unset the reader runs as far from the anchor as *every* matched
+    /// series reaches. Each column then reads at an offset of its own — how many
+    /// of its own steps precede the anchor — so series that begin at different
+    /// instants, or run for different lengths, sweep together as long as they
+    /// all cover the window. That is the point: a grid mismatch is a property of
+    /// the whole series, and a simulation usually wants a span they agree on,
+    /// not the whole of each.
+    ///
+    /// Held to the same rules as everything else that resolves a bound:
+    ///
+    /// * A series that does not cover the window is an **error naming it**, not
+    ///   a column quietly dropped. A missing column is invisible at read time,
+    ///   and the numbers that come back are a complete, plausible, wrong answer.
+    /// * The anchor must lie *on* each series' own grid — at or after its start,
+    ///   and on a step boundary. It is checked, never floored.
+    /// * A calendar resolution (`Period::Months`) is refused where re-anchoring
+    ///   would move the dates, by the same
+    ///   [`Period::sub_grid_is_anchorable`] rule that governs a sliced read: a
+    ///   monthly grid from Jan-31 re-anchored at its own Feb-29 reads Feb-29,
+    ///   Mar-29, Apr-29 — the right values under the wrong dates.
+    /// * `window.start`'s spelling must match the series', as for every other
+    ///   query bound.
+    ///
+    /// `window.count` counts forecast windows and means nothing here;
+    /// `window.len` without a `start` is refused, because a window with no
+    /// anchor is exactly the ambiguity this call exists to remove. A window with
+    /// no `start` at all is [`Self::build_static_reader`] — the grid comes from
+    /// the series — and the two irregular types take no window: their timeline
+    /// is the vector they carry, so there is nothing to re-anchor.
+    pub fn build_static_reader_over(
+        &self,
+        mut filter: ListFilter,
+        window: ReadWindow,
+    ) -> Result<StaticReader> {
         let ts_type = filter
             .time_series_type
             .unwrap_or(TimeSeriesType::SingleTimeSeries);
         filter.time_series_type = Some(ts_type);
+        if window.count.is_some() {
+            return Err(TimeSeriesError::InvalidParameter(
+                "build_static_reader_over: `count` counts forecast windows; a static reader's \
+                 extent is `len`, a number of timesteps"
+                    .into(),
+            ));
+        }
+        if window.start.is_none() && window.len.is_some() {
+            return Err(TimeSeriesError::InvalidParameter(
+                "build_static_reader_over: a reader window needs a start. A length alone does \
+                 not say where to begin, and on series that disagree about their grid there is \
+                 no start to infer"
+                    .into(),
+            ));
+        }
+        let windowed = window.start.is_some();
+        if windowed && ts_type != TimeSeriesType::SingleTimeSeries {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "build_static_reader_over takes no window for {}: its timeline is the \
+                 timestamp vector the series carry, not a grid to re-anchor. Build the reader \
+                 and start the sweep where you mean to.",
+                ts_type.as_str()
+            )));
+        }
         match ts_type {
             TimeSeriesType::SingleTimeSeries => {
-                if filter.resolution.is_none() {
+                let Some(resolution) = filter.resolution else {
                     return Err(TimeSeriesError::InvalidParameter(
                         "build_static_reader requires a resolution filter for SingleTimeSeries \
                          (one resolution per reader)"
                             .into(),
                     ));
-                }
+                };
                 let rows = self.list_with_timestamps(filter)?;
-                let timeline = crate::reader::regular_timeline(&rows)?;
-                crate::reader::build_groups(timeline, rows)
+                match window.start {
+                    None => {
+                        let timeline = crate::reader::regular_timeline(&rows)?;
+                        crate::reader::build_groups(timeline, rows)
+                    }
+                    Some(anchor) => {
+                        let (timeline, placed) = crate::reader::window_timeline(
+                            rows,
+                            resolution,
+                            anchor,
+                            window.zoneless,
+                            window.len,
+                        )?;
+                        crate::reader::build_groups_windowed(timeline, placed)
+                    }
+                }
             }
             TimeSeriesType::NonSequentialTimeSeries => {
                 if filter.resolution.is_some() {
@@ -6794,6 +6915,11 @@ fn identity_filter(key: &KeyIdentity) -> MetadataFilter {
         name_glob: None,
         component_field: None,
         zoneless: None,
+        // A `KeyIdentity` carries no grid: two series differing only in start or
+        // length are the *same* row to the catalog, which is why an identity
+        // probe must not narrow by either.
+        initial_timestamp: None,
+        length: None,
         ids: None,
     }
 }

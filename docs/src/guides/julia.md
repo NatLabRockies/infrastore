@@ -400,6 +400,33 @@ Series are grouped by `(dtype, element_shape)`; each group's `static_values` is 
 whose columns line up with the group's `ids`. All matched series must share one grid
 (`initial_timestamp` + `length`), validated at build.
 
+Most real systems do not meet that — a year of load beside a week of an outage schedule — and the
+build then errors, naming the series that diverges. Give the reader a span instead of letting it
+inherit one:
+
+```julia
+reader = build_static_reader(store; resolution = Hour(1),
+                             window_start = DateTime(2024, 1, 1, 7),
+                             window_length = 8760)  # optional: without it, as far as all reach
+```
+
+Each column then reads at an offset of its own, so ragged series sweep together. The span is checked
+rather than clamped: a series that does not cover it errors, naming that series, and the anchor must
+land on each series' own step boundaries. See
+[reader windows](../reference/julia-api.md#reader-windows).
+
+When the odd series out should not take part at all — a stray day of data beside a year of it is a
+different component, not a shorter view of the same sweep — filter to one grid instead:
+
+```julia
+reader = build_static_reader(store; resolution = Hour(1),
+                             initial_timestamp = DateTime(2024, 1, 1, 7), length = 8784)
+```
+
+The window sweeps a span across whatever matched; the filter matches only the series already on that
+grid, and reaches `list_metadata` and `remove_by_filter!` the same way. See
+[selecting one grid](../reference/julia-api.md#selecting-one-grid).
+
 ### Forecasts
 
 ```julia

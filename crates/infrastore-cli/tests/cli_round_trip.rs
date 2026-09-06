@@ -1029,3 +1029,133 @@ fn a_descriptor_can_declare_its_time_reference() {
         "a real zone is not flagged: {info}"
     );
 }
+
+/// `grid --window-start`: the read-side rescue for a store whose series share no
+/// grid.
+///
+/// The two flags that bound a `grid` do different jobs and compose:
+/// `--window-start` decides which rows the reader has at all, `--time-range`
+/// filters the rows it already has. Only the first can build a reader over
+/// series that start at different instants.
+#[test]
+fn grid_sweeps_a_named_window_over_series_that_share_no_grid() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("ragged.h5");
+    write_csv(dir.path(), "early.csv", "0.0\n1.0\n2.0\n3.0\n");
+    write_csv(dir.path(), "late.csv", "2.0\n3.0\n4.0\n5.0\n");
+    for (owner, csv, start) in [
+        (1, "early.csv", "2024-01-01T00:00:00Z"),
+        (2, "late.csv", "2024-01-01T02:00:00Z"),
+    ] {
+        let descriptor = write(
+            dir.path(),
+            &format!("s{owner}.json"),
+            &format!(
+                r#"{{
+  "owner_id": {owner},
+  "owner_type": "Generator",
+  "name": "load",
+  "type": "single",
+  "element_type": "f64",
+  "csv": "{csv}",
+  "initial_timestamp": "{start}",
+  "resolution": "PT1H"
+}}"#
+            ),
+        );
+        run(
+            &store,
+            &["add", "--descriptor", descriptor.to_str().unwrap()],
+        );
+    }
+
+    // No shared grid, so the plain reader will not build -- and says what to do.
+    let err = run_err(&store, &["grid", "--resolution", "PT1H"]);
+    assert!(err.contains("requires a uniform grid"), "{err}");
+    assert!(err.contains("build the reader over a window"), "{err}");
+
+    // Anchored where they overlap, both columns read at offsets of their own.
+    let out = run(
+        &store,
+        &[
+            "grid",
+            "--resolution",
+            "PT1H",
+            "--window-start",
+            "2024-01-01T02:00:00Z",
+            "-f",
+            "csv",
+        ],
+    );
+    let rows = data_lines(&out);
+    assert_eq!(rows.len(), 2, "{out}");
+    assert_eq!(rows[0], "2024-01-01T02:00:00+00:00,2,2");
+    assert_eq!(rows[1], "2024-01-01T03:00:00+00:00,3,3");
+
+    // A length one of them cannot serve is an error naming it.
+    let err = run_err(
+        &store,
+        &[
+            "grid",
+            "--resolution",
+            "PT1H",
+            "--window-start",
+            "2024-01-01T02:00:00Z",
+            "--window-length",
+            "4",
+        ],
+    );
+    assert!(err.contains("does not cover the reader window"), "{err}");
+    assert!(err.contains("owner 1"), "{err}");
+
+    // The two bounds compose: the window builds the reader, the range filters it.
+    let out = run(
+        &store,
+        &[
+            "grid",
+            "--resolution",
+            "PT1H",
+            "--window-start",
+            "2024-01-01T02:00:00Z",
+            "--time-range",
+            "2024-01-01T03:00:00Z..2024-01-01T04:00:00Z",
+            "-f",
+            "csv",
+        ],
+    );
+    assert_eq!(data_lines(&out), vec!["2024-01-01T03:00:00+00:00,3,3"]);
+
+    // The other remedy: select one grid, and the series on the other is not
+    // there to constrain the sweep. One column, its own full four rows.
+    let out = run(
+        &store,
+        &[
+            "grid",
+            "--resolution",
+            "PT1H",
+            "--initial-timestamp",
+            "2024-01-01T02:00:00Z",
+            "--length",
+            "4",
+            "-f",
+            "csv",
+        ],
+    );
+    assert_eq!(data_lines(&out).len(), 4, "{out}");
+    assert_eq!(data_lines(&out)[3], "2024-01-01T05:00:00+00:00,5");
+
+    // And it narrows a listing the same way, which is how the grid is found.
+    let listed = run(&store, &["list", "--length", "4", "-f", "json"]);
+    assert_eq!(listed.matches("\"owner_id\"").count(), 2, "{listed}");
+    let listed = run(
+        &store,
+        &[
+            "list",
+            "--initial-timestamp",
+            "2024-01-01T02:00:00Z",
+            "-f",
+            "json",
+        ],
+    );
+    assert_eq!(listed.matches("\"owner_id\"").count(), 1, "{listed}");
+}

@@ -233,6 +233,12 @@ impl Store {
 
     // Per-timestamp readers (see "Readers" below).
     pub fn build_static_reader(&self, filter: ListFilter) -> Result<StaticReader>;
+    // The same, over a caller-named span rather than the grid the series share.
+    pub fn build_static_reader_over(
+        &self,
+        filter: ListFilter,
+        window: ReadWindow,
+    ) -> Result<StaticReader>;
     pub fn static_read(&self, reader: &mut StaticReader, at: DateTime<Utc>) -> Result<()>;
     pub fn build_forecast_reader(&self, filter: ListFilter) -> Result<ForecastReader>;
     pub fn forecast_read(&self, reader: &mut ForecastReader, at: DateTime<Utc>) -> Result<()>;
@@ -610,6 +616,46 @@ for t in reader.timestamps().collect::<Vec<_>>() {
     store.static_read(&mut reader, t)?;
 }
 ```
+
+When the matched `SingleTimeSeries` do _not_ share a grid — the usual shape of a real system —
+`build_static_reader_over` takes the span instead of deriving it. Each column then reads at an
+offset of its own, so series that begin at different instants, or run for different lengths, sweep
+together as long as they all cover the span:
+
+```rust
+let mut reader = store.build_static_reader_over(
+    ListFilter::new().resolution(Duration::hours(1)),
+    ReadWindow::from(anchor).with_len(8760),   // len optional: without it, as far as all reach
+)?;
+```
+
+The window is checked, never clamped, in the three ways that would otherwise return a full,
+plausible, wrong row: a matched series that does not cover it is an error **naming that series**
+rather than a column silently dropped; the anchor must fall at or after each series' start and on
+one of its own step boundaries (unlike `read_by_id`, which floors a start inside a step, because
+there a value covers its step); and a calendar resolution is refused where re-anchoring would move
+the dates, by `Period::sub_grid_is_anchorable` — the same rule that governs a sliced read. The
+window belongs to `SingleTimeSeries` alone, and `ReadWindow::count` (which counts forecast windows)
+and a `len` with no `start` are both errors.
+
+The window's counterpart is a filter: `ListFilter::initial_timestamp` and `ListFilter::length` match
+only the series already on one grid, so the ones that are not on it never become columns.
+
+```rust
+// three series named "active_power": one stray day, two full leap years
+store.build_static_reader(ListFilter::new().resolution(hour))?;                  // Err: no shared grid
+store.build_static_reader_over(filter, ReadWindow::from(t7))?;                    // 3 columns, 17 steps
+store.build_static_reader(ListFilter::new().resolution(hour).initial_timestamp(t7))?; // 2 columns, 8784
+```
+
+Use the window when the ragged series should all take part in the sweep, the filter when they should
+not; the two compose. With `resolution` they complete the grid triple, which is what lets a filter
+_name_ a grid rather than only be refused a divergent one — the role `ListFilter::zoneless` plays
+for time-reference coherence. Being ordinary filter fields they reach every filter-taking call, and
+like every filter they select rather than assert: a grid no row is on is an empty result, not an
+error, and a row that stores no `initial_timestamp` (the two irregular types) matches no value at
+all. They are not part of `KeyIdentity`, so an identity probe never narrows by them: two series
+differing only in start or length are the same row to the catalog.
 
 Uniformity — where it is required — is validated at build, so there is no presence mask in any of
 the three cases. `build_forecast_reader` requires a forecast type and a resolution; a

@@ -200,6 +200,37 @@ the two reach different formats:
 So `-f csv get --limit 3` still writes every row; thin a pipe with `--stride`, or slice it with
 `--time-range`. The table's own default cap is 50 rows, lifted by `--full`.
 
+#### `grid` over series that share no grid
+
+Every column in a `grid` sits on one timeline, and for `SingleTimeSeries` that means one
+`initial_timestamp` and one `length` — which most real stores do not have. `--window-start` names
+the span instead of deriving it, and each column then reads at an offset of its own:
+
+```sh
+infrastore --store demo.h5 grid --resolution PT1H
+# Error: invalid parameter: StaticReader requires a uniform grid; series 'load' (owner 2) has
+# grid (2024-01-01T02:00:00Z, PT1H, 4) but the reader grid is (2024-01-01T00:00:00Z, PT1H, 4).
+# Build the reader over a window ...
+
+infrastore --store demo.h5 grid --resolution PT1H --window-start 2024-01-01T02:00:00Z
+```
+
+`--window-length N` pins the extent; without it the sweep runs as far from the anchor as _every_
+matched series reaches. The span is checked, not clamped — a matched series that does not cover it
+is an error naming that series, rather than a column silently missing from the table — and the
+anchor must land on each series' own step boundaries. It is `SingleTimeSeries`-only: the two
+irregular types carry their timeline rather than deriving it.
+
+`--window-start` and `--time-range` do different jobs and compose. The first decides which rows the
+reader has at all; the second filters the rows it already has, and is the one that reaches every
+output format the same way.
+
+There is a third way to bound a `grid`, and it is a _selector_ rather than a display bound:
+`--initial-timestamp` / `--length` keep only the series already on one grid, so the ones that are
+not never become columns at all. Reach for the window when the ragged series should all take part in
+the sweep, and the selector when they should not — a stray day of data beside a year of it is
+usually a different component, not a shorter view of the same sweep.
+
 ### Write data
 
 | Command         | Purpose                                                                         |
@@ -387,7 +418,7 @@ infrastore --store <PATH> add --csv <FILE.csv> --owner-id <I> --owner-type <T> -
 infrastore --store <PATH> merge --from <PATH.h5> [SELECTOR...] [--replace] [--dry-run]
 infrastore --store <PATH> list    [SELECTOR...] [--limit N] [--wide]
 infrastore --store <PATH> get     [SELECTOR...] [--time-range START..END] [--limit N | --full] [--tail] [--stride N] [--plot [--plot-width COLS]] [--window N | --issue-time <TS>]
-infrastore --store <PATH> grid    [SELECTOR...] [--time-range START..END] [--limit N | --full] [--label <auto|owner|full>]
+infrastore --store <PATH> grid    [SELECTOR...] [--window-start <TS> [--window-length N]] [--time-range START..END] [--limit N | --full] [--label <auto|owner|full>]
 infrastore --store <PATH> plot    [SELECTOR...] [--out <FILE.svg|FILE.html|->] [--kind <line|duration|heatmap|fan|overlay>] [--time-range START..END] [--title <T>] [--width W] [--height H] [--window N] [--limit N]
 infrastore --store <PATH> info    [SELECTOR...] [--no-stats]
 infrastore --store <PATH> export  [SELECTOR...] [--dir <DIR>] [--time-range START..END]
@@ -491,18 +522,35 @@ catalog.
 flags as filters. Every flag is optional. Only `--feature` may be repeated; the rest take a single
 value:
 
-| Flag                    | Meaning                                                                    |
-| ----------------------- | -------------------------------------------------------------------------- |
-| `--id <N>`              | Catalog association ID. A point lookup — see below.                        |
-| `--owner-id <I>`        | Owner identifier (`i64` integer).                                          |
-| `--owner-category <C>`  | Restrict to `Component` or `SupplementalAttribute`; omit to match either.  |
-| `--name <N>`            | Series name (exact match).                                                 |
-| `--name-glob <P>`       | Name pattern (SQLite `GLOB`: case-sensitive `*`/`?`). ANDed with `--name`. |
-| `--component-field <F>` | Owning component's field, exact and case-sensitive.                        |
-| `--type <T>`            | See the type spellings below.                                              |
-| `--resolution <DUR>`    | Resolution as an ISO-8601 duration, e.g. `PT1H`, `PT15M`, `P1M`.           |
-| `--feature key=value`   | Feature filter; repeatable. Values are inferred as int/float/bool/string.  |
-| `--spelling <S>`        | `zoned` or `zoneless`: which timestamp spelling to keep.                   |
+| Flag                       | Meaning                                                                    |
+| -------------------------- | -------------------------------------------------------------------------- |
+| `--id <N>`                 | Catalog association ID. A point lookup — see below.                        |
+| `--owner-id <I>`           | Owner identifier (`i64` integer).                                          |
+| `--owner-category <C>`     | Restrict to `Component` or `SupplementalAttribute`; omit to match either.  |
+| `--name <N>`               | Series name (exact match).                                                 |
+| `--name-glob <P>`          | Name pattern (SQLite `GLOB`: case-sensitive `*`/`?`). ANDed with `--name`. |
+| `--component-field <F>`    | Owning component's field, exact and case-sensitive.                        |
+| `--type <T>`               | See the type spellings below.                                              |
+| `--resolution <DUR>`       | Resolution as an ISO-8601 duration, e.g. `PT1H`, `PT15M`, `P1M`.           |
+| `--initial-timestamp <TS>` | Keep only the series whose own grid starts here (RFC3339 or epoch-ms).     |
+| `--length <N>`             | Keep only the series of exactly this many timesteps.                       |
+| `--feature key=value`      | Feature filter; repeatable. Values are inferred as int/float/bool/string.  |
+| `--spelling <S>`           | `zoned` or `zoneless`: which timestamp spelling to keep.                   |
+
+`--initial-timestamp` and `--length` join `--resolution` to name a whole **grid**, which is how a
+store holding several is narrowed to the one you mean. That matters most for `grid`, whose columns
+must share a timeline: a stray day of data beside a year of it, under the same name, leaves no
+readable selection until one grid is picked. It is the counterpart to `grid --window-start`, and the
+two answer different questions — the filter drops the series that are not on the grid, the window
+sweeps a span across them all. Like every filter they select rather than assert, so a grid no row is
+on is an empty result rather than an error, and a series that stores no start (the two irregular
+types) matches no value at all.
+
+```sh
+infrastore --store system.h5 list --initial-timestamp 2024-01-01T07:00:00Z --length 8784
+infrastore --store system.h5 grid --resolution PT1H --initial-timestamp 2024-01-01T07:00:00Z
+infrastore --store system.h5 --yes remove --initial-timestamp 2024-01-01T00:00:00Z --length 24
+```
 
 `--id` is different in kind from the flags under it. The others narrow a set; `--id` names exactly
 one row, by the catalog id that `add`, `list`, and `info` report. So it cannot be combined with them

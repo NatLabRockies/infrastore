@@ -2757,6 +2757,10 @@ pub unsafe extern "C" fn infrastore_store_has_any_by_filter(
     features_json: *const c_char,
     component_field: *const c_char,
     zoneless: i32,
+    has_initial_timestamp: bool,
+    initial_timestamp_ms: i64,
+    has_length: bool,
+    length: u64,
     out_present: *mut bool,
 ) -> i32 {
     clear_error();
@@ -2779,6 +2783,10 @@ pub unsafe extern "C" fn infrastore_store_has_any_by_filter(
             features_json,
             component_field,
             zoneless,
+            has_initial_timestamp,
+            initial_timestamp_ms,
+            has_length,
+            length,
         )
     } {
         Ok(f) => f,
@@ -5317,6 +5325,10 @@ pub unsafe extern "C" fn infrastore_store_list_metadata(
     features_json: *const c_char,
     component_field: *const c_char,
     zoneless: i32,
+    has_initial_timestamp: bool,
+    initial_timestamp_ms: i64,
+    has_length: bool,
+    length: u64,
     out_json: *mut *mut c_char,
     out_len: *mut u64,
 ) -> i32 {
@@ -5341,6 +5353,10 @@ pub unsafe extern "C" fn infrastore_store_list_metadata(
             features_json,
             component_field,
             zoneless,
+            has_initial_timestamp,
+            initial_timestamp_ms,
+            has_length,
+            length,
         )
     } {
         Ok(f) => f,
@@ -5378,6 +5394,10 @@ pub unsafe extern "C" fn infrastore_store_list_names(
     features_json: *const c_char,
     component_field: *const c_char,
     zoneless: i32,
+    has_initial_timestamp: bool,
+    initial_timestamp_ms: i64,
+    has_length: bool,
+    length: u64,
     out_json: *mut *mut c_char,
     out_len: *mut u64,
 ) -> i32 {
@@ -5402,6 +5422,10 @@ pub unsafe extern "C" fn infrastore_store_list_names(
             features_json,
             component_field,
             zoneless,
+            has_initial_timestamp,
+            initial_timestamp_ms,
+            has_length,
+            length,
         )
     } {
         Ok(f) => f,
@@ -5439,6 +5463,10 @@ pub unsafe extern "C" fn infrastore_store_list_owner_types(
     features_json: *const c_char,
     component_field: *const c_char,
     zoneless: i32,
+    has_initial_timestamp: bool,
+    initial_timestamp_ms: i64,
+    has_length: bool,
+    length: u64,
     out_json: *mut *mut c_char,
     out_len: *mut u64,
 ) -> i32 {
@@ -5463,6 +5491,10 @@ pub unsafe extern "C" fn infrastore_store_list_owner_types(
             features_json,
             component_field,
             zoneless,
+            has_initial_timestamp,
+            initial_timestamp_ms,
+            has_length,
+            length,
         )
     } {
         Ok(f) => f,
@@ -5500,6 +5532,10 @@ pub unsafe extern "C" fn infrastore_store_remove_by_filter(
     features_json: *const c_char,
     component_field: *const c_char,
     zoneless: i32,
+    has_initial_timestamp: bool,
+    initial_timestamp_ms: i64,
+    has_length: bool,
+    length: u64,
     out_removed: *mut u64,
 ) -> i32 {
     clear_error();
@@ -5523,6 +5559,10 @@ pub unsafe extern "C" fn infrastore_store_remove_by_filter(
             features_json,
             component_field,
             zoneless,
+            has_initial_timestamp,
+            initial_timestamp_ms,
+            has_length,
+            length,
         )
     } {
         Ok(f) => f,
@@ -5562,6 +5602,10 @@ unsafe fn build_list_filter(
     features_json: *const c_char,
     component_field: *const c_char,
     zoneless: i32,
+    has_initial_timestamp: bool,
+    initial_timestamp_ms: i64,
+    has_length: bool,
+    length: u64,
 ) -> std::result::Result<core_lib::ListFilter, i32> {
     let mut filter = core_lib::ListFilter::new();
     if has_owner {
@@ -5628,6 +5672,13 @@ unsafe fn build_list_filter(
     if !features.is_empty() {
         filter = filter.features(features);
     }
+    filter = apply_grid_filter(
+        filter,
+        has_initial_timestamp,
+        initial_timestamp_ms,
+        has_length,
+        length,
+    )?;
     Ok(filter)
 }
 
@@ -6678,6 +6729,10 @@ pub unsafe extern "C" fn infrastore_store_export_time_series_associations_openap
     features_json: *const c_char,
     component_field: *const c_char,
     zoneless: i32,
+    has_initial_timestamp: bool,
+    initial_timestamp_ms: i64,
+    has_length: bool,
+    length: u64,
     out_json: *mut *mut c_char,
     out_len: *mut u64,
 ) -> i32 {
@@ -6702,6 +6757,10 @@ pub unsafe extern "C" fn infrastore_store_export_time_series_associations_openap
             features_json,
             component_field,
             zoneless,
+            has_initial_timestamp,
+            initial_timestamp_ms,
+            has_length,
+            length,
         )
     } {
         Ok(f) => f,
@@ -7022,6 +7081,36 @@ pub struct InfraStoreForecastReaderHandle {
     inner: core_lib::ForecastReader,
 }
 
+/// Apply the grid-filter pair — a static series' own `initial_timestamp` and
+/// `length` — to a filter under construction.
+///
+/// Shared by both FFI filter builders because it is one predicate wherever a
+/// filter is taken. Deliberately *not* spelling-checked: a filter selects rather
+/// than reads, so an anchor no row was written with is an empty result, not an
+/// error. Pair it with `zoneless` to pick a coherence group.
+fn apply_grid_filter(
+    filter: core_lib::ListFilter,
+    has_initial_timestamp: bool,
+    initial_timestamp_ms: i64,
+    has_length: bool,
+    length: u64,
+) -> Result<core_lib::ListFilter, i32> {
+    let mut filter = filter;
+    if has_initial_timestamp {
+        let Some(t) = unix_ms_to_datetime(initial_timestamp_ms) else {
+            set_error(format!(
+                "invalid initial_timestamp_ms: {initial_timestamp_ms}"
+            ));
+            return Err(INFRASTORE_ERR_INVALID_PARAMETER);
+        };
+        filter = filter.initial_timestamp(t);
+    }
+    if has_length {
+        filter = filter.length(length as usize);
+    }
+    Ok(filter)
+}
+
 /// Build a [`core_lib::ListFilter`] from the reader build arguments shared by
 /// both readers (owner / category / name / name_glob / resolution / features /
 /// component_field). The time-series type is set by the caller, not here.
@@ -7043,6 +7132,10 @@ unsafe fn reader_filter(
     features_json: *const c_char,
     component_field: *const c_char,
     zoneless: i32,
+    has_initial_timestamp: bool,
+    initial_timestamp_ms: i64,
+    has_length: bool,
+    length: u64,
 ) -> Result<core_lib::ListFilter, i32> {
     let mut filter = core_lib::ListFilter::new();
     if has_owner {
@@ -7093,6 +7186,13 @@ unsafe fn reader_filter(
     if !features.is_empty() {
         filter = filter.features(features);
     }
+    filter = apply_grid_filter(
+        filter,
+        has_initial_timestamp,
+        initial_timestamp_ms,
+        has_length,
+        length,
+    )?;
     Ok(filter)
 }
 
@@ -7137,6 +7237,29 @@ unsafe fn write_i64_slice_out(values: &[i64], buf: *mut i64, cap: u64, out_len: 
 ///
 /// Any other discriminant is rejected.
 ///
+/// `has_window_start` lifts the shared-grid requirement for `SingleTimeSeries`:
+/// the reader then sweeps the window `window_start_ms` (+ `window_length` steps,
+/// or as far as *every* matched series reaches when `has_window_length` is
+/// false) instead of the grid the series happen to share, and each column reads
+/// at an offset of its own. It is checked, never clamped -- a matched series
+/// that does not cover the window is an error naming it, the anchor must fall on
+/// each series' own step boundaries, and a calendar resolution is refused where
+/// re-anchoring would move the dates. `window_start_zoneless` carries how the
+/// caller *spelled* the anchor, the same convention as
+/// `infrastore_store_read_by_ids_range`'s bounds: the wire form is Unix
+/// milliseconds either way, and this flag is what tells a wall clock from an
+/// instant. The window belongs to `SingleTimeSeries` alone; the two irregular
+/// types carry their timeline rather than deriving it, so passing one with them
+/// is an error. `has_window_length` without `has_window_start` is rejected too:
+/// a length alone does not say where to begin.
+///
+/// The window is **not** the `has_initial_timestamp` / `has_length` filter pair
+/// above it. A window sweeps a named span across whatever matched, letting each
+/// column read at an offset of its own; the filter matches only the series that
+/// already begin at `initial_timestamp_ms` and run for `length` steps. Use the
+/// window when the ragged series should all take part, the filter when they
+/// should not.
+///
 /// # Safety
 ///
 /// `name` / `name_glob` / `resolution` / `features_json` / `component_field` -- every string
@@ -7157,6 +7280,15 @@ pub unsafe extern "C" fn infrastore_store_build_static_reader(
     features_json: *const c_char,
     component_field: *const c_char,
     zoneless: i32,
+    has_initial_timestamp: bool,
+    initial_timestamp_ms: i64,
+    has_length: bool,
+    length: u64,
+    has_window_start: bool,
+    window_start_ms: i64,
+    window_start_zoneless: bool,
+    has_window_length: bool,
+    window_length: u64,
     out_reader: *mut *mut InfraStoreStaticReaderHandle,
 ) -> i32 {
     clear_error();
@@ -7190,13 +7322,34 @@ pub unsafe extern "C" fn infrastore_store_build_static_reader(
             features_json,
             component_field,
             zoneless,
+            has_initial_timestamp,
+            initial_timestamp_ms,
+            has_length,
+            length,
         )
     } {
         Ok(f) => f,
         Err(c) => return c,
     };
     let filter = filter.time_series_type(ts_type);
-    let reader = match store.inner.build_static_reader(filter) {
+    let start = if has_window_start {
+        match unix_ms_to_datetime(window_start_ms) {
+            Some(t) => Some(t),
+            None => {
+                set_error(format!("invalid window_start_ms: {window_start_ms}"));
+                return INFRASTORE_ERR_INVALID_PARAMETER;
+            }
+        }
+    } else {
+        None
+    };
+    let window = core_lib::ReadWindow {
+        start,
+        zoneless: has_window_start && window_start_zoneless,
+        len: has_window_length.then_some(window_length as usize),
+        count: None,
+    };
+    let reader = match store.inner.build_static_reader_over(filter, window) {
         Ok(r) => r,
         Err(e) => return map_core_error(e),
     };
@@ -7734,6 +7887,10 @@ pub unsafe extern "C" fn infrastore_store_build_forecast_reader(
     features_json: *const c_char,
     component_field: *const c_char,
     zoneless: i32,
+    has_initial_timestamp: bool,
+    initial_timestamp_ms: i64,
+    has_length: bool,
+    length: u64,
     out_reader: *mut *mut InfraStoreForecastReaderHandle,
 ) -> i32 {
     clear_error();
@@ -7767,6 +7924,10 @@ pub unsafe extern "C" fn infrastore_store_build_forecast_reader(
             features_json,
             component_field,
             zoneless,
+            has_initial_timestamp,
+            initial_timestamp_ms,
+            has_length,
+            length,
         )
     } {
         Ok(f) => f,
@@ -8203,6 +8364,15 @@ mod reader_ffi_tests {
                 ptr::null(),
                 ptr::null(),
                 -1,
+                false,
+                0,
+                false,
+                0,
+                false,
+                0,
+                false,
+                false,
+                0,
                 &mut reader,
             )
         };
@@ -8285,6 +8455,146 @@ mod reader_ffi_tests {
         unsafe { infrastore_static_reader_free(reader) };
     }
 
+    /// Whether the thread-local error message mentions `needle` — the ABI's only
+    /// channel for *why* a call was refused, and the half of a refusal a caller
+    /// can act on.
+    fn last_error_contains(needle: &str) -> bool {
+        let mut needed = 0u64;
+        assert_eq!(
+            unsafe { infrastore_last_error_message(ptr::null_mut(), 0, &mut needed) },
+            INFRASTORE_OK
+        );
+        let mut buf = vec![0u8; needed as usize + 1];
+        assert_eq!(
+            unsafe {
+                infrastore_last_error_message(
+                    buf.as_mut_ptr() as *mut c_char,
+                    buf.len() as u64,
+                    &mut needed,
+                )
+            },
+            INFRASTORE_OK
+        );
+        let msg = unsafe { CStr::from_ptr(buf.as_ptr() as *const c_char) }
+            .to_string_lossy()
+            .into_owned();
+        msg.contains(needle)
+    }
+
+    /// A `SingleTimeSeries` starting `start_hours` after `t0`, whose value at
+    /// each step is its own hour offset — so a read proves which row it landed on.
+    fn add_sts_from(store: &mut Store, owner_id: i64, name: &str, start_hours: i64, len: usize) {
+        let vals: Vec<f64> = (0..len).map(|k| (start_hours + k as i64) as f64).collect();
+        let ts = SingleTimeSeries::new(
+            t0() + ChronoDuration::hours(start_hours),
+            ChronoDuration::hours(1),
+            TypedArray::from_f64(vec![len], &vals),
+            name,
+        );
+        store
+            .add_time_series(
+                owner_id,
+                "Gen",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(ts),
+                Default::default(),
+            )
+            .unwrap();
+    }
+
+    /// The window arguments across the ABI: two series that share no grid sweep
+    /// together once the caller names a span, and a span one of them does not
+    /// cover is refused rather than silently dropping its column.
+    #[test]
+    fn static_reader_ffi_window() {
+        let mut store = Store::create(None, true).unwrap();
+        add_sts_from(&mut store, 1, "short", 0, 24);
+        add_sts_from(&mut store, 2, "long", 7, 48);
+        let handle = InfraStoreHandle { inner: store };
+        let hour = std::ffi::CString::new("PT1H").unwrap();
+
+        // Without a window the grids disagree and nothing builds.
+        let mut reader: *mut InfraStoreStaticReaderHandle = ptr::null_mut();
+        let build = |has_ts: bool,
+                     ms: i64,
+                     has_len: bool,
+                     len: u64,
+                     out: &mut *mut InfraStoreStaticReaderHandle| unsafe {
+            infrastore_store_build_static_reader(
+                &handle,
+                0,
+                false,
+                0,
+                false,
+                0,
+                ptr::null(),
+                ptr::null(),
+                hour.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+                -1,
+                false,
+                0,
+                false,
+                0,
+                has_ts,
+                ms,
+                false,
+                has_len,
+                len,
+                out,
+            )
+        };
+        assert_eq!(
+            build(false, 0, false, 0, &mut reader),
+            INFRASTORE_ERR_INVALID_PARAMETER
+        );
+
+        // Anchored at hour 7, with no length: as far as both reach, which is
+        // where the 24-hour series ends.
+        assert_eq!(
+            build(true, T0_MS + 7 * HOUR_MS, false, 0, &mut reader),
+            INFRASTORE_OK
+        );
+        let (mut initial, mut len) = (0i64, 0u64);
+        let mut res: *mut c_char = ptr::null_mut();
+        assert_eq!(
+            unsafe { infrastore_static_reader_grid(reader, &mut initial, &mut res, &mut len) },
+            INFRASTORE_OK
+        );
+        assert_eq!((initial, len), (T0_MS + 7 * HOUR_MS, 17));
+        unsafe { infrastore_string_free(res) };
+
+        // Both columns report hour 7, each from a row of its own.
+        assert_eq!(
+            unsafe { infrastore_static_reader_read(reader, &handle, T0_MS + 7 * HOUR_MS) },
+            INFRASTORE_OK
+        );
+        let (mut p, mut blen) = (ptr::null::<u8>(), 0u64);
+        assert_eq!(
+            unsafe { infrastore_static_reader_group_values(reader, 0, &mut p, &mut blen) },
+            INFRASTORE_OK
+        );
+        assert_eq!(
+            unsafe { slice::from_raw_parts(p as *const f64, 2) },
+            &[7.0, 7.0]
+        );
+        unsafe { infrastore_static_reader_free(reader) };
+
+        // A span the shorter series cannot cover, and a length with no anchor.
+        let mut other: *mut InfraStoreStaticReaderHandle = ptr::null_mut();
+        assert_eq!(
+            build(true, T0_MS + 7 * HOUR_MS, true, 48, &mut other),
+            INFRASTORE_ERR_INVALID_PARAMETER
+        );
+        assert!(last_error_contains("does not cover"));
+        assert_eq!(
+            build(false, 0, true, 4, &mut other),
+            INFRASTORE_ERR_INVALID_PARAMETER
+        );
+        assert!(last_error_contains("needs a start"));
+    }
+
     #[test]
     fn forecast_reader_ffi_roundtrip() {
         use core_lib::Deterministic;
@@ -8330,6 +8640,10 @@ mod reader_ffi_tests {
                 ptr::null(),
                 ptr::null(),
                 -1,
+                false,
+                0,
+                false,
+                0,
                 &mut reader,
             )
         };
@@ -8659,6 +8973,10 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     -1,
+                    false,
+                    0,
+                    false,
+                    0,
                     &mut out,
                     &mut len,
                 )
@@ -9115,6 +9433,15 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     -1,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    false,
+                    0,
                     &mut reader,
                 )
             },
@@ -9143,6 +9470,15 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     -1,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    false,
+                    0,
                     &mut reader,
                 )
             },
@@ -9256,6 +9592,10 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     -1,
+                    false,
+                    0,
+                    false,
+                    0,
                     ptr::null_mut(),
                     ptr::null_mut(),
                 )
@@ -9335,6 +9675,10 @@ mod abi_tests {
             *const c_char,
             *const c_char,
             i32,
+            bool,
+            i64,
+            bool,
+            u64,
             *mut *mut c_char,
             *mut u64,
         ) -> i32;
@@ -9364,6 +9708,10 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     -1,
+                    false,
+                    0,
+                    false,
+                    0,
                     &mut out,
                     &mut len,
                 )
@@ -9424,6 +9772,10 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     -1,
+                    false,
+                    0,
+                    false,
+                    0,
                     &mut present,
                 )
             },
@@ -9451,6 +9803,15 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     -1,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    false,
+                    0,
                     &mut reader,
                 )
             },
@@ -9503,6 +9864,10 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     -1,
+                    false,
+                    0,
+                    false,
+                    0,
                     &mut removed,
                 )
             },
@@ -9630,6 +9995,10 @@ mod abi_tests {
                 ptr::null(),
                 ptr::null(),
                 -1,
+                false,
+                0,
+                false,
+                0,
                 &mut out,
                 &mut len,
             )
@@ -9659,6 +10028,15 @@ mod abi_tests {
                 ptr::null(),
                 ptr::null(),
                 -1,
+                false,
+                0,
+                false,
+                0,
+                false,
+                0,
+                false,
+                false,
+                0,
                 &mut reader,
             )
         };
@@ -9688,6 +10066,10 @@ mod abi_tests {
                 ptr::null(),
                 ptr::null(),
                 -1,
+                false,
+                0,
+                false,
+                0,
                 &mut out,
                 &mut len,
             )
@@ -10104,6 +10486,15 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     -1,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    false,
+                    0,
                     &mut reader,
                 )
             },
@@ -10178,6 +10569,15 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     -1,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    false,
+                    0,
                     &mut reader,
                 )
             },
@@ -10249,6 +10649,10 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     -1,
+                    false,
+                    0,
+                    false,
+                    0,
                     &mut freader,
                 )
             },
@@ -10431,6 +10835,10 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     -1,
+                    false,
+                    0,
+                    false,
+                    0,
                     &mut out,
                     &mut len,
                 )
@@ -11019,6 +11427,10 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     -1,
+                    false,
+                    0,
+                    false,
+                    0,
                     &mut json,
                     &mut json_len,
                 )

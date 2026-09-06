@@ -5480,3 +5480,77 @@ end
     )
     @test add_time_series!(store, 1, "Generator", Component, sub_daily) isa Integer
 end
+
+@testset "StaticReader over a caller-named window" begin
+    # Without a window a reader takes its grid from the series it matched, so a
+    # store whose `SingleTimeSeries` start at different instants -- the usual
+    # shape of a real system -- has no reader at all. Naming a window makes them
+    # sweep together, each column reading at an offset of its own.
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+    # Values equal their own hour offset, so a read proves which row it hit.
+    add_time_series!(
+        store, 1, "Gen", Component,
+        SingleTimeSeries(t0, res, collect(0.0:23.0), "short"),
+    )
+    add_time_series!(
+        store, 2, "Gen", Component,
+        SingleTimeSeries(t0 + Hour(7), res, collect(7.0:54.0), "long"),
+    )
+
+    @test_throws InfraStore.InvalidParameterError build_static_reader(
+        store; resolution=res
+    )
+
+    # Anchored at hour 7 with no length: as far as both series reach.
+    r = build_static_reader(store; resolution=res, window_start=t0 + Hour(7))
+    grid = static_grid(r)
+    @test grid.initial_timestamp == t0 + Hour(7)
+    @test grid.length == 17
+    @test Base.length(static_groups(r)[1].ids) == 2
+
+    static_read!(r, t0 + Hour(7))
+    @test static_values(r, 1) == [7.0, 7.0]
+    static_read!(r, t0 + Hour(23))
+    @test static_values(r, 1) == [23.0, 23.0]
+
+    # An explicit length the shorter series cannot serve names it.
+    @test_throws InfraStore.InvalidParameterError build_static_reader(
+        store; resolution=res, window_start=t0 + Hour(7), window_length=48
+    )
+    # An anchor before one series' start, and one part-way through a step.
+    @test_throws InfraStore.InvalidParameterError build_static_reader(
+        store; resolution=res, window_start=t0 + Hour(3), window_length=2
+    )
+    @test_throws InfraStore.InvalidParameterError build_static_reader(
+        store; resolution=res, window_start=t0 + Hour(7) + Minute(30), window_length=2
+    )
+    # A length with nothing to anchor it.
+    @test_throws InfraStore.InvalidParameterError build_static_reader(
+        store; resolution=res, window_length=4
+    )
+    # The irregular types carry their timeline; there is nothing to re-anchor.
+    @test_throws InfraStore.InvalidParameterError build_static_reader(
+        store; time_series_type=NonSequentialTimeSeries, window_start=t0
+    )
+
+    # The other answer to the same store: select the cohort on one grid, and the
+    # odd series out is not there to constrain the sweep at all.
+    add_time_series!(
+        store, 3, "Gen", Component,
+        SingleTimeSeries(t0 + Hour(7), res, collect(7.0:54.0), "long2"),
+    )
+    r2 = build_static_reader(
+        store; resolution=res, initial_timestamp=t0 + Hour(7), length=48
+    )
+    @test static_grid(r2).length == 48
+    @test Base.length(static_groups(r2)[1].ids) == 2
+    static_read!(r2, t0 + Hour(54))
+    @test static_values(r2, 1) == [54.0, 54.0]
+
+    # The same predicate on a listing, which is how a caller finds the grid.
+    @test Base.length(list_metadata(store; initial_timestamp=t0 + Hour(7))) == 2
+    @test Base.length(list_metadata(store; initial_timestamp=t0, length=24)) == 1
+    @test isempty(list_metadata(store; initial_timestamp=t0, length=99))
+end
