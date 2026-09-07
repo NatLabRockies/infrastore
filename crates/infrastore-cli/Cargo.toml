@@ -21,7 +21,13 @@ path = "src/main.rs"
 # only ever one `hdf5-metno-sys` in the graph.
 [features]
 default = ["vendored"]
-vendored = ["infrastore-core/vendored"]
+vendored = ["infrastore-core/vendored", "infrastore-parquet?/vendored"]
+# `export -f parquet` and `add --parquet`. Off by default: Arrow and Parquet are
+# a large dependency tree that nothing else here needs, and `deny.toml` makes
+# every dependency a policy decision. `-f parquet` still *parses* without it, so
+# `--help` and the documented examples read the same either way; the export then
+# fails with the flag that turns it on.
+parquet = ["dep:infrastore-parquet"]
 
 [dependencies]
 chrono = { workspace = true }
@@ -41,6 +47,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tabled = { workspace = true }
 infrastore-core = { workspace = true }
+infrastore-parquet = { workspace = true, optional = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
@@ -48,5 +55,9 @@ tracing-subscriber = { workspace = true }
 # `cli_errors.rs` builds deliberately corrupt stores: `hdf5-metno` to perturb a
 # stored array behind its recorded hash, `rusqlite` to corrupt the catalog half.
 hdf5-metno = "0.14.0"
+# The Parquet round-trip tests read back what `export -f parquet` wrote, so they
+# need a reader. Only reachable under the `parquet` feature, which is what gates
+# those tests.
+parquet = { version = "59", default-features = false, features = ["arrow", "snap", "zstd"] }
 rusqlite = { workspace = true }
 tempfile = "3"

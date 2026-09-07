@@ -862,6 +862,23 @@ fn arrow_table_from_column<'py>(
     pa.call_method("table", (columns,), Some(&kwargs))
 }
 
+/// A list of integers as a JSON array: `[]`, `[3]`, `[2,3]`.
+///
+/// Hand-rolled rather than through `serde_json`, which is not otherwise a
+/// dependency of this crate: a list of `usize` has no escaping, no float
+/// formatting, and no failure mode.
+fn json_int_list(values: &[usize]) -> String {
+    let mut out = String::from("[");
+    for (i, v) in values.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&v.to_string());
+    }
+    out.push(']');
+    out
+}
+
 /// The descriptive attributes a `to_arrow` table carries as schema metadata.
 ///
 /// A macro for the same reason as `apply_descriptors!`: the three static types
@@ -874,6 +891,17 @@ macro_rules! arrow_metadata {
         meta.insert("time_series_type".to_string(), $type_name.to_string());
         meta.insert("name".to_string(), $inner.name.clone());
         meta.insert("element_type".to_string(), $inner.element_type.to_string());
+        // A JSON list, `[]` for a scalar element, and written even when empty
+        // unlike the descriptors below: an absent descriptor means "not
+        // declared", where an empty shape is a fact about the data. It is
+        // recoverable from the value column's own nested type, and is here so a
+        // reader that only opens the footer does not have to walk it -- and
+        // because the CLI's Parquet export writes it, and the two producers
+        // write one schema.
+        meta.insert(
+            "element_shape".to_string(),
+            json_int_list($inner.data.element_shape()),
+        );
         if let Some(v) = &$inner.units {
             meta.insert("units".to_string(), v.clone());
         }
@@ -1272,6 +1300,11 @@ impl PyDeterministic {
             let stamps = inner.window_timestamps(k).map_err(map_err)?;
             let start = inner.window_start(k).map_err(map_err)?;
             let mut metadata = arrow_metadata!(inner, "Deterministic");
+            // The macro takes `TypedArray::element_shape`, which strips one
+            // axis -- right for a static series, one axis short for a forecast,
+            // whose stored shape is `[H, count, *E]`. A window's element shape
+            // is what follows both.
+            metadata.insert("element_shape".to_string(), json_int_list(&element_shape));
             metadata.insert("resolution".to_string(), inner.resolution.to_iso8601());
             metadata.insert("horizon".to_string(), inner.horizon.to_iso8601());
             metadata.insert("interval".to_string(), inner.interval.to_iso8601());

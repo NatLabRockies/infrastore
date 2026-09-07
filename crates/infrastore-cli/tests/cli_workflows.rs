@@ -4657,3 +4657,99 @@ fn diff_reports_store_attributes_in_their_own_section_and_gates_on_them() {
     assert_eq!(rows[0]["key"], "creator");
     assert_eq!(rows[0]["status"], "removed");
 }
+
+// ---- Parquet export ---------------------------------------------------------
+
+#[test]
+fn parquet_is_only_offered_where_it_means_something() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("pq.h5");
+    seed_one(dir.path(), &store);
+
+    // Not a rendering of a result: refused for every command but `export`,
+    // once and centrally, rather than falling through to a table.
+    let err = run_err(&store, &["-f", "parquet", "list"]);
+    assert!(err.contains("only available on `export`"), "{err}");
+
+    // A footer at the end of the file needs a seekable sink, which a pipe is
+    // not.
+    let err = run_err(&store, &["-f", "parquet", "export"]);
+    assert!(err.contains("--dir"), "{err}");
+}
+
+#[cfg(feature = "parquet")]
+#[test]
+fn export_writes_one_parquet_file_per_series() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("pq.h5");
+    seed_one(dir.path(), &store);
+    let out = dir.path().join("out");
+
+    let report = run(
+        &store,
+        &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
+    );
+    assert!(report.contains(".parquet"), "{report}");
+
+    let files: Vec<_> = fs::read_dir(&out)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(files.len(), 1, "one file per matched series");
+    assert_eq!(files[0].extension().unwrap(), "parquet");
+
+    // A real Parquet file, with the footer the schema promises.
+    let file = fs::File::open(&files[0]).unwrap();
+    let builder =
+        parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
+    let schema = builder.schema().clone();
+    assert_eq!(
+        schema
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect::<Vec<_>>(),
+        vec!["timestamp".to_string(), "value".to_string()]
+    );
+    assert_eq!(schema.metadata()["name"], "load");
+    assert_eq!(schema.metadata()["time_series_type"], "SingleTimeSeries");
+    assert_eq!(schema.metadata()["resolution"], "PT1H");
+    assert_eq!(schema.metadata()["owner_id"], "42");
+    assert_eq!(schema.metadata()["owner_type"], "Generator");
+    assert_eq!(schema.metadata()["element_shape"], "[]");
+
+    let mut reader = builder.build().unwrap();
+    let batch = reader.next().unwrap().unwrap();
+    assert_eq!(batch.num_rows(), 3);
+}
+
+#[cfg(feature = "parquet")]
+#[test]
+fn a_parquet_export_honors_the_time_range() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("pq_range.h5");
+    seed_one(dir.path(), &store);
+    let out = dir.path().join("out");
+
+    run(
+        &store,
+        &[
+            "-f",
+            "parquet",
+            "export",
+            "--dir",
+            out.to_str().unwrap(),
+            "--time-range",
+            "2024-01-01T01:00:00Z..2024-01-01T03:00:00Z",
+        ],
+    );
+    let file = fs::read_dir(&out).unwrap().next().unwrap().unwrap().path();
+    let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+        fs::File::open(file).unwrap(),
+    )
+    .unwrap()
+    .build()
+    .unwrap();
+    let rows: usize = reader.map(|b| b.unwrap().num_rows()).sum();
+    assert_eq!(rows, 2, "the range selects two of the three steps");
+}

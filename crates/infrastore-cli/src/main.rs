@@ -888,6 +888,12 @@ fn real_main() {
 }
 
 fn run(cli: &Cli) -> Result<(), String> {
+    // `-f` is global, but Parquet is not a rendering of a result -- it is a
+    // binary container. Refusing it here, once, beats each command's `match`
+    // falling through to its `_` arm and quietly printing a table.
+    if cli.format.is_parquet() && !matches!(cli.command, Commands::Export { .. }) {
+        return Err("the parquet format is only available on `export`".to_string());
+    }
     match &cli.command {
         Commands::Add {
             descriptor,

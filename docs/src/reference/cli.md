@@ -168,13 +168,13 @@ example can never name a flag the command does not have.
 
 ### Read data
 
-| Command  | Purpose                                                                   |
-| -------- | ------------------------------------------------------------------------- |
-| `list`   | List stored series matching the selector filters.                         |
-| `get`    | Read and display a single series' values.                                 |
-| `grid`   | Render N series as N columns against one shared time axis.                |
-| `info`   | Metadata, content hash, HDF5 location, and stats for one series.          |
-| `export` | Write series values to CSV/JSON files (`--dir`), or stdout for one match. |
+| Command  | Purpose                                                                           |
+| -------- | --------------------------------------------------------------------------------- |
+| `list`   | List stored series matching the selector filters.                                 |
+| `get`    | Read and display a single series' values.                                         |
+| `grid`   | Render N series as N columns against one shared time axis.                        |
+| `info`   | Metadata, content hash, HDF5 location, and stats for one series.                  |
+| `export` | Write series values to CSV/JSON/Parquet files (`--dir`), or stdout for one match. |
 
 ```sh
 infrastore --store demo.h5 list                                   # everything in the store
@@ -185,7 +185,34 @@ infrastore --store demo.h5 get --name load --tail --limit 24      # the last day
 infrastore --store demo.h5 -f csv grid --name-glob 'load_*' --resolution PT1H
 infrastore --store demo.h5 info --name load --no-stats            # catalog only, no array read
 infrastore --store demo.h5 -f csv export --name-glob 'load_*' --dir out/
+infrastore --store demo.h5 -f parquet export --name-glob 'load_*' --dir out/
 ```
+
+#### Parquet export
+
+`-f parquet` writes one `.parquet` file per matched series, with the same two-column table Python's
+`to_arrow()` builds: `timestamp` (Arrow `timestamp[ms, tz]`, in the series' own spelling) and
+`value` (a primitive for a scalar series, nested `FixedSizeList` for a multidimensional per-timestep
+value). The row's descriptors ride in the file's key/value footer — `name`, `time_series_type`,
+`element_type`, `element_shape`, `resolution`, `time_reference`, `units`, `quantity_kind`,
+`unit_system`, `component_field`, `application_data` — plus the row-level `id`, `owner_id`,
+`owner_type`, `owner_category`, and `features` that a value object has no way to know.
+
+Composite element types (`piecewise_linear` and friends) keep their stored packing, a
+`FixedSizeList<double>[w]`; `element_type` in the footer is what names them, and every binding has a
+decoder. Both columns are non-nullable: the store has no nulls, and NaN is a value.
+
+Two limits, both deliberate:
+
+- **`--dir` is required.** Parquet's footer sits at the end of the file and its offsets point
+  backwards, so a writer has to seek and a pipe cannot.
+- **`-f parquet` is only accepted on `export`.** It is a binary container, not a rendering of a
+  result; there is no `list -f parquet`.
+
+Parquet support is a **build-time option**. Arrow and Parquet are a large dependency tree nothing
+else in the CLI needs, so the released binary is built with it and a source build is not by default:
+`cargo install infrastore-cli --features parquet`. A binary without it still accepts the flag and
+tells you which one turns it on, rather than reporting `parquet` as an unknown format.
 
 #### Bounding the rows
 

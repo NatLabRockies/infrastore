@@ -37,6 +37,23 @@ allow = [
 ]
 confidence-threshold = 0.8
 
+# `tiny-keccak` is CC0-1.0, a public-domain dedication -- strictly more
+# permissive than every license in the list above, since it waives the
+# attribution the MIT and BSD terms require. It is allowed here as a *scoped
+# exception* rather than by adding CC0-1.0 to `allow`, because the reasoning is
+# about this one crate and a future CC0 dependency deserves its own look: CC0's
+# fallback license grant is unusual in explicitly not granting patent rights,
+# which is why several organizations' policies treat it as a review item rather
+# than as a permissive license.
+#
+# It reaches the graph only through `infrastore-parquet` (off by default), and
+# only at build time: arrow-array -> ahash -> const-random -> const-random-macro,
+# a proc macro that seeds a compile-time hash. No CC0 code is linked into any
+# shipped artifact.
+[[licenses.exceptions]]
+crate = "tiny-keccak"
+allow = ["CC0-1.0"]
+
 [[licenses.clarify]]
 crate = "cargo-husky"
 expression = "MIT"

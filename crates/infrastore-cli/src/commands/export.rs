@@ -36,8 +36,19 @@ pub fn run(
     let file_ext = match format {
         Format::Csv => "csv",
         Format::Jsonl => "jsonl",
+        Format::Parquet => "parquet",
         _ => "json",
     };
+    // Parquet's footer sits at the *end* of the file and its offsets point
+    // backwards, so a writer has to seek. A pipe cannot, which is why this is
+    // refused rather than buffered: buffering would make `export -f parquet >
+    // one.parquet` work for one series and silently mean something else for two.
+    if format.is_parquet() && dir.is_none() {
+        return Err(
+            "the parquet format writes files, not stdout; pass --dir to name a directory"
+                .to_string(),
+        );
+    }
 
     let range = crate::parse::parse_time_range(time_range)?;
     let store = store_access::open_readonly(store_path)?;
@@ -91,9 +102,16 @@ pub fn run(
             let mut written = Vec::with_capacity(metas.len());
             for ((meta, data), stem) in metas.iter().zip(&datas).zip(&stems) {
                 let path = dir.join(format!("{stem}.{file_ext}"));
-                let content = render(meta, data, format)?;
-                std::fs::write(&path, content)
-                    .map_err(|e| format!("writing {}: {e}", path.display()))?;
+                if format.is_parquet() {
+                    // Written by the library rather than rendered to a String:
+                    // the writer owns the file so it can seek back for the
+                    // footer.
+                    write_parquet(&path, meta, data)?;
+                } else {
+                    let content = render(meta, data, format)?;
+                    std::fs::write(&path, content)
+                        .map_err(|e| format!("writing {}: {e}", path.display()))?;
+                }
                 written.push(path.display().to_string());
             }
             return output::report(
@@ -414,4 +432,35 @@ fn render_json(
         _ => serde_json::to_string_pretty(&value),
     };
     text.map(|s| s + "\n").map_err(|e| e.to_string())
+}
+
+/// Write one series as Parquet, or explain that this binary cannot.
+///
+/// Arrow and Parquet are a large dependency tree that nothing else in the CLI
+/// needs, so `infrastore-parquet` sits behind a cargo feature that is **off by
+/// default**. A build without it still accepts `-f parquet` at the command line
+/// — that keeps `--help`, the completions, and the documented examples identical
+/// in both builds — and fails here with the flag that turns it on, rather than
+/// reporting `parquet` as an unknown format.
+#[cfg(feature = "parquet")]
+fn write_parquet(
+    path: &Path,
+    meta: &TimeSeriesMetadata,
+    data: &TimeSeriesData,
+) -> Result<(), String> {
+    infrastore_parquet::write_series(path, meta, data)
+        .map_err(|e| format!("writing {}: {e}", path.display()))
+}
+
+#[cfg(not(feature = "parquet"))]
+fn write_parquet(
+    _path: &Path,
+    _meta: &TimeSeriesMetadata,
+    _data: &TimeSeriesData,
+) -> Result<(), String> {
+    Err(
+        "this infrastore was built without Parquet support; rebuild with \
+         `cargo install infrastore-cli --features parquet`"
+            .to_string(),
+    )
 }

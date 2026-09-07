@@ -221,6 +221,26 @@ def test_descriptors_ride_in_the_schema_metadata():
     assert metadata[b"resolution"] == b"PT1H"
 
 
+def test_element_shape_is_always_written():
+    """A fact about the data, not a label, so it is written even when empty --
+    and the CLI's Parquet export writes the same key, because the two producers
+    write one schema."""
+    assert hourly(np.arange(3.0)).to_arrow().schema.metadata[b"element_shape"] == b"[]"
+
+    values = np.arange(24.0).reshape(4, 2, 3)
+    assert hourly(values).to_arrow().schema.metadata[b"element_shape"] == b"[2,3]"
+
+
+def test_a_forecast_window_reports_its_own_element_shape():
+    """A forecast's stored shape is `[H, count, *E]`, so the per-window element
+    shape is what follows *both* -- one axis further in than a static series."""
+    values = np.arange(2 * 3 * 4.0).reshape(2, 3, 4)
+    forecast = Deterministic(UTC_START, "PT1H", "PT2H", "PT1H", 3, values, "fc")
+    windows = forecast.to_arrow_windows()
+    for table in windows.values():
+        assert table.schema.metadata[b"element_shape"] == b"[4]"
+
+
 def test_undeclared_descriptors_are_absent_rather_than_empty():
     """`b"units" in metadata` has to answer "was a label declared?", so an unset
     one must not be written as an empty string."""
