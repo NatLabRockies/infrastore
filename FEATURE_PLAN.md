@@ -320,3 +320,86 @@ documented example cannot contain a quoted argument. The guide's examples use un
 project overview enumerates the same surface in prose. **Decision:** update it too. Leaving the file
 that every future agent reads first describing a surface that has moved is a defect, and the edit is
 one paragraph inside the two features' own subject matter.
+
+### 7.6 The row-level footer keys have only one producer (§2.2)
+
+§2.2 asks for `id`, `owner_id`, `owner_type`, `owner_category` and `features` in the footer, and
+says to "add any missing key to `to_arrow()` in the same change so the two producers stay
+identical." `to_arrow()` cannot produce four of those five: it is a method on a value object, and a
+`SingleTimeSeries` built in Python is not filed anywhere — it has no owner, no catalog id, and no
+feature map. **Decision:** the two producers agree on every key that describes the _values_, and the
+CLI writes the row-level ones on top. The consequence is stated in the docs: a file written by
+`export -f parquet` re-adds with no flags, while a `to_arrow()` file needs `--owner-id` and
+`--owner-type`, exactly as a CSV does.
+
+`element_shape` was genuinely missing from both and was added to both. It is written even when
+empty, unlike the descriptors: an absent descriptor means "not declared", where an empty shape is a
+fact about the data.
+
+`features` is written as plain JSON scalars (`{"model_year":2030}`), not `FeatureValue`'s externally
+tagged serde form (`{"model_year":{"Int":2030}}`). The plain form is what the C ABI's
+`features_json` and the CLI's `--features` already use, and a foreign reader of this footer should
+see the value rather than the discriminant carrying it.
+
+### 7.7 `Format::Parquet` exists in every build (§2.1)
+
+Gating the clap variant on the `parquet` cargo feature would make `--help`, the shell completions,
+and the documented examples differ between builds — and
+`every_command_is_shown_in_the_docs_and_every_doc_example_parses` runs the documented examples
+through the real parser, so a default-feature `cargo test` would fail on a documented `-f parquet`
+example. **Decision:** the variant is unconditional and the export path fails with the flag that
+turns the feature on. A binary without Parquet then says "rebuild with `--features parquet`" instead
+of reporting `parquet` as an unknown format, which is the better error anyway.
+
+`-f` is global, so the variant is refused for every command but `export`, once, in `run` — otherwise
+each command's `match` would fall through to its `_` arm and quietly print a table.
+
+### 7.8 `tiny-keccak` is CC0-1.0, allowed as a scoped exception (§1)
+
+Arrow reaches it through `arrow-array -> ahash -> const-random -> const-random-macro`, a build-time
+proc macro. CC0-1.0 is a public-domain dedication, strictly more permissive than everything in the
+allowlist. **Decision:** allow it as a `[[licenses.exceptions]]` entry naming the crate, not by
+adding CC0-1.0 to `allow`. CC0's fallback license grant explicitly does not grant patent rights,
+which is why several organizations treat it as a review item rather than as a plain permissive
+license — so a future CC0 dependency should get its own look rather than inheriting this one's.
+
+### 7.9 Two refusals the plan did not anticipate (§2.5)
+
+An **empty `SingleTimeSeries`** cannot be imported: the timestamp column _is_ its anchor, and an
+empty table has nowhere to put one. Refused with a message saying so, rather than defaulted to an
+epoch nobody chose. The two irregular types need no anchor and import fine. (Adding
+`initial_timestamp` to the footer would fix it, but that key would have to land in both producers
+and is not what §2.2 asks for.)
+
+A **type that cannot be inferred**: with no `time_series_type` in the footer, a grid reads as
+`SingleTimeSeries` and anything else as `NonSequentialTimeSeries`. `PersistentTimeSeries` is never
+inferred — it is structurally identical to the irregular type and differs only in what the values
+mean between rows, so guessing it would be guessing that. `--type` names it.
+
+### 7.10 A dense forecast's grid is required, not inferred (§2.4)
+
+§2.4 specifies the long table but not what the import may assume. Resolution, horizon, interval,
+window count and the percentile list could be reverse-engineered from a complete set of rows, but a
+merely self-consistent set would give a plausible wrong answer: a one-window forecast is
+indistinguishable from a static series, and overlapping windows make the interval ambiguous.
+**Decision:** the footer's forecast parameters are required, and a long table without them is
+refused naming the missing key. Rows are then placed by their coordinates rather than their order,
+so a file a query engine rewrote still reads correctly.
+
+### 7.11 `to_arrow_windows()` does not gain a long form (§2.4)
+
+§2.4 asks this phase to settle it. **Decision: no.** It returns a dict of per-window tables, which
+is an in-memory analysis shape and could never be one Parquet file — so it is not a competing
+spelling of the file format and "one schema, two producers" has nothing to reconcile. The long table
+has one producer, the CLI, and one consumer, the CLI. A Python `to_arrow_long()` /
+`from_arrow_long()` pair is a reasonable follow-up; §2.6 scopes Python's Arrow inverse to the three
+static types, and that is what phase 3 delivered.
+
+### 7.12 An unspecified `time_reference` comes back as `utc` (§2.2)
+
+Arrow's timestamp type has a zone or it has none, and _unspecified_ has no third spelling.
+`to_arrow()` has always mapped it to a UTC-zoned column, and this export follows — so the import
+reads `utc` back. The instants are unchanged; only the label moves from "not stated" to "UTC".
+**Decision:** keep the existing mapping and document the asymmetry rather than inventing a
+`zoneless`-shaped column for "unspecified", which would collide with the real `zoneless` and be
+worse.

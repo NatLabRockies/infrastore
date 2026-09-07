@@ -166,6 +166,7 @@ asymmetry is that the read-only gRPC server does not accept any writes:
 | Materialized timestamps       | ✅        | ✅    | ✅              | ✅    | ✅           | ❌          |
 | `from_timestamps` (verified)  | ✅        | ✅    | ✅              | ✅    | ❌           | ❌          |
 | Arrow tables (`to_arrow`)     | ❌        | ❌    | ✅              | ❌    | ❌           | ❌          |
+| Parquet files                 | crate     | ❌    | via `to_arrow`  | ❌    | `-f parquet` | ❌          |
 | Store summary (`show`)        | ❌        | ❌    | ✅              | ❌    | `store-info` | ❌          |
 | Forecast windows as Arrow     | ❌        | ❌    | `Deterministic` | ❌    | ❌           | ❌          |
 
@@ -176,6 +177,16 @@ local filesystem access, so the read-only gRPC server serves forecast reads but 
 already has one of its own — Julia has `Base.show`, and the CLI has `store-info` plus the `list`
 family. It composes existing catalog aggregate queries and adds no core API, so any binding that
 wants it can grow one without a change underneath.
+
+**Parquet** lives in a crate of its own, `infrastore-parquet`, which the CLI depends on behind a
+cargo feature that is **off by default** — Arrow is a large dependency tree nothing else in the
+project needs, and `deny.toml` makes every dependency a policy decision. The CLI is the only surface
+that reads and writes Parquet _files_ (`export -f parquet`, `add --parquet`). Python reaches the
+same files through `to_arrow()` / `from_arrow` plus `pyarrow.parquet`, and the table those produce
+is deliberately identical to the one the CLI writes — one schema, two producers — so a file moves
+between them without changing meaning. Nothing else has it: the C ABI and Julia would need the whole
+Arrow tree in the cdylib for a format their host languages already have readers for, and the gRPC
+server serves values, not files.
 
 **Materialized timestamps** and **`from_timestamps`** both run in the core and reach Julia through
 two stateless ABI entry points, `infrastore_grid_timestamps` and `infrastore_infer_period`. That

@@ -295,6 +295,31 @@ forecast has two grids that overlap — windows step by `interval`, rows inside 
 neighbouring windows. The dict iterates chronologically. See
 [`to_arrow_windows()`](../reference/python-api.md#to_arrow_windows).
 
+### Back from a table
+
+`from_arrow` is the inverse, on the same three types — and it reads a table anything wrote, not just
+one `to_arrow()` produced:
+
+```python
+import pyarrow.parquet as pq
+
+series = SingleTimeSeries.from_arrow(pq.read_table("load.parquet"))
+store.add_time_series(42, "Generator", OwnerCategory.Component, series)
+```
+
+A table `to_arrow()` wrote round-trips with no arguments, because the metadata is the descriptor. A
+**foreign** table — from a dataframe, or a Parquet file someone else wrote — needs a `name=` at
+minimum, since a name is part of a series' identity; everything else is inferred from the Arrow
+schema. Note what a table does not carry: the owner and the catalog id, because `to_arrow()` is a
+method on a value object and a series built here is not filed anywhere. You supply the owner to
+`add_time_series`, as you would for any other series.
+
+The inference rules and the four things that are refused rather than coerced (nulls, sub-millisecond
+timestamps, rows that leave a declared grid, decoded `struct`/`list` value columns) are in the
+[reference](../reference/python-api.md#from_arrow). They are the same rules
+`infrastore add --parquet` applies, so a file moves between the CLI and here without changing
+meaning.
+
 ### Datetimes and precision
 
 Every `datetime` must be timezone-aware (any zone; converted to UTC on the way in, UTC on the way

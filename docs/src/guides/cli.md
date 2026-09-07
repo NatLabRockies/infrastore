@@ -339,6 +339,65 @@ hashes as garbage bytes, and in `.mode box` it mangles the table borders:
 sqlite3 demo.h5.sqlite 'SELECT name, data_hash FROM time_series_readable;'
 ```
 
+## Hand It to Something Else: Parquet
+
+CSV is the interchange format `add` and `export` default to, and it has one real cost: a float goes
+out as decimal text and comes back as whatever parsing that text gives. Parquet does not have that
+problem, and every analysis tool worth the name reads it:
+
+```sh
+infrastore --store demo.h5 -f parquet export --name-glob 'load_*' --dir parquet/
+infrastore --store other.h5 add --parquet parquet/42_Generator_load_SingleTimeSeries.parquet
+```
+
+One file per series, two columns (`timestamp` and `value`), and the whole catalog row in the file's
+footer -- so a file written by `export` re-adds with no other flag. A dense forecast comes out as a
+long table instead (`issue_time`, `target_time`, `value`, plus `percentile` or `scenario`), which is
+the same shape the CSV export uses for a forecast.
+
+It reads foreign files too. A Parquet file from a dataframe carries no footer, so the pieces it does
+not have are inferred -- a grid becomes a `SingleTimeSeries`, the timestamp column's zone becomes
+the `time_reference` -- and what cannot be inferred is asked for:
+
+```sh
+infrastore --store demo.h5 add --parquet from_pandas.parquet \
+    --owner-id 42 --owner-type Generator --name load
+```
+
+Python's `to_arrow()` writes the same table, so
+`pyarrow.parquet.write_table(series.to_arrow(), ...)` produces a file `add --parquet` reads, and
+`SingleTimeSeries.from_arrow` reads one this wrote.
+
+Two things to know. `-f parquet` requires `--dir`, because the footer sits at the end of the file
+and a writer has to seek back to it -- a pipe cannot. And Parquet is a **build-time option**: Arrow
+is a large dependency nothing else here needs, so a source build turns it on with
+`cargo install infrastore-cli --features parquet`. A binary without it accepts the flag and says
+which one to rebuild with.
+
+### Querying it with DuckDB
+
+The reason to write Parquet rather than to embed a query engine here. The arrays and the catalog are
+two files, and DuckDB reads both:
+
+```sql
+INSTALL sqlite; LOAD sqlite;
+ATTACH 'demo.h5.sqlite' AS catalog (TYPE sqlite);
+
+-- The values, straight out of the directory `export` wrote.
+SELECT timestamp, value FROM 'parquet/*.parquet' WHERE value > 100;
+
+-- Every series' peak, joined to what the catalog knows about it.
+SELECT c.name, c.owner_id, c.units, max(p.value) AS peak
+FROM 'parquet/*.parquet' AS p, catalog.time_series_readable AS c
+GROUP BY c.name, c.owner_id, c.units;
+```
+
+`time_series_readable` is the catalog's hand-inspection view -- it hex-encodes the two content
+hashes and decodes the integer type codes, so the rows read as text (see
+[Reading the SQLite catalog by hand](../reference/cli.md#reading-the-sqlite-catalog-by-hand)). Each
+Parquet file also carries its own row in its footer, which `parquet_kv_metadata` exposes if you
+would rather not attach the catalog at all.
+
 ## Stamp Provenance on the Artifact
 
 A store built by a model run should say so. `store-attr` records free-form key/value provenance
