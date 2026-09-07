@@ -60,6 +60,8 @@ assert np.array_equal(np.asarray(got.data), np.asarray(ts.data))
 <https://natlabrockies.github.io/infrastore/latest/> — see the
 [Python guide](https://natlabrockies.github.io/infrastore/latest/guides/python.html) and the
 [Python API reference](https://natlabrockies.github.io/infrastore/latest/reference/python-api.html).
+Complete, runnable programs are indexed in the repository's
+[Python examples](https://github.com/NatLabRockies/infrastore/tree/main/examples/python).
 
 ## License
 

@@ -4,6 +4,11 @@ This guide covers building on the `infrastore` PyO3 module, from installing the 
 consumer package makes. For exact signatures and return shapes, see the
 [Python API reference](../reference/python-api.md).
 
+For complete programs rather than isolated snippets, use the repository's
+[runnable Python examples](https://github.com/NatLabRockies/infrastore/tree/main/examples/python).
+They cover static, non-sequential, deterministic, probabilistic, and scenario data; fixed tuples;
+every function-valued element type; feature-based selection; and conversion to Polars data frames.
+
 ## Install
 
 Python 3.11 or newer. The wheels are prebuilt and statically linked, so a consumer package such as
@@ -505,6 +510,124 @@ leaves behind:
 ```python
 left_behind = store.list_metadata(time_series_type=TimeSeriesType.PersistentTimeSeries)
 ```
+
+## Custom Element Types
+
+By default an array's elements are plain numbers of its dtype. `element_type=` on a series
+constructor says otherwise: what the trailing per-step dimension of the array actually _means_. It
+is metadata, not a different storage format — the array is still the same typed HDF5 dataset — but
+it is what lets `decode_element_values` (and every other binding's reader) turn the raw floats back
+into the values you meant. See [Element types](../reference/element-types.md) for the full grammar
+and the byte layout each kind produces; this section works through each one from Python.
+
+### Composite values: `tuple(N,dtype)`
+
+A `tuple(N,dtype)` is bytes-identical to a plain array shaped `(length, N)` — declaring it changes
+nothing about what is stored, only how a reader should group the trailing `N` values: as one
+composite value (three cost-curve coefficients), not `N` independent samples. Build it like any
+other multi-dimensional series and declare the type on the constructor:
+
+```python
+coeffs = np.array([[1.0, 0.5, 12.0], [1.1, 0.4, 11.5]])  # (length=2, N=3)
+ts = SingleTimeSeries(
+    datetime(2024, 1, 1, tzinfo=timezone.utc), timedelta(hours=1), coeffs, "cost_coeffs",
+    element_type="tuple(3,f64)",
+)
+```
+
+`decode_element_values` only unpacks `f64` arrays — for any other dtype (`tuple(3,i32)`, say) it
+returns `None`, because there is nothing to unpack: the stored rows already are the tuples, and you
+read them straight off `.data`. `encode_element_values` is a convenience for the `f64` case only; it
+also always builds `f64`, so it cannot produce a tuple of any other dtype.
+
+### Fixed-width coefficients: `linear_function`, `quadratic_function`
+
+These give every timestep a small, fixed number of function coefficients — a proportional and a
+constant term for a line, plus a quadratic term for a parabola — packed as `f64` regardless of the
+rest of the series. Build the array with `encode_element_values` from a list of per-timestep dicts,
+matching keys to the function's coefficients:
+
+```python
+from infrastore import encode_element_values, decode_element_values
+
+curves = [
+    {"proportional": 1.0, "constant": 2.0},
+    {"proportional": 1.2, "constant": 1.8},
+]
+array = encode_element_values(curves, "linear_function")   # shape (2, 2), f64
+
+ts = SingleTimeSeries(
+    datetime(2024, 1, 1, tzinfo=timezone.utc), timedelta(hours=1), array, "marginal_cost",
+    element_type="linear_function",
+)
+series_id = store.add_time_series(
+    owner_id=7, owner_type="ThermalStandard", owner_category=OwnerCategory.Component,
+    time_series=ts,
+)
+
+meta = store.get_metadata_by_id(series_id)
+back = store.read_by_id(series_id)
+assert decode_element_values(back.data, meta["element_type"]) == curves
+```
+
+`quadratic_function` is the same shape, with a `"quadratic"` key added and row width `3` instead of
+`2`. Both raise if a row doesn't match the required width exactly — there is no padding for these
+two, because every timestep genuinely has the same number of coefficients.
+
+### Ragged curves: `piecewise_linear`, `piecewise_step`
+
+These are the element types built for a **variable** number of points per timestep — a case covered
+end to end in the runnable
+[`single_custom_elements.py`](https://github.com/NatLabRockies/infrastore/blob/main/examples/python/single_custom_elements.py)
+example. `encode_element_values` finds the widest row across the whole array, then packs every
+timestep as a leading count `n` followed by its points, zero-padded out to that common width;
+decoding reads `n` back off each row and returns exactly that many points, ignoring the padding.
+
+A `piecewise_linear` timestep is a list of `{"x", "y"}` knots:
+
+```python
+curves = [
+    [{"x": 0.0, "y": 1.0}, {"x": 1.0, "y": 3.0}, {"x": 2.0, "y": 5.0}],                      # 3 points
+    [{"x": 0.0, "y": 2.0}, {"x": 1.0, "y": 4.0}, {"x": 2.0, "y": 6.0}, {"x": 3.0, "y": 8.0}], # 4 points
+]
+array = encode_element_values(curves, "piecewise_linear")   # shape (2, 1 + 2*4) = (2, 9)
+
+ts = SingleTimeSeries(
+    datetime(2024, 1, 1, tzinfo=timezone.utc), timedelta(hours=1), array, "cost_curve",
+    element_type="piecewise_linear",
+)
+series_id = store.add_time_series(
+    owner_id=42, owner_type="Generator", owner_category=OwnerCategory.Component, time_series=ts,
+)
+
+meta = store.get_metadata_by_id(series_id)
+back = store.read_by_id(series_id)
+assert decode_element_values(back.data, meta["element_type"]) == curves   # 3- and 4-point rows both exact
+```
+
+A `piecewise_step` timestep decodes to a **different** shape — one dict of parallel arrays rather
+than a list of points, since a step function has one fewer `y` than `x`: each `y` is the value
+_between_ two adjacent `x`'s, so `n` coordinates bound `n - 1` steps and the last coordinate is the
+right-hand end of the curve rather than the start of an open final step. Nothing is held forward
+past it — that is a `PersistentTimeSeries`, which is a time series type rather than an element type:
+
+```python
+steps = [
+    {"x": [0.0, 1.0, 2.5], "y": [10.0, 20.0]},   # 3 x's, 2 steps
+    {"x": [0.0, 5.0], "y": [7.5]},               # 2 x's, 1 step
+]
+array = encode_element_values(steps, "piecewise_step")
+```
+
+The padded width is fixed by whatever `encode_element_values` saw in that one call. Add a timestep
+with more points later than any seen so far, and the wider row width makes it a different packed
+HDF5 dataset (`element_shape` differs), not an in-place resize of the array you already wrote — the
+same packing rule every other same-shaped-series pooling in this store follows.
+
+Forecasts (`Deterministic`, `Probabilistic`, `Scenarios`) use these same element types over their
+extra leading axes — pass `leading_dims=[horizon, count]` (or `[percentiles, horizon, count]` /
+`[scenarios, horizon, count]`) to `encode_element_values` instead of the default single-axis case.
+See [Forecasts](#forecasts) above for the shapes those types read back as.
 
 ## Query Metadata
 
