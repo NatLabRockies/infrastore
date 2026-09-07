@@ -188,6 +188,10 @@
 <p>This guide covers building on the <code>infrastore</code> PyO3 module, from installing the wheel to the calls a
 consumer package makes. For exact signatures and return shapes, see the
 <a href="../reference/python-api.html">Python API reference</a>.</p>
+<p>For complete programs rather than isolated snippets, use the repository's
+<a href="https://github.com/NatLabRockies/infrastore/tree/main/examples/python">runnable Python examples</a>.
+They cover static, non-sequential, deterministic, probabilistic, and scenario data; fixed tuples;
+every function-valued element type; feature-based selection; and conversion to Polars data frames.</p>
 <h2 id="install"><a class="header" href="#install">Install</a></h2>
 <p>Python 3.11 or newer. The wheels are prebuilt and statically linked, so a consumer package such as
 infrasys needs nothing else:</p>
@@ -570,6 +574,102 @@ unaffected: they live in the artifact, which holds them in full. Ask the catalog
 leaves behind:</p>
 <pre><code class="language-python">left_behind = store.list_metadata(time_series_type=TimeSeriesType.PersistentTimeSeries)
 </code></pre>
+<h2 id="custom-element-types"><a class="header" href="#custom-element-types">Custom Element Types</a></h2>
+<p>By default an array's elements are plain numbers of its dtype. <code>element_type=</code> on a series
+constructor says otherwise: what the trailing per-step dimension of the array actually <em>means</em>. It
+is metadata, not a different storage format — the array is still the same typed HDF5 dataset — but
+it is what lets <code>decode_element_values</code> (and every other binding's reader) turn the raw floats back
+into the values you meant. See <a href="../reference/element-types.html">Element types</a> for the full grammar
+and the byte layout each kind produces; this section works through each one from Python.</p>
+<h3 id="composite-values-tuplendtype"><a class="header" href="#composite-values-tuplendtype">Composite values: <code>tuple(N,dtype)</code></a></h3>
+<p>A <code>tuple(N,dtype)</code> is bytes-identical to a plain array shaped <code>(length, N)</code> — declaring it changes
+nothing about what is stored, only how a reader should group the trailing <code>N</code> values: as one
+composite value (three cost-curve coefficients), not <code>N</code> independent samples. Build it like any
+other multi-dimensional series and declare the type on the constructor:</p>
+<pre><code class="language-python">coeffs = np.array([[1.0, 0.5, 12.0], [1.1, 0.4, 11.5]])  # (length=2, N=3)
+ts = SingleTimeSeries(
+    datetime(2024, 1, 1, tzinfo=timezone.utc), timedelta(hours=1), coeffs, "cost_coeffs",
+    element_type="tuple(3,f64)",
+)
+</code></pre>
+<p><code>decode_element_values</code> only unpacks <code>f64</code> arrays — for any other dtype (<code>tuple(3,i32)</code>, say) it
+returns <code>None</code>, because there is nothing to unpack: the stored rows already are the tuples, and you
+read them straight off <code>.data</code>. <code>encode_element_values</code> is a convenience for the <code>f64</code> case only; it
+also always builds <code>f64</code>, so it cannot produce a tuple of any other dtype.</p>
+<h3 id="fixed-width-coefficients-linear_function-quadratic_function"><a class="header" href="#fixed-width-coefficients-linear_function-quadratic_function">Fixed-width coefficients: <code>linear_function</code>, <code>quadratic_function</code></a></h3>
+<p>These give every timestep a small, fixed number of function coefficients — a proportional and a
+constant term for a line, plus a quadratic term for a parabola — packed as <code>f64</code> regardless of the
+rest of the series. Build the array with <code>encode_element_values</code> from a list of per-timestep dicts,
+matching keys to the function's coefficients:</p>
+<pre><code class="language-python">from infrastore import encode_element_values, decode_element_values
+
+curves = [
+    {"proportional": 1.0, "constant": 2.0},
+    {"proportional": 1.2, "constant": 1.8},
+]
+array = encode_element_values(curves, "linear_function")   # shape (2, 2), f64
+
+ts = SingleTimeSeries(
+    datetime(2024, 1, 1, tzinfo=timezone.utc), timedelta(hours=1), array, "marginal_cost",
+    element_type="linear_function",
+)
+series_id = store.add_time_series(
+    owner_id=7, owner_type="ThermalStandard", owner_category=OwnerCategory.Component,
+    time_series=ts,
+)
+
+meta = store.get_metadata_by_id(series_id)
+back = store.read_by_id(series_id)
+assert decode_element_values(back.data, meta["element_type"]) == curves
+</code></pre>
+<p><code>quadratic_function</code> is the same shape, with a <code>"quadratic"</code> key added and row width <code>3</code> instead of
+<code>2</code>. Both raise if a row doesn't match the required width exactly — there is no padding for these
+two, because every timestep genuinely has the same number of coefficients.</p>
+<h3 id="ragged-curves-piecewise_linear-piecewise_step"><a class="header" href="#ragged-curves-piecewise_linear-piecewise_step">Ragged curves: <code>piecewise_linear</code>, <code>piecewise_step</code></a></h3>
+<p>These are the element types built for a <strong>variable</strong> number of points per timestep — a case covered
+end to end in the runnable
+<a href="https://github.com/NatLabRockies/infrastore/blob/main/examples/python/single_custom_elements.py"><code>single_custom_elements.py</code></a>
+example. <code>encode_element_values</code> finds the widest row across the whole array, then packs every
+timestep as a leading count <code>n</code> followed by its points, zero-padded out to that common width;
+decoding reads <code>n</code> back off each row and returns exactly that many points, ignoring the padding.</p>
+<p>A <code>piecewise_linear</code> timestep is a list of <code>{"x", "y"}</code> knots:</p>
+<pre><code class="language-python">curves = [
+    [{"x": 0.0, "y": 1.0}, {"x": 1.0, "y": 3.0}, {"x": 2.0, "y": 5.0}],                      # 3 points
+    [{"x": 0.0, "y": 2.0}, {"x": 1.0, "y": 4.0}, {"x": 2.0, "y": 6.0}, {"x": 3.0, "y": 8.0}], # 4 points
+]
+array = encode_element_values(curves, "piecewise_linear")   # shape (2, 1 + 2*4) = (2, 9)
+
+ts = SingleTimeSeries(
+    datetime(2024, 1, 1, tzinfo=timezone.utc), timedelta(hours=1), array, "cost_curve",
+    element_type="piecewise_linear",
+)
+series_id = store.add_time_series(
+    owner_id=42, owner_type="Generator", owner_category=OwnerCategory.Component, time_series=ts,
+)
+
+meta = store.get_metadata_by_id(series_id)
+back = store.read_by_id(series_id)
+assert decode_element_values(back.data, meta["element_type"]) == curves   # 3- and 4-point rows both exact
+</code></pre>
+<p>A <code>piecewise_step</code> timestep decodes to a <strong>different</strong> shape — one dict of parallel arrays rather
+than a list of points, since a step function has one fewer <code>y</code> than <code>x</code>: each <code>y</code> is the value
+<em>between</em> two adjacent <code>x</code>'s, so <code>n</code> coordinates bound <code>n - 1</code> steps and the last coordinate is the
+right-hand end of the curve rather than the start of an open final step. Nothing is held forward
+past it — that is a <code>PersistentTimeSeries</code>, which is a time series type rather than an element type:</p>
+<pre><code class="language-python">steps = [
+    {"x": [0.0, 1.0, 2.5], "y": [10.0, 20.0]},   # 3 x's, 2 steps
+    {"x": [0.0, 5.0], "y": [7.5]},               # 2 x's, 1 step
+]
+array = encode_element_values(steps, "piecewise_step")
+</code></pre>
+<p>The padded width is fixed by whatever <code>encode_element_values</code> saw in that one call. Add a timestep
+with more points later than any seen so far, and the wider row width makes it a different packed
+HDF5 dataset (<code>element_shape</code> differs), not an in-place resize of the array you already wrote — the
+same packing rule every other same-shaped-series pooling in this store follows.</p>
+<p>Forecasts (<code>Deterministic</code>, <code>Probabilistic</code>, <code>Scenarios</code>) use these same element types over their
+extra leading axes — pass <code>leading_dims=[horizon, count]</code> (or <code>[percentiles, horizon, count]</code> /
+<code>[scenarios, horizon, count]</code>) to <code>encode_element_values</code> instead of the default single-axis case.
+See <a href="#forecasts">Forecasts</a> above for the shapes those types read back as.</p>
 <h2 id="query-metadata"><a class="header" href="#query-metadata">Query Metadata</a></h2>
 <p><code>list_metadata</code> returns a list of plain dicts, filtered by any combination of arguments (the
 <code>features</code> argument is a subset match):</p>
