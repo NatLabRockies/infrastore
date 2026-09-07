@@ -136,5 +136,4 @@ for series_id in series_ids:
         strict=False,
     )
     print(f"\n{series.name} ({series.units})")
-    breakpoint()
     print(frame)
