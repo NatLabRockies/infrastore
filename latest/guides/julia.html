@@ -188,6 +188,11 @@
 <p>This guide covers building on <code>InfraStore.jl</code>, the Julia package that wraps the
 <a href="../reference/c-abi.html">C ABI</a>, from installing it to the calls a consumer package makes. For exact
 signatures see the <a href="../reference/julia-api.html">Julia API reference</a>.</p>
+<p>For complete programs rather than isolated snippets, use the repository's
+<a href="https://github.com/NatLabRockies/infrastore/tree/main/examples/julia">runnable Julia examples</a>.
+They cover static, non-sequential, persistent, deterministic, probabilistic, and scenario data;
+fixed tuples; every function-valued element type; feature-based selection; and conversion to
+<code>DataFrame</code>s.</p>
 <h2 id="install"><a class="header" href="#install">Install</a></h2>
 <p>Julia 1.10 or newer. <code>InfraStore.jl</code> is registered in General, and the native library comes with it:</p>
 <pre><code class="language-julia">using Pkg
@@ -248,7 +253,20 @@ store = Store(in_memory=false, path="system.h5")
 # Reopen read-only.
 store = open_store("system.h5"; read_only=true)
 </code></pre>
-<p>The store is finalized automatically, but you can release it eagerly with <code>close!(store)</code>.</p>
+<p>A <code>Store</code> registers a finalizer, so nothing leaks if you never close one — but the GC decides
+<em>when</em>, and on disk that means an open file handle and a held SQLite write lock for an unbounded
+time. Prefer the <strong>do-block forms</strong>, which release the store on the way out including on a throw:</p>
+<pre><code class="language-julia">Store(in_memory=true) do store
+    add_time_series!(store, 42, "Generator", Component, ts)
+end
+
+open_store("system.h5"; read_only=true) do store
+    only(list_metadata(store; owner_id=42, owner_category=Component, name="load"))
+end
+</code></pre>
+<p><code>open_copy</code> has one too. <code>close!(store)</code> is the explicit form when a do-block does not fit — a
+long-lived store held by a consumer package, say — and is idempotent, so closing a store the
+finalizer later reaps is fine.</p>
 <h2 id="add-a-series"><a class="header" href="#add-a-series">Add a Series</a></h2>
 <pre><code class="language-julia"># `name` ("load") is a required field on the struct.
 ts = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(100.0:123.0), "load")
@@ -342,6 +360,53 @@ end   # committed if the block returns, rolled back if it throws
 outermost one ends. A transaction does not batch: use <code>add_time_series_bulk!</code> inside it for the
 writes themselves. <code>begin_transaction!</code> / <code>commit_transaction!</code> / <code>rollback_transaction!</code> are the
 explicit form.</p>
+<h3 id="values-that-are-not-numbers"><a class="header" href="#values-that-are-not-numbers">Values that are not numbers</a></h3>
+<p>A timestep's value can be a function rather than a number — a cost curve re-offered every hour, a
+pair of coefficients, a fixed-width tuple. Hand the constructor those values and it does the rest:
+it packs them into the array the store holds and names the <code>element_type</code> they imply.</p>
+<pre><code class="language-julia">curves = [
+    PiecewiseLinear([(x = 30.0, y = 1155.0), (x = 100.0, y = 4120.0)]),
+    PiecewiseLinear([(x = 30.0, y = 1353.0), (x = 65.0, y = 2730.0), (x = 100.0, y = 4223.0)]),
+]
+
+ts = SingleTimeSeries(t0, Hour(1), curves, "variable_cost")
+ts.element_type            # "piecewise_linear" -- derived, not declared
+
+id = add_time_series!(store, 42, "Generator", Component, ts)
+read_by_id(store, id).data == curves      # true
+</code></pre>
+<p>There is no separate constructor for this and nothing to declare. A <code>Vector{PiecewiseLinear}</code> says
+what it is, so <code>element_type=</code> is only for the numeric case, where the numbers alone cannot say what
+they mean — and one that contradicts the values is an error rather than an override. The struct goes
+on holding the values you gave it; encoding happens at the ABI boundary, which is why a read hands
+back the same thing a write was given.</p>
+<p>A case covered end to end in the runnable
+<a href="https://github.com/NatLabRockies/infrastore/blob/main/examples/julia/single_custom_elements.jl"><code>single_custom_elements.jl</code></a>
+example. <code>InfraStore.jl</code> ships four value types plus <code>NTuple{N,Float64}</code>:</p>
+<div class="table-wrapper"><table><thead><tr><th>Value type</th><th><code>element_type</code></th><th>Constructor</th></tr></thead><tbody>
+<tr><td><code>LinearFunction</code></td><td><code>linear_function</code></td><td><code>(proportional, constant)</code></td></tr>
+<tr><td><code>QuadraticFunction</code></td><td><code>quadratic_function</code></td><td><code>(quadratic, proportional, constant)</code></td></tr>
+<tr><td><code>PiecewiseLinear</code></td><td><code>piecewise_linear</code></td><td><code>(points)</code>, a vector of <code>XYCoords</code></td></tr>
+<tr><td><code>PiecewiseStep</code></td><td><code>piecewise_step</code></td><td><code>(x_coords, y_values)</code></td></tr>
+<tr><td><code>NTuple{N,Float64}</code></td><td><code>tuple(N,f64)</code></td><td>—</td></tr>
+</tbody></table>
+</div>
+<p>Every series type takes them, including the irregular ones and the forecasts. A forecast's values
+keep their window shape rather than arriving flat, since a Julia array carries its own:</p>
+<pre><code class="language-julia"># [H = 2, count = 2]: a curve for every (horizon step, window) pair.
+det = Deterministic(t0, Hour(1), Hour(2), Hour(1), 2, reshape(curves4, 2, 2), "offer")
+</code></pre>
+<p>Two things follow from Julia arrays carrying their element type that are worth knowing. An <strong>empty</strong>
+series still names itself — <code>NTuple{3,Float64}[]</code> is a <code>tuple(3,f64)</code> series with no rows, which a
+language whose empty list is untyped cannot express. And a metadata row's <code>time_series_type</code> is the
+<em>full</em> parameterized type, <code>SingleTimeSeries{PiecewiseLinear, 1}</code>, so it describes the values rather
+than their packing.</p>
+<p><code>raw = true</code> on a read hands back the packing instead, and the per-timestamp
+<a href="#per-timestamp-reads-simulation-loop">readers</a> are deliberately never decoded — they are the
+simulation path, and their numbers are physical. <code>encode_element_values</code> / <code>decode_element_values</code>
+are the same two directions as free functions, for an array with no series around it, and the door a
+consumer extends to encode and decode its <strong>own</strong> domain types with no conversion step. See
+<a href="../reference/julia-api.html#element-values">Element values</a> for both.</p>
 <h2 id="read-a-series"><a class="header" href="#read-a-series">Read a Series</a></h2>
 <pre><code class="language-julia">got = read_by_id(store, id)
 @assert got.data == ts.data

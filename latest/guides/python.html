@@ -245,8 +245,8 @@ from infrastore import Store, SingleTimeSeries, OwnerCategory, TimeSeriesType
 <code>NonSequentialTimeSeries</code>, and <code>PersistentTimeSeries</code>; the forecast classes <code>Deterministic</code>,
 <code>Probabilistic</code>, and <code>Scenarios</code>; the readers <code>StaticReader</code> and <code>ForecastReader</code>; the association
 records <code>SupplementalAttributeAssociation</code> and <code>ParentChildAssociation</code>; the <code>TimeSeriesType</code> and
-<code>OwnerCategory</code> enums; the <code>init_tracing</code> and <code>decode_element_values</code> functions; <code>__version__</code>; and
-an exception hierarchy rooted at <code>TimeSeriesError</code>.</p>
+<code>OwnerCategory</code> enums; the <code>init_tracing</code>, <code>encode_element_values</code>, and <code>decode_element_values</code>
+functions; <code>__version__</code>; and an exception hierarchy rooted at <code>TimeSeriesError</code>.</p>
 <p>If you are building a package on top of infrastore — the way
 <a href="https://github.com/NatLabRockies/infrasys">infrasys</a> does — read
 <a href="./embedding.html">Embedding in a Parent Package</a> alongside this guide: it covers the lifecycle
@@ -575,12 +575,51 @@ leaves behind:</p>
 <pre><code class="language-python">left_behind = store.list_metadata(time_series_type=TimeSeriesType.PersistentTimeSeries)
 </code></pre>
 <h2 id="custom-element-types"><a class="header" href="#custom-element-types">Custom Element Types</a></h2>
-<p>By default an array's elements are plain numbers of its dtype. <code>element_type=</code> on a series
-constructor says otherwise: what the trailing per-step dimension of the array actually <em>means</em>. It
-is metadata, not a different storage format — the array is still the same typed HDF5 dataset — but
-it is what lets <code>decode_element_values</code> (and every other binding's reader) turn the raw floats back
-into the values you meant. See <a href="../reference/element-types.html">Element types</a> for the full grammar
-and the byte layout each kind produces; this section works through each one from Python.</p>
+<p>By default an array's elements are plain numbers of its dtype. An <code>element_type</code> says otherwise:
+what the trailing per-step dimension of the array actually <em>means</em>. It is metadata, not a different
+storage format — the array is still the same typed HDF5 dataset — but it is what lets a reader turn
+the raw floats back into the values you meant. See <a href="../reference/element-types.html">Element types</a>
+for the full grammar and the byte layout each kind produces; this section works through each one
+from Python.</p>
+<h3 id="from_values-and-decoded_values"><a class="header" href="#from_values-and-decoded_values"><code>from_values</code> and <code>decoded_values</code></a></h3>
+<p>Every series type has a <code>from_values</code> classmethod that takes the values themselves. It encodes them
+and records the element type they imply, so the two cannot disagree:</p>
+<pre><code class="language-python">curves = [
+    [{"x": 0.0, "y": 1.0}, {"x": 1.0, "y": 3.0}],
+    [{"x": 0.0, "y": 2.0}],
+]
+ts = SingleTimeSeries.from_values(
+    datetime(2024, 1, 1, tzinfo=timezone.utc), timedelta(hours=1), curves, "cost_curve",
+)
+assert ts.element_type == "piecewise_linear"     # nobody declared it
+
+series_id = store.add_time_series(
+    owner_id=42, owner_type="Generator", owner_category=OwnerCategory.Component, time_series=ts,
+)
+assert store.read_by_id(series_id).decoded_values() == curves
+</code></pre>
+<p><code>decoded_values()</code> is the read-side half: the element type and the number of leading axes both come
+off the series, so there is nothing left to pass. It returns <code>None</code> for a scalar element type and
+for any array whose dtype is not <code>float64</code> — there the stored elements already are the values, and
+<code>.data</code> is the answer.</p>
+<p>Which element type a payload implies is read off the shape of a row; the five shapes are disjoint:</p>
+<div class="table-wrapper"><table><thead><tr><th><code>values</code> entry</th><th>element type</th></tr></thead><tbody>
+<tr><td><code>{"proportional": …, "constant": …}</code></td><td><code>linear_function</code></td></tr>
+<tr><td><code>{"quadratic": …, "proportional": …, "constant": …}</code></td><td><code>quadratic_function</code></td></tr>
+<tr><td><code>list[{"x": …, "y": …}]</code></td><td><code>piecewise_linear</code></td></tr>
+<tr><td><code>{"x": list, "y": list}</code></td><td><code>piecewise_step</code></td></tr>
+<tr><td><code>list[float]</code> of length <code>N</code></td><td><code>tuple(N,f64)</code></td></tr>
+</tbody></table>
+</div>
+<p><code>element_type=</code> is still accepted on <code>from_values</code>, as an assertion rather than an override: it
+raises <code>InvalidParameterError</code> if it disagrees with the values. Where the values name nothing it is
+the only thing to go on — an empty <code>values</code>, or rows that are all empty and read equally as a curve
+with no points or a tuple with no fields.</p>
+<p>Underneath sit <code>encode_element_values(values, element_type, leading_dims)</code> and
+<code>decode_element_values(array, element_type, leading_dims)</code>, which the rest of this section uses to
+show what each element type packs into. Reach for them directly when there is no series to hang the
+values on — decoding an array that arrived on its own — or for the one series <code>from_values</code> cannot
+name: an empty <code>tuple(N,f64)</code>, whose arity lives in rows it does not have.</p>
 <h3 id="composite-values-tuplendtype"><a class="header" href="#composite-values-tuplendtype">Composite values: <code>tuple(N,dtype)</code></a></h3>
 <p>A <code>tuple(N,dtype)</code> is bytes-identical to a plain array shaped <code>(length, N)</code> — declaring it changes
 nothing about what is stored, only how a reader should group the trailing <code>N</code> values: as one
@@ -592,15 +631,19 @@ ts = SingleTimeSeries(
     element_type="tuple(3,f64)",
 )
 </code></pre>
-<p><code>decode_element_values</code> only unpacks <code>f64</code> arrays — for any other dtype (<code>tuple(3,i32)</code>, say) it
-returns <code>None</code>, because there is nothing to unpack: the stored rows already are the tuples, and you
-read them straight off <code>.data</code>. <code>encode_element_values</code> is a convenience for the <code>f64</code> case only; it
-also always builds <code>f64</code>, so it cannot produce a tuple of any other dtype.</p>
+<p>This is the one element type where the constructor stays the natural call: there is no packing to
+build, so an array you already hold in numpy needs no encoding step. <code>from_values</code> accepts the same
+values as a list of <code>list[float]</code> rows, and is the better fit when that is the shape you have.</p>
+<p><code>decoded_values()</code> and <code>decode_element_values</code> only unpack <code>f64</code> arrays — for any other dtype
+(<code>tuple(3,i32)</code>, say) they return <code>None</code>, because there is nothing to unpack: the stored rows
+already are the tuples, and you read them straight off <code>.data</code>. <code>encode_element_values</code> is a
+convenience for the <code>f64</code> case only; it also always builds <code>f64</code>, so neither it nor <code>from_values</code>
+can produce a tuple of any other dtype.</p>
 <h3 id="fixed-width-coefficients-linear_function-quadratic_function"><a class="header" href="#fixed-width-coefficients-linear_function-quadratic_function">Fixed-width coefficients: <code>linear_function</code>, <code>quadratic_function</code></a></h3>
 <p>These give every timestep a small, fixed number of function coefficients — a proportional and a
 constant term for a line, plus a quadratic term for a parabola — packed as <code>f64</code> regardless of the
-rest of the series. Build the array with <code>encode_element_values</code> from a list of per-timestep dicts,
-matching keys to the function's coefficients:</p>
+rest of the series. The values are a list of per-timestep dicts, matching keys to the function's
+coefficients:</p>
 <pre><code class="language-python">from infrastore import encode_element_values, decode_element_values
 
 curves = [
@@ -608,19 +651,17 @@ curves = [
     {"proportional": 1.2, "constant": 1.8},
 ]
 array = encode_element_values(curves, "linear_function")   # shape (2, 2), f64
-
-ts = SingleTimeSeries(
-    datetime(2024, 1, 1, tzinfo=timezone.utc), timedelta(hours=1), array, "marginal_cost",
-    element_type="linear_function",
+assert decode_element_values(array, "linear_function") == curves
+</code></pre>
+<p>Or, without naming the type or holding the array at all:</p>
+<pre><code class="language-python">ts = SingleTimeSeries.from_values(
+    datetime(2024, 1, 1, tzinfo=timezone.utc), timedelta(hours=1), curves, "marginal_cost",
 )
 series_id = store.add_time_series(
     owner_id=7, owner_type="ThermalStandard", owner_category=OwnerCategory.Component,
     time_series=ts,
 )
-
-meta = store.get_metadata_by_id(series_id)
-back = store.read_by_id(series_id)
-assert decode_element_values(back.data, meta["element_type"]) == curves
+assert store.read_by_id(series_id).decoded_values() == curves
 </code></pre>
 <p><code>quadratic_function</code> is the same shape, with a <code>"quadratic"</code> key added and row width <code>3</code> instead of
 <code>2</code>. Both raise if a row doesn't match the required width exactly — there is no padding for these
@@ -637,19 +678,16 @@ decoding reads <code>n</code> back off each row and returns exactly that many po
     [{"x": 0.0, "y": 1.0}, {"x": 1.0, "y": 3.0}, {"x": 2.0, "y": 5.0}],                      # 3 points
     [{"x": 0.0, "y": 2.0}, {"x": 1.0, "y": 4.0}, {"x": 2.0, "y": 6.0}, {"x": 3.0, "y": 8.0}], # 4 points
 ]
-array = encode_element_values(curves, "piecewise_linear")   # shape (2, 1 + 2*4) = (2, 9)
-
-ts = SingleTimeSeries(
-    datetime(2024, 1, 1, tzinfo=timezone.utc), timedelta(hours=1), array, "cost_curve",
-    element_type="piecewise_linear",
+ts = SingleTimeSeries.from_values(
+    datetime(2024, 1, 1, tzinfo=timezone.utc), timedelta(hours=1), curves, "cost_curve",
 )
+assert ts.data.shape == (2, 1 + 2 * 4)   # widest row wins; the 3-point row is padded
 series_id = store.add_time_series(
     owner_id=42, owner_type="Generator", owner_category=OwnerCategory.Component, time_series=ts,
 )
 
-meta = store.get_metadata_by_id(series_id)
 back = store.read_by_id(series_id)
-assert decode_element_values(back.data, meta["element_type"]) == curves   # 3- and 4-point rows both exact
+assert back.decoded_values() == curves   # 3- and 4-point rows both exact
 </code></pre>
 <p>A <code>piecewise_step</code> timestep decodes to a <strong>different</strong> shape — one dict of parallel arrays rather
 than a list of points, since a step function has one fewer <code>y</code> than <code>x</code>: each <code>y</code> is the value
@@ -667,9 +705,21 @@ with more points later than any seen so far, and the wider row width makes it a 
 HDF5 dataset (<code>element_shape</code> differs), not an in-place resize of the array you already wrote — the
 same packing rule every other same-shaped-series pooling in this store follows.</p>
 <p>Forecasts (<code>Deterministic</code>, <code>Probabilistic</code>, <code>Scenarios</code>) use these same element types over their
-extra leading axes — pass <code>leading_dims=[horizon, count]</code> (or <code>[percentiles, horizon, count]</code> /
-<code>[scenarios, horizon, count]</code>) to <code>encode_element_values</code> instead of the default single-axis case.
-See <a href="#forecasts">Forecasts</a> above for the shapes those types read back as.</p>
+extra leading axes. This is where <code>from_values</code> saves the most: the leading dimensions come from
+arguments the forecast constructor already takes, so nothing is computed by hand.</p>
+<pre><code class="language-python"># H = horizon / resolution = 2, so [H, count] = [2, 2] wants four curves, entry
+# `i * count + j` being window `j`'s step `i`.
+forecast = Deterministic.from_values(
+    start, timedelta(hours=1), timedelta(hours=2), timedelta(hours=1), 2, curves * 2,
+    "cost_curve",
+)
+assert forecast.data.shape == (2, 2, 9)
+</code></pre>
+<p><code>Scenarios.from_values</code> takes <code>scenario_count</code> explicitly, where its constructor reads it off the
+array's first axis — there is no array yet to read it from. Going through <code>encode_element_values</code>
+instead means passing <code>leading_dims=[horizon, count]</code> (or <code>[percentiles, horizon, count]</code> /
+<code>[scenarios, horizon, count]</code>) yourself, in place of the default single-axis case. See
+<a href="#forecasts">Forecasts</a> above for the shapes those types read back as.</p>
 <h2 id="query-metadata"><a class="header" href="#query-metadata">Query Metadata</a></h2>
 <p><code>list_metadata</code> returns a list of plain dicts, filtered by any combination of arguments (the
 <code>features</code> argument is a subset match):</p>

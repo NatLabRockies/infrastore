@@ -255,24 +255,54 @@ records what its bytes mean.</p>
 <h2 id="codecs"><a class="header" href="#codecs">Codecs</a></h2>
 <p>Each binding ships a reference codec between the stored bytes and per-timestep values:</p>
 <ul>
-<li><strong>Rust</strong> — <code>infrastore_core::{decode, encode}</code> over <code>TypedArray</code> + <code>ElementType</code>. Prefer the
+<li>
+<p><strong>Rust</strong> — <code>infrastore_core::{decode, encode}</code> over <code>TypedArray</code> + <code>ElementType</code>. Prefer the
 paired forms: every value type has a <code>from_values</code> constructor that encodes the values <em>and</em>
 declares the element type they imply, and <code>TimeSeriesData::decoded_values</code> reads them back. An
 <code>element_type</code> and the array it describes are two things a caller can get out of step — the store
 rejects the mismatch on write, but deriving both from one set of values means there is none to
-reject.</li>
-<li><strong>Python</strong> — <code>infrastore.decode_element_values(array, element_type, leading_dims)</code> and
-<code>encode_element_values(values, element_type, leading_dims)</code>. The series is still built from the
-encoded array with <code>element_type=</code> declared on its constructor; the encoder is what builds it.</li>
-<li><strong>TypeScript</strong> — <code>@infrastore/codec</code>, which decodes a gRPC response's <code>value_bytes</code> + <code>shape</code> +
-<code>element_type</code> directly into plottable values.</li>
-<li><strong>Julia</strong> — <code>InfraStore.encode_element_values</code> / <code>decode_element_values</code>, over the value types
+reject. <code>encode_as</code> is the declared-type encoder for the one series <code>from_values</code> cannot name: a
+tuple with no rows, whose arity lives in rows it does not have. See
+<a href="./rust-api.html#element-values">Element values</a>.</p>
+</li>
+<li>
+<p><strong>Python</strong> — the paired forms first, as in Rust: every series type has a <code>from_values</code> classmethod
+that encodes the values <em>and</em> declares the element type they imply, and <code>.decoded_values()</code> on a
+series reads them back. Underneath sit
+<code>infrastore.decode_element_values(array, element_type, leading_dims)</code> and
+<code>encode_element_values(values, element_type, leading_dims)</code>, for the cases the pair cannot name —
+an empty <code>tuple(N,f64)</code> series, whose arity lives in rows it does not have — and for decoding an
+array that arrived without a series around it.</p>
+<p>A Python payload carries no type tag of its own, unlike a Rust <code>DecodedValues</code> or a Julia
+<code>Vector{PiecewiseLinear}</code>, so <code>from_values</code> reads the element type off the shape of a row. The
+five shapes are disjoint, which makes that a decision rather than a guess:</p>
+<div class="table-wrapper"><table><thead><tr><th><code>values</code> entry</th><th>element type</th></tr></thead><tbody>
+<tr><td><code>{"proportional": …, "constant": …}</code></td><td><code>linear_function</code></td></tr>
+<tr><td><code>{"quadratic": …, "proportional": …, "constant": …}</code></td><td><code>quadratic_function</code></td></tr>
+<tr><td><code>list[{"x": …, "y": …}]</code></td><td><code>piecewise_linear</code></td></tr>
+<tr><td><code>{"x": list, "y": list}</code></td><td><code>piecewise_step</code></td></tr>
+<tr><td><code>list[float]</code> of length <code>N</code></td><td><code>tuple(N,f64)</code></td></tr>
+</tbody></table>
+</div>
+<p><code>element_type=</code> is still accepted, as an assertion rather than an override: it raises if it
+disagrees with the values. Where the values name nothing it is the only thing to go on — an empty
+<code>values</code>, or rows that are all empty and read equally as a pointless curve or a zero-arity tuple —
+and without it those are refused, naming the remedy. The one series no declaration reaches is an
+empty <code>tuple(N,f64)</code>, whose arity lives in rows it does not have.</p>
+</li>
+<li>
+<p><strong>TypeScript</strong> — <code>@infrastore/codec</code>, which decodes a gRPC response's <code>value_bytes</code> + <code>shape</code> +
+<code>element_type</code> directly into plottable values.</p>
+</li>
+<li>
+<p><strong>Julia</strong> — <code>InfraStore.encode_element_values</code> / <code>decode_element_values</code>, over the value types
 <code>LinearFunction</code>, <code>QuadraticFunction</code>, <code>PiecewiseLinear</code> and <code>PiecewiseStep</code>. Decode takes a
 <code>types</code> keyword, so a consumer with its own domain types — InfrastructureSystems.jl's
 <code>FunctionData</code> — decodes straight into them and pays no conversion; encode is three small generic
 functions it extends instead. The names follow the wire vocabulary (<code>PiecewiseLinear</code>, not
 <code>PiecewiseLinearData</code>) so that <code>using InfraStore, InfrastructureSystems</code> is not an ambiguity
-error.</li>
+error.</p>
+</li>
 </ul>
 <p>The CLI decodes composite rows for <code>get -f json</code>, under an <code>element_values</code> key alongside the raw
 <code>values</code>. Its <strong>CSV</strong> output stays packed on purpose: that form is what <code>add</code> reads back, so it has

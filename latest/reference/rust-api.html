@@ -1080,6 +1080,11 @@ impl SingleTimeSeries {
     pub fn from_timestamps(
         timestamps: &amp;[DateTime&lt;Utc&gt;], data: TypedArray, name: impl Into&lt;String&gt;,
     ) -&gt; Result&lt;Self, String&gt;;
+
+    pub fn from_values(
+        initial_timestamp: DateTime&lt;Utc&gt;, resolution: impl Into&lt;Period&gt;,
+        values: &amp;DecodedValues, name: impl Into&lt;String&gt;,
+    ) -&gt; Result&lt;Self, String&gt;;
 }
 <span class="boring">}</span></code></pre></pre>
 <p><code>from_timestamps</code> builds from the timeline a caller holds, inferring the resolution with
@@ -1105,6 +1110,75 @@ that way would not compare equal to the same series read back. The consequence t
 <code>data</code> on an already-built series without updating <code>element_type</code> is a mismatch the store rejects on
 write (<code>InvalidParameter</code>) rather than silently re-deriving one — build the series again instead.
 The other four series types follow the same pattern.</p>
+<p><code>from_values</code> is the constructor that makes that mismatch unrepresentable, and the one to prefer for
+a composite series: it takes the per-timestep values, encodes them into the array, and declares the
+element type they imply. An <code>element_type</code> and the array it describes are two independent things a
+caller can get out of step; deriving both from one input means there is nothing left to keep in
+step. See <a href="#element-values">Element values</a>, which every series type's <code>from_values</code> shares.</p>
+<h3 id="element-values"><a class="header" href="#element-values">Element values</a></h3>
+<p><code>ElementType</code> says what one timestep's stored bytes <em>mean</em>; <code>DecodedValues</code> is those meanings as
+Rust values. The two travel together, which is the whole design: a <code>from_values</code> constructor takes
+the values and produces both halves, and <code>TimeSeriesData::decoded_values</code> reverses it.</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub struct XyPoint { pub x: f64, pub y: f64 }
+pub struct LinearFunction { pub proportional: f64, pub constant: f64 }
+pub struct QuadraticFunction { pub quadratic: f64, pub proportional: f64, pub constant: f64 }
+pub struct StepFunction { pub x: Vec&lt;f64&gt;, pub y: Vec&lt;f64&gt; }  // n x's, n-1 y's between them
+
+pub enum DecodedValues {
+    Raw,                                    // nothing to decode; the array is the answer
+    Tuple(Vec&lt;Vec&lt;f64&gt;&gt;),                   // one arity-long row per timestep
+    LinearFunction(Vec&lt;LinearFunction&gt;),
+    QuadraticFunction(Vec&lt;QuadraticFunction&gt;),
+    PiecewiseLinear(Vec&lt;Vec&lt;XyPoint&gt;&gt;),     // the points of one curve per timestep
+    PiecewiseStep(Vec&lt;StepFunction&gt;),
+}
+
+impl DecodedValues {
+    pub fn len(&amp;self) -&gt; usize;             // timesteps; 0 for `Raw`
+    pub fn is_empty(&amp;self) -&gt; bool;
+}
+
+pub fn decode(array: &amp;TypedArray, element_type: ElementType, leading_dims: usize)
+    -&gt; Result&lt;DecodedValues&gt;;
+pub fn encode(values: &amp;DecodedValues, leading_dims: &amp;[usize]) -&gt; Result&lt;TypedArray&gt;;
+pub fn encode_as(values: &amp;DecodedValues, leading_dims: &amp;[usize], element_type: ElementType)
+    -&gt; Result&lt;TypedArray&gt;;
+pub fn element_type_of(values: &amp;DecodedValues) -&gt; Option&lt;ElementType&gt;;
+<span class="boring">}</span></code></pre></pre>
+<p>Every variant but <code>Raw</code> holds <strong>one entry per timestep</strong>, in row-major order over the array's
+leading dims. <code>Raw</code> is what a scalar element type decodes to, and any array whose physical dtype is
+not <code>f64</code>: there the stored elements already are the values, so the <code>TypedArray</code> is the answer and
+there is nothing to hand back. It is the one variant <code>encode</code> refuses, because it carries no values
+of its own.</p>
+<p><strong>Prefer the paired forms.</strong> <code>encode</code>/<code>decode</code> are the low-level pair; <code>from_values</code> and
+<code>decoded_values</code> are <code>encode</code>/<code>decode</code> with the second half — the element type on the way in, the
+element type and <code>leading_dims</code> on the way out — supplied by the series instead of the caller:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let curves = DecodedValues::PiecewiseLinear(vec![
+    vec![XyPoint { x: 0.0, y: 1.0 }, XyPoint { x: 1.0, y: 3.0 }],
+    vec![XyPoint { x: 0.0, y: 2.0 }],
+]);
+let series = SingleTimeSeries::from_values(t0, Period::Fixed(Duration::hours(1)), &amp;curves, "cost")?;
+assert_eq!(series.element_type, ElementType::PiecewiseLinear);   // nobody declared it
+
+let data = store.read_by_id(id, ReadWindow::full())?;
+assert_eq!(data.decoded_values()?, curves);
+<span class="boring">}</span></code></pre></pre>
+<p><code>element_type_of</code> names the element type an encode of some values would produce, for a caller
+assembling the two halves by hand.</p>
+<p><code>encode_as</code> is the declared-type encoder, and exists for the one storable series <code>from_values</code>
+cannot name: a <strong>tuple with no rows</strong>. A tuple's arity lives in its rows, so an empty
+<code>DecodedValues::Tuple</code> implies <code>tuple(0,f64)</code>, which is not a legal element type; <code>encode_as</code> takes
+the arity from the declaration instead. Pair it with <code>new</code> + <code>with_element_type</code>. It also checks the
+packing it produces against the declaration, so <code>tuple(3,f64)</code> given two-wide rows is an error
+rather than a two-wide array under a three-wide label.</p>
+<p>The ragged kinds pad to the widest timestep <strong>across the whole input</strong>, so the same curve encodes
+differently in a differently-shaped series. That is the storage layout, not a property of the value
+— see <a href="./element-types.html">Element types</a> for the byte layouts and
+<code>conformance/element_type_vectors.json</code> for the pinned vectors every binding is held to.</p>
 <h3 id="typedarray-and-dtype"><a class="header" href="#typedarray-and-dtype"><code>TypedArray</code> and <code>Dtype</code></a></h3>
 <p>The storage array type: an element <code>dtype</code>, an N-dimensional <code>shape</code> <code>[length, k1, k2, …]</code> (first
 axis time, trailing axes the per-step element shape), and raw row-major, little-endian bytes.</p>
@@ -1252,12 +1326,25 @@ impl Deterministic {
         name: impl Into&lt;String&gt;,
     ) -&gt; Result&lt;Self, String&gt;;
 
+    pub fn from_values(
+        initial_timestamp: DateTime&lt;Utc&gt;, resolution: impl Into&lt;Period&gt;,
+        horizon: impl Into&lt;Period&gt;, interval: impl Into&lt;Period&gt;, count: usize,
+        values: &amp;DecodedValues, name: impl Into&lt;String&gt;,
+    ) -&gt; Result&lt;Self, String&gt;;
+
     pub fn horizon_count(&amp;self) -&gt; usize;
     pub fn window_start(&amp;self, index: usize) -&gt; Result&lt;DateTime&lt;Utc&gt;&gt;;
     pub fn window_timestamps(&amp;self, index: usize) -&gt; Result&lt;Vec&lt;DateTime&lt;Utc&gt;&gt;&gt;;
 }
 <span class="boring">}</span></code></pre></pre>
 <p><code>new</code> validates <code>data.shape</code> against <code>[H, count, *E]</code> where <code>H = horizon / resolution</code>.</p>
+<p><code>from_values</code> is the composite-value constructor described under
+<a href="#singletimeseries"><code>SingleTimeSeries</code></a>, and it carries more weight on a forecast: the leading axes
+are <code>[H, count]</code>, and <code>H</code> is derived here from <code>horizon</code>/<code>resolution</code> rather than asked for. Values
+are one entry per timestep in row-major order over those axes, so entry <code>i * count + j</code> is window
+<code>j</code>'s step <code>i</code>, and there must be exactly <code>H * count</code> of them. <code>Probabilistic::from_values</code> takes
+<code>percentiles</code> and fills <code>[percentiles.len(), H, count]</code>; <code>Scenarios::from_values</code> takes
+<code>scenario_count</code> and fills <code>[scenario_count, H, count]</code>.</p>
 <p>A forecast has <strong>two grids</strong> and both are needed to place a value: windows step by <code>interval</code>
 (<code>window_start</code>), and the steps inside one window step by <code>resolution</code> (<code>window_timestamps</code>, which
 returns <code>horizon_count()</code> of them from that window's issue time). They coincide only where windows
@@ -1386,8 +1473,14 @@ impl TimeSeriesData {
     pub fn as_deterministic(&amp;self) -&gt; Option&lt;&amp;Deterministic&gt;;
     pub fn as_probabilistic(&amp;self) -&gt; Option&lt;&amp;Probabilistic&gt;;
     pub fn as_scenarios(&amp;self) -&gt; Option&lt;&amp;Scenarios&gt;;
+
+    pub fn element_type(&amp;self) -&gt; ElementType;
+    pub fn decoded_values(&amp;self) -&gt; Result&lt;DecodedValues&gt;;
 }
 <span class="boring">}</span></code></pre></pre>
+<p><code>decoded_values</code> is the read-side counterpart of the <code>from_values</code> constructors — see
+<a href="#element-values">Element values</a>. It takes the element type and the leading-axis count off the
+value itself, so a caller decoding a read never restates either.</p>
 <p>There is no <code>DeterministicSingleTimeSeries</code> variant: a stored <code>DeterministicSingleTimeSeries</code> is
 read back as a <code>Deterministic</code> (so <code>as_deterministic</code> returns <code>Some</code> for it).</p>
 <h3 id="timeseriestype"><a class="header" href="#timeseriestype"><code>TimeSeriesType</code></a></h3>

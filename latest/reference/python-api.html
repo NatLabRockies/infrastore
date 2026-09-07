@@ -201,9 +201,12 @@
 <p><strong>Array dtypes.</strong> The binding accepts and returns NumPy arrays of <code>float64</code>, <code>float32</code>, the signed
 and unsigned integer widths (<code>int64</code>/<code>int32</code>/<code>int16</code>/<code>int8</code>/<code>uint64</code>/<code>uint32</code>/<code>uint16</code>/<code>uint8</code>),
 or <code>bool</code>; whatever dtype is given round-trips unchanged. What those elements <em>mean</em> is the
-association's <code>element_type</code> (see <a href="./element-types.html">Element types</a>), declared with the
-<code>element_type=</code> keyword on the value constructor and decoded with <code>decode_element_values</code>.
-Multi-dimensional arrays (a per-step element shape) are supported via the NumPy array's shape.</p>
+association's <code>element_type</code> (see <a href="./element-types.html">Element types</a>). A composite series is
+built with the <code>from_values</code> classmethod, which encodes the per-timestep values and declares the
+element type they imply, and read back with <code>.decoded_values()</code>; <code>element_type=</code> on the plain
+constructor declares it for an array you already hold, and <code>encode_element_values</code> /
+<code>decode_element_values</code> are the standalone pair. Multi-dimensional arrays (a per-step element
+shape) are supported via the NumPy array's shape.</p>
 </blockquote>
 <h2 id="datetimes"><a class="header" href="#datetimes">Datetimes</a></h2>
 <p>Every <code>datetime</code> argument — an initial timestamp, a <code>NonSequentialTimeSeries</code> timestamp vector or a
