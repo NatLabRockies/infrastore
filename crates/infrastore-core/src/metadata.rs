@@ -7,7 +7,7 @@ pub mod migrate;
 pub mod schema;
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
@@ -76,6 +76,9 @@ pub struct MetadataStore {
     /// this is resolved once at open.
     has_supplemental_attribute_table: bool,
     has_parent_child_table: bool,
+    /// Whether `store_attributes` exists on this connection, resolved once at
+    /// open for the same reason as the two flags above.
+    has_store_attributes_table: bool,
     /// Recently decoded timestamp vectors — see [`TimestampCache`].
     ///
     /// `RefCell` rather than a lock because this type is already `!Sync` (it
@@ -844,19 +847,30 @@ impl MetadataFilter {
 }
 
 impl MetadataStore {
-    pub fn open_in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory()?;
-        Self::init(&conn)?;
+    /// Wrap an already-initialized connection, resolving the additive-table
+    /// flags once. Every open funnels through here so a new additive table is
+    /// probed on all of them or none — the three call sites drifted apart
+    /// otherwise, and a flag left `false` on one of them reads as "this store
+    /// has no such rows".
+    fn from_connection(conn: Connection, read_only: bool) -> Result<Self> {
         let has_supplemental_attribute_table =
             table_exists(&conn, "supplemental_attribute_associations")?;
         let has_parent_child_table = table_exists(&conn, "parent_child_associations")?;
+        let has_store_attributes_table = table_exists(&conn, "store_attributes")?;
         Ok(Self {
             conn,
-            read_only: false,
+            read_only,
             has_supplemental_attribute_table,
             has_parent_child_table,
+            has_store_attributes_table,
             timestamps_cache: RefCell::default(),
         })
+    }
+
+    pub fn open_in_memory() -> Result<Self> {
+        let conn = Connection::open_in_memory()?;
+        Self::init(&conn)?;
+        Self::from_connection(conn, false)
     }
 
     /// Copy the entire metadata database to a new SQLite file at `path`
@@ -932,16 +946,7 @@ impl MetadataStore {
             Connection::open(path)?
         };
         Self::init(&conn)?;
-        let has_supplemental_attribute_table =
-            table_exists(&conn, "supplemental_attribute_associations")?;
-        let has_parent_child_table = table_exists(&conn, "parent_child_associations")?;
-        Ok(Self {
-            conn,
-            read_only,
-            has_supplemental_attribute_table,
-            has_parent_child_table,
-            timestamps_cache: RefCell::default(),
-        })
+        Self::from_connection(conn, read_only)
     }
 
     /// Copy an existing catalog file into a fresh in-memory database.
@@ -969,16 +974,7 @@ impl MetadataStore {
         }
         drop(src);
         Self::init(&conn)?;
-        let has_supplemental_attribute_table =
-            table_exists(&conn, "supplemental_attribute_associations")?;
-        let has_parent_child_table = table_exists(&conn, "parent_child_associations")?;
-        Ok(Self {
-            conn,
-            read_only,
-            has_supplemental_attribute_table,
-            has_parent_child_table,
-            timestamps_cache: RefCell::default(),
-        })
+        Self::from_connection(conn, read_only)
     }
 
     fn init(conn: &Connection) -> Result<()> {
@@ -2967,6 +2963,64 @@ impl MetadataStore {
         self.assoc_count(PARENT_CHILD_TABLE, &filter.endpoints(), "COUNT(*)")
     }
 
+    // ---- Store attributes -------------------------------------------------
+    //
+    // Free-form provenance on the artifact as a whole. Like the association
+    // catalogs above, every read short-circuits when the table is absent, which
+    // happens only for a read-only open of a store written before it existed.
+
+    /// Upsert one attribute inside the supplied transaction. The caller has
+    /// already validated the key and is responsible for committing.
+    pub fn set_store_attribute(tx: &Connection, key: &str, value: &str) -> Result<()> {
+        tx.execute(
+            "INSERT INTO store_attributes (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    /// One attribute's value, or `None` if the key is unset.
+    pub fn get_store_attribute(&self, key: &str) -> Result<Option<String>> {
+        if !self.has_store_attributes_table {
+            return Ok(None);
+        }
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT value FROM store_attributes WHERE key = ?1",
+                params![key],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?)
+    }
+
+    /// Every attribute, keyed by name. A `BTreeMap` because the order a caller
+    /// sees should not depend on insertion history — a listing is compared
+    /// between two stores and printed, and both want it sorted.
+    pub fn list_store_attributes(&self) -> Result<BTreeMap<String, String>> {
+        if !self.has_store_attributes_table {
+            return Ok(BTreeMap::new());
+        }
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT key, value FROM store_attributes ORDER BY key")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let mut out = BTreeMap::new();
+        for row in rows {
+            let (key, value) = row?;
+            out.insert(key, value);
+        }
+        Ok(out)
+    }
+
+    /// Drop one attribute inside the supplied transaction, reporting whether it
+    /// was there.
+    pub fn remove_store_attribute(tx: &Connection, key: &str) -> Result<bool> {
+        let removed = tx.execute("DELETE FROM store_attributes WHERE key = ?1", params![key])?;
+        Ok(removed > 0)
+    }
+
     /// Whether the catalog holds no content of any kind — the emptiness
     /// predicate behind [`crate::Store::is_empty`]. One short-circuited
     /// `SELECT 1 ... LIMIT 1` per content table, so it costs index probes
@@ -2982,6 +3036,11 @@ impl MetadataStore {
     /// bookkeeping and never empty; `feature_sets` is a content-addressed side
     /// table that only ever holds rows referenced from
     /// `time_series_associations`, so it is covered by probing it.
+    ///
+    /// `store_attributes` *is* probed. Its rows are the consumer's own text, put
+    /// there by an explicit call and recoverable from nowhere else, so a store
+    /// holding nothing but provenance is not empty — reporting it so is exactly
+    /// the "skips writing the artifact" loss described above.
     pub fn is_empty(&self) -> Result<bool> {
         if self.exists(&MetadataFilter::default())? {
             return Ok(false);
@@ -2990,6 +3049,15 @@ impl MetadataStore {
             if self.assoc_has(table, &EndpointFilter::default())? {
                 return Ok(false);
             }
+        }
+        if self.has_store_attributes_table
+            && self
+                .conn
+                .query_row("SELECT 1 FROM store_attributes LIMIT 1", [], |_| Ok(()))
+                .optional()?
+                .is_some()
+        {
+            return Ok(false);
         }
         Ok(true)
     }

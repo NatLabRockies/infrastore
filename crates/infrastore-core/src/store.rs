@@ -1,6 +1,6 @@
 //! High-level `Store` composing the storage backend and metadata store.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -4603,6 +4603,70 @@ impl Store {
         self.metadata.count_parent_child_associations(filter)
     }
 
+    // ---- Store attributes -------------------------------------------------
+    //
+    // Key/value provenance stamped on the artifact as a whole: who built it,
+    // from what source system, under which of the consumer's own schema
+    // versions. The store never interprets a value, exactly as it never
+    // interprets a row's `application_data`.
+    //
+    // "Store attribute" is the term, and every identifier here carries the
+    // `store_` prefix, because a bare "attribute" already means a supplemental
+    // attribute in this project and a bare "metadata" already means a
+    // `TimeSeriesMetadata` row. These describe the artifact, not a row.
+
+    /// Set `key` to `value`, replacing any value it already had. An artifact
+    /// records one creator, not a history of them, so this is an upsert.
+    ///
+    /// Errors with [`TimeSeriesError::InvalidParameter`] for an empty key, and
+    /// for any key beginning with `infrastore.` — that prefix is reserved so the
+    /// store can stamp facts of its own later without colliding with a
+    /// consumer's keys. Values are unconstrained: a caller wanting structure
+    /// stores JSON.
+    ///
+    /// Takes part in the ambient transaction like every other write, and is
+    /// refused on a read-only store.
+    pub fn set_store_attribute(&mut self, key: &str, value: &str) -> Result<()> {
+        if self.read_only {
+            return Err(TimeSeriesError::ReadOnlyStore);
+        }
+        validate_store_attribute_key(key)?;
+        let tx = self.metadata.savepoint()?;
+        MetadataStore::set_store_attribute(&tx, key, value)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The value of `key`, or `None` if it is unset.
+    ///
+    /// `None` rather than an error for the same reason
+    /// [`Self::get_metadata_by_id`] returns one: a consumer asking whether the
+    /// artifact carries a key is asking a question, not asserting an answer.
+    pub fn get_store_attribute(&self, key: &str) -> Result<Option<String>> {
+        self.metadata.get_store_attribute(key)
+    }
+
+    /// Every store attribute, sorted by key.
+    pub fn list_store_attributes(&self) -> Result<BTreeMap<String, String>> {
+        self.metadata.list_store_attributes()
+    }
+
+    /// Remove `key`, reporting whether it was there. Removing an absent key is
+    /// `Ok(false)`, not an error: the caller knows whether it expected a hit.
+    ///
+    /// A reserved key is refused here too, so the reserved namespace reads the
+    /// same from both directions rather than being reachable by deletion.
+    pub fn remove_store_attribute(&mut self, key: &str) -> Result<bool> {
+        if self.read_only {
+            return Err(TimeSeriesError::ReadOnlyStore);
+        }
+        validate_store_attribute_key(key)?;
+        let tx = self.metadata.savepoint()?;
+        let removed = MetadataStore::remove_store_attribute(&tx, key)?;
+        tx.commit()?;
+        Ok(removed)
+    }
+
     /// Delete every stored timestamp vector no association references any more,
     /// returning how many went. The array-file half of what
     /// [`MetadataStore::sweep_orphan_feature_sets`] does for the catalog.
@@ -5448,6 +5512,34 @@ struct RequestParts {
 /// axis the windows lie along.
 /// Refuse a pair of halves whose generation stamps disagree.
 ///
+/// Key prefix the store keeps for itself in [`Store::set_store_attribute`].
+///
+/// Nothing writes such a key today. Reserving the namespace before there is
+/// anything in it is the whole point: once a consumer's store carries
+/// `infrastore.something`, a built-in key of that name can no longer be
+/// introduced without silently overwriting it.
+pub const RESERVED_STORE_ATTRIBUTE_PREFIX: &str = "infrastore.";
+
+/// Reject the keys [`Store::set_store_attribute`] and
+/// [`Store::remove_store_attribute`] refuse. Shared so both directions agree on
+/// what the reserved namespace contains — a key that cannot be written must not
+/// be removable either, or "reserved" would only mean "reserved until someone
+/// deletes it".
+fn validate_store_attribute_key(key: &str) -> Result<()> {
+    if key.is_empty() {
+        return Err(TimeSeriesError::InvalidParameter(
+            "store attribute key must not be empty".into(),
+        ));
+    }
+    if key.starts_with(RESERVED_STORE_ATTRIBUTE_PREFIX) {
+        return Err(TimeSeriesError::InvalidParameter(format!(
+            "store attribute key '{key}' uses the reserved '{RESERVED_STORE_ATTRIBUTE_PREFIX}' \
+             prefix"
+        )));
+    }
+    Ok(())
+}
+
 /// Stamps that disagree mean these files came from different saves — most
 /// likely a `persist_to` interrupted between its two renames. Comparing the
 /// `Option`s directly makes a lone stamp a mismatch too, which is the point:
