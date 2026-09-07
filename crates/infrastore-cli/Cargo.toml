@@ -58,6 +58,7 @@ hdf5-metno = "0.14.0"
 # The Parquet round-trip tests read back what `export -f parquet` wrote, so they
 # need a reader. Only reachable under the `parquet` feature, which is what gates
 # those tests.
+arrow = { version = "59", default-features = false }
 parquet = { version = "59", default-features = false, features = ["arrow", "snap", "zstd"] }
 rusqlite = { workspace = true }
 tempfile = "3"

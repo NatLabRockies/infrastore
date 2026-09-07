@@ -235,6 +235,9 @@ impl InlineArgs {
 pub struct Options<'a> {
     pub descriptor: Option<&'a Path>,
     pub csv: Option<&'a Path>,
+    /// Parquet files to load, one series each. Mutually exclusive with the
+    /// descriptor and CSV forms: a Parquet file carries its own descriptor.
+    pub parquet: &'a [PathBuf],
     pub inline: &'a InlineArgs,
     pub compression: Option<Compression>,
     pub catalog: CatalogChoice,
@@ -246,10 +249,21 @@ pub struct Options<'a> {
 }
 
 pub fn run(store_path: &Path, opts: &Options<'_>) -> Result<(), String> {
-    let (descriptors, base_dir, csv_override) = load_descriptors(opts)?;
+    // Resolved up front, because a Parquet file *is* the descriptor: there is
+    // nothing to load from a JSON file and nothing for a relative `csv` path to
+    // sit beside.
+    let (requests, descriptors, base_dir, csv_override) = if opts.parquet.is_empty() {
+        let (descriptors, base_dir, csv_override) = load_descriptors(opts)?;
+        (None, descriptors, base_dir, csv_override)
+    } else {
+        (Some(parquet_requests(opts)?), Vec::new(), None, None)
+    };
 
     if opts.dry_run {
-        return dry_run(&descriptors, base_dir.as_deref(), csv_override, opts.format);
+        return match &requests {
+            Some(requests) => report_dry_run(requests, opts.format),
+            None => dry_run(&descriptors, base_dir.as_deref(), csv_override, opts.format),
+        };
     }
 
     let batch = opts.batch_size.unwrap_or(usize::MAX);
@@ -274,6 +288,23 @@ pub fn run(store_path: &Path, opts: &Options<'_>) -> Result<(), String> {
     // The load runs to completion or to its first error; either way the catalog
     // is written out below. Nothing between here and there may return early.
     let loaded = (|| -> Result<(), String> {
+        // A Parquet load resolves every file before the store is opened, so the
+        // batch loop sees a ready list; a descriptor load resolves each
+        // descriptor as it reaches it, because a wide one can expand into
+        // thousands of series and holding them all would defeat --batch-size.
+        if let Some(requests) = &requests {
+            for (i, request) in requests.iter().enumerate() {
+                pending.push(request.clone());
+                progress.tick(i + 1, total + pending.len());
+                if pending.len() >= batch {
+                    if store.is_none() {
+                        store = Some(open(opts.compression, opts.catalog)?);
+                    }
+                    let store = store.as_mut().expect("just opened");
+                    total += flush(store, &mut pending, opts.replace, &mut added)?;
+                }
+            }
+        }
         for (i, desc) in descriptors.iter().enumerate() {
             pending.extend(desc.to_add_requests(base_dir.as_deref(), csv_override)?);
             progress.tick(i + 1, total + pending.len());
@@ -442,7 +473,11 @@ fn dry_run(
     for desc in descriptors {
         requests.extend(desc.to_add_requests(base_dir, csv_override)?);
     }
+    report_dry_run(&requests, format)
+}
 
+/// Render what a load would write, whatever resolved the requests.
+fn report_dry_run(requests: &[AddRequest], format: Format) -> Result<(), String> {
     let headers: Vec<String> = [
         "Owner",
         "Owner Type",
@@ -605,4 +640,116 @@ impl Progress {
         let _ = write!(err, "\r\x1b[K");
         let _ = err.flush();
     }
+}
+
+// ---- Parquet ----------------------------------------------------------------
+
+/// Resolve every `--parquet` file into an [`AddRequest`].
+///
+/// A Parquet file written by `export -f parquet` carries the whole catalog row
+/// in its footer, so this needs no other flag. A foreign file — anything else's
+/// Parquet, including one Python's `to_arrow()` wrote — carries no owner, since
+/// `to_arrow()` is a method on a value object and a series built in Python is
+/// not filed anywhere; `--owner-id` and `--owner-type` supply it.
+///
+/// The inline flags are the caller's half of that. `--name`, `--owner-*` and
+/// `--type` fill in or override what the footer says. `--element-type` is an
+/// **assertion**, not an override: it is how `tuple(3,f64)` gets named for a
+/// file whose bytes cannot say whether a `FixedSizeList<double>[3]` is a tuple
+/// or a dense row, and a contradiction with the footer is an error, exactly as
+/// it is everywhere else in this project.
+#[cfg(feature = "parquet")]
+fn parquet_requests(opts: &Options<'_>) -> Result<Vec<AddRequest>, String> {
+    if opts.descriptor.is_some() || opts.csv.is_some() {
+        return Err(
+            "--parquet carries its own descriptor; drop --descriptor and --csv".to_string(),
+        );
+    }
+    let options = infrastore_parquet::ImportOptions {
+        time_series_type: opts
+            .inline
+            .ts_type
+            .as_deref()
+            .map(parse::parse_ts_type)
+            .transpose()?,
+        element_type: opts
+            .inline
+            .element_type
+            .as_deref()
+            .map(parse::parse_element_type)
+            .transpose()?,
+        name: opts.inline.name.clone(),
+        time_reference: opts
+            .inline
+            .time_reference
+            .as_deref()
+            .map(|spelling| {
+                infrastore_core::TimeReference::parse(spelling)
+                    .map_err(|e| format!("invalid --time-reference: {e}"))
+            })
+            .transpose()?,
+    };
+    let mut features = std::collections::BTreeMap::new();
+    for pair in &opts.inline.feature {
+        let (k, v) = parse::parse_feature_kv(pair)?;
+        features.insert(k, v);
+    }
+    let owner_category = opts
+        .inline
+        .owner_category
+        .as_deref()
+        .map(parse::parse_owner_category)
+        .transpose()?;
+
+    let mut requests = Vec::with_capacity(opts.parquet.len());
+    for path in opts.parquet {
+        let series = infrastore_parquet::read_series(path, &options)
+            .map_err(|e| format!("reading {}: {e}", path.display()))?;
+        let owner_id = opts
+            .inline
+            .owner_id
+            .or(series.owner_id)
+            .ok_or_else(|| owner_missing(path, "--owner-id", "owner_id"))?;
+        let owner_type = opts
+            .inline
+            .owner_type
+            .clone()
+            .or(series.owner_type)
+            .ok_or_else(|| owner_missing(path, "--owner-type", "owner_type"))?;
+        requests.push(AddRequest {
+            owner_id,
+            owner_type,
+            owner_category: owner_category
+                .or(series.owner_category)
+                .unwrap_or(infrastore_core::OwnerCategory::Component),
+            data: series.data,
+            // The flags replace the footer's map rather than merging into it: a
+            // feature set is part of a series' identity, so a half-replaced one
+            // would file the row under an identity nobody named.
+            features: if features.is_empty() {
+                series.features
+            } else {
+                features.clone()
+            },
+        });
+    }
+    Ok(requests)
+}
+
+#[cfg(feature = "parquet")]
+fn owner_missing(path: &Path, flag: &str, key: &str) -> String {
+    format!(
+        "{} records no {key}; pass {flag} (a file written by `export -f parquet` carries \
+         one, a foreign file does not)",
+        path.display()
+    )
+}
+
+#[cfg(not(feature = "parquet"))]
+fn parquet_requests(_opts: &Options<'_>) -> Result<Vec<AddRequest>, String> {
+    Err(
+        "this infrastore was built without Parquet support; rebuild with \
+         `cargo install infrastore-cli --features parquet`"
+            .to_string(),
+    )
 }

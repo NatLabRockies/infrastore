@@ -4753,3 +4753,168 @@ fn a_parquet_export_honors_the_time_range() {
     let rows: usize = reader.map(|b| b.unwrap().num_rows()).sum();
     assert_eq!(rows, 2, "the range selects two of the three steps");
 }
+
+#[cfg(feature = "parquet")]
+#[test]
+fn a_parquet_export_re_adds_with_no_flags() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("src.h5");
+    let dest = dir.path().join("dest.h5");
+    seed_one(dir.path(), &source);
+    let out = dir.path().join("out");
+
+    run(
+        &source,
+        &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
+    );
+    let file = fs::read_dir(&out).unwrap().next().unwrap().unwrap().path();
+
+    // Self-describing: the footer is the descriptor.
+    run(&dest, &["add", "--parquet", file.to_str().unwrap()]);
+
+    let listed = run(&dest, &["-f", "json", "list"]);
+    let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    let rows = listed["items"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["name"], "load");
+    assert_eq!(rows[0]["owner_id"], 42);
+    assert_eq!(rows[0]["owner_type"], "Generator");
+    assert_eq!(rows[0]["type"], "SingleTimeSeries");
+
+    // And the *values* are the same bytes, which is what a content hash says.
+    let src_hash = {
+        let listed = run(&source, &["-f", "json", "list"]);
+        let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
+        listed["items"][0]["data_hash"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(rows[0]["data_hash"].as_str().unwrap(), src_hash);
+}
+
+#[cfg(feature = "parquet")]
+#[test]
+fn a_parquet_dry_run_reports_the_plan_and_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("src.h5");
+    let dest = dir.path().join("dest.h5");
+    seed_one(dir.path(), &source);
+    let out = dir.path().join("out");
+    run(
+        &source,
+        &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
+    );
+    let file = fs::read_dir(&out).unwrap().next().unwrap().unwrap().path();
+
+    let plan = run(
+        &dest,
+        &[
+            "-f",
+            "json",
+            "add",
+            "--parquet",
+            file.to_str().unwrap(),
+            "--dry-run",
+        ],
+    );
+    let plan: serde_json::Value = serde_json::from_str(&plan).unwrap();
+    assert_eq!(plan["items"][0]["name"], "load");
+    assert_eq!(plan["items"][0]["owner_id"], 42);
+    assert!(!dest.exists(), "--dry-run must not create the store");
+}
+
+#[cfg(feature = "parquet")]
+#[test]
+fn a_foreign_parquet_file_needs_its_owner_supplied() {
+    // What `to_arrow()` produces: a value object has no owner and no catalog id.
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("foreign.h5");
+    let path = dir.path().join("naked.parquet");
+    write_naked_parquet(&path);
+
+    // A name is part of a series' identity, so it is the first thing missing.
+    let err = run_err(&store, &["add", "--parquet", path.to_str().unwrap()]);
+    assert!(err.contains("name"), "{err}");
+
+    // With a name, the owner is what is left to supply.
+    let err = run_err(
+        &store,
+        &[
+            "add",
+            "--parquet",
+            path.to_str().unwrap(),
+            "--name",
+            "voltage",
+        ],
+    );
+    assert!(err.contains("--owner-id"), "{err}");
+
+    run(
+        &store,
+        &[
+            "add",
+            "--parquet",
+            path.to_str().unwrap(),
+            "--owner-id",
+            "7",
+            "--owner-type",
+            "Bus",
+            "--name",
+            "voltage",
+        ],
+    );
+    let listed = run(&store, &["-f", "json", "list"]);
+    let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    assert_eq!(listed["items"][0]["name"], "voltage");
+    assert_eq!(listed["items"][0]["owner_id"], 7);
+    // Evenly spaced rows with no footer read as a grid.
+    assert_eq!(listed["items"][0]["type"], "SingleTimeSeries");
+}
+
+#[cfg(feature = "parquet")]
+#[test]
+fn parquet_and_the_csv_forms_are_mutually_exclusive() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("both.h5");
+    let path = dir.path().join("naked.parquet");
+    write_naked_parquet(&path);
+    write(dir.path(), "v.csv", "value\n1\n2\n3\n");
+
+    let err = run_err(
+        &store,
+        &[
+            "add",
+            "--parquet",
+            path.to_str().unwrap(),
+            "--csv",
+            dir.path().join("v.csv").to_str().unwrap(),
+        ],
+    );
+    assert!(err.contains("carries its own descriptor"), "{err}");
+}
+
+/// A Parquet file with the right columns and no footer at all.
+#[cfg(feature = "parquet")]
+fn write_naked_parquet(path: &Path) {
+    use std::sync::Arc;
+
+    use arrow::array::{ArrayRef, Float64Array, RecordBatch, TimestampMillisecondArray};
+    use arrow::datatypes::{Field, Schema};
+
+    let t0 = 1_704_067_200_000i64; // 2024-01-01T00:00:00Z
+    let timestamps: ArrayRef = Arc::new(
+        TimestampMillisecondArray::from(vec![t0, t0 + 3_600_000, t0 + 7_200_000])
+            .with_timezone("UTC"),
+    );
+    let values: ArrayRef = Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0]));
+    let schema = Schema::new(vec![
+        Field::new("timestamp", timestamps.data_type().clone(), false),
+        Field::new("value", values.data_type().clone(), false),
+    ]);
+    let batch = RecordBatch::try_new(Arc::new(schema), vec![timestamps, values]).unwrap();
+    let file = fs::File::create(path).unwrap();
+    let mut writer = parquet::arrow::ArrowWriter::try_new(file, batch.schema(), None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+}

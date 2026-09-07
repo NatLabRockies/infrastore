@@ -188,6 +188,56 @@ infrastore --store demo.h5 -f csv export --name-glob 'load_*' --dir out/
 infrastore --store demo.h5 -f parquet export --name-glob 'load_*' --dir out/
 ```
 
+#### Parquet import
+
+`add --parquet <FILE>` is a third `add` form beside the descriptor and inline ones, repeatable so a
+whole `export --dir` lands in one command. **The file's footer is the descriptor**: a file written
+by `export -f parquet` round-trips back with no other flag.
+
+A **foreign** file — anything else's Parquet, including one Python's `to_arrow()` wrote — carries
+less, and what is missing has to be supplied:
+
+```sh
+infrastore --store demo.h5 add --parquet from_pandas.parquet \
+    --owner-id 42 --owner-type Generator --name load
+```
+
+What the import concludes when the footer is silent:
+
+| Missing            | Read as                                                                                                                                                                   |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `time_series_type` | `SingleTimeSeries` when the timestamps walk a grid, `NonSequentialTimeSeries` otherwise. `PersistentTimeSeries` is never inferred — name it with `--type`.                |
+| `element_type`     | The leaf Arrow type. A `FixedSizeList<T>[N]` becomes dtype `T` with element shape `[N]` — _dense_, not `tuple(N,T)`, because the bytes cannot say and dense assumes less. |
+| `time_reference`   | The timestamp column's Arrow zone; a column with no zone reads as `zoneless`, since a naive timestamp is a wall clock.                                                    |
+| `name`             | Nothing. A name is part of a series' identity, so `--name` is required.                                                                                                   |
+
+The inline flags fill those in, with one exception that follows the project's usual rule:
+`--element-type` is an **assertion**, not an override. `--element-type 'tuple(3,f64)'` states the
+reading the bytes cannot, and a value that contradicts the footer is an error rather than a silent
+replacement. `--type` behaves the same way.
+
+Four refusals:
+
+- **Nulls**, in either column. The store holds none, and NaN is a value rather than an absence, so a
+  null is refused rather than coerced.
+- **Timestamps finer than a millisecond.** Seconds and milliseconds cross as they are; microseconds
+  and nanoseconds only when every value is a whole millisecond. That is the same rule the write path
+  enforces on every instant the store records.
+- **Rows that leave the declared grid.** A `SingleTimeSeries` whose footer names `PT1H` must
+  actually walk one, checked against the grid that resolution generates rather than against
+  successive differences — `Period::Months` clamps to month end, so the two are not the same test.
+- **`Struct` and `List` value columns.** Those are the _decoded_ form of a composite element type,
+  which this version does not write and so does not claim to read.
+
+Two things a Parquet round trip does not preserve, both worth knowing:
+
+- **The catalog id.** `add` never accepts one — "never reissued" is a guarantee of the catalog's
+  `AUTOINCREMENT`, and a caller free to name an id could re-file a retired one — so the footer's
+  `id` is reported at `--dry-run` and then ignored. The destination assigns a fresh one.
+- **A composite series' `data_hash`.** Values round-trip exactly, which is an improvement over CSV
+  where floats pass through decimal text. But a composite element type re-encodes at the minimum
+  padding width, so one stored wider comes back with a different content hash.
+
 #### Parquet export
 
 `-f parquet` writes one `.parquet` file per matched series, with the same two-column table Python's
@@ -261,16 +311,16 @@ usually a different component, not a shorter view of the same sweep.
 
 ### Write data
 
-| Command         | Purpose                                                                         |
-| --------------- | ------------------------------------------------------------------------------- |
-| `init`          | Create an empty store with an explicit compression and catalog policy.          |
-| `add`           | Add one or more series from a descriptor JSON + CSV, or from flags.             |
-| `merge`         | Copy matching series from another store into this one.                          |
-| `transform`     | Derive `DeterministicSingleTimeSeries` from stored `SingleTimeSeries`.          |
-| `remove`        | Delete a single series, or every match with `--all` (prompts unless `--force`). |
-| `copy`          | Copy the single series a selector resolves to onto another owner.               |
-| `replace-owner` | Reassign every series from one owner to another.                                |
-| `clear`         | Remove all series, or all for one owner (prompts unless `--force`).             |
+| Command         | Purpose                                                                           |
+| --------------- | --------------------------------------------------------------------------------- |
+| `init`          | Create an empty store with an explicit compression and catalog policy.            |
+| `add`           | Add one or more series from a descriptor JSON + CSV, from Parquet, or from flags. |
+| `merge`         | Copy matching series from another store into this one.                            |
+| `transform`     | Derive `DeterministicSingleTimeSeries` from stored `SingleTimeSeries`.            |
+| `remove`        | Delete a single series, or every match with `--all` (prompts unless `--force`).   |
+| `copy`          | Copy the single series a selector resolves to onto another owner.                 |
+| `replace-owner` | Reassign every series from one owner to another.                                  |
+| `clear`         | Remove all series, or all for one owner (prompts unless `--force`).               |
 
 ```sh
 infrastore --store demo.h5 init --compression deflate:6
@@ -280,6 +330,7 @@ infrastore --store demo.h5 add --descriptor batch.json --replace --batch-size 50
 infrastore --store demo.h5 add --csv load.csv --owner-id 42 --owner-type Generator \
     --name load --type SingleTimeSeries --element-type f64 \
     --resolution PT1H --initial-timestamp 2024-01-01T00:00:00Z
+infrastore --store demo.h5 add --parquet out/42_Generator_load_SingleTimeSeries.parquet
 infrastore --store demo.h5 merge --from other.h5 --name-glob 'load_*'
 infrastore --store demo.h5 transform --horizon PT24H --interval PT1H
 infrastore --store demo.h5 remove --owner-id 42 --name load --type SingleTimeSeries
@@ -467,6 +518,7 @@ infrastore completions zsh > ~/.zfunc/_infrastore
 infrastore --store <PATH> init [--compression <none|deflate[:LEVEL]>] [--no-shuffle] [--catalog <attached|in-memory>]
 infrastore --store <PATH> add --descriptor <FILE.json|-> [--csv <FILE.csv>] [--dry-run] [--replace] [--batch-size N] [-q|--quiet] [--compression <SPEC>] [--no-shuffle] [--catalog <MODE>]
 infrastore --store <PATH> add --csv <FILE.csv> --owner-id <I> --owner-type <T> --name <N> --type <T> --element-type <E> [DESCRIPTOR FIELDS...]
+infrastore --store <PATH> add --parquet <FILE.parquet> [--parquet <FILE.parquet>...] [DESCRIPTOR FIELDS...]
 infrastore --store <PATH> merge --from <PATH.h5> [SELECTOR...] [--replace] [--dry-run]
 infrastore --store <PATH> list    [SELECTOR...] [--limit N] [--wide]
 infrastore --store <PATH> get     [SELECTOR...] [--time-range START..END] [--limit N | --full] [--tail] [--stride N] [--plot [--plot-width COLS]] [--window N | --issue-time <TS>]

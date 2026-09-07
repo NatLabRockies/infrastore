@@ -38,9 +38,11 @@
 //! leaks, so a caller matching on `TimeSeriesError` needs no new arm.
 
 pub mod export;
+pub mod import;
 pub mod schema;
 
 pub use export::{TIMESTAMP_COLUMN, VALUE_COLUMN, record_batch, timestamp_data_type, write_series};
+pub use import::{ImportOptions, ImportedSeries, read_series};
 
 use infrastore_core::TimeSeriesError;
 
