@@ -48,11 +48,21 @@ while a set of series driving all of them may share one name.
 
 from __future__ import annotations
 
+import sys
 from datetime import datetime, timezone
 from typing import Any, NamedTuple
 
 import numpy as np
 import polars as pl
+
+# Polars draws its tables with Unicode box-drawing characters, and a Windows
+# console defaults to a code page that cannot encode them - printing a frame
+# raises UnicodeEncodeError rather than rendering badly. Every example imports
+# this module, so asking stdout for UTF-8 here fixes all of them. `reconfigure`
+# is missing when stdout has been replaced by something that is not a text
+# stream, which is why this is guarded rather than called outright.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 
 
 class Component(NamedTuple):
