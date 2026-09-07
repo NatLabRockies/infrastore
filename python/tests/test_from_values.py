@@ -183,12 +183,65 @@ def test_values_that_name_no_element_type_are_refused():
     # Rows that read equally as an empty curve or an empty tuple.
     with pytest.raises(InvalidParameterError, match="every row is empty"):
         SingleTimeSeries.from_values(T0, HOUR, [[], []], "cost")
-    # A declaration settles the first case.
+    # A declaration settles both cases — the error names it as the remedy, so it
+    # has to actually be one.
     declared = SingleTimeSeries.from_values(
         T0, HOUR, [], "cost", element_type="linear_function"
     )
     assert declared.element_type == "linear_function"
     assert declared.data.shape == (0, 2)
+
+
+def test_a_declaration_settles_rows_that_are_all_empty():
+    """The remedy the ambiguity error names, so it has to actually be one.
+
+    A curve with no points is a storable series — it packs to width 1, the
+    leading point count — and the rows cannot say so themselves.
+    """
+    curves = SingleTimeSeries.from_values(
+        T0, HOUR, [[], []], "cost", element_type="piecewise_linear"
+    )
+    assert curves.element_type == "piecewise_linear"
+    assert curves.data.shape == (2, 1)
+    assert curves.decoded_values() == [[], []]
+
+    # Still an assertion: empty rows are sequences, so a declaration whose rows
+    # are mappings disagrees with them, and a tuple arity they cannot fill does
+    # too — neither degrades into a raw TypeError from the decoder.
+    with pytest.raises(InvalidParameterError, match="disagrees with the values"):
+        SingleTimeSeries.from_values(
+            T0, HOUR, [[], []], "q", element_type="quadratic_function"
+        )
+    with pytest.raises(InvalidParameterError, match="disagrees with the values"):
+        SingleTimeSeries.from_values(
+            T0, HOUR, [[], []], "t", element_type="tuple(3,f64)"
+        )
+
+
+def test_the_values_are_read_once_so_a_generator_survives():
+    """Inference and encoding share one pass.
+
+    Iterating `values` twice would hand the encoder whatever inference had not
+    already consumed — and a static series takes its `length` from the values, so
+    the lost timesteps would not be caught by anything downstream.
+    """
+    rows = ({"proportional": float(h), "constant": 1.0} for h in range(4))
+    ts = SingleTimeSeries.from_values(T0, HOUR, rows, "cost")
+    assert ts.element_type == "linear_function"
+    assert ts.length == 4
+    assert [v["proportional"] for v in ts.decoded_values()] == [0.0, 1.0, 2.0, 3.0]
+
+
+def test_a_scalar_element_type_is_sent_back_to_the_constructor():
+    """Inside the hierarchy, whatever the values are.
+
+    `from_values` exists to encode composite values; a scalar has none, and the
+    refusal has to be catchable as `InvalidParameterError` like every other
+    argument error — `ValueError` is outside `TimeSeriesError` entirely.
+    """
+    for values in ([], [{"proportional": 1.0, "constant": 2.0}]):
+        with pytest.raises(InvalidParameterError, match="is a scalar"):
+            SingleTimeSeries.from_values(T0, HOUR, values, "load", element_type="f64")
 
 
 def test_an_empty_tuple_series_names_its_remedy():

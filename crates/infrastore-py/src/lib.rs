@@ -2044,9 +2044,11 @@ impl PySingleTimeSeries {
     /// the constructor as `data=`.
     ///
     /// `element_type=` is accepted as an assertion, not an override — it raises
-    /// `InvalidParameterError` if it disagrees with the values. The remaining
-    /// keyword arguments are the descriptive attributes documented on the
-    /// constructor.
+    /// `InvalidParameterError` if it disagrees with the values. Where the values
+    /// name nothing it is the only thing to go on: an empty `values`, or rows
+    /// that are all empty and read equally as a curve with no points or a tuple
+    /// with no fields. The remaining keyword arguments are the descriptive
+    /// attributes documented on the constructor.
     ///
     /// Raises `InvalidParameterError` if the values cannot be encoded: tuple
     /// rows of differing arity, a step function whose `x` and `y` lengths
@@ -5880,7 +5882,8 @@ fn encode_element_values<'py>(
     leading_dims: Option<Vec<usize>>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let element_type = parse_element_type(element_type)?;
-    let decoded = py_to_decoded(values, element_type)?;
+    let rows: Vec<Bound<'_, PyAny>> = values.try_iter()?.collect::<PyResult<_>>()?;
+    let decoded = py_to_decoded(&rows, element_type)?;
     let dims = leading_dims.unwrap_or_else(|| vec![decoded.len()]);
     // `encode_as` is the core's declared-type encoder: it takes an empty tuple
     // series' arity from `element_type` (the generic encoder cannot infer one
@@ -5892,8 +5895,19 @@ fn encode_element_values<'py>(
     numpy_from_typed(py, &array)
 }
 
-/// The element type a `from_values` payload implies, or `None` when the payload
-/// is empty and implies nothing.
+/// What a scan of a `from_values` payload's rows settles about its element type.
+enum Inferred {
+    /// A row discriminated, so this is what the values are.
+    Known(core_lib::ElementType),
+    /// There are rows, but every one of them is empty, which reads equally as a
+    /// `piecewise_linear` curve with no points or a tuple with no fields. Only a
+    /// declaration can break the tie.
+    Ambiguous,
+    /// There are no rows at all, so the values imply nothing.
+    Empty,
+}
+
+/// The element type a `from_values` payload implies.
 ///
 /// Rust and Julia never need this: a `DecodedValues` and a
 /// `Vector{PiecewiseLinear}` each carry their variant in the type system. A
@@ -5914,8 +5928,10 @@ fn encode_element_values<'py>(
 /// A `piecewise_linear` row is an empty list when a timestep's curve has no
 /// points, and so is a zero-arity tuple row, so the scan walks past empty rows
 /// looking for one that discriminates. A payload of nothing but empty rows is
-/// genuinely ambiguous and reported as such.
-fn infer_element_type(values: &Bound<'_, PyAny>) -> PyResult<Option<core_lib::ElementType>> {
+/// genuinely ambiguous, and says so rather than failing here: such a series is
+/// storable, and a declared `element_type=` settles which one it is. Deciding
+/// that is [`from_values_payload`]'s job, because only it knows the declaration.
+fn infer_element_type(rows: &[Bound<'_, PyAny>]) -> PyResult<Inferred> {
     use core_lib::{Dtype, ElementType};
 
     // `get_item` on a mapping without the key raises `KeyError`, and on a
@@ -5923,16 +5939,15 @@ fn infer_element_type(values: &Bound<'_, PyAny>) -> PyResult<Option<core_lib::El
     let has = |row: &Bound<'_, PyAny>, key: &str| row.get_item(key).is_ok();
 
     let mut saw_empty_row = false;
-    for (index, row) in values.try_iter()?.enumerate() {
-        let row = row?;
-        if has(&row, "quadratic") {
-            return Ok(Some(ElementType::QuadraticFunction));
+    for (index, row) in rows.iter().enumerate() {
+        if has(row, "quadratic") {
+            return Ok(Inferred::Known(ElementType::QuadraticFunction));
         }
-        if has(&row, "proportional") {
-            return Ok(Some(ElementType::LinearFunction));
+        if has(row, "proportional") {
+            return Ok(Inferred::Known(ElementType::LinearFunction));
         }
-        if has(&row, "x") && has(&row, "y") {
-            return Ok(Some(ElementType::PiecewiseStep));
+        if has(row, "x") && has(row, "y") {
+            return Ok(Inferred::Known(ElementType::PiecewiseStep));
         }
         let Ok(mut points) = row.try_iter() else {
             return Err(InvalidParameterError::new_err(format!(
@@ -5949,7 +5964,7 @@ fn infer_element_type(values: &Bound<'_, PyAny>) -> PyResult<Option<core_lib::El
             None => saw_empty_row = true,
             Some(point) => {
                 let point = point?;
-                return Ok(Some(if has(&point, "x") && has(&point, "y") {
+                return Ok(Inferred::Known(if has(&point, "x") && has(&point, "y") {
                     ElementType::PiecewiseLinear
                 } else {
                     // Arity comes from the decoded rows, not from this one.
@@ -5961,14 +5976,11 @@ fn infer_element_type(values: &Bound<'_, PyAny>) -> PyResult<Option<core_lib::El
             }
         }
     }
-    if saw_empty_row {
-        return Err(InvalidParameterError::new_err(
-            "cannot tell what these values are: every row is empty, which reads \
-             equally as a `piecewise_linear` curve with no points or a tuple with \
-             no fields. Declare `element_type=` to say which.",
-        ));
-    }
-    Ok(None)
+    Ok(if saw_empty_row {
+        Inferred::Ambiguous
+    } else {
+        Inferred::Empty
+    })
 }
 
 /// Read a `from_values` payload into the core's `DecodedValues`, cross-checking
@@ -5983,12 +5995,50 @@ fn from_values_payload(
     declared: Option<&str>,
 ) -> PyResult<core_lib::DecodedValues> {
     let declared = declared.map(parse_element_type).transpose()?;
-    let inferred = infer_element_type(values)?;
-    let read_as = match (declared, inferred) {
+    // One pass over `values`. Both halves below need the rows, and a generator
+    // is spent by whoever iterates it first -- iterating twice would drop the
+    // rows inference consumed, silently, since the series takes its length from
+    // what survives.
+    let rows: Vec<Bound<'_, PyAny>> = values.try_iter()?.collect::<PyResult<_>>()?;
+    if let Some(scalar @ core_lib::ElementType::Scalar(_)) = declared {
+        return Err(InvalidParameterError::new_err(format!(
+            "from_values encodes composite per-timestep values (a cost curve, a \
+             linear function, a tuple), and element_type \"{scalar}\" is a scalar. \
+             A series of plain numbers is `data=` on the constructor, which needs \
+             no encoding."
+        )));
+    }
+    let read_as = match (declared, infer_element_type(&rows)?) {
         // Non-empty values always win: they are the thing being encoded.
-        (_, Some(inferred)) => inferred,
-        // Nothing to read, so the declaration is all there is to go on.
-        (Some(core_lib::ElementType::Tuple { arity, dtype }), None) => {
+        (_, Inferred::Known(inferred)) => inferred,
+        // Rows too empty to speak for themselves, settled by the declaration:
+        // an all-empty `piecewise_linear` series is storable, so this is the one
+        // place a declaration is load-bearing rather than a cross-check. The rows
+        // are still sequences, though, so a declaration whose rows are mappings
+        // disagrees with them as surely as a populated row would.
+        (
+            Some(
+                declared @ (core_lib::ElementType::PiecewiseLinear
+                | core_lib::ElementType::Tuple { .. }),
+            ),
+            Inferred::Ambiguous,
+        ) => declared,
+        (Some(declared), Inferred::Ambiguous) => {
+            return Err(InvalidParameterError::new_err(format!(
+                "element_type \"{declared}\" disagrees with the values, whose rows are \
+                 all empty sequences -- which read as `piecewise_linear` curves with \
+                 no points, not as \"{declared}\"."
+            )));
+        }
+        (None, Inferred::Ambiguous) => {
+            return Err(InvalidParameterError::new_err(
+                "cannot tell what these values are: every row is empty, which reads \
+                 equally as a `piecewise_linear` curve with no points or a tuple with \
+                 no fields. Declare `element_type=` to say which.",
+            ));
+        }
+        // Nothing to read at all, so the declaration is all there is to go on.
+        (Some(core_lib::ElementType::Tuple { arity, dtype }), Inferred::Empty) => {
             return Err(InvalidParameterError::new_err(format!(
                 "an empty tuple series cannot be built from values, because a \
                  tuple's arity lives in its rows and there are none. Encode it \
@@ -5997,15 +6047,15 @@ fn from_values_payload(
                 dtype.as_str()
             )));
         }
-        (Some(declared), None) => declared,
-        (None, None) => {
+        (Some(declared), Inferred::Empty) => declared,
+        (None, Inferred::Empty) => {
             return Err(InvalidParameterError::new_err(
                 "cannot infer an element_type from an empty `values`: declare \
                  element_type= to say what the series holds.",
             ));
         }
     };
-    let decoded = py_to_decoded(values, read_as)?;
+    let decoded = py_to_decoded(&rows, read_as)?;
     if let Some(declared) = declared {
         let implied = core_lib::element_type_of(&decoded).unwrap_or(read_as);
         if declared != implied {
@@ -6023,18 +6073,17 @@ fn from_values_payload(
 /// `decode_element_values` produces, so a round trip through Python needs no
 /// reshaping in between.
 fn py_to_decoded(
-    values: &Bound<'_, PyAny>,
+    rows: &[Bound<'_, PyAny>],
     element_type: core_lib::ElementType,
 ) -> PyResult<core_lib::DecodedValues> {
     use core_lib::{DecodedValues, ElementType, LinearFunction, QuadraticFunction};
 
-    let rows: Vec<Bound<'_, PyAny>> = values.try_iter()?.collect::<PyResult<_>>()?;
     let field = |row: &Bound<'_, PyAny>, name: &str| -> PyResult<f64> {
         row.get_item(name)?.extract::<f64>()
     };
     Ok(match element_type {
         ElementType::Scalar(_) => {
-            return Err(pyo3::exceptions::PyValueError::new_err(
+            return Err(InvalidParameterError::new_err(
                 "a scalar element_type has no values to encode: pass the numpy array \
                  to add_time_series directly",
             ));

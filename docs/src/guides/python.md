@@ -557,7 +557,9 @@ Which element type a payload implies is read off the shape of a row; the five sh
 | `list[float]` of length `N`                          | `tuple(N,f64)`       |
 
 `element_type=` is still accepted on `from_values`, as an assertion rather than an override: it
-raises `InvalidParameterError` if it disagrees with the values.
+raises `InvalidParameterError` if it disagrees with the values. Where the values name nothing it is
+the only thing to go on — an empty `values`, or rows that are all empty and read equally as a curve
+with no points or a tuple with no fields.
 
 Underneath sit `encode_element_values(values, element_type, leading_dims)` and
 `decode_element_values(array, element_type, leading_dims)`, which the rest of this section uses to

@@ -120,8 +120,10 @@ Each binding ships a reference codec between the stored bytes and per-timestep v
   | `list[float]` of length `N`                          | `tuple(N,f64)`       |
 
   `element_type=` is still accepted, as an assertion rather than an override: it raises if it
-  disagrees with the values. Rows that name nothing — an empty `values`, or rows that are all empty
-  and read equally as a pointless curve or a zero-arity tuple — are refused, naming the remedy.
+  disagrees with the values. Where the values name nothing it is the only thing to go on — an empty
+  `values`, or rows that are all empty and read equally as a pointless curve or a zero-arity tuple —
+  and without it those are refused, naming the remedy. The one series no declaration reaches is an
+  empty `tuple(N,f64)`, whose arity lives in rows it does not have.
 - **TypeScript** — `@infrastore/codec`, which decodes a gRPC response's `value_bytes` + `shape` +
   `element_type` directly into plottable values.
 - **Julia** — `InfraStore.encode_element_values` / `decode_element_values`, over the value types
