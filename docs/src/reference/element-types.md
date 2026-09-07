@@ -96,10 +96,34 @@ Each binding ships a reference codec between the stored bytes and per-timestep v
   declares the element type they imply, and `TimeSeriesData::decoded_values` reads them back. An
   `element_type` and the array it describes are two things a caller can get out of step — the store
   rejects the mismatch on write, but deriving both from one set of values means there is none to
-  reject.
-- **Python** — `infrastore.decode_element_values(array, element_type, leading_dims)` and
-  `encode_element_values(values, element_type, leading_dims)`. The series is still built from the
-  encoded array with `element_type=` declared on its constructor; the encoder is what builds it.
+  reject. `encode_as` is the declared-type encoder for the one series `from_values` cannot name: a
+  tuple with no rows, whose arity lives in rows it does not have. See
+  [Element values](./rust-api.md#element-values).
+- **Python** — the paired forms first, as in Rust: every series type has a `from_values` classmethod
+  that encodes the values _and_ declares the element type they imply, and `.decoded_values()` on a
+  series reads them back. Underneath sit
+  `infrastore.decode_element_values(array, element_type, leading_dims)` and
+  `encode_element_values(values, element_type, leading_dims)`, for the cases the pair cannot name —
+  an empty `tuple(N,f64)` series, whose arity lives in rows it does not have — and for decoding an
+  array that arrived without a series around it.
+
+  A Python payload carries no type tag of its own, unlike a Rust `DecodedValues` or a Julia
+  `Vector{PiecewiseLinear}`, so `from_values` reads the element type off the shape of a row. The
+  five shapes are disjoint, which makes that a decision rather than a guess:
+
+  | `values` entry                                       | element type         |
+  | ---------------------------------------------------- | -------------------- |
+  | `{"proportional": …, "constant": …}`                 | `linear_function`    |
+  | `{"quadratic": …, "proportional": …, "constant": …}` | `quadratic_function` |
+  | `list[{"x": …, "y": …}]`                             | `piecewise_linear`   |
+  | `{"x": list, "y": list}`                             | `piecewise_step`     |
+  | `list[float]` of length `N`                          | `tuple(N,f64)`       |
+
+  `element_type=` is still accepted, as an assertion rather than an override: it raises if it
+  disagrees with the values. Where the values name nothing it is the only thing to go on — an empty
+  `values`, or rows that are all empty and read equally as a pointless curve or a zero-arity tuple —
+  and without it those are refused, naming the remedy. The one series no declaration reaches is an
+  empty `tuple(N,f64)`, whose arity lives in rows it does not have.
 - **TypeScript** — `@infrastore/codec`, which decodes a gRPC response's `value_bytes` + `shape` +
   `element_type` directly into plottable values.
 - **Julia** — `InfraStore.encode_element_values` / `decode_element_values`, over the value types

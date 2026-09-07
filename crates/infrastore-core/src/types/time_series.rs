@@ -715,6 +715,40 @@ pub struct PersistentTimeSeries {
 }
 
 impl PersistentTimeSeries {
+    /// Construct from per-breakpoint logical values, encoding them into the
+    /// flat array the store holds and declaring the element type they imply.
+    ///
+    /// The pairing is the point. An `element_type` and the array it describes
+    /// are two independent things a caller can get out of step;
+    /// [`Store::add`](crate::Store::add) rejects the mismatch, but only after
+    /// the fact. Deriving both from one set of values means there is no
+    /// mismatch to reject.
+    ///
+    /// Returns `Err(String)` if the values cannot be encoded: a
+    /// [`DecodedValues::Raw`], which carries no values of its own (build the
+    /// [`TypedArray`] and call [`Self::new`] instead), tuple rows of differing
+    /// arity, or a step function whose `x` and `y` lengths disagree.
+    ///
+    /// A tuple series with *no* rows is the one storable series these
+    /// constructors cannot name, because a tuple's arity lives in its rows.
+    /// Encode that one with [`encode_as`](crate::encode_as), which takes the
+    /// arity from a declared element type, and pair the two through
+    /// [`Self::new`] and [`Self::with_element_type`].
+    /// It also returns `Err` when the breakpoint count does not match the
+    /// number of values, or the breakpoints are not strictly increasing — the
+    /// same checks [`Self::new`] makes.
+    ///
+    /// One entry per breakpoint, so the step function holds entry `i` from
+    /// `timestamps[i]` until the next breakpoint.
+    pub fn from_values(
+        timestamps: Vec<DateTime<Utc>>,
+        values: &DecodedValues,
+        name: impl Into<String>,
+    ) -> Result<Self, String> {
+        let (data, element_type) = encode_with_type(values, &[values.len()])?;
+        Ok(Self::new(timestamps, data, name)?.with_element_type(element_type))
+    }
+
     pub fn new(
         timestamps: Vec<DateTime<Utc>>,
         data: TypedArray,
@@ -2859,6 +2893,14 @@ mod tests {
                     (0..4).map(|i| t0() + Duration::hours(i * 3)).collect(),
                     &curves(),
                     "n",
+                )
+                .unwrap(),
+            ),
+            TimeSeriesData::PersistentTimeSeries(
+                PersistentTimeSeries::from_values(
+                    (0..4).map(|i| t0() + Duration::hours(i * 3)).collect(),
+                    &curves(),
+                    "pt",
                 )
                 .unwrap(),
             ),

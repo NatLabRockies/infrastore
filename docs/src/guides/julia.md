@@ -4,6 +4,12 @@ This guide covers building on `InfraStore.jl`, the Julia package that wraps the
 [C ABI](../reference/c-abi.md), from installing it to the calls a consumer package makes. For exact
 signatures see the [Julia API reference](../reference/julia-api.md).
 
+For complete programs rather than isolated snippets, use the repository's
+[runnable Julia examples](https://github.com/NatLabRockies/infrastore/tree/main/examples/julia).
+They cover static, non-sequential, persistent, deterministic, probabilistic, and scenario data;
+fixed tuples; every function-valued element type; feature-based selection; and conversion to
+`DataFrame`s.
+
 ## Install
 
 Julia 1.10 or newer. `InfraStore.jl` is registered in General, and the native library comes with it:
@@ -82,7 +88,23 @@ store = Store(in_memory=false, path="system.h5")
 store = open_store("system.h5"; read_only=true)
 ```
 
-The store is finalized automatically, but you can release it eagerly with `close!(store)`.
+A `Store` registers a finalizer, so nothing leaks if you never close one — but the GC decides
+_when_, and on disk that means an open file handle and a held SQLite write lock for an unbounded
+time. Prefer the **do-block forms**, which release the store on the way out including on a throw:
+
+```julia
+Store(in_memory=true) do store
+    add_time_series!(store, 42, "Generator", Component, ts)
+end
+
+open_store("system.h5"; read_only=true) do store
+    only(list_metadata(store; owner_id=42, owner_category=Component, name="load"))
+end
+```
+
+`open_copy` has one too. `close!(store)` is the explicit form when a do-block does not fit — a
+long-lived store held by a consumer package, say — and is idempotent, so closing a store the
+finalizer later reaps is fine.
 
 ## Add a Series
 
@@ -202,6 +224,64 @@ Blocks nest (each level is a savepoint), and the store holds the SQLite write lo
 outermost one ends. A transaction does not batch: use `add_time_series_bulk!` inside it for the
 writes themselves. `begin_transaction!` / `commit_transaction!` / `rollback_transaction!` are the
 explicit form.
+
+### Values that are not numbers
+
+A timestep's value can be a function rather than a number — a cost curve re-offered every hour, a
+pair of coefficients, a fixed-width tuple. Hand the constructor those values and it does the rest:
+it packs them into the array the store holds and names the `element_type` they imply.
+
+```julia
+curves = [
+    PiecewiseLinear([(x = 30.0, y = 1155.0), (x = 100.0, y = 4120.0)]),
+    PiecewiseLinear([(x = 30.0, y = 1353.0), (x = 65.0, y = 2730.0), (x = 100.0, y = 4223.0)]),
+]
+
+ts = SingleTimeSeries(t0, Hour(1), curves, "variable_cost")
+ts.element_type            # "piecewise_linear" -- derived, not declared
+
+id = add_time_series!(store, 42, "Generator", Component, ts)
+read_by_id(store, id).data == curves      # true
+```
+
+There is no separate constructor for this and nothing to declare. A `Vector{PiecewiseLinear}` says
+what it is, so `element_type=` is only for the numeric case, where the numbers alone cannot say what
+they mean — and one that contradicts the values is an error rather than an override. The struct goes
+on holding the values you gave it; encoding happens at the ABI boundary, which is why a read hands
+back the same thing a write was given.
+
+A case covered end to end in the runnable
+[`single_custom_elements.jl`](https://github.com/NatLabRockies/infrastore/blob/main/examples/julia/single_custom_elements.jl)
+example. `InfraStore.jl` ships four value types plus `NTuple{N,Float64}`:
+
+| Value type          | `element_type`       | Constructor                           |
+| ------------------- | -------------------- | ------------------------------------- |
+| `LinearFunction`    | `linear_function`    | `(proportional, constant)`            |
+| `QuadraticFunction` | `quadratic_function` | `(quadratic, proportional, constant)` |
+| `PiecewiseLinear`   | `piecewise_linear`   | `(points)`, a vector of `XYCoords`    |
+| `PiecewiseStep`     | `piecewise_step`     | `(x_coords, y_values)`                |
+| `NTuple{N,Float64}` | `tuple(N,f64)`       | —                                     |
+
+Every series type takes them, including the irregular ones and the forecasts. A forecast's values
+keep their window shape rather than arriving flat, since a Julia array carries its own:
+
+```julia
+# [H = 2, count = 2]: a curve for every (horizon step, window) pair.
+det = Deterministic(t0, Hour(1), Hour(2), Hour(1), 2, reshape(curves4, 2, 2), "offer")
+```
+
+Two things follow from Julia arrays carrying their element type that are worth knowing. An **empty**
+series still names itself — `NTuple{3,Float64}[]` is a `tuple(3,f64)` series with no rows, which a
+language whose empty list is untyped cannot express. And a metadata row's `time_series_type` is the
+_full_ parameterized type, `SingleTimeSeries{PiecewiseLinear, 1}`, so it describes the values rather
+than their packing.
+
+`raw = true` on a read hands back the packing instead, and the per-timestamp
+[readers](#per-timestamp-reads-simulation-loop) are deliberately never decoded — they are the
+simulation path, and their numbers are physical. `encode_element_values` / `decode_element_values`
+are the same two directions as free functions, for an array with no series around it, and the door a
+consumer extends to encode and decode its **own** domain types with no conversion step. See
+[Element values](../reference/julia-api.md#element-values) for both.
 
 ## Read a Series
 

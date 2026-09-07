@@ -80,5 +80,8 @@ element types, which cover the curve forms production-cost and market models act
 | `piecewise_linear`   | (MW, $/hr) input-output points                                                    |
 | `piecewise_step`     | MW breakpoints + one $/MWh marginal cost per segment — an incremental offer curve |
 
-`encode_element_values` / `decode_element_values` translate between these and the packed arrays the
-store holds; `docs/src/reference/element-types.md` documents the packing and the wire vocabulary.
+Both examples build their series with `from_values`, which packs the curves into the array the store
+holds and records the element type they imply, and read them back with `decoded_values()`. The
+lower-level `encode_element_values` / `decode_element_values` translate the same two directions for
+a caller holding an array rather than a series; `docs/src/reference/element-types.md` documents the
+packing and the wire vocabulary.

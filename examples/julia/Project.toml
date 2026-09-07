@@ -1,0 +1,13 @@
+# The examples are their own project: `InfraStore` comes from this checkout, and
+# `DataFrames` is here only to print the results as tables. Nothing in the
+# binding needs it.
+[deps]
+DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
+Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
+InfraStore = "6aee0376-896a-4a59-96ff-12f221c99746"
+
+[sources]
+InfraStore = { path = "../../julia/InfraStore.jl" }
+
+[compat]
+julia = "1.11"

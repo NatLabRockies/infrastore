@@ -118,6 +118,23 @@ class SingleTimeSeries:
         component_field: str | None = None,
         time_reference: str | None = None,
     ) -> SingleTimeSeries: ...
+    @classmethod
+    def from_values(
+        cls,
+        initial_timestamp: datetime,
+        resolution: Period,
+        values: Sequence[Any],
+        name: str,
+        *,
+        application_data: str | None = None,
+        element_type: str | None = None,
+        units: str | None = None,
+        quantity_kind: str | None = None,
+        unit_system: str | None = None,
+        component_field: str | None = None,
+        time_reference: str | None = None,
+    ) -> SingleTimeSeries: ...
+    def decoded_values(self) -> list[Any] | None: ...
     @property
     def name(self) -> str: ...
     @property
@@ -164,6 +181,22 @@ class NonSequentialTimeSeries:
         component_field: str | None = None,
         time_reference: str | None = None,
     ) -> None: ...
+    @classmethod
+    def from_values(
+        cls,
+        timestamps: list[datetime],
+        values: Sequence[Any],
+        name: str,
+        *,
+        application_data: str | None = None,
+        element_type: str | None = None,
+        units: str | None = None,
+        quantity_kind: str | None = None,
+        unit_system: str | None = None,
+        component_field: str | None = None,
+        time_reference: str | None = None,
+    ) -> NonSequentialTimeSeries: ...
+    def decoded_values(self) -> list[Any] | None: ...
     @property
     def name(self) -> str: ...
     @property
@@ -206,6 +239,22 @@ class PersistentTimeSeries:
         component_field: str | None = None,
         time_reference: str | None = None,
     ) -> None: ...
+    @classmethod
+    def from_values(
+        cls,
+        timestamps: list[datetime],
+        values: Sequence[Any],
+        name: str,
+        *,
+        application_data: str | None = None,
+        element_type: str | None = None,
+        units: str | None = None,
+        quantity_kind: str | None = None,
+        unit_system: str | None = None,
+        component_field: str | None = None,
+        time_reference: str | None = None,
+    ) -> PersistentTimeSeries: ...
+    def decoded_values(self) -> list[Any] | None: ...
     @property
     def name(self) -> str: ...
     @property
@@ -255,6 +304,26 @@ class Deterministic:
         component_field: str | None = None,
         time_reference: str | None = None,
     ) -> None: ...
+    @classmethod
+    def from_values(
+        cls,
+        initial_timestamp: datetime,
+        resolution: Period,
+        horizon: Period,
+        interval: Period,
+        count: int,
+        values: Sequence[Any],
+        name: str,
+        *,
+        application_data: str | None = None,
+        element_type: str | None = None,
+        units: str | None = None,
+        quantity_kind: str | None = None,
+        unit_system: str | None = None,
+        component_field: str | None = None,
+        time_reference: str | None = None,
+    ) -> Deterministic: ...
+    def decoded_values(self) -> list[Any] | None: ...
     @property
     def name(self) -> str: ...
     @property
@@ -308,6 +377,27 @@ class Probabilistic:
         component_field: str | None = None,
         time_reference: str | None = None,
     ) -> None: ...
+    @classmethod
+    def from_values(
+        cls,
+        initial_timestamp: datetime,
+        resolution: Period,
+        horizon: Period,
+        interval: Period,
+        count: int,
+        percentiles: list[float],
+        values: Sequence[Any],
+        name: str,
+        *,
+        application_data: str | None = None,
+        element_type: str | None = None,
+        units: str | None = None,
+        quantity_kind: str | None = None,
+        unit_system: str | None = None,
+        component_field: str | None = None,
+        time_reference: str | None = None,
+    ) -> Probabilistic: ...
+    def decoded_values(self) -> list[Any] | None: ...
     @property
     def name(self) -> str: ...
     @property
@@ -361,6 +451,27 @@ class Scenarios:
         component_field: str | None = None,
         time_reference: str | None = None,
     ) -> None: ...
+    @classmethod
+    def from_values(
+        cls,
+        initial_timestamp: datetime,
+        resolution: Period,
+        horizon: Period,
+        interval: Period,
+        count: int,
+        scenario_count: int,
+        values: Sequence[Any],
+        name: str,
+        *,
+        application_data: str | None = None,
+        element_type: str | None = None,
+        units: str | None = None,
+        quantity_kind: str | None = None,
+        unit_system: str | None = None,
+        component_field: str | None = None,
+        time_reference: str | None = None,
+    ) -> Scenarios: ...
+    def decoded_values(self) -> list[Any] | None: ...
     @property
     def name(self) -> str: ...
     @property

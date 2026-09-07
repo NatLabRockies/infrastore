@@ -81,8 +81,8 @@ The module exposes `Store` and `Transaction`; the static series classes `SingleT
 `NonSequentialTimeSeries`, and `PersistentTimeSeries`; the forecast classes `Deterministic`,
 `Probabilistic`, and `Scenarios`; the readers `StaticReader` and `ForecastReader`; the association
 records `SupplementalAttributeAssociation` and `ParentChildAssociation`; the `TimeSeriesType` and
-`OwnerCategory` enums; the `init_tracing` and `decode_element_values` functions; `__version__`; and
-an exception hierarchy rooted at `TimeSeriesError`.
+`OwnerCategory` enums; the `init_tracing`, `encode_element_values`, and `decode_element_values`
+functions; `__version__`; and an exception hierarchy rooted at `TimeSeriesError`.
 
 If you are building a package on top of infrastore — the way
 [infrasys](https://github.com/NatLabRockies/infrasys) does — read
@@ -513,12 +513,59 @@ left_behind = store.list_metadata(time_series_type=TimeSeriesType.PersistentTime
 
 ## Custom Element Types
 
-By default an array's elements are plain numbers of its dtype. `element_type=` on a series
-constructor says otherwise: what the trailing per-step dimension of the array actually _means_. It
-is metadata, not a different storage format — the array is still the same typed HDF5 dataset — but
-it is what lets `decode_element_values` (and every other binding's reader) turn the raw floats back
-into the values you meant. See [Element types](../reference/element-types.md) for the full grammar
-and the byte layout each kind produces; this section works through each one from Python.
+By default an array's elements are plain numbers of its dtype. An `element_type` says otherwise:
+what the trailing per-step dimension of the array actually _means_. It is metadata, not a different
+storage format — the array is still the same typed HDF5 dataset — but it is what lets a reader turn
+the raw floats back into the values you meant. See [Element types](../reference/element-types.md)
+for the full grammar and the byte layout each kind produces; this section works through each one
+from Python.
+
+### `from_values` and `decoded_values`
+
+Every series type has a `from_values` classmethod that takes the values themselves. It encodes them
+and records the element type they imply, so the two cannot disagree:
+
+```python
+curves = [
+    [{"x": 0.0, "y": 1.0}, {"x": 1.0, "y": 3.0}],
+    [{"x": 0.0, "y": 2.0}],
+]
+ts = SingleTimeSeries.from_values(
+    datetime(2024, 1, 1, tzinfo=timezone.utc), timedelta(hours=1), curves, "cost_curve",
+)
+assert ts.element_type == "piecewise_linear"     # nobody declared it
+
+series_id = store.add_time_series(
+    owner_id=42, owner_type="Generator", owner_category=OwnerCategory.Component, time_series=ts,
+)
+assert store.read_by_id(series_id).decoded_values() == curves
+```
+
+`decoded_values()` is the read-side half: the element type and the number of leading axes both come
+off the series, so there is nothing left to pass. It returns `None` for a scalar element type and
+for any array whose dtype is not `float64` — there the stored elements already are the values, and
+`.data` is the answer.
+
+Which element type a payload implies is read off the shape of a row; the five shapes are disjoint:
+
+| `values` entry                                       | element type         |
+| ---------------------------------------------------- | -------------------- |
+| `{"proportional": …, "constant": …}`                 | `linear_function`    |
+| `{"quadratic": …, "proportional": …, "constant": …}` | `quadratic_function` |
+| `list[{"x": …, "y": …}]`                             | `piecewise_linear`   |
+| `{"x": list, "y": list}`                             | `piecewise_step`     |
+| `list[float]` of length `N`                          | `tuple(N,f64)`       |
+
+`element_type=` is still accepted on `from_values`, as an assertion rather than an override: it
+raises `InvalidParameterError` if it disagrees with the values. Where the values name nothing it is
+the only thing to go on — an empty `values`, or rows that are all empty and read equally as a curve
+with no points or a tuple with no fields.
+
+Underneath sit `encode_element_values(values, element_type, leading_dims)` and
+`decode_element_values(array, element_type, leading_dims)`, which the rest of this section uses to
+show what each element type packs into. Reach for them directly when there is no series to hang the
+values on — decoding an array that arrived on its own — or for the one series `from_values` cannot
+name: an empty `tuple(N,f64)`, whose arity lives in rows it does not have.
 
 ### Composite values: `tuple(N,dtype)`
 
@@ -535,17 +582,22 @@ ts = SingleTimeSeries(
 )
 ```
 
-`decode_element_values` only unpacks `f64` arrays — for any other dtype (`tuple(3,i32)`, say) it
-returns `None`, because there is nothing to unpack: the stored rows already are the tuples, and you
-read them straight off `.data`. `encode_element_values` is a convenience for the `f64` case only; it
-also always builds `f64`, so it cannot produce a tuple of any other dtype.
+This is the one element type where the constructor stays the natural call: there is no packing to
+build, so an array you already hold in numpy needs no encoding step. `from_values` accepts the same
+values as a list of `list[float]` rows, and is the better fit when that is the shape you have.
+
+`decoded_values()` and `decode_element_values` only unpack `f64` arrays — for any other dtype
+(`tuple(3,i32)`, say) they return `None`, because there is nothing to unpack: the stored rows
+already are the tuples, and you read them straight off `.data`. `encode_element_values` is a
+convenience for the `f64` case only; it also always builds `f64`, so neither it nor `from_values`
+can produce a tuple of any other dtype.
 
 ### Fixed-width coefficients: `linear_function`, `quadratic_function`
 
 These give every timestep a small, fixed number of function coefficients — a proportional and a
 constant term for a line, plus a quadratic term for a parabola — packed as `f64` regardless of the
-rest of the series. Build the array with `encode_element_values` from a list of per-timestep dicts,
-matching keys to the function's coefficients:
+rest of the series. The values are a list of per-timestep dicts, matching keys to the function's
+coefficients:
 
 ```python
 from infrastore import encode_element_values, decode_element_values
@@ -555,19 +607,20 @@ curves = [
     {"proportional": 1.2, "constant": 1.8},
 ]
 array = encode_element_values(curves, "linear_function")   # shape (2, 2), f64
+assert decode_element_values(array, "linear_function") == curves
+```
 
-ts = SingleTimeSeries(
-    datetime(2024, 1, 1, tzinfo=timezone.utc), timedelta(hours=1), array, "marginal_cost",
-    element_type="linear_function",
+Or, without naming the type or holding the array at all:
+
+```python
+ts = SingleTimeSeries.from_values(
+    datetime(2024, 1, 1, tzinfo=timezone.utc), timedelta(hours=1), curves, "marginal_cost",
 )
 series_id = store.add_time_series(
     owner_id=7, owner_type="ThermalStandard", owner_category=OwnerCategory.Component,
     time_series=ts,
 )
-
-meta = store.get_metadata_by_id(series_id)
-back = store.read_by_id(series_id)
-assert decode_element_values(back.data, meta["element_type"]) == curves
+assert store.read_by_id(series_id).decoded_values() == curves
 ```
 
 `quadratic_function` is the same shape, with a `"quadratic"` key added and row width `3` instead of
@@ -590,19 +643,16 @@ curves = [
     [{"x": 0.0, "y": 1.0}, {"x": 1.0, "y": 3.0}, {"x": 2.0, "y": 5.0}],                      # 3 points
     [{"x": 0.0, "y": 2.0}, {"x": 1.0, "y": 4.0}, {"x": 2.0, "y": 6.0}, {"x": 3.0, "y": 8.0}], # 4 points
 ]
-array = encode_element_values(curves, "piecewise_linear")   # shape (2, 1 + 2*4) = (2, 9)
-
-ts = SingleTimeSeries(
-    datetime(2024, 1, 1, tzinfo=timezone.utc), timedelta(hours=1), array, "cost_curve",
-    element_type="piecewise_linear",
+ts = SingleTimeSeries.from_values(
+    datetime(2024, 1, 1, tzinfo=timezone.utc), timedelta(hours=1), curves, "cost_curve",
 )
+assert ts.data.shape == (2, 1 + 2 * 4)   # widest row wins; the 3-point row is padded
 series_id = store.add_time_series(
     owner_id=42, owner_type="Generator", owner_category=OwnerCategory.Component, time_series=ts,
 )
 
-meta = store.get_metadata_by_id(series_id)
 back = store.read_by_id(series_id)
-assert decode_element_values(back.data, meta["element_type"]) == curves   # 3- and 4-point rows both exact
+assert back.decoded_values() == curves   # 3- and 4-point rows both exact
 ```
 
 A `piecewise_step` timestep decodes to a **different** shape — one dict of parallel arrays rather
@@ -625,9 +675,24 @@ HDF5 dataset (`element_shape` differs), not an in-place resize of the array you 
 same packing rule every other same-shaped-series pooling in this store follows.
 
 Forecasts (`Deterministic`, `Probabilistic`, `Scenarios`) use these same element types over their
-extra leading axes — pass `leading_dims=[horizon, count]` (or `[percentiles, horizon, count]` /
-`[scenarios, horizon, count]`) to `encode_element_values` instead of the default single-axis case.
-See [Forecasts](#forecasts) above for the shapes those types read back as.
+extra leading axes. This is where `from_values` saves the most: the leading dimensions come from
+arguments the forecast constructor already takes, so nothing is computed by hand.
+
+```python
+# H = horizon / resolution = 2, so [H, count] = [2, 2] wants four curves, entry
+# `i * count + j` being window `j`'s step `i`.
+forecast = Deterministic.from_values(
+    start, timedelta(hours=1), timedelta(hours=2), timedelta(hours=1), 2, curves * 2,
+    "cost_curve",
+)
+assert forecast.data.shape == (2, 2, 9)
+```
+
+`Scenarios.from_values` takes `scenario_count` explicitly, where its constructor reads it off the
+array's first axis — there is no array yet to read it from. Going through `encode_element_values`
+instead means passing `leading_dims=[horizon, count]` (or `[percentiles, horizon, count]` /
+`[scenarios, horizon, count]`) yourself, in place of the default single-axis case. See
+[Forecasts](#forecasts) above for the shapes those types read back as.
 
 ## Query Metadata
 

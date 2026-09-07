@@ -191,6 +191,60 @@ last breakpoint's value forward to it, with `row_at` as the shape-generic form a
 [`StaticReader`](../explanation/readers.md), which for this type alone lets its columns sit on
 independent breakpoint vectors.
 
+### Values that are not numbers
+
+A timestep's value can be a function rather than a number — a cost curve re-offered every hour, a
+pair of coefficients, a fixed-width tuple. The array still holds `f64`; what those elements _mean_
+is the series' [`element_type`](../reference/element-types.md), and the values themselves are a
+[`DecodedValues`](../reference/rust-api.md#element-values).
+
+Build such a series with `from_values` rather than `new`. It encodes the values into the array _and_
+declares the element type they imply:
+
+```rust
+use infrastore_core::{DecodedValues, ElementType, XyPoint};
+
+// One input-output cost curve per hour; point counts may differ per timestep.
+let curves = DecodedValues::PiecewiseLinear(vec![
+    vec![XyPoint { x: 30.0, y: 1155.0 }, XyPoint { x: 100.0, y: 4120.0 }],
+    vec![XyPoint { x: 30.0, y: 1353.0 }, XyPoint { x: 65.0, y: 2730.0 }, XyPoint { x: 100.0, y: 4223.0 }],
+]);
+
+let ts = SingleTimeSeries::from_values(initial, Duration::hours(1), &curves, "variable_cost")?;
+assert_eq!(ts.element_type, ElementType::PiecewiseLinear);   // derived, not declared
+```
+
+That pairing is the point. An `element_type` and the array it describes are two independent things a
+caller can get out of step — `add_time_series` rejects the mismatch, but only after the fact.
+Deriving both from one input leaves nothing to get out of step, which is why `from_values` is
+preferred over `new` + `with_element_type` for every composite series.
+
+The read side is `decoded_values`, which takes the element type and the leading-axis count off the
+value rather than asking for them:
+
+```rust
+let data = store.read_by_id(ts_id, ReadWindow::full())?;
+assert_eq!(data.decoded_values()?, curves);
+```
+
+A plain numeric series decodes to `DecodedValues::Raw` — the stored elements already are the values,
+so the array is the answer. That is a result, not an error.
+
+Every series type has `from_values`. On a forecast it carries more weight, because the leading axes
+are derived too: `Deterministic::from_values` fills `[H, count]` with `H` computed from
+`horizon`/`resolution`, so the values are one flat list in row-major order over those axes and
+nothing is reshaped by hand.
+
+```rust
+// H = 2 (a two-hour horizon at hourly resolution) x count = 2 windows = 4 curves.
+let forecast = Deterministic::from_values(
+    initial, Duration::hours(1), Duration::hours(2), Duration::hours(1), 2, &curves4, "offer",
+)?;
+```
+
+`Probabilistic::from_values` and `Scenarios::from_values` are the same with a third leading axis,
+taken from `percentiles.len()` and `scenario_count`.
+
 See [Choosing a Type](../explanation/time-series-types.md#choosing-a-type) if you are deciding
 between these and a `SingleTimeSeries`.
 

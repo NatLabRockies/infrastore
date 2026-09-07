@@ -184,6 +184,33 @@ jobs:
             julia --project=julia/InfraStore.jl -e 'using Pkg; Pkg.test()'
           fi
 
+      # Keep the documentation examples executable on every supported runner,
+      # as the Python ones above are. `shared.jl` is included by the examples;
+      # it is not an example itself.
+      #
+      # `examples/julia` is its own project, resolving InfraStore from this
+      # checkout through `[sources]`, and it adds DataFrames purely to print
+      # tables -- so this instantiates separately from the package's own project
+      # above rather than reusing it.
+      - name: Run Julia examples
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            Linux) root=$PWD; lib=libinfrastore_ffi.so ;;
+            macOS) root=$PWD; lib=libinfrastore_ffi.dylib ;;
+            Windows) root=$(pwd -W); lib=infrastore_ffi.dll ;;
+            *) echo "unsupported runner: $RUNNER_OS" >&2; exit 1 ;;
+          esac
+          export INFRASTORE_LIB="$root/target/debug/$lib"
+          julia --project=examples/julia -e 'using Pkg; Pkg.instantiate()'
+          for example in examples/julia/*.jl; do
+            if [ "$(basename "$example")" = shared.jl ]; then
+              continue
+            fi
+            echo "Running $example"
+            julia --project=examples/julia "$example"
+          done
+
       # Render both reports from the profiles all three suites just wrote.
       # `--ignore-filename-regex` drops the protobuf code infrastore-proto's build
       # script generates into target/; build scripts are themselves excluded
