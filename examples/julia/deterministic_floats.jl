@@ -56,44 +56,43 @@ for window in 1:COUNT, step in 1:horizon_steps
     windows[step, window] = round(truth * (1.0 + 0.03 * lead), digits = 2)
 end
 
-store = Store()
+Store(in_memory = true) do store
+    forecast = Deterministic(
+        DAY_START + Hour(FIRST_ISSUE_HOUR),   # start of the first window
+        RESOLUTION,
+        HORIZON,
+        INTERVAL,
+        COUNT,
+        windows,
+        "max_active_power";
+        units = "MW",
+        quantity_kind = "ActivePower",
+        unit_system = NaturalUnits,
+        component_field = "max_active_power",
+    )
+    series_id = add_time_series!(store, BUS_A_LOAD.id, BUS_A_LOAD.type, Component, forecast)
+    println("added $(BUS_A_LOAD.type) '$(BUS_A_LOAD.name)': id=$series_id")
 
-forecast = Deterministic(
-    DAY_START + Hour(FIRST_ISSUE_HOUR),   # start of the first window
-    RESOLUTION,
-    HORIZON,
-    INTERVAL,
-    COUNT,
-    windows,
-    "max_active_power";
-    units = "MW",
-    quantity_kind = "ActivePower",
-    unit_system = NaturalUnits,
-    component_field = "max_active_power",
-)
-series_id = add_time_series!(store, BUS_A_LOAD.id, BUS_A_LOAD.type, Component, forecast)
-println("added $(BUS_A_LOAD.type) '$(BUS_A_LOAD.name)': id=$series_id")
+    metadata = get_metadata_by_id(store, series_id)
+    # Periods come back as milliseconds — `pretty` is the examples' own display
+    # helper, not something the binding needs.
+    println("resolution=$(pretty(metadata.resolution)) " *
+            "horizon=$(pretty(metadata.horizon)) " *
+            "interval=$(pretty(metadata.interval)) count=$(metadata.count)")
 
-metadata = get_metadata_by_id(store, series_id)
-# Periods come back as milliseconds — `pretty` is the examples' own display
-# helper, not something the binding needs.
-println("resolution=$(pretty(metadata.resolution)) horizon=$(pretty(metadata.horizon)) " *
-        "interval=$(pretty(metadata.interval)) count=$(metadata.count)")
+    read_back = read_by_id(store, series_id)
+    frame = deterministic_frame(read_back)
+    println("\n$(nrow(frame)) (window, timestep) values")
+    println(first(sort(frame, [:issue_time, :timestamp]), 8))
 
-read_back = read_by_id(store, series_id)
-frame = deterministic_frame(read_back)
-println("\n$(nrow(frame)) (window, timestep) values")
-println(first(sort(frame, [:issue_time, :timestamp]), 8))
-
-# The overlap, made visible: every forecast anyone ever made of the peak hour,
-# oldest first, against what the hour actually turned out to be.
-peak = DAY_START + Hour(PEAK_HOUR)
-actual_peak = ACTUAL[PEAK_HOUR + 1]
-peak_rows = sort(filter(:timestamp => ==(peak), frame), :issue_time)
-peak_rows.lead_hours = Hour.(peak_rows.timestamp .- peak_rows.issue_time)
-peak_rows.error_mw = round.(peak_rows.value .- actual_peak, digits = 2)
-println("\nforecasts of the $(Dates.format(peak, "HH:MM")) peak " *
-        "(actual $actual_peak MW)")
-println(select(peak_rows, :issue_time, :lead_hours, :value, :error_mw))
-
-close!(store)
+    # The overlap, made visible: every forecast anyone ever made of the peak hour,
+    # oldest first, against what the hour actually turned out to be.
+    peak = DAY_START + Hour(PEAK_HOUR)
+    actual_peak = ACTUAL[PEAK_HOUR + 1]
+    peak_rows = sort(filter(:timestamp => ==(peak), frame), :issue_time)
+    peak_rows.lead_hours = Hour.(peak_rows.timestamp .- peak_rows.issue_time)
+    peak_rows.error_mw = round.(peak_rows.value .- actual_peak, digits = 2)
+    println("\nforecasts of the $(Dates.format(peak, "HH:MM")) peak " *
+            "(actual $actual_peak MW)")
+    println(select(peak_rows, :issue_time, :lead_hours, :value, :error_mw))
+end

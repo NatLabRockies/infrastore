@@ -88,7 +88,23 @@ store = Store(in_memory=false, path="system.h5")
 store = open_store("system.h5"; read_only=true)
 ```
 
-The store is finalized automatically, but you can release it eagerly with `close!(store)`.
+A `Store` registers a finalizer, so nothing leaks if you never close one — but the GC decides
+_when_, and on disk that means an open file handle and a held SQLite write lock for an unbounded
+time. Prefer the **do-block forms**, which release the store on the way out including on a throw:
+
+```julia
+Store(in_memory=true) do store
+    add_time_series!(store, 42, "Generator", Component, ts)
+end
+
+open_store("system.h5"; read_only=true) do store
+    only(list_metadata(store; owner_id=42, owner_category=Component, name="load"))
+end
+```
+
+`open_copy` has one too. `close!(store)` is the explicit form when a do-block does not fit — a
+long-lived store held by a consumer package, say — and is idempotent, so closing a store the
+finalizer later reaps is fine.
 
 ## Add a Series
 

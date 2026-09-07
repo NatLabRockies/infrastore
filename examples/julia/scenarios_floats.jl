@@ -70,54 +70,52 @@ for (member, (_, cloud)) in enumerate(MEMBERS), step in 1:horizon_steps
         round(availability[hour % 24 + 1] * cloud[step], digits = 4)
 end
 
-store = Store()
+Store(in_memory = true) do store
+    forecast = Scenarios(
+        DAY_START + Hour(FIRST_ISSUE_HOUR),
+        RESOLUTION,
+        HORIZON,
+        INTERVAL,
+        COUNT,
+        values,
+        "max_active_power";
+        units = "per_unit",
+        quantity_kind = "ActivePower",
+        unit_system = ComponentBase,
+        # What bounds a plant's output is usually its rating rather than a
+        # separate max-power field, so that is the field these values drive.
+        component_field = "rating",
+    )
+    series_id = add_time_series!(
+        store, SUNDANCE_PV.id, SUNDANCE_PV.type, Component, forecast;
+        # Which weather days the members came from is the consumer's record, not the
+        # store's; a feature tag is the natural place for it.
+        features = Dict("ensemble" => "ecmwf_2012", "model_year" => 2030),
+    )
+    println("added $(SUNDANCE_PV.type) '$(SUNDANCE_PV.name)': id=$series_id")
 
-forecast = Scenarios(
-    DAY_START + Hour(FIRST_ISSUE_HOUR),
-    RESOLUTION,
-    HORIZON,
-    INTERVAL,
-    COUNT,
-    values,
-    "max_active_power";
-    units = "per_unit",
-    quantity_kind = "ActivePower",
-    unit_system = ComponentBase,
-    # What bounds a plant's output is usually its rating rather than a
-    # separate max-power field, so that is the field these values drive.
-    component_field = "rating",
-)
-series_id = add_time_series!(
-    store, SUNDANCE_PV.id, SUNDANCE_PV.type, Component, forecast;
-    # Which weather days the members came from is the consumer's record, not the
-    # store's; a feature tag is the natural place for it.
-    features = Dict("ensemble" => "ecmwf_2012", "model_year" => 2030),
-)
-println("added $(SUNDANCE_PV.type) '$(SUNDANCE_PV.name)': id=$series_id")
+    read_back = read_by_id(store, series_id)
+    println("scenario_count=$(read_back.scenario_count) count=$(read_back.count)")
 
-read_back = read_by_id(store, series_id)
-println("scenario_count=$(read_back.scenario_count) count=$(read_back.count)")
+    # MW from a 60 MW plant, one column per member.
+    mw(member, step) =
+        round(read_back.data[member, step, 1] * SUNDANCE_PV.base_power_mw, digits = 2)
 
-# MW from a 60 MW plant, one column per member.
-mw(member, step) =
-    round(read_back.data[member, step, 1] * SUNDANCE_PV.base_power_mw, digits = 2)
+    frame = DataFrame(timestamp = window_timestamps(read_back, 1))
+    for (member, (label, _)) in enumerate(MEMBERS)
+        frame[!, label] = [mw(member, s) for s in 1:horizon_steps]
+    end
+    println("\nensemble members, MW from a 60 MW plant")
+    println(frame)
 
-frame = DataFrame(timestamp = window_timestamps(read_back, 1))
-for (member, (label, _)) in enumerate(MEMBERS)
-    frame[!, label] = [mw(member, s) for s in 1:horizon_steps]
+    # Each member is one plausible trajectory over this window, so summing it is a
+    # per-member statistic — the thing you cannot compute from per-hour quantiles,
+    # where "the p10 day" is not a day at all. Summing across windows instead would
+    # be meaningless, which is why there is only one here.
+    println("\nwindow energy per member (hourly steps, so MW sums to MWh)")
+    println(DataFrame(
+        member = [label for (label, _) in MEMBERS],
+        energy_mwh = [round(sum(mw(m, s) for s in 1:horizon_steps), digits = 1)
+                      for m in 1:SCENARIO_COUNT],
+    ))
 end
-println("\nensemble members, MW from a 60 MW plant")
-println(frame)
-
-# Each member is one plausible trajectory over this window, so summing it is a
-# per-member statistic — the thing you cannot compute from per-hour quantiles,
-# where "the p10 day" is not a day at all. Summing across windows instead would
-# be meaningless, which is why there is only one here.
-println("\nwindow energy per member (hourly steps, so MW sums to MWh)")
-println(DataFrame(
-    member = [label for (label, _) in MEMBERS],
-    energy_mwh = [round(sum(mw(m, s) for s in 1:horizon_steps), digits = 1)
-                  for m in 1:SCENARIO_COUNT],
-))
-
-close!(store)

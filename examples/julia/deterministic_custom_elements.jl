@@ -69,43 +69,42 @@ offers = [
      for gas in prices],
 ]
 
-store = Store()
-series_ids = Int64[]
+Store(in_memory = true) do store
+    series_ids = Int64[]
 
-for values in offers
-    tag = element_type_tag(vec(values))
-    forecast = Deterministic(
-        DAY_START + Hour(FIRST_ISSUE_HOUR),
-        RESOLUTION,
-        HORIZON_STEPS * RESOLUTION,   # horizon
-        RESOLUTION,                   # interval: re-offered hourly, so windows overlap
-        WINDOW_COUNT,
-        values,
-        "incremental_offer_curves_$tag";
-        units = tag == "tuple(2,f64)" ? "MW" :
-                tag == "piecewise_step" ? "\$/MWh" : "\$/hr",
-        quantity_kind = startswith(tag, "tuple") ? "ActivePower" : "CostRate",
-        unit_system = NaturalUnits,
-        component_field = "operation_cost",
-    )
-    id = add_time_series!(store, SOLITUDE.id, SOLITUDE.type, Component, forecast)
-    push!(series_ids, id)
-    println("added $tag for '$(SOLITUDE.name)': id=$id")
+    for values in offers
+        tag = element_type_tag(vec(values))
+        forecast = Deterministic(
+            DAY_START + Hour(FIRST_ISSUE_HOUR),
+            RESOLUTION,
+            HORIZON_STEPS * RESOLUTION,   # horizon
+            RESOLUTION,                   # interval: re-offered hourly, so windows overlap
+            WINDOW_COUNT,
+            values,
+            "incremental_offer_curves_$tag";
+            units = tag == "tuple(2,f64)" ? "MW" :
+                    tag == "piecewise_step" ? "\$/MWh" : "\$/hr",
+            quantity_kind = startswith(tag, "tuple") ? "ActivePower" : "CostRate",
+            unit_system = NaturalUnits,
+            component_field = "operation_cost",
+        )
+        id = add_time_series!(store, SOLITUDE.id, SOLITUDE.type, Component, forecast)
+        push!(series_ids, id)
+        println("added $tag for '$(SOLITUDE.name)': id=$id")
+    end
+
+    for id in series_ids
+        forecast = read_by_id(store, id)
+        # `forecast.data` is back in its `(step, window)` shape, curves and all.
+        frame = DataFrame(
+            issue_time = [window_issue_times(forecast)[w]
+                          for s in 1:HORIZON_STEPS for w in 1:WINDOW_COUNT],
+            offer_for = [DAY_START + Hour(target_hour(s, w))
+                         for s in 1:HORIZON_STEPS for w in 1:WINDOW_COUNT],
+            gas_price = [prices[s, w] for s in 1:HORIZON_STEPS for w in 1:WINDOW_COUNT],
+            offer = [forecast.data[s, w] for s in 1:HORIZON_STEPS for w in 1:WINDOW_COUNT],
+        )
+        println("\n$(forecast.name)")
+        println(sort(frame, [:issue_time, :offer_for]))
+    end
 end
-
-for id in series_ids
-    forecast = read_by_id(store, id)
-    # `forecast.data` is back in its `(step, window)` shape, curves and all.
-    frame = DataFrame(
-        issue_time = [window_issue_times(forecast)[w]
-                      for s in 1:HORIZON_STEPS for w in 1:WINDOW_COUNT],
-        offer_for = [DAY_START + Hour(target_hour(s, w))
-                     for s in 1:HORIZON_STEPS for w in 1:WINDOW_COUNT],
-        gas_price = [prices[s, w] for s in 1:HORIZON_STEPS for w in 1:WINDOW_COUNT],
-        offer = [forecast.data[s, w] for s in 1:HORIZON_STEPS for w in 1:WINDOW_COUNT],
-    )
-    println("\n$(forecast.name)")
-    println(sort(frame, [:issue_time, :offer_for]))
-end
-
-close!(store)

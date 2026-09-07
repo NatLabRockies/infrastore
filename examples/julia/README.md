@@ -70,6 +70,22 @@ Read them in this order; each builds on the vocabulary of the one before.
 on, and the display helpers. Everything else — every `add_time_series!` and every read — stays
 visible in the script that needs it.
 
+## Closing a store
+
+A `Store` registers a finalizer, so nothing leaks if you never close one — but the GC decides
+_when_, and on disk that means an open file handle and a held SQLite write lock for an unbounded
+time. The **do-block forms** are the release-on-exit answer, including on a throw:
+
+```julia
+Store(in_memory = true) do store
+    add_time_series!(store, 42, "Generator", Component, ts)
+end
+```
+
+`open_store` and `open_copy` have them too. Every example here is written that way. `close!(store)`
+is the explicit form for a store that outlives a block — one held by a consumer package, say — and
+is idempotent, so closing a store the finalizer later reaps is fine.
+
 ## Values that are not numbers
 
 `single_fixed_tuples.jl`, `single_custom_elements.jl` and `deterministic_custom_elements.jl` store a

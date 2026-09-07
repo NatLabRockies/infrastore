@@ -78,32 +78,6 @@ curves = [
      for gas in GAS_PRICE],
 ]
 
-store = Store()
-series_ids = Int64[]
-
-for values in curves
-    tag = element_type_tag(values)      # what these values will be stored as
-    series = SingleTimeSeries(
-        DAY_START,
-        Hour(1),
-        values,
-        "variable_cost_$tag";
-        # The label describes what evaluating the curve gives you: a production
-        # cost rate in \$/hr for the first three, and a marginal cost in \$/MWh
-        # for the offer curve, whose y values are per-segment slopes.
-        units = tag == "piecewise_step" ? "\$/MWh" : "\$/hr",
-        # Free-form. QUDT, whose local names `quantity_kind` otherwise borrows,
-        # has no kind for money per unit time, so this is a convention the
-        # consumer picks and sticks to.
-        quantity_kind = "CostRate",
-        unit_system = NaturalUnits,
-        component_field = "operation_cost",
-    )
-    id = add_time_series!(store, SOLITUDE.id, SOLITUDE.type, Component, series)
-    push!(series_ids, id)
-    println("added $tag for '$(SOLITUDE.name)': id=$id")
-end
-
 # The package's `show` methods are deliberately compact — `PiecewiseLinear(3
 # points)` — so this renders the numbers a table should show.
 cost_at(c::LinearFunction, mw) = c.proportional * mw + c.constant
@@ -113,35 +87,60 @@ cost_at(c::PiecewiseLinear, mw) = last(c.points).y
 # number is the last segment's — what the unit charges for its final MW.
 cost_at(c::PiecewiseStep, mw) = last(c.y)
 
-# Reading back: a read hands back the whole series — its descriptors as well as
-# its values — and decodes as it goes, so there is no catalog lookup here and
-# nothing to unpack.
-for id in series_ids
-    series = read_by_id(store, id)
-    println("\n$(series.name) ($(series.units))")
-    println(DataFrame(
-        timestamp = timestamps(series),
-        gas_price = GAS_PRICE,
-        curve = series.data,
-        at_100mw = [round(cost_at(c, 100.0), digits = 2) for c in series.data],
-    ))
+Store(in_memory = true) do store
+    series_ids = Int64[]
+
+    for values in curves
+        tag = element_type_tag(values)      # what these values will be stored as
+        series = SingleTimeSeries(
+            DAY_START,
+            Hour(1),
+            values,
+            "variable_cost_$tag";
+            # The label describes what evaluating the curve gives you: a production
+            # cost rate in \$/hr for the first three, and a marginal cost in \$/MWh
+            # for the offer curve, whose y values are per-segment slopes.
+            units = tag == "piecewise_step" ? "\$/MWh" : "\$/hr",
+            # Free-form. QUDT, whose local names `quantity_kind` otherwise borrows,
+            # has no kind for money per unit time, so this is a convention the
+            # consumer picks and sticks to.
+            quantity_kind = "CostRate",
+            unit_system = NaturalUnits,
+            component_field = "operation_cost",
+        )
+        id = add_time_series!(store, SOLITUDE.id, SOLITUDE.type, Component, series)
+        push!(series_ids, id)
+        println("added $tag for '$(SOLITUDE.name)': id=$id")
+    end
+
+    # Reading back: a read hands back the whole series — its descriptors as well as
+    # its values — and decodes as it goes, so there is no catalog lookup here and
+    # nothing to unpack.
+    for id in series_ids
+        series = read_by_id(store, id)
+        println("\n$(series.name) ($(series.units))")
+        println(DataFrame(
+            timestamp = timestamps(series),
+            gas_price = GAS_PRICE,
+            curve = series.data,
+            at_100mw = [round(cost_at(c, 100.0), digits = 2) for c in series.data],
+        ))
+    end
+
+    # The packing, for one series, as `raw = true` hands it back. The leading slot
+    # is the point count and the rest is zero padding out to the widest row — which
+    # is why a 2-point and a 3-point curve can share one rectangular array.
+    ragged = SingleTimeSeries(
+        DAY_START,
+        Hour(1),
+        [PiecewiseLinear([(x = 30.0, y = 1155.0), (x = 100.0, y = 4120.0)]),
+         PiecewiseLinear([(x = 30.0, y = 1353.0), (x = 65.0, y = 2730.0),
+                          (x = 100.0, y = 4223.0)])],
+        "ragged_cost",
+    )
+    ragged_id = add_time_series!(store, SOLITUDE.id, SOLITUDE.type, Component, ragged)
+    println("\nragged curves, as values:")
+    println(read_by_id(store, ragged_id).data)
+    println("\nthe same rows as stored (raw = true):")
+    println(read_by_id(store, ragged_id; raw = true).data)
 end
-
-# The packing, for one series, as `raw = true` hands it back. The leading slot
-# is the point count and the rest is zero padding out to the widest row — which
-# is why a 2-point and a 3-point curve can share one rectangular array.
-ragged = SingleTimeSeries(
-    DAY_START,
-    Hour(1),
-    [PiecewiseLinear([(x = 30.0, y = 1155.0), (x = 100.0, y = 4120.0)]),
-     PiecewiseLinear([(x = 30.0, y = 1353.0), (x = 65.0, y = 2730.0),
-                      (x = 100.0, y = 4223.0)])],
-    "ragged_cost",
-)
-ragged_id = add_time_series!(store, SOLITUDE.id, SOLITUDE.type, Component, ragged)
-println("\nragged curves, as values:")
-println(read_by_id(store, ragged_id).data)
-println("\nthe same rows as stored (raw = true):")
-println(read_by_id(store, ragged_id; raw = true).data)
-
-close!(store)

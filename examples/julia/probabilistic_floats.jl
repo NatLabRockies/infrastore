@@ -57,46 +57,45 @@ for window in 1:COUNT, step in 1:horizon_steps
     end
 end
 
-store = Store()
+Store(in_memory = true) do store
+    forecast = Probabilistic(
+        DAY_START + Hour(FIRST_ISSUE_HOUR),
+        RESOLUTION,
+        HORIZON,
+        INTERVAL,
+        COUNT,
+        PERCENTILES,
+        values,
+        "max_active_power";
+        units = "per_unit",
+        quantity_kind = "ActivePower",
+        unit_system = ComponentBase,
+        # What bounds a plant's output is usually its rating rather than a
+        # separate max-power field, so that is the field these values drive.
+        component_field = "rating",
+    )
+    series_id =
+        add_time_series!(store, SUNDANCE_PV.id, SUNDANCE_PV.type, Component, forecast)
+    println("added $(SUNDANCE_PV.type) '$(SUNDANCE_PV.name)': id=$series_id")
 
-forecast = Probabilistic(
-    DAY_START + Hour(FIRST_ISSUE_HOUR),
-    RESOLUTION,
-    HORIZON,
-    INTERVAL,
-    COUNT,
-    PERCENTILES,
-    values,
-    "max_active_power";
-    units = "per_unit",
-    quantity_kind = "ActivePower",
-    unit_system = ComponentBase,
-    # What bounds a plant's output is usually its rating rather than a
-    # separate max-power field, so that is the field these values drive.
-    component_field = "rating",
-)
-series_id = add_time_series!(store, SUNDANCE_PV.id, SUNDANCE_PV.type, Component, forecast)
-println("added $(SUNDANCE_PV.type) '$(SUNDANCE_PV.name)': id=$series_id")
+    read_back = read_by_id(store, series_id)
+    println("percentiles=$(read_back.percentiles) count=$(read_back.count)")
 
-read_back = read_by_id(store, series_id)
-println("percentiles=$(read_back.percentiles) count=$(read_back.count)")
+    # One row per forecast hour, with the band the study would plan against. Back to
+    # MW, since the values are per-unit of the plant's rating.
+    mw(index, step, window) =
+        round(read_back.data[index, step, window] * SUNDANCE_PV.base_power_mw, digits = 2)
 
-# One row per forecast hour, with the band the study would plan against. Back to
-# MW, since the values are per-unit of the plant's rating.
-mw(index, step, window) =
-    round(read_back.data[index, step, window] * SUNDANCE_PV.base_power_mw, digits = 2)
+    cells = [(w, s) for w in 1:COUNT for s in 1:horizon_steps]
+    band = DataFrame(
+        issue_time = [window_issue_times(read_back)[w] for (w, _) in cells],
+        timestamp = [window_timestamps(read_back, w)[s] for (w, s) in cells],
+        p10_mw = [mw(1, s, w) for (w, s) in cells],
+        p50_mw = [mw(2, s, w) for (w, s) in cells],
+        p90_mw = [mw(3, s, w) for (w, s) in cells],
+    )
+    band.band_mw = round.(band.p90_mw .- band.p10_mw, digits = 2)
 
-cells = [(w, s) for w in 1:COUNT for s in 1:horizon_steps]
-band = DataFrame(
-    issue_time = [window_issue_times(read_back)[w] for (w, _) in cells],
-    timestamp = [window_timestamps(read_back, w)[s] for (w, s) in cells],
-    p10_mw = [mw(1, s, w) for (w, s) in cells],
-    p50_mw = [mw(2, s, w) for (w, s) in cells],
-    p90_mw = [mw(3, s, w) for (w, s) in cells],
-)
-band.band_mw = round.(band.p90_mw .- band.p10_mw, digits = 2)
-
-println("\np10/p50/p90 availability of a 60 MW plant, by forecast hour")
-println(sort(band, :timestamp))
-
-close!(store)
+    println("\np10/p50/p90 availability of a 60 MW plant, by forecast hour")
+    println(sort(band, :timestamp))
+end
