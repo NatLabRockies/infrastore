@@ -40,12 +40,14 @@
 pub mod export;
 pub mod import;
 pub mod partition;
+pub mod read;
 pub mod schema;
 pub mod table;
 pub mod write;
 
 pub use export::{TIMESTAMP_COLUMN, VALUE_COLUMN, record_batch, timestamp_data_type, write_series};
 pub use import::{ImportOptions, ImportedSeries, read_series};
+pub use read::{parquet_files, read_file};
 pub use write::{ExportReport, WrittenFile, write_partitions};
 
 use infrastore_core::TimeSeriesError;

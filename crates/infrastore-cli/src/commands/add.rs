@@ -252,16 +252,16 @@ pub fn run(store_path: &Path, opts: &Options<'_>) -> Result<(), String> {
     // Resolved up front, because a Parquet file *is* the descriptor: there is
     // nothing to load from a JSON file and nothing for a relative `csv` path to
     // sit beside.
-    let (requests, descriptors, base_dir, csv_override) = if opts.parquet.is_empty() {
+    let (batches, descriptors, base_dir, csv_override) = if opts.parquet.is_empty() {
         let (descriptors, base_dir, csv_override) = load_descriptors(opts)?;
         (None, descriptors, base_dir, csv_override)
     } else {
-        (Some(parquet_requests(opts)?), Vec::new(), None, None)
+        (Some(parquet_batches(opts)?), Vec::new(), None, None)
     };
 
     if opts.dry_run {
-        return match &requests {
-            Some(requests) => report_dry_run(requests, opts.format),
+        return match &batches {
+            Some(batches) => report_parquet_dry_run(batches, opts.format),
             None => dry_run(&descriptors, base_dir.as_deref(), csv_override, opts.format),
         };
     }
@@ -280,7 +280,10 @@ pub fn run(store_path: &Path, opts: &Options<'_>) -> Result<(), String> {
     let open = |compression, catalog| -> Result<Store, String> {
         store_access::open_writable_with(store_path, compression, catalog)
     };
-    let mut progress = Progress::new(descriptors.len(), opts.quiet);
+    let mut progress = Progress::new(
+        batches.as_ref().map_or(descriptors.len(), Vec::len),
+        opts.quiet,
+    );
     let mut pending: Vec<AddRequest> = Vec::new();
     let mut added: Vec<AddedRow> = Vec::new();
     let mut total = 0usize;
@@ -288,21 +291,20 @@ pub fn run(store_path: &Path, opts: &Options<'_>) -> Result<(), String> {
     // The load runs to completion or to its first error; either way the catalog
     // is written out below. Nothing between here and there may return early.
     let loaded = (|| -> Result<(), String> {
-        // A Parquet load resolves every file before the store is opened, so the
-        // batch loop sees a ready list; a descriptor load resolves each
-        // descriptor as it reaches it, because a wide one can expand into
-        // thousands of series and holding them all would defeat --batch-size.
-        if let Some(requests) = &requests {
-            for (i, request) in requests.iter().enumerate() {
-                pending.push(request.clone());
+        // One transaction per Parquet file, whatever --batch-size says: a
+        // directory import is all-or-nothing *per file*, so a partition that
+        // fails leaves the ones already committed alone. Splitting a file
+        // further would give up that guarantee for no gain -- a file is one
+        // partition, which is already a bounded unit.
+        if let Some(batches) = &batches {
+            for (i, one) in batches.iter().enumerate() {
+                pending.extend(one.requests.iter().cloned());
                 progress.tick(i + 1, total + pending.len());
-                if pending.len() >= batch {
-                    if store.is_none() {
-                        store = Some(open(opts.compression, opts.catalog)?);
-                    }
-                    let store = store.as_mut().expect("just opened");
-                    total += flush(store, &mut pending, opts.replace, &mut added)?;
+                if store.is_none() {
+                    store = Some(open(opts.compression, opts.catalog)?);
                 }
+                let store = store.as_mut().expect("just opened");
+                total += flush(store, &mut pending, opts.replace, &mut added)?;
             }
         }
         for (i, desc) in descriptors.iter().enumerate() {
@@ -644,28 +646,89 @@ impl Progress {
 
 // ---- Parquet ----------------------------------------------------------------
 
-/// Resolve every `--parquet` file into an [`AddRequest`].
+/// Resolve every `--parquet` path into [`AddRequest`]s, one batch per file.
 ///
-/// A Parquet file written by `export -f parquet` carries the whole catalog row
-/// in its footer, so this needs no other flag. A foreign file — anything else's
-/// Parquet, including one Python's `to_arrow()` wrote — carries no owner, since
-/// `to_arrow()` is a method on a value object and a series built in Python is
-/// not filed anywhere; `--owner-id` and `--owner-type` supply it.
+/// A path may be a **file or a directory**; a directory takes every `.parquet`
+/// in it, sorted. Each file is its own batch, so a directory import is
+/// all-or-nothing per file rather than all-or-nothing across the whole
+/// directory: a partition that fails leaves the ones already committed alone,
+/// and re-running after the fix does not have to redo them.
 ///
-/// The inline flags are the caller's half of that. `--name`, `--owner-*` and
-/// `--type` fill in or override what the footer says. `--element-type` is an
-/// **assertion**, not an override: it is how `tuple(3,f64)` gets named for a
-/// file whose bytes cannot say whether a `FixedSizeList<double>[3]` is a tuple
-/// or a dense row, and a contradiction with the footer is an error, exactly as
-/// it is everywhere else in this project.
+/// A file written by `export -f parquet` carries the whole catalog row as
+/// columns, so this needs no other flag. A **foreign** file — anything else's
+/// Parquet — carries less, and `--owner-id`, `--owner-type` and `--name` supply
+/// what is missing.
+///
+/// The inline flags override a column for every series in the file, with one
+/// exception that follows the project's usual rule: `--element-type` is an
+/// **assertion**. It is how `tuple(3,f64)` gets named for a file whose bytes
+/// cannot say whether a `FixedSizeList<double>[3]` is a tuple or a dense row,
+/// and a contradiction is an error rather than a silent replacement.
 #[cfg(feature = "parquet")]
-fn parquet_requests(opts: &Options<'_>) -> Result<Vec<AddRequest>, String> {
+fn parquet_batches(opts: &Options<'_>) -> Result<Vec<ParquetBatch>, String> {
     if opts.descriptor.is_some() || opts.csv.is_some() {
         return Err(
-            "--parquet carries its own descriptor; drop --descriptor and --csv".to_string(),
+            "--parquet carries its own descriptors; drop --descriptor and --csv".to_string(),
         );
     }
-    let options = infrastore_parquet::ImportOptions {
+    let options = parquet_options(opts)?;
+    let features = inline_features(opts)?;
+    let owner_category = opts
+        .inline
+        .owner_category
+        .as_deref()
+        .map(parse::parse_owner_category)
+        .transpose()?;
+
+    let mut batches = Vec::new();
+    for path in opts.parquet {
+        for file in infrastore_parquet::parquet_files(path).map_err(|e| e.to_string())? {
+            let series = infrastore_parquet::read_file(&file, &options)
+                .map_err(|e| format!("reading {}: {e}", file.display()))?;
+            let mut requests = Vec::with_capacity(series.len());
+            let mut ignored_ids = Vec::new();
+            for one in series {
+                if let Some(id) = one.recorded_id {
+                    ignored_ids.push(id);
+                }
+                requests.push(AddRequest {
+                    owner_id: one.owner_id,
+                    owner_type: one.owner_type,
+                    owner_category: owner_category.unwrap_or(one.owner_category),
+                    data: one.data,
+                    // The flags replace the file's map rather than merging into
+                    // it: a feature set is part of a series' identity, so a
+                    // half-replaced one would file the row under an identity
+                    // nobody named.
+                    features: features.clone().unwrap_or(one.features),
+                });
+            }
+            batches.push(ParquetBatch {
+                path: file,
+                requests,
+                ignored_ids,
+            });
+        }
+    }
+    Ok(batches)
+}
+
+/// One file's worth of work: what it holds and what was thrown away.
+#[cfg(feature = "parquet")]
+pub struct ParquetBatch {
+    pub path: std::path::PathBuf,
+    pub requests: Vec<AddRequest>,
+    /// The ids the file recorded, reported at `--dry-run` and then dropped.
+    ///
+    /// `add` never accepts an id: "never reissued" is a guarantee of the
+    /// catalog's `AUTOINCREMENT`, and a caller free to name one could re-file a
+    /// retired id. The destination assigns fresh ones.
+    pub ignored_ids: Vec<i64>,
+}
+
+#[cfg(feature = "parquet")]
+fn parquet_options(opts: &Options<'_>) -> Result<infrastore_parquet::read::ImportOptions, String> {
+    Ok(infrastore_parquet::read::ImportOptions {
         time_series_type: opts
             .inline
             .ts_type
@@ -679,6 +742,14 @@ fn parquet_requests(opts: &Options<'_>) -> Result<Vec<AddRequest>, String> {
             .map(parse::parse_element_type)
             .transpose()?,
         name: opts.inline.name.clone(),
+        owner_id: opts.inline.owner_id,
+        owner_type: opts.inline.owner_type.clone(),
+        owner_category: opts
+            .inline
+            .owner_category
+            .as_deref()
+            .map(parse::parse_owner_category)
+            .transpose()?,
         time_reference: opts
             .inline
             .time_reference
@@ -688,68 +759,138 @@ fn parquet_requests(opts: &Options<'_>) -> Result<Vec<AddRequest>, String> {
                     .map_err(|e| format!("invalid --time-reference: {e}"))
             })
             .transpose()?,
-    };
-    let mut features = std::collections::BTreeMap::new();
+        features: inline_features(opts)?,
+        skip_checksum: false,
+    })
+}
+
+#[cfg(feature = "parquet")]
+fn inline_features(opts: &Options<'_>) -> Result<Option<infrastore_core::Features>, String> {
+    if opts.inline.feature.is_empty() {
+        return Ok(None);
+    }
+    let mut features = infrastore_core::Features::new();
     for pair in &opts.inline.feature {
         let (k, v) = parse::parse_feature_kv(pair)?;
         features.insert(k, v);
     }
-    let owner_category = opts
-        .inline
-        .owner_category
-        .as_deref()
-        .map(parse::parse_owner_category)
-        .transpose()?;
-
-    let mut requests = Vec::with_capacity(opts.parquet.len());
-    for path in opts.parquet {
-        let series = infrastore_parquet::read_series(path, &options)
-            .map_err(|e| format!("reading {}: {e}", path.display()))?;
-        let owner_id = opts
-            .inline
-            .owner_id
-            .or(series.owner_id)
-            .ok_or_else(|| owner_missing(path, "--owner-id", "owner_id"))?;
-        let owner_type = opts
-            .inline
-            .owner_type
-            .clone()
-            .or(series.owner_type)
-            .ok_or_else(|| owner_missing(path, "--owner-type", "owner_type"))?;
-        requests.push(AddRequest {
-            owner_id,
-            owner_type,
-            owner_category: owner_category
-                .or(series.owner_category)
-                .unwrap_or(infrastore_core::OwnerCategory::Component),
-            data: series.data,
-            // The flags replace the footer's map rather than merging into it: a
-            // feature set is part of a series' identity, so a half-replaced one
-            // would file the row under an identity nobody named.
-            features: if features.is_empty() {
-                series.features
-            } else {
-                features.clone()
-            },
-        });
-    }
-    Ok(requests)
-}
-
-#[cfg(feature = "parquet")]
-fn owner_missing(path: &Path, flag: &str, key: &str) -> String {
-    format!(
-        "{} records no {key}; pass {flag} (a file written by `export -f parquet` carries \
-         one, a foreign file does not)",
-        path.display()
-    )
+    Ok(Some(features))
 }
 
 #[cfg(not(feature = "parquet"))]
-fn parquet_requests(_opts: &Options<'_>) -> Result<Vec<AddRequest>, String> {
+pub struct ParquetBatch {
+    pub path: std::path::PathBuf,
+    pub requests: Vec<AddRequest>,
+    pub ignored_ids: Vec<i64>,
+}
+
+#[cfg(not(feature = "parquet"))]
+fn parquet_batches(_opts: &Options<'_>) -> Result<Vec<ParquetBatch>, String> {
     Err(
         "this infrastore was built without Parquet support; rebuild with \
          `cargo install infrastore-cli --features parquet`"
             .to_string(),
     )
+}
+
+/// Report what a Parquet load would write, per file.
+///
+/// Per file rather than flattened, because a directory import is one transaction
+/// per file and a caller deciding whether to run it wants to see that shape.
+/// The ignored ids are reported here and nowhere else: this is the only moment
+/// where saying "the file names id 7 and the store will not use it" is useful.
+fn report_parquet_dry_run(batches: &[ParquetBatch], format: Format) -> Result<(), String> {
+    let total: usize = batches.iter().map(|b| b.requests.len()).sum();
+    match format {
+        f if f.is_json() => {
+            let items: Vec<Value> = batches
+                .iter()
+                .map(|b| {
+                    json!({
+                        "file": b.path.display().to_string(),
+                        "series": b.requests.len(),
+                        "ignored_ids": b.ignored_ids,
+                        "matches": b
+                            .requests
+                            .iter()
+                            .map(|r| json!({
+                                "owner_id": r.owner_id,
+                                "owner_type": r.owner_type,
+                                "owner_category": r.owner_category.as_str(),
+                                "type": r.data.time_series_type().as_str(),
+                                "name": r.data.name(),
+                                "element_type": r.data.element_type().to_string(),
+                                "features": crate::fields::features_json(&r.features),
+                                "empty_descriptors": empty_descriptors(r),
+                            }))
+                            .collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
+            output::print_value(
+                f,
+                &json!({ "dry_run": true, "would_add": total, "files": items }),
+            )
+        }
+        _ => {
+            for one in batches {
+                println!(
+                    "{} — {} series{}",
+                    one.path.display(),
+                    one.requests.len(),
+                    if one.ignored_ids.is_empty() {
+                        String::new()
+                    } else {
+                        format!(", ignoring {} recorded ids", one.ignored_ids.len())
+                    }
+                );
+                for request in &one.requests {
+                    let empty = empty_descriptors(request);
+                    let note = if empty.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  (no {})", empty.join(", "))
+                    };
+                    println!(
+                        "  - owner={} type={} name={}{note}",
+                        request.owner_id,
+                        request.data.time_series_type().as_str(),
+                        request.data.name(),
+                    );
+                }
+            }
+            println!(
+                "{}",
+                color::header(&format!(
+                    "Would add {total} time series. Nothing was written."
+                ))
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Which free-form descriptors the file left empty.
+///
+/// An empty string is how the format writes "absent", so a file that genuinely
+/// stored an empty string is indistinguishable from one that stored nothing.
+/// Naming them at `--dry-run` is what makes that visible before it is committed.
+fn empty_descriptors(request: &AddRequest) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    if request.data.units().is_none() {
+        out.push("units");
+    }
+    if request.data.quantity_kind().is_none() {
+        out.push("quantity_kind");
+    }
+    if request.data.unit_system().is_none() {
+        out.push("unit_system");
+    }
+    if request.data.component_field().is_none() {
+        out.push("component_field");
+    }
+    if request.data.application_data().is_none() {
+        out.push("application_data");
+    }
+    out
 }

@@ -96,22 +96,23 @@ pub fn run(
             let content = render(&metas[0], &datas[0], format)?;
             output::write_raw(&content)?;
         }
+        // Parquet is not a rendering of one series: the whole selection becomes
+        // a handful of partitioned long tables, so it never walks the per-series
+        // loop below.
+        Some(dir) if format.is_parquet() => {
+            let pairs: Vec<(TimeSeriesMetadata, TimeSeriesData)> =
+                metas.iter().cloned().zip(datas).collect();
+            return write_parquet(dir, &pairs, format);
+        }
         Some(dir) => {
             std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
             let stems = unique_file_stems(&metas);
             let mut written = Vec::with_capacity(metas.len());
             for ((meta, data), stem) in metas.iter().zip(&datas).zip(&stems) {
                 let path = dir.join(format!("{stem}.{file_ext}"));
-                if format.is_parquet() {
-                    // Written by the library rather than rendered to a String:
-                    // the writer owns the file so it can seek back for the
-                    // footer.
-                    write_parquet(&path, meta, data)?;
-                } else {
-                    let content = render(meta, data, format)?;
-                    std::fs::write(&path, content)
-                        .map_err(|e| format!("writing {}: {e}", path.display()))?;
-                }
+                let content = render(meta, data, format)?;
+                std::fs::write(&path, content)
+                    .map_err(|e| format!("writing {}: {e}", path.display()))?;
                 written.push(path.display().to_string());
             }
             return output::report(
@@ -434,29 +435,105 @@ fn render_json(
     text.map(|s| s + "\n").map_err(|e| e.to_string())
 }
 
-/// Write one series as Parquet, or explain that this binary cannot.
+/// Write the whole selection as partitioned long tables, or explain that this
+/// binary cannot.
 ///
-/// Arrow and Parquet are a large dependency tree that nothing else in the CLI
-/// needs, so `infrastore-parquet` sits behind a cargo feature that is **off by
-/// default**. A build without it still accepts `-f parquet` at the command line
-/// — that keeps `--help`, the completions, and the documented examples identical
-/// in both builds — and fails here with the flag that turns it on, rather than
-/// reporting `parquet` as an unknown format.
+/// One file per `(type, value type, time reference)` triple rather than one per
+/// series: a store with thousands of series would otherwise become thousands of
+/// files, which defeats every reader worth exporting for.
+///
+/// Parquet is a cargo feature -- on by default, so the shipped binary has it,
+/// but switchable so `--no-default-features` builds without the Arrow tree. The
+/// flags keep *parsing* either way, which is what makes `--help`, the
+/// completions, and the documented examples read the same in both builds; a
+/// build without the feature fails here naming the feature to rebuild with.
 #[cfg(feature = "parquet")]
 fn write_parquet(
-    path: &Path,
-    meta: &TimeSeriesMetadata,
-    data: &TimeSeriesData,
+    dir: &Path,
+    pairs: &[(TimeSeriesMetadata, TimeSeriesData)],
+    format: Format,
 ) -> Result<(), String> {
-    infrastore_parquet::write_series(path, meta, data)
-        .map_err(|e| format!("writing {}: {e}", path.display()))
+    let report = infrastore_parquet::write_partitions(dir, pairs)
+        .map_err(|e| format!("writing to {}: {e}", dir.display()))?;
+
+    // A long table has one row per value, so a series with no values is in no
+    // file. Told to the caller rather than left to be noticed: stderr, because
+    // stdout carries the status document a script parses.
+    for name in &report.empty {
+        eprintln!(
+            "{}",
+            color::dim_err(&format!(
+                "warning: '{name}' has no values, so it has no rows and is not in the export"
+            ))
+        );
+    }
+
+    let files: Vec<String> = report
+        .files
+        .iter()
+        .map(|f| f.path.display().to_string())
+        .collect();
+    let series: usize = report.files.iter().map(|f| f.series).sum();
+    output::report(
+        format_for_status(format),
+        || {
+            json!({
+                "exported": series,
+                "dir": dir.display().to_string(),
+                "files": files,
+                "rows": report.rows(),
+                "partitions": report
+                    .files
+                    .iter()
+                    .map(|f| json!({
+                        "path": f.path.display().to_string(),
+                        "time_series_type": f.time_series_type.as_str(),
+                        "value_type": f.value_slug,
+                        "time_reference": f.reference,
+                        "series": f.series,
+                        "rows": f.rows,
+                    }))
+                    .collect::<Vec<_>>(),
+                "empty": report.empty,
+            })
+        },
+        || {
+            for file in &report.files {
+                println!(
+                    "exported {} ({} series, {} rows)",
+                    file.path.display(),
+                    file.series,
+                    file.rows
+                );
+            }
+            println!(
+                "{}",
+                color::header(&format!(
+                    "Exported {series} time series into {} files under {}.",
+                    report.files.len(),
+                    dir.display()
+                ))
+            );
+        },
+    )
+}
+
+/// `-f parquet` names the *payload*, not how the status report renders, so the
+/// report falls back to the table form unless JSON was asked for.
+#[cfg(feature = "parquet")]
+fn format_for_status(format: Format) -> Format {
+    if format.is_json() {
+        format
+    } else {
+        Format::Table
+    }
 }
 
 #[cfg(not(feature = "parquet"))]
 fn write_parquet(
-    _path: &Path,
-    _meta: &TimeSeriesMetadata,
-    _data: &TimeSeriesData,
+    _dir: &Path,
+    _pairs: &[(TimeSeriesMetadata, TimeSeriesData)],
+    _format: Format,
 ) -> Result<(), String> {
     Err(
         "this infrastore was built without Parquet support; rebuild with \

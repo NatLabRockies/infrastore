@@ -4679,7 +4679,7 @@ fn parquet_is_only_offered_where_it_means_something() {
 
 #[cfg(feature = "parquet")]
 #[test]
-fn export_writes_one_parquet_file_per_series() {
+fn export_writes_one_parquet_file_per_partition() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("pq.h5");
     seed_one(dir.path(), &store);
@@ -4695,28 +4695,43 @@ fn export_writes_one_parquet_file_per_series() {
         .unwrap()
         .map(|e| e.unwrap().path())
         .collect();
-    assert_eq!(files.len(), 1, "one file per matched series");
-    assert_eq!(files[0].extension().unwrap(), "parquet");
+    // One file per (type, value type, time reference) triple -- not one per
+    // series, which is what made the first design unusable at scale.
+    assert_eq!(files.len(), 1, "one partition, one file");
+    assert_eq!(
+        files[0].file_name().unwrap(),
+        "SingleTimeSeries.f64.utc.parquet"
+    );
 
-    // A real Parquet file, with the footer the schema promises.
     let file = fs::File::open(&files[0]).unwrap();
     let builder =
         parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
     let schema = builder.schema().clone();
-    assert_eq!(
-        schema
-            .fields()
-            .iter()
-            .map(|f| f.name().clone())
-            .collect::<Vec<_>>(),
-        vec!["timestamp".to_string(), "value".to_string()]
-    );
-    assert_eq!(schema.metadata()["name"], "load");
+    // Every catalog column is a table column, so a reader has the whole row
+    // without attaching the SQLite catalog -- and none of them is nullable.
+    let columns: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
+    for expected in [
+        "timestamp",
+        "value",
+        "id",
+        "data_hash",
+        "owner_id",
+        "owner_type",
+        "name",
+        "resolution",
+        "features",
+        "element_type",
+        "time_reference",
+        "units",
+    ] {
+        assert!(columns.contains(&expected.to_string()), "{columns:?}");
+    }
+    assert!(schema.fields().iter().all(|f| !f.is_nullable()));
+    // The footer states the partition exactly; the filename is a convenience.
+    assert_eq!(schema.metadata()["infrastore.format"], "long_table_v1");
     assert_eq!(schema.metadata()["time_series_type"], "SingleTimeSeries");
-    assert_eq!(schema.metadata()["resolution"], "PT1H");
-    assert_eq!(schema.metadata()["owner_id"], "42");
-    assert_eq!(schema.metadata()["owner_type"], "Generator");
-    assert_eq!(schema.metadata()["element_shape"], "[]");
+    assert_eq!(schema.metadata()["time_reference"], "utc");
+    assert_eq!(schema.metadata()["rows_contiguous_by_series"], "true");
 
     let mut reader = builder.build().unwrap();
     let batch = reader.next().unwrap().unwrap();
@@ -4819,8 +4834,23 @@ fn a_parquet_dry_run_reports_the_plan_and_writes_nothing() {
         ],
     );
     let plan: serde_json::Value = serde_json::from_str(&plan).unwrap();
-    assert_eq!(plan["items"][0]["name"], "load");
-    assert_eq!(plan["items"][0]["owner_id"], 42);
+    assert_eq!(plan["would_add"], 1);
+    let file = &plan["files"][0];
+    assert_eq!(file["series"], 1);
+    assert_eq!(file["matches"][0]["name"], "load");
+    assert_eq!(file["matches"][0]["owner_id"], 42);
+    // The file records an id; `add` never accepts one, so it is reported here
+    // and then dropped.
+    assert_eq!(file["ignored_ids"][0], 1);
+    // And the descriptors the file left empty, since an empty string is how
+    // this format writes "absent" and a stored empty string is the same text.
+    assert!(
+        file["matches"][0]["empty_descriptors"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::Value::from("units")),
+        "{plan}"
+    );
     assert!(!dest.exists(), "--dry-run must not create the store");
 }
 
@@ -4921,57 +4951,105 @@ fn write_naked_parquet(path: &Path) {
 
 #[cfg(feature = "parquet")]
 #[test]
-fn a_dense_forecast_round_trips_as_a_long_table() {
+fn a_dense_forecast_is_refused_until_its_partition_exists() {
+    // A forecast's long table carries key columns a static one does not -- an
+    // `issue_time`, and a `percentile` or `scenario` -- so it is a partition of
+    // its own rather than a variation on this one. Refused with the type named
+    // rather than mis-shaped into the static columns.
     let dir = tempfile::tempdir().unwrap();
-    let source = dir.path().join("fc.h5");
-    let dest = dir.path().join("fc_dest.h5");
-    seed_day_of_windows(dir.path(), &source);
+    let store = dir.path().join("fc.h5");
+    seed_day_of_windows(dir.path(), &store);
     let out = dir.path().join("out");
 
-    run(
+    let err = run_err(
+        &store,
+        &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
+    );
+    assert!(err.contains("Deterministic"), "{err}");
+}
+
+#[cfg(feature = "parquet")]
+#[test]
+fn a_whole_directory_of_partitions_re_imports() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("src.h5");
+    let dest = dir.path().join("dest.h5");
+    let out = dir.path().join("out");
+
+    // Two partitions: a regular series and an irregular one, which differ in
+    // their key columns and so cannot share a table.
+    write(dir.path(), "v.csv", "value\n1\n2\n3\n");
+    write(
+        dir.path(),
+        "n.csv",
+        "timestamp,value\n2024-01-01T00:00:00Z,1\n2024-01-01T05:00:00Z,2\n",
+    );
+    let d = write(
+        dir.path(),
+        "both.json",
+        r#"[{"owner_id": 42, "owner_type": "Generator", "name": "load",
+             "type": "SingleTimeSeries", "element_type": "f64", "csv": "v.csv",
+             "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H"},
+            {"owner_id": 43, "owner_type": "Generator", "name": "irregular",
+             "type": "NonSequentialTimeSeries", "element_type": "f64", "csv": "n.csv"}]"#,
+    );
+    run(&source, &["add", "--descriptor", d.to_str().unwrap()]);
+
+    let report = run(
         &source,
         &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
     );
-    let file = fs::read_dir(&out).unwrap().next().unwrap().unwrap().path();
+    assert!(report.contains("2 files"), "{report}");
+    assert_eq!(fs::read_dir(&out).unwrap().count(), 2);
 
-    // The same three columns the CSV export uses for a forecast, so the two
-    // exports describe a window the same way.
-    let reader = fs::File::open(&file).unwrap();
-    let builder =
-        parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(reader).unwrap();
-    assert_eq!(
-        builder
-            .schema()
-            .fields()
-            .iter()
-            .map(|f| f.name().clone())
-            .collect::<Vec<_>>(),
-        vec![
-            "issue_time".to_string(),
-            "target_time".to_string(),
-            "value".to_string()
-        ]
-    );
-    // 24 windows x 2 steps, flattened.
-    let rows: usize = builder
-        .build()
-        .unwrap()
-        .map(|b| b.unwrap().num_rows())
-        .sum();
-    assert_eq!(rows, 48);
-
-    run(&dest, &["add", "--parquet", file.to_str().unwrap()]);
+    // One `--parquet` pointing at the directory takes both files.
+    run(&dest, &["add", "--parquet", out.to_str().unwrap()]);
     let listed = run(&dest, &["-f", "json", "list"]);
     let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
-    let row = &listed["items"][0];
-    assert_eq!(row["type"], "Deterministic");
-    assert_eq!(row["name"], "load_det");
-    assert_eq!(row["count"], 24);
-    assert_eq!(row["horizon"], "PT2H");
-    assert_eq!(row["interval"], "PT1H");
+    let rows = listed["items"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
 
     // The values are the same bytes, which is what a content hash says.
     let src = run(&source, &["-f", "json", "list"]);
     let src: serde_json::Value = serde_json::from_str(&src).unwrap();
-    assert_eq!(row["data_hash"], src["items"][0]["data_hash"]);
+    let hashes = |doc: &serde_json::Value| {
+        let mut out: Vec<String> = doc["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["data_hash"].as_str().unwrap().to_string())
+            .collect();
+        out.sort();
+        out
+    };
+    assert_eq!(hashes(&listed), hashes(&src));
+}
+
+#[cfg(feature = "parquet")]
+#[test]
+fn an_empty_series_is_warned_about_because_it_has_no_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("empty.h5");
+    let out = dir.path().join("out");
+
+    write(dir.path(), "v.csv", "value\n");
+    let d = write(
+        dir.path(),
+        "empty.json",
+        r#"{"owner_id": 42, "owner_type": "Generator", "name": "nothing",
+            "type": "SingleTimeSeries", "element_type": "f64", "csv": "v.csv",
+            "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H"}"#,
+    );
+    run(&store, &["add", "--descriptor", d.to_str().unwrap()]);
+
+    // A long table has one row per value, so a series with none is in no file.
+    // Said out loud rather than left to be noticed.
+    let output = raw(
+        &store,
+        &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
+    );
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("nothing"), "{stderr}");
+    assert!(stderr.contains("no rows"), "{stderr}");
 }
