@@ -106,7 +106,9 @@ jobs:
       # handling differs.
       - name: Install Python test dependencies
         shell: bash
-        run: python -m pip install --upgrade maturin pytest numpy tzdata
+        run: |
+          python -m pip install --upgrade maturin pytest numpy tzdata
+          python -m pip install -r examples/python/requirements.txt
 
       - name: Build and install the Python extension
         shell: bash
@@ -118,6 +120,19 @@ jobs:
       - name: Run Python tests
         shell: bash
         run: python -m pytest python/tests -q
+
+      # Keep the documentation examples executable on every supported runner.
+      # `_shared.py` is imported by the examples; it is not an example itself.
+      - name: Run Python examples
+        shell: bash
+        run: |
+          for example in examples/python/*.py; do
+            if [[ "$(basename "$example")" == _* ]]; then
+              continue
+            fi
+            echo "Running $example"
+            python "$example"
+          done
 
       - name: Setup Julia
         uses: julia-actions/setup-julia@v2
