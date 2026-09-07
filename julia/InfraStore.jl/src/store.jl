@@ -423,3 +423,103 @@ function transaction(f::Function, store::Store)
     end
     return result
 end
+
+# ---- Store attributes -------------------------------------------------------
+#
+# Key/value provenance about the artifact as a whole. Named with the `store_`
+# prefix throughout because a bare "attribute" already means a supplemental
+# attribute here (see `associations.jl`) and a bare "metadata" already means a
+# `TimeSeriesMetadata` row.
+
+"""
+    set_store_attribute!(store, key, value)
+
+Record `key => value` as provenance about the whole artifact — who built it,
+from what source system, under which of your own schema versions. The store
+never interprets a value, in the same spirit as a series' `application_data`; a
+caller wanting structure stores JSON.
+
+Setting a key that is already there replaces its value: an artifact records one
+creator, not a history of them.
+
+Throws for an empty key, for a key beginning with the reserved `infrastore.`
+prefix, and on a read-only store.
+
+```julia
+set_store_attribute!(store, "creator", "sienna-build")
+set_store_attribute!(store, "source_system", "WECC 2032 ADS")
+```
+"""
+function set_store_attribute!(store::Store, key::AbstractString, value::AbstractString)
+    _check(
+        @ccall lib_path().infrastore_store_set_store_attribute(
+            store::Ptr{Cvoid}, key::Cstring, value::Cstring
+        )::Int32
+    )
+    return nothing
+end
+
+"""
+    get_store_attribute(store, key) -> Union{Nothing,String}
+
+The value recorded for `key`, or `nothing` if the artifact carries no such key.
+
+`nothing` rather than an error because a consumer asking whether a key is there
+is asking a question. Note that `nothing` and `""` are different answers: a key
+may legitimately be set to the empty string.
+"""
+function get_store_attribute(store::Store, key::AbstractString)
+    out_value = Ref{Ptr{Cchar}}(C_NULL)
+    out_len = Ref{UInt64}(0)
+    _check(
+        @ccall lib_path().infrastore_store_get_store_attribute(
+            store::Ptr{Cvoid},
+            key::Cstring,
+            out_value::Ref{Ptr{Cchar}},
+            out_len::Ref{UInt64},
+        )::Int32
+    )
+    ptr = out_value[]
+    # A null pointer is the ABI's "unset", distinct from a pointer to "".
+    ptr == C_NULL && return nothing
+    try
+        return unsafe_string(Ptr{UInt8}(ptr), Int(out_len[]))
+    finally
+        @ccall lib_path().infrastore_string_free(ptr::Ptr{Cchar})::Cvoid
+    end
+end
+
+"""
+    list_store_attributes(store) -> Dict{String,String}
+
+Every store attribute. Empty for a store that carries none.
+"""
+function list_store_attributes(store::Store)
+    json = _owned_str(
+        (out_json, out_len) -> @ccall lib_path().infrastore_store_list_store_attributes(
+            store::Ptr{Cvoid}, out_json::Ref{Ptr{Cchar}}, out_len::Ref{UInt64}
+        )::Int32
+    )
+    return Dict{String, String}(
+        String(k) => String(v) for (k, v) in JSON.parse(json)
+    )
+end
+
+"""
+    remove_store_attribute!(store, key) -> Bool
+
+Remove `key`, returning whether it was there. Removing an absent key is `false`,
+not an error.
+
+A key in the reserved `infrastore.` namespace is refused here as well as on
+write, so the reservation cannot be worked around by deleting one.
+"""
+function remove_store_attribute!(store::Store, key::AbstractString)
+    out = Ref{Bool}(false)
+    _check(
+        @ccall lib_path().infrastore_store_remove_store_attribute(
+            store::Ptr{Cvoid}, key::Cstring, out::Ref{Bool}
+        )::Int32
+    )
+    return out[]
+end

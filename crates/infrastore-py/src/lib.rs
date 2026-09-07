@@ -3942,7 +3942,7 @@ impl PyStore {
     }
 
     /// Return True if the store holds no persistent content of any kind — no
-    /// time series, and no associations in any catalog.
+    /// time series, no associations in any catalog, and no store attributes.
     ///
     /// Answered by short-circuited existence probes, one per catalog table, so
     /// the cost does not grow with the store. Prefer it over a conjunction over
@@ -5259,6 +5259,56 @@ impl PyStore {
         let filter = build_parent_child_filter(parent_id, parent_types, child_id, child_types);
         self.store()?
             .count_parent_child_associations(&filter)
+            .map_err(map_err)
+    }
+
+    // ---- Store attributes --------------------------------------------------
+    //
+    // Key/value provenance about the artifact as a whole. Every name carries the
+    // `store_` prefix because a bare "attribute" already means a supplemental
+    // attribute here, and a bare "metadata" already means a time-series row.
+
+    /// Record ``key`` -> ``value`` as provenance about the whole artifact — who
+    /// built it, from what source system, under which of your own schema
+    /// versions. The store never interprets a value, in the same spirit as a
+    /// series' ``application_data``; a caller wanting structure stores JSON.
+    ///
+    /// Setting a key that is already there replaces its value: an artifact
+    /// records one creator, not a history of them.
+    ///
+    /// Raises `InvalidParameterError` for an empty key or one beginning with the
+    /// reserved ``infrastore.`` prefix, and `ReadOnlyStoreError` on a read-only
+    /// store.
+    fn set_store_attribute(&mut self, key: &str, value: &str) -> PyResult<()> {
+        self.store_mut()?
+            .set_store_attribute(key, value)
+            .map_err(map_err)
+    }
+
+    /// The value recorded for ``key``, or ``None`` if the artifact carries no
+    /// such key.
+    ///
+    /// ``None`` rather than an exception because a consumer asking whether a key
+    /// is there is asking a question. ``None`` and ``""`` are different answers:
+    /// a key may legitimately hold the empty string.
+    fn get_store_attribute(&self, key: &str) -> PyResult<Option<String>> {
+        self.store()?.get_store_attribute(key).map_err(map_err)
+    }
+
+    /// Every store attribute as a ``dict``, sorted by key. Empty for a store
+    /// carrying none.
+    fn list_store_attributes(&self) -> PyResult<BTreeMap<String, String>> {
+        self.store()?.list_store_attributes().map_err(map_err)
+    }
+
+    /// Remove ``key``, returning whether it was there. Removing an absent key is
+    /// ``False``, not an error.
+    ///
+    /// A key in the reserved ``infrastore.`` namespace is refused here as well
+    /// as on write, so the reservation cannot be worked around by deleting one.
+    fn remove_store_attribute(&mut self, key: &str) -> PyResult<bool> {
+        self.store_mut()?
+            .remove_store_attribute(key)
             .map_err(map_err)
     }
 

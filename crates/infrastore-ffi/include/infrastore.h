@@ -2300,6 +2300,89 @@ int32_t infrastore_store_count_parent_child_associations(const struct InfraStore
                                                          int64_t *out_count);
 
 /**
+ * Set store attribute `key` to `value`, replacing any value it had.
+ *
+ * Returns `INFRASTORE_ERR_INVALID_PARAMETER` for an empty key or one using the
+ * reserved `infrastore.` prefix, and `INFRASTORE_ERR_READ_ONLY` on a read-only
+ * store.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle obtained from this library and not
+ * freed, and must not be used concurrently from another thread. `key` and
+ * `value` must be non-null pointers to null-terminated UTF-8 strings, valid
+ * for the duration of the call; both are copied, so neither has to outlive it.
+ * Nothing is allocated for the caller to free.
+ */
+int32_t infrastore_store_set_store_attribute(struct InfraStore *handle,
+                                             const char *key,
+                                             const char *value);
+
+/**
+ * The value of store attribute `key`, through `out_value` as an **owned**
+ * allocation the caller releases with `infrastore_string_free`; `out_len` is
+ * its byte length.
+ *
+ * An unset key is not an error: the call returns `INFRASTORE_OK` with
+ * `*out_value` null and `*out_len` zero. A null pointer is the unambiguous
+ * signal here — a *set* key whose value is the empty string comes back as a
+ * non-null pointer to `""` with length zero, so length alone cannot tell the
+ * two apart.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle obtained from this library and not
+ * freed, and must not be used concurrently from another thread. `key` must be
+ * a non-null pointer to a null-terminated UTF-8 string valid for the duration
+ * of the call. `out_value` must be valid for writing one pointer and `out_len`
+ * for writing one `u64`; both are written on success and left untouched on
+ * error. A non-null `*out_value` must be released exactly once with
+ * `infrastore_string_free`.
+ */
+int32_t infrastore_store_get_store_attribute(const struct InfraStore *handle,
+                                             const char *key,
+                                             char **out_value,
+                                             uint64_t *out_len);
+
+/**
+ * Every store attribute as a JSON object of key to value, through `out_json`
+ * as an **owned** allocation the caller releases with `infrastore_string_free`;
+ * `out_len` is its byte length. A store with none yields `{}`.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle obtained from this library and not
+ * freed, and must not be used concurrently from another thread. `out_json`
+ * must be valid for writing one pointer and `out_len` for writing one `u64`;
+ * on success `*out_json` must be released exactly once with
+ * `infrastore_string_free`.
+ */
+int32_t infrastore_store_list_store_attributes(const struct InfraStore *handle,
+                                               char **out_json,
+                                               uint64_t *out_len);
+
+/**
+ * Remove store attribute `key`, reporting through `out_removed` whether it was
+ * there. Removing an absent key succeeds with `*out_removed` false.
+ *
+ * Returns `INFRASTORE_ERR_INVALID_PARAMETER` for an empty key or one using the
+ * reserved `infrastore.` prefix, and `INFRASTORE_ERR_READ_ONLY` on a read-only
+ * store.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle obtained from this library and not
+ * freed, and must not be used concurrently from another thread. `key` must be
+ * a non-null pointer to a null-terminated UTF-8 string valid for the duration
+ * of the call. `out_removed` may be null (the result is then discarded);
+ * otherwise it must be valid for writing one `bool`. Nothing is allocated for
+ * the caller to free.
+ */
+int32_t infrastore_store_remove_store_attribute(struct InfraStore *handle,
+                                                const char *key,
+                                                bool *out_removed);
+
+/**
  * Export `time_series_associations` matching the filter as a sorted
  * OpenAPI-row JSON array. Each row's `uri` and `data_hash` are the
  * hex-encoded content hash the store already has for that row — never a
