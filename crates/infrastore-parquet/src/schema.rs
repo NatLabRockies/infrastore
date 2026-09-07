@@ -80,6 +80,27 @@ pub const OWNER_CATEGORY: &str = "owner_category";
 /// The feature map as a JSON object, in the spelling `Features` serializes to.
 pub const FEATURES: &str = "features";
 
+// ---- Forecast keys ---------------------------------------------------------
+//
+// Written only for the dense forecast types, whose long table cannot be read
+// back without them: a `(issue_time, target_time, value)` row says where a value
+// belongs but not what the grid it belongs to *is*, and inferring five
+// parameters from a set of rows would be guessing.
+
+/// The first window's issue time, RFC 3339. The anchor of the window grid.
+pub const INITIAL_TIMESTAMP: &str = "initial_timestamp";
+/// ISO-8601 forecast horizon: how far ahead one window reaches.
+pub const HORIZON: &str = "horizon";
+/// ISO-8601 forecast interval: how far apart two windows are issued.
+pub const INTERVAL: &str = "interval";
+/// Number of windows.
+pub const COUNT: &str = "count";
+/// `Probabilistic` only: the percentiles, as a JSON array of numbers, in the
+/// order the stored array's leading axis is in.
+pub const PERCENTILES: &str = "percentiles";
+/// `Scenarios` only: how many trajectories each window carries.
+pub const SCENARIO_COUNT: &str = "scenario_count";
+
 /// The footer for one catalog row.
 ///
 /// Absent descriptors are **left out** rather than written as an empty string,
@@ -100,6 +121,28 @@ pub fn metadata_for_row(row: &TimeSeriesMetadata) -> BTreeMap<String, String> {
     );
     if let Some(resolution) = row.resolution {
         meta.insert(RESOLUTION.to_string(), resolution.to_iso8601());
+    }
+    // Forecast-only. A static row leaves all of these unset, so nothing here
+    // changes the footer `to_arrow()` writes for the three static types.
+    if row.time_series_type.is_forecast() {
+        if let Some(initial) = row.initial_timestamp {
+            meta.insert(INITIAL_TIMESTAMP.to_string(), initial.to_rfc3339());
+        }
+        if let Some(horizon) = row.horizon {
+            meta.insert(HORIZON.to_string(), horizon.to_iso8601());
+        }
+        if let Some(interval) = row.interval {
+            meta.insert(INTERVAL.to_string(), interval.to_iso8601());
+        }
+        if let Some(count) = row.count {
+            meta.insert(COUNT.to_string(), count.to_string());
+        }
+        if let Some(percentiles) = &row.percentiles {
+            meta.insert(
+                PERCENTILES.to_string(),
+                serde_json::to_string(percentiles).expect("a list of floats always serializes"),
+            );
+        }
     }
     if let Some(reference) = &row.time_reference {
         meta.insert(TIME_REFERENCE.to_string(), reference.as_storage_string());
@@ -197,6 +240,11 @@ pub fn decode_features(text: &str) -> Result<Features, String> {
         features.insert(key.clone(), feature);
     }
     Ok(features)
+}
+
+/// Parse a `percentiles` value back.
+pub fn decode_percentiles(text: &str) -> Result<Vec<f64>, String> {
+    serde_json::from_str(text).map_err(|e| format!("{PERCENTILES} is not a list of numbers: {e}"))
 }
 
 /// Parse a `time_series_type` value back.

@@ -229,7 +229,16 @@ Four refusals:
 - **`Struct` and `List` value columns.** Those are the _decoded_ form of a composite element type,
   which this version does not write and so does not claim to read.
 
-Two things a Parquet round trip does not preserve, both worth knowing:
+A dense forecast's long table is read back the same way, with one addition: **its footer's forecast
+parameters are required.** Resolution, horizon, interval, window count and the percentile list could
+in principle be reverse-engineered from a complete set of rows, but a merely self-consistent set
+would produce a plausible wrong answer -- a one-window forecast is indistinguishable from a static
+series, and overlapping windows make the interval ambiguous -- so they are read, not guessed. Rows
+are placed by their coordinates rather than by their order, so a file a query engine rewrote still
+reads correctly; every slot must be filled exactly once, since a forecast cube has no hole to leave
+and two rows for one slot means they disagree.
+
+Three things a Parquet round trip does not preserve, all worth knowing:
 
 - **The catalog id.** `add` never accepts one — "never reissued" is a guarantee of the catalog's
   `AUTOINCREMENT`, and a caller free to name an id could re-file a retired one — so the footer's
@@ -237,6 +246,10 @@ Two things a Parquet round trip does not preserve, both worth knowing:
 - **A composite series' `data_hash`.** Values round-trip exactly, which is an improvement over CSV
   where floats pass through decimal text. But a composite element type re-encodes at the minimum
   padding width, so one stored wider comes back with a different content hash.
+- **An _unspecified_ `time_reference`.** It comes back as `utc`. Arrow's timestamp type has a zone
+  or it has none, and _unspecified_ has no third spelling; the export writes a UTC-zoned column for
+  it, the same mapping `to_arrow()` has always used. The instants are unchanged -- only the label
+  moves from "not stated" to "UTC".
 
 #### Parquet export
 
@@ -251,6 +264,16 @@ value). The row's descriptors ride in the file's key/value footer — `name`, `t
 Composite element types (`piecewise_linear` and friends) keep their stored packing, a
 `FixedSizeList<double>[w]`; `element_type` in the footer is what names them, and every binding has a
 decoder. Both columns are non-nullable: the store has no nulls, and NaN is a value.
+
+A **dense forecast** takes a different shape, because a forecast is a cube and a Parquet file is one
+flat table. It exports as a **long table** -- `issue_time`, `target_time`, `value`, plus
+`percentile` for a `Probabilistic` and `scenario` for a `Scenarios` -- which is the same
+three-column description of a window the CSV export already uses. Rows come out window-major, so
+`GROUP BY issue_time` scans contiguously, and one instant's percentiles sit together. The footer
+additionally carries `initial_timestamp`, `horizon`, `interval`, `count`, and `percentiles` or
+`scenario_count`: the rows say where each value belongs, not what the grid it belongs to is, so
+those are what make the file readable back. A stored `DeterministicSingleTimeSeries` exports under
+its own name and comes back as the `Deterministic` it is a view of, exactly as `merge` does.
 
 Two limits, both deliberate:
 

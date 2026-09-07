@@ -31,7 +31,10 @@ use infrastore_core::{
 };
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-use crate::export::{TIMESTAMP_COLUMN, VALUE_COLUMN};
+use crate::export::{
+    ISSUE_TIME_COLUMN, PERCENTILE_COLUMN, SCENARIO_COLUMN, TARGET_TIME_COLUMN, TIMESTAMP_COLUMN,
+    VALUE_COLUMN,
+};
 use crate::schema;
 use crate::{Result, arrow_err, parquet_err, unsupported};
 
@@ -100,17 +103,24 @@ pub fn read_series(path: &Path, options: &ImportOptions) -> Result<ImportedSerie
     // guaranteed the same length by `RecordBatch` itself.
     let batch = arrow::compute::concat_batches(&schema, &batches).map_err(arrow_err)?;
 
-    let zone = timestamp_zone(&batch)?;
-    let timestamps = read_timestamps(&batch)?;
+    // A dense forecast is a long table, told apart by its columns -- the footer
+    // names the type too, but a foreign long table may carry no footer at all
+    // and the column names are the shape's own evidence.
+    if batch.column_by_name(ISSUE_TIME_COLUMN).is_some() {
+        return read_forecast(&batch, &footer, options);
+    }
+
+    let zone = timestamp_zone(&batch, TIMESTAMP_COLUMN)?;
+    let timestamps = read_timestamps(&batch, TIMESTAMP_COLUMN)?;
     let (dims, leaf) = descend(column(&batch, VALUE_COLUMN)?)?;
     let array = build_array(&dims, &leaf, timestamps.len())?;
 
     build_series(timestamps, array, &footer, options, zone.as_deref())
 }
 
-/// The timestamp column's own Arrow zone, if it has one.
-fn timestamp_zone(batch: &RecordBatch) -> Result<Option<String>> {
-    match column(batch, TIMESTAMP_COLUMN)?.data_type() {
+/// A timestamp column's own Arrow zone, if it has one.
+fn timestamp_zone(batch: &RecordBatch, name: &str) -> Result<Option<String>> {
+    match column(batch, name)?.data_type() {
         DataType::Timestamp(_, zone) => Ok(zone.as_ref().map(|z| z.to_string())),
         _ => Ok(None),
     }
@@ -131,12 +141,11 @@ fn column(batch: &RecordBatch, name: &str) -> Result<ArrayRef> {
 /// rule the store's write path enforces on every instant it records: unix
 /// milliseconds are the store's precision, and silently rounding a finer
 /// timestamp would move it.
-fn read_timestamps(batch: &RecordBatch) -> Result<Vec<DateTime<Utc>>> {
-    let array = column(batch, TIMESTAMP_COLUMN)?;
+fn read_timestamps(batch: &RecordBatch, name: &str) -> Result<Vec<DateTime<Utc>>> {
+    let array = column(batch, name)?;
     if array.null_count() > 0 {
         return Err(unsupported(format!(
-            "the `{TIMESTAMP_COLUMN}` column has nulls; the store records an \
-             instant for every row"
+            "the `{name}` column has nulls; the store records an instant for every row"
         )));
     }
     let millis: Vec<i64> = match array.data_type() {
@@ -156,15 +165,20 @@ fn read_timestamps(batch: &RecordBatch) -> Result<Vec<DateTime<Utc>>> {
         }
         DataType::Timestamp(TimeUnit::Microsecond, _) => {
             let a = downcast::<TimestampMicrosecondArray>(&array, "timestamp[us]")?;
-            rescale((0..a.len()).map(|i| a.value(i)), 1_000, "microsecond")?
+            rescale((0..a.len()).map(|i| a.value(i)), 1_000, "microsecond", name)?
         }
         DataType::Timestamp(TimeUnit::Nanosecond, _) => {
             let a = downcast::<TimestampNanosecondArray>(&array, "timestamp[ns]")?;
-            rescale((0..a.len()).map(|i| a.value(i)), 1_000_000, "nanosecond")?
+            rescale(
+                (0..a.len()).map(|i| a.value(i)),
+                1_000_000,
+                "nanosecond",
+                name,
+            )?
         }
         other => {
             return Err(unsupported(format!(
-                "the `{TIMESTAMP_COLUMN}` column is {other}, not a timestamp"
+                "the `{name}` column is {other}, not a timestamp"
             )));
         }
     };
@@ -180,15 +194,20 @@ fn read_timestamps(batch: &RecordBatch) -> Result<Vec<DateTime<Utc>>> {
 
 /// Divide sub-millisecond timestamps down, refusing any that is not a whole
 /// millisecond.
-fn rescale(values: impl Iterator<Item = i64>, per_milli: i64, unit: &str) -> Result<Vec<i64>> {
+fn rescale(
+    values: impl Iterator<Item = i64>,
+    per_milli: i64,
+    unit: &str,
+    column: &str,
+) -> Result<Vec<i64>> {
     values
         .map(|v| {
             if v % per_milli == 0 {
                 Ok(v / per_milli)
             } else {
                 Err(unsupported(format!(
-                    "the `{TIMESTAMP_COLUMN}` column is in {unit}s and {v} is not a whole \
-                     millisecond; the store records millisecond instants and will not round one"
+                    "the `{column}` column is in {unit}s and {v} is not a whole millisecond; \
+                     the store records millisecond instants and will not round one"
                 )))
             }
         })
@@ -535,4 +554,379 @@ pub fn dtype_of(data_type: &DataType) -> Option<Dtype> {
         DataType::Boolean => Dtype::Bool,
         _ => return None,
     })
+}
+
+// ---- Dense forecasts --------------------------------------------------------
+
+/// Read a dense forecast's long table back into the cube the store holds.
+///
+/// **The footer's forecast parameters are required.** A `(issue_time,
+/// target_time, value)` row says where a value belongs; it does not say what the
+/// grid it belongs to *is*. Resolution, horizon, interval and window count could
+/// in principle be reverse-engineered from a complete set of rows, but a set that
+/// is merely self-consistent would produce a plausible wrong answer — a forecast
+/// with one window is indistinguishable from a static series, and overlapping
+/// windows make the interval ambiguous. So they are read, not guessed, and a long
+/// table with no footer is refused with a message saying which key is missing.
+///
+/// Rows are placed by their **coordinates**, not by their order, so a file a
+/// query engine rewrote still reads correctly. Every slot must be filled exactly
+/// once: a missing one is a hole the cube has no representation for, and a
+/// duplicate means two rows disagree about the same value.
+fn read_forecast(
+    batch: &RecordBatch,
+    footer: &BTreeMap<String, String>,
+    options: &ImportOptions,
+) -> Result<ImportedSeries> {
+    let ts_type = footer
+        .get(schema::TIME_SERIES_TYPE)
+        .map(|text| schema::decode_time_series_type(text).map_err(unsupported))
+        .transpose()?
+        .or(options.time_series_type)
+        .ok_or_else(|| {
+            unsupported(
+                "a long forecast table does not say which forecast type it is; the footer's \
+                 `time_series_type` names it",
+            )
+        })?;
+
+    let initial_timestamp = required_instant(footer, schema::INITIAL_TIMESTAMP)?;
+    let resolution = required_period(footer, schema::RESOLUTION)?;
+    let horizon = required_period(footer, schema::HORIZON)?;
+    let interval = required_period(footer, schema::INTERVAL)?;
+    let count = required_usize(footer, schema::COUNT)?;
+    let name = resolve_name(footer, options)?;
+
+    let issue = read_timestamps(batch, ISSUE_TIME_COLUMN)?;
+    let target = read_timestamps(batch, TARGET_TIME_COLUMN)?;
+    let (dims, leaf) = descend(column(batch, VALUE_COLUMN)?)?;
+    let values = build_array(&dims, &leaf, issue.len())?;
+
+    // The lane axis and its labels: percentiles for one type, trajectory
+    // indices for the other, and nothing at all for `Deterministic`.
+    let (lanes, lane_of_row, percentiles) = match ts_type {
+        TimeSeriesType::Deterministic | TimeSeriesType::DeterministicSingleTimeSeries => {
+            (1usize, vec![0usize; issue.len()], None)
+        }
+        TimeSeriesType::Probabilistic => {
+            let percentiles = footer
+                .get(schema::PERCENTILES)
+                .ok_or_else(|| missing_key(schema::PERCENTILES))
+                .and_then(|text| schema::decode_percentiles(text).map_err(unsupported))?;
+            let column = read_f64_column(batch, PERCENTILE_COLUMN)?;
+            let lanes = percentiles.len();
+            let rows = column
+                .iter()
+                .map(|p| {
+                    percentiles.iter().position(|q| q == p).ok_or_else(|| {
+                        unsupported(format!(
+                            "the `{PERCENTILE_COLUMN}` column has {p}, which the footer's \
+                                 percentiles {percentiles:?} do not list"
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            (lanes, rows, Some(percentiles))
+        }
+        TimeSeriesType::Scenarios => {
+            let lanes = required_usize(footer, schema::SCENARIO_COUNT)?;
+            let column = read_i64_column(batch, SCENARIO_COLUMN)?;
+            let rows = column
+                .iter()
+                .map(|s| {
+                    usize::try_from(*s)
+                        .ok()
+                        .filter(|s| *s < lanes)
+                        .ok_or_else(|| {
+                            unsupported(format!(
+                                "the `{SCENARIO_COLUMN}` column has {s}, outside 0..{lanes}"
+                            ))
+                        })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            (lanes, rows, None)
+        }
+        other => {
+            return Err(unsupported(format!(
+                "{} is not a dense forecast",
+                other.as_str()
+            )));
+        }
+    };
+
+    let grid = WindowGrid {
+        initial_timestamp,
+        resolution,
+        interval,
+        count,
+    };
+    let horizon_steps = grid.horizon_steps(horizon)?;
+    let expected = lanes * horizon_steps * count;
+    if issue.len() != expected {
+        return Err(unsupported(format!(
+            "the table has {} rows, but this forecast's grid holds {expected} values \
+             ({lanes} lanes x {horizon_steps} steps x {count} windows)",
+            issue.len()
+        )));
+    }
+
+    // Place each row by its coordinates. `filled` catches a hole and a
+    // duplicate with one pass, which is what makes order irrelevant.
+    let element_shape = values.element_shape().to_vec();
+    let per_element: usize = element_shape.iter().product::<usize>().max(1);
+    let width = values.dtype.size() * per_element;
+    let mut bytes = vec![0u8; expected * width];
+    let mut filled = vec![false; expected];
+    for row in 0..issue.len() {
+        let window = grid.window_of(issue[row])?;
+        let step = grid.step_of(issue[row], target[row], horizon_steps)?;
+        let lane = lane_of_row[row];
+        let slot = (lane * horizon_steps + step) * count + window;
+        if filled[slot] {
+            return Err(unsupported(format!(
+                "two rows describe window {window}, step {step}, lane {lane}"
+            )));
+        }
+        filled[slot] = true;
+        let src = row * width;
+        bytes[slot * width..(slot + 1) * width].copy_from_slice(&values.bytes[src..src + width]);
+    }
+    if let Some(slot) = filled.iter().position(|f| !f) {
+        let window = slot % count;
+        let step = (slot / count) % horizon_steps;
+        return Err(unsupported(format!(
+            "no row describes window {window}, step {step}; a forecast cube has no hole to \
+             put one in"
+        )));
+    }
+
+    let mut shape = if lanes > 1 || percentiles.is_some() || ts_type == TimeSeriesType::Scenarios {
+        vec![lanes, horizon_steps, count]
+    } else {
+        vec![horizon_steps, count]
+    };
+    shape.extend_from_slice(&element_shape);
+    let cube = TypedArray::new(values.dtype, shape, bytes).map_err(unsupported)?;
+
+    let mut data = match ts_type {
+        TimeSeriesType::Probabilistic => TimeSeriesData::Probabilistic(
+            infrastore_core::Probabilistic::new(
+                initial_timestamp,
+                resolution,
+                horizon,
+                interval,
+                count,
+                percentiles.expect("a Probabilistic resolves its percentiles above"),
+                cube,
+                name,
+            )
+            .map_err(unsupported)?,
+        ),
+        TimeSeriesType::Scenarios => TimeSeriesData::Scenarios(
+            infrastore_core::Scenarios::new(
+                initial_timestamp,
+                resolution,
+                horizon,
+                interval,
+                count,
+                lanes,
+                cube,
+                name,
+            )
+            .map_err(unsupported)?,
+        ),
+        // A stored `DeterministicSingleTimeSeries` reads back as the
+        // `Deterministic` it is a view of, so it lands as one here too.
+        _ => TimeSeriesData::Deterministic(
+            infrastore_core::Deterministic::new(
+                initial_timestamp,
+                resolution,
+                horizon,
+                interval,
+                count,
+                cube,
+                name,
+            )
+            .map_err(unsupported)?,
+        ),
+    };
+    let zone = timestamp_zone(batch, ISSUE_TIME_COLUMN)?;
+    let element_type = resolve_element_type_for(&data, footer, options)?;
+    let reference = resolve_time_reference(footer, options, zone.as_deref())?;
+    apply_descriptors(&mut data, element_type, reference, footer)?;
+
+    Ok(ImportedSeries {
+        recorded_id: footer
+            .get(schema::ID)
+            .and_then(|text| text.parse::<i64>().ok()),
+        owner_id: footer
+            .get(schema::OWNER_ID)
+            .map(|text| {
+                text.parse::<i64>()
+                    .map_err(|e| unsupported(format!("{}: {e}", schema::OWNER_ID)))
+            })
+            .transpose()?,
+        owner_type: footer.get(schema::OWNER_TYPE).cloned(),
+        owner_category: footer
+            .get(schema::OWNER_CATEGORY)
+            .map(|text| schema::decode_owner_category(text).map_err(unsupported))
+            .transpose()?,
+        features: footer
+            .get(schema::FEATURES)
+            .map(|text| schema::decode_features(text).map_err(unsupported))
+            .transpose()?
+            .unwrap_or_default(),
+        data,
+    })
+}
+
+/// The window grid, plus the arithmetic that turns an instant back into a
+/// coordinate on it.
+struct WindowGrid {
+    initial_timestamp: DateTime<Utc>,
+    resolution: Period,
+    interval: Period,
+    count: usize,
+}
+
+impl WindowGrid {
+    /// How many `resolution` steps fit in `horizon`.
+    ///
+    /// Counted by walking the grid rather than dividing, because a calendar
+    /// period is not a fixed number of milliseconds and the quotient would be
+    /// wrong for a monthly resolution inside a yearly horizon.
+    fn horizon_steps(&self, horizon: Period) -> Result<usize> {
+        let end = horizon
+            .add_to(self.initial_timestamp, 1)
+            .ok_or_else(|| unsupported("the forecast horizon overflows the calendar"))?;
+        let mut steps = 0usize;
+        loop {
+            let at = self
+                .resolution
+                .add_to(self.initial_timestamp, steps as i64)
+                .ok_or_else(|| unsupported("the forecast horizon overflows the calendar"))?;
+            if at >= end {
+                return Ok(steps);
+            }
+            steps += 1;
+            if steps > 1_000_000 {
+                return Err(unsupported(
+                    "the forecast horizon holds more than a million steps; the resolution and \
+                     horizon in the footer are probably not the ones that wrote the file",
+                ));
+            }
+        }
+    }
+
+    fn window_of(&self, issue: DateTime<Utc>) -> Result<usize> {
+        for window in 0..self.count {
+            let at = self
+                .interval
+                .add_to(self.initial_timestamp, window as i64)
+                .ok_or_else(|| unsupported("a forecast window overflows the calendar"))?;
+            if at == issue {
+                return Ok(window);
+            }
+        }
+        Err(unsupported(format!(
+            "the `{ISSUE_TIME_COLUMN}` value {issue} is not one of this forecast's {} window \
+             starts",
+            self.count
+        )))
+    }
+
+    fn step_of(
+        &self,
+        issue: DateTime<Utc>,
+        target: DateTime<Utc>,
+        horizon_steps: usize,
+    ) -> Result<usize> {
+        for step in 0..horizon_steps {
+            let at = self
+                .resolution
+                .add_to(issue, step as i64)
+                .ok_or_else(|| unsupported("a forecast step overflows the calendar"))?;
+            if at == target {
+                return Ok(step);
+            }
+        }
+        Err(unsupported(format!(
+            "the `{TARGET_TIME_COLUMN}` value {target} is not on the {horizon_steps}-step grid \
+             starting at {issue}"
+        )))
+    }
+}
+
+fn missing_key(key: &str) -> infrastore_core::TimeSeriesError {
+    unsupported(format!(
+        "a dense forecast's table cannot be read back without `{key}` in the footer: the rows \
+         say where each value belongs, not what the grid it belongs to is"
+    ))
+}
+
+fn required_period(footer: &BTreeMap<String, String>, key: &str) -> Result<Period> {
+    let text = footer.get(key).ok_or_else(|| missing_key(key))?;
+    Period::from_iso8601(text).map_err(|e| unsupported(format!("{key}: {e}")))
+}
+
+fn required_usize(footer: &BTreeMap<String, String>, key: &str) -> Result<usize> {
+    let text = footer.get(key).ok_or_else(|| missing_key(key))?;
+    text.parse::<usize>()
+        .map_err(|e| unsupported(format!("{key}: {e}")))
+}
+
+fn required_instant(footer: &BTreeMap<String, String>, key: &str) -> Result<DateTime<Utc>> {
+    let text = footer.get(key).ok_or_else(|| missing_key(key))?;
+    DateTime::parse_from_rfc3339(text)
+        .map(|t| t.with_timezone(&Utc))
+        .map_err(|e| unsupported(format!("{key}: {e}")))
+}
+
+fn read_f64_column(batch: &RecordBatch, name: &str) -> Result<Vec<f64>> {
+    let array = column(batch, name)?;
+    if array.null_count() > 0 {
+        return Err(unsupported(format!("the `{name}` column has nulls")));
+    }
+    let a = downcast::<Float64Array>(&array, "float64")?;
+    Ok((0..a.len()).map(|i| a.value(i)).collect())
+}
+
+fn read_i64_column(batch: &RecordBatch, name: &str) -> Result<Vec<i64>> {
+    let array = column(batch, name)?;
+    if array.null_count() > 0 {
+        return Err(unsupported(format!("the `{name}` column has nulls")));
+    }
+    match array.data_type() {
+        DataType::Int32 => {
+            let a = downcast::<Int32Array>(&array, "int32")?;
+            Ok((0..a.len()).map(|i| a.value(i) as i64).collect())
+        }
+        DataType::Int64 => {
+            let a = downcast::<Int64Array>(&array, "int64")?;
+            Ok((0..a.len()).map(|i| a.value(i)).collect())
+        }
+        other => Err(unsupported(format!(
+            "the `{name}` column is {other}, not an integer"
+        ))),
+    }
+}
+
+/// [`resolve_element_type`] over an assembled series rather than a bare array.
+fn resolve_element_type_for(
+    data: &TimeSeriesData,
+    footer: &BTreeMap<String, String>,
+    options: &ImportOptions,
+) -> Result<ElementType> {
+    let declared = footer
+        .get(schema::ELEMENT_TYPE)
+        .map(|text| schema::decode_element_type(text).map_err(unsupported))
+        .transpose()?;
+    match (declared, options.element_type) {
+        (Some(from_file), Some(asserted)) if from_file != asserted => Err(unsupported(format!(
+            "the file declares element_type {from_file}, but {asserted} was asserted"
+        ))),
+        (Some(from_file), _) => Ok(from_file),
+        (None, Some(asserted)) => Ok(asserted),
+        (None, None) => Ok(data.element_type()),
+    }
 }

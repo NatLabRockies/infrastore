@@ -395,8 +395,11 @@ fn the_irregular_types_share_a_shape_and_differ_only_in_the_footer() {
     );
 }
 
+/// A forecast exports as a long table rather than the two-column static one;
+/// `tests/forecasts.rs` covers that shape. What matters here is only that the
+/// static path does not claim it.
 #[test]
-fn a_forecast_is_refused_rather_than_mis_shaped() {
+fn a_forecast_takes_the_long_table_shape_instead() {
     // Two windows of two steps: shape `[horizon_steps, count]`.
     let forecast = Deterministic::new(
         t0(),
@@ -409,12 +412,20 @@ fn a_forecast_is_refused_rather_than_mis_shaped() {
     )
     .expect("a forecast should build");
     let (row, data) = stored(TimeSeriesData::Deterministic(forecast), Features::new());
-    let err = record_batch(&row, &data).expect_err("a forecast is a different table shape");
-    assert!(
-        matches!(err, infrastore_core::TimeSeriesError::InvalidParameter(_)),
-        "got {err:?}"
+    let batch = record_batch(&row, &data).expect("a forecast exports as a long table");
+    assert_eq!(
+        batch
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect::<Vec<_>>(),
+        vec![
+            "issue_time".to_string(),
+            "target_time".to_string(),
+            "value".to_string()
+        ]
     );
-    assert!(err.to_string().contains("forecast"), "{err}");
 }
 
 #[test]

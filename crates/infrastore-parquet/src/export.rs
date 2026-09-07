@@ -20,7 +20,9 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use chrono::{DateTime, Utc};
-use infrastore_core::{Dtype, TimeReference, TimeSeriesData, TimeSeriesMetadata, TypedArray};
+use infrastore_core::{
+    Dtype, Period, TimeReference, TimeSeriesData, TimeSeriesMetadata, TypedArray,
+};
 use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
@@ -30,26 +32,43 @@ use crate::{Result, arrow_err, parquet_err, unsupported};
 
 /// The value column's name. Fixed, so two exports concatenate.
 pub const VALUE_COLUMN: &str = "value";
+/// A dense forecast's issue-time column: which window a row belongs to.
+pub const ISSUE_TIME_COLUMN: &str = "issue_time";
+/// A dense forecast's target-time column: the instant the value is for.
+pub const TARGET_TIME_COLUMN: &str = "target_time";
+/// A `Probabilistic` forecast's percentile column.
+pub const PERCENTILE_COLUMN: &str = "percentile";
+/// A `Scenarios` forecast's trajectory column, `0..scenario_count`.
+pub const SCENARIO_COLUMN: &str = "scenario";
 /// The timestamp column's name. For a `PersistentTimeSeries` these are
 /// breakpoints rather than the instants the series has values at — the
 /// `time_series_type` in the footer is what says so.
 pub const TIMESTAMP_COLUMN: &str = "timestamp";
 
-/// Build the one-series Arrow table: `timestamp`, `value`, and the row's footer.
+/// Build the one-series Arrow table and the row's footer.
 ///
-/// Refuses anything but the three static types. A forecast is a different table
-/// shape (a long form keyed by issue and target time) and is not part of this
-/// version.
+/// Two shapes, chosen by the type. A static series is `timestamp`, `value`. A
+/// dense forecast is a **long table**: `issue_time`, `target_time`, `value`, plus
+/// `percentile` or `scenario` where the type has a third axis. Long rather than
+/// one table per window because a Parquet file is one table, and a column of
+/// issue times is what makes `GROUP BY issue_time` the natural query.
+///
+/// A `DeterministicSingleTimeSeries` never reaches here as itself: the store
+/// reads one back as the `Deterministic` it is a view of, so it exports as one.
 pub fn record_batch(row: &TimeSeriesMetadata, data: &TimeSeriesData) -> Result<RecordBatch> {
-    let (instants, array) = static_parts(data)?;
     // The row's spelling, not the value object's: the two agree for a series
     // read out of a store, and the catalog is the authority when they do not.
-    build_batch(
-        &instants,
-        row.time_reference.as_ref(),
-        array,
-        schema::metadata_for_row(row),
-    )
+    let reference = row.time_reference.as_ref();
+    let metadata = schema::metadata_for_row(row);
+    match data {
+        TimeSeriesData::SingleTimeSeries(_)
+        | TimeSeriesData::NonSequentialTimeSeries(_)
+        | TimeSeriesData::PersistentTimeSeries(_) => {
+            let (instants, array) = static_parts(data)?;
+            build_batch(&instants, reference, array, metadata)
+        }
+        _ => forecast_batch(data, reference, metadata),
+    }
 }
 
 /// Write [`record_batch`] to `path` as Parquet.
@@ -84,8 +103,12 @@ fn static_parts(data: &TimeSeriesData) -> Result<(Vec<DateTime<Utc>>, &TypedArra
         TimeSeriesData::SingleTimeSeries(s) => Ok((s.timestamps().collect(), &s.data)),
         TimeSeriesData::NonSequentialTimeSeries(s) => Ok((s.timestamps.clone(), &s.data)),
         TimeSeriesData::PersistentTimeSeries(s) => Ok((s.timestamps.clone(), &s.data)),
+        // Unreachable through `record_batch`, which dispatches a forecast to
+        // its own long-table builder. Kept as a real arm rather than an
+        // `unreachable!` so a seventh type added later fails loudly here instead
+        // of being silently mis-shaped.
         other => Err(unsupported(format!(
-            "Parquet export covers the static types; {} is a forecast",
+            "{} is not a static series",
             other.time_series_type().as_str()
         ))),
     }
@@ -213,4 +236,223 @@ pub fn timestamp_data_type(reference: Option<&TimeReference>) -> DataType {
         Some(TimeReference::Zoneless) => DataType::Timestamp(TimeUnit::Millisecond, None),
         Some(r) => DataType::Timestamp(TimeUnit::Millisecond, Some(r.as_storage_string().into())),
     }
+}
+
+// ---- Dense forecasts --------------------------------------------------------
+//
+// A forecast is stored as a cube -- `[H, count, *E]`, or `[P, H, count, *E]`
+// with a third axis -- and a Parquet file is one flat table. The long form is
+// the standard way to flatten one: every row carries the coordinates that place
+// it, so nothing depends on row order and the file reads correctly however a
+// query engine chooses to scan it.
+
+/// The axes a forecast's stored cube has, resolved once.
+struct ForecastShape<'a> {
+    /// Windows.
+    count: usize,
+    /// Steps per window.
+    horizon_steps: usize,
+    /// The leading axis: percentiles or scenarios. `None` for `Deterministic`.
+    lanes: Option<usize>,
+    /// Trailing per-step dims, after the axes above.
+    element_shape: Vec<usize>,
+    array: &'a TypedArray,
+}
+
+impl ForecastShape<'_> {
+    fn rows(&self) -> usize {
+        self.count * self.horizon_steps * self.lanes.unwrap_or(1)
+    }
+
+    /// The flat element index of `(lane, step, window)`, in the stored cube's
+    /// own row-major order.
+    fn offset(&self, lane: usize, step: usize, window: usize) -> usize {
+        (lane * self.horizon_steps + step) * self.count + window
+    }
+}
+
+fn forecast_shape(data: &TimeSeriesData) -> Result<(ForecastShape<'_>, ForecastGrid)> {
+    let (array, lanes, grid) = match data {
+        TimeSeriesData::Deterministic(f) => (
+            &f.data,
+            None,
+            ForecastGrid {
+                initial_timestamp: f.initial_timestamp,
+                resolution: f.resolution,
+                interval: f.interval,
+                count: f.count,
+            },
+        ),
+        TimeSeriesData::Probabilistic(f) => (
+            &f.data,
+            Some(f.percentiles.len()),
+            ForecastGrid {
+                initial_timestamp: f.initial_timestamp,
+                resolution: f.resolution,
+                interval: f.interval,
+                count: f.count,
+            },
+        ),
+        TimeSeriesData::Scenarios(f) => (
+            &f.data,
+            Some(f.scenario_count),
+            ForecastGrid {
+                initial_timestamp: f.initial_timestamp,
+                resolution: f.resolution,
+                interval: f.interval,
+                count: f.count,
+            },
+        ),
+        other => {
+            return Err(unsupported(format!(
+                "{} is not a dense forecast",
+                other.time_series_type().as_str()
+            )));
+        }
+    };
+    // The leading axes are fixed by the type; everything after them is the
+    // per-step element shape, which is one axis further in than the static
+    // rule and is why `TypedArray::element_shape` is wrong here.
+    let leading = if lanes.is_some() { 3 } else { 2 };
+    if array.shape.len() < leading {
+        return Err(unsupported(format!(
+            "a forecast array has at least {leading} dimensions, got {:?}",
+            array.shape
+        )));
+    }
+    let horizon_steps = array.shape[leading - 2];
+    Ok((
+        ForecastShape {
+            count: grid.count,
+            horizon_steps,
+            lanes,
+            element_shape: array.shape[leading..].to_vec(),
+            array,
+        },
+        grid,
+    ))
+}
+
+/// The two grids a forecast value sits on: windows step by `interval`, and the
+/// steps inside one window step by `resolution`.
+struct ForecastGrid {
+    initial_timestamp: DateTime<Utc>,
+    resolution: Period,
+    interval: Period,
+    count: usize,
+}
+
+impl ForecastGrid {
+    fn issue_time(&self, window: usize) -> Result<DateTime<Utc>> {
+        self.interval
+            .add_to(self.initial_timestamp, window as i64)
+            .ok_or_else(|| unsupported(format!("forecast window {window} overflows the calendar")))
+    }
+
+    fn target_time(&self, issue: DateTime<Utc>, step: usize) -> Result<DateTime<Utc>> {
+        self.resolution
+            .add_to(issue, step as i64)
+            .ok_or_else(|| unsupported(format!("forecast step {step} overflows the calendar")))
+    }
+}
+
+/// The long table for a dense forecast.
+fn forecast_batch(
+    data: &TimeSeriesData,
+    reference: Option<&TimeReference>,
+    mut metadata: std::collections::BTreeMap<String, String>,
+) -> Result<RecordBatch> {
+    let (shape, grid) = forecast_shape(data)?;
+    // The catalog's `element_shape` counts from the wrong axis for a forecast,
+    // and `scenario_count` is not a catalog column at all -- both are read off
+    // the stored cube here.
+    metadata.insert(
+        schema::ELEMENT_SHAPE.to_string(),
+        schema::encode_element_shape(&shape.element_shape),
+    );
+    if matches!(data, TimeSeriesData::Scenarios(_)) {
+        metadata.insert(
+            schema::SCENARIO_COUNT.to_string(),
+            shape.lanes.unwrap_or(0).to_string(),
+        );
+    }
+
+    let rows = shape.rows();
+    let mut issue = Vec::with_capacity(rows);
+    let mut target = Vec::with_capacity(rows);
+    let mut lane_index = Vec::with_capacity(rows);
+    // Element offsets in the stored cube, in the order the rows are emitted.
+    let mut order = Vec::with_capacity(rows);
+
+    // Window-major, then step, then lane: a `GROUP BY issue_time` scans
+    // contiguously, and one instant's percentiles sit together, which is how a
+    // fan chart reads a row.
+    for window in 0..shape.count {
+        let issued = grid.issue_time(window)?;
+        for step in 0..shape.horizon_steps {
+            let at = grid.target_time(issued, step)?;
+            for lane in 0..shape.lanes.unwrap_or(1) {
+                issue.push(issued);
+                target.push(at);
+                lane_index.push(lane);
+                order.push(shape.offset(lane, step, window));
+            }
+        }
+    }
+
+    let values = gathered_value_array(&shape, &order)?;
+    let mut fields: Vec<Field> = vec![
+        Field::new(ISSUE_TIME_COLUMN, timestamp_data_type(reference), false),
+        Field::new(TARGET_TIME_COLUMN, timestamp_data_type(reference), false),
+    ];
+    let mut columns: Vec<ArrayRef> = vec![
+        timestamp_array(&issue, reference),
+        timestamp_array(&target, reference),
+    ];
+    match data {
+        TimeSeriesData::Probabilistic(f) => {
+            let column: Vec<f64> = lane_index.iter().map(|&i| f.percentiles[i]).collect();
+            fields.push(Field::new(PERCENTILE_COLUMN, DataType::Float64, false));
+            columns.push(Arc::new(Float64Array::from(column)));
+        }
+        TimeSeriesData::Scenarios(_) => {
+            let column: Vec<i32> = lane_index.iter().map(|&i| i as i32).collect();
+            fields.push(Field::new(SCENARIO_COLUMN, DataType::Int32, false));
+            columns.push(Arc::new(Int32Array::from(column)));
+        }
+        _ => {}
+    }
+    fields.push(Field::new(VALUE_COLUMN, values.data_type().clone(), false));
+    columns.push(values);
+
+    let schema = Schema::new_with_metadata(fields, metadata.into_iter().collect());
+    RecordBatch::try_new(Arc::new(schema), columns).map_err(arrow_err)
+}
+
+/// The value column for a long table: the stored elements, permuted into the
+/// row order the table emits.
+///
+/// Built by copying the element bytes rather than by decoding to a typed vector
+/// and back, so it is dtype-agnostic and exact — a value never passes through a
+/// wider type on its way out.
+fn gathered_value_array(shape: &ForecastShape<'_>, order: &[usize]) -> Result<ArrayRef> {
+    let per_element: usize = shape.element_shape.iter().product::<usize>().max(1);
+    let width = shape.array.dtype.size() * per_element;
+    let mut bytes = Vec::with_capacity(order.len() * width);
+    for &offset in order {
+        let start = offset * width;
+        let end = start + width;
+        let slice = shape.array.bytes.get(start..end).ok_or_else(|| {
+            unsupported(format!(
+                "forecast array is {} bytes, too short for element {offset}",
+                shape.array.bytes.len()
+            ))
+        })?;
+        bytes.extend_from_slice(slice);
+    }
+    let mut gathered_shape = vec![order.len()];
+    gathered_shape.extend_from_slice(&shape.element_shape);
+    let gathered =
+        TypedArray::new(shape.array.dtype, gathered_shape, bytes).map_err(unsupported)?;
+    value_array(&gathered)
 }

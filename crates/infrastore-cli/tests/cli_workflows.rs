@@ -4918,3 +4918,60 @@ fn write_naked_parquet(path: &Path) {
     writer.write(&batch).unwrap();
     writer.close().unwrap();
 }
+
+#[cfg(feature = "parquet")]
+#[test]
+fn a_dense_forecast_round_trips_as_a_long_table() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("fc.h5");
+    let dest = dir.path().join("fc_dest.h5");
+    seed_day_of_windows(dir.path(), &source);
+    let out = dir.path().join("out");
+
+    run(
+        &source,
+        &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
+    );
+    let file = fs::read_dir(&out).unwrap().next().unwrap().unwrap().path();
+
+    // The same three columns the CSV export uses for a forecast, so the two
+    // exports describe a window the same way.
+    let reader = fs::File::open(&file).unwrap();
+    let builder =
+        parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(reader).unwrap();
+    assert_eq!(
+        builder
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect::<Vec<_>>(),
+        vec![
+            "issue_time".to_string(),
+            "target_time".to_string(),
+            "value".to_string()
+        ]
+    );
+    // 24 windows x 2 steps, flattened.
+    let rows: usize = builder
+        .build()
+        .unwrap()
+        .map(|b| b.unwrap().num_rows())
+        .sum();
+    assert_eq!(rows, 48);
+
+    run(&dest, &["add", "--parquet", file.to_str().unwrap()]);
+    let listed = run(&dest, &["-f", "json", "list"]);
+    let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    let row = &listed["items"][0];
+    assert_eq!(row["type"], "Deterministic");
+    assert_eq!(row["name"], "load_det");
+    assert_eq!(row["count"], 24);
+    assert_eq!(row["horizon"], "PT2H");
+    assert_eq!(row["interval"], "PT1H");
+
+    // The values are the same bytes, which is what a content hash says.
+    let src = run(&source, &["-f", "json", "list"]);
+    let src: serde_json::Value = serde_json::from_str(&src).unwrap();
+    assert_eq!(row["data_hash"], src["items"][0]["data_hash"]);
+}
