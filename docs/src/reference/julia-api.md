@@ -1270,6 +1270,34 @@ remove_parent_child_associations!(store; parent_types=["Bus"])   # 1
 Neither association catalog is exposed over the [gRPC server](./grpc-api.md) or the
 [`infrastore` CLI](./cli.md).
 
+### Store attributes
+
+Key/value provenance about the **artifact as a whole**, as opposed to a supplemental attribute
+(which belongs to a component) or `application_data` (which belongs to one series). See
+[Store attributes](../explanation/data-model.md#store-attributes) for the model.
+
+```julia
+set_store_attribute!(store, key::AbstractString, value::AbstractString) -> Nothing
+get_store_attribute(store, key::AbstractString)  -> Union{Nothing,String}
+list_store_attributes(store)                     -> Dict{String,String}
+remove_store_attribute!(store, key::AbstractString) -> Bool
+```
+
+```julia
+set_store_attribute!(store, "creator", "sienna-build")
+set_store_attribute!(store, "source_system", "WECC 2032 ADS")
+
+get_store_attribute(store, "creator")      # "sienna-build"
+get_store_attribute(store, "absent")       # nothing — a question, not an error
+list_store_attributes(store)               # Dict("creator" => ..., "source_system" => ...)
+remove_store_attribute!(store, "creator")  # true; a second call is false
+```
+
+A `set` replaces rather than appending. `nothing` and `""` are different answers: a key set to the
+empty string is present. An empty key or one beginning with `infrastore.` — reserved, on removal as
+well as on write — throws `InvalidParameterError`; a write to a read-only store throws
+`ReadOnlyStoreError`.
+
 ### OpenAPI-row association serde
 
 Direct JSON serde of the two association catalogs, in the wire spelling

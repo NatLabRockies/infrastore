@@ -33,6 +33,8 @@ too, reads included: no message or RPC covers `supplemental_attribute_associatio
 | `GetForecastSummary`     | `GetForecastSummaryReq`     | `GetForecastSummaryResp`     | Grouped forecast summary               |
 | `CheckStaticConsistency` | `CheckStaticConsistencyReq` | `CheckStaticConsistencyResp` | Per-resolution static-grid check       |
 | `VerifyIntegrity`        | `VerifyIntegrityReq`        | `VerifyIntegrityResp`        | Recompute and compare stored hashes    |
+| `ListStoreAttributes`    | `ListStoreAttributesReq`    | `ListStoreAttributesResp`    | Every store attribute                  |
+| `GetStoreAttribute`      | `GetStoreAttributeReq`      | `GetStoreAttributeResp`      | One store attribute's value            |
 
 Every RPC is named for the `Store` method it exposes, and its request and response are `<Rpc>Req` /
 `<Rpc>Resp` — including the ones that carry no field today, so a later filter lands as an added
@@ -291,6 +293,30 @@ A catalog written by a _newer_ build is `CatalogTooNew` and is refused outright;
 downgrade. See
 [Upgrade a store in place](../explanation/design-choices.md#upgrade-a-store-in-place-rather-than-bricking-it).
 
+## Store Attributes
+
+The read half of the artifact's key/value provenance — see
+[Store attributes](../explanation/data-model.md#store-attributes). Setting one is a write, and
+writes need local filesystem access, so they stay off this service.
+
+```proto
+message ListStoreAttributesReq {}
+message ListStoreAttributesResp {
+  map<string, string> attributes = 1;
+}
+
+message GetStoreAttributeReq  { string key = 1; }
+message GetStoreAttributeResp { optional string value = 1; }
+```
+
+`value` is **absent** when the artifact carries no such key — not `NOT_FOUND`, mirroring
+`Store::get_store_attribute`: a caller asking whether a key is there is asking a question, where
+`GetMetadataById` deals with a caller holding an id it believes in. `optional` rather than an empty
+string, because a key set to `""` is a legitimate value.
+
+A protobuf map is unordered on the wire, so the core's sorted-by-key ordering does not survive the
+trip; `RemoteClient::list_store_attributes` collects into a `BTreeMap` and restores it.
+
 ## Authentication
 
 When the server is configured with `method = "api_key"`, clients must send the key in the
@@ -341,7 +367,8 @@ let hydrated = client.list_metadata_by_ids(&live).await?;
 `list_metadata_by_ids`, `get_metadata_by_id`, `association_exists`, `has_any_time_series`,
 `read_by_id`, `read_by_ids`, `get_resolutions`, `get_intervals`, `get_counts`, `counts_by_type`,
 `time_series_counts_detailed`, `get_forecast_parameters`, `list_owner_ids`, `static_summary`,
-`forecast_summary`, `check_static_consistency`, `verify_integrity`. The id-taking ones accept
-`infrastore_core::TimeSeriesId`, the same newtype the local `Store` uses, so an `owner_id` cannot be
-passed where a series id belongs. See the [gRPC Server guide](../guides/server.md) for end-to-end
-usage and adding an API key to client requests.
+`forecast_summary`, `check_static_consistency`, `verify_integrity`, `list_store_attributes`,
+`get_store_attribute`. The id-taking ones accept `infrastore_core::TimeSeriesId`, the same newtype
+the local `Store` uses, so an `owner_id` cannot be passed where a series id belongs. See the
+[gRPC Server guide](../guides/server.md) for end-to-end usage and adding an API key to client
+requests.

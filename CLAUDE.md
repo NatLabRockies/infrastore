@@ -85,13 +85,22 @@ the Rust core, C ABI, Julia, Python, and the CLI (read via `attributes` / `links
 `supplemental_attribute_associations` (component ↔ supplemental attribute, the wider surface —
 counts, counts-by-type, grouped summary) and `parent_child_associations` (directed component ↔
 component edges, e.g. a generator connected to a bus, deliberately narrower until a consumer needs
-more). Both are independent of time series in both directions, and of each other. Every catalog row
-carries an **`id`** — an `INTEGER PRIMARY KEY AUTOINCREMENT`, so it is never reissued once its row
-is deleted — and it is **the only way to address a stored time series**. A consumer records the id
-in its own object model and references the series by it (a generator's `operation_cost` naming the
-series that varies it). In the Rust core it is the newtype `TimeSeriesId(i64)`, so an `owner_id`
-cannot be passed where a series id belongs; it is `#[serde(transparent)]`, so SQLite, the gRPC wire
-and the OpenAPI document are unchanged and every binding still exchanges a plain integer.
+more). Both are independent of time series in both directions, and of each other. Beside them sits
+**`store_attributes`**, free-form key/value provenance about the _artifact_ rather than a row (who
+built it, from what source system, under which of the consumer's own schema versions) — never
+interpreted, TEXT values, one value per key so a set is an upsert, `infrastore.` reserved on removal
+as well as on write, and probed by `is_empty` because those rows are the consumer's own text and
+recoverable nowhere else. Available in the Rust core, C ABI, Julia, Python, and the CLI
+(`store-attr`, plus `store_attributes` in `store-info`), with `ListStoreAttributes` /
+`GetStoreAttribute` as the gRPC read half. The `store_` prefix is load-bearing: a bare "attribute"
+means a supplemental attribute here and a bare "metadata" means a `TimeSeriesMetadata` row. Every
+catalog row carries an **`id`** — an `INTEGER PRIMARY KEY AUTOINCREMENT`, so it is never reissued
+once its row is deleted — and it is **the only way to address a stored time series**. A consumer
+records the id in its own object model and references the series by it (a generator's
+`operation_cost` naming the series that varies it). In the Rust core it is the newtype
+`TimeSeriesId(i64)`, so an `owner_id` cannot be passed where a series id belongs; it is
+`#[serde(transparent)]`, so SQLite, the gRPC wire and the OpenAPI document are unchanged and every
+binding still exchanges a plain integer.
 
 The surface splits into _identify_ and _act_. Identifying is four calls, all returning the same
 `TimeSeriesMetadata` row: `list_metadata(filter)` (by attributes, 0..N), `list_metadata_by_ids(ids)`

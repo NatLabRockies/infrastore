@@ -162,6 +162,7 @@ asymmetry is that the read-only gRPC server does not accept any writes:
 | Forecast metadata / counts    | ✅        | ✅    | ✅              | ✅    | ✅           | list/counts |
 | Readers (columnar sweep)      | ✅        | ✅    | ✅              | ✅    | `grid`       | ❌          |
 | Association catalogs          | ✅        | ✅    | ✅              | ✅    | ✅           | ❌          |
+| Store attributes              | ✅        | ✅    | ✅              | ✅    | `store-attr` | read-only   |
 | Materialized timestamps       | ✅        | ✅    | ✅              | ✅    | ✅           | ❌          |
 | `from_timestamps` (verified)  | ✅        | ✅    | ✅              | ✅    | ❌           | ❌          |
 | Arrow tables (`to_arrow`)     | ❌        | ❌    | ✅              | ❌    | ❌           | ❌          |

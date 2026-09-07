@@ -1361,6 +1361,42 @@ store.remove_parent_child_associations(parent_types=["Bus"])   # -> 1
 Neither association catalog is exposed over the [gRPC server](grpc-api.md) or the
 [`infrastore` CLI](cli.md).
 
+### Store attributes
+
+Key/value provenance about the **artifact as a whole**, as opposed to a supplemental attribute
+(which belongs to a component) or `application_data` (which belongs to one series). See
+[Store attributes](../explanation/data-model.md#store-attributes) for the model.
+
+```python
+def set_store_attribute(self, key: str, value: str) -> None: ...
+def get_store_attribute(self, key: str) -> str | None: ...
+def list_store_attributes(self) -> dict[str, str]: ...
+def remove_store_attribute(self, key: str) -> bool: ...
+```
+
+```python
+store.set_store_attribute("creator", "sienna-build")
+store.set_store_attribute("source_system", "WECC 2032 ADS")
+
+store.get_store_attribute("creator")      # 'sienna-build'
+store.get_store_attribute("absent")       # None — a question, not an exception
+store.list_store_attributes()             # {'creator': ..., 'source_system': ...}
+store.remove_store_attribute("creator")   # True; a second call is False
+```
+
+A `set` replaces rather than appending. `None` and `""` are different answers: a key set to the
+empty string is present. An empty key or one beginning with `infrastore.` — reserved, on removal as
+well as on write — raises `InvalidParameterError`; a write to a read-only store raises
+`ReadOnlyStoreError`.
+
+The store never interprets a value, so structure rides in the text:
+
+```python
+import json
+store.set_store_attribute("provenance", json.dumps({"pipeline": "nightly", "run": 412}))
+json.loads(store.get_store_attribute("provenance"))   # {'pipeline': 'nightly', 'run': 412}
+```
+
 ### OpenAPI-row association serde
 
 Direct JSON serde of the two association catalogs, in the wire spelling

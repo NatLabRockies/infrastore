@@ -399,3 +399,53 @@ Both are available in the Rust core, the C ABI, Julia, Python, and the `infrasto
 supplemental-attribute surface is the wider of the two (it carries counts and a grouped summary)
 because each of its operations is driven by an existing consumer; the parent/child surface is
 deliberately narrower for now.
+
+## Store attributes
+
+Everything above describes a _row_: a series' `application_data`, a component's supplemental
+attributes, an edge between two components. **Store attributes** describe the artifact itself.
+
+A store attribute is a key/value pair recorded once per store — who built it, from what source
+system, under which of the consumer's own schema versions. The store never interprets a value, in
+exactly the same spirit as `application_data`: keys and values are TEXT, nothing here participates
+in any identity, hash, or query, and a caller wanting structure stores JSON.
+
+```rust,ignore
+store.set_store_attribute("creator", "sienna-build")?;
+store.set_store_attribute("source_system", "WECC 2032 ADS")?;
+assert_eq!(store.get_store_attribute("creator")?.as_deref(), Some("sienna-build"));
+```
+
+Note the term and the prefix. In this project a bare "attribute" means a _supplemental_ attribute
+(above) and a bare "metadata" means a `TimeSeriesMetadata` row, so every identifier for this feature
+carries `store_`: `set_store_attribute`, `list_store_attributes`, the CLI's `store-attr`, the
+`store_attributes` table. Neither misreading is available.
+
+Four rules are worth stating outright:
+
+- **A set replaces.** `key` is the primary key, so an artifact records one creator rather than a
+  history of them.
+- **An absent key is `None`, not an error.** A consumer asking whether the artifact carries a key is
+  asking a question, the same reading [`get_metadata_by_id`](#association-ids) takes. A key set to
+  the empty string is _present_; every binding keeps the two distinguishable.
+- **`infrastore.` is reserved**, refused on removal as well as on write, so the store can stamp
+  facts of its own later without colliding with a consumer's keys — and so a reserved key cannot be
+  worked around by deleting it.
+- **Attributes are content.** `is_empty` reports `false` for a store holding nothing but provenance:
+  those rows are the consumer's own text, recoverable from nowhere else, and a consumer that skips
+  writing an "empty" store would drop them with no error.
+
+They live in the catalog, so they travel with `persist_to` and `persist_catalog`, survive `compact`
+(which rewrites only the array half), and come across with `open_copy`. `open_without_catalog` mints
+an empty set, since there is nowhere else for them to have been. They are **not** carried by the
+OpenAPI export or import: the vendored schema has no place for them.
+
+Available in the Rust core, the C ABI, Julia, Python, and the CLI (`store-attr`, plus
+`store_attributes` in `store-info`); the read-only gRPC server carries the read half
+(`ListStoreAttributes`, `GetStoreAttribute`).
+
+The CLI's two cross-store commands take a position rather than ignoring the table. `merge` is
+additive with the **destination winning**: a merge brings data into an artifact that already has an
+identity, so a key the destination lacks is copied, a key both sides agree on is a no-op, and a
+disagreement is reported and left as the destination has it. `diff` gives them a section of their
+own — there is no series identity to pair them on — and counts a difference toward its nonzero exit.

@@ -263,3 +263,60 @@ beside the artifact; SQLite import via a query; the CLI `--endpoint` mode for wh
 - **Done means:** every phase committed, every gate green, `bindings.md`'s matrix and the
   per-binding references updated, and a final summary listing each commit, any findings, and
   anything left out with the reason.
+
+## 7. Findings
+
+Questions the plan did not settle, and the decision taken. Recorded as they came up, so the order is
+the implementation order.
+
+### 7.1 `is_empty` must probe `store_attributes` (§3, phase 1)
+
+`MetadataStore::is_empty` documents itself as covering **every** persistent content table, and warns
+that a table it misses is data a consumer drops with no error — infrasys skips writing an artifact
+the store reports empty. Store attributes are the consumer's own text, put there by an explicit call
+and recoverable from nowhere else, so a store holding nothing but provenance is not empty.
+**Decision: probe it.** The only behavior change is for a store that has attributes and nothing
+else, which no existing test or consumer can already have.
+
+### 7.2 `merge` and `diff` are CLI commands, not core ones (§3.4, §3.7 phase 1)
+
+§3.4 assigns `merge` and `diff` behavior to store attributes, and §3.7 puts it in phase 1 alongside
+the core work. There is no `Store::merge` or `Store::diff`: both are `infrastore-cli` commands built
+out of `list_metadata` + `read_by_ids` + `add_time_series_bulk`. **Decision:** the core phase covers
+`persist_to` / `persist_catalog` / `compact` / `open_copy` / `open_without_catalog` survival, and
+the merge/diff behavior lands with the rest of the CLI work in phase 3.
+
+The behavior itself is as §3.4 specifies. `merge` is additive with the destination winning, reported
+through `store_attributes_copied` and `store_attribute_conflicts` in the JSON status document and in
+the prose form; merging twice therefore changes nothing the second time. `diff` gives them a section
+of their own, and — a point §3.4 does not reach — counts a difference toward the **nonzero exit**.
+The gate asks whether this is the artifact you expected, and one whose recorded source system
+changed is not; reporting the difference while exiting 0 would make the section decorative.
+
+### 7.3 `store-info` reports `store_attributes`, not `attributes` (§3.5)
+
+§3.5 says "`store-info` gains an `attributes` object". §3.6 says every new identifier carries the
+`store_` prefix so the supplemental-attribute reading is not available. In this CLI `attributes` is
+already a command that lists component <-> supplemental-attribute associations, so the bare key is
+exactly the collision §3.6 forbids. **Decision: `store_attributes`**, following §3.6 over §3.5's
+wording.
+
+### 7.4 CLI documentation lands with the CLI phase, not the docs phase (§3.7)
+
+`crates/infrastore-cli/src/main.rs`'s
+`every_command_is_shown_in_the_docs_and_every_doc_example_parses` test fails the build for a command
+with no example in `docs/src/reference/cli.md`, `docs/src/guides/cli.md`, or the quick start — and
+it runs every documented example through the real clap parser. **Decision:** the CLI reference and
+guide entries for `store-attr` are part of phase 3, because phase 3 cannot pass its own gates
+without them. The remaining documentation (data model, per-binding references, the `bindings.md`
+matrix, the README) stays in phase 4.
+
+One incidental constraint: the test splits examples on whitespace with no quote handling, so a
+documented example cannot contain a quoted argument. The guide's examples use unquoted values.
+
+### 7.5 `CLAUDE.md` updated alongside the docs (§6 scope discipline)
+
+§6's "done means" lists `bindings.md` and the per-binding references but not `CLAUDE.md`, whose
+project overview enumerates the same surface in prose. **Decision:** update it too. Leaving the file
+that every future agent reads first describing a surface that has moved is a defect, and the edit is
+one paragraph inside the two features' own subject matter.
