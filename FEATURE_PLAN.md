@@ -30,134 +30,180 @@ and dropped; the reasoning is recorded in §4 so it is not re-litigated.
 
 ## 2. Parquet export and import
 
+**Revised 2026-09-07.** The first version of this section exported one Parquet file per series,
+which the branch implemented (commits `3750a82` through `cce9d45`). It does not scale: a store with
+thousands of series becomes thousands of files, which defeats every reader that matters. This
+revision replaces it with **long tables**: many series per file, one row per value, every catalog
+column a table column. The store-attributes work (§3) and the crate structure (§2.1) are unchanged.
+The rework lands as new commits on top of the existing ones; history is not rewritten.
+
 ### 2.1 Where the code lives
 
-A new workspace crate, **`infrastore-parquet`**, depending on `infrastore-core` and on the `arrow`
-and `parquet` crates with default features off (enable only the `snap` and `zstd` codecs). The CLI
-depends on it behind a `parquet` cargo feature, **off by default**, so the default `infrastore`
-binary and every other crate stay free of the Arrow dependency tree. A separate crate rather than a
-core feature keeps core's feature surface flat and makes the optional dependency visible in the
-workspace graph.
+Unchanged: the `infrastore-parquet` crate, depending on `infrastore-core` and on `arrow` and
+`parquet` with default features off. The CLI enables it through its `parquet` feature, which is **on
+by default** (decided 2026-09-07): the shipped `infrastore` binary carries Parquet, while
+`infrastore-core`, `infrastore-py`, and `infrastore-ffi` never depend on the Arrow tree. The
+bindings export to Parquet themselves through `to_arrow()` if they want to.
 
-> **Revised 2026-09-07, after review.** The feature is **on by default** for the CLI. Handing an
-> analyst a Parquet file for DuckDB or polars is an ordinary reason to reach for this CLI, and a
-> default that needs a flag to turn on is one most people never find; the release archives were
-> already built `--all-features`, so this changes what a source build gets rather than what ships.
-> The line Arrow must not cross is into the **libraries** — `infrastore-core`, `infrastore-py`, and
-> `infrastore-ffi` stay free of it, and a binding that wants Parquet has `to_arrow()` plus its host
-> language's own writer. The feature stays switchable, so
-> `--no-default-features --features vendored` still builds a lean binary. See Finding 7.7.
+### 2.2 Partitioning: one file per (type, value type, time reference)
 
-Check before adding: the pinned `arrow`/`parquet` versions must compile on the declared MSRV (Rust
-1.94). arrow-rs moves its MSRV quickly; pin a version that fits rather than raising `rust-version`.
+A long table holds many series, and three things cannot vary within one Parquet table without
+nullable or ill-typed columns: the set of key columns (a forecast has an `issue_time`, a static
+series does not), the Arrow type of the `value` column, and the zone of the `timestamp` column. So
+the export **partitions the selection by the triple**
 
-### 2.2 One schema, two producers
+```text
+(time_series_type, value type, time_reference)
+```
 
-Python already has `to_arrow()` on the three static types, behind the `arrow` extra, and a user can
-write Parquet today with `to_arrow()` plus `pyarrow.parquet.write_table`. **The CLI export must
-produce the same schema.** That is the governing principle: a Parquet file has one shape whether
-Python or the CLI wrote it, and the import reads that one shape. Concretely the export mirrors what
-`python/tests/test_arrow.py` already pins:
+and writes **one file per distinct triple**. Within a file every column is **required**; there are
+no nullable columns anywhere in the format. The three partition keys are also written as ordinary
+columns (constant within the file, so they dictionary-encode to nothing) and recorded in the footer
+so a reader knows the partition before scanning a row.
 
-- `timestamp`: Arrow `timestamp(ms, tz)`, the zone taken from the series' `time_reference` the way
-  `to_arrow()` already does (`Utc` and `Zone` become an Arrow zone, `FixedOffset` an offset string,
-  `Zoneless` no zone).
-- `value`: the type follows the `element_type` and `element_shape`, see §2.3.
-- Schema metadata: the row's descriptors as UTF-8 key/value pairs, exactly the keys `to_arrow()`
-  writes today (`name`, `units`, `quantity_kind`, `unit_system`, `component_field`,
-  `application_data`, `element_type`, ...), plus the ones import needs and `to_arrow()` may not yet
-  write: `id`, `owner_id`, `owner_type`, `owner_category`, `time_series_type`, `time_reference`,
-  `element_shape`, `features`. Add any missing key to `to_arrow()` in the same change so the two
-  producers stay identical. `time_reference` must be spelled explicitly because an Arrow timestamp
-  without a zone cannot distinguish `Zoneless` from unspecified.
+The **value type** is the element type with its shape, except that composite kinds
+(`piecewise_linear`, `piecewise_step`) partition by kind alone: their stored width `w` varies per
+series, so within a file every composite row is **re-padded to the widest series in that file**. The
+layout allows any width the kind can produce and the leading count `n` keeps rows self-describing,
+so this is a legal re-encoding, with the `data_hash` caveat in §2.6.
 
-One file per series, which is what `export --dir` already does for CSV and what makes the footer a
-faithful copy of one catalog row. A combined multi-series file (an `id` column plus a footer array
-of rows) is a possible later option, not part of this plan.
+**File names** are `<type>.<value-slug>.<reference-slug>.parquet`, for example
+`SingleTimeSeries.f64.utc.parquet`, `Deterministic.tuple3_f64.America_Denver.parquet`,
+`NonSequentialTimeSeries.piecewise_linear.zoneless.parquet`. Slugs must be filesystem-safe on all
+three CI platforms (no `(`, `,`, `/`, `:`, `+`); the slug function is one-way and tested, and the
+footer carries the exact partition key, so the name is a convenience rather than the truth.
 
-### 2.3 Element values
+A `DeterministicSingleTimeSeries` is handled the way the CSV export already handles it; the import
+refuses a file whose partition names that type, pointing at `transform_single_time_series`, since
+the type is derived rather than added.
 
-The `value` column's Arrow type is decided by the element type alone; the time series type only adds
-key columns. The tuple and dense cases are the same bytes and the same Arrow type, told apart by the
-`element_type` metadata, exactly as the element-type reference describes:
+### 2.3 Columns
 
-| `element_type` and shape                                                      | Arrow type of `value`                                                  |
-| ----------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
-| scalar dtype, shape `[]`                                                      | primitive (`float64`, `int32`, `bool`, ...)                            |
-| `tuple(N,T)`                                                                  | `FixedSizeList<T>[N]`                                                  |
-| scalar dtype with dense shape `[N]`                                           | `FixedSizeList<T>[N]`                                                  |
-| scalar dtype with shape `[M,N]`                                               | `FixedSizeList<FixedSizeList<T>[N]>[M]` (nested, as `to_arrow()` does) |
-| `linear_function`, `quadratic_function`, `piecewise_linear`, `piecewise_step` | `FixedSizeList<float64>[w]` holding the stored packing                 |
+Every file has the key columns its type needs, then the value, then every catalog column:
 
-**Decision: composites keep their stored packing in v1.** This revises the earlier suggestion of
-decoding them into `Struct` and `List` columns. `to_arrow()` already pins the packed form with a
-test, the packing is the documented cross-language wire form held to
-`conformance/element_type_vectors.json`, and every binding has a decoder for it. Changing
-`to_arrow()` would break the one-schema principle for a benefit that mostly reaches foreign readers
-of function-data series, which are rare. A `decoded` option (`--decode` on the CLI, `decoded=True`
-on `to_arrow()`) that emits `Struct{proportional, constant}`, `List<Struct{x, y}>` and friends is
-the natural follow-up, and it is out of scope here.
+| Column                                                                         | Type                             | Files                         | Notes                                                                                        |
+| ------------------------------------------------------------------------------ | -------------------------------- | ----------------------------- | -------------------------------------------------------------------------------------------- |
+| `timestamp`                                                                    | `timestamp(ms, zone)`            | all                           | The target time for a forecast, the breakpoint for a `PersistentTimeSeries`. Zone from §2.4. |
+| `issue_time`                                                                   | `timestamp(ms, zone)`            | forecasts                     | Same zone as `timestamp`.                                                                    |
+| `percentile`                                                                   | `float64`                        | `Probabilistic`               | One row per (issue, target, percentile).                                                     |
+| `scenario`                                                                     | `int64`                          | `Scenarios`                   | Zero-based scenario index.                                                                   |
+| `value`                                                                        | per §2.5                         | all                           |                                                                                              |
+| `id`                                                                           | `int64`                          | all                           | Provenance only; §2.6.                                                                       |
+| `data_hash`                                                                    | `utf8` (hex)                     | all                           | Identifies the array; a checksum on import; §2.6.                                            |
+| `owner_id`                                                                     | `int64`                          | all                           |                                                                                              |
+| `owner_type`                                                                   | `utf8`                           | all                           |                                                                                              |
+| `owner_category`                                                               | `utf8`                           | all                           |                                                                                              |
+| `time_series_type`                                                             | `utf8`                           | all                           | Constant per file.                                                                           |
+| `name`                                                                         | `utf8`                           | all                           |                                                                                              |
+| `resolution`                                                                   | `utf8` (`Period` storage string) | `SingleTimeSeries`, forecasts | Absent from the two irregular types' files.                                                  |
+| `interval`                                                                     | `utf8`                           | forecasts                     |                                                                                              |
+| `horizon`                                                                      | `utf8`                           | forecasts                     |                                                                                              |
+| `features`                                                                     | `utf8` (JSON object)             | all                           | `{}` when empty.                                                                             |
+| `element_type`                                                                 | `utf8`                           | all                           | Constant per file except composite width.                                                    |
+| `time_reference`                                                               | `utf8`                           | all                           | Constant per file; the literal `unspecified` when the series records none.                   |
+| `units`, `quantity_kind`, `unit_system`, `component_field`, `application_data` | `utf8`                           | all                           | Empty string when the row has none; §2.7.                                                    |
 
-Columns are written as **required** (non-nullable). The store has no nulls; NaN is a value.
+Not written because the rows imply them: `initial_timestamp`, `length`, `count`, `percentiles`,
+`timestamps`. Every string column is dictionary-encoded, so a per-series constant costs one
+dictionary entry per row group. Compression is zstd.
 
-### 2.4 Export
+**Row order and row groups.** Each series' rows are **contiguous** and sorted by the key columns
+(`issue_time`, `timestamp`, then `percentile` or `scenario`). Row groups target roughly one million
+rows and are cut at a series boundary whenever the current series ends within reach of the target,
+so row-group statistics on `id`, `owner_id`, and `name` let a reader skip whole groups. A series
+larger than the target spans several groups. The footer records `rows_contiguous_by_series=true`.
 
-`infrastore export ... -f parquet --dir <DIR>` writes `<id>.parquet` per matched series, reusing
-`export`'s selection and `--time-range` path (`read_by_ids_range`). Phase 1 covers the three static
-types, matching `to_arrow()`'s coverage. Phase 2 adds dense forecasts as a long table with
-`issue_time` and `target_time` columns, plus `percentile` or `scenario` for `Probabilistic` and
-`Scenarios`; `Deterministic` gets the same long shape rather than `to_arrow_windows()`' one table
-per window, and the plan for that phase should say whether `to_arrow_windows()` gains a long form to
-keep the two producers aligned.
+### 2.4 Time spelling
 
-`-f parquet` on stdout is refused: Parquet needs a seekable sink for its footer.
+`time_reference` is a partition key, so one file has one spelling and the `timestamp` column's zone
+states it exactly: `Utc` is zone `UTC`; `FixedOffset` is the offset string; `Zone` is the IANA name;
+`Zoneless` is a naive `timestamp(ms)`. A series that records **no** reference is written UTC-zoned
+with the `time_reference` column and footer saying `unspecified`, the decision recorded in Finding
+7.12, and reads back as none. Because the spelling is a partition key, the export never faces a
+mixed selection and never refuses one; `--spelling` remains a way to select fewer files.
 
-`PersistentTimeSeries` exports like `NonSequentialTimeSeries` (breakpoint column named `timestamp`)
-with `time_series_type` in the metadata telling them apart, since the two share storage and differ
-only in read semantics.
+### 2.5 Element values
 
-### 2.5 Import
+Unchanged from the first version: the `value` column's Arrow type follows the element type alone.
 
-`infrastore add --parquet <FILE>` becomes a third `add` layout beside the timestamped and wide CSV
-ones. The rules:
+| `element_type` and shape            | Arrow type of `value`                                                     |
+| ----------------------------------- | ------------------------------------------------------------------------- |
+| scalar dtype, shape `[]`            | primitive                                                                 |
+| `tuple(N,T)`                        | `FixedSizeList<T>[N]`                                                     |
+| scalar dtype with dense shape `[N]` | `FixedSizeList<T>[N]`                                                     |
+| scalar dtype with shape `[M,N]`     | nested `FixedSizeList`                                                    |
+| composite kinds                     | `FixedSizeList<float64>[w]`, stored packing, `w` the file's widest series |
 
-- **Schema metadata is the descriptor.** When the footer carries the keys from §2.2 the file is
-  self-describing and no `--descriptor` is needed; the descriptor or inline flags may still override
-  a key. Since `add` never accepts an id, the `id` key is ignored on import and reported at
-  `--dry-run`. A file exported by `export` therefore round-trips through `add` with no flags.
-- **Foreign files infer.** With no metadata, the element type is inferred from the Arrow type:
-  primitive to its dtype; `FixedSizeList<T>[N]` to dtype `T` with `element_shape [N]` (dense, not
-  tuple, because the bytes cannot say and dense is the weaker claim); nested fixed-size lists to a
-  multi-dim shape. `--element-type tuple(N,f64)` asserts the tuple reading, and as everywhere else
-  in the project a contradicting assertion is an error, not an override. `Struct` and `List` value
-  columns are refused in v1 (they are the decoded form §2.3 defers).
-- **Timestamps** of unit seconds or milliseconds are accepted; microseconds or nanoseconds only when
-  every value is a whole millisecond, otherwise refused with `InvalidParameter`, the same
-  millisecond rule the write path enforces. The Arrow zone becomes the `time_reference` unless the
-  `time_reference` metadata key names it, which wins. A regular series' timestamps must sit on a
-  grid, reusing the check the timestamped CSV layout already performs.
-- **Nulls are refused**, not coerced to NaN.
-- **Round-trip caveat to document:** values round-trip exactly (an improvement over CSV, where
-  floats pass through decimal text), but a composite series re-encodes at the minimum padding width,
-  so one stored wider comes back with a different `data_hash`. Its id survives only through the
-  rows-only OpenAPI import; a plain `add` assigns a fresh one.
+Composites keep their stored packing (a `--decode` option remains a follow-up). Casting to a common
+dtype is ruled out: the dtype round trip is a project promise.
 
-### 2.6 Python
+### 2.6 Identity on import
 
-`SingleTimeSeries.from_arrow(table, **overrides)` and the same on the two irregular types, as the
-Python inverse of `to_arrow()`, pure Python on top of the existing constructors and applying the
-§2.5 inference rules. The rules live in one place in the docs so the CLI and Python implementations
-cannot drift; a pytest round-trips a CLI-written file through `from_arrow` and a `to_arrow()` file
-through `add`.
+`add` never accepts an id, so the import groups rows by the **`KeyIdentity` columns**: `owner_id`,
+`owner_category`, `time_series_type`, `name`, `resolution`, `interval`, `features`. `owner_type` and
+every descriptor must be constant within a group; a contradiction is an error naming the series. The
+`id` column is ignored and reported at `--dry-run`.
 
-### 2.7 Phases
+`data_hash`, when present, is a **checksum**: the import re-encodes the group, hashes it, and
+refuses a mismatch naming the series. A user who edits values in DuckDB drops the column before
+re-importing. A foreign file without the column is fine. Composite rows re-padded per §2.2, or
+re-encoded at minimum width on import, hash differently from a wider original; that is the one case
+where an untouched export fails its own checksum, so the import compares the hash of the **decoded**
+points for composite kinds rather than of the packed bytes.
 
-1. `infrastore-parquet` crate, static-type export, `to_arrow()` metadata parity, CLI `-f parquet`.
-2. Import of self-describing and foreign files, `--dry-run`, round-trip tests against CSV export.
-3. Python `from_arrow`.
-4. Dense forecasts, export then import.
-5. Docs: CLI guide and reference, Python guide, `bindings.md` matrix row, a DuckDB recipe showing
-   Parquet plus the attached SQLite catalog (the reason DuckDB is not embedded).
+Import **streams** row groups, accumulating the current series and flushing when the key changes. A
+key that reappears after another series' rows is refused with a message saying to sort by the key
+columns and then by time; foreign files must meet the same contiguity rule, which the docs state.
+
+### 2.7 Absent descriptors
+
+The five free-form descriptors (`units`, `quantity_kind`, `unit_system`, `component_field`,
+`application_data`) are optional in the catalog. To keep every column required they are written as
+the **empty string when absent**, and the import maps an empty string back to absent. The one
+consequence, to document: a stored empty string round-trips as absent. `unit_system`'s unset state
+means unspecified, not natural units, and the empty string preserves that.
+
+### 2.8 CLI
+
+- `infrastore export ... -f parquet --dir <DIR>` writes the partition files into `<DIR>`.
+  `-f
+  parquet` to stdout stays refused. `--time-range` applies as it does for CSV. An **empty
+  series** has no rows in a long table and is therefore not in the output; the export **warns,
+  naming it**. This supersedes Finding 7.9's "empty series has no anchor" refusal on import, which
+  no longer arises.
+- `infrastore add --parquet <PATH>` takes a **file or a directory**; a directory imports every
+  `.parquet` file in it, each in its own transaction batch, all-or-nothing per file. `--dry-run`
+  reports the partitions, series counts, ignored ids, and any empty-string descriptors.
+- Inline flags override a column for every series in the file, as they did the footer keys.
+  `--descriptor` alongside `--parquet` stays refused (the file carries its own descriptors).
+- Foreign files: the element type is inferred from the Arrow type as before (dense reading by
+  default, `--element-type tuple(N,f64)` asserts). Missing catalog columns are filled from inline
+  flags; a missing `name` or `owner_id` is an error. `time_series_type` absent: a grid reads as
+  `SingleTimeSeries`, anything else as `NonSequentialTimeSeries`, and `PersistentTimeSeries` is
+  never inferred (Finding 7.9's second half stands). `time_reference` absent: from the Arrow zone.
+
+### 2.9 Python and Julia
+
+`to_arrow()` and `from_arrow()` stay **per-series and unchanged**; they are in-memory conveniences,
+not a file format. The "one schema, two producers" principle of the first version is withdrawn. The
+relationship is documented in one sentence: the long table's columns are `to_arrow()`'s footer keys
+turned into columns. No new Python or Julia code is part of this revision.
+
+### 2.10 Phases
+
+1. Partitioned long-table export for the three static types: partition key, slugs, column set, row
+   ordering and row-group policy, footer, empty-series warning. Round-trip tests via the existing
+   CSV export where useful.
+2. Import: directory or file, streaming group-by, `KeyIdentity` grouping, checksum, empty-string
+   descriptors, contiguity refusal, `--dry-run`. Round trip of every static type, every element type
+   in §2.5 including re-padded composites, and every `time_reference` including unspecified.
+3. Forecasts, export then import, all three dense kinds.
+4. Remove the per-file writer and reader and any test or doc that describes them; amend Findings
+   7.6, 7.7, 7.9, 7.10, 7.11, 7.12 with dated notes saying what this revision changes, without
+   deleting their text.
+5. Docs: CLI guide and reference, the file-format-style reference for the Parquet layout (columns,
+   partitioning, slugs, footer keys, contiguity rule), `bindings.md`, a DuckDB recipe reading a
+   partition directory plus the attached SQLite catalog.
 
 ## 3. Store-level attributes
 
