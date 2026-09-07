@@ -12,12 +12,16 @@ Every example describes the same three components:
 | 102        | `SolarPlant`       | `sundance_pv` | 60 MW utility-scale solar plant |
 | 201        | `Load`             | `bus_a_load`  | 150 MW distribution feeder      |
 
-infrastore stores time series, not components. A series is filed against its owner by `owner_id` +
-`owner_type` + `owner_category`, and the store never resolves those — your modeling application owns
-the components, and infrastore owns the arrays and the catalog rows pointing at them. So `owner_id`
-is whatever integer id your application gives a component, and `owner_type` is the name of its
-_concrete_ type: the store is only matching strings, and an abstract "Generator" will not
-distinguish a thermal unit from a wind farm.
+infrastore stores time series, not components. A series is filed against its owner, and the store
+never resolves that owner into anything — your modeling application owns the components, and
+infrastore owns the arrays and the catalog rows pointing at them.
+
+The owner's identity is the _pair_ `(owner_id, owner_category)`: an integer id from your
+application, and whether it names a `Component` or a `SupplementalAttribute` (the two id streams are
+independent, so one integer can name one of each). `owner_type` is **not** part of that identity —
+it is descriptive, and reusing an id across two component types collides however different the type
+strings are. It earns its keep in retrieval instead, through `list_metadata(owner_type=...)` and
+`list_owner_types()`, which is why a concrete type name beats an abstract one.
 
 Values are stored as they are given. `unit_system` says which basis they are already on —
 `natural_units` for MW/MVar, `component_base` for per-unit on the component's own base power — and

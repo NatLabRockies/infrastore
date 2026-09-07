@@ -42,7 +42,8 @@ FIRST_ISSUE_HOUR = 6
 horizon_steps = HORIZON // RESOLUTION
 availability = solar_availability()
 
-# The p50 is the expected availability; the band around it scales with how much
+# The p50 is the median - the level the hour is as likely to beat as to miss,
+# which is not in general the mean. The band around it scales with how much
 # output is at stake and widens with lead time into the window.
 values = np.empty((len(PERCENTILES), horizon_steps, COUNT), dtype=np.float64)
 for window in range(COUNT):

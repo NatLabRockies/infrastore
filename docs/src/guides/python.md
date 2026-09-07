@@ -606,8 +606,10 @@ assert decode_element_values(back.data, meta["element_type"]) == curves   # 3- a
 ```
 
 A `piecewise_step` timestep decodes to a **different** shape — one dict of parallel arrays rather
-than a list of points, since a step function has one fewer `y` than `x` (the last step holds
-forward, like `PersistentTimeSeries`):
+than a list of points, since a step function has one fewer `y` than `x`: each `y` is the value
+_between_ two adjacent `x`'s, so `n` coordinates bound `n - 1` steps and the last coordinate is the
+right-hand end of the curve rather than the start of an open final step. Nothing is held forward
+past it — that is a `PersistentTimeSeries`, which is a time series type rather than an element type:
 
 ```python
 steps = [

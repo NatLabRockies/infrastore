@@ -19,7 +19,17 @@ of them), and unlike `Probabilistic` there is nothing to name them with. Which
 weather year a member came from is the consumer's bookkeeping - a `features` tag
 or `application_data` on the series, not a field the store owns.
 
-Below, three ensemble members of the PV plant's day-ahead output, each carrying
+A member is a trajectory *within one window*, and only there. Nothing ties
+member 2 of the run issued at 06:00 to member 2 of the run issued at 12:00: they
+are separate draws that happen to share an index, and stitching them together
+would invent a correlation the forecast never claimed. So this example stores a
+single 12-hour window (`count=1`, and `interval` is the canonical `PT0S` a
+one-window forecast has, since there is no second window to step to), which is
+what makes the whole-day statistic at the bottom legitimate. A multi-window
+ensemble is fine - see `deterministic_floats.py` for what windows mean - but
+each window's members have to be summarized on their own.
+
+Below, three ensemble members of the PV plant's daylight output, each carrying
 its own cloud pattern through the day.
 """
 
@@ -33,9 +43,9 @@ from infrastore import OwnerCategory, Scenarios, Store
 from _shared import DAY_START, SUNDANCE_PV, solar_availability
 
 RESOLUTION = timedelta(hours=1)
-HORIZON = timedelta(hours=6)
-INTERVAL = timedelta(hours=6)
-COUNT = 2
+HORIZON = timedelta(hours=12)
+INTERVAL = timedelta(0)  # PT0S: a single-window forecast steps nowhere
+COUNT = 1
 SCENARIO_COUNT = 3
 FIRST_ISSUE_HOUR = 6
 
@@ -50,12 +60,13 @@ rng = np.random.default_rng(2012)
 values = np.empty((SCENARIO_COUNT, horizon_steps, COUNT), dtype=np.float64)
 for scenario in range(SCENARIO_COUNT):
     cloud = 1.0
-    for window in range(COUNT):
-        for step in range(horizon_steps):
-            hour = FIRST_ISSUE_HOUR + window * (INTERVAL // RESOLUTION) + step
-            # Random walk with a pull back towards clear sky.
-            cloud = float(np.clip(0.75 * cloud + 0.25 + rng.normal(0.0, 0.18), 0.2, 1.0))
-            values[scenario, step, window] = round(availability[hour % 24] * cloud, 4)
+    for step in range(horizon_steps):
+        hour = FIRST_ISSUE_HOUR + step
+        # Random walk with a pull back towards clear sky. It runs the length of
+        # the window and is not carried into another one, because a member does
+        # not continue across forecast vintages.
+        cloud = float(np.clip(0.75 * cloud + 0.25 + rng.normal(0.0, 0.18), 0.2, 1.0))
+        values[scenario, step, 0] = round(availability[hour % 24] * cloud, 4)
 
 store = Store.create(in_memory=True)
 
@@ -91,14 +102,12 @@ print(f"scenario_count={read_back.scenario_count} count={read_back.count}")
 data = np.asarray(read_back.data)
 rows = [
     {
-        "timestamp": DAY_START
-        + timedelta(hours=FIRST_ISSUE_HOUR + window * (INTERVAL // RESOLUTION) + step),
+        "timestamp": DAY_START + timedelta(hours=FIRST_ISSUE_HOUR + step),
         "scenario": scenario,
-        "mw": round(float(data[scenario, step, window]) * SUNDANCE_PV.base_power_mw, 2),
+        "mw": round(float(data[scenario, step, 0]) * SUNDANCE_PV.base_power_mw, 2),
     }
     for scenario in range(read_back.scenario_count)
     for step in range(data.shape[1])
-    for window in range(data.shape[2])
 ]
 frame = pl.DataFrame(rows)
 
@@ -109,12 +118,14 @@ print(
     .sort("timestamp")
 )
 
-# Each member is one plausible day, so a whole-day statistic is a per-member
-# statistic - the thing you cannot compute from per-hour quantiles.
+# Each member is one plausible trajectory over this window, so summing it is a
+# per-member statistic - the thing you cannot compute from per-hour quantiles,
+# where "the p10 day" is not a day at all. Summing across windows instead would
+# be meaningless, which is why there is only one here.
 energy = (
     frame.group_by("scenario")
     .agg(pl.col("mw").sum().round(1).alias("energy_mwh"))
     .sort("scenario")
 )
-print("\nday-ahead energy per member (hourly steps, so MW sums to MWh)")
+print("\nwindow energy per member (hourly steps, so MW sums to MWh)")
 print(energy)

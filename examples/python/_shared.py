@@ -8,14 +8,20 @@ Every example describes the same three-component power system:
     201       Load                bus_a_load     150 MW distribution feeder
 
 infrastore stores time series, not components. A series is filed against the
-component that owns it by `owner_id` + `owner_type` + `owner_category`, and the
-store never resolves those into anything - your modeling application owns the
-components, and infrastore owns the arrays and the catalog rows pointing at
-them. So `owner_id` is whatever integer id your application gives a component,
-`owner_type` is the name of its *concrete* type (not an abstract base class -
-the store is only matching strings, and "Generator" will not distinguish a
-thermal unit from a wind farm), and `owner_category` is `Component` as opposed
-to `SupplementalAttribute`, the other kind of owner a series can have.
+component that owns it, and the store never resolves that owner into anything -
+your modeling application owns the components, and infrastore owns the arrays
+and the catalog rows pointing at them.
+
+The owner's identity is the *pair* `(owner_id, owner_category)`. `owner_id` is
+whatever integer id your application gives a component, and `owner_category`
+distinguishes a `Component` from a `SupplementalAttribute` - the two id streams
+are independent, so one integer can name one of each.
+
+`owner_type` is **not** part of that identity: it is descriptive, and reusing an
+id across two component types will collide no matter how the type strings
+differ. What it is good for is retrieval - it is recorded on every row, and both
+`list_metadata(owner_type=...)` and `list_owner_types()` read it - so a concrete
+type name earns its keep, where an abstract one lumps every generator together.
 
 Three descriptors travel with every series and are worth setting even though the
 store never acts on them:
