@@ -879,6 +879,21 @@ fn json_int_list(values: &[usize]) -> String {
     out
 }
 
+/// What the `time_reference` metadata key holds for a series that records no
+/// spelling.
+///
+/// Deliberately **not** a `TimeReference` variant and not something
+/// `TimeReference::parse` accepts: unspecified is `None`, not a fourth kind of
+/// reference, and teaching the core's parser this literal would also make
+/// `time_reference="unspecified"` a thing a constructor accepted. It is a
+/// metadata encoding, and `from_arrow` decodes it back to `None`.
+///
+/// The CLI's Parquet export writes the same literal
+/// (`infrastore_parquet::schema::UNSPECIFIED_REFERENCE`); the pytest
+/// `test_the_unspecified_literal_is_the_one_the_cli_writes` pins the two
+/// together, since the two producers must agree on it exactly.
+const UNSPECIFIED_REFERENCE: &str = "unspecified";
+
 /// The descriptive attributes a `to_arrow` table carries as schema metadata.
 ///
 /// A macro for the same reason as `apply_descriptors!`: the three static types
@@ -917,12 +932,18 @@ macro_rules! arrow_metadata {
         if let Some(v) = &$inner.application_data {
             meta.insert("application_data".to_string(), v.clone());
         }
-        if let Some(v) = &$inner.time_reference {
-            meta.insert(
-                "time_reference".to_string(),
-                core_lib::TimeReference::as_storage_string(v),
-            );
-        }
+        // Written for every series, unlike the descriptors above. An absent
+        // descriptor means "not declared"; an absent reference would mean "read
+        // it off the timestamp column's zone", and an unspecified reference
+        // writes a UTC-zoned column -- so it would come back as `utc`, a claim
+        // the series never made. `UNSPECIFIED_REFERENCE` says so instead.
+        meta.insert(
+            "time_reference".to_string(),
+            $inner.time_reference.as_ref().map_or_else(
+                || UNSPECIFIED_REFERENCE.to_string(),
+                core_lib::TimeReference::as_storage_string,
+            ),
+        );
         meta
     }};
 }
@@ -1187,6 +1208,16 @@ fn arrow_descriptor_args(
         Some(z) if z.eq_ignore_ascii_case("UTC") => "utc".to_string(),
         Some(z) => z.to_string(),
     };
+    // The keyword wins, then the metadata -- `unspecified` included, which
+    // resolves to *no* reference rather than leaving a gap for the zone to fill.
+    // Only a table with no `time_reference` key at all (a foreign one) falls
+    // through to the column's own zone.
+    let time_reference = match (time_reference, meta.get("time_reference")) {
+        (Some(declared), _) => Some(declared),
+        (None, Some(from_table)) if from_table == UNSPECIFIED_REFERENCE => None,
+        (None, Some(from_table)) => Some(from_table.clone()),
+        (None, None) => Some(zone_reference),
+    };
     Ok(DescriptorArgs {
         application_data: application_data.or_else(|| meta.get("application_data").cloned()),
         element_type,
@@ -1194,11 +1225,7 @@ fn arrow_descriptor_args(
         quantity_kind: quantity_kind.or_else(|| meta.get("quantity_kind").cloned()),
         unit_system: unit_system.or_else(|| meta.get("unit_system").cloned()),
         component_field: component_field.or_else(|| meta.get("component_field").cloned()),
-        time_reference: Some(
-            time_reference
-                .or_else(|| meta.get("time_reference").cloned())
-                .unwrap_or(zone_reference),
-        ),
+        time_reference,
     })
 }
 

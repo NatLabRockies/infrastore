@@ -431,3 +431,29 @@ reads `utc` back. The instants are unchanged; only the label moves from "not sta
 **Decision:** keep the existing mapping and document the asymmetry rather than inventing a
 `zoneless`-shaped column for "unspecified", which would collide with the real `zoneless` and be
 worse.
+
+**Fixed 2026-09-07, after review.** Documenting the asymmetry was the wrong call: a round trip that
+turns "the series declared nothing" into "the series declared UTC" invents a claim, and a consumer
+that reads `time_reference` to decide whether it may trust a bound would be misled by it.
+
+The premise stands — Arrow has no third spelling and the column stays UTC-zoned — so the fix is in
+the **footer**, which has no such limit. `time_reference` is now written for every series and holds
+the literal `unspecified` when the series records none, in both producers; both consumers decode
+that literal back to `None`, and it beats the column's own zone. A file with no `time_reference` key
+at all — a foreign one — keeps the existing Arrow-zone inference, so nothing about reading someone
+else's Parquet changed.
+
+The literal is defined once per crate (`infrastore_parquet::schema::UNSPECIFIED_REFERENCE` and a
+private `UNSPECIFIED_REFERENCE` in `infrastore-py`) and pinned to the same string by a test on each
+side, because the two are compiled separately and a silent divergence would look exactly like the
+bug this replaces.
+
+`TimeReference::parse` was deliberately **not** taught the literal. Unspecified is `None`, not a
+fourth variant, and the CLI's `--time-reference` must go on meaning what it meant. Note what that
+implies and what it does not: the core validates a zone name's shape and never resolves it, so
+`TimeReference::parse("unspecified")` already returned `Zone("unspecified")` and still does — the
+footer decoder intercepts the literal itself rather than delegating, which is what leaves the core
+untouched. One collision follows and is accepted rather than engineered around: a series whose
+reference is literally `Zone("unspecified")` writes the same footer value and comes back as
+unspecified. It is not an IANA zone, so nothing could ever resolve such a reference, and every
+alternative encoding is collidable the same way.

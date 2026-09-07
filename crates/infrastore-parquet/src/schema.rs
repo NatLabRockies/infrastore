@@ -46,13 +46,34 @@ pub const ELEMENT_SHAPE: &str = "element_shape";
 /// constant step, and its absence is how a reader knows that.
 pub const RESOLUTION: &str = "resolution";
 /// [`TimeReference::as_storage_string`]: `utc`, `zoneless`, `-07:00`, or an IANA
-/// name.
+/// name — plus [`UNSPECIFIED_REFERENCE`] for a series that records none.
 ///
 /// Spelled explicitly rather than inferred from the timestamp column's zone,
 /// because Arrow cannot express the difference: a `timestamp[ms]` with no zone
 /// is what both `Zoneless` and *unspecified* would produce, and those are
-/// different claims.
+/// different claims. **Always written**, for the same reason: leaving the key
+/// out for an unspecified reference would leave nothing but the column's zone to
+/// go on, and the export writes a UTC-zoned column there — so an unspecified
+/// reference would come back as `utc`, a claim the series never made.
 pub const TIME_REFERENCE: &str = "time_reference";
+
+/// What [`TIME_REFERENCE`] holds for a series that records no spelling.
+///
+/// Deliberately **not** a `TimeReference` variant and not something
+/// `TimeReference::parse` accepts: unspecified is `None`, not a fourth kind of
+/// reference, and teaching the core's parser this literal would also make the
+/// CLI's `--time-reference unspecified` a thing a caller could write. It is a
+/// footer encoding, so it lives here, and it is decoded back to `None`.
+///
+/// `to_arrow()` writes the same literal (`crates/infrastore-py/src/lib.rs`);
+/// `the_unspecified_literal_matches_the_python_binding` pins the two together.
+///
+/// One collision is accepted rather than engineered around: a series whose
+/// reference is literally `Zone("unspecified")` writes the same footer value and
+/// comes back as unspecified. `unspecified` is not an IANA zone, so nothing could
+/// ever resolve such a reference anyway, and every alternative encoding is
+/// collidable in the same way.
+pub const UNSPECIFIED_REFERENCE: &str = "unspecified";
 
 /// Free-form unit label.
 pub const UNITS: &str = "units";
@@ -144,9 +165,17 @@ pub fn metadata_for_row(row: &TimeSeriesMetadata) -> BTreeMap<String, String> {
             );
         }
     }
-    if let Some(reference) = &row.time_reference {
-        meta.insert(TIME_REFERENCE.to_string(), reference.as_storage_string());
-    }
+    // Written for every row, unlike the descriptors below. An absent descriptor
+    // means "not declared"; an absent reference would mean "read it off the
+    // column's zone", which for an unspecified reference gives `utc` -- a claim
+    // the series never made. The literal says so instead.
+    meta.insert(
+        TIME_REFERENCE.to_string(),
+        row.time_reference.as_ref().map_or_else(
+            || UNSPECIFIED_REFERENCE.to_string(),
+            |r| r.as_storage_string(),
+        ),
+    );
     insert_opt(&mut meta, UNITS, row.units.as_deref());
     insert_opt(&mut meta, QUANTITY_KIND, row.quantity_kind.as_deref());
     insert_opt(&mut meta, UNIT_SYSTEM, row.unit_system.map(|u| u.as_str()));
@@ -257,9 +286,18 @@ pub fn decode_element_type(text: &str) -> Result<ElementType, String> {
     ElementType::parse(text).ok_or_else(|| format!("unknown {ELEMENT_TYPE} {text:?}"))
 }
 
-/// Parse a `time_reference` value back.
-pub fn decode_time_reference(text: &str) -> Result<TimeReference, String> {
-    TimeReference::parse(text).map_err(|e| format!("{TIME_REFERENCE} {text:?}: {e}"))
+/// Parse a `time_reference` value back. `None` for [`UNSPECIFIED_REFERENCE`].
+///
+/// The `Option` is the point: unspecified is the absence of a reference, so it
+/// is decoded here rather than in `TimeReference::parse`, which must keep
+/// refusing the literal -- see [`UNSPECIFIED_REFERENCE`].
+pub fn decode_time_reference(text: &str) -> Result<Option<TimeReference>, String> {
+    if text == UNSPECIFIED_REFERENCE {
+        return Ok(None);
+    }
+    TimeReference::parse(text)
+        .map(Some)
+        .map_err(|e| format!("{TIME_REFERENCE} {text:?}: {e}"))
 }
 
 /// Parse an `owner_category` value back.

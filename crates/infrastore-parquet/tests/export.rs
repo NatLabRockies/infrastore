@@ -257,9 +257,10 @@ fn the_spelling_of_the_timestamps_survives() {
 
 #[test]
 fn a_zoneless_series_is_told_from_an_unspecified_one_by_the_footer() {
-    // Both would produce `timestamp[ms]` with no zone if the zone were the only
-    // record, which is why `time_reference` is written explicitly. Only the
-    // zoneless one actually does, but the key is what makes it unambiguous.
+    // Arrow cannot tell them apart in either direction: a column with no zone is
+    // what `zoneless` and *unspecified* would both produce if unspecified fell
+    // back to nothing, and the UTC-zoned column it actually produces is what
+    // `utc` produces. The footer key is what makes both unambiguous.
     let mut series = hourly(&[1.0, 2.0]);
     series.time_reference = Some(TimeReference::Zoneless);
     let (row, data) = stored(TimeSeriesData::SingleTimeSeries(series), Features::new());
@@ -271,9 +272,11 @@ fn a_zoneless_series_is_told_from_an_unspecified_one_by_the_footer() {
         Features::new(),
     );
     let batch = record_batch(&row, &data).expect("the batch should build");
-    assert!(
-        !footer(&batch).contains_key(schema::TIME_REFERENCE),
-        "an unspecified reference is absent, not written as a literal"
+    assert_eq!(
+        footer(&batch)[schema::TIME_REFERENCE],
+        schema::UNSPECIFIED_REFERENCE,
+        "an unspecified reference is written as its own literal, not omitted: \
+         the column's zone would say `utc`, which the series never claimed"
     );
 }
 

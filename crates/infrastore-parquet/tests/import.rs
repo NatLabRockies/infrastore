@@ -617,3 +617,100 @@ fn timestamps_that_leave_the_declared_grid_are_refused() {
     let err = read_series(&path, &ImportOptions::default()).expect_err("row 2 is off the grid");
     assert!(err.to_string().contains("grid"), "{err}");
 }
+
+// ---- The unspecified reference ---------------------------------------------
+
+#[test]
+fn an_unspecified_reference_survives_the_round_trip() {
+    // Arrow's timestamp type has a zone or it has none, and *unspecified* has no
+    // third spelling -- the export writes the UTC-zoned column `to_arrow()` has
+    // always written for it. What keeps the claim honest is the footer, which
+    // says `unspecified` outright and beats the column's zone on the way back.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let series = hourly(&[1.0, 2.0, 3.0]);
+    assert_eq!(series.time_reference, None, "the fixture declares none");
+    let path = exported(
+        dir.path(),
+        TimeSeriesData::SingleTimeSeries(series),
+        Features::new(),
+    );
+
+    // The column really is UTC-zoned, so the footer is doing the work.
+    let file = std::fs::File::open(&path).expect("the file should open");
+    let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
+        .expect("a valid Parquet file");
+    assert_eq!(
+        *builder.schema().field(0).data_type(),
+        arrow::datatypes::DataType::Timestamp(
+            arrow::datatypes::TimeUnit::Millisecond,
+            Some("UTC".into())
+        )
+    );
+    assert_eq!(
+        builder.schema().metadata()[infrastore_parquet::schema::TIME_REFERENCE],
+        infrastore_parquet::schema::UNSPECIFIED_REFERENCE
+    );
+
+    let back = read_series(&path, &ImportOptions::default()).expect("the file should import");
+    assert_eq!(
+        back.data.time_reference(),
+        None,
+        "unspecified comes back unspecified, not promoted to utc"
+    );
+}
+
+#[test]
+fn the_unspecified_literal_is_decoded_here_not_by_the_core() {
+    // The literal is a *footer* encoding for the absence of a reference, not a
+    // fourth `TimeReference` variant, and the core is left alone: `parse` still
+    // reads it the way it reads any other unrecognized text, as a zone name --
+    // the core validates a zone's shape and never resolves it. That is exactly
+    // why the footer decoder has to intercept the literal itself instead of
+    // delegating, and it is what keeps the CLI's `--time-reference` behaving
+    // today the way it did yesterday.
+    assert_eq!(
+        TimeReference::parse(infrastore_parquet::schema::UNSPECIFIED_REFERENCE)
+            .expect("the core reads it as a zone name, as it always has"),
+        TimeReference::Zone(infrastore_parquet::schema::UNSPECIFIED_REFERENCE.to_string()),
+        "the core is unchanged"
+    );
+    assert_eq!(
+        infrastore_parquet::schema::decode_time_reference(
+            infrastore_parquet::schema::UNSPECIFIED_REFERENCE
+        )
+        .expect("the footer literal decodes"),
+        None,
+        "the footer decoder is where unspecified means None"
+    );
+}
+
+#[test]
+fn the_unspecified_literal_matches_the_python_binding() {
+    // The two producers must agree on this string exactly, and they are compiled
+    // separately -- so it is pinned from both sides. The Python half is
+    // `test_the_unspecified_literal_is_the_one_the_cli_writes` in
+    // `python/tests/test_arrow.py`.
+    assert_eq!(
+        infrastore_parquet::schema::UNSPECIFIED_REFERENCE,
+        "unspecified"
+    );
+}
+
+#[test]
+fn a_foreign_file_still_reads_its_zone() {
+    // Only a footer that says `unspecified` overrides the column. A file with no
+    // `time_reference` key at all keeps the existing inference.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = foreign(
+        dir.path(),
+        "no_footer.parquet",
+        millis(2, 3_600_000),
+        Arc::new(Float64Array::from(vec![1.0, 2.0])),
+    );
+    let options = ImportOptions {
+        name: Some("load".into()),
+        ..Default::default()
+    };
+    let back = read_series(&path, &options).expect("the file should import");
+    assert_eq!(back.data.time_reference(), Some(&TimeReference::Zoneless));
+}

@@ -260,6 +260,7 @@ value). The row's descriptors ride in the file's key/value footer — `name`, `t
 `element_type`, `element_shape`, `resolution`, `time_reference`, `units`, `quantity_kind`,
 `unit_system`, `component_field`, `application_data` — plus the row-level `id`, `owner_id`,
 `owner_type`, `owner_category`, and `features` that a value object has no way to know.
+`time_reference` is always present, spelling a series that declared none as `unspecified`.
 
 Composite element types (`piecewise_linear` and friends) keep their stored packing, a
 `FixedSizeList<double>[w]`; `element_type` in the footer is what names them, and every binding has a

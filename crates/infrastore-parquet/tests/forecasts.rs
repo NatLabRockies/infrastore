@@ -360,13 +360,10 @@ fn a_calendar_horizon_counts_its_steps_by_walking_the_grid() {
 }
 
 #[test]
-fn an_unspecified_reference_comes_back_as_utc() {
-    // Not a defect, and worth stating: Arrow's timestamp type has a zone or it
-    // has none, and *unspecified* has no third spelling. The export writes a
-    // UTC-zoned column for it -- the mapping `to_arrow()` has always used -- so
-    // an unspecified reference is promoted to `utc` on the way back. The
-    // instants are unchanged; only the label the store records moves from "not
-    // stated" to "UTC".
+fn an_unspecified_reference_survives_a_forecast_round_trip() {
+    // The footer carries `unspecified` explicitly, so the column's own zone --
+    // which the export writes as UTC, the mapping `to_arrow()` has always used
+    // -- never gets to answer for it.
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("unspecified.parquet");
     let mut forecast = deterministic();
@@ -375,5 +372,5 @@ fn an_unspecified_reference_comes_back_as_utc() {
     write_series(&path, &row, &data).expect("the file should write");
 
     let back = read_series(&path, &ImportOptions::default()).expect("the file should import");
-    assert_eq!(back.data.time_reference(), Some(&TimeReference::Utc));
+    assert_eq!(back.data.time_reference(), None);
 }

@@ -482,10 +482,12 @@ fn resolve_name(footer: &BTreeMap<String, String>, options: &ImportOptions) -> R
 ///
 /// The option wins, then the footer, then the Arrow zone. The zone is last
 /// because it cannot express everything the store records: a column with no zone
-/// is what both `zoneless` and *unspecified* would produce, which is why the
-/// footer spells it out. For a foreign file with no footer, a zoneless column
-/// reads as `Zoneless` — a naive timestamp is a wall clock, which is the same
-/// reading Python and the CLI take.
+/// is what both `zoneless` and *unspecified* would produce, and a UTC-zoned one
+/// is what both `utc` and *unspecified* produce — which is why the footer spells
+/// it out, `unspecified` included. A **foreign** file, with no footer at all,
+/// still falls back to the zone: there a zoneless column reads as `Zoneless`,
+/// since a naive timestamp is a wall clock, the same reading Python and the CLI
+/// take.
 fn resolve_time_reference(
     footer: &BTreeMap<String, String>,
     options: &ImportOptions,
@@ -494,10 +496,10 @@ fn resolve_time_reference(
     if let Some(reference) = &options.time_reference {
         return Ok(Some(reference.clone()));
     }
+    // The footer wins outright, `unspecified` included: it decodes to `None`,
+    // which is a real answer and not a gap for the zone to fill.
     if let Some(text) = footer.get(schema::TIME_REFERENCE) {
-        return Ok(Some(
-            schema::decode_time_reference(text).map_err(unsupported)?,
-        ));
+        return schema::decode_time_reference(text).map_err(unsupported);
     }
     reference_from_arrow_zone(zone).map(Some)
 }

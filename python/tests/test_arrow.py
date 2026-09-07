@@ -684,3 +684,71 @@ def test_a_parquet_file_round_trips_through_from_arrow(tmp_path):
     back = SingleTimeSeries.from_arrow(pq.read_table(path))
     assert back == series
     assert np.array_equal(back.data, awkward)
+
+
+# ---- The unspecified reference ---------------------------------------------
+#
+# A series that records no timestamp spelling. Every constructor infers one from
+# its input -- that inference is the point -- so the only way to reach `None` is
+# a table that says so, which is also the case under test.
+
+
+def _unspecified_table():
+    """A `to_arrow()`-shaped table whose metadata says the series declared no
+    spelling, over a UTC-zoned timestamp column."""
+    return pa.table(
+        {
+            "timestamp": _stamps([UTC_START + timedelta(hours=k) for k in range(3)]),
+            "value": pa.array([1.0, 2.0, 3.0]),
+        }
+    ).replace_schema_metadata({"name": "load", "time_reference": "unspecified"})
+
+
+def test_the_unspecified_literal_is_the_one_the_cli_writes():
+    """The two producers are compiled separately and must agree on this string
+    exactly. The Rust half is `the_unspecified_literal_matches_the_python_binding`
+    in `crates/infrastore-parquet/tests/import.rs`."""
+    series = SingleTimeSeries.from_arrow(_unspecified_table())
+    assert series.to_arrow().schema.metadata[b"time_reference"] == b"unspecified"
+
+
+def test_a_declared_reference_is_still_written_as_itself():
+    assert hourly(np.arange(3.0)).to_arrow().schema.metadata[b"time_reference"] == b"utc"
+
+
+def test_from_arrow_decodes_the_literal_back_to_none():
+    assert SingleTimeSeries.from_arrow(_unspecified_table()).time_reference is None
+
+
+def test_the_literal_beats_the_columns_zone():
+    """The column is UTC-zoned; the metadata says the series declared nothing.
+    The metadata wins, or the round trip would invent a claim the series never
+    made -- which is the whole reason the key is written rather than omitted."""
+    table = _unspecified_table()
+    assert table.schema.field("timestamp").type.tz == "UTC"
+    assert SingleTimeSeries.from_arrow(table).time_reference is None
+
+
+def test_an_explicit_keyword_still_wins_over_the_literal():
+    series = SingleTimeSeries.from_arrow(
+        _unspecified_table(), time_reference="America/Denver"
+    )
+    assert series.time_reference == "America/Denver"
+
+
+def test_a_table_with_no_time_reference_key_still_reads_its_zone():
+    """Only the literal overrides the column. A foreign table, which has no
+    metadata at all, keeps the existing inference."""
+    hours = [UTC_START + timedelta(hours=k) for k in range(3)]
+    assert (
+        SingleTimeSeries.from_arrow(
+            _foreign(hours, [1.0, 2.0, 3.0], tz=None), name="load"
+        ).time_reference
+        == "zoneless"
+    )
+
+
+def test_an_unspecified_series_round_trips_through_to_arrow():
+    series = SingleTimeSeries.from_arrow(_unspecified_table())
+    assert series.time_reference is None
+    assert SingleTimeSeries.from_arrow(series.to_arrow()).time_reference is None

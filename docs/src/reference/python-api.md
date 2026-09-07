@@ -657,6 +657,13 @@ has no constant step), and whichever of `units`, `quantity_kind`, `unit_system`,
 and `application_data` were declared. An undeclared one is **absent** rather than empty, so
 `b"units" in table.schema.metadata` answers "was a label declared?".
 
+`time_reference` is the exception: it is always written, and a series that records no spelling gets
+the literal `b"unspecified"`. Arrow's timestamp type has a zone or it has none, and _unspecified_
+has no third spelling — an unspecified reference produces a UTC-zoned column, the same as `"utc"` —
+so omitting the key would leave that column as the only evidence and `from_arrow` would hand back a
+series claiming `utc`, which it never did. `unspecified` is a metadata encoding only: it is not a
+value `time_reference=` accepts on any constructor.
+
 The value column is named `value` rather than after the series so that tables from different
 components concatenate without renaming; the series' own name is in the metadata.
 
@@ -688,12 +695,12 @@ The rules are the same ones `infrastore add --parquet` applies, and they are sta
 short: what the metadata says is used; what it does not say is inferred from the Arrow schema,
 taking the reading that assumes least.
 
-| Missing          | Read as                                                                                                                                               |
-| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `resolution`     | Inferred from the timestamps, which must then walk a grid.                                                                                            |
-| `element_type`   | The leaf Arrow type. A `fixed_size_list<double>[3]` becomes `f64` with shape `(rows, 3)` — _dense_, not `tuple(3,f64)`, because the bytes cannot say. |
-| `time_reference` | The timestamp column's zone; a column with no zone reads as `zoneless`, since a naive timestamp is a wall clock.                                      |
-| `name`           | Nothing. A name is part of a series' identity, so pass `name=`.                                                                                       |
+| Missing          | Read as                                                                                                                                                                         |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `resolution`     | Inferred from the timestamps, which must then walk a grid.                                                                                                                      |
+| `element_type`   | The leaf Arrow type. A `fixed_size_list<double>[3]` becomes `f64` with shape `(rows, 3)` — _dense_, not `tuple(3,f64)`, because the bytes cannot say.                           |
+| `time_reference` | The timestamp column's zone; a column with no zone reads as `zoneless`, since a naive timestamp is a wall clock. A metadata `unspecified` beats the zone and gives back `None`. |
+| `name`           | Nothing. A name is part of a series' identity, so pass `name=`.                                                                                                                 |
 
 Every keyword overrides the metadata, with one exception: **`element_type` is an assertion.**
 `element_type="tuple(3,f64)"` states the reading the bytes cannot, and a value that contradicts the
