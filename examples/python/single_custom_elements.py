@@ -21,24 +21,19 @@ gas price climbs from $3.50 to $5.25/MMBtu, so the curves get steeper hour by
 hour. They are four spellings of one physical unit; a real system carries the
 one its cost model calls for.
 
-`encode_element_values` packs the values into the array the store holds and
-`decode_element_values` unpacks them. The packing is the store's business (a
-piecewise row carries its point count in the leading slot, so ragged curves
-share one rectangular array); the `element_type` recorded on the row is what
-tells a reader how to read it back.
+`SingleTimeSeries.from_values` takes the curves themselves: it packs them into
+the array the store holds and records the element type they imply, so the two
+cannot get out of step. The packing is the store's business (a piecewise row
+carries its point count in the leading slot, so ragged curves share one
+rectangular array); `decoded_values()` on a read unpacks it again, and the
+`element_type` recorded on the row is what tells any other reader how to.
 """
 
 from datetime import timedelta
 
 import polars as pl
 
-from infrastore import (
-    OwnerCategory,
-    SingleTimeSeries,
-    Store,
-    decode_element_values,
-    encode_element_values,
-)
+from infrastore import OwnerCategory, SingleTimeSeries, Store
 
 from _shared import DAY_START, SOLITUDE
 
@@ -98,12 +93,13 @@ store = Store.create(in_memory=True)
 series_ids = []
 
 for element_type, values in CURVES.items():
-    packed = encode_element_values(values, element_type)
-    series = SingleTimeSeries(
+    series = SingleTimeSeries.from_values(
         DAY_START,
         timedelta(hours=1),
-        packed,
+        values,
         f"variable_cost_{element_type}",
+        # An assertion, not an override: the values already name the type, and
+        # this raises if the two disagree. Omitting it changes nothing.
         element_type=element_type,
         # The label describes what evaluating the curve gives you: a production
         # cost rate in $/hr for the first three, and a marginal cost in $/MWh for
@@ -125,15 +121,20 @@ for element_type, values in CURVES.items():
     series_ids.append(series_id)
     print(f"added {element_type} for '{SOLITUDE.name}': id={series_id}")
 
-# Reading back: the row's own `element_type` drives the decode, so the caller
-# does not have to remember what it wrote.
+# Reading back: a read hands back the whole series - its descriptors as well as
+# its values - and the series' own `element_type` drives the decode. So there is
+# no catalog lookup here: nothing in this loop is asking a question about the row
+# that the row itself did not come back with.
 for series_id in series_ids:
-    metadata = store.get_metadata_by_id(series_id)
     series = store.read_by_id(series_id)
-    decoded = decode_element_values(series.data, metadata["element_type"])
     frame = pl.DataFrame(
-        {"timestamp": series.timestamps, "gas_price": GAS_PRICE, "curve": decoded},
+        {
+            "timestamp": series.timestamps,
+            "gas_price": GAS_PRICE,
+            "curve": series.decoded_values(),
+        },
         strict=False,
     )
-    print(f"\n{metadata['name']} ({metadata['units']})")
+    print(f"\n{series.name} ({series.units})")
+    breakpoint()
     print(frame)

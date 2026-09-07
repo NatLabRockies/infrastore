@@ -19,9 +19,12 @@ from infrastore import (
 > **Array dtypes.** The binding accepts and returns NumPy arrays of `float64`, `float32`, the signed
 > and unsigned integer widths (`int64`/`int32`/`int16`/`int8`/`uint64`/`uint32`/`uint16`/`uint8`),
 > or `bool`; whatever dtype is given round-trips unchanged. What those elements _mean_ is the
-> association's `element_type` (see [Element types](./element-types.md)), declared with the
-> `element_type=` keyword on the value constructor and decoded with `decode_element_values`.
-> Multi-dimensional arrays (a per-step element shape) are supported via the NumPy array's shape.
+> association's `element_type` (see [Element types](./element-types.md)). A composite series is
+> built with the `from_values` classmethod, which encodes the per-timestep values and declares the
+> element type they imply, and read back with `.decoded_values()`; `element_type=` on the plain
+> constructor declares it for an array you already hold, and `encode_element_values` /
+> `decode_element_values` are the standalone pair. Multi-dimensional arrays (a per-step element
+> shape) are supported via the NumPy array's shape.
 
 ## Datetimes
 

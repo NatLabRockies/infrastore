@@ -16,22 +16,18 @@ stored (`count`). Windows overlap, so 16:00 is offered twice - once in the run
 issued at 15:00 and once in the run issued at 16:00 - and the two offers must
 agree here, because they rest on the same gas price forecast for that hour.
 
-`encode_element_values` needs `leading_dims` for a forecast: the values arrive as
-a flat list and the encoder has to know the (horizon steps, window count) shape
-they fold into. The flat order is horizon-major, matching the stored layout.
+`Deterministic.from_values` takes the curves themselves. It encodes them, records
+the element type they imply, and folds them into the (horizon steps, window
+count) grid derived from `horizon`, `resolution` and `count` - the arithmetic the
+lower-level `encode_element_values` asks for as `leading_dims`. The flat order is
+horizon-major, matching the stored layout.
 """
 
 from datetime import timedelta
 
 import polars as pl
 
-from infrastore import (
-    Deterministic,
-    OwnerCategory,
-    Store,
-    decode_element_values,
-    encode_element_values,
-)
+from infrastore import Deterministic, OwnerCategory, Store
 
 from _shared import DAY_START, SOLITUDE
 
@@ -97,15 +93,16 @@ store = Store.create(in_memory=True)
 series_ids = []
 
 for element_type, values in OFFERS.items():
-    packed = encode_element_values(values, element_type, [HORIZON_STEPS, WINDOW_COUNT])
-    forecast = Deterministic(
+    forecast = Deterministic.from_values(
         DAY_START + timedelta(hours=FIRST_ISSUE_HOUR),
         RESOLUTION,
         HORIZON_STEPS * RESOLUTION,  # horizon
         RESOLUTION,  # interval: re-offered every hour, so windows overlap
         WINDOW_COUNT,
-        packed,
+        values,
         f"incremental_offer_curves_{element_type}",
+        # An assertion, not an override: the values already name the type, and
+        # this raises if the two disagree. Omitting it changes nothing.
         element_type=element_type,
         units={"tuple(2,f64)": "MW", "piecewise_step": "$/MWh"}.get(
             element_type, "$/hr"
@@ -124,11 +121,12 @@ for element_type, values in OFFERS.items():
     print(f"added {element_type} for '{SOLITUDE.name}': id={series_id}")
 
 for series_id in series_ids:
-    metadata = store.get_metadata_by_id(series_id)
+    # A read hands back the whole forecast, descriptors included, so there is no
+    # catalog lookup to make here. It also knows both halves of the decode - its
+    # element type, and that its values are indexed by two axes ahead of the
+    # element, i.e. the (horizon step, window) grid - so nothing is passed in.
     forecast = store.read_by_id(series_id)
-    # `leading_dims=2` says the values are indexed by two axes ahead of the
-    # element, i.e. the (horizon step, window) grid.
-    decoded = decode_element_values(forecast.data, metadata["element_type"], 2)
+    decoded = forecast.decoded_values()
     rows = [
         {
             "issue_time": DAY_START + timedelta(hours=FIRST_ISSUE_HOUR + window),
@@ -138,5 +136,5 @@ for series_id in series_ids:
         }
         for (step, window), value in zip(GRID, decoded, strict=True)
     ]
-    print(f"\n{metadata['name']}")
+    print(f"\n{forecast.name}")
     print(pl.DataFrame(rows, strict=False).sort("issue_time", "offer_for"))

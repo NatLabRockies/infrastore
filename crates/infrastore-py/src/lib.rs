@@ -1050,6 +1050,82 @@ impl PyDeterministic {
         Ok(Self { inner })
     }
 
+    /// Build from per-timestep logical values, encoding them into the array the
+    /// store holds and declaring the element type they imply. See
+    /// `SingleTimeSeries.from_values` for the value shapes and the rules.
+    ///
+    /// `values` is one entry per timestep in row-major order over the leading
+    /// axes, so entry `i * count + j` is window `j`'s step `i`. Those axes are
+    /// `[H, count]`, with `H` derived from `horizon`/`resolution` — the
+    /// arithmetic `encode_element_values` otherwise leaves to the caller.
+    #[classmethod]
+    #[pyo3(signature = (
+        initial_timestamp, resolution, horizon, interval, count, values, name, *,
+        application_data=None, element_type=None, units=None, quantity_kind=None,
+        unit_system=None, component_field=None, time_reference=None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn from_values(
+        _cls: &Bound<'_, pyo3::types::PyType>,
+        py: Python<'_>,
+        initial_timestamp: PyInstant,
+        resolution: Bound<'_, PyAny>,
+        horizon: Bound<'_, PyAny>,
+        interval: Bound<'_, PyAny>,
+        count: usize,
+        values: &Bound<'_, PyAny>,
+        name: String,
+        application_data: Option<String>,
+        element_type: Option<String>,
+        units: Option<String>,
+        quantity_kind: Option<String>,
+        unit_system: Option<String>,
+        component_field: Option<String>,
+        time_reference: Option<String>,
+    ) -> PyResult<Self> {
+        let resolution = pyany_to_period(&resolution)?;
+        let horizon = pyany_to_period(&horizon)?;
+        let interval = pyany_to_period(&interval)?;
+        let decoded = from_values_payload(values, element_type.as_deref())?;
+        let mut inner = core_lib::Deterministic::from_values(
+            initial_timestamp.instant,
+            resolution,
+            horizon,
+            interval,
+            count,
+            &decoded,
+            name,
+        )
+        .map_err(InvalidParameterError::new_err)?;
+        let descriptors = DescriptorArgs {
+            application_data,
+            element_type,
+            units,
+            quantity_kind,
+            unit_system,
+            component_field,
+            time_reference,
+        }
+        .resolve(py, inner.element_type, Some(initial_timestamp.reference))?;
+        apply_descriptors!(inner, descriptors);
+        Ok(Self { inner })
+    }
+
+    /// Decode this series' array into the per-timestep values its element type
+    /// describes — the read-side counterpart of `from_values`, and the reason a
+    /// caller never has to know the stored row layouts.
+    ///
+    /// Same shapes as `decode_element_values`, which this is: the element type
+    /// and the number of leading axes both come from the series, so there is
+    /// nothing left to pass and nothing to get wrong.
+    ///
+    /// `None` for a scalar element type and for any array whose physical dtype
+    /// is not `float64`: there the stored elements already are the values, and
+    /// `.data` is the answer.
+    fn decoded_values<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        decoded_or_none(py, &self.inner.data, self.inner.element_type, 2)
+    }
+
     #[getter]
     fn name(&self) -> String {
         self.inner.name.clone()
@@ -1309,6 +1385,85 @@ impl PyProbabilistic {
         Ok(Self { inner })
     }
 
+    /// Build from per-timestep logical values, encoding them into the array the
+    /// store holds and declaring the element type they imply. See
+    /// `SingleTimeSeries.from_values` for the value shapes and the rules.
+    ///
+    /// `values` is one entry per timestep in row-major order over the leading
+    /// axes, so entry `(p * H + i) * count + j` is percentile `p`'s window `j`,
+    /// step `i`. Those axes are `[len(percentiles), H, count]`, with `H` derived
+    /// from `horizon`/`resolution` — the arithmetic `encode_element_values`
+    /// otherwise leaves to the caller.
+    #[classmethod]
+    #[pyo3(signature = (
+        initial_timestamp, resolution, horizon, interval, count, percentiles, values, name, *,
+        application_data=None, element_type=None, units=None, quantity_kind=None,
+        unit_system=None, component_field=None, time_reference=None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn from_values(
+        _cls: &Bound<'_, pyo3::types::PyType>,
+        py: Python<'_>,
+        initial_timestamp: PyInstant,
+        resolution: Bound<'_, PyAny>,
+        horizon: Bound<'_, PyAny>,
+        interval: Bound<'_, PyAny>,
+        count: usize,
+        percentiles: Vec<f64>,
+        values: &Bound<'_, PyAny>,
+        name: String,
+        application_data: Option<String>,
+        element_type: Option<String>,
+        units: Option<String>,
+        quantity_kind: Option<String>,
+        unit_system: Option<String>,
+        component_field: Option<String>,
+        time_reference: Option<String>,
+    ) -> PyResult<Self> {
+        let resolution = pyany_to_period(&resolution)?;
+        let horizon = pyany_to_period(&horizon)?;
+        let interval = pyany_to_period(&interval)?;
+        let decoded = from_values_payload(values, element_type.as_deref())?;
+        let mut inner = core_lib::Probabilistic::from_values(
+            initial_timestamp.instant,
+            resolution,
+            horizon,
+            interval,
+            count,
+            percentiles,
+            &decoded,
+            name,
+        )
+        .map_err(InvalidParameterError::new_err)?;
+        let descriptors = DescriptorArgs {
+            application_data,
+            element_type,
+            units,
+            quantity_kind,
+            unit_system,
+            component_field,
+            time_reference,
+        }
+        .resolve(py, inner.element_type, Some(initial_timestamp.reference))?;
+        apply_descriptors!(inner, descriptors);
+        Ok(Self { inner })
+    }
+
+    /// Decode this series' array into the per-timestep values its element type
+    /// describes — the read-side counterpart of `from_values`, and the reason a
+    /// caller never has to know the stored row layouts.
+    ///
+    /// Same shapes as `decode_element_values`, which this is: the element type
+    /// and the number of leading axes both come from the series, so there is
+    /// nothing left to pass and nothing to get wrong.
+    ///
+    /// `None` for a scalar element type and for any array whose physical dtype
+    /// is not `float64`: there the stored elements already are the values, and
+    /// `.data` is the answer.
+    fn decoded_values<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        decoded_or_none(py, &self.inner.data, self.inner.element_type, 3)
+    }
+
     #[getter]
     fn name(&self) -> String {
         self.inner.name.clone()
@@ -1501,6 +1656,88 @@ impl PyScenarios {
         .resolve(py, inner.element_type, Some(initial_timestamp.reference))?;
         apply_descriptors!(inner, descriptors);
         Ok(Self { inner })
+    }
+
+    /// Build from per-timestep logical values, encoding them into the array the
+    /// store holds and declaring the element type they imply. See
+    /// `SingleTimeSeries.from_values` for the value shapes and the rules.
+    ///
+    /// `values` is one entry per timestep in row-major order over the leading
+    /// axes, so entry `(s * H + i) * count + j` is scenario `s`'s window `j`,
+    /// step `i`. Those axes are `[scenario_count, H, count]`, with `H` derived
+    /// from `horizon`/`resolution` — the arithmetic `encode_element_values`
+    /// otherwise leaves to the caller.
+    ///
+    /// `scenario_count` is explicit here, where the constructor reads it off the
+    /// array's first axis: there is no array yet to read it from.
+    #[classmethod]
+    #[pyo3(signature = (
+        initial_timestamp, resolution, horizon, interval, count, scenario_count, values, name, *,
+        application_data=None, element_type=None, units=None, quantity_kind=None,
+        unit_system=None, component_field=None, time_reference=None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn from_values(
+        _cls: &Bound<'_, pyo3::types::PyType>,
+        py: Python<'_>,
+        initial_timestamp: PyInstant,
+        resolution: Bound<'_, PyAny>,
+        horizon: Bound<'_, PyAny>,
+        interval: Bound<'_, PyAny>,
+        count: usize,
+        scenario_count: usize,
+        values: &Bound<'_, PyAny>,
+        name: String,
+        application_data: Option<String>,
+        element_type: Option<String>,
+        units: Option<String>,
+        quantity_kind: Option<String>,
+        unit_system: Option<String>,
+        component_field: Option<String>,
+        time_reference: Option<String>,
+    ) -> PyResult<Self> {
+        let resolution = pyany_to_period(&resolution)?;
+        let horizon = pyany_to_period(&horizon)?;
+        let interval = pyany_to_period(&interval)?;
+        let decoded = from_values_payload(values, element_type.as_deref())?;
+        let mut inner = core_lib::Scenarios::from_values(
+            initial_timestamp.instant,
+            resolution,
+            horizon,
+            interval,
+            count,
+            scenario_count,
+            &decoded,
+            name,
+        )
+        .map_err(InvalidParameterError::new_err)?;
+        let descriptors = DescriptorArgs {
+            application_data,
+            element_type,
+            units,
+            quantity_kind,
+            unit_system,
+            component_field,
+            time_reference,
+        }
+        .resolve(py, inner.element_type, Some(initial_timestamp.reference))?;
+        apply_descriptors!(inner, descriptors);
+        Ok(Self { inner })
+    }
+
+    /// Decode this series' array into the per-timestep values its element type
+    /// describes — the read-side counterpart of `from_values`, and the reason a
+    /// caller never has to know the stored row layouts.
+    ///
+    /// Same shapes as `decode_element_values`, which this is: the element type
+    /// and the number of leading axes both come from the series, so there is
+    /// nothing left to pass and nothing to get wrong.
+    ///
+    /// `None` for a scalar element type and for any array whose physical dtype
+    /// is not `float64`: there the stored elements already are the values, and
+    /// `.data` is the answer.
+    fn decoded_values<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        decoded_or_none(py, &self.inner.data, self.inner.element_type, 3)
     }
 
     #[getter]
@@ -1774,6 +2011,106 @@ impl PySingleTimeSeries {
         Ok(Self { inner })
     }
 
+    /// Build from per-timestep logical values, encoding them into the array the
+    /// store holds and declaring the element type they imply.
+    ///
+    /// The pairing is the point. An `element_type` and the array it describes
+    /// are two independent things a caller can get out of step; the store
+    /// rejects the mismatch, but only after the fact. Deriving both from one
+    /// set of values means there is none to reject — and for a forecast it also
+    /// derives the leading dimensions, which `encode_element_values` otherwise
+    /// asks the caller to compute.
+    ///
+    /// `values` is one entry per timestep, in the shapes `decoded_values`
+    /// returns, and the entry's own shape is what names the element type:
+    ///
+    /// ```python
+    /// SingleTimeSeries.from_values(
+    ///     start, timedelta(hours=1),
+    ///     [[{"x": 0.0, "y": 1.0}, {"x": 1.0, "y": 3.0}], [{"x": 0.0, "y": 2.0}]],
+    ///     "variable_cost",
+    /// )                                            # -> element_type "piecewise_linear"
+    /// ```
+    ///
+    /// | `values` entry                                | element type          |
+    /// | --------------------------------------------- | --------------------- |
+    /// | `{"proportional": _, "constant": _}`          | `linear_function`     |
+    /// | `{"quadratic": _, "proportional": _, ...}`    | `quadratic_function`  |
+    /// | `list[{"x": _, "y": _}]`                      | `piecewise_linear`    |
+    /// | `{"x": list, "y": list}`                      | `piecewise_step`      |
+    /// | `list[float]` of length N                     | `tuple(N,f64)`        |
+    ///
+    /// A series of plain numbers has no encoding to do: pass the numpy array to
+    /// the constructor as `data=`.
+    ///
+    /// `element_type=` is accepted as an assertion, not an override — it raises
+    /// `InvalidParameterError` if it disagrees with the values. The remaining
+    /// keyword arguments are the descriptive attributes documented on the
+    /// constructor.
+    ///
+    /// Raises `InvalidParameterError` if the values cannot be encoded: tuple
+    /// rows of differing arity, a step function whose `x` and `y` lengths
+    /// disagree, or (for a forecast) a count that does not fill the windows.
+    #[classmethod]
+    #[pyo3(signature = (
+        initial_timestamp, resolution, values, name, *,
+        application_data=None, element_type=None, units=None, quantity_kind=None,
+        unit_system=None, component_field=None, time_reference=None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn from_values(
+        _cls: &Bound<'_, pyo3::types::PyType>,
+        py: Python<'_>,
+        initial_timestamp: PyInstant,
+        resolution: Bound<'_, PyAny>,
+        values: &Bound<'_, PyAny>,
+        name: String,
+        application_data: Option<String>,
+        element_type: Option<String>,
+        units: Option<String>,
+        quantity_kind: Option<String>,
+        unit_system: Option<String>,
+        component_field: Option<String>,
+        time_reference: Option<String>,
+    ) -> PyResult<Self> {
+        let resolution = pyany_to_period(&resolution)?;
+        let decoded = from_values_payload(values, element_type.as_deref())?;
+        let mut inner = core_lib::SingleTimeSeries::from_values(
+            initial_timestamp.instant,
+            resolution,
+            &decoded,
+            name,
+        )
+        .map_err(InvalidParameterError::new_err)?;
+        let descriptors = DescriptorArgs {
+            application_data,
+            element_type,
+            units,
+            quantity_kind,
+            unit_system,
+            component_field,
+            time_reference,
+        }
+        .resolve(py, inner.element_type, Some(initial_timestamp.reference))?;
+        apply_descriptors!(inner, descriptors);
+        Ok(Self { inner })
+    }
+
+    /// Decode this series' array into the per-timestep values its element type
+    /// describes — the read-side counterpart of `from_values`, and the reason a
+    /// caller never has to know the stored row layouts.
+    ///
+    /// Same shapes as `decode_element_values`, which this is: the element type
+    /// and the number of leading axes both come from the series, so there is
+    /// nothing left to pass and nothing to get wrong.
+    ///
+    /// `None` for a scalar element type and for any array whose physical dtype
+    /// is not `float64`: there the stored elements already are the values, and
+    /// `.data` is the answer.
+    fn decoded_values<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        decoded_or_none(py, &self.inner.data, self.inner.element_type, 1)
+    }
+
     #[getter]
     fn name(&self) -> String {
         self.inner.name.clone()
@@ -1982,6 +2319,68 @@ impl PyNonSequentialTimeSeries {
         Ok(Self { inner })
     }
 
+    /// Build from per-timestamp logical values, encoding them into the array
+    /// the store holds and declaring the element type they imply. See
+    /// `SingleTimeSeries.from_values` for the value shapes and the rules.
+    #[classmethod]
+    #[pyo3(signature = (
+        timestamps, values, name, *,
+        application_data=None, element_type=None, units=None, quantity_kind=None,
+        unit_system=None, component_field=None, time_reference=None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn from_values(
+        _cls: &Bound<'_, pyo3::types::PyType>,
+        py: Python<'_>,
+        timestamps: Vec<PyInstant>,
+        values: &Bound<'_, PyAny>,
+        name: String,
+        application_data: Option<String>,
+        element_type: Option<String>,
+        units: Option<String>,
+        quantity_kind: Option<String>,
+        unit_system: Option<String>,
+        component_field: Option<String>,
+        time_reference: Option<String>,
+    ) -> PyResult<Self> {
+        // One series records one spelling, so the vector has to agree on one.
+        let reference = vector_reference(&timestamps)?;
+        let decoded = from_values_payload(values, element_type.as_deref())?;
+        let mut inner = core_lib::NonSequentialTimeSeries::from_values(
+            instants_to_utc(&timestamps),
+            &decoded,
+            name,
+        )
+        .map_err(InvalidParameterError::new_err)?;
+        let descriptors = DescriptorArgs {
+            application_data,
+            element_type,
+            units,
+            quantity_kind,
+            unit_system,
+            component_field,
+            time_reference,
+        }
+        .resolve(py, inner.element_type, reference)?;
+        apply_descriptors!(inner, descriptors);
+        Ok(Self { inner })
+    }
+
+    /// Decode this series' array into the per-timestep values its element type
+    /// describes — the read-side counterpart of `from_values`, and the reason a
+    /// caller never has to know the stored row layouts.
+    ///
+    /// Same shapes as `decode_element_values`, which this is: the element type
+    /// and the number of leading axes both come from the series, so there is
+    /// nothing left to pass and nothing to get wrong.
+    ///
+    /// `None` for a scalar element type and for any array whose physical dtype
+    /// is not `float64`: there the stored elements already are the values, and
+    /// `.data` is the answer.
+    fn decoded_values<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        decoded_or_none(py, &self.inner.data, self.inner.element_type, 1)
+    }
+
     #[getter]
     fn name(&self) -> String {
         self.inner.name.clone()
@@ -2158,6 +2557,68 @@ impl PyPersistentTimeSeries {
         .resolve(py, inner.element_type, reference)?;
         apply_descriptors!(inner, descriptors);
         Ok(Self { inner })
+    }
+
+    /// Build from per-breakpoint logical values, encoding them into the array
+    /// the store holds and declaring the element type they imply. See
+    /// `SingleTimeSeries.from_values` for the value shapes and the rules.
+    #[classmethod]
+    #[pyo3(signature = (
+        timestamps, values, name, *,
+        application_data=None, element_type=None, units=None, quantity_kind=None,
+        unit_system=None, component_field=None, time_reference=None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn from_values(
+        _cls: &Bound<'_, pyo3::types::PyType>,
+        py: Python<'_>,
+        timestamps: Vec<PyInstant>,
+        values: &Bound<'_, PyAny>,
+        name: String,
+        application_data: Option<String>,
+        element_type: Option<String>,
+        units: Option<String>,
+        quantity_kind: Option<String>,
+        unit_system: Option<String>,
+        component_field: Option<String>,
+        time_reference: Option<String>,
+    ) -> PyResult<Self> {
+        // One series records one spelling, so the vector has to agree on one.
+        let reference = vector_reference(&timestamps)?;
+        let decoded = from_values_payload(values, element_type.as_deref())?;
+        let mut inner = core_lib::PersistentTimeSeries::from_values(
+            instants_to_utc(&timestamps),
+            &decoded,
+            name,
+        )
+        .map_err(InvalidParameterError::new_err)?;
+        let descriptors = DescriptorArgs {
+            application_data,
+            element_type,
+            units,
+            quantity_kind,
+            unit_system,
+            component_field,
+            time_reference,
+        }
+        .resolve(py, inner.element_type, reference)?;
+        apply_descriptors!(inner, descriptors);
+        Ok(Self { inner })
+    }
+
+    /// Decode this series' array into the per-timestep values its element type
+    /// describes — the read-side counterpart of `from_values`, and the reason a
+    /// caller never has to know the stored row layouts.
+    ///
+    /// Same shapes as `decode_element_values`, which this is: the element type
+    /// and the number of leading axes both come from the series, so there is
+    /// nothing left to pass and nothing to get wrong.
+    ///
+    /// `None` for a scalar element type and for any array whose physical dtype
+    /// is not `float64`: there the stored elements already are the values, and
+    /// `.data` is the answer.
+    fn decoded_values<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        decoded_or_none(py, &self.inner.data, self.inner.element_type, 1)
     }
 
     #[getter]
@@ -5318,7 +5779,21 @@ fn decode_element_values<'py>(
 ) -> PyResult<Option<Bound<'py, PyAny>>> {
     let array = typed_array_from_numpy(data)?;
     let element_type = parse_element_type(element_type)?;
-    let decoded = core_lib::decode(&array, element_type, leading_dims).map_err(map_err)?;
+    decoded_or_none(py, &array, element_type, leading_dims)
+}
+
+/// Decode `array` for Python, mapping the core's `Raw` — "the elements already
+/// are the values" — onto `None`.
+///
+/// Shared by `decode_element_values` and by every series' `decoded_values`, so
+/// the two can never come to disagree about what a scalar series decodes to.
+fn decoded_or_none<'py>(
+    py: Python<'py>,
+    array: &core_lib::TypedArray,
+    element_type: core_lib::ElementType,
+    leading_dims: usize,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let decoded = core_lib::decode(array, element_type, leading_dims).map_err(map_err)?;
     Ok(match decoded {
         core_lib::DecodedValues::Raw => None,
         other => Some(decoded_to_py(py, &other)?),
@@ -5415,6 +5890,132 @@ fn encode_element_values<'py>(
     // `add_time_series`, as the docstring promises.
     let array = core_lib::encode_as(&decoded, &dims, element_type).map_err(map_err)?;
     numpy_from_typed(py, &array)
+}
+
+/// The element type a `from_values` payload implies, or `None` when the payload
+/// is empty and implies nothing.
+///
+/// Rust and Julia never need this: a `DecodedValues` and a
+/// `Vector{PiecewiseLinear}` each carry their variant in the type system. A
+/// Python list of dicts carries nothing, so the shape of a row is the only tag
+/// there is. The five shapes are disjoint, which is what makes reading one a
+/// decision rather than a guess:
+///
+/// - `{"quadratic", "proportional", "constant"}` -> `quadratic_function`
+/// - `{"proportional", "constant"}`              -> `linear_function`
+/// - `{"x": [...], "y": [...]}`                  -> `piecewise_step`
+/// - `[{"x": _, "y": _}, ...]`                   -> `piecewise_linear`
+/// - `[float, ...]`                              -> `tuple(N,f64)`
+///
+/// The arity of a tuple is deliberately *not* settled here — it is read off the
+/// decoded rows by [`core_lib::element_type_of`], the same call the core's own
+/// `from_values` uses, so the two can never disagree about it.
+///
+/// A `piecewise_linear` row is an empty list when a timestep's curve has no
+/// points, and so is a zero-arity tuple row, so the scan walks past empty rows
+/// looking for one that discriminates. A payload of nothing but empty rows is
+/// genuinely ambiguous and reported as such.
+fn infer_element_type(values: &Bound<'_, PyAny>) -> PyResult<Option<core_lib::ElementType>> {
+    use core_lib::{Dtype, ElementType};
+
+    // `get_item` on a mapping without the key raises `KeyError`, and on a
+    // sequence raises `TypeError` for a string index -- either way, "no".
+    let has = |row: &Bound<'_, PyAny>, key: &str| row.get_item(key).is_ok();
+
+    let mut saw_empty_row = false;
+    for (index, row) in values.try_iter()?.enumerate() {
+        let row = row?;
+        if has(&row, "quadratic") {
+            return Ok(Some(ElementType::QuadraticFunction));
+        }
+        if has(&row, "proportional") {
+            return Ok(Some(ElementType::LinearFunction));
+        }
+        if has(&row, "x") && has(&row, "y") {
+            return Ok(Some(ElementType::PiecewiseStep));
+        }
+        let Ok(mut points) = row.try_iter() else {
+            return Err(InvalidParameterError::new_err(format!(
+                "from_values takes per-timestep composite values (a cost curve, a \
+                 linear function, a tuple), and row {index} is {}. A series of \
+                 plain numbers is `data=` on the constructor, which needs no \
+                 encoding.",
+                row.get_type().name()?
+            )));
+        };
+        match points.next() {
+            // An empty row cannot discriminate `piecewise_linear` from a
+            // zero-arity tuple; a later row may.
+            None => saw_empty_row = true,
+            Some(point) => {
+                let point = point?;
+                return Ok(Some(if has(&point, "x") && has(&point, "y") {
+                    ElementType::PiecewiseLinear
+                } else {
+                    // Arity comes from the decoded rows, not from this one.
+                    ElementType::Tuple {
+                        arity: 0,
+                        dtype: Dtype::F64,
+                    }
+                }));
+            }
+        }
+    }
+    if saw_empty_row {
+        return Err(InvalidParameterError::new_err(
+            "cannot tell what these values are: every row is empty, which reads \
+             equally as a `piecewise_linear` curve with no points or a tuple with \
+             no fields. Declare `element_type=` to say which.",
+        ));
+    }
+    Ok(None)
+}
+
+/// Read a `from_values` payload into the core's `DecodedValues`, cross-checking
+/// a declared `element_type` against what the values actually are.
+///
+/// The declaration is an assertion, never an override: the encoded array and
+/// the element type recorded beside it both come from the values, which is the
+/// whole reason these constructors exist. A declaration that disagrees is a
+/// mistake worth naming rather than a preference to honor.
+fn from_values_payload(
+    values: &Bound<'_, PyAny>,
+    declared: Option<&str>,
+) -> PyResult<core_lib::DecodedValues> {
+    let declared = declared.map(parse_element_type).transpose()?;
+    let inferred = infer_element_type(values)?;
+    let read_as = match (declared, inferred) {
+        // Non-empty values always win: they are the thing being encoded.
+        (_, Some(inferred)) => inferred,
+        // Nothing to read, so the declaration is all there is to go on.
+        (Some(core_lib::ElementType::Tuple { arity, dtype }), None) => {
+            return Err(InvalidParameterError::new_err(format!(
+                "an empty tuple series cannot be built from values, because a \
+                 tuple's arity lives in its rows and there are none. Encode it \
+                 with encode_element_values([], \"tuple({arity},{})\") and \
+                 pass the array to the constructor with the same element_type=.",
+                dtype.as_str()
+            )));
+        }
+        (Some(declared), None) => declared,
+        (None, None) => {
+            return Err(InvalidParameterError::new_err(
+                "cannot infer an element_type from an empty `values`: declare \
+                 element_type= to say what the series holds.",
+            ));
+        }
+    };
+    let decoded = py_to_decoded(values, read_as)?;
+    if let Some(declared) = declared {
+        let implied = core_lib::element_type_of(&decoded).unwrap_or(read_as);
+        if declared != implied {
+            return Err(InvalidParameterError::new_err(format!(
+                "element_type \"{declared}\" disagrees with the values, which are \
+                 \"{implied}\". Drop the declaration -- from_values derives it."
+            )));
+        }
+    }
+    Ok(decoded)
 }
 
 /// Read a Python payload back into the core's `DecodedValues`, keyed on the

@@ -195,33 +195,39 @@ name's _shape_ only and never resolves it — no tz database; existence is audit
 have one (the CLI via `chrono-tz`, Python via `zoneinfo`, Julia via `TimeZones`) and reported by
 `store-info`. The CLI is the one place that runs local → instant, so `--assume-timezone <IANA name>`
 refuses the skipped and repeated wall clocks per row rather than guessing. Python ships type stubs
-(`infrastore.pyi` + a pytest drift guard), a full exception hierarchy, and keyword-only optional
-arguments; Julia returns its catalog/metadata/summary query results as structs
-(`TimeSeriesMetadata`, `StaticGrid`, … — see `docs/src/reference/julia-api.md#result-types`),
-overloads `Base` (`==`/`hash`/`show`/`length`/`iterate` on the value types), and offers do-block
-`Store`/`open_store` forms. It also carries the **element-value codec** —
-`encode_element_values`/`decode_element_values` over `LinearFunction`, `QuadraticFunction`,
-`PiecewiseLinear`, `PiecewiseStep` — held to `conformance/element_type_vectors.json` like the Python
-and TypeScript ones. Its value types are permissive where a consumer's domain types are strict (a
-zero- or one-point curve is a row the store accepts, so the codec must represent it), and named for
-the wire vocabulary so they cannot clash with InfrastructureSystems.jl's; a consumer decodes
-straight into its own types through the `types` keyword and extends
-`element_type_tag`/`element_row_width`/`write_element_row!` to encode from them. The write and read
-paths use it, so a series of domain values round-trips as those values: a constructor names the
-`element_type` from what it is given (a contradicting `element_type=` is an error, not an override),
-encoding happens at the ABI boundary so the struct keeps the values, and a read decodes — `raw=true`
-hands back the packing instead. A composite row's `time_series_type` names the decoded values, so it
-is one rank lower than the stored array. The **readers stay raw**: `StaticReader`/`ForecastReader`
-are the per-timestamp path and `StaticGroup.dtype` is physical. A `TimeSeriesMetadata`'s
-`time_series_type` is the _full_ Julia type, parameterized `{T,N}` off the row's own
-`element_type`/`element_shape`, so it equals `typeof(read_by_id(...))` for every stored type but the
-derived one — a `DeterministicSingleTimeSeries` row keeps its own tag while a read hands back the
-`Deterministic` it becomes, parameterized alike (ask which kind a row is with `<:`, not `==`); the
-counts and summaries group by stored type alone and stay bare. Every type-taking call — a
-`time_series_type=` filter, `has_time_series`, both readers — accepts either spelling and _ignores_
-the parameters, since identity carries no element type, so a row round-trips back into them. A
-stored `DeterministicSingleTimeSeries` always reads back as a `Deterministic` (storage-level view,
-by design); the DST tag remains visible in catalog surfaces (metadata rows, counts). The CLI
+(`infrastore.pyi` + a pytest drift guard), a full exception hierarchy, keyword-only optional
+arguments, and the paired element-value forms the Rust core has — a `from_values` classmethod on
+each of the six types that encodes the values _and_ declares the element type they imply (inferring
+it from the shape of a row, since a Python payload carries no type tag; `element_type=` there is an
+assertion, not an override) and `.decoded_values()` on a series, which takes both the element type
+and the leading-axis count off the series. `encode_element_values` / `decode_element_values` remain
+the lower-level pair, and the only way to name the one series `from_values` cannot: an empty
+`tuple(N,f64)`, whose arity lives in rows it does not have. Julia returns its
+catalog/metadata/summary query results as structs (`TimeSeriesMetadata`, `StaticGrid`, … — see
+`docs/src/reference/julia-api.md#result-types`), overloads `Base`
+(`==`/`hash`/`show`/`length`/`iterate` on the value types), and offers do-block `Store`/`open_store`
+forms. It also carries the **element-value codec** — `encode_element_values`/`decode_element_values`
+over `LinearFunction`, `QuadraticFunction`, `PiecewiseLinear`, `PiecewiseStep` — held to
+`conformance/element_type_vectors.json` like the Python and TypeScript ones. Its value types are
+permissive where a consumer's domain types are strict (a zero- or one-point curve is a row the store
+accepts, so the codec must represent it), and named for the wire vocabulary so they cannot clash
+with InfrastructureSystems.jl's; a consumer decodes straight into its own types through the `types`
+keyword and extends `element_type_tag`/`element_row_width`/`write_element_row!` to encode from them.
+The write and read paths use it, so a series of domain values round-trips as those values: a
+constructor names the `element_type` from what it is given (a contradicting `element_type=` is an
+error, not an override), encoding happens at the ABI boundary so the struct keeps the values, and a
+read decodes — `raw=true` hands back the packing instead. A composite row's `time_series_type` names
+the decoded values, so it is one rank lower than the stored array. The **readers stay raw**:
+`StaticReader`/`ForecastReader` are the per-timestamp path and `StaticGroup.dtype` is physical. A
+`TimeSeriesMetadata`'s `time_series_type` is the _full_ Julia type, parameterized `{T,N}` off the
+row's own `element_type`/`element_shape`, so it equals `typeof(read_by_id(...))` for every stored
+type but the derived one — a `DeterministicSingleTimeSeries` row keeps its own tag while a read
+hands back the `Deterministic` it becomes, parameterized alike (ask which kind a row is with `<:`,
+not `==`); the counts and summaries group by stored type alone and stay bare. Every type-taking call
+— a `time_series_type=` filter, `has_time_series`, both readers — accepts either spelling and
+_ignores_ the parameters, since identity carries no element type, so a row round-trips back into
+them. A stored `DeterministicSingleTimeSeries` always reads back as a `Deterministic` (storage-level
+view, by design); the DST tag remains visible in catalog surfaces (metadata rows, counts). The CLI
 additionally has `export` (bulk read-direction inverse of `add`; its timestamped CSV is re-readable
 by `add`, which detects the layout from the header), `arrays` / `store-info` and the `data_hash` +
 resolved HDF5 dataset/column on `list`/`info`, `--name-glob` selectors, `--dry-run` on destructive

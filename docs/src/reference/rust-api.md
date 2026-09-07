@@ -948,6 +948,11 @@ impl SingleTimeSeries {
     pub fn from_timestamps(
         timestamps: &[DateTime<Utc>], data: TypedArray, name: impl Into<String>,
     ) -> Result<Self, String>;
+
+    pub fn from_values(
+        initial_timestamp: DateTime<Utc>, resolution: impl Into<Period>,
+        values: &DecodedValues, name: impl Into<String>,
+    ) -> Result<Self, String>;
 }
 ```
 
@@ -977,6 +982,83 @@ that way would not compare equal to the same series read back. The consequence t
 `data` on an already-built series without updating `element_type` is a mismatch the store rejects on
 write (`InvalidParameter`) rather than silently re-deriving one — build the series again instead.
 The other four series types follow the same pattern.
+
+`from_values` is the constructor that makes that mismatch unrepresentable, and the one to prefer for
+a composite series: it takes the per-timestep values, encodes them into the array, and declares the
+element type they imply. An `element_type` and the array it describes are two independent things a
+caller can get out of step; deriving both from one input means there is nothing left to keep in
+step. See [Element values](#element-values), which every series type's `from_values` shares.
+
+### Element values
+
+`ElementType` says what one timestep's stored bytes _mean_; `DecodedValues` is those meanings as
+Rust values. The two travel together, which is the whole design: a `from_values` constructor takes
+the values and produces both halves, and `TimeSeriesData::decoded_values` reverses it.
+
+```rust
+pub struct XyPoint { pub x: f64, pub y: f64 }
+pub struct LinearFunction { pub proportional: f64, pub constant: f64 }
+pub struct QuadraticFunction { pub quadratic: f64, pub proportional: f64, pub constant: f64 }
+pub struct StepFunction { pub x: Vec<f64>, pub y: Vec<f64> }  // n x's, n-1 y's between them
+
+pub enum DecodedValues {
+    Raw,                                    // nothing to decode; the array is the answer
+    Tuple(Vec<Vec<f64>>),                   // one arity-long row per timestep
+    LinearFunction(Vec<LinearFunction>),
+    QuadraticFunction(Vec<QuadraticFunction>),
+    PiecewiseLinear(Vec<Vec<XyPoint>>),     // the points of one curve per timestep
+    PiecewiseStep(Vec<StepFunction>),
+}
+
+impl DecodedValues {
+    pub fn len(&self) -> usize;             // timesteps; 0 for `Raw`
+    pub fn is_empty(&self) -> bool;
+}
+
+pub fn decode(array: &TypedArray, element_type: ElementType, leading_dims: usize)
+    -> Result<DecodedValues>;
+pub fn encode(values: &DecodedValues, leading_dims: &[usize]) -> Result<TypedArray>;
+pub fn encode_as(values: &DecodedValues, leading_dims: &[usize], element_type: ElementType)
+    -> Result<TypedArray>;
+pub fn element_type_of(values: &DecodedValues) -> Option<ElementType>;
+```
+
+Every variant but `Raw` holds **one entry per timestep**, in row-major order over the array's
+leading dims. `Raw` is what a scalar element type decodes to, and any array whose physical dtype is
+not `f64`: there the stored elements already are the values, so the `TypedArray` is the answer and
+there is nothing to hand back. It is the one variant `encode` refuses, because it carries no values
+of its own.
+
+**Prefer the paired forms.** `encode`/`decode` are the low-level pair; `from_values` and
+`decoded_values` are `encode`/`decode` with the second half — the element type on the way in, the
+element type and `leading_dims` on the way out — supplied by the series instead of the caller:
+
+```rust
+let curves = DecodedValues::PiecewiseLinear(vec![
+    vec![XyPoint { x: 0.0, y: 1.0 }, XyPoint { x: 1.0, y: 3.0 }],
+    vec![XyPoint { x: 0.0, y: 2.0 }],
+]);
+let series = SingleTimeSeries::from_values(t0, Period::Fixed(Duration::hours(1)), &curves, "cost")?;
+assert_eq!(series.element_type, ElementType::PiecewiseLinear);   // nobody declared it
+
+let data = store.read_by_id(id, ReadWindow::full())?;
+assert_eq!(data.decoded_values()?, curves);
+```
+
+`element_type_of` names the element type an encode of some values would produce, for a caller
+assembling the two halves by hand.
+
+`encode_as` is the declared-type encoder, and exists for the one storable series `from_values`
+cannot name: a **tuple with no rows**. A tuple's arity lives in its rows, so an empty
+`DecodedValues::Tuple` implies `tuple(0,f64)`, which is not a legal element type; `encode_as` takes
+the arity from the declaration instead. Pair it with `new` + `with_element_type`. It also checks the
+packing it produces against the declaration, so `tuple(3,f64)` given two-wide rows is an error
+rather than a two-wide array under a three-wide label.
+
+The ragged kinds pad to the widest timestep **across the whole input**, so the same curve encodes
+differently in a differently-shaped series. That is the storage layout, not a property of the value
+— see [Element types](./element-types.md) for the byte layouts and
+`conformance/element_type_vectors.json` for the pinned vectors every binding is held to.
 
 ### `TypedArray` and `Dtype`
 
@@ -1137,6 +1219,12 @@ impl Deterministic {
         name: impl Into<String>,
     ) -> Result<Self, String>;
 
+    pub fn from_values(
+        initial_timestamp: DateTime<Utc>, resolution: impl Into<Period>,
+        horizon: impl Into<Period>, interval: impl Into<Period>, count: usize,
+        values: &DecodedValues, name: impl Into<String>,
+    ) -> Result<Self, String>;
+
     pub fn horizon_count(&self) -> usize;
     pub fn window_start(&self, index: usize) -> Result<DateTime<Utc>>;
     pub fn window_timestamps(&self, index: usize) -> Result<Vec<DateTime<Utc>>>;
@@ -1144,6 +1232,14 @@ impl Deterministic {
 ```
 
 `new` validates `data.shape` against `[H, count, *E]` where `H = horizon / resolution`.
+
+`from_values` is the composite-value constructor described under
+[`SingleTimeSeries`](#singletimeseries), and it carries more weight on a forecast: the leading axes
+are `[H, count]`, and `H` is derived here from `horizon`/`resolution` rather than asked for. Values
+are one entry per timestep in row-major order over those axes, so entry `i * count + j` is window
+`j`'s step `i`, and there must be exactly `H * count` of them. `Probabilistic::from_values` takes
+`percentiles` and fills `[percentiles.len(), H, count]`; `Scenarios::from_values` takes
+`scenario_count` and fills `[scenario_count, H, count]`.
 
 A forecast has **two grids** and both are needed to place a value: windows step by `interval`
 (`window_start`), and the steps inside one window step by `resolution` (`window_timestamps`, which
@@ -1282,8 +1378,15 @@ impl TimeSeriesData {
     pub fn as_deterministic(&self) -> Option<&Deterministic>;
     pub fn as_probabilistic(&self) -> Option<&Probabilistic>;
     pub fn as_scenarios(&self) -> Option<&Scenarios>;
+
+    pub fn element_type(&self) -> ElementType;
+    pub fn decoded_values(&self) -> Result<DecodedValues>;
 }
 ```
+
+`decoded_values` is the read-side counterpart of the `from_values` constructors — see
+[Element values](#element-values). It takes the element type and the leading-axis count off the
+value itself, so a caller decoding a read never restates either.
 
 There is no `DeterministicSingleTimeSeries` variant: a stored `DeterministicSingleTimeSeries` is
 read back as a `Deterministic` (so `as_deterministic` returns `Some` for it).
