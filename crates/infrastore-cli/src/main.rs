@@ -67,6 +67,7 @@ const COMMAND_GROUPS: &[(&str, &[&str])] = &[
         &[
             "stats",
             "store-info",
+            "store-attr",
             "upgrade",
             "arrays",
             "summary",
@@ -569,6 +570,16 @@ enum Commands {
     /// HDF5 + SQLite paths, on-disk format version, catalog revision, and compression.
     #[command(after_help = help::STORE_INFO)]
     StoreInfo,
+    /// Key/value provenance stamped on the whole artifact.
+    ///
+    /// Named `store-attr` rather than `attr`: `attributes` already lists
+    /// component <-> supplemental-attribute associations, which are a different
+    /// thing entirely.
+    #[command(after_help = help::STORE_ATTR)]
+    StoreAttr {
+        #[command(subcommand)]
+        action: StoreAttrAction,
+    },
     /// Bring a store written by an older build up to this one's catalog revision.
     ///
     /// Every read command opens the store read-only and so cannot upgrade it;
@@ -797,6 +808,35 @@ enum Commands {
         /// Probabilistic|Scenarios
         #[arg(value_name = "TYPE")]
         ts_type: String,
+    },
+}
+
+/// What `store-attr` does. Four subcommands over the store's key/value
+/// provenance table, one per core call.
+///
+/// A subcommand group rather than four top-level commands: `store-attr-set` and
+/// friends would put four more names into the flat command list for one
+/// concept, and none of them means anything without the others.
+#[derive(Subcommand, Debug)]
+enum StoreAttrAction {
+    /// Every store attribute.
+    List,
+    /// One attribute's value. Exits 1 if the key is unset.
+    Get {
+        #[arg(value_name = "KEY")]
+        key: String,
+    },
+    /// Record a value, replacing any the key already had.
+    Set {
+        #[arg(value_name = "KEY")]
+        key: String,
+        #[arg(value_name = "VALUE")]
+        value: String,
+    },
+    /// Remove an attribute. Removing one that is not there is not an error.
+    Remove {
+        #[arg(value_name = "KEY")]
+        key: String,
     },
 }
 
@@ -1085,6 +1125,21 @@ fn run(cli: &Cli) -> Result<(), String> {
         }
         Commands::Stats => commands::admin::stats(&require_store(cli)?, cli.format),
         Commands::StoreInfo => commands::admin::store_info(&require_store(cli)?, cli.format),
+        Commands::StoreAttr { action } => {
+            let store_path = require_store(cli)?;
+            match action {
+                StoreAttrAction::List => commands::admin::store_attr_list(&store_path, cli.format),
+                StoreAttrAction::Get { key } => {
+                    commands::admin::store_attr_get(&store_path, key, cli.format)
+                }
+                StoreAttrAction::Set { key, value } => {
+                    commands::admin::store_attr_set(&store_path, key, value, cli.format)
+                }
+                StoreAttrAction::Remove { key } => {
+                    commands::admin::store_attr_remove(&store_path, key, cli.format)
+                }
+            }
+        }
         Commands::Upgrade => commands::admin::upgrade(&require_store(cli)?, cli.format),
         Commands::Arrays {
             selector,

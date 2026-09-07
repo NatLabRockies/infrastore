@@ -30,6 +30,12 @@ service CatalogStore {
   rpc GetForecastSummary     (GetForecastSummaryReq)     returns (GetForecastSummaryResp);
   rpc CheckStaticConsistency (CheckStaticConsistencyReq) returns (CheckStaticConsistencyResp);
   rpc VerifyIntegrity        (VerifyIntegrityReq)        returns (VerifyIntegrityResp);
+
+  // Store attributes: key/value provenance about the artifact as a whole. Read
+  // half only -- setting one is a write, and writes need local filesystem
+  // access.
+  rpc ListStoreAttributes    (ListStoreAttributesReq)    returns (ListStoreAttributesResp);
+  rpc GetStoreAttribute      (GetStoreAttributeReq)      returns (GetStoreAttributeResp);
 }
 
 // ---- Common types ----
@@ -403,3 +409,24 @@ message CheckStaticConsistencyResp {
   repeated Row rows = 1;
 }
 
+
+// ---- Store attributes ----
+//
+// Free-form key/value provenance about the artifact as a whole. The store never
+// interprets a value, so both sides are plain strings.
+
+message ListStoreAttributesReq {}
+message ListStoreAttributesResp {
+  // Sorted by key, as the core returns them.
+  map<string, string> attributes = 1;
+}
+
+message GetStoreAttributeReq {
+  string key = 1;
+}
+message GetStoreAttributeResp {
+  // Absent when the artifact carries no such key. `optional` rather than an
+  // empty string, because a key set to "" is a legitimate value and the caller
+  // must be able to tell the two apart.
+  optional string value = 1;
+}

@@ -339,6 +339,36 @@ hashes as garbage bytes, and in `.mode box` it mangles the table borders:
 sqlite3 demo.h5.sqlite 'SELECT name, data_hash FROM time_series_readable;'
 ```
 
+## Stamp Provenance on the Artifact
+
+A store built by a model run should say so. `store-attr` records free-form key/value provenance
+about the whole artifact -- who built it, from what source system, under which of your own schema
+versions:
+
+```sh
+infrastore --store demo.h5 store-attr set creator sienna-build
+infrastore --store demo.h5 store-attr set source_system WECC-2032-ADS
+infrastore --store demo.h5 store-attr list
+infrastore --store demo.h5 store-attr get creator     # bare value on stdout
+infrastore --store demo.h5 store-attr remove creator
+```
+
+The store never interprets a value, so structure rides in the text -- store JSON if you need it. The
+attributes live in the catalog, which means they travel with `persist`, survive `compact`, and show
+up under `store_attributes` in `infrastore -f json store-info`.
+
+Three things to know. `set` replaces rather than appending: an artifact records one creator, not a
+history of them. `get` exits 1 when the key is unset, so a script can branch on it, while `remove`
+reports `removed: false` and exits 0. And keys beginning with `infrastore.` are reserved.
+
+`merge` brings a source's attributes across without overwriting: a key the destination lacks is
+copied, a key both sides agree on is a no-op, and a disagreement is reported and left as the
+destination has it. `diff` gives them a section of their own and gates on them -- an artifact whose
+recorded source system changed is not the artifact you expected, even when every series is
+identical.
+
+Note the name. `attributes` (below) is a different command about a different thing.
+
 ## Associations
 
 Two association catalogs live alongside the time series, readable and writable here:

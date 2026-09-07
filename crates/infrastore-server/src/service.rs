@@ -99,10 +99,11 @@ use infrastore_proto::pb::{
     GetCountsResp, GetDetailedCountsReq, GetDetailedCountsResp, GetForecastParametersReq,
     GetForecastParametersResp, GetForecastSummaryReq, GetForecastSummaryResp, GetIntervalsReq,
     GetIntervalsResp, GetResolutionsReq, GetResolutionsResp, GetStaticSummaryReq,
-    GetStaticSummaryResp, HasAnyTimeSeriesReq, HasAnyTimeSeriesResp, ListMetadataByIdsReq,
-    ListMetadataByIdsResp, ListMetadataReq, ListMetadataResp, ListOwnerIdsReq, ListOwnerIdsResp,
-    ReadByIdReq, ReadByIdResp, ReadByIdsReq, ReadByIdsResp, TimeSeriesMetadata, VerifyIntegrityReq,
-    VerifyIntegrityResp,
+    GetStaticSummaryResp, GetStoreAttributeReq, GetStoreAttributeResp, HasAnyTimeSeriesReq,
+    HasAnyTimeSeriesResp, ListMetadataByIdsReq, ListMetadataByIdsResp, ListMetadataReq,
+    ListMetadataResp, ListOwnerIdsReq, ListOwnerIdsResp, ListStoreAttributesReq,
+    ListStoreAttributesResp, ReadByIdReq, ReadByIdResp, ReadByIdsReq, ReadByIdsResp,
+    TimeSeriesMetadata, VerifyIntegrityReq, VerifyIntegrityResp,
     catalog_store_server::{CatalogStore as CatalogStoreSvc, CatalogStoreServer},
 };
 use tokio::sync::Mutex;
@@ -518,5 +519,33 @@ impl CatalogStoreSvc for CatalogStoreService {
             })
             .collect();
         Ok(Response::new(CheckStaticConsistencyResp { rows }))
+    }
+
+    async fn list_store_attributes(
+        &self,
+        _request: Request<ListStoreAttributesReq>,
+    ) -> Result<Response<ListStoreAttributesResp>, Status> {
+        let store = self.store.lock().await;
+        let attributes = store.list_store_attributes().map_err(map_err)?;
+        // A protobuf map is unordered on the wire, so the core's sorted order is
+        // not a promise this RPC can keep; a client that wants one sorts.
+        Ok(Response::new(ListStoreAttributesResp {
+            attributes: attributes.into_iter().collect(),
+        }))
+    }
+
+    async fn get_store_attribute(
+        &self,
+        request: Request<GetStoreAttributeReq>,
+    ) -> Result<Response<GetStoreAttributeResp>, Status> {
+        let key = request.into_inner().key;
+        let store = self.store.lock().await;
+        // An unset key is an absent `value`, not `NOT_FOUND`: asking whether the
+        // artifact carries a key is a question, the same reading
+        // `Store::get_store_attribute` takes. `GetMetadataById` differs because
+        // there the caller holds an id it believes in, and a stale one is worth
+        // a status.
+        let value = store.get_store_attribute(&key).map_err(map_err)?;
+        Ok(Response::new(GetStoreAttributeResp { value }))
     }
 }

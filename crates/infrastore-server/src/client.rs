@@ -5,6 +5,8 @@
 //! `Store`/client trait is deliberately out of scope (the store is sync, the
 //! client async).
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use infrastore_core::{
     ForecastSummaryRow, OwnerCategory, Period, Result as CoreResult, StaticConsistency,
@@ -64,8 +66,9 @@ use infrastore_proto::convert::{
 };
 use infrastore_proto::pb::{
     self, CheckStaticConsistencyReq, GetCountsReq, GetForecastParametersReq, GetIntervalsReq,
-    GetResolutionsReq, HasAnyTimeSeriesReq, ListMetadataReq, ListOwnerIdsReq, ReadByIdReq,
-    ReadByIdsReq, VerifyIntegrityReq, catalog_store_client::CatalogStoreClient,
+    GetResolutionsReq, GetStoreAttributeReq, HasAnyTimeSeriesReq, ListMetadataReq, ListOwnerIdsReq,
+    ListStoreAttributesReq, ReadByIdReq, ReadByIdsReq, VerifyIntegrityReq,
+    catalog_store_client::CatalogStoreClient,
 };
 use tokio::sync::Mutex;
 use tonic::transport::Channel;
@@ -487,5 +490,41 @@ impl RemoteClient {
                 })
             })
             .collect()
+    }
+
+    // ---- Store attributes ----
+    //
+    // The read half of the artifact's key/value provenance. Setting one is a
+    // write and stays off this service.
+
+    /// Every store attribute, sorted by key.
+    ///
+    /// The sort happens here, not on the server: a protobuf map is unordered on
+    /// the wire, so the core's own ordering cannot survive the trip. Collecting
+    /// into a `BTreeMap` restores it, and matches what `Store` returns locally.
+    pub async fn list_store_attributes(&self) -> CoreResult<BTreeMap<String, String>> {
+        let mut inner = self.inner.lock().await;
+        let resp = inner
+            .list_store_attributes(ListStoreAttributesReq {})
+            .await
+            .map_err(Self::map_status)?
+            .into_inner();
+        Ok(resp.attributes.into_iter().collect())
+    }
+
+    /// The value recorded for `key`, or `None` if the artifact carries none.
+    ///
+    /// `None` rather than `NotFound`, mirroring `Store::get_store_attribute`: a
+    /// caller asking whether a key is there is asking a question.
+    pub async fn get_store_attribute(&self, key: &str) -> CoreResult<Option<String>> {
+        let mut inner = self.inner.lock().await;
+        let resp = inner
+            .get_store_attribute(GetStoreAttributeReq {
+                key: key.to_string(),
+            })
+            .await
+            .map_err(Self::map_status)?
+            .into_inner();
+        Ok(resp.value)
     }
 }

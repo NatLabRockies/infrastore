@@ -4521,3 +4521,139 @@ fn line_points(svg: &str) -> Vec<(f64, f64)> {
         })
         .collect()
 }
+
+// ---- store-attr -------------------------------------------------------------
+
+#[test]
+fn store_attr_round_trips_through_the_command_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("attrs.h5");
+    seed_one(dir.path(), &store);
+
+    let empty = run(&store, &["store-attr", "list"]);
+    assert!(empty.contains("No store attributes"), "{empty}");
+
+    run(&store, &["store-attr", "set", "creator", "sienna-build"]);
+    run(&store, &["store-attr", "set", "source_system", "WECC"]);
+
+    // `get` prints the bare value, so `$(...)` in a script is the value itself.
+    let value = run(&store, &["store-attr", "get", "creator"]);
+    assert_eq!(value.trim_end(), "sienna-build");
+
+    let listed = run(&store, &["-f", "json", "store-attr", "list"]);
+    let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    assert_eq!(listed["creator"], "sienna-build");
+    assert_eq!(listed["source_system"], "WECC");
+
+    // A set replaces rather than appending.
+    run(&store, &["store-attr", "set", "creator", "someone else"]);
+    assert_eq!(
+        run(&store, &["store-attr", "get", "creator"]).trim_end(),
+        "someone else"
+    );
+
+    let removed = run(&store, &["-f", "json", "store-attr", "remove", "creator"]);
+    let removed: serde_json::Value = serde_json::from_str(&removed).unwrap();
+    assert_eq!(removed["removed"], true);
+    // Removing an absent key succeeds and says so, unlike `get`.
+    let again = run(&store, &["-f", "json", "store-attr", "remove", "creator"]);
+    let again: serde_json::Value = serde_json::from_str(&again).unwrap();
+    assert_eq!(again["removed"], false);
+}
+
+#[test]
+fn store_attr_get_exits_nonzero_for_an_unset_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("missing.h5");
+    seed_one(dir.path(), &store);
+    let err = run_err(&store, &["store-attr", "get", "creator"]);
+    assert!(err.contains("creator"), "{err}");
+}
+
+#[test]
+fn store_attr_refuses_the_reserved_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("reserved.h5");
+    seed_one(dir.path(), &store);
+    let err = run_err(&store, &["store-attr", "set", "infrastore.generation", "1"]);
+    assert!(err.contains("infrastore."), "{err}");
+}
+
+#[test]
+fn store_info_reports_the_artifact_s_attributes() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("info.h5");
+    seed_one(dir.path(), &store);
+    run(&store, &["store-attr", "set", "creator", "sienna-build"]);
+
+    let info = run(&store, &["-f", "json", "store-info"]);
+    let info: serde_json::Value = serde_json::from_str(&info).unwrap();
+    assert_eq!(info["store_attributes"]["creator"], "sienna-build");
+}
+
+#[test]
+fn merge_copies_the_source_s_new_attributes_and_reports_the_conflicts() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.h5");
+    let dest = dir.path().join("dest.h5");
+    seed_one(dir.path(), &source);
+    run(&source, &["store-attr", "set", "creator", "source-build"]);
+    run(&source, &["store-attr", "set", "source_system", "WECC"]);
+
+    run(&dest, &["init"]);
+    run(&dest, &["store-attr", "set", "creator", "dest-build"]);
+
+    let out = run(
+        &dest,
+        &["-f", "json", "merge", "--from", source.to_str().unwrap()],
+    );
+    let out: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(out["store_attributes_copied"], 1);
+    let conflicts = out["store_attribute_conflicts"].as_array().unwrap();
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(conflicts[0]["key"], "creator");
+
+    // The destination's own value survives; the key it lacked came across.
+    let listed = run(&dest, &["-f", "json", "store-attr", "list"]);
+    let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    assert_eq!(
+        listed["creator"], "dest-build",
+        "the destination's provenance is not restamped by the source's"
+    );
+    assert_eq!(listed["source_system"], "WECC");
+}
+
+#[test]
+fn diff_reports_store_attributes_in_their_own_section_and_gates_on_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let left = dir.path().join("left.h5");
+    let right = dir.path().join("right.h5");
+    seed_one(dir.path(), &left);
+    run(&left, &["persist", "--dest", right.to_str().unwrap()]);
+
+    // Identical artifacts, no attributes anywhere: exit 0 and no section.
+    let same = run(&left, &["diff", "--against", right.to_str().unwrap()]);
+    assert!(!same.contains("Store attributes"), "{same}");
+
+    // A store attribute on one side only is a difference the gate must catch,
+    // even though every series is identical.
+    run(&left, &["store-attr", "set", "creator", "sienna-build"]);
+    let output = raw(&left, &["diff", "--against", right.to_str().unwrap()]);
+    assert!(
+        !output.status.success(),
+        "an attribute-only difference must exit nonzero"
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("Store attributes"), "{text}");
+    assert!(text.contains("creator"), "{text}");
+
+    let json = raw(
+        &left,
+        &["-f", "json", "diff", "--against", right.to_str().unwrap()],
+    );
+    let doc: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    let rows = doc["store_attributes"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["key"], "creator");
+    assert_eq!(rows[0]["status"], "removed");
+}

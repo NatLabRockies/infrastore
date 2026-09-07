@@ -32,12 +32,13 @@ Every global option is accepted after the command too (`infrastore add --store d
 
 `-f`/`--format` applies to every command, read and write alike. The read/inspection commands
 (`list`, `get`, `grid`, `info`, `export`, `names`, `owner-types`, `owners`, `exists`, `stats`,
-`store-info`, `arrays`, `summary`, `attributes`, `links`, `diff`, `verify`, `check-consistency`,
-`resolutions`, `params`, `compact`, and `add --dry-run`) render their results in it. The write
-commands (`init`, `add`, `merge`, `remove`, `copy`, `replace-owner`, `clear`, `transform`,
-`persist`, `plot`, `attach`, `detach`, `link`, `unlink`, `reassign`) report their outcome in it:
-prose under `table`, and a one-object status document under `json`/`jsonl`, so a scripted mutation
-pipes into `jq` the way a scripted query does.
+`store-info`, `store-attr list`, `store-attr get`, `arrays`, `summary`, `attributes`, `links`,
+`diff`, `verify`, `check-consistency`, `resolutions`, `params`, `compact`, and `add --dry-run`)
+render their results in it. The write commands (`init`, `add`, `merge`, `remove`, `copy`,
+`replace-owner`, `clear`, `transform`, `persist`, `plot`, `attach`, `detach`, `link`, `unlink`,
+`reassign`, `store-attr set`, `store-attr remove`) report their outcome in it: prose under `table`,
+and a one-object status document under `json`/`jsonl`, so a scripted mutation pipes into `jq` the
+way a scripted query does.
 
 ```console
 $ infrastore --store s.h5 -f json --yes remove --all --owner-id 42 | jq .removed
@@ -303,25 +304,49 @@ in-terminal check, `get --plot` draws a sparkline with no file involved.
 
 ### Inspect the store
 
-| Command       | Purpose                                                                       |
-| ------------- | ----------------------------------------------------------------------------- |
-| `stats`       | Association, owner, and distinct-array counts.                                |
-| `store-info`  | HDF5 + SQLite paths and sizes, on-disk format version, catalog revision.      |
-| `upgrade`     | Bring a store written by an older build up to this one's catalog revision.    |
-| `arrays`      | Distinct stored arrays: content hash, HDF5 location, series sharing each.     |
-| `summary`     | Grouped static and/or forecast summaries (`--static-only`/`--forecast-only`). |
-| `resolutions` | List distinct resolutions and forecast intervals.                             |
-| `params`      | Show the store's forecast parameters (`--resolution`/`--interval`).           |
+| Command       | Purpose                                                                           |
+| ------------- | --------------------------------------------------------------------------------- |
+| `stats`       | Association, owner, and distinct-array counts.                                    |
+| `store-info`  | HDF5 + SQLite paths and sizes, on-disk format version, catalog revision.          |
+| `store-attr`  | Key/value provenance stamped on the whole artifact (`list`/`get`/`set`/`remove`). |
+| `upgrade`     | Bring a store written by an older build up to this one's catalog revision.        |
+| `arrays`      | Distinct stored arrays: content hash, HDF5 location, series sharing each.         |
+| `summary`     | Grouped static and/or forecast summaries (`--static-only`/`--forecast-only`).     |
+| `resolutions` | List distinct resolutions and forecast intervals.                                 |
+| `params`      | Show the store's forecast parameters (`--resolution`/`--interval`).               |
 
 ```sh
 infrastore --store demo.h5 stats
 infrastore --store demo.h5 store-info
+infrastore --store demo.h5 store-attr list
+infrastore --store demo.h5 store-attr set creator sienna-build
+infrastore --store demo.h5 store-attr get creator
+infrastore --store demo.h5 store-attr remove creator
 infrastore --store demo.h5 upgrade
 infrastore --store demo.h5 arrays --data-hash 2018057b
 infrastore --store demo.h5 summary --static-only
 infrastore --store demo.h5 resolutions
 infrastore --store demo.h5 params --resolution PT1H --interval PT1H
 ```
+
+`store-attr` reads and writes **store attributes** — free-form key/value provenance about the
+artifact as a whole: who built it, from what source system, under which of your own schema versions.
+The store never interprets a value, in the same spirit as a series' `application_data`; store JSON
+if you want structure. See [Store attributes](../explanation/data-model.md#store-attributes).
+
+Do not confuse it with `attributes`, which lists component <-> supplemental-attribute associations —
+a different thing entirely, which is why this command carries the `store-` prefix.
+
+Three details worth knowing:
+
+- `set` replaces rather than appending. An artifact records one creator, not a history of them.
+- `get` prints the bare value, so `$(infrastore store-attr get creator)` is the value and nothing
+  else, and **exits 1 when the key is unset** so a script can branch on it. `remove` instead reports
+  `removed: false` and exits 0 — there the outcome is the output.
+- Keys beginning with `infrastore.` are reserved, on removal as well as on write.
+
+`store-info` reports whatever is there under `store_attributes`, so `infrastore -f json store-info`
+is the one call that answers "what is this artifact" completely.
 
 `upgrade` is the writable open that runs the catalog migration ladder. It is needed only for a store
 written by an older infrastore: such a store reports `the store's catalog is at revision N …` on
@@ -436,6 +461,10 @@ infrastore --store <PATH> persist --dest <PATH.h5> [--force] [--dry-run]
 infrastore --store <PATH> compact [--force]
 infrastore --store <PATH> stats
 infrastore --store <PATH> store-info
+infrastore --store <PATH> store-attr list
+infrastore --store <PATH> store-attr get    <KEY>
+infrastore --store <PATH> store-attr set    <KEY> <VALUE>
+infrastore --store <PATH> store-attr remove <KEY>
 infrastore --store <PATH> upgrade
 infrastore --store <PATH> arrays [SELECTOR...] [--data-hash <HEX>]
 infrastore --store <PATH> attributes [--component-id <I>] [--attribute-id <I>] [--component-type <T>] [--attribute-type <T>] [--summary]

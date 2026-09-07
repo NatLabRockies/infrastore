@@ -700,3 +700,49 @@ async fn a_value_read_carries_the_unit_descriptors() {
     assert_eq!(bare.unit_system(), None);
     assert_eq!(bare.component_field(), None);
 }
+
+#[tokio::test]
+async fn store_attributes_read_over_the_wire() {
+    let mut store = create_store(None, true).unwrap();
+    store
+        .set_store_attribute("creator", "sienna-build")
+        .unwrap();
+    store
+        .set_store_attribute("source_system", "WECC 2032 ADS")
+        .unwrap();
+    // A value that is the empty string, to pin that it is not confused with an
+    // absent key on either side of the wire.
+    store.set_store_attribute("note", "").unwrap();
+
+    let addr = spawn_server(store).await;
+    let client = RemoteClient::connect(addr).await.unwrap();
+
+    let expected: BTreeMap<String, String> = [
+        ("creator", "sienna-build"),
+        ("note", ""),
+        ("source_system", "WECC 2032 ADS"),
+    ]
+    .iter()
+    .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+    .collect();
+    assert_eq!(client.list_store_attributes().await.unwrap(), expected);
+
+    assert_eq!(
+        client.get_store_attribute("creator").await.unwrap(),
+        Some("sienna-build".to_string())
+    );
+    assert_eq!(
+        client.get_store_attribute("note").await.unwrap(),
+        Some(String::new()),
+        "a key set to the empty string is present, not absent"
+    );
+    // An unset key is an answer, not a NOT_FOUND status.
+    assert_eq!(client.get_store_attribute("absent").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn a_store_with_no_attributes_lists_none() {
+    let addr = spawn_server(fixture_store()).await;
+    let client = RemoteClient::connect(addr).await.unwrap();
+    assert!(client.list_store_attributes().await.unwrap().is_empty());
+}
