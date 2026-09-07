@@ -4,6 +4,12 @@ This guide covers building on `InfraStore.jl`, the Julia package that wraps the
 [C ABI](../reference/c-abi.md), from installing it to the calls a consumer package makes. For exact
 signatures see the [Julia API reference](../reference/julia-api.md).
 
+For complete programs rather than isolated snippets, use the repository's
+[runnable Julia examples](https://github.com/NatLabRockies/infrastore/tree/main/examples/julia).
+They cover static, non-sequential, persistent, deterministic, probabilistic, and scenario data;
+fixed tuples; every function-valued element type; feature-based selection; and conversion to
+`DataFrame`s.
+
 ## Install
 
 Julia 1.10 or newer. `InfraStore.jl` is registered in General, and the native library comes with it:
@@ -228,7 +234,9 @@ they mean — and one that contradicts the values is an error rather than an ove
 on holding the values you gave it; encoding happens at the ABI boundary, which is why a read hands
 back the same thing a write was given.
 
-`InfraStore.jl` ships four value types plus `NTuple{N,Float64}`:
+A case covered end to end in the runnable
+[`single_custom_elements.jl`](https://github.com/NatLabRockies/infrastore/blob/main/examples/julia/single_custom_elements.jl)
+example. `InfraStore.jl` ships four value types plus `NTuple{N,Float64}`:
 
 | Value type          | `element_type`       | Constructor                           |
 | ------------------- | -------------------- | ------------------------------------- |

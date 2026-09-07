@@ -305,7 +305,8 @@ crates/
   infrastore-bench/   # `infrastore-bench` binary: bulk-ingest + simulation-read benchmarks
 julia/InfraStore.jl/    # Julia package wrapping the C ABI
 python/tests/                # pytest suite
-examples/                    # Sample server config and cli/ (sample CSV + descriptor)
+examples/                    # Sample server config, cli/ (sample CSV + descriptor), and
+                             #   runnable python/ + julia/ example programs
 .github/workflows/           # Cross-platform tests, linting, security, wheel builds
 ```
 

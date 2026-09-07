@@ -291,7 +291,8 @@ crates/
 julia/InfraStore.jl/   # Julia package wrapping the C ABI
 python/tests/          # pytest suite
 docs/                  # mdBook sources for the documentation site
-examples/              # Sample server config and cli/ sample CSV + descriptor
+examples/              # Sample server config, cli/ sample CSV + descriptor, and
+                       #   runnable python/ + julia/ example programs
 ```
 
 ## Building from source
