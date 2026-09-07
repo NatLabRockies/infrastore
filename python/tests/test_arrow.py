@@ -21,6 +21,7 @@ import pytest
 
 from infrastore import (
     Deterministic,
+    InvalidParameterError,
     NonSequentialTimeSeries,
     OwnerCategory,
     PersistentTimeSeries,
@@ -516,3 +517,170 @@ def test_missing_pyarrow_names_the_extra(monkeypatch):
     monkeypatch.setitem(sys.modules, "pyarrow", None)
     with pytest.raises(ImportError, match=r"infrastore\[arrow\]"):
         hourly(np.arange(3.0)).to_arrow()
+
+
+# ---- from_arrow: the inverse ------------------------------------------------
+
+
+def test_to_arrow_from_arrow_round_trips_a_series():
+    series = hourly(
+        np.arange(3.0),
+        name="load",
+        units="MW",
+        quantity_kind="ActivePower",
+        unit_system="natural_units",
+        component_field="max_active_power",
+        application_data='{"k": 1}',
+    )
+    assert SingleTimeSeries.from_arrow(series.to_arrow()) == series
+
+
+@pytest.mark.parametrize(
+    "cls",
+    [NonSequentialTimeSeries, PersistentTimeSeries],
+)
+def test_the_irregular_types_round_trip(cls):
+    series = cls(breakpoints(), np.array([1.0, 2.0, 3.0]), "irregular", units="MW")
+    assert cls.from_arrow(series.to_arrow()) == series
+
+
+def test_a_multidimensional_series_round_trips():
+    values = np.arange(24.0).reshape(4, 2, 3)
+    series = hourly(values)
+    back = SingleTimeSeries.from_arrow(series.to_arrow())
+    assert back == series
+    assert back.data.shape == (4, 2, 3)
+
+
+def test_a_composite_element_type_round_trips():
+    values = np.array([[0.0, 1.0, 1.0, 3.0], [0.0, 2.0, 1.0, 4.0]])
+    series = hourly(values, name="cost", element_type="piecewise_linear")
+    back = SingleTimeSeries.from_arrow(series.to_arrow())
+    assert back.element_type == "piecewise_linear"
+    assert back == series
+
+
+def test_the_spelling_survives_the_round_trip():
+    denver = datetime(2024, 1, 1, tzinfo=ZoneInfo("America/Denver"))
+    series = SingleTimeSeries(denver, "PT1H", np.arange(3.0), "load")
+    assert SingleTimeSeries.from_arrow(series.to_arrow()).time_reference == "America/Denver"
+
+    naive = SingleTimeSeries(datetime(2024, 1, 1), "PT1H", np.arange(3.0), "load")
+    assert SingleTimeSeries.from_arrow(naive.to_arrow()).time_reference == "zoneless"
+
+
+def test_a_monthly_grid_round_trips_on_the_calendar():
+    """The case a difference-based grid check gets wrong: `P1M` clamps to month
+    end, so Jan-31 -> Feb-29 -> Mar-31 is a grid even though the steps differ."""
+    series = SingleTimeSeries(
+        datetime(2024, 1, 31, tzinfo=timezone.utc), "P1M", np.arange(3.0), "monthly"
+    )
+    assert SingleTimeSeries.from_arrow(series.to_arrow()) == series
+
+
+# ---- from_arrow: foreign tables ---------------------------------------------
+
+
+def _stamps(timestamps, tz="UTC"):
+    """A `timestamp[ms, tz]` array built from raw milliseconds.
+
+    Not from `np.datetime64`, which carries no zone and warns when one is asked
+    for -- the point here is the zone the column declares.
+    """
+    millis = [int(t.replace(tzinfo=timezone.utc).timestamp() * 1000) for t in timestamps]
+    return pa.array(millis, type=pa.int64()).cast(pa.timestamp("ms", tz))
+
+
+def _foreign(timestamps, values, tz="UTC"):
+    """A table with the right columns and no metadata at all."""
+    return pa.table({"timestamp": _stamps(timestamps, tz), "value": pa.array(values)})
+
+
+def test_a_foreign_grid_infers_its_resolution():
+    hours = [UTC_START + timedelta(hours=k) for k in range(3)]
+    series = SingleTimeSeries.from_arrow(
+        _foreign(hours, [1.0, 2.0, 3.0]), name="load"
+    )
+    assert series.resolution == "PT1H"
+    assert series.time_reference == "utc"
+
+
+def test_a_foreign_table_without_a_zone_is_zoneless():
+    hours = [UTC_START + timedelta(hours=k) for k in range(3)]
+    series = SingleTimeSeries.from_arrow(
+        _foreign(hours, [1.0, 2.0, 3.0], tz=None), name="load"
+    )
+    assert series.time_reference == "zoneless"
+
+
+def test_a_fixed_size_list_reads_as_dense_and_an_assertion_makes_it_a_tuple():
+    hours = [UTC_START + timedelta(hours=k) for k in range(2)]
+    values = pa.FixedSizeListArray.from_arrays(
+        pa.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]), 3
+    )
+    table = pa.table({"timestamp": _stamps(hours), "value": values})
+    # Dense is the weaker claim, and the bytes cannot say more.
+    dense = SingleTimeSeries.from_arrow(table, name="load")
+    assert dense.element_type == "f64"
+    assert dense.data.shape == (2, 3)
+
+    # The assertion states the stronger one.
+    tup = SingleTimeSeries.from_arrow(table, name="load", element_type="tuple(3,f64)")
+    assert tup.element_type == "tuple(3,f64)"
+
+
+def test_a_contradicting_element_type_is_an_error_not_an_override():
+    table = hourly(np.arange(3.0)).to_arrow()
+    with pytest.raises(InvalidParameterError, match="asserted"):
+        SingleTimeSeries.from_arrow(table, element_type="i64")
+
+
+def test_a_nameless_table_is_refused():
+    hours = [UTC_START + timedelta(hours=k) for k in range(2)]
+    with pytest.raises(InvalidParameterError, match="name"):
+        SingleTimeSeries.from_arrow(_foreign(hours, [1.0, 2.0]))
+
+
+def test_nulls_are_refused_rather_than_coerced():
+    hours = [UTC_START + timedelta(hours=k) for k in range(3)]
+    table = pa.table({"timestamp": _stamps(hours), "value": pa.array([1.0, None, 3.0])})
+    with pytest.raises(InvalidParameterError, match="nulls"):
+        SingleTimeSeries.from_arrow(table, name="load")
+
+
+def test_a_sub_millisecond_timestamp_is_refused():
+    micros = pa.array(
+        [1_704_067_200_000_500, 1_704_070_800_000_500], type=pa.timestamp("us", "UTC")
+    )
+    table = pa.table({"timestamp": micros, "value": pa.array([1.0, 2.0])})
+    with pytest.raises(InvalidParameterError, match="whole millisecond"):
+        SingleTimeSeries.from_arrow(table, name="load")
+
+    # Whole milliseconds expressed in microseconds are fine.
+    micros = pa.array(
+        [1_704_067_200_000_000, 1_704_070_800_000_000], type=pa.timestamp("us", "UTC")
+    )
+    table = pa.table({"timestamp": micros, "value": pa.array([1.0, 2.0])})
+    assert SingleTimeSeries.from_arrow(table, name="load").length == 2
+
+
+def test_a_missing_column_names_what_is_expected():
+    table = pa.table({"t": pa.array([1, 2]), "v": pa.array([1.0, 2.0])})
+    with pytest.raises(InvalidParameterError, match="timestamp"):
+        SingleTimeSeries.from_arrow(table, name="load")
+
+
+def test_a_parquet_file_round_trips_through_from_arrow(tmp_path):
+    """The end-to-end shape: values written as Parquet come back bit-identical,
+    which is the improvement over CSV, where floats pass through decimal text."""
+    pq = pytest.importorskip("pyarrow.parquet")
+    awkward = np.array(
+        [np.pi, 1e-300, -0.0, np.inf, -np.inf, np.finfo(np.float64).max]
+    )
+    series = hourly(awkward, units="MW")
+    path = tmp_path / "series.parquet"
+    pq.write_table(series.to_arrow(), path)
+
+    back = SingleTimeSeries.from_arrow(pq.read_table(path))
+    assert back == series
+    assert np.array_equal(back.data, awkward)

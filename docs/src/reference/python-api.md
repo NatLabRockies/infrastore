@@ -665,6 +665,52 @@ step function as stored. Resampling onto a dense grid is the caller's to do, and
 series does not carry: there is no value before the first breakpoint, so a grid starting earlier has
 no answer to give.
 
+Also written, and not part of the descriptive set above: `element_shape`, as a JSON list (`[]` for a
+scalar element). It is a fact about the data rather than a label, so it is written even when empty,
+and the CLI's Parquet export writes the same key — the two producers write one schema.
+
+### `from_arrow()`
+
+The inverse, on the same three types, and a reader of **foreign** tables too — anything with a
+`timestamp` and a `value` column, whether or not it carries the metadata `to_arrow()` writes:
+
+```python
+series = SingleTimeSeries.from_arrow(series.to_arrow())            # exact round trip
+
+import pyarrow.parquet as pq
+SingleTimeSeries.from_arrow(pq.read_table("load.parquet"))         # written by anything
+NonSequentialTimeSeries.from_arrow(table, name="irregular")
+PersistentTimeSeries.from_arrow(table, name="steps")
+```
+
+The rules are the same ones `infrastore add --parquet` applies, and they are stated once in the
+[CLI reference](cli.md#parquet-import) so the two implementations cannot drift apart quietly. In
+short: what the metadata says is used; what it does not say is inferred from the Arrow schema,
+taking the reading that assumes least.
+
+| Missing          | Read as                                                                                                                                               |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `resolution`     | Inferred from the timestamps, which must then walk a grid.                                                                                            |
+| `element_type`   | The leaf Arrow type. A `fixed_size_list<double>[3]` becomes `f64` with shape `(rows, 3)` — _dense_, not `tuple(3,f64)`, because the bytes cannot say. |
+| `time_reference` | The timestamp column's zone; a column with no zone reads as `zoneless`, since a naive timestamp is a wall clock.                                      |
+| `name`           | Nothing. A name is part of a series' identity, so pass `name=`.                                                                                       |
+
+Every keyword overrides the metadata, with one exception: **`element_type` is an assertion.**
+`element_type="tuple(3,f64)"` states the reading the bytes cannot, and a value that contradicts the
+table's own raises `InvalidParameterError` rather than replacing it — the rule this project applies
+to every assertion.
+
+Refused rather than coerced: **nulls** in either column (the store holds none, and NaN is a value
+rather than an absence); a **microsecond or nanosecond timestamp that is not a whole millisecond**
+(the store's own precision, and rounding one would move it); **rows that leave a declared grid**,
+checked against the grid the resolution generates rather than against successive differences, since
+`P1M` clamps to month end; and **`struct`/`list` value columns**, which are the decoded form
+`to_arrow()` does not produce.
+
+`from_arrow` is not the whole catalog row: a table records no owner and no catalog id, because
+`to_arrow()` is a method on a value object and a series built here is not filed anywhere. Pass the
+result to `Store.add_time_series` with the owner you want, as you would any other series.
+
 ## `NonSequentialTimeSeries`
 
 ```python
