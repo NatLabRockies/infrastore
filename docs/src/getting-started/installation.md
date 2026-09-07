@@ -64,6 +64,18 @@ cargo install infrastore-cli      # installs the `infrastore` binary
 This compiles HDF5 from vendored sources, so it needs `cmake` and a C compiler (see
 [Build Prerequisites](#build-prerequisites)) and takes a few minutes on the first build.
 
+Parquet support (`export -f parquet`, `add --parquet`) is on by default, which is what pulls in the
+Arrow dependency tree. To leave it out -- a smaller binary and a shorter build, at the cost of those
+two flags:
+
+```sh
+cargo install infrastore-cli --no-default-features --features vendored
+```
+
+That binary still accepts the flags and names the feature to rebuild with, rather than reporting
+`parquet` as an unknown format. The Arrow tree reaches only the CLI: `infrastore-core`, the Python
+wheel, and the FFI cdylib never link it.
+
 ## Julia
 
 `InfraStore.jl` is registered in the Julia General registry:

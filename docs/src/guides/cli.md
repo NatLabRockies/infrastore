@@ -368,11 +368,13 @@ Python's `to_arrow()` writes the same table, so
 `pyarrow.parquet.write_table(series.to_arrow(), ...)` produces a file `add --parquet` reads, and
 `SingleTimeSeries.from_arrow` reads one this wrote.
 
-Two things to know. `-f parquet` requires `--dir`, because the footer sits at the end of the file
-and a writer has to seek back to it -- a pipe cannot. And Parquet is a **build-time option**: Arrow
-is a large dependency nothing else here needs, so a source build turns it on with
-`cargo install infrastore-cli --features parquet`. A binary without it accepts the flag and says
-which one to rebuild with.
+One thing to know: `-f parquet` requires `--dir`, because the footer sits at the end of the file and
+a writer has to seek back to it -- a pipe cannot.
+
+Parquet is on by default, in the released binaries and in `cargo install infrastore-cli` alike. It
+_is_ a cargo feature, so `--no-default-features --features vendored` builds a binary without the
+Arrow dependency tree; that binary still accepts the flags and tells you which feature to rebuild
+with, rather than reporting `parquet` as an unknown format.
 
 ### Querying it with DuckDB
 

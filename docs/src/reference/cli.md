@@ -282,10 +282,16 @@ Two limits, both deliberate:
 - **`-f parquet` is only accepted on `export`.** It is a binary container, not a rendering of a
   result; there is no `list -f parquet`.
 
-Parquet support is a **build-time option**. Arrow and Parquet are a large dependency tree nothing
-else in the CLI needs, so the released binary is built with it and a source build is not by default:
-`cargo install infrastore-cli --features parquet`. A binary without it still accepts the flag and
-tells you which one turns it on, rather than reporting `parquet` as an unknown format.
+Parquet is **on by default** -- in the released binaries and in `cargo install infrastore-cli`
+alike. It is still a cargo feature (`parquet`), so `--no-default-features --features vendored`
+builds a binary without the Arrow dependency tree. That binary accepts `-f parquet` and `--parquet`
+and fails with the feature to rebuild with, rather than reporting `parquet` as an unknown format --
+which is also why `--help`, the shell completions, and the examples on this page read the same in
+both builds.
+
+The Arrow tree deliberately stays out of the **library** crates: `infrastore-core`, `infrastore-py`,
+and `infrastore-ffi` never link it. A binding that wants Parquet has `to_arrow()` and its host
+language's own writer, which is a much smaller ask than linking Arrow into a wheel or a cdylib.
 
 #### Bounding the rows
 

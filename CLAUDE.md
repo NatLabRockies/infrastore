@@ -18,15 +18,19 @@ SQLite. It exposes multiple bindings over a shared core:
   and inspects a store, talking directly to the on-disk HDF5 + SQLite artifact (read+write; no
   gRPC). Output uses a global `-f/--format table|json|jsonl|csv|parquet`.
 - **Parquet** — `infrastore-parquet`, a crate the CLI depends on behind a `parquet` cargo feature
-  that is **off by default** (Arrow is a large tree nothing else needs). `export -f parquet` writes
-  one file per series and `add --parquet` reads one back; the table is deliberately the same one
-  Python's `to_arrow()` / `from_arrow` produce and consume — **one schema, two producers** — so a
-  file moves between them unchanged. Two columns (`timestamp`, `value`) for a static series, a long
-  table (`issue_time`, `target_time`, `value`, plus `percentile` or `scenario`) for a dense
-  forecast, and the catalog row in the file's key/value footer. The import reads a foreign file too,
-  inferring what the footer does not say and taking the reading that assumes least; the inference
-  and refusal rules are stated once, in `docs/src/reference/cli.md`'s "Parquet import", because the
-  CLI and Python implement them separately.
+  that is **on by default**, so the shipped `infrastore` binary carries it; the line Arrow must not
+  cross is into the _libraries_ — `infrastore-core`, `infrastore-py`, and `infrastore-ffi` never
+  link it, and `cargo tree --edges normal` on each is the check. The feature stays switchable
+  (`--no-default-features --features vendored`), and a binary without it still parses `-f parquet`
+  and `--parquet` and names the feature to rebuild with. `export -f parquet` writes one file per
+  series and `add --parquet` reads one back; the table is deliberately the same one Python's
+  `to_arrow()` / `from_arrow` produce and consume — **one schema, two producers** — so a file moves
+  between them unchanged. Two columns (`timestamp`, `value`) for a static series, a long table
+  (`issue_time`, `target_time`, `value`, plus `percentile` or `scenario`) for a dense forecast, and
+  the catalog row in the file's key/value footer. The import reads a foreign file too, inferring
+  what the footer does not say and taking the reading that assumes least; the inference and refusal
+  rules are stated once, in `docs/src/reference/cli.md`'s "Parquet import", because the CLI and
+  Python implement them separately.
 
 **Current feature coverage:** `SingleTimeSeries`, `NonSequentialTimeSeries`, and
 `PersistentTimeSeries` are implemented end-to-end (read+write in the Rust core, C ABI, Python,

@@ -179,14 +179,18 @@ family. It composes existing catalog aggregate queries and adds no core API, so 
 wants it can grow one without a change underneath.
 
 **Parquet** lives in a crate of its own, `infrastore-parquet`, which the CLI depends on behind a
-cargo feature that is **off by default** — Arrow is a large dependency tree nothing else in the
-project needs, and `deny.toml` makes every dependency a policy decision. The CLI is the only surface
-that reads and writes Parquet _files_ (`export -f parquet`, `add --parquet`). Python reaches the
-same files through `to_arrow()` / `from_arrow` plus `pyarrow.parquet`, and the table those produce
-is deliberately identical to the one the CLI writes — one schema, two producers — so a file moves
-between them without changing meaning. Nothing else has it: the C ABI and Julia would need the whole
-Arrow tree in the cdylib for a format their host languages already have readers for, and the gRPC
-server serves values, not files.
+cargo feature that is **on by default** — the `infrastore` binary anyone installs can read and write
+Parquet, because handing an analyst a file for DuckDB or polars is an ordinary reason to reach for
+the CLI. The feature stays switchable (`--no-default-features --features vendored` builds a lean
+binary), and the line it draws is between the binary and the **libraries**: `infrastore-core`,
+`infrastore-py`, and `infrastore-ffi` never link Arrow, which `cargo tree --edges normal` on each is
+the check for. The CLI is the only surface that reads and writes Parquet _files_
+(`export -f parquet`, `add --parquet`). Python reaches the same files through `to_arrow()` /
+`from_arrow` plus `pyarrow.parquet`, and the table those produce is deliberately identical to the
+one the CLI writes — one schema, two producers — so a file moves between them without changing
+meaning. Nothing else has it: the C ABI and Julia would need the whole Arrow tree in the cdylib for
+a format their host languages already have readers for, and the gRPC server serves values, not
+files.
 
 **Materialized timestamps** and **`from_timestamps`** both run in the core and reach Julia through
 two stateless ABI entry points, `infrastore_grid_timestamps` and `infrastore_infer_period`. That

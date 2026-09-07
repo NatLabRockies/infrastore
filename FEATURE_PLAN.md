@@ -39,6 +39,15 @@ binary and every other crate stay free of the Arrow dependency tree. A separate 
 core feature keeps core's feature surface flat and makes the optional dependency visible in the
 workspace graph.
 
+> **Revised 2026-09-07, after review.** The feature is **on by default** for the CLI. Handing an
+> analyst a Parquet file for DuckDB or polars is an ordinary reason to reach for this CLI, and a
+> default that needs a flag to turn on is one most people never find; the release archives were
+> already built `--all-features`, so this changes what a source build gets rather than what ships.
+> The line Arrow must not cross is into the **libraries** — `infrastore-core`, `infrastore-py`, and
+> `infrastore-ffi` stay free of it, and a binding that wants Parquet has `to_arrow()` plus its host
+> language's own writer. The feature stays switchable, so
+> `--no-default-features --features vendored` still builds a lean binary. See Finding 7.7.
+
 Check before adding: the pinned `arrow`/`parquet` versions must compile on the declared MSRV (Rust
 1.94). arrow-rs moves its MSRV quickly; pin a version that fits rather than raising `rust-version`.
 
@@ -353,6 +362,25 @@ of reporting `parquet` as an unknown format, which is the better error anyway.
 
 `-f` is global, so the variant is refused for every command but `export`, once, in `run` — otherwise
 each command's `match` would fall through to its `_` arm and quietly print a table.
+
+**Amended 2026-09-07, after review: the `parquet` feature is now on by default.** Nothing above
+changes — the clap variant was already unconditional, and it has to stay that way, because the
+feature is still switchable and `--help`, the completions, and the documented examples must read the
+same in a `--no-default-features` build. What changed is which build most people get: the shipped
+binary and `cargo install infrastore-cli` both carry Parquet now, and the "rebuild with
+`--features parquet`" refusal survives for the lean build rather than being the common case.
+
+The reason for the original default was that Arrow is a large dependency tree, and that reason still
+holds — for the _libraries_. `infrastore-core`, `infrastore-py`, and `infrastore-ffi` must never
+link Arrow: a Python wheel or a Julia cdylib carrying it would be several times its current size for
+a format both host languages already read, and both bindings can already produce the file through
+`to_arrow()`. The check is `cargo tree --edges normal -p <crate> | grep -E 'arrow v|parquet v'`,
+which must find nothing for those three. (Grep the versioned name, not the bare word: this
+worktree's directory is called `infrastore-parquet`, so a path match is not evidence.)
+
+No CI or release change was needed. Both `cargo build` steps in `.github/workflows/release.yml` use
+`--all-features`, so the released `infrastore` binary already carried Parquet; nothing in the
+workflows builds the CLI with `--no-default-features` or an explicit feature list.
 
 ### 7.8 `tiny-keccak` is CC0-1.0, allowed as a scoped exception (§1)
 
