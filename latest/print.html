@@ -448,10 +448,10 @@ shared storage. See
 <ul>
 <li><strong>Bulk add</strong> (<code>add_time_series_bulk</code> / <code>AddBatch</code> + <code>add_time_series_bulk!</code>) commits a whole batch
 in one catalog transaction and takes the block-sized HDF5 write path. Series sharing a
-<code>(dtype, element_shape, length, resolution)</code> pack into one dataset whose chunks hold one timestamp
-across every column, which is what makes the simulation read below fast — so land same-shaped
-series in the same batch. A loop of single adds is an order of magnitude slower and fills chunks
-one column at a time.</li>
+<code>(dtype, element_shape, length, resolution)</code> pack into one dataset whose chunks span every column,
+which is what makes the simulation read below fast — so land same-shaped series in the same batch.
+A loop of single adds outside a transaction is an order of magnitude slower and fills chunks one
+column at a time; inside one it is buffered and written as a block instead.</li>
 <li><strong>Transactions</strong> (<code>with store.transaction():</code> / <code>transaction(store) do … end</code>) make several
 operations succeed or fail together. Inside one, a removal is reversible; outside one it is not,
 because the array bytes are reclaimed immediately. A transaction holds the SQLite write lock until
@@ -1157,16 +1157,20 @@ The practical counterpart — which calls a parent package should make, and in w
 <h2 id="data-orientation-optimize-for-reading-every-component-at-one-timestamp"><a class="header" href="#data-orientation-optimize-for-reading-every-component-at-one-timestamp">Data Orientation: Optimize for Reading Every Component at One Timestamp</a></h2>
 <p><strong>The decision.</strong> In the HDF5 file, <code>SingleTimeSeries</code> arrays that share a
 <code>(dtype, element_shape, length, resolution)</code> are packed as columns of one dataset: <strong>columns are
-series, rows are timesteps</strong>, and the HDF5 chunking is <code>(1, cols, *element_shape)</code> so that a single
-chunk holds one timestamp across every column. We optimize for reading <strong>all components' values at a
+series, rows are timesteps</strong>, and the HDF5 chunking spans the whole width —
+<code>(rows, cols, *element_shape)</code>, one row unless the dataset is narrow enough that a single timestamp
+row would make an uneconomically small chunk
+(<a href="explanation/../reference/file-format.html#packed-mode">file format</a>). A chunk therefore holds one timestamp, or
+a few consecutive ones, across every column. We optimize for reading <strong>all components' values at a
 given timestamp</strong>, and accept that reading <strong>one component's entire array</strong> is comparatively slow.</p>
 <p><strong>Why.</strong> The workload that matters is simulation. A production-cost or power-flow model steps
 through time and, at each step, needs the value of every generator, load, and branch for that one
-timestamp — a slice <em>across</em> series, not <em>down</em> one. With this layout that slice is a single chunk
-read; the <a href="explanation/./readers.html"><code>ForecastReader</code> / <code>StaticReader</code></a> columnar surface is built directly on
-it. The inverse access — pulling one component's full history — has to touch every chunk band and is
-slow by design. That trade is deliberate: the simulation read path is the hot one, and it is the one
-parent packages hand to their users.</p>
+timestamp — a slice <em>across</em> series, not <em>down</em> one. With this layout that slice is one chunk read
+per dataset, and a sweep of them costs the same whatever the chunk's row count, since it visits
+every chunk anyway; the <a href="explanation/./readers.html"><code>ForecastReader</code> / <code>StaticReader</code></a> columnar surface is built
+directly on it. The inverse access — pulling one component's full history — has to touch every chunk
+band and is slow by design. That trade is deliberate: the simulation read path is the hot one, and
+it is the one parent packages hand to their users.</p>
 <p><strong>What this means for parent-package developers.</strong></p>
 <ul>
 <li>Lay out bulk writes so that series sharing a shape land in the same dataset — that is what fills
@@ -1256,12 +1260,36 @@ see its uncommitted writes, because they go through the same connection — so a
 staging overlay to give a caller read-your-own-writes. And nesting is free: each level is a SQLite
 savepoint, so an inner failure unwinds only its own work and leaves the enclosing transaction
 usable.</p>
+<p><strong>Append-only also means "not yet written".</strong> A packed single add outside a transaction fills one
+slot of a thousand-column growth pool, and because that pool is chunked one timestamp row across
+every column, filling one column rewrites every chunk in it. Inside a transaction that write is owed
+to nobody until the outermost commit, so it is buffered per pool instead and the buffered arrays are
+written together with the same block writer a bulk add uses — at the commit, when a read needs one
+of them to have a physical position, or when the buffer hits one of the bounds below. A loop of
+single adds inside one transaction therefore produces the file one bulk add of the same items
+produces: same dataset names, same widths, same chunking. Nothing about the format changes; these
+are layouts the bulk path already wrote.</p>
+<p>Two edges keep that from being a worse trade than the one it replaces. <strong>A block of one is not a
+block</strong>: a span holding a single array for a pool fills a growth-pool slot, because a dataset sized
+to one column is chunked <code>(1, 1)</code> and gives a scalar <code>f64</code> series an eight-byte chunk per timestep,
+whose per-chunk overhead dwarfs the data — the same reason <code>add_time_series_bulk</code> sends a batch of
+one down the single-add path. That matters because "several operations atomic together" is most
+often a removal and its replacement, not an ingest. The same rule settles whether an irregular
+series packs with a cohort or stands alone: that is a bet on the axis being shared, and inside a
+span only the block knows the answer, so a cohort added one series at a time pools exactly as the
+bulk add of it does. And <strong>the buffer is bounded</strong>, per pool at the width the block writer spills a
+batch at and across every pool at a fixed byte ceiling; crossing either writes a block out early,
+which costs an extra dataset and nothing else. The per-pool bound is the chunk budget rather than
+the growth pool's thousand columns because a bulk add inside a transaction is buffered too, and a
+narrower cap gave it ten times the datasets — and a columnar read ten times the chunks — of the same
+add outside one.</p>
 <p>The costs are real and bound where this is worth using. A transaction holds the SQLite write lock
 until it finishes, so a concurrent writer on the same artifact blocks and then fails on its busy
-timeout. And a transaction is not a substitute for batching: block-sized HDF5 writes and feature-set
-dedup come from <code>bulk_add</code>, and a loop of single adds gets neither just because it is wrapped in a
-transaction. The two compose — batch each operation, and use a transaction when several of them must
-be atomic together.</p>
+timeout. The buffer holds its not-yet-written arrays in memory — the same memory the equivalent bulk
+add allocates, bounded per pool by the width it spills at. And a transaction still does not replace
+batching for everything: feature-set dedup across a batch comes from <code>bulk_add</code>, which is also the
+direct spelling when the whole cohort is already in hand as a list. The two compose — batch each
+operation, and use a transaction when several of them must be atomic together.</p>
 <h2 id="upgrade-a-store-in-place-rather-than-bricking-it"><a class="header" href="#upgrade-a-store-in-place-rather-than-bricking-it">Upgrade a Store In Place Rather Than Bricking It</a></h2>
 <p><code>DATA_FORMAT_VERSION</code> used to be checked by strict equality on open, which made every bump a wall:
 "re-create the store." It was bumped six times between 0.12 and 0.19 and each one meant exactly
@@ -2136,10 +2164,16 @@ concept rather than as two type names.</p>
 </div>
 <p>Neither is exposed over gRPC.</p>
 <h2 id="why-they-exist"><a class="header" href="#why-they-exist">Why They Exist</a></h2>
-<p>Static arrays that share a shape are packed as <strong>columns of one dataset</strong>, with the HDF5 chunking
-<code>(1, cols, *element_shape)</code> — a single chunk holds one timestamp across every column. So "every
-generator's output at hour 4 371" is one chunk read, while "this one generator's whole year" has to
-touch every chunk band in the dataset.</p>
+<p>Static arrays that share a shape are packed as <strong>columns of one dataset</strong>, chunked across the whole
+width — <code>(rows, cols, *element_shape)</code>, with <code>rows = 1</code> unless the dataset is narrow enough that one
+timestamp row would make a chunk too small to be worth one
+(<a href="explanation/../reference/file-format.html#packed-mode">file format</a>). So a chunk holds one timestamp, or a few
+consecutive ones, across every column: "every generator's output at hour 4 371" is one chunk read
+per dataset, while "this one generator's whole year" has to touch every chunk band in the dataset.</p>
+<p>That is the asymmetry these readers are built on, and it is a property of the <em>width</em>, not of the
+row count. A sweep — which is what a reader does — pays the same either way: it visits every chunk
+regardless, and when a chunk carries several rows they are the next ones the sweep asks for.
+Scattered access to a single timestamp is the case where extra rows are decompressed and discarded.</p>
 <p>That asymmetry is deliberate
 (<a href="explanation/./design-choices.html#data-orientation-optimize-for-reading-every-component-at-one-timestamp">Design Choices</a>),
 and a reader is the API that spends it correctly. A loop of whole-series reads walks the slow
@@ -2296,8 +2330,9 @@ deleting the old one.</p>
 <code>DeterministicSingleTimeSeries</code>). Arrays that share a <code>(dtype, element_shape, length, resolution)</code>
 are packed together as columns of one dataset named <code>sts_{dtype}_{shape}_{length}_{res}</code>, with shape
 <code>(length, cols, *element_shape)</code>. The column count <code>cols</code> is sized to the batch that created the
-dataset (capped so one chunk stays within a byte budget); an incremental, one-at-a-time write path
-uses a default width of 1,000:</p>
+dataset (capped so one chunk stays within a byte budget) — where "the batch" is a bulk add's items
+or the whole span of an open transaction; only an incremental one-at-a-time write outside a
+transaction uses the default width of 1,000:</p>
 <pre class="mermaid">flowchart TB
     subgraph ds[&quot;dataset&amp;nbsp;sts_f64_s_8760_PT1H&amp;nbsp;&amp;nbsp;shape&amp;nbsp;(8760,&amp;nbsp;cols)&quot;]
         direction LR
@@ -2317,11 +2352,15 @@ uses a default width of 1,000:</p>
     style H fill:#6f42c1,color:#fff
 </pre>
 <ul>
-<li><strong>Columns are series, rows are timesteps.</strong> Chunking is <code>(1, cols, *element_shape)</code>, so one HDF5
-chunk holds a single timestamp across every column. The layout favors <strong>bulk writes</strong> (a batch
-fills whole chunks in one pass) and <strong>reads across series by timestamp</strong> (one timestamp is one
-chunk). The reverse directions are the slow ones, by design: reading a single series in full
-touches every chunk band, and adding one series at a time rewrites a chunk band per timestep.</li>
+<li><strong>Columns are series, rows are timesteps.</strong> Chunking spans the whole width,
+<code>(rows, cols, *element_shape)</code> — one row, so that one chunk is one timestamp across every column,
+unless the dataset is narrow enough that a single row would make the chunk too small to be worth
+one (<a href="explanation/../reference/file-format.html#packed-mode">file format</a>). The layout favors <strong>bulk writes</strong> (a
+batch fills whole chunks in one pass) and <strong>reads across series by timestamp</strong> (one timestamp is a
+chunk per dataset, and a sweep costs the same whatever the row count). The reverse directions are
+the slow ones, by design: reading a single series in full touches every chunk band, and adding one
+series at a time rewrites a chunk band per timestep — which is why a run of single adds belongs
+inside a transaction, where they are buffered and written as one block instead.</li>
 <li><strong>A companion dataset holds the hashes.</strong> For each packed dataset there is a sibling
 <code>{dataset}_h</code>, a <code>(cols, 64)</code> array of <code>u8</code>; row <code>i</code> holds the SHA-256 hex of column <code>i</code> as raw
 bytes, or is all-zero if the slot is free. This is the on-disk index the backend rebuilds on open.</li>
@@ -2432,7 +2471,15 @@ staged <em>in this call</em> is removed, returning the store to its prior state.
 <li><strong>Bulk writes are all-or-nothing.</strong> <code>add_time_series_bulk</code> (and the buffered <code>bulk_add</code> session)
 group packed series by shape and stage each group as one batch-sized block — filling whole chunks
 — then insert every association in one transaction; any error rolls the whole batch back and
-removes the staged arrays.</li>
+removes the staged arrays. A one-item batch outside a transaction is the exception: sizing a
+dataset to a batch of one would claim a one-column dataset per call, so it takes the single-add
+path and fills a shared pool's slot instead.</li>
+<li><strong>Single adds inside a transaction take the block path too.</strong> Nothing a transaction wrote is
+durable until its outermost commit, so its packed adds are buffered per pool and written together
+by the same block writer at the commit — bounded per pool by a column width and across all pools
+by a byte ceiling, and with a span holding one array falling back to a growth-pool slot for the
+same reason a one-item batch does. See
+<a href="explanation/./design-choices.html#make-transactions-span-operations-without-enlisting-hdf5">Make Transactions Span Operations</a>.</li>
 </ul>
 <p>On delete, the order reverses and is reference-counted: the association rows are removed inside a
 transaction, then an array column is only zeroed/freed if no remaining association references that
@@ -2506,11 +2553,13 @@ committing the rows that name them, so a process killed right after the call ret
 halves agreeing. Inside a transaction the flush is deferred to the outermost commit, and a call that
 wrote nothing new (a re-add of content the store already holds) skips it. The flush is not free — a
 caller adding series one at a time pays it per call — and a bulk add or a transaction is how to pay
-it once for many writes. <code>InMemory</code> suits a consumer that builds a store in a scratch directory
-beside its own volatile state — a <code>System</code> under construction, say. A crash loses that state
-regardless, so journaling the scratch catalog buys nothing, and skipping it removes per-commit WAL
-and fsync work. Arrays still stream to the HDF5 file, so this does <strong>not</strong> require the data to fit
-in memory. Nothing is durable until <code>persist_to</code>.</p>
+it once for many writes. A transaction also holds that span's packed adds in a per-pool buffer and
+writes them as one block at the commit, so they land in the file the way a bulk add's do. <code>InMemory</code>
+suits a consumer that builds a store in a scratch directory beside its own volatile state — a
+<code>System</code> under construction, say. A crash loses that state regardless, so journaling the scratch
+catalog buys nothing, and skipping it removes per-commit WAL and fsync work. Arrays still stream to
+the HDF5 file, so this does <strong>not</strong> require the data to fit in memory. Nothing is durable until
+<code>persist_to</code>.</p>
 <p>Two caveats. Opening with <code>InMemory</code> reads <code>&lt;path&gt;.sqlite</code> into RAM but still opens the HDF5 half
 <strong>in place</strong>, so mutations land in the original file; a caller that means to leave the source
 untouched until an explicit save wants <code>open_copy</code> (see <a href="explanation/storage-model.html#working-on-a-copy">Working on a Copy</a>).
@@ -3766,9 +3815,22 @@ immediately.</p>
 # committed on a clean exit, rolled back if the block raised
 </code></pre>
 <p>Blocks nest (each level is a savepoint), and the store holds the SQLite write lock until the
-outermost one ends. A transaction does not batch: use <code>add_time_series_bulk</code> inside it for the
-writes themselves. <code>begin_transaction</code> / <code>commit_transaction</code> / <code>rollback_transaction</code> are the
+outermost one ends. <code>begin_transaction</code> / <code>commit_transaction</code> / <code>rollback_transaction</code> are the
 explicit form.</p>
+<p>A transaction is also where a <strong>run of single adds</strong> belongs. Nothing it writes is durable until the
+outermost commit, so packed adds inside one are buffered per shape group and written as one block at
+the commit — the datasets <code>add_time_series_bulk</code> of the same series would produce, without having to
+hold the batch yourself. Two things qualify it. The buffer <strong>spills a block early</strong> — an extra
+dataset, nothing else, the same split a batch that wide gets — once a group reaches the narrower of
+two widths, or once the unwritten arrays across every group cross 128 MiB:</p>
+<ul>
+<li>the columns one chunk row holds: 131,072 for a scalar <code>float64</code>;</li>
+<li>128 MiB divided by one column's bytes, which for anything but a short series is the ceiling that
+actually binds — a 30,500-step <code>float64</code> series is 244 KB a column, so its group spills at 550.</li>
+</ul>
+<p>And a span holding a <strong>single</strong> array fills a shared-pool slot rather than claiming a dataset one
+column wide. <code>add_time_series_bulk</code> is still the direct way to say it when you already have the
+batch in hand.</p>
 <h2 id="read-a-series-1"><a class="header" href="#read-a-series-1">Read a Series</a></h2>
 <pre><code class="language-python">got = store.read_by_id(series_id)
 assert np.array_equal(np.asarray(got.data), np.asarray(ts.data))
@@ -4539,9 +4601,22 @@ immediately.</p>
 end   # committed if the block returns, rolled back if it throws
 </code></pre>
 <p>Blocks nest (each level is a savepoint), and the store holds the SQLite write lock until the
-outermost one ends. A transaction does not batch: use <code>add_time_series_bulk!</code> inside it for the
-writes themselves. <code>begin_transaction!</code> / <code>commit_transaction!</code> / <code>rollback_transaction!</code> are the
+outermost one ends. <code>begin_transaction!</code> / <code>commit_transaction!</code> / <code>rollback_transaction!</code> are the
 explicit form.</p>
+<p>A transaction is also where a <strong>run of single adds</strong> belongs. Nothing it writes is durable until the
+outermost commit, so packed adds inside one are buffered per shape group and written as one block at
+the commit — the datasets <code>add_time_series_bulk!</code> of the same series would produce, without having
+to hold the batch yourself. Two things qualify it. The buffer <strong>spills a block early</strong> — an extra
+dataset, nothing else, the same split a batch that wide gets — once a group reaches the narrower of
+two widths, or once the unwritten arrays across every group cross 128 MiB:</p>
+<ul>
+<li>the columns one chunk row holds: 131,072 for a scalar <code>Float64</code>;</li>
+<li>128 MiB divided by one column's bytes, which for anything but a short series is the ceiling that
+actually binds — a 30,500-step <code>Float64</code> series is 244 KB a column, so its group spills at 550.</li>
+</ul>
+<p>And a span holding a <strong>single</strong> array fills a shared-pool slot rather than claiming a dataset one
+column wide. <code>add_time_series_bulk!</code> is still the direct way to say it when you already have the
+batch in hand.</p>
 <h3 id="values-that-are-not-numbers-1"><a class="header" href="#values-that-are-not-numbers-1">Values that are not numbers</a></h3>
 <p>A timestep's value can be a function rather than a number — a cost curve re-offered every hour, a
 pair of coefficients, a fixed-width tuple. Hand the constructor those values and it does the rest:
@@ -5688,10 +5763,11 @@ bottleneck is likely the SQLite commit or HDF5 file growth, not array constructi
 <li>
 <p><strong>Per-step time</strong> for the read benchmark scales linearly with <code>--count</code>. If the cost per step is
 much higher for on-disk than in-memory, the bottleneck is HDF5 chunk reads or SQLite metadata
-queries rather than Rust overhead. The packed <code>SingleTimeSeries</code> layout chunks <code>(1, cols)</code> — one
-timestamp across every column — so reading one timestamp across many series is a single chunk
-read, while reading one full series touches every chunk band (the slow direction, expected for
-exploration/plotting rather than hot loops).</p>
+queries rather than Rust overhead. The packed <code>SingleTimeSeries</code> layout chunks <code>(rows, cols)</code>
+across the whole width — one timestamp per chunk, or a few for a narrow dataset
+(<a href="guides/../reference/file-format.html#packed-mode">file format</a>) — so reading one timestamp across many
+series is a chunk read per dataset, while reading one full series touches every chunk band (the
+slow direction, expected for exploration/plotting rather than hot loops).</p>
 </li>
 </ul>
 <h2 id="tracing-spans-for-deeper-diagnosis"><a class="header" href="#tracing-spans-for-deeper-diagnosis">Tracing spans for deeper diagnosis</a></h2>
@@ -5982,12 +6058,87 @@ key is the time axis and <strong>never the series type</strong>, so a <code>Pers
 them share one content-addressed array. The full 64-char hash is used, not a prefix: the name is
 parsed back into the pool key when the index is rebuilt at open, so a truncated form could let two
 distinct time axes collide into one pool.</p>
-<p>The dataset shape is <code>(length, cols, *element_shape)</code> and chunking is <code>(1, cols, *element_shape)</code>,
-so one HDF5 chunk holds a single timestamp across every column — making a read across series by
-timestamp one chunk, and a buffered bulk write fill whole chunks. <code>cols</code> is chosen per dataset: a
-managed bulk write sizes it to the batch, while an incremental one-at-a-time write path uses a
-default width (<code>DEFAULT_COLS_PER_DATASET = 1000</code>). In both cases <code>cols</code> is capped so one chunk stays
-within a byte budget (<code>MAX_CHUNK_BYTES = 1 MiB</code>); a batch wider than the cap spills across datasets.</p>
+<p>The dataset shape is <code>(length, cols, *element_shape)</code> and chunking is <code>(rows, cols, *element_shape)</code>
+with <code>rows = 1</code> in the ordinary case, so one HDF5 chunk holds a single timestamp across every column
+— making a read across series by timestamp one chunk, and a buffered bulk write fill whole chunks.
+<code>cols</code> is chosen per dataset: a managed write sizes it to the batch it has in hand, while an
+incremental one-at-a-time write path uses a default width (<code>DEFAULT_COLS_PER_DATASET = 1000</code>) and
+fills one of its slots per call. In both cases <code>cols</code> is capped so one chunk stays within a byte
+budget (<code>MAX_CHUNK_BYTES = 1 MiB</code>); a batch wider than the cap spills across datasets.</p>
+<p>"The batch it has in hand" is the whole of an <code>add_time_series_bulk</code> call — <strong>or the whole span of
+an open transaction</strong>, for irregular cohorts as well as regular pools: whether an irregular series
+packs with others on its axis or stands alone is decided from the block's final membership at the
+commit, not from the one request an add can see. Nothing a transaction writes is durable until its
+outermost commit, so a single add inside one is buffered per pool rather than dropped into a
+growth-pool slot, and the buffered arrays are written with the same block writer at the commit, or
+when a read needs one of them to have a physical position. A loop of single adds inside one
+transaction therefore produces exactly the datasets one bulk add of the same items produces — <strong>so
+long as the span reaches its commit without materializing early</strong>; only an un-transactioned single
+add takes the default width.</p>
+<p>The byte ceiling below and an early materialization are what can break that equivalence: crossing
+the ceiling, or asking a buffered array for its physical location, writes the span out as it stands.
+Each split costs an extra dataset and nothing else — the datasets are still block-written and
+chunk-aligned.</p>
+<p>Two limits keep that buffer from being unbounded, and both simply write a block out early — the same
+spill a too-wide batch already performs, costing an extra dataset and nothing else:</p>
+<p>A pool's block width is the <strong>lower of two</strong> ceilings, and the buffer as a whole has a third:</p>
+<ul>
+<li><strong>Per pool, one chunk row of columns</strong> — <code>MAX_CHUNK_BYTES</code> over the element block, exactly the
+width a bulk add's block spills at, so the span's datasets are the bulk add's datasets. It is
+deliberately not <code>DEFAULT_COLS_PER_DATASET</code>: a bulk add issued inside a transaction is buffered
+too, and a thousand-column cap cut a 100,000-series batch into a hundred datasets where the same
+batch outside a transaction writes ten, which every per-timestep read then paid for chunk by
+chunk.</li>
+<li><strong>Per pool, <code>MAX_PENDING_BYTES</code> over one column's bytes</strong> — <code>length × element_block</code>. A chunk row
+is a count of columns and says nothing about how long they are, so for anything but a short series
+this is the ceiling that actually binds: scalar <code>f64</code> is 131,072 columns by the rule above, but
+30,500 steps is 244,000 bytes a column, so the pool spills at 550. The two together are
+<code>min(MAX_CHUNK_BYTES / element_block, MAX_PENDING_BYTES / (length × element_block))</code>.</li>
+<li><strong>Across every pool, <code>MAX_PENDING_BYTES = 128 MiB</code></strong> of unwritten arrays. Per-pool shares do not
+add up to a global one, so a span touching several shapes is held to the total as well; crossing
+it writes out the widest block.</li>
+</ul>
+<p><strong>A block of one is not a block.</strong> If a span ends up holding a single array for a pool, it fills a
+growth-pool slot rather than claiming a dataset sized to one column — chunked <code>(1, 1)</code>, that would
+give a scalar <code>f64</code> series an eight-byte chunk per timestep, whose per-chunk overhead dwarfs the
+data. It is the same rule <code>add_time_series_bulk</code> applies to a batch of one. For an <strong>irregular</strong>
+pool the fallback is a standalone <code>arr_</code> dataset instead of a slot, because an <code>nsts_</code> pool is
+shared only by the series on that exact axis: a cohort of one is a dataset spread over <code>length</code>
+chunks for no reason, where a regular pool is shared by every series on the resolution. From two
+columns up the block is what the bulk add of those items writes.</p>
+<p>This is a write-time policy like every other choice on this page: the layouts it produces are ones
+the format already had, so it does not affect <code>data_format_version</code> and stores written either way
+stay mutually readable.</p>
+<p><code>rows</code> rises above one when a single timestamp row would leave the chunk under
+<code>MIN_CHUNK_BYTES = 32 KiB</code>. A narrow dataset is where that bites hardest, and a dataset is narrow
+when the width had to be small — which above is <code>MAX_PENDING_BYTES / length</code> for a span, so a long
+series got a 512-byte chunk. That is small enough to cost on both sides: deflate has too little to
+work with, and HDF5's fixed per-chunk cost stops being rounding error.</p>
+<p>Measured on 512 series of 262,144 <code>f64</code> steps written one at a time in one span — a 64-column block,
+so a 512-byte timestamp row — carrying a daily-plus-annual profile with AR(1) noise rather than
+anything conveniently compressible:</p>
+<div class="table-wrapper"><table><thead><tr><th>chunk</th><th style="text-align: right">write</th><th style="text-align: right">file (1.074 GB raw)</th><th style="text-align: right">8,760 consecutive timestamp reads</th></tr></thead><tbody>
+<tr><td><code>(1, 64)</code> = 512 B</td><td style="text-align: right">59.5 s</td><td style="text-align: right">1.098 GB</td><td style="text-align: right">0.97 s</td></tr>
+<tr><td><code>(8, 64)</code> = 4 KiB</td><td style="text-align: right">19.1 s</td><td style="text-align: right">0.909 GB</td><td style="text-align: right">1.26 s</td></tr>
+<tr><td><code>(32, 64)</code> = 16 KiB</td><td style="text-align: right">13.8 s</td><td style="text-align: right">0.843 GB</td><td style="text-align: right">1.26 s</td></tr>
+<tr><td><code>(64, 64)</code> = 32 KiB</td><td style="text-align: right">14.8 s</td><td style="text-align: right">0.813 GB</td><td style="text-align: right">1.24 s</td></tr>
+<tr><td><code>(128, 64)</code> = 64 KiB</td><td style="text-align: right">16.5 s</td><td style="text-align: right">0.787 GB</td><td style="text-align: right">1.21 s</td></tr>
+</tbody></table>
+</div>
+<p>The 512-byte chunking wrote a file <em>larger than the raw data</em>: at that size deflate's per-chunk
+overhead exceeds what it saves. Write time bottoms out around 16–32 KiB and file size keeps falling
+past it. <strong>Sweeps are flat at every chunk size</strong> — a sweep visits every chunk regardless, and the
+rows a chunk brings along are the next ones it wants, so the reader's main pattern is untouched.</p>
+<p>Scattered <em>single-timestamp</em> reads are the one thing taller chunks cost in principle, since they
+decompress rows nobody asked for. In practice the measurement varied by ±0.4 s run to run and could
+not separate 4 KiB from 32 KiB; a consumer whose access pattern is genuinely scattered rather than
+swept should benchmark it rather than trust this note.</p>
+<p>The floor reaches past the narrow blocks it is aimed at. A 1,000-column <code>f64</code> growth pool is an
+8,000-byte row and takes five rows per chunk; a year of hourly <code>f64</code> in a 1,915-column span block is
+15 KiB and takes three. On that wide shape the trade measured as about 15% more write time for about
+3% less on disk.</p>
+<p>Chunking is a write-time policy: it is not recorded in <code>data_format_version</code>, HDF5 readers do not
+care, and files written under either rule stay readable.</p>
 <ul>
 <li><strong>Rows are timesteps, columns are series.</strong> Column <code>i</code> holds one complete series.</li>
 <li><strong>Hash companion dataset.</strong> Each packed dataset has a sibling <code>{dataset}_h</code> dataset of <code>u8</code>,

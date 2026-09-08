@@ -200,10 +200,16 @@ concept rather than as two type names.</p>
 </div>
 <p>Neither is exposed over gRPC.</p>
 <h2 id="why-they-exist"><a class="header" href="#why-they-exist">Why They Exist</a></h2>
-<p>Static arrays that share a shape are packed as <strong>columns of one dataset</strong>, with the HDF5 chunking
-<code>(1, cols, *element_shape)</code> — a single chunk holds one timestamp across every column. So "every
-generator's output at hour 4 371" is one chunk read, while "this one generator's whole year" has to
-touch every chunk band in the dataset.</p>
+<p>Static arrays that share a shape are packed as <strong>columns of one dataset</strong>, chunked across the whole
+width — <code>(rows, cols, *element_shape)</code>, with <code>rows = 1</code> unless the dataset is narrow enough that one
+timestamp row would make a chunk too small to be worth one
+(<a href="../reference/file-format.html#packed-mode">file format</a>). So a chunk holds one timestamp, or a few
+consecutive ones, across every column: "every generator's output at hour 4 371" is one chunk read
+per dataset, while "this one generator's whole year" has to touch every chunk band in the dataset.</p>
+<p>That is the asymmetry these readers are built on, and it is a property of the <em>width</em>, not of the
+row count. A sweep — which is what a reader does — pays the same either way: it visits every chunk
+regardless, and when a chunk carries several rows they are the next ones the sweep asks for.
+Scattered access to a single timestamp is the case where extra rows are decompressed and discarded.</p>
 <p>That asymmetry is deliberate
 (<a href="./design-choices.html#data-orientation-optimize-for-reading-every-component-at-one-timestamp">Design Choices</a>),
 and a reader is the API that spends it correctly. A loop of whole-series reads walks the slow

@@ -354,9 +354,22 @@ immediately.</p>
 # committed on a clean exit, rolled back if the block raised
 </code></pre>
 <p>Blocks nest (each level is a savepoint), and the store holds the SQLite write lock until the
-outermost one ends. A transaction does not batch: use <code>add_time_series_bulk</code> inside it for the
-writes themselves. <code>begin_transaction</code> / <code>commit_transaction</code> / <code>rollback_transaction</code> are the
+outermost one ends. <code>begin_transaction</code> / <code>commit_transaction</code> / <code>rollback_transaction</code> are the
 explicit form.</p>
+<p>A transaction is also where a <strong>run of single adds</strong> belongs. Nothing it writes is durable until the
+outermost commit, so packed adds inside one are buffered per shape group and written as one block at
+the commit — the datasets <code>add_time_series_bulk</code> of the same series would produce, without having to
+hold the batch yourself. Two things qualify it. The buffer <strong>spills a block early</strong> — an extra
+dataset, nothing else, the same split a batch that wide gets — once a group reaches the narrower of
+two widths, or once the unwritten arrays across every group cross 128 MiB:</p>
+<ul>
+<li>the columns one chunk row holds: 131,072 for a scalar <code>float64</code>;</li>
+<li>128 MiB divided by one column's bytes, which for anything but a short series is the ceiling that
+actually binds — a 30,500-step <code>float64</code> series is 244 KB a column, so its group spills at 550.</li>
+</ul>
+<p>And a span holding a <strong>single</strong> array fills a shared-pool slot rather than claiming a dataset one
+column wide. <code>add_time_series_bulk</code> is still the direct way to say it when you already have the
+batch in hand.</p>
 <h2 id="read-a-series"><a class="header" href="#read-a-series">Read a Series</a></h2>
 <pre><code class="language-python">got = store.read_by_id(series_id)
 assert np.array_equal(np.asarray(got.data), np.asarray(ts.data))

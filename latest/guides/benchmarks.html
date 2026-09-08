@@ -265,10 +265,11 @@ bottleneck is likely the SQLite commit or HDF5 file growth, not array constructi
 <li>
 <p><strong>Per-step time</strong> for the read benchmark scales linearly with <code>--count</code>. If the cost per step is
 much higher for on-disk than in-memory, the bottleneck is HDF5 chunk reads or SQLite metadata
-queries rather than Rust overhead. The packed <code>SingleTimeSeries</code> layout chunks <code>(1, cols)</code> — one
-timestamp across every column — so reading one timestamp across many series is a single chunk
-read, while reading one full series touches every chunk band (the slow direction, expected for
-exploration/plotting rather than hot loops).</p>
+queries rather than Rust overhead. The packed <code>SingleTimeSeries</code> layout chunks <code>(rows, cols)</code>
+across the whole width — one timestamp per chunk, or a few for a narrow dataset
+(<a href="../reference/file-format.html#packed-mode">file format</a>) — so reading one timestamp across many
+series is a chunk read per dataset, while reading one full series touches every chunk band (the
+slow direction, expected for exploration/plotting rather than hot loops).</p>
 </li>
 </ul>
 <h2 id="tracing-spans-for-deeper-diagnosis"><a class="header" href="#tracing-spans-for-deeper-diagnosis">Tracing spans for deeper diagnosis</a></h2>
