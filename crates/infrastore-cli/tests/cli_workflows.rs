@@ -4986,6 +4986,98 @@ fn a_foreign_parquet_file_needs_its_owner_supplied() {
 
 #[cfg(feature = "parquet")]
 #[test]
+fn a_values_file_without_its_partner_is_a_foreign_file() {
+    // Copying half a partition is easy to do and impossible to detect after the
+    // fact, so it is not treated as an error: it is a values file like any
+    // other, and everything the series file carried has to be supplied.
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("src.h5");
+    let dest = dir.path().join("dest.h5");
+    seed_one(dir.path(), &source);
+    let out = dir.path().join("out");
+    run(
+        &source,
+        &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
+    );
+    let stem = parquet_stem(&out);
+    fs::remove_file(out.join(format!("{stem}.series.parquet"))).unwrap();
+    let values = out.join(format!("{stem}.values.parquet"));
+
+    let err = run_err(&dest, &["add", "--parquet", values.to_str().unwrap()]);
+    assert!(err.contains("--name"), "{err}");
+
+    // The key columns survive, so the dry run can still say how many distinct
+    // arrays the file holds.
+    let plan = run(
+        &dest,
+        &[
+            "-f",
+            "json",
+            "add",
+            "--parquet",
+            values.to_str().unwrap(),
+            "--dry-run",
+            "--name",
+            "load",
+            "--owner-id",
+            "7",
+            "--owner-type",
+            "Bus",
+        ],
+    );
+    let plan: serde_json::Value = serde_json::from_str(&plan).unwrap();
+    assert_eq!(plan["would_add"], 1);
+    assert_eq!(plan["files"][0]["arrays"], 1);
+
+    run(
+        &dest,
+        &[
+            "add",
+            "--parquet",
+            values.to_str().unwrap(),
+            "--name",
+            "load",
+            "--owner-id",
+            "7",
+            "--owner-type",
+            "Bus",
+        ],
+    );
+    let listed = run(&dest, &["-f", "json", "list"]);
+    let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    assert_eq!(listed["items"][0]["owner_id"], 7);
+    // Same bytes, which is what the surviving key column says they are.
+    let src = run(&source, &["-f", "json", "list"]);
+    let src: serde_json::Value = serde_json::from_str(&src).unwrap();
+    assert_eq!(
+        listed["items"][0]["data_hash"],
+        src["items"][0]["data_hash"]
+    );
+}
+
+#[cfg(feature = "parquet")]
+#[test]
+fn a_series_file_without_its_partner_is_refused() {
+    // The mirror case is not survivable: its rows name arrays that are not
+    // there, so the message says that rather than reporting a missing column.
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("src.h5");
+    let dest = dir.path().join("dest.h5");
+    seed_one(dir.path(), &source);
+    let out = dir.path().join("out");
+    run(
+        &source,
+        &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
+    );
+    let stem = parquet_stem(&out);
+    fs::remove_file(out.join(format!("{stem}.values.parquet"))).unwrap();
+
+    let err = run_err(&dest, &["add", "--parquet", out.to_str().unwrap()]);
+    assert!(err.contains("not there"), "{err}");
+}
+
+#[cfg(feature = "parquet")]
+#[test]
 fn parquet_and_the_csv_forms_are_mutually_exclusive() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("both.h5");

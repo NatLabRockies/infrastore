@@ -745,6 +745,153 @@ fn a_deterministic_single_time_series_points_at_transform() {
     );
 }
 
+// ---- Foreign values files ---------------------------------------------------
+//
+// A values file with no series file beside it. It may be a stranger's Parquet,
+// which carries neither key column, or one of ours whose partner was lost or
+// never copied, which carries both. The two differ in how many series come out
+// of it and in whether the checksum has anything to check.
+
+#[test]
+fn a_values_file_with_no_series_file_is_read_as_a_foreign_one() {
+    // Our own file, minus its partner. The key columns are still there, so the
+    // checksum still means something -- but everything a catalog row carried is
+    // gone and has to be supplied.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let series = stored(plain(vec![(1, hourly("load", &[1.0, 2.0, 3.0]))]));
+    let report = write_partitions(dir.path(), &series).expect("export");
+    std::fs::remove_file(&report.partitions[0].series_path).unwrap();
+    let values = report.partitions[0].values_path.clone();
+
+    let err = read_lone(&values, &ImportOptions::default()).expect_err("no catalog row");
+    assert!(err.to_string().contains("--name"), "{err}");
+
+    let options = ImportOptions {
+        name: Some("load".into()),
+        owner_id: Some(7),
+        owner_type: Some("Bus".into()),
+        ..Default::default()
+    };
+    let back = read_lone(&values, &options).expect("a foreign file imports");
+    assert_eq!(back.len(), 1);
+    assert_eq!(back[0].owner_id, 7);
+    // The key is still read, so a --dry-run can still count distinct arrays and
+    // the checksum still has something to compare against.
+    assert!(back[0].array.is_some());
+    let TimeSeriesData::SingleTimeSeries(got) = &back[0].data else {
+        panic!("expected a SingleTimeSeries, got {:?}", back[0].data);
+    };
+    assert_eq!(got.data.to_f64_vec().unwrap(), vec![1.0, 2.0, 3.0]);
+    // Nothing in the file says how the timestamps were spelled once the series
+    // file is gone, so the column's Arrow zone is what is left.
+    assert_eq!(got.time_reference, Some(TimeReference::Utc));
+}
+
+#[test]
+fn a_foreign_file_with_the_key_columns_is_one_series_per_array() {
+    // The key columns are what a foreign file's series boundaries are, when it
+    // has them: three arrays, three series, and no other column consulted.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let series = stored(plain(vec![
+        (1, hourly("a", &[1.0, 2.0])),
+        (2, hourly("b", &[3.0, 4.0])),
+        (3, hourly("c", &[5.0, 6.0])),
+    ]));
+    let report = write_partitions(dir.path(), &series).expect("export");
+    assert_eq!(report.arrays(), 3);
+    std::fs::remove_file(&report.partitions[0].series_path).unwrap();
+
+    let options = ImportOptions {
+        name: Some("supplied".into()),
+        owner_id: Some(7),
+        owner_type: Some("Bus".into()),
+        ..Default::default()
+    };
+    let back = read_lone(&report.partitions[0].values_path, &options).expect("import");
+    assert_eq!(back.len(), 3);
+    assert_eq!(
+        back.iter()
+            .map(|s| s.array.clone().expect("keyed"))
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        3
+    );
+    // Every one of them takes the supplied name, which is what `--name` means.
+    // Filing three series under one identity is the store's problem to refuse,
+    // not the reader's to guess around.
+    assert!(back.iter().all(|s| s.data.name() == "supplied"));
+}
+
+#[test]
+fn a_foreign_file_without_the_key_columns_is_exactly_one_series() {
+    use arrow::array::{ArrayRef, Float64Array, RecordBatch, TimestampMillisecondArray};
+    use arrow::datatypes::{Field, Schema};
+
+    // No key columns at all: there is no boundary to cut on, so the whole file
+    // is one series and there is no hash to check it against.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let stamps: ArrayRef = std::sync::Arc::new(TimestampMillisecondArray::from(
+        (0..4)
+            .map(|i| t0().timestamp_millis() + i * 3_600_000)
+            .collect::<Vec<_>>(),
+    ));
+    let values: ArrayRef = std::sync::Arc::new(Float64Array::from(vec![1.0, 2.0, 1.0, 2.0]));
+    let schema = Schema::new(vec![
+        Field::new("timestamp", stamps.data_type().clone(), false),
+        Field::new("value", values.data_type().clone(), false),
+    ]);
+    let batch =
+        RecordBatch::try_new(std::sync::Arc::new(schema), vec![stamps, values]).expect("batch");
+    let path = dir.path().join("naked.parquet");
+    write_batch(&path, &batch);
+
+    let options = ImportOptions {
+        name: Some("load".into()),
+        owner_id: Some(7),
+        owner_type: Some("Bus".into()),
+        ..Default::default()
+    };
+    let back = read_lone(&path, &options).expect("import");
+    assert_eq!(back.len(), 1, "repeated values are not a second array");
+    assert_eq!(back[0].array, None, "no key columns, no array key");
+    let TimeSeriesData::SingleTimeSeries(got) = &back[0].data else {
+        panic!("expected a SingleTimeSeries, got {:?}", back[0].data);
+    };
+    assert_eq!(got.data.to_f64_vec().unwrap(), vec![1.0, 2.0, 1.0, 2.0]);
+}
+
+#[test]
+fn a_directory_of_lone_values_files_reads_them_as_foreign() {
+    // Discovery, not just a named file: a directory whose series halves are
+    // missing is a directory of foreign files, each on its own.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let series = stored(plain(vec![
+        (1, hourly("load", &[1.0])),
+        (
+            2,
+            utc(TimeSeriesData::NonSequentialTimeSeries(
+                NonSequentialTimeSeries::new(
+                    vec![t0(), t0() + Duration::hours(5)],
+                    TypedArray::from_f64(vec![2], &[1.0, 2.0]),
+                    "irregular",
+                )
+                .unwrap(),
+            )),
+        ),
+    ]));
+    let report = write_partitions(dir.path(), &series).expect("export");
+    for written in &report.partitions {
+        std::fs::remove_file(&written.series_path).unwrap();
+    }
+
+    let found = partitions(dir.path()).expect("list");
+    assert_eq!(found.len(), 2);
+    assert!(found.iter().all(|p| p.series.is_none()), "{found:?}");
+    // A foreign file is named by its path, since it has no partner to share a
+    // stem with.
+    assert!(found[0].label().ends_with(".values.parquet"), "{found:?}");
+}
+
 #[test]
 fn a_foreign_file_infers_what_it_does_not_say() {
     use arrow::array::{ArrayRef, Float64Array, RecordBatch, TimestampMillisecondArray};
