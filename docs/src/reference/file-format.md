@@ -280,12 +280,98 @@ them share one content-addressed array. The full 64-char hash is used, not a pre
 parsed back into the pool key when the index is rebuilt at open, so a truncated form could let two
 distinct time axes collide into one pool.
 
-The dataset shape is `(length, cols, *element_shape)` and chunking is `(1, cols, *element_shape)`,
-so one HDF5 chunk holds a single timestamp across every column — making a read across series by
-timestamp one chunk, and a buffered bulk write fill whole chunks. `cols` is chosen per dataset: a
-managed bulk write sizes it to the batch, while an incremental one-at-a-time write path uses a
-default width (`DEFAULT_COLS_PER_DATASET = 1000`). In both cases `cols` is capped so one chunk stays
-within a byte budget (`MAX_CHUNK_BYTES = 1 MiB`); a batch wider than the cap spills across datasets.
+The dataset shape is `(length, cols, *element_shape)` and chunking is `(rows, cols, *element_shape)`
+with `rows = 1` in the ordinary case, so one HDF5 chunk holds a single timestamp across every column
+— making a read across series by timestamp one chunk, and a buffered bulk write fill whole chunks.
+`cols` is chosen per dataset: a managed write sizes it to the batch it has in hand, while an
+incremental one-at-a-time write path uses a default width (`DEFAULT_COLS_PER_DATASET = 1000`) and
+fills one of its slots per call. In both cases `cols` is capped so one chunk stays within a byte
+budget (`MAX_CHUNK_BYTES = 1 MiB`); a batch wider than the cap spills across datasets.
+
+"The batch it has in hand" is the whole of an `add_time_series_bulk` call — **or the whole span of
+an open transaction**, for irregular cohorts as well as regular pools: whether an irregular series
+packs with others on its axis or stands alone is decided from the block's final membership at the
+commit, not from the one request an add can see. Nothing a transaction writes is durable until its
+outermost commit, so a single add inside one is buffered per pool rather than dropped into a
+growth-pool slot, and the buffered arrays are written with the same block writer at the commit, or
+when a read needs one of them to have a physical position. A loop of single adds inside one
+transaction therefore produces exactly the datasets one bulk add of the same items produces — **so
+long as the span reaches its commit without materializing early**; only an un-transactioned single
+add takes the default width.
+
+The byte ceiling below and an early materialization are what can break that equivalence: crossing
+the ceiling, or asking a buffered array for its physical location, writes the span out as it stands.
+Each split costs an extra dataset and nothing else — the datasets are still block-written and
+chunk-aligned.
+
+Two limits keep that buffer from being unbounded, and both simply write a block out early — the same
+spill a too-wide batch already performs, costing an extra dataset and nothing else:
+
+A pool's block width is the **lower of two** ceilings, and the buffer as a whole has a third:
+
+- **Per pool, one chunk row of columns** — `MAX_CHUNK_BYTES` over the element block, exactly the
+  width a bulk add's block spills at, so the span's datasets are the bulk add's datasets. It is
+  deliberately not `DEFAULT_COLS_PER_DATASET`: a bulk add issued inside a transaction is buffered
+  too, and a thousand-column cap cut a 100,000-series batch into a hundred datasets where the same
+  batch outside a transaction writes ten, which every per-timestep read then paid for chunk by
+  chunk.
+- **Per pool, `MAX_PENDING_BYTES` over one column's bytes** — `length × element_block`. A chunk row
+  is a count of columns and says nothing about how long they are, so for anything but a short series
+  this is the ceiling that actually binds: scalar `f64` is 131,072 columns by the rule above, but
+  30,500 steps is 244,000 bytes a column, so the pool spills at 550. The two together are
+  `min(MAX_CHUNK_BYTES / element_block, MAX_PENDING_BYTES / (length × element_block))`.
+- **Across every pool, `MAX_PENDING_BYTES = 128 MiB`** of unwritten arrays. Per-pool shares do not
+  add up to a global one, so a span touching several shapes is held to the total as well; crossing
+  it writes out the widest block.
+
+**A block of one is not a block.** If a span ends up holding a single array for a pool, it fills a
+growth-pool slot rather than claiming a dataset sized to one column — chunked `(1, 1)`, that would
+give a scalar `f64` series an eight-byte chunk per timestep, whose per-chunk overhead dwarfs the
+data. It is the same rule `add_time_series_bulk` applies to a batch of one. For an **irregular**
+pool the fallback is a standalone `arr_` dataset instead of a slot, because an `nsts_` pool is
+shared only by the series on that exact axis: a cohort of one is a dataset spread over `length`
+chunks for no reason, where a regular pool is shared by every series on the resolution. From two
+columns up the block is what the bulk add of those items writes.
+
+This is a write-time policy like every other choice on this page: the layouts it produces are ones
+the format already had, so it does not affect `data_format_version` and stores written either way
+stay mutually readable.
+
+`rows` rises above one when a single timestamp row would leave the chunk under
+`MIN_CHUNK_BYTES = 32 KiB`. A narrow dataset is where that bites hardest, and a dataset is narrow
+when the width had to be small — which above is `MAX_PENDING_BYTES / length` for a span, so a long
+series got a 512-byte chunk. That is small enough to cost on both sides: deflate has too little to
+work with, and HDF5's fixed per-chunk cost stops being rounding error.
+
+Measured on 512 series of 262,144 `f64` steps written one at a time in one span — a 64-column block,
+so a 512-byte timestamp row — carrying a daily-plus-annual profile with AR(1) noise rather than
+anything conveniently compressible:
+
+| chunk                |  write | file (1.074 GB raw) | 8,760 consecutive timestamp reads |
+| -------------------- | -----: | ------------------: | --------------------------------: |
+| `(1, 64)` = 512 B    | 59.5 s |            1.098 GB |                            0.97 s |
+| `(8, 64)` = 4 KiB    | 19.1 s |            0.909 GB |                            1.26 s |
+| `(32, 64)` = 16 KiB  | 13.8 s |            0.843 GB |                            1.26 s |
+| `(64, 64)` = 32 KiB  | 14.8 s |            0.813 GB |                            1.24 s |
+| `(128, 64)` = 64 KiB | 16.5 s |            0.787 GB |                            1.21 s |
+
+The 512-byte chunking wrote a file _larger than the raw data_: at that size deflate's per-chunk
+overhead exceeds what it saves. Write time bottoms out around 16–32 KiB and file size keeps falling
+past it. **Sweeps are flat at every chunk size** — a sweep visits every chunk regardless, and the
+rows a chunk brings along are the next ones it wants, so the reader's main pattern is untouched.
+
+Scattered _single-timestamp_ reads are the one thing taller chunks cost in principle, since they
+decompress rows nobody asked for. In practice the measurement varied by ±0.4 s run to run and could
+not separate 4 KiB from 32 KiB; a consumer whose access pattern is genuinely scattered rather than
+swept should benchmark it rather than trust this note.
+
+The floor reaches past the narrow blocks it is aimed at. A 1,000-column `f64` growth pool is an
+8,000-byte row and takes five rows per chunk; a year of hourly `f64` in a 1,915-column span block is
+15 KiB and takes three. On that wide shape the trade measured as about 15% more write time for about
+3% less on disk.
+
+Chunking is a write-time policy: it is not recorded in `data_format_version`, HDF5 readers do not
+care, and files written under either rule stay readable.
 
 - **Rows are timesteps, columns are series.** Column `i` holds one complete series.
 - **Hash companion dataset.** Each packed dataset has a sibling `{dataset}_h` dataset of `u8`,

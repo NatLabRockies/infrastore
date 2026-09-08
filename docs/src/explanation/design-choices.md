@@ -14,17 +14,21 @@ The practical counterpart — which calls a parent package should make, and in w
 
 **The decision.** In the HDF5 file, `SingleTimeSeries` arrays that share a
 `(dtype, element_shape, length, resolution)` are packed as columns of one dataset: **columns are
-series, rows are timesteps**, and the HDF5 chunking is `(1, cols, *element_shape)` so that a single
-chunk holds one timestamp across every column. We optimize for reading **all components' values at a
+series, rows are timesteps**, and the HDF5 chunking spans the whole width —
+`(rows, cols, *element_shape)`, one row unless the dataset is narrow enough that a single timestamp
+row would make an uneconomically small chunk
+([file format](../reference/file-format.md#packed-mode)). A chunk therefore holds one timestamp, or
+a few consecutive ones, across every column. We optimize for reading **all components' values at a
 given timestamp**, and accept that reading **one component's entire array** is comparatively slow.
 
 **Why.** The workload that matters is simulation. A production-cost or power-flow model steps
 through time and, at each step, needs the value of every generator, load, and branch for that one
-timestamp — a slice _across_ series, not _down_ one. With this layout that slice is a single chunk
-read; the [`ForecastReader` / `StaticReader`](./readers.md) columnar surface is built directly on
-it. The inverse access — pulling one component's full history — has to touch every chunk band and is
-slow by design. That trade is deliberate: the simulation read path is the hot one, and it is the one
-parent packages hand to their users.
+timestamp — a slice _across_ series, not _down_ one. With this layout that slice is one chunk read
+per dataset, and a sweep of them costs the same whatever the chunk's row count, since it visits
+every chunk anyway; the [`ForecastReader` / `StaticReader`](./readers.md) columnar surface is built
+directly on it. The inverse access — pulling one component's full history — has to touch every chunk
+band and is slow by design. That trade is deliberate: the simulation read path is the hot one, and
+it is the one parent packages hand to their users.
 
 **What this means for parent-package developers.**
 
@@ -129,12 +133,38 @@ staging overlay to give a caller read-your-own-writes. And nesting is free: each
 savepoint, so an inner failure unwinds only its own work and leaves the enclosing transaction
 usable.
 
+**Append-only also means "not yet written".** A packed single add outside a transaction fills one
+slot of a thousand-column growth pool, and because that pool is chunked one timestamp row across
+every column, filling one column rewrites every chunk in it. Inside a transaction that write is owed
+to nobody until the outermost commit, so it is buffered per pool instead and the buffered arrays are
+written together with the same block writer a bulk add uses — at the commit, when a read needs one
+of them to have a physical position, or when the buffer hits one of the bounds below. A loop of
+single adds inside one transaction therefore produces the file one bulk add of the same items
+produces: same dataset names, same widths, same chunking. Nothing about the format changes; these
+are layouts the bulk path already wrote.
+
+Two edges keep that from being a worse trade than the one it replaces. **A block of one is not a
+block**: a span holding a single array for a pool fills a growth-pool slot, because a dataset sized
+to one column is chunked `(1, 1)` and gives a scalar `f64` series an eight-byte chunk per timestep,
+whose per-chunk overhead dwarfs the data — the same reason `add_time_series_bulk` sends a batch of
+one down the single-add path. That matters because "several operations atomic together" is most
+often a removal and its replacement, not an ingest. The same rule settles whether an irregular
+series packs with a cohort or stands alone: that is a bet on the axis being shared, and inside a
+span only the block knows the answer, so a cohort added one series at a time pools exactly as the
+bulk add of it does. And **the buffer is bounded**, per pool at the width the block writer spills a
+batch at and across every pool at a fixed byte ceiling; crossing either writes a block out early,
+which costs an extra dataset and nothing else. The per-pool bound is the chunk budget rather than
+the growth pool's thousand columns because a bulk add inside a transaction is buffered too, and a
+narrower cap gave it ten times the datasets — and a columnar read ten times the chunks — of the same
+add outside one.
+
 The costs are real and bound where this is worth using. A transaction holds the SQLite write lock
 until it finishes, so a concurrent writer on the same artifact blocks and then fails on its busy
-timeout. And a transaction is not a substitute for batching: block-sized HDF5 writes and feature-set
-dedup come from `bulk_add`, and a loop of single adds gets neither just because it is wrapped in a
-transaction. The two compose — batch each operation, and use a transaction when several of them must
-be atomic together.
+timeout. The buffer holds its not-yet-written arrays in memory — the same memory the equivalent bulk
+add allocates, bounded per pool by the width it spills at. And a transaction still does not replace
+batching for everything: feature-set dedup across a batch comes from `bulk_add`, which is also the
+direct spelling when the whole cohort is already in hand as a list. The two compose — batch each
+operation, and use a transaction when several of them must be atomic together.
 
 ## Upgrade a Store In Place Rather Than Bricking It
 

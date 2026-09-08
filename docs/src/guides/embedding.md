@@ -216,10 +216,10 @@ Two mechanisms compose, and neither substitutes for the other:
 
 - **Bulk add** (`add_time_series_bulk` / `AddBatch` + `add_time_series_bulk!`) commits a whole batch
   in one catalog transaction and takes the block-sized HDF5 write path. Series sharing a
-  `(dtype, element_shape, length, resolution)` pack into one dataset whose chunks hold one timestamp
-  across every column, which is what makes the simulation read below fast — so land same-shaped
-  series in the same batch. A loop of single adds is an order of magnitude slower and fills chunks
-  one column at a time.
+  `(dtype, element_shape, length, resolution)` pack into one dataset whose chunks span every column,
+  which is what makes the simulation read below fast — so land same-shaped series in the same batch.
+  A loop of single adds outside a transaction is an order of magnitude slower and fills chunks one
+  column at a time; inside one it is buffered and written as a block instead.
 - **Transactions** (`with store.transaction():` / `transaction(store) do … end`) make several
   operations succeed or fail together. Inside one, a removal is reversible; outside one it is not,
   because the array bytes are reclaimed immediately. A transaction holds the SQLite write lock until

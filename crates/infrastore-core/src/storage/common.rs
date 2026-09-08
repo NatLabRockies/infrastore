@@ -45,6 +45,83 @@ pub const DEFAULT_COLS_PER_DATASET: usize = 1000;
 /// wider than the cap spill into additional datasets.
 pub(crate) const MAX_CHUNK_BYTES: usize = 1 << 20; // 1 MiB
 
+/// Ceiling on the bytes a backend may hold in *unwritten* packed blocks across
+/// every pool at once — the memory a transaction's buffered adds occupy before
+/// its commit writes them (see `Hdf5Backend`'s pending blocks).
+///
+/// A ceiling is required, not merely nice: a packed single add outside a
+/// transaction is O(1) in memory, and buffering makes a span O(its own bytes).
+/// Crossing it writes whole blocks out early, which costs an extra dataset per
+/// eviction and nothing else — the same spill a batch wider than
+/// [`MAX_CHUNK_BYTES`] allows already performs.
+///
+/// 128 MiB is chosen to sit above the batches this is for and below anything a
+/// consumer would notice: the shipped consumers build stores of a few thousand
+/// hourly series, and a year of hourly `f64` is 70 KiB, so a span of two
+/// thousand of them fits. A decade of 5-minute data is 8 MiB a series, and
+/// sixteen of those spill — which is the right answer, because a block that
+/// size is already worth its own dataset.
+pub(crate) const MAX_PENDING_BYTES: usize = 128 << 20; // 128 MiB
+
+/// Floor on the bytes of one packed chunk, the companion to [`MAX_CHUNK_BYTES`].
+///
+/// A packed dataset is chunked across its whole width, so the chunk's size is
+/// the *width* times one element block — and the width is not always ours to
+/// choose. A transaction's buffer is capped in bytes, which converts to a
+/// column count of `MAX_PENDING_BYTES / (length x element_block)`, so a long
+/// series gets a narrow block and, with one timestamp row per chunk, a chunk of
+/// `MAX_PENDING_BYTES / length` bytes: 15 KiB for a year of hourly data, 512
+/// bytes for 262,144 steps, 255 for a year of minutes. Below a few KiB deflate
+/// has too little to work with and HDF5's per-chunk overhead stops being
+/// rounding error; the 262,144-step case measured 41% larger on disk and 2.4x
+/// slower to write than the same arrays in a 512-column block.
+///
+/// Rather than let the memory budget decide the chunk size, a chunk narrower
+/// than this floor is made *taller* instead -- see [`packed_chunk_rows`].
+///
+/// 32 KiB is where the two measurable costs bottom out. On 512 series of
+/// 262,144 `f64` steps (a 64-column block, so a 512-byte row) the write went
+/// 59.5s -> 14.8s and the file 1.098 GB -> 0.813 GB against 1.074 GB raw, both
+/// improving monotonically from 512 bytes up. Sweeps are flat at every size --
+/// a sweep visits every chunk regardless, so chunk height does not reach it.
+/// Scattered single-timestamp reads are the one thing taller chunks cost in
+/// principle, since they decompress rows nobody asked for, but the measurement
+/// varied by +-0.4s run to run and could not distinguish 4 KiB from 32; if that
+/// pattern ever matters it wants a proper benchmark rather than this constant.
+///
+/// The floor reaches past the narrow blocks it is aimed at: a 1,000-column
+/// `f64` growth pool is an 8,000-byte row and takes five, a 1,915-column
+/// hourly-year span block is 15 KiB and takes three. That cost the wide shapes
+/// about 15% on write for about 3% on disk, which is the trade this constant
+/// makes. [`MAX_CHUNK_BYTES`] is still the ceiling above it.
+pub(crate) const MIN_CHUNK_BYTES: usize = 32 << 10; // 32 KiB
+
+/// Timestamp rows in one chunk of a packed dataset `cols` columns wide.
+///
+/// One, which is the layout's default and what makes a read across series at
+/// one timestamp exactly one chunk, unless that chunk would fall below
+/// [`MIN_CHUNK_BYTES`] -- then as many rows as it takes to clear the floor,
+/// never more than the dataset has.
+///
+/// Taller chunks cost a *random* single-timestamp read, which decompresses
+/// every row of the chunk it lands in. They cost a sweep nothing: a sweep
+/// visits every chunk regardless, and the rows it decompresses together are the
+/// next ones it asks for.
+pub(crate) fn packed_chunk_rows(
+    dtype: Dtype,
+    element_shape: &[usize],
+    cols: usize,
+    length: usize,
+) -> usize {
+    let row = cols
+        .saturating_mul(element_block_bytes(dtype, element_shape))
+        .max(1);
+    if row >= MIN_CHUNK_BYTES {
+        return 1;
+    }
+    MIN_CHUNK_BYTES.div_ceil(row).clamp(1, length.max(1))
+}
+
 /// Bytes in one column's element block at a single timestep.
 pub(crate) fn element_block_bytes(dtype: Dtype, element_shape: &[usize]) -> usize {
     element_shape.iter().product::<usize>() * dtype.size()

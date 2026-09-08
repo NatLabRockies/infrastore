@@ -19,10 +19,17 @@ Neither is exposed over gRPC.
 
 ## Why They Exist
 
-Static arrays that share a shape are packed as **columns of one dataset**, with the HDF5 chunking
-`(1, cols, *element_shape)` — a single chunk holds one timestamp across every column. So "every
-generator's output at hour 4 371" is one chunk read, while "this one generator's whole year" has to
-touch every chunk band in the dataset.
+Static arrays that share a shape are packed as **columns of one dataset**, chunked across the whole
+width — `(rows, cols, *element_shape)`, with `rows = 1` unless the dataset is narrow enough that one
+timestamp row would make a chunk too small to be worth one
+([file format](../reference/file-format.md#packed-mode)). So a chunk holds one timestamp, or a few
+consecutive ones, across every column: "every generator's output at hour 4 371" is one chunk read
+per dataset, while "this one generator's whole year" has to touch every chunk band in the dataset.
+
+That is the asymmetry these readers are built on, and it is a property of the _width_, not of the
+row count. A sweep — which is what a reader does — pays the same either way: it visits every chunk
+regardless, and when a chunk carries several rows they are the next ones the sweep asks for.
+Scattered access to a single timestamp is the case where extra rows are decompressed and discarded.
 
 That asymmetry is deliberate
 ([Design Choices](./design-choices.md#data-orientation-optimize-for-reading-every-component-at-one-timestamp)),
