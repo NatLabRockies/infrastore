@@ -740,3 +740,44 @@ tests:
   target on its own is split.
 - Three comments (the crate manifest, its crate-level doc, `deny.toml`) still said the CLI feature
   was off by default, and a proto field comment promised an order a protobuf map cannot carry.
+
+### 7.21 `time_axis` comes from the values, not from the catalog row (§2.3, decided 2026-09-07)
+
+The first cut of `time_axis_of` read the catalog row: `length`/`initial_timestamp`/`resolution` for
+a `SingleTimeSeries`, `row.timestamps` for the irregular pair. Both are wrong sources.
+
+`list_metadata` leaves `TimeSeriesMetadata::timestamps` unpopulated — materializing every irregular
+axis to list a catalog would be absurd — so `export -f parquet` of a `NonSequentialTimeSeries`
+failed with "its catalog row carries no timestamps". And `export --time-range` hands back a _slice_,
+whose anchor and length are its own and not the stored series'; an axis read off the catalog would
+have claimed a grid the values file does not hold, while `data_hash` beside it is already recomputed
+from the sliced array.
+
+So `time_axis_of` takes the `TimeSeriesData` being exported, and the series file's
+`initial_timestamp`, `length` and `count` columns come from the same place (`table::grid_of`). The
+two sources agree for a whole-series export, which is every existing test; where they disagree the
+values are the ones the file holds. The spelling is unchanged, so an irregular series' axis is still
+exactly the catalog's `timestamps_hash` in hex.
+
+### 7.22 `--no-checksum` is a real CLI flag (§2.7, §2.10, decided 2026-09-07)
+
+§2.7 tells a user who edited values in DuckDB to "recompute the hash or pass `--no-checksum` (the
+existing `skip_checksum` option)", but §2.10 never lists the flag and the option was previously
+library-only, hard-wired to `false` — the old remedy was to drop the `data_hash` column. That remedy
+is gone: dropping the key column from a values file makes it a **foreign** file, which then needs
+`--name`, `--owner-id` and `--owner-type` and loses the series file entirely. `add --no-checksum`
+therefore exists, and waives only the comparison; the pair is still the join key.
+
+### 7.23 Foreign values files land with the merge join, not one phase later (§2.12 phases 2 and 4)
+
+Phase 2 replaces the single-table reader outright, so the old reader's foreign-file path had to go
+with it rather than be kept alive for a phase. Reading a lone values file as one group per distinct
+`(data_hash, time_axis)`, or as exactly one group when those columns are absent, is two lines of the
+same `ValuesReader`, so it is here. Phase 4's remaining work is the tests §2.12 names — foreign
+files with and without the key columns — plus whatever they turn up.
+
+### 7.24 Forecast round trips stay `#[ignore]`d for one more phase (§2.12 phases 2 and 3)
+
+Phase 2 is scoped to the static types, so the nine forecast tests in `long_round_trip.rs` and the
+CLI forecast test keep an `#[ignore]` whose reason now names phase 3. They still compile against the
+new reader, so the attribute is the only thing phase 3 removes.

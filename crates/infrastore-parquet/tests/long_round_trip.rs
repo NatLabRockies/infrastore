@@ -1,14 +1,12 @@
-//! Export to the partitioned files and read them back.
+//! Export a store to the values/series pairs and read them back.
 //!
 //! The property under test is that a store survives the trip: every static type,
-//! every element type, every timestamp spelling.
-//!
-//! **Every test here is `#[ignore]`d for one commit.** The export now writes the
-//! normalized values/series pair (§2.12 phase 1) and the reader that pairs them
-//! lands in phase 2; ignoring rather than deleting keeps what these assert
-//! visible, and phase 2 lifts the attribute rather than reinventing them. What is deliberately *not*
+//! every element type, every timestamp spelling. What is deliberately *not*
 //! preserved — the catalog id, a composite series' stored padding — is asserted
 //! too, because a silent change there would be worse than a loud one.
+//!
+//! The forecast tests at the end are still `#[ignore]`d: the export writes their
+//! partitions but the merge join reads them in §2.12 phase 3.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -20,7 +18,7 @@ use infrastore_core::{
     TypedArray, create_store,
 };
 use infrastore_parquet::read::{ImportOptions, ImportedSeries};
-use infrastore_parquet::{parquet_files, read_file, write_partitions};
+use infrastore_parquet::{PartitionFiles, partitions, read_partition, write_partitions};
 
 fn t0() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap()
@@ -71,8 +69,10 @@ fn round_trip(
     );
 
     let mut out = Vec::new();
-    for file in parquet_files(dir.path()).expect("the directory should list") {
-        out.extend(read_file(&file, &ImportOptions::default()).expect("the file should import"));
+    for files in partitions(dir.path()).expect("the directory should list") {
+        out.extend(
+            read_partition(&files, &ImportOptions::default()).expect("the partition should import"),
+        );
     }
     out.sort_by_key(|s| (s.owner_id, s.data.name().to_string()));
     (out, dir)
@@ -104,7 +104,6 @@ fn plain(items: Vec<(i64, TimeSeriesData)>) -> Vec<(i64, TimeSeriesData, Feature
 }
 
 #[test]
-#[ignore = "the normalized reader lands in the next commit (FEATURE_PLAN.md §2.12 phase 2)"]
 fn a_store_survives_the_round_trip() {
     let (back, _dir) = round_trip(plain(vec![
         (1, hourly("load", &[1.0, 2.0, 3.0])),
@@ -126,7 +125,6 @@ fn a_store_survives_the_round_trip() {
 }
 
 #[test]
-#[ignore = "the normalized reader lands in the next commit (FEATURE_PLAN.md §2.12 phase 2)"]
 fn the_values_round_trip_exactly() {
     // The improvement over CSV, where a float passes through decimal text.
     let awkward = [
@@ -148,7 +146,6 @@ fn the_values_round_trip_exactly() {
 }
 
 #[test]
-#[ignore = "the normalized reader lands in the next commit (FEATURE_PLAN.md §2.12 phase 2)"]
 fn every_descriptor_comes_back() {
     let mut inner = SingleTimeSeries::new(
         t0(),
@@ -188,7 +185,6 @@ fn every_descriptor_comes_back() {
 }
 
 #[test]
-#[ignore = "the normalized reader lands in the next commit (FEATURE_PLAN.md §2.12 phase 2)"]
 fn an_absent_descriptor_stays_absent() {
     // Written as the empty string so every column can be required, and mapped
     // back to absent here.
@@ -204,7 +200,6 @@ fn an_absent_descriptor_stays_absent() {
 }
 
 #[test]
-#[ignore = "the normalized reader lands in the next commit (FEATURE_PLAN.md §2.12 phase 2)"]
 fn a_stored_empty_string_reads_back_as_absent() {
     // The one documented consequence of §2.7. Asserted rather than left to be
     // discovered, because it is a real (if small) loss.
@@ -227,7 +222,6 @@ fn a_stored_empty_string_reads_back_as_absent() {
 }
 
 #[test]
-#[ignore = "the normalized reader lands in the next commit (FEATURE_PLAN.md §2.12 phase 2)"]
 fn the_irregular_types_keep_their_own_reading() {
     let stamps = vec![t0(), t0() + Duration::hours(1), t0() + Duration::hours(5)];
     let values = TypedArray::from_f64(vec![3], &[1.0, 2.0, 3.0]);
@@ -258,7 +252,6 @@ fn the_irregular_types_keep_their_own_reading() {
 }
 
 #[test]
-#[ignore = "the normalized reader lands in the next commit (FEATURE_PLAN.md §2.12 phase 2)"]
 fn every_element_type_round_trips() {
     // §2.5's whole table, in one export.
     let dense = SingleTimeSeries::new(
@@ -353,7 +346,6 @@ fn every_element_type_round_trips() {
 }
 
 #[test]
-#[ignore = "the normalized reader lands in the next commit (FEATURE_PLAN.md §2.12 phase 2)"]
 fn a_repadded_composite_comes_back_at_its_own_width() {
     // Two curves share a file and are padded to its widest; the import shrinks
     // each back to the width its own points need. The values are what must
@@ -390,7 +382,6 @@ fn a_repadded_composite_comes_back_at_its_own_width() {
 }
 
 #[test]
-#[ignore = "the normalized reader lands in the next commit (FEATURE_PLAN.md §2.12 phase 2)"]
 fn every_spelling_round_trips_including_unspecified() {
     let spelling = |name: &str, reference: Option<TimeReference>| {
         let mut inner = SingleTimeSeries::new(
@@ -429,7 +420,6 @@ fn every_spelling_round_trips_including_unspecified() {
 }
 
 #[test]
-#[ignore = "the normalized reader lands in the next commit (FEATURE_PLAN.md §2.12 phase 2)"]
 fn a_monthly_grid_survives_its_calendar() {
     let series = SingleTimeSeries::new(
         Utc.with_ymd_and_hms(2024, 1, 31, 0, 0, 0).unwrap(),
@@ -453,7 +443,6 @@ fn a_monthly_grid_survives_its_calendar() {
 }
 
 #[test]
-#[ignore = "the normalized reader lands in the next commit (FEATURE_PLAN.md §2.12 phase 2)"]
 fn the_id_is_reported_and_then_ignored() {
     let (back, _dir) = round_trip(plain(vec![(1, hourly("load", &[1.0]))]));
     // The file records it, so a --dry-run can say which row it came from.
@@ -463,11 +452,87 @@ fn the_id_is_reported_and_then_ignored() {
 }
 
 #[test]
-#[ignore = "the normalized reader lands in the next commit (FEATURE_PLAN.md §2.12 phase 2)"]
-fn a_series_that_reappears_is_refused() {
-    // The import streams, so it cannot stitch a series back together from rows
-    // scattered through a file -- and holding everything to allow that would
-    // give up what makes a large file importable.
+fn an_array_that_reappears_is_refused() {
+    // The merge join streams, so it cannot stitch a key back together from rows
+    // scattered through a file -- and holding a whole file to allow that would
+    // give up what makes a large partition importable.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let series = stored(plain(vec![
+        (1, hourly("a", &[1.0, 2.0])),
+        (2, hourly("b", &[3.0, 4.0])),
+    ]));
+    let report = write_partitions(dir.path(), &series).expect("export");
+    let files = &report.partitions[0];
+    assert_eq!(files.arrays, 2, "two different profiles, two arrays");
+
+    // Reorder the rows so the first array appears on both sides of the second.
+    let (schema, batch) = read_one(&files.values_path);
+    let indices = arrow::array::UInt32Array::from(vec![0u32, 2, 3, 1]);
+    let shuffled: Vec<arrow::array::ArrayRef> = batch
+        .columns()
+        .iter()
+        .map(|c| arrow::compute::take(c, &indices, None).unwrap())
+        .collect();
+    let shuffled = arrow::array::RecordBatch::try_new(schema.clone(), shuffled).expect("rebuild");
+    write_batch(&files.values_path, &shuffled);
+
+    let err = read_partition(&pair(&report), &ImportOptions::default()).expect_err("scattered");
+    assert!(err.to_string().contains("returns to array"), "{err}");
+    assert!(err.to_string().contains("sorted"), "{err}");
+}
+
+#[test]
+fn an_edited_value_fails_the_checksum() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let series = stored(plain(vec![(1, hourly("load", &[1.0, 2.0]))]));
+    let report = write_partitions(dir.path(), &series).expect("export");
+    let path = &report.partitions[0].values_path;
+
+    // Change a value without touching the key that names the array, which is
+    // what an edit in a query engine looks like.
+    let (schema, batch) = read_one(path);
+    let mut columns = batch.columns().to_vec();
+    let value_index = schema.index_of("value").unwrap();
+    columns[value_index] = std::sync::Arc::new(arrow::array::Float64Array::from(vec![9.0, 2.0]));
+    let edited = arrow::array::RecordBatch::try_new(schema, columns).expect("rebuild");
+    write_batch(path, &edited);
+
+    let err = read_partition(&pair(&report), &ImportOptions::default()).expect_err("checksum");
+    assert!(err.to_string().contains("data_hash"), "{err}");
+    assert!(err.to_string().contains("--no-checksum"), "{err}");
+}
+
+#[test]
+fn waiving_the_checksum_is_how_edited_values_get_in() {
+    // The pair is still the join key; only its meaning as a content hash is
+    // waived. Which is the whole remedy for a file a query engine rewrote.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let series = stored(plain(vec![(1, hourly("load", &[1.0, 2.0]))]));
+    let report = write_partitions(dir.path(), &series).expect("export");
+    let path = &report.partitions[0].values_path;
+
+    let (schema, batch) = read_one(path);
+    let mut columns = batch.columns().to_vec();
+    let value_index = schema.index_of("value").unwrap();
+    columns[value_index] = std::sync::Arc::new(arrow::array::Float64Array::from(vec![9.0, 2.0]));
+    let edited = arrow::array::RecordBatch::try_new(schema, columns).expect("rebuild");
+    write_batch(path, &edited);
+
+    let options = ImportOptions {
+        skip_checksum: true,
+        ..Default::default()
+    };
+    let back = read_partition(&pair(&report), &options).expect("waived");
+    let TimeSeriesData::SingleTimeSeries(s) = &back[0].data else {
+        panic!("expected a SingleTimeSeries");
+    };
+    assert_eq!(s.data.to_f64_vec().unwrap(), vec![9.0, 2.0]);
+}
+
+#[test]
+fn a_series_row_with_no_values_group_is_refused() {
+    // The two halves come from one export; a series row naming an array that is
+    // not in the values file means one of them was truncated.
     let dir = tempfile::tempdir().expect("tempdir");
     let series = stored(plain(vec![
         (1, hourly("a", &[1.0, 2.0])),
@@ -476,83 +541,121 @@ fn a_series_that_reappears_is_refused() {
     let report = write_partitions(dir.path(), &series).expect("export");
     let path = &report.partitions[0].values_path;
 
-    // Reorder the rows so owner 1 appears on both sides of owner 2. The
-    // `data_hash` column goes first, so the contiguity refusal is what surfaces
-    // rather than the truncated first group failing its checksum -- both are
-    // real, and this test is about the one that explains the fix.
+    // Keep only the first array's rows.
     let (schema, batch) = read_one(path);
-    let keep: Vec<usize> = (0..schema.fields().len())
-        .filter(|i| schema.field(*i).name() != "data_hash")
-        .collect();
-    let batch = batch.project(&keep).expect("project");
-    let indices = arrow::array::UInt32Array::from(vec![0u32, 2, 3, 1]);
-    let shuffled: Vec<arrow::array::ArrayRef> = batch
-        .columns()
-        .iter()
-        .map(|c| arrow::compute::take(c, &indices, None).unwrap())
-        .collect();
-    let shuffled = arrow::array::RecordBatch::try_new(batch.schema(), shuffled).expect("rebuild");
+    let truncated = batch.slice(0, 2);
+    write_batch(
+        path,
+        &arrow::array::RecordBatch::try_new(schema, truncated.columns().to_vec()).unwrap(),
+    );
 
-    let scrambled = dir.path().join("scrambled.parquet");
-    write_batch(&scrambled, &shuffled);
-    let err = read_file(&scrambled, &ImportOptions::default()).expect_err("not contiguous");
-    assert!(err.to_string().contains("appears again"), "{err}");
-    assert!(err.to_string().contains("sorted"), "{err}");
+    let err = read_partition(&pair(&report), &ImportOptions::default()).expect_err("dangling");
+    assert!(err.to_string().contains("does not hold"), "{err}");
 }
 
 #[test]
-#[ignore = "the normalized reader lands in the next commit (FEATURE_PLAN.md §2.12 phase 2)"]
-fn an_edited_value_fails_the_checksum() {
+fn a_values_group_no_series_row_names_is_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let series = stored(plain(vec![
+        (1, hourly("a", &[1.0, 2.0])),
+        (2, hourly("b", &[3.0, 4.0])),
+    ]));
+    let report = write_partitions(dir.path(), &series).expect("export");
+    let path = &report.partitions[0].series_path;
+
+    // Keep only the first catalog row, leaving the second array unclaimed.
+    let (schema, batch) = read_one(path);
+    let truncated = batch.slice(0, 1);
+    write_batch(
+        path,
+        &arrow::array::RecordBatch::try_new(schema, truncated.columns().to_vec()).unwrap(),
+    );
+
+    let err = read_partition(&pair(&report), &ImportOptions::default()).expect_err("dangling");
+    assert!(err.to_string().contains("no series row names"), "{err}");
+}
+
+#[test]
+fn a_series_file_with_no_values_file_is_refused() {
     let dir = tempfile::tempdir().expect("tempdir");
     let series = stored(plain(vec![(1, hourly("load", &[1.0, 2.0]))]));
     let report = write_partitions(dir.path(), &series).expect("export");
-    let path = &report.partitions[0].values_path;
+    std::fs::remove_file(&report.partitions[0].values_path).unwrap();
 
-    let (schema, batch) = read_one(path);
-    // Change a value without touching the recorded hash, which is what an edit
-    // in a query engine looks like if the column is kept.
-    let mut columns = batch.columns().to_vec();
-    let value_index = schema.index_of("value").unwrap();
-    columns[value_index] = std::sync::Arc::new(arrow::array::Float64Array::from(vec![9.0, 2.0]));
-    let edited = arrow::array::RecordBatch::try_new(batch.schema(), columns).expect("rebuild");
-    let edited_path = dir.path().join("edited.parquet");
-    write_batch(&edited_path, &edited);
-
-    let err = read_file(&edited_path, &ImportOptions::default()).expect_err("checksum");
-    assert!(err.to_string().contains("data_hash"), "{err}");
-    assert!(err.to_string().contains("drop"), "{err}");
+    let err = partitions(dir.path()).expect_err("its rows name nothing");
+    assert!(err.to_string().contains("has no"), "{err}");
+    assert!(err.to_string().contains("not there"), "{err}");
 }
 
 #[test]
-#[ignore = "the normalized reader lands in the next commit (FEATURE_PLAN.md §2.12 phase 2)"]
-fn dropping_the_hash_column_is_how_edited_values_get_in() {
+fn a_partition_can_be_named_by_its_stem() {
+    // A stem is neither file: it is the two of them, which is what the CLI's
+    // `--parquet <stem>` means.
     let dir = tempfile::tempdir().expect("tempdir");
     let series = stored(plain(vec![(1, hourly("load", &[1.0, 2.0]))]));
     let report = write_partitions(dir.path(), &series).expect("export");
-    let (schema, batch) = read_one(&report.partitions[0].values_path);
+    let stem = dir.path().join(&report.partitions[0].stem);
 
-    let keep: Vec<usize> = (0..schema.fields().len())
-        .filter(|i| schema.field(*i).name() != "data_hash")
-        .collect();
-    let projected = batch.project(&keep).expect("project");
-    let edited_values = arrow::array::Float64Array::from(vec![9.0, 2.0]);
-    let mut columns = projected.columns().to_vec();
-    let value_index = projected.schema().index_of("value").unwrap();
-    columns[value_index] = std::sync::Arc::new(edited_values);
-    let edited = arrow::array::RecordBatch::try_new(projected.schema(), columns).expect("rebuild");
-
-    let path = dir.path().join("no_hash.parquet");
-    write_batch(&path, &edited);
-    let back = read_file(&path, &ImportOptions::default()).expect("no column, no checksum");
-    let TimeSeriesData::SingleTimeSeries(s) = &back[0].data else {
-        panic!("expected a SingleTimeSeries");
-    };
-    assert_eq!(s.data.to_f64_vec().unwrap(), vec![9.0, 2.0]);
+    let found = partitions(&stem).expect("the stem names the pair");
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].values, report.partitions[0].values_path);
+    assert_eq!(
+        found[0].series.as_deref(),
+        Some(report.partitions[0].series_path.as_path())
+    );
+    assert_eq!(
+        read_partition(&found[0], &ImportOptions::default())
+            .expect("import")
+            .len(),
+        1
+    );
 }
 
 #[test]
-#[ignore = "the normalized reader lands in the next commit (FEATURE_PLAN.md §2.12 phase 2)"]
-fn a_directory_imports_every_file_in_it() {
+fn a_thousand_series_share_one_array() {
+    // The reason for the layout: a shared profile is written once, and the store
+    // it is re-imported into holds it once.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let profile = [1.0, 2.0, 3.0, 4.0];
+    let series = stored(plain(
+        (0..1000)
+            .map(|owner| (owner, hourly("load", &profile)))
+            .collect(),
+    ));
+    let report = write_partitions(dir.path(), &series).expect("export");
+    assert_eq!(report.partitions.len(), 1);
+    assert_eq!(report.arrays(), 1, "one profile, one array");
+    assert_eq!(report.series(), 1000);
+    assert_eq!(report.rows(), 4, "the values file holds the profile once");
+
+    let back = read_partition(&pair(&report), &ImportOptions::default()).expect("import");
+    assert_eq!(back.len(), 1000);
+    assert_eq!(
+        back.iter()
+            .map(|s| s.array.clone().expect("keyed"))
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        1,
+        "every series names the same array"
+    );
+
+    let mut store = create_store(None, true).expect("in-memory store");
+    for one in back {
+        store
+            .add_time_series(
+                one.owner_id,
+                &one.owner_type,
+                one.owner_category,
+                one.data,
+                one.features,
+            )
+            .expect("add");
+    }
+    assert_eq!(store.num_distinct_arrays().unwrap(), 1);
+}
+
+#[test]
+fn a_directory_imports_every_partition_in_it() {
     let dir = tempfile::tempdir().expect("tempdir");
     let series = stored(plain(vec![
         (1, hourly("load", &[1.0])),
@@ -571,12 +674,13 @@ fn a_directory_imports_every_file_in_it() {
     let report = write_partitions(dir.path(), &series).expect("export");
     assert_eq!(report.partitions.len(), 2);
 
-    let files = parquet_files(dir.path()).expect("list");
-    assert_eq!(files.len(), 2);
-    let total: usize = files
+    let found = partitions(dir.path()).expect("list");
+    assert_eq!(found.len(), 2, "two partitions, four files");
+    assert!(found.iter().all(|p| p.series.is_some()), "{found:?}");
+    let total: usize = found
         .iter()
-        .map(|f| {
-            read_file(f, &ImportOptions::default())
+        .map(|p| {
+            read_partition(p, &ImportOptions::default())
                 .expect("import")
                 .len()
         })
@@ -585,56 +689,56 @@ fn a_directory_imports_every_file_in_it() {
 }
 
 #[test]
-#[ignore = "the normalized reader lands in the next commit (FEATURE_PLAN.md §2.12 phase 2)"]
 fn a_directory_with_no_parquet_says_so() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let err = parquet_files(dir.path()).expect_err("nothing to import");
+    let err = partitions(dir.path()).expect_err("nothing to import");
     assert!(err.to_string().contains("no .parquet"), "{err}");
 }
 
 #[test]
-#[ignore = "the normalized reader lands in the next commit (FEATURE_PLAN.md §2.12 phase 2)"]
 fn a_file_from_a_later_format_is_refused_by_version() {
     let dir = tempfile::tempdir().expect("tempdir");
     let series = stored(plain(vec![(1, hourly("load", &[1.0]))]));
     let report = write_partitions(dir.path(), &series).expect("export");
-    let (schema, batch) = read_one(&report.partitions[0].values_path);
+    let path = &report.partitions[0].values_path;
+    let (schema, batch) = read_one(path);
 
     let mut metadata = schema.metadata().clone();
-    metadata.insert("infrastore.format".into(), "long_table_v99".into());
+    metadata.insert("infrastore.format".into(), "normalized_v99".into());
     let bumped = std::sync::Arc::new(arrow::datatypes::Schema::new_with_metadata(
         schema.fields().clone(),
         metadata,
     ));
     let batch = arrow::array::RecordBatch::try_new(bumped, batch.columns().to_vec()).unwrap();
-    let path = dir.path().join("future.parquet");
-    write_batch(&path, &batch);
+    write_batch(path, &batch);
 
-    let err = read_file(&path, &ImportOptions::default()).expect_err("a later format");
-    assert!(err.to_string().contains("long_table_v99"), "{err}");
-    assert!(err.to_string().contains("long_table_v1"), "{err}");
+    let err =
+        read_partition(&pair(&report), &ImportOptions::default()).expect_err("a later format");
+    assert!(err.to_string().contains("normalized_v99"), "{err}");
+    assert!(err.to_string().contains("normalized_v1"), "{err}");
 }
 
 #[test]
-#[ignore = "the normalized reader lands in the next commit (FEATURE_PLAN.md §2.12 phase 2)"]
 fn a_deterministic_single_time_series_points_at_transform() {
     // The type is derived rather than added, so a file naming it is a mistake
     // worth explaining.
     let dir = tempfile::tempdir().expect("tempdir");
     let series = stored(plain(vec![(1, hourly("load", &[1.0]))]));
     let report = write_partitions(dir.path(), &series).expect("export");
-    let (schema, batch) = read_one(&report.partitions[0].values_path);
+    // The type is a series-file column: the values file says nothing about it.
+    let path = &report.partitions[0].series_path;
+    let (schema, batch) = read_one(path);
 
     let mut columns = batch.columns().to_vec();
     let index = schema.index_of("time_series_type").unwrap();
     columns[index] = std::sync::Arc::new(arrow::array::StringArray::from(vec![
         "DeterministicSingleTimeSeries",
     ]));
-    let edited = arrow::array::RecordBatch::try_new(batch.schema(), columns).expect("rebuild");
-    let path = dir.path().join("dst.parquet");
-    write_batch(&path, &edited);
+    let edited = arrow::array::RecordBatch::try_new(schema, columns).expect("rebuild");
+    write_batch(path, &edited);
 
-    let err = read_file(&path, &ImportOptions::default()).expect_err("derived, not added");
+    let err =
+        read_partition(&pair(&report), &ImportOptions::default()).expect_err("derived, not added");
     assert!(
         err.to_string().contains("transform_single_time_series"),
         "{err}"
@@ -642,7 +746,6 @@ fn a_deterministic_single_time_series_points_at_transform() {
 }
 
 #[test]
-#[ignore = "the normalized reader lands in the next commit (FEATURE_PLAN.md §2.12 phase 2)"]
 fn a_foreign_file_infers_what_it_does_not_say() {
     use arrow::array::{ArrayRef, Float64Array, RecordBatch, TimestampMillisecondArray};
     use arrow::datatypes::{Field, Schema};
@@ -672,9 +775,10 @@ fn a_foreign_file_infers_what_it_does_not_say() {
         owner_type: Some("Bus".into()),
         ..Default::default()
     };
-    let back = read_file(&path, &options).expect("a foreign file imports");
+    let back = read_lone(&path, &options).expect("a foreign file imports");
     assert_eq!(back.len(), 1);
     assert_eq!(back[0].owner_id, 7);
+    assert_eq!(back[0].array, None, "a foreign file carries no array key");
     assert_eq!(back[0].owner_type, "Bus");
     // Evenly spaced rows read as a grid.
     let TimeSeriesData::SingleTimeSeries(s) = &back[0].data else {
@@ -685,7 +789,6 @@ fn a_foreign_file_infers_what_it_does_not_say() {
 }
 
 #[test]
-#[ignore = "the normalized reader lands in the next commit (FEATURE_PLAN.md §2.12 phase 2)"]
 fn nulls_are_refused_rather_than_coerced() {
     use arrow::array::{ArrayRef, Float64Array, RecordBatch, TimestampMillisecondArray};
     use arrow::datatypes::{Field, Schema};
@@ -714,12 +817,11 @@ fn nulls_are_refused_rather_than_coerced() {
         owner_type: Some("Bus".into()),
         ..Default::default()
     };
-    let err = read_file(&path, &options).expect_err("a null is not NaN");
+    let err = read_lone(&path, &options).expect_err("a null is not NaN");
     assert!(err.to_string().contains("nulls"), "{err}");
 }
 
 #[test]
-#[ignore = "the normalized reader lands in the next commit (FEATURE_PLAN.md §2.12 phase 2)"]
 fn a_foreign_file_takes_its_spelling_from_the_arrow_zone() {
     use arrow::array::{ArrayRef, Float64Array, RecordBatch, TimestampMillisecondArray};
     use arrow::datatypes::{Field, Schema};
@@ -752,7 +854,7 @@ fn a_foreign_file_takes_its_spelling_from_the_arrow_zone() {
         path
     };
     let reference = |path: &Path| {
-        let back = read_file(path, &options).expect("a foreign file imports");
+        let back = read_lone(path, &options).expect("a foreign file imports");
         let TimeSeriesData::SingleTimeSeries(s) = &back[0].data else {
             panic!("expected a SingleTimeSeries, got {:?}", back[0].data);
         };
@@ -774,60 +876,58 @@ fn a_foreign_file_takes_its_spelling_from_the_arrow_zone() {
 }
 
 #[test]
-#[ignore = "the normalized reader lands in the next commit (FEATURE_PLAN.md §2.12 phase 2)"]
 fn a_null_in_a_text_or_integer_column_is_refused() {
-    use arrow::array::{
-        ArrayRef, Float64Array, Int64Array, RecordBatch, StringArray, TimestampMillisecondArray,
-    };
-    use arrow::datatypes::{Field, Schema};
-
+    // A null is not an absent value: the format writes absent *as* the empty
+    // string precisely so that no column is nullable, and a null in an identity
+    // column would file the row under a different series.
     let dir = tempfile::tempdir().expect("tempdir");
-    let stamps = || -> ArrayRef {
-        std::sync::Arc::new(
-            TimestampMillisecondArray::from(vec![
-                t0().timestamp_millis(),
-                t0().timestamp_millis() + 3_600_000,
-            ])
-            .with_timezone("UTC"),
-        )
-    };
-    let values = || -> ArrayRef { std::sync::Arc::new(Float64Array::from(vec![1.0, 2.0])) };
-    let options = ImportOptions {
-        name: Some("load".into()),
-        owner_id: Some(1),
-        owner_type: Some("Bus".into()),
-        ..Default::default()
+    let series = stored(plain(vec![(1, hourly("load", &[1.0, 2.0]))]));
+    let report = write_partitions(dir.path(), &series).expect("export");
+    let path = &report.partitions[0].series_path;
+    let (schema, batch) = read_one(path);
+
+    let nulled = |column: &str, array: arrow::array::ArrayRef| {
+        let index = schema.index_of(column).unwrap();
+        let fields: Vec<arrow::datatypes::FieldRef> = schema
+            .fields()
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                if i == index {
+                    std::sync::Arc::new(arrow::datatypes::Field::new(
+                        f.name(),
+                        f.data_type().clone(),
+                        true,
+                    ))
+                } else {
+                    f.clone()
+                }
+            })
+            .collect();
+        let mut columns = batch.columns().to_vec();
+        columns[index] = array;
+        let relaxed = std::sync::Arc::new(arrow::datatypes::Schema::new_with_metadata(
+            arrow::datatypes::Fields::from(fields),
+            schema.metadata().clone(),
+        ));
+        let edited = arrow::array::RecordBatch::try_new(relaxed, columns).expect("rebuild");
+        write_batch(path, &edited);
+        read_partition(&pair(&report), &ImportOptions::default()).expect_err("a null is refused")
     };
 
-    // A null descriptor is not an absent one: absent is the empty string.
-    let units: ArrayRef = std::sync::Arc::new(StringArray::from(vec![Some("MW"), None]));
-    let schema = Schema::new(vec![
-        Field::new("timestamp", stamps().data_type().clone(), false),
-        Field::new("value", values().data_type().clone(), false),
-        Field::new("units", units.data_type().clone(), true),
-    ]);
-    let batch = RecordBatch::try_new(std::sync::Arc::new(schema), vec![stamps(), values(), units])
-        .expect("batch");
-    let path = dir.path().join("null_text.parquet");
-    write_batch(&path, &batch);
-    let err = read_file(&path, &options).expect_err("a null descriptor is refused");
+    let err = nulled(
+        "units",
+        std::sync::Arc::new(arrow::array::StringArray::from(vec![None::<&str>])),
+    );
     assert!(
         err.to_string().contains("`units` column has nulls"),
         "{err}"
     );
 
-    // A null identity column would file the rows under a different series.
-    let owner: ArrayRef = std::sync::Arc::new(Int64Array::from(vec![Some(1), None]));
-    let schema = Schema::new(vec![
-        Field::new("timestamp", stamps().data_type().clone(), false),
-        Field::new("value", values().data_type().clone(), false),
-        Field::new("owner_id", owner.data_type().clone(), true),
-    ]);
-    let batch = RecordBatch::try_new(std::sync::Arc::new(schema), vec![stamps(), values(), owner])
-        .expect("batch");
-    let path = dir.path().join("null_int.parquet");
-    write_batch(&path, &batch);
-    let err = read_file(&path, &options).expect_err("a null owner is refused");
+    let err = nulled(
+        "owner_id",
+        std::sync::Arc::new(arrow::array::Int64Array::from(vec![None::<i64>])),
+    );
     assert!(
         err.to_string().contains("`owner_id` column has nulls"),
         "{err}"
@@ -835,9 +935,8 @@ fn a_null_in_a_text_or_integer_column_is_refused() {
 }
 
 #[test]
-#[ignore = "the normalized reader lands in the next commit (FEATURE_PLAN.md §2.12 phase 2)"]
-fn a_file_streams_into_its_sink_one_series_at_a_time() {
-    use infrastore_parquet::read_file_with;
+fn a_partition_streams_into_its_sink_one_series_at_a_time() {
+    use infrastore_parquet::read_partition_with;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let series = stored(plain(vec![
@@ -846,21 +945,23 @@ fn a_file_streams_into_its_sink_one_series_at_a_time() {
         (3, hourly("c", &[5.0, 6.0])),
     ]));
     let report = write_partitions(dir.path(), &series).expect("export");
-    let path = &report.partitions[0].values_path;
+    let files = pair(&report);
 
-    // Every series reaches the sink, in file order, and the count says so.
+    // Every series reaches the sink, and the count says so. The order is the
+    // array key's, not the name's: the merge join walks the values file.
     let mut names = Vec::new();
-    let filed = read_file_with(path, &ImportOptions::default(), &mut |one| {
+    let filed = read_partition_with(&files, &ImportOptions::default(), &mut |one| {
         names.push(one.data.name().to_string());
         Ok(())
     })
     .expect("streams");
     assert_eq!(filed, 3);
+    names.sort();
     assert_eq!(names, ["a", "b", "c"]);
 
     // A sink error stops the read where it happened and comes back as it is.
     let mut seen = 0;
-    let err = read_file_with(path, &ImportOptions::default(), &mut |_| {
+    let err = read_partition_with(&files, &ImportOptions::default(), &mut |_| {
         seen += 1;
         if seen == 2 {
             Err(infrastore_core::TimeSeriesError::InvalidParameter(
@@ -876,7 +977,6 @@ fn a_file_streams_into_its_sink_one_series_at_a_time() {
 }
 
 #[test]
-#[ignore = "the normalized reader lands in the next commit (FEATURE_PLAN.md §2.12 phase 2)"]
 fn a_contradicting_assertion_is_an_error() {
     let dir = tempfile::tempdir().expect("tempdir");
     let series = stored(plain(vec![(1, hourly("load", &[1.0]))]));
@@ -885,11 +985,32 @@ fn a_contradicting_assertion_is_an_error() {
         element_type: Some(ElementType::Scalar(Dtype::I64)),
         ..Default::default()
     };
-    let err = read_file(&report.partitions[0].values_path, &options).expect_err("contradiction");
+    let err = read_partition(&pair(&report), &options).expect_err("contradiction");
     assert!(err.to_string().contains("asserted"), "{err}");
 }
 
 // ---- helpers ---------------------------------------------------------------
+
+/// The one partition an export wrote, as the pair the import takes.
+fn pair(report: &infrastore_parquet::ExportReport) -> PartitionFiles {
+    let written = &report.partitions[0];
+    PartitionFiles {
+        stem: written.stem.clone(),
+        values: written.values_path.clone(),
+        series: Some(written.series_path.clone()),
+    }
+}
+
+/// A lone Parquet file, which is what a foreign one is.
+fn read_lone(
+    path: &Path,
+    options: &ImportOptions,
+) -> Result<Vec<ImportedSeries>, infrastore_core::TimeSeriesError> {
+    let found = partitions(path)?;
+    assert_eq!(found.len(), 1);
+    assert!(found[0].series.is_none(), "a lone file has no series half");
+    read_partition(&found[0], options)
+}
 
 fn read_one(path: &Path) -> (arrow::datatypes::SchemaRef, arrow::array::RecordBatch) {
     let file = std::fs::File::open(path).unwrap();
@@ -927,7 +1048,7 @@ fn deterministic(name: &str) -> TimeSeriesData {
 }
 
 #[test]
-#[ignore = "the normalized reader lands in the next commit (FEATURE_PLAN.md §2.12 phase 2)"]
+#[ignore = "the merge join reads a forecast partition in FEATURE_PLAN.md §2.12 phase 3"]
 fn a_deterministic_forecast_round_trips() {
     let original = deterministic("day_ahead");
     let (back, _dir) = round_trip(plain(vec![(1, original.clone())]));
@@ -941,7 +1062,7 @@ fn a_deterministic_forecast_round_trips() {
 }
 
 #[test]
-#[ignore = "the normalized reader lands in the next commit (FEATURE_PLAN.md §2.12 phase 2)"]
+#[ignore = "the merge join reads a forecast partition in FEATURE_PLAN.md §2.12 phase 3"]
 fn a_probabilistic_forecast_keeps_its_percentiles() {
     // The core requires percentiles to be strictly increasing, so the import can
     // sort the lane labels -- which is what makes it independent of the row
@@ -972,7 +1093,7 @@ fn a_probabilistic_forecast_keeps_its_percentiles() {
 }
 
 #[test]
-#[ignore = "the normalized reader lands in the next commit (FEATURE_PLAN.md §2.12 phase 2)"]
+#[ignore = "the merge join reads a forecast partition in FEATURE_PLAN.md §2.12 phase 3"]
 fn a_scenarios_forecast_round_trips() {
     let values: Vec<f64> = (0..12).map(|i| i as f64).collect();
     let mut forecast = infrastore_core::Scenarios::new(
@@ -999,7 +1120,7 @@ fn a_scenarios_forecast_round_trips() {
 }
 
 #[test]
-#[ignore = "the normalized reader lands in the next commit (FEATURE_PLAN.md §2.12 phase 2)"]
+#[ignore = "the merge join reads a forecast partition in FEATURE_PLAN.md §2.12 phase 3"]
 fn a_multidimensional_forecast_round_trips() {
     let values: Vec<f64> = (0..12).map(|i| i as f64).collect();
     let mut forecast = infrastore_core::Deterministic::new(
@@ -1025,7 +1146,7 @@ fn a_multidimensional_forecast_round_trips() {
 }
 
 #[test]
-#[ignore = "the normalized reader lands in the next commit (FEATURE_PLAN.md §2.12 phase 2)"]
+#[ignore = "the merge join reads a forecast partition in FEATURE_PLAN.md §2.12 phase 3"]
 fn a_calendar_horizon_counts_its_steps_by_walking_the_grid() {
     // A month is not a fixed number of milliseconds, so `horizon / resolution`
     // is the wrong arithmetic.
@@ -1052,7 +1173,7 @@ fn a_calendar_horizon_counts_its_steps_by_walking_the_grid() {
 }
 
 #[test]
-#[ignore = "the normalized reader lands in the next commit (FEATURE_PLAN.md §2.12 phase 2)"]
+#[ignore = "the merge join reads a forecast partition in FEATURE_PLAN.md §2.12 phase 3"]
 fn forecast_rows_are_placed_by_coordinates_not_order() {
     // A query engine may rewrite a file in any order within a series; the
     // coordinates are what put each value back where it belongs.
@@ -1073,7 +1194,7 @@ fn forecast_rows_are_placed_by_coordinates_not_order() {
     let path = dir.path().join("reversed.parquet");
     write_batch(&path, &reversed);
 
-    let back = read_file(&path, &ImportOptions::default()).expect("import");
+    let back = read_lone(&path, &ImportOptions::default()).expect("import");
     let (TimeSeriesData::Deterministic(got), TimeSeriesData::Deterministic(want)) =
         (&back[0].data, &original)
     else {
@@ -1083,7 +1204,7 @@ fn forecast_rows_are_placed_by_coordinates_not_order() {
 }
 
 #[test]
-#[ignore = "the normalized reader lands in the next commit (FEATURE_PLAN.md §2.12 phase 2)"]
+#[ignore = "the merge join reads a forecast partition in FEATURE_PLAN.md §2.12 phase 3"]
 fn a_forecast_missing_its_grid_columns_is_refused() {
     // The rows say where a value belongs, not what the grid it belongs to is.
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1098,12 +1219,12 @@ fn a_forecast_missing_its_grid_columns_is_refused() {
     let path = dir.path().join("no_horizon.parquet");
     write_batch(&path, &projected);
 
-    let err = read_file(&path, &ImportOptions::default()).expect_err("no horizon");
+    let err = read_lone(&path, &ImportOptions::default()).expect_err("no horizon");
     assert!(err.to_string().contains("horizon"), "{err}");
 }
 
 #[test]
-#[ignore = "the normalized reader lands in the next commit (FEATURE_PLAN.md §2.12 phase 2)"]
+#[ignore = "the merge join reads a forecast partition in FEATURE_PLAN.md §2.12 phase 3"]
 fn a_forecast_short_of_its_grid_is_refused() {
     // A cube has no hole to leave, so a missing row cannot be filled in. The
     // count is checked first, which is the more useful message.
@@ -1120,12 +1241,12 @@ fn a_forecast_short_of_its_grid_is_refused() {
     let path = dir.path().join("short.parquet");
     write_batch(&path, &short);
 
-    let err = read_file(&path, &ImportOptions::default()).expect_err("a hole");
+    let err = read_lone(&path, &ImportOptions::default()).expect_err("a hole");
     assert!(err.to_string().contains("its grid holds"), "{err}");
 }
 
 #[test]
-#[ignore = "the normalized reader lands in the next commit (FEATURE_PLAN.md §2.12 phase 2)"]
+#[ignore = "the merge join reads a forecast partition in FEATURE_PLAN.md §2.12 phase 3"]
 fn a_forecast_with_two_rows_for_one_slot_is_refused() {
     // The right number of rows, but one coordinate twice -- so somewhere else
     // has none, and the two rows disagree about the same value.
@@ -1152,6 +1273,6 @@ fn a_forecast_with_two_rows_for_one_slot_is_refused() {
     let path = dir.path().join("doubled.parquet");
     write_batch(&path, &doubled);
 
-    let err = read_file(&path, &ImportOptions::default()).expect_err("a duplicate");
+    let err = read_lone(&path, &ImportOptions::default()).expect_err("a duplicate");
     assert!(err.to_string().contains("two rows for"), "{err}");
 }

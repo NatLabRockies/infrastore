@@ -254,11 +254,16 @@ enum Commands {
         /// (single-series descriptors only); without one it starts an inline add.
         #[arg(long)]
         csv: Option<PathBuf>,
-        /// Parquet file to load, repeatable. A file written by
-        /// `export -f parquet` is self-describing and needs no other flag; a
-        /// foreign one needs at least --owner-id and --owner-type.
-        #[arg(long, value_name = "FILE")]
+        /// Parquet partition to load, repeatable: a file, a directory, or a
+        /// partition stem. A pair written by `export -f parquet` is
+        /// self-describing and needs no other flag; a foreign values file needs
+        /// at least --owner-id and --owner-type.
+        #[arg(long, value_name = "PATH")]
         parquet: Vec<PathBuf>,
+        /// Waive the data_hash check on a --parquet load, for values edited in a
+        /// query engine without the hash being recomputed.
+        #[arg(long)]
+        no_checksum: bool,
         #[command(flatten)]
         inline: commands::add::InlineArgs,
         /// Resolve every descriptor and print what would be written, without
@@ -904,6 +909,7 @@ fn run(cli: &Cli) -> Result<(), String> {
             descriptor,
             csv,
             parquet,
+            no_checksum,
             inline,
             dry_run,
             replace,
@@ -923,6 +929,7 @@ fn run(cli: &Cli) -> Result<(), String> {
                     descriptor: descriptor.as_deref(),
                     csv: csv.as_deref(),
                     parquet,
+                    no_checksum: *no_checksum,
                     inline,
                     compression,
                     catalog: *catalog,

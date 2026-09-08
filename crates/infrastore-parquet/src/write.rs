@@ -230,7 +230,7 @@ pub fn array_key(row: &TimeSeriesMetadata, data: &TimeSeriesData) -> Result<Arra
     let leading = leading_shape(row, array);
     Ok(ArrayKey {
         data_hash: table::canonical_hash(array, row.element_type, &leading)?,
-        time_axis: table::time_axis_of(row)?,
+        time_axis: table::time_axis_of(data)?,
     })
 }
 
@@ -335,7 +335,8 @@ fn write_series_file(
     let mut builder = SeriesFileBuilder::new(table);
     for (key, members) in arrays {
         for index in members {
-            builder.push(key, &series[*index].0)?;
+            let (row, data) = &series[*index];
+            builder.push(key, row, data)?;
         }
     }
     if !builder.is_empty() {
@@ -410,15 +411,24 @@ impl<'a> SeriesFileBuilder<'a> {
         self.data_hash.is_empty()
     }
 
-    fn push(&mut self, key: &ArrayKey, row: &TimeSeriesMetadata) -> Result<()> {
+    /// The grid columns come from `data` rather than `row` for the reason
+    /// [`table::time_axis_of`] gives: `export --time-range` writes a slice, and
+    /// the catalog's anchor and length are the unsliced series'.
+    fn push(
+        &mut self,
+        key: &ArrayKey,
+        row: &TimeSeriesMetadata,
+        data: &TimeSeriesData,
+    ) -> Result<()> {
         let ts_type = self.table.key.time_series_type;
+        let grid = table::grid_of(data);
         self.data_hash.push(key.data_hash.clone());
         self.time_axis.push(key.time_axis.clone());
         self.id.push(row.id.map_or(0, |i| i.get()));
         self.owner_id.push(row.owner_id);
         if ts_type == TimeSeriesType::SingleTimeSeries || ts_type.is_forecast() {
             self.initial_timestamp.push(
-                row.initial_timestamp
+                grid.initial_timestamp
                     .ok_or_else(|| {
                         unsupported(format!(
                             "series '{}' is a {} but carries no initial_timestamp",
@@ -430,10 +440,10 @@ impl<'a> SeriesFileBuilder<'a> {
             );
         }
         if ts_type == TimeSeriesType::SingleTimeSeries {
-            self.length.push(row.length.unwrap_or(0) as i64);
+            self.length.push(grid.count.unwrap_or(0) as i64);
         }
         if ts_type.is_forecast() {
-            self.count.push(row.count.unwrap_or(0) as i64);
+            self.count.push(grid.count.unwrap_or(0) as i64);
         }
         for (name, value) in descriptor_row(ts_type, row) {
             self.text

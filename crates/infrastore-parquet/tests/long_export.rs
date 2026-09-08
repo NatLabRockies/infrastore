@@ -1123,7 +1123,7 @@ fn a_forecasts_per_step_shape_is_not_the_catalogs_element_shape() {
 /// The `time_axis` a stored series ends up with, without exporting it.
 fn axis_of(data: TimeSeriesData) -> String {
     let series = stored(vec![(1, data)]);
-    infrastore_parquet::table::time_axis_of(&series[0].0).expect("a time axis")
+    infrastore_parquet::table::time_axis_of(&series[0].1).expect("a time axis")
 }
 
 #[test]

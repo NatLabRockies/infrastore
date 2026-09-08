@@ -4761,7 +4761,9 @@ fn a_parquet_export_honors_the_time_range() {
             "2024-01-01T01:00:00Z..2024-01-01T03:00:00Z",
         ],
     );
-    let file = fs::read_dir(&out).unwrap().next().unwrap().unwrap().path();
+    // The values half, named rather than whichever `read_dir` returns first:
+    // the series half has one row whatever the range selects.
+    let file = out.join("SingleTimeSeries.f64.utc.values.parquet");
     let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
         fs::File::open(file).unwrap(),
     )
@@ -4774,10 +4776,9 @@ fn a_parquet_export_honors_the_time_range() {
 
 #[cfg(feature = "parquet")]
 #[test]
-#[ignore = "the normalized reader lands in the next commit (FEATURE_PLAN.md §2.12 phase 2)"]
-fn a_directory_import_commits_file_by_file() {
-    // The guarantee is per file: a malformed later partition fails the load,
-    // but the files before it are already committed and stay that way.
+fn a_directory_import_commits_partition_by_partition() {
+    // The guarantee is per partition: a malformed later one fails the load, but
+    // the partitions before it are already committed and stay that way.
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("src.h5");
     let dest = dir.path().join("dest.h5");
@@ -4787,12 +4788,21 @@ fn a_directory_import_commits_file_by_file() {
         &source,
         &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
     );
-    let good = fs::read_dir(&out).unwrap().next().unwrap().unwrap().path();
+    let stem = parquet_stem(&out);
 
     // Sorted import order: `a_good` is committed before `b_bad` is opened.
     let batch = dir.path().join("batch");
     fs::create_dir(&batch).unwrap();
-    fs::copy(&good, batch.join("a_good.parquet")).unwrap();
+    fs::copy(
+        out.join(format!("{stem}.values.parquet")),
+        batch.join("a_good.values.parquet"),
+    )
+    .unwrap();
+    fs::copy(
+        out.join(format!("{stem}.series.parquet")),
+        batch.join("a_good.series.parquet"),
+    )
+    .unwrap();
     fs::write(batch.join("b_bad.parquet"), b"this is not a parquet file").unwrap();
 
     let err = run_err(&dest, &["add", "--parquet", batch.to_str().unwrap()]);
@@ -4841,7 +4851,6 @@ fn a_stale_parquet_directory_is_refused_even_when_nothing_matches() {
 
 #[cfg(feature = "parquet")]
 #[test]
-#[ignore = "the normalized reader lands in the next commit (FEATURE_PLAN.md §2.12 phase 2)"]
 fn a_parquet_export_re_adds_with_no_flags() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("src.h5");
@@ -4853,10 +4862,9 @@ fn a_parquet_export_re_adds_with_no_flags() {
         &source,
         &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
     );
-    let file = fs::read_dir(&out).unwrap().next().unwrap().unwrap().path();
-
-    // Self-describing: the footer is the descriptor.
-    run(&dest, &["add", "--parquet", file.to_str().unwrap()]);
+    // Self-describing: the series half is the descriptor. The whole directory
+    // is what a user points at, and the pair is found by its stem.
+    run(&dest, &["add", "--parquet", out.to_str().unwrap()]);
 
     let listed = run(&dest, &["-f", "json", "list"]);
     let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
@@ -4881,7 +4889,6 @@ fn a_parquet_export_re_adds_with_no_flags() {
 
 #[cfg(feature = "parquet")]
 #[test]
-#[ignore = "the normalized reader lands in the next commit (FEATURE_PLAN.md §2.12 phase 2)"]
 fn a_parquet_dry_run_reports_the_plan_and_writes_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("src.h5");
@@ -4892,7 +4899,8 @@ fn a_parquet_dry_run_reports_the_plan_and_writes_nothing() {
         &source,
         &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
     );
-    let file = fs::read_dir(&out).unwrap().next().unwrap().unwrap().path();
+    // A stem names the pair, which is the third thing `--parquet` accepts.
+    let stem = out.join(parquet_stem(&out));
 
     let plan = run(
         &dest,
@@ -4901,7 +4909,7 @@ fn a_parquet_dry_run_reports_the_plan_and_writes_nothing() {
             "json",
             "add",
             "--parquet",
-            file.to_str().unwrap(),
+            stem.to_str().unwrap(),
             "--dry-run",
         ],
     );
@@ -4909,6 +4917,8 @@ fn a_parquet_dry_run_reports_the_plan_and_writes_nothing() {
     assert_eq!(plan["would_add"], 1);
     let file = &plan["files"][0];
     assert_eq!(file["series"], 1);
+    // The count this layout exists for: one series over one distinct array.
+    assert_eq!(file["arrays"], 1);
     assert_eq!(file["matches"][0]["name"], "load");
     assert_eq!(file["matches"][0]["owner_id"], 42);
     // The file records an id; `add` never accepts one, so it is reported here
@@ -4996,6 +5006,16 @@ fn parquet_and_the_csv_forms_are_mutually_exclusive() {
     assert!(err.contains("carries its own descriptor"), "{err}");
 }
 
+/// The single partition stem an export left in `dir`.
+#[cfg(feature = "parquet")]
+fn parquet_stem(dir: &Path) -> String {
+    fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .find_map(|name| name.strip_suffix(".values.parquet").map(str::to_string))
+        .expect("an export writes a values file")
+}
+
 /// A Parquet file with the right columns and no footer at all.
 #[cfg(feature = "parquet")]
 fn write_naked_parquet(path: &Path) {
@@ -5023,7 +5043,7 @@ fn write_naked_parquet(path: &Path) {
 
 #[cfg(feature = "parquet")]
 #[test]
-#[ignore = "the normalized reader lands in the next commit (FEATURE_PLAN.md §2.12 phase 2)"]
+#[ignore = "the merge join reads a forecast partition in FEATURE_PLAN.md §2.12 phase 3"]
 fn a_dense_forecast_round_trips_through_its_own_partition() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("fc.h5");
@@ -5081,7 +5101,6 @@ fn a_dense_forecast_round_trips_through_its_own_partition() {
 
 #[cfg(feature = "parquet")]
 #[test]
-#[ignore = "the normalized reader lands in the next commit (FEATURE_PLAN.md §2.12 phase 2)"]
 fn a_whole_directory_of_partitions_re_imports() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("src.h5");
@@ -5111,10 +5130,10 @@ fn a_whole_directory_of_partitions_re_imports() {
         &source,
         &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
     );
-    assert!(report.contains("2 files"), "{report}");
-    assert_eq!(fs::read_dir(&out).unwrap().count(), 2);
+    assert!(report.contains("2 partitions"), "{report}");
+    assert_eq!(fs::read_dir(&out).unwrap().count(), 4, "two pairs");
 
-    // One `--parquet` pointing at the directory takes both files.
+    // One `--parquet` pointing at the directory takes both partitions.
     run(&dest, &["add", "--parquet", out.to_str().unwrap()]);
     let listed = run(&dest, &["-f", "json", "list"]);
     let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();

@@ -13,7 +13,7 @@ use std::sync::Arc;
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use chrono::{DateTime, SecondsFormat, Utc};
 use infrastore_core::{
-    ElementType, Period, TimeReference, TimeSeriesMetadata, TimeSeriesType, TypedArray, array_hash,
+    ElementType, Period, TimeReference, TimeSeriesData, TimeSeriesType, TypedArray, array_hash,
     hash_hex, timestamps_hash,
 };
 
@@ -80,16 +80,13 @@ pub struct ArrayKey {
     pub time_axis: String,
 }
 
-/// The `time_axis` spelling for one catalog row.
-///
-/// One string per type, spelling the catalog fields that decide where a value
-/// row sits in time — because those, not the array bytes, are what a shared
-/// array does *not* carry:
+/// One string per type, spelling what decides where a value row sits in time —
+/// because that, not the array bytes, is what a shared array does *not* carry:
 ///
 /// | Type | `time_axis` |
 /// | --- | --- |
 /// | `SingleTimeSeries` | `R<length>/<initial>/<resolution>`, an ISO 8601 repeating interval |
-/// | the two irregular types | the catalog's `timestamps_hash`, hex |
+/// | the two irregular types | the `timestamps_hash` of its own axis, hex — the catalog's key for it |
 /// | dense forecasts | `R<count>/<initial>/<interval>/<horizon>/<resolution>` |
 ///
 /// The instant is spelled in **UTC** whatever the partition's `time_reference`;
@@ -98,44 +95,101 @@ pub struct ArrayKey {
 /// A forecast needs its horizon as well as its interval because the horizon's own
 /// step decides how many `target_time` rows a window has — two forecasts sharing
 /// an array, an anchor and an interval but not a horizon are different tables.
-pub fn time_axis_of(row: &TimeSeriesMetadata) -> Result<String> {
-    match row.time_series_type {
-        TimeSeriesType::SingleTimeSeries => Ok(format!(
+///
+/// Read off the **values being exported** rather than off the catalog row. The
+/// two agree for a whole-series export, and where they do not the values are
+/// right: `export --time-range` hands back a slice whose anchor and length are
+/// its own, and the catalog's are the unsliced series'. The row is also allowed
+/// to carry less than the axis needs — `list_metadata` leaves `timestamps`
+/// unpopulated, since materializing every irregular axis to list a catalog would
+/// be absurd — while the values always carry all of it.
+pub fn time_axis_of(data: &TimeSeriesData) -> Result<String> {
+    Ok(match data {
+        TimeSeriesData::SingleTimeSeries(s) => format!(
             "R{}/{}/{}",
-            required_usize(row.length, "length", row)?,
-            instant(required_instant(
-                row.initial_timestamp,
-                "initial_timestamp",
-                row
-            )?),
-            required_period(row.resolution, "resolution", row)?.to_iso8601(),
-        )),
-        TimeSeriesType::NonSequentialTimeSeries | TimeSeriesType::PersistentTimeSeries => {
-            let timestamps = row.timestamps.as_ref().ok_or_else(|| {
-                unsupported(format!(
-                    "series '{}' is a {} but its catalog row carries no timestamps",
-                    row.name,
-                    row.time_series_type.as_str()
-                ))
-            })?;
-            Ok(hash_hex(&timestamps_hash(timestamps)))
+            s.length,
+            instant(s.initial_timestamp),
+            s.resolution.to_iso8601()
+        ),
+        TimeSeriesData::NonSequentialTimeSeries(s) => hash_hex(&timestamps_hash(&s.timestamps)),
+        TimeSeriesData::PersistentTimeSeries(s) => hash_hex(&timestamps_hash(&s.timestamps)),
+        TimeSeriesData::Deterministic(f) => forecast_axis(
+            f.count,
+            f.initial_timestamp,
+            f.interval,
+            f.horizon,
+            f.resolution,
+        ),
+        TimeSeriesData::Probabilistic(f) => forecast_axis(
+            f.count,
+            f.initial_timestamp,
+            f.interval,
+            f.horizon,
+            f.resolution,
+        ),
+        TimeSeriesData::Scenarios(f) => forecast_axis(
+            f.count,
+            f.initial_timestamp,
+            f.interval,
+            f.horizon,
+            f.resolution,
+        ),
+    })
+}
+
+fn forecast_axis(
+    count: usize,
+    initial: DateTime<Utc>,
+    interval: Period,
+    horizon: Period,
+    resolution: Period,
+) -> String {
+    format!(
+        "R{count}/{}/{}/{}/{}",
+        instant(initial),
+        interval.to_iso8601(),
+        horizon.to_iso8601(),
+        resolution.to_iso8601()
+    )
+}
+
+/// Where a series' own grid columns come from: the values, for the reason
+/// [`time_axis_of`] gives.
+///
+/// `initial_timestamp` and `count` are `None` for the two irregular types, which
+/// have neither.
+pub struct Grid {
+    pub initial_timestamp: Option<DateTime<Utc>>,
+    /// The `length` column for a `SingleTimeSeries`, the `count` column for a
+    /// forecast, and nothing for the irregular types.
+    pub count: Option<usize>,
+}
+
+/// The grid a series' own values describe.
+pub fn grid_of(data: &TimeSeriesData) -> Grid {
+    match data {
+        TimeSeriesData::SingleTimeSeries(s) => Grid {
+            initial_timestamp: Some(s.initial_timestamp),
+            count: Some(s.length),
+        },
+        TimeSeriesData::NonSequentialTimeSeries(_) | TimeSeriesData::PersistentTimeSeries(_) => {
+            Grid {
+                initial_timestamp: None,
+                count: None,
+            }
         }
-        ts_type if ts_type.is_forecast() => Ok(format!(
-            "R{}/{}/{}/{}/{}",
-            required_usize(row.count, "count", row)?,
-            instant(required_instant(
-                row.initial_timestamp,
-                "initial_timestamp",
-                row
-            )?),
-            required_period(row.interval, "interval", row)?.to_iso8601(),
-            required_period(row.horizon, "horizon", row)?.to_iso8601(),
-            required_period(row.resolution, "resolution", row)?.to_iso8601(),
-        )),
-        other => Err(unsupported(format!(
-            "no time_axis spelling for {}",
-            other.as_str()
-        ))),
+        TimeSeriesData::Deterministic(f) => Grid {
+            initial_timestamp: Some(f.initial_timestamp),
+            count: Some(f.count),
+        },
+        TimeSeriesData::Probabilistic(f) => Grid {
+            initial_timestamp: Some(f.initial_timestamp),
+            count: Some(f.count),
+        },
+        TimeSeriesData::Scenarios(f) => Grid {
+            initial_timestamp: Some(f.initial_timestamp),
+            count: Some(f.count),
+        },
     }
 }
 
@@ -143,30 +197,6 @@ pub fn time_axis_of(row: &TimeSeriesMetadata) -> Result<String> {
 /// sub-second digits only when there are any.
 fn instant(at: DateTime<Utc>) -> String {
     at.to_rfc3339_opts(SecondsFormat::AutoSi, true)
-}
-
-fn required_usize(value: Option<usize>, field: &str, row: &TimeSeriesMetadata) -> Result<usize> {
-    value.ok_or_else(|| missing(field, row))
-}
-
-fn required_instant(
-    value: Option<DateTime<Utc>>,
-    field: &str,
-    row: &TimeSeriesMetadata,
-) -> Result<DateTime<Utc>> {
-    value.ok_or_else(|| missing(field, row))
-}
-
-fn required_period(value: Option<Period>, field: &str, row: &TimeSeriesMetadata) -> Result<Period> {
-    value.ok_or_else(|| missing(field, row))
-}
-
-fn missing(field: &str, row: &TimeSeriesMetadata) -> infrastore_core::TimeSeriesError {
-    unsupported(format!(
-        "series '{}' is a {} but its catalog row carries no {field}, which its time axis needs",
-        row.name,
-        row.time_series_type.as_str()
-    ))
 }
 
 /// The two Arrow schemas one partition writes, plus what the partition settled

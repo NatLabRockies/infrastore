@@ -235,9 +235,17 @@ impl InlineArgs {
 pub struct Options<'a> {
     pub descriptor: Option<&'a Path>,
     pub csv: Option<&'a Path>,
-    /// Parquet files to load, one series each. Mutually exclusive with the
-    /// descriptor and CSV forms: a Parquet file carries its own descriptor.
+    /// Parquet partitions to load: a file, a directory, or a stem. Mutually
+    /// exclusive with the descriptor and CSV forms, because a partition's series
+    /// file *is* the descriptor.
     pub parquet: &'a [PathBuf],
+    /// Waive the `data_hash` comparison the array key doubles as.
+    ///
+    /// Only the Parquet path reads it, so a build without that feature has a
+    /// flag it parses and does not use — which is what every other `--parquet`
+    /// argument does too, and better than a flag that vanishes from `--help`.
+    #[cfg_attr(not(feature = "parquet"), allow(dead_code))]
+    pub no_checksum: bool,
     pub inline: &'a InlineArgs,
     pub compression: Option<Compression>,
     pub catalog: CatalogChoice,
@@ -302,7 +310,7 @@ pub fn run(store_path: &Path, opts: &Options<'_>) -> Result<(), String> {
         // larger than memory, and holding it would defeat the format.
         if let Some((setup, files)) = &parquet {
             for (i, file) in files.iter().enumerate() {
-                total += import_parquet_file(
+                total += import_parquet_partition(
                     file,
                     setup,
                     &mut store,
@@ -652,12 +660,14 @@ impl Progress {
 
 // ---- Parquet ----------------------------------------------------------------
 
-/// What every `--parquet` file is read with: the inline flags, resolved once.
+/// What every `--parquet` partition is read with: the inline flags, resolved
+/// once.
 ///
-/// A file written by `export -f parquet` carries the whole catalog row as
-/// columns, so this needs no other flag. A **foreign** file — anything else's
-/// Parquet — carries less, and `--owner-id`, `--owner-type` and `--name` supply
-/// what is missing.
+/// A partition written by `export -f parquet` carries the whole catalog row in
+/// its series file, so this needs no other flag. A **foreign** values file —
+/// anything else's Parquet, or one of ours with no series file beside it —
+/// carries less, and `--owner-id`, `--owner-type` and `--name` supply what is
+/// missing.
 ///
 /// The inline flags override a column for every series in the file, with one
 /// exception that follows the project's usual rule: `--element-type` is an
@@ -690,14 +700,18 @@ impl ParquetImport {
 
 /// Resolve the flags and discover every file, before anything is read.
 ///
-/// A path may be a **file or a directory**; a directory takes every `.parquet`
-/// in it, sorted. Discovery is separate from reading so that a malformed later
-/// file is found while its predecessors are being committed, not before any of
-/// them is: each file is its own transaction (see [`import_parquet_file`]),
-/// and a directory import is all-or-nothing per file rather than across the
-/// whole directory. Re-running after a fix does not redo the committed ones.
+/// A path may be a **file, a directory, or a partition stem**; a directory takes
+/// every partition in it, sorted, pairing each `.values.parquet` with the
+/// `.series.parquet` beside it. Discovery is separate from reading so that a
+/// malformed later partition is found while its predecessors are being
+/// committed, not before any of them is: each partition is its own transaction
+/// (see [`import_parquet_partition`]), and a directory import is all-or-nothing
+/// per partition rather than across the whole directory. Re-running after a fix
+/// does not redo the committed ones.
 #[cfg(feature = "parquet")]
-fn parquet_import(opts: &Options<'_>) -> Result<(ParquetImport, Vec<PathBuf>), String> {
+fn parquet_import(
+    opts: &Options<'_>,
+) -> Result<(ParquetImport, Vec<infrastore_parquet::PartitionFiles>), String> {
     if opts.descriptor.is_some() || opts.csv.is_some() {
         return Err(
             "--parquet carries its own descriptors; drop --descriptor and --csv".to_string(),
@@ -715,25 +729,25 @@ fn parquet_import(opts: &Options<'_>) -> Result<(ParquetImport, Vec<PathBuf>), S
     };
     let mut files = Vec::new();
     for path in opts.parquet {
-        files.extend(infrastore_parquet::parquet_files(path).map_err(|e| e.to_string())?);
+        files.extend(infrastore_parquet::partitions(path).map_err(|e| e.to_string())?);
     }
     Ok((setup, files))
 }
 
-/// Stream one file into the store as one transaction.
+/// Stream one partition into the store as one transaction.
 ///
-/// Each series is added the moment the reader finishes it, inside a transaction
-/// opened on the first one and committed after the last, so the file is
-/// all-or-nothing without ever being in memory at once. A read or write error
-/// rolls the transaction back, leaving the store as it was before this file and
-/// every earlier file's commit intact.
+/// Each series is added the moment the merge join finishes it, inside a
+/// transaction opened on the first one and committed after the last, so the
+/// partition is all-or-nothing without ever being in memory at once. A read or
+/// write error rolls the transaction back, leaving the store as it was before
+/// this partition and every earlier partition's commit intact.
 ///
 /// The store is still opened lazily, on the first series: `add` creates a
-/// missing store, and a file that turns out to hold nothing readable should not
-/// leave an empty artifact behind.
+/// missing store, and a partition that turns out to hold nothing readable
+/// should not leave an empty artifact behind.
 #[cfg(feature = "parquet")]
-fn import_parquet_file(
-    file: &Path,
+fn import_parquet_partition(
+    file: &infrastore_parquet::PartitionFiles,
     setup: &ParquetImport,
     store: &mut Option<Store>,
     open: &dyn Fn() -> Result<Store, String>,
@@ -747,7 +761,7 @@ fn import_parquet_file(
     let mut in_transaction = false;
     let mut count = 0usize;
 
-    let streamed = infrastore_parquet::read_file_with(file, &setup.options, &mut |one| {
+    let streamed = infrastore_parquet::read_partition_with(file, &setup.options, &mut |one| {
         let request = setup.request(one);
         if store.is_none() {
             match open() {
@@ -794,7 +808,7 @@ fn import_parquet_file(
         Ok(_) => Ok(count),
         Err(e) => Err(side_error
             .take()
-            .unwrap_or_else(|| format!("reading {}: {e}", file.display()))),
+            .unwrap_or_else(|| format!("reading {}: {e}", file.label()))),
     };
     if in_transaction {
         let target = store.as_mut().expect("a transaction is open on it");
@@ -802,7 +816,7 @@ fn import_parquet_file(
             Ok(_) => target.commit_transaction().map_err(|e| e.to_string())?,
             Err(_) => {
                 if let Err(e) = target.rollback_transaction() {
-                    tracing::warn!(error = %e, file = %file.display(), "rolling back the file's transaction failed");
+                    tracing::warn!(error = %e, partition = %file.label(), "rolling back the partition's transaction failed");
                 }
             }
         }
@@ -810,26 +824,36 @@ fn import_parquet_file(
     outcome
 }
 
-/// Collect what a load would write, per file, without writing.
+/// Collect what a load would write, per partition, without writing.
 ///
-/// Still streamed: each series is reduced to its summary line as it is read,
-/// so a dry run over a large directory costs no more memory than the load.
+/// Still streamed: each series is reduced to its summary line as it is read, so
+/// a dry run over a large directory costs no more memory than the load. The
+/// distinct-array count is the one number this layout exists for: a thousand
+/// components sharing one profile is a thousand series over **one** array.
 #[cfg(feature = "parquet")]
-fn parquet_dry_run(setup: &ParquetImport, files: &[PathBuf]) -> Result<Vec<ParquetBatch>, String> {
+fn parquet_dry_run(
+    setup: &ParquetImport,
+    files: &[infrastore_parquet::PartitionFiles],
+) -> Result<Vec<ParquetBatch>, String> {
     let mut batches = Vec::with_capacity(files.len());
     for file in files {
         let mut series = Vec::new();
         let mut ignored_ids = Vec::new();
-        infrastore_parquet::read_file_with(file, &setup.options, &mut |one| {
+        let mut arrays = std::collections::HashSet::new();
+        infrastore_parquet::read_partition_with(file, &setup.options, &mut |one| {
             if let Some(id) = one.recorded_id {
                 ignored_ids.push(id);
+            }
+            if let Some(key) = one.array.clone() {
+                arrays.insert(key);
             }
             series.push(ParquetSummary::of(&setup.request(one)));
             Ok(())
         })
-        .map_err(|e| format!("reading {}: {e}", file.display()))?;
+        .map_err(|e| format!("reading {}: {e}", file.label()))?;
         batches.push(ParquetBatch {
-            path: file.clone(),
+            label: file.label(),
+            arrays: arrays.len(),
             series,
             ignored_ids,
         });
@@ -837,9 +861,12 @@ fn parquet_dry_run(setup: &ParquetImport, files: &[PathBuf]) -> Result<Vec<Parqu
     Ok(batches)
 }
 
-/// One file's worth of a dry run: what it holds and what was thrown away.
+/// One partition's worth of a dry run: what it holds and what was thrown away.
 pub struct ParquetBatch {
-    pub path: PathBuf,
+    /// The partition's stem, or a foreign file's path.
+    pub label: String,
+    /// How many **distinct** arrays its series read between them.
+    pub arrays: usize,
     pub series: Vec<ParquetSummary>,
     /// The ids the file recorded, reported at `--dry-run` and then dropped.
     ///
@@ -912,7 +939,7 @@ fn parquet_options(opts: &Options<'_>) -> Result<infrastore_parquet::read::Impor
             })
             .transpose()?,
         features: inline_features(opts)?,
-        skip_checksum: false,
+        skip_checksum: opts.no_checksum,
     })
 }
 
@@ -938,7 +965,7 @@ fn parquet_import(_opts: &Options<'_>) -> Result<(ParquetImport, Vec<PathBuf>), 
 }
 
 #[cfg(not(feature = "parquet"))]
-fn import_parquet_file(
+fn import_parquet_partition(
     _file: &Path,
     _setup: &ParquetImport,
     _store: &mut Option<Store>,
@@ -964,10 +991,11 @@ fn without_parquet() -> String {
         .to_string()
 }
 
-/// Report what a Parquet load would write, per file.
+/// Report what a Parquet load would write, per partition.
 ///
-/// Per file rather than flattened, because a directory import is one transaction
-/// per file and a caller deciding whether to run it wants to see that shape.
+/// Per partition rather than flattened, because a directory import is one
+/// transaction per partition and a caller deciding whether to run it wants to
+/// see that shape.
 /// The ignored ids are reported here and nowhere else: this is the only moment
 /// where saying "the file names id 7 and the store will not use it" is useful.
 fn report_parquet_dry_run(batches: &[ParquetBatch], format: Format) -> Result<(), String> {
@@ -978,8 +1006,9 @@ fn report_parquet_dry_run(batches: &[ParquetBatch], format: Format) -> Result<()
                 .iter()
                 .map(|b| {
                     json!({
-                        "file": b.path.display().to_string(),
+                        "file": b.label,
                         "series": b.series.len(),
+                        "arrays": b.arrays,
                         "ignored_ids": b.ignored_ids,
                         "matches": b
                             .series
@@ -1006,9 +1035,10 @@ fn report_parquet_dry_run(batches: &[ParquetBatch], format: Format) -> Result<()
         _ => {
             for one in batches {
                 println!(
-                    "{} — {} series{}",
-                    one.path.display(),
+                    "{} — {} series over {} arrays{}",
+                    one.label,
                     one.series.len(),
+                    one.arrays,
                     if one.ignored_ids.is_empty() {
                         String::new()
                     } else {
