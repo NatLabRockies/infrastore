@@ -690,10 +690,10 @@ NonSequentialTimeSeries.from_arrow(table, name="irregular")
 PersistentTimeSeries.from_arrow(table, name="steps")
 ```
 
-The rules are the same ones `infrastore add --parquet` applies, and they are stated once in the
-[CLI reference](cli.md#parquet-import) so the two implementations cannot drift apart quietly. In
-short: what the metadata says is used; what it does not say is inferred from the Arrow schema,
-taking the reading that assumes least.
+The inference rules are the ones `infrastore add --parquet` applies to a foreign file, stated once
+under [Foreign files](parquet-format.md#foreign-files) in the Parquet layout reference so the two
+implementations cannot drift apart quietly. In short: what the metadata says is used; what it does
+not say is inferred from the Arrow schema, taking the reading that assumes least.
 
 | Missing          | Read as                                                                                                                                                                         |
 | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
