@@ -862,6 +862,38 @@ fn arrow_table_from_column<'py>(
     pa.call_method("table", (columns,), Some(&kwargs))
 }
 
+/// A list of integers as a JSON array: `[]`, `[3]`, `[2,3]`.
+///
+/// Hand-rolled rather than through `serde_json`, which is not otherwise a
+/// dependency of this crate: a list of `usize` has no escaping, no float
+/// formatting, and no failure mode.
+fn json_int_list(values: &[usize]) -> String {
+    let mut out = String::from("[");
+    for (i, v) in values.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&v.to_string());
+    }
+    out.push(']');
+    out
+}
+
+/// What the `time_reference` metadata key holds for a series that records no
+/// spelling.
+///
+/// Deliberately **not** a `TimeReference` variant and not something
+/// `TimeReference::parse` accepts: unspecified is `None`, not a fourth kind of
+/// reference, and teaching the core's parser this literal would also make
+/// `time_reference="unspecified"` a thing a constructor accepted. It is a
+/// metadata encoding, and `from_arrow` decodes it back to `None`.
+///
+/// The CLI's Parquet export writes the same literal
+/// (`infrastore_parquet::schema::UNSPECIFIED_REFERENCE`); the pytest
+/// `test_the_unspecified_literal_is_the_one_the_cli_writes` pins the two
+/// together, since the two producers must agree on it exactly.
+const UNSPECIFIED_REFERENCE: &str = "unspecified";
+
 /// The descriptive attributes a `to_arrow` table carries as schema metadata.
 ///
 /// A macro for the same reason as `apply_descriptors!`: the three static types
@@ -874,6 +906,17 @@ macro_rules! arrow_metadata {
         meta.insert("time_series_type".to_string(), $type_name.to_string());
         meta.insert("name".to_string(), $inner.name.clone());
         meta.insert("element_type".to_string(), $inner.element_type.to_string());
+        // A JSON list, `[]` for a scalar element, and written even when empty
+        // unlike the descriptors below: an absent descriptor means "not
+        // declared", where an empty shape is a fact about the data. It is
+        // recoverable from the value column's own nested type, and is here so a
+        // reader that only opens the footer does not have to walk it -- and
+        // because the CLI's Parquet export writes it, and the two producers
+        // write one schema.
+        meta.insert(
+            "element_shape".to_string(),
+            json_int_list($inner.data.element_shape()),
+        );
         if let Some(v) = &$inner.units {
             meta.insert("units".to_string(), v.clone());
         }
@@ -889,14 +932,327 @@ macro_rules! arrow_metadata {
         if let Some(v) = &$inner.application_data {
             meta.insert("application_data".to_string(), v.clone());
         }
-        if let Some(v) = &$inner.time_reference {
-            meta.insert(
-                "time_reference".to_string(),
-                core_lib::TimeReference::as_storage_string(v),
-            );
-        }
+        // Written for every series, unlike the descriptors above. An absent
+        // descriptor means "not declared"; an absent reference would mean "read
+        // it off the timestamp column's zone", and an unspecified reference
+        // writes a UTC-zoned column -- so it would come back as `utc`, a claim
+        // the series never made. `UNSPECIFIED_REFERENCE` says so instead.
+        meta.insert(
+            "time_reference".to_string(),
+            $inner.time_reference.as_ref().map_or_else(
+                || UNSPECIFIED_REFERENCE.to_string(),
+                core_lib::TimeReference::as_storage_string,
+            ),
+        );
         meta
     }};
+}
+
+// ---- Arrow import ---------------------------------------------------------
+//
+// `from_arrow` is the inverse of `to_arrow`, and reads a *foreign* table too --
+// anything with a `timestamp` and a `value` column, whether or not it carries
+// the schema metadata `to_arrow` writes. The rules it applies when the metadata
+// is silent are the same ones the CLI's Parquet import applies, and they are
+// documented in one place (the CLI reference's "Parquet import") so the two
+// implementations cannot drift apart quietly.
+
+/// The pieces of an Arrow table this binding reads back.
+struct ArrowParts<'py> {
+    /// Instants in unix milliseconds.
+    millis: Vec<i64>,
+    /// The timestamp column's own zone, if it declares one.
+    zone: Option<String>,
+    /// The values as a numpy array shaped `(rows, *element_shape)`.
+    values: Bound<'py, PyAny>,
+    /// The schema metadata, decoded from its bytes keys and values.
+    metadata: BTreeMap<String, String>,
+}
+
+/// Pull a `pyarrow.Table` apart into the pieces a constructor needs.
+fn arrow_parts<'py>(py: Python<'py>, table: &Bound<'py, PyAny>) -> PyResult<ArrowParts<'py>> {
+    let pa = pyarrow(py)?;
+    let metadata = arrow_metadata_map(table)?;
+    let (millis, zone) = arrow_instants(&pa, table)?;
+    let values = arrow_values(&pa, table, millis.len())?;
+    Ok(ArrowParts {
+        millis,
+        zone,
+        values,
+        metadata,
+    })
+}
+
+/// `table.schema.metadata` as text. Absent (the schema carries none) is an empty
+/// map, not an error: a foreign table is expected to have none.
+fn arrow_metadata_map(table: &Bound<'_, PyAny>) -> PyResult<BTreeMap<String, String>> {
+    let raw = table.getattr("schema")?.getattr("metadata")?;
+    let mut out = BTreeMap::new();
+    if raw.is_none() {
+        return Ok(out);
+    }
+    let dict: Bound<'_, PyDict> = raw.extract().map_err(|_| {
+        InvalidParameterError::new_err("table.schema.metadata is not a mapping".to_string())
+    })?;
+    for (key, value) in dict.iter() {
+        // Arrow stores both halves as bytes. A key or value that is not UTF-8
+        // was not written by this project, so it is skipped rather than
+        // erroring: a foreign table may carry metadata of its own.
+        let (Ok(key), Ok(value)) = (bytes_to_string(&key), bytes_to_string(&value)) else {
+            continue;
+        };
+        out.insert(key, value);
+    }
+    Ok(out)
+}
+
+fn bytes_to_string(value: &Bound<'_, PyAny>) -> Result<String, ()> {
+    if let Ok(text) = value.extract::<String>() {
+        return Ok(text);
+    }
+    let raw: Vec<u8> = value.extract::<Vec<u8>>().map_err(|_| ())?;
+    String::from_utf8(raw).map_err(|_| ())
+}
+
+fn table_column<'py>(table: &Bound<'py, PyAny>, name: &str) -> PyResult<Bound<'py, PyAny>> {
+    let names: Vec<String> = table.getattr("column_names")?.extract()?;
+    if !names.iter().any(|n| n == name) {
+        return Err(InvalidParameterError::new_err(format!(
+            "the table has no `{name}` column (it has {names:?})"
+        )));
+    }
+    table.call_method1("column", (name,))
+}
+
+/// The timestamp column as unix milliseconds, plus the zone it declares.
+///
+/// Seconds and milliseconds cross as they are. Microseconds and nanoseconds are
+/// accepted **only when every value is a whole millisecond** — the rule the
+/// store's write path enforces on every instant it records, so a finer timestamp
+/// is refused rather than rounded onto the grid.
+fn arrow_instants(
+    pa: &Bound<'_, PyModule>,
+    table: &Bound<'_, PyAny>,
+) -> PyResult<(Vec<i64>, Option<String>)> {
+    let column = table_column(table, "timestamp")?;
+    let ty = column.getattr("type")?;
+    let is_timestamp: bool = pa
+        .getattr("types")?
+        .call_method1("is_timestamp", (&ty,))?
+        .extract()?;
+    if !is_timestamp {
+        return Err(InvalidParameterError::new_err(format!(
+            "the `timestamp` column is {ty}, not a timestamp"
+        )));
+    }
+    if column.getattr("null_count")?.extract::<usize>()? > 0 {
+        return Err(InvalidParameterError::new_err(
+            "the `timestamp` column has nulls; the store records an instant for every row"
+                .to_string(),
+        ));
+    }
+    let unit: String = ty.getattr("unit")?.extract()?;
+    let zone: Option<String> = ty.getattr("tz")?.extract()?;
+
+    // Cast to int64 first: that is a zero-copy reinterpretation of the same
+    // buffer, where casting the timestamp itself to a coarser unit would round.
+    let raw = column
+        .call_method1("cast", (pa.call_method0("int64")?,))?
+        .call_method0("to_numpy")?;
+    let raw: Vec<i64> = raw.call_method0("tolist")?.extract()?;
+
+    let per_milli: i64 = match unit.as_str() {
+        "s" => -1_000, // negative marks a multiply rather than a divide
+        "ms" => 1,
+        "us" => 1_000,
+        "ns" => 1_000_000,
+        other => {
+            return Err(InvalidParameterError::new_err(format!(
+                "unsupported timestamp unit {other:?}"
+            )));
+        }
+    };
+    let millis = raw
+        .into_iter()
+        .map(|v| {
+            if per_milli < 0 {
+                v.checked_mul(-per_milli).ok_or_else(|| {
+                    InvalidParameterError::new_err(
+                        "a timestamp in seconds overflows milliseconds".to_string(),
+                    )
+                })
+            } else if v % per_milli == 0 {
+                Ok(v / per_milli)
+            } else {
+                Err(InvalidParameterError::new_err(format!(
+                    "the `timestamp` column is in {unit} and {v} is not a whole millisecond; \
+                     the store records millisecond instants and will not round one"
+                )))
+            }
+        })
+        .collect::<PyResult<Vec<i64>>>()?;
+    Ok((millis, zone))
+}
+
+/// The value column as a numpy array shaped `(rows, *element_shape)`.
+///
+/// Nested `FixedSizeList`s are peeled off outermost first, which is the order
+/// their sizes make up the element shape. `Struct` and `List` are refused:
+/// those are the *decoded* form of a composite element type, which `to_arrow`
+/// does not produce and this does not claim to read — and a `List` is ragged,
+/// which a per-timestep shape is not.
+fn arrow_values<'py>(
+    pa: &Bound<'py, PyModule>,
+    table: &Bound<'py, PyAny>,
+    rows: usize,
+) -> PyResult<Bound<'py, PyAny>> {
+    let py = pa.py();
+    let types = pa.getattr("types")?;
+    let column = table_column(table, "value")?;
+    // One `Array`, so `flatten` below has a single offset to respect.
+    // `combine_chunks` returns an `Array` in some pyarrow versions and a
+    // one-chunk `ChunkedArray` in others, and a table with no rows has no chunks
+    // at all -- hence all three arms rather than the one the current version
+    // happens to need.
+    let combined = column.call_method0("combine_chunks")?;
+    let mut array = match combined.getattr("num_chunks") {
+        Err(_) => combined,
+        Ok(count) if count.extract::<usize>()? > 0 => combined.call_method1("chunk", (0,))?,
+        Ok(_) => pa.call_method1("array", (PyList::empty(py), column.getattr("type")?))?,
+    };
+
+    let mut dims: Vec<usize> = Vec::new();
+    loop {
+        let ty = array.getattr("type")?;
+        if types
+            .call_method1("is_fixed_size_list", (&ty,))?
+            .extract::<bool>()?
+        {
+            if array.getattr("null_count")?.extract::<usize>()? > 0 {
+                return Err(nulls_refused());
+            }
+            dims.push(ty.getattr("list_size")?.extract()?);
+            array = array.call_method0("flatten")?;
+            continue;
+        }
+        for (predicate, what) in [
+            ("is_struct", "a struct"),
+            ("is_list", "a variable-length list"),
+            ("is_large_list", "a variable-length list"),
+        ] {
+            if types.call_method1(predicate, (&ty,))?.extract::<bool>()? {
+                return Err(InvalidParameterError::new_err(format!(
+                    "the `value` column is {what}; this reads the packed form composite \
+                     element types are stored in, not a decoded one"
+                )));
+            }
+        }
+        break;
+    }
+    if array.getattr("null_count")?.extract::<usize>()? > 0 {
+        return Err(nulls_refused());
+    }
+
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("zero_copy_only", false)?;
+    let flat = array.call_method("to_numpy", (), Some(&kwargs))?;
+    let mut shape = vec![rows];
+    shape.extend(dims);
+    flat.call_method1("reshape", (shape,))
+}
+
+fn nulls_refused() -> PyErr {
+    InvalidParameterError::new_err(
+        "the `value` column has nulls; the store holds no nulls, and NaN is a value rather \
+         than an absence, so this is refused rather than coerced"
+            .to_string(),
+    )
+}
+
+/// Resolve the descriptors a `from_arrow` ends up with.
+///
+/// Every keyword **overrides** the metadata, with one exception: `element_type`
+/// is an **assertion**. It is how `tuple(3,f64)` gets named for a table whose
+/// bytes cannot say whether a `fixed_size_list<double>[3]` is a tuple or a dense
+/// row, and a value that contradicts the table's own `element_type` is an error
+/// rather than a silent replacement — the rule this project applies to every
+/// assertion.
+///
+/// `time_reference` falls back to the timestamp column's Arrow zone, and a
+/// column with no zone reads as `zoneless`: a naive timestamp is a wall clock.
+/// This is why the metadata spells the reference out at all — Arrow cannot
+/// distinguish `zoneless` from *unspecified*.
+#[allow(clippy::too_many_arguments)]
+fn arrow_descriptor_args(
+    parts: &ArrowParts<'_>,
+    application_data: Option<String>,
+    element_type: Option<String>,
+    units: Option<String>,
+    quantity_kind: Option<String>,
+    unit_system: Option<String>,
+    component_field: Option<String>,
+    time_reference: Option<String>,
+) -> PyResult<DescriptorArgs> {
+    let meta = &parts.metadata;
+    let element_type = match (meta.get("element_type"), element_type) {
+        (Some(from_table), Some(asserted)) if from_table != &asserted => {
+            return Err(InvalidParameterError::new_err(format!(
+                "the table declares element_type {from_table:?}, but {asserted:?} was asserted"
+            )));
+        }
+        (Some(from_table), _) => Some(from_table.clone()),
+        (None, asserted) => asserted,
+    };
+    let zone_reference = match parts.zone.as_deref() {
+        None => "zoneless".to_string(),
+        Some(z) if z.eq_ignore_ascii_case("UTC") => "utc".to_string(),
+        Some(z) => z.to_string(),
+    };
+    // The keyword wins, then the metadata -- `unspecified` included, which
+    // resolves to *no* reference rather than leaving a gap for the zone to fill.
+    // Only a table with no `time_reference` key at all (a foreign one) falls
+    // through to the column's own zone.
+    let time_reference = match (time_reference, meta.get("time_reference")) {
+        (Some(declared), _) => Some(declared),
+        (None, Some(from_table)) if from_table == UNSPECIFIED_REFERENCE => None,
+        (None, Some(from_table)) => Some(from_table.clone()),
+        (None, None) => Some(zone_reference),
+    };
+    Ok(DescriptorArgs {
+        application_data: application_data.or_else(|| meta.get("application_data").cloned()),
+        element_type,
+        units: units.or_else(|| meta.get("units").cloned()),
+        quantity_kind: quantity_kind.or_else(|| meta.get("quantity_kind").cloned()),
+        unit_system: unit_system.or_else(|| meta.get("unit_system").cloned()),
+        component_field: component_field.or_else(|| meta.get("component_field").cloned()),
+        time_reference,
+    })
+}
+
+/// The series name: the keyword, then the table's, then a refusal.
+///
+/// A name is part of a series' identity, so there is nothing sensible to default
+/// it to.
+fn arrow_name(parts: &ArrowParts<'_>, name: Option<String>) -> PyResult<String> {
+    name.or_else(|| parts.metadata.get("name").cloned())
+        .ok_or_else(|| {
+            InvalidParameterError::new_err(
+                "the table records no series name and none was given; a name is part of a \
+                 series' identity"
+                    .to_string(),
+            )
+        })
+}
+
+fn arrow_instant_vec(millis: &[i64]) -> PyResult<Vec<DateTime<Utc>>> {
+    millis
+        .iter()
+        .map(|ms| {
+            Utc.timestamp_millis_opt(*ms).single().ok_or_else(|| {
+                InvalidParameterError::new_err(format!("timestamp {ms} ms is not representable"))
+            })
+        })
+        .collect()
 }
 
 // ---- Descriptive attributes -----------------------------------------------
@@ -1272,6 +1628,11 @@ impl PyDeterministic {
             let stamps = inner.window_timestamps(k).map_err(map_err)?;
             let start = inner.window_start(k).map_err(map_err)?;
             let mut metadata = arrow_metadata!(inner, "Deterministic");
+            // The macro takes `TypedArray::element_shape`, which strips one
+            // axis -- right for a static series, one axis short for a forecast,
+            // whose stored shape is `[H, count, *E]`. A window's element shape
+            // is what follows both.
+            metadata.insert("element_shape".to_string(), json_int_list(&element_shape));
             metadata.insert("resolution".to_string(), inner.resolution.to_iso8601());
             metadata.insert("horizon".to_string(), inner.horizon.to_iso8601());
             metadata.insert("interval".to_string(), inner.interval.to_iso8601());
@@ -2203,6 +2564,117 @@ impl PySingleTimeSeries {
         spell_instants(py, &grid, self.inner.time_reference.as_ref())
     }
 
+    /// Build a `SingleTimeSeries` from a `pyarrow.Table` — the inverse of
+    /// `to_arrow()`, and a reader of foreign tables too.
+    ///
+    /// Requires pyarrow, which is not installed with infrastore — use
+    /// `pip install 'infrastore[arrow]'`.
+    ///
+    /// The table needs a `timestamp` column and a `value` column. Everything
+    /// else is read from `table.schema.metadata` when it is there, and inferred
+    /// when it is not:
+    ///
+    /// | Missing | Read as |
+    /// | --- | --- |
+    /// | `resolution` | Inferred from the timestamps, which must walk a grid. |
+    /// | `element_type` | The leaf Arrow type. A `fixed_size_list<T>[N]` becomes dtype `T` with element shape `[N]` — *dense*, not `tuple(N,T)`, because the bytes cannot say and dense assumes less. |
+    /// | `time_reference` | The timestamp column's zone; a column with no zone reads as `zoneless`, since a naive timestamp is a wall clock. |
+    /// | `name` | Nothing — a name is part of a series' identity, so pass `name=`. |
+    ///
+    /// Every keyword overrides the metadata, except `element_type`, which is an
+    /// **assertion**: it states the reading the bytes cannot, and a value that
+    /// contradicts the table's own is an error rather than a silent
+    /// replacement.
+    ///
+    /// Refused rather than coerced: nulls in either column; a microsecond or
+    /// nanosecond timestamp that is not a whole millisecond (the store's own
+    /// precision, and rounding one would move it); rows that leave a declared
+    /// grid; and `struct`/`list` value columns, which are the decoded form
+    /// `to_arrow()` does not produce.
+    ///
+    /// ```python
+    /// series = SingleTimeSeries.from_arrow(series.to_arrow())
+    /// import pyarrow.parquet as pq
+    /// SingleTimeSeries.from_arrow(pq.read_table("load.parquet"))
+    /// ```
+    #[classmethod]
+    #[pyo3(signature = (
+        table, *, name=None, resolution=None, application_data=None, element_type=None,
+        units=None, quantity_kind=None, unit_system=None, component_field=None,
+        time_reference=None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn from_arrow(
+        _cls: &Bound<'_, pyo3::types::PyType>,
+        py: Python<'_>,
+        table: &Bound<'_, PyAny>,
+        name: Option<String>,
+        resolution: Option<Bound<'_, PyAny>>,
+        application_data: Option<String>,
+        element_type: Option<String>,
+        units: Option<String>,
+        quantity_kind: Option<String>,
+        unit_system: Option<String>,
+        component_field: Option<String>,
+        time_reference: Option<String>,
+    ) -> PyResult<Self> {
+        let parts = arrow_parts(py, table)?;
+        let name = arrow_name(&parts, name)?;
+        let instants = arrow_instant_vec(&parts.millis)?;
+        let typed = typed_array_from_numpy(&parts.values)?;
+        // The keyword, then the table's, then whatever the timestamps imply.
+        let resolution = match resolution {
+            Some(r) => Some(pyany_to_period(&r)?),
+            None => parts
+                .metadata
+                .get("resolution")
+                .map(|iso| {
+                    core_lib::Period::from_iso8601(iso)
+                        .map_err(|e| InvalidParameterError::new_err(e.to_string()))
+                })
+                .transpose()?,
+        };
+        let mut inner = match resolution {
+            None => core_lib::SingleTimeSeries::from_timestamps(&instants, typed, name)
+                .map_err(InvalidParameterError::new_err)?,
+            Some(resolution) => {
+                let Some(&first) = instants.first() else {
+                    return Err(InvalidParameterError::new_err(
+                        "a SingleTimeSeries is anchored at its first timestamp, and this table \
+                         has no rows; give the anchor another way, or read it as a \
+                         NonSequentialTimeSeries"
+                            .to_string(),
+                    ));
+                };
+                let series = core_lib::SingleTimeSeries::new(first, resolution, typed, name);
+                // Checked against the grid the resolution *generates*, not
+                // against successive differences: `Period::Months` clamps to
+                // month end, so those are not the same test.
+                let grid: Vec<DateTime<Utc>> = series.timestamps().collect();
+                if grid != instants {
+                    return Err(InvalidParameterError::new_err(format!(
+                        "the timestamps do not sit on a {} grid anchored at {first}",
+                        resolution.to_iso8601()
+                    )));
+                }
+                series
+            }
+        };
+        let descriptors = arrow_descriptor_args(
+            &parts,
+            application_data,
+            element_type,
+            units,
+            quantity_kind,
+            unit_system,
+            component_field,
+            time_reference,
+        )?
+        .resolve(py, inner.element_type, None)?;
+        apply_descriptors!(inner, descriptors);
+        Ok(Self { inner })
+    }
+
     /// This series as a two-column `pyarrow.Table`: `timestamp` and `value`.
     ///
     /// Requires pyarrow, which is not installed with infrastore — use
@@ -2452,6 +2924,50 @@ impl PyNonSequentialTimeSeries {
     #[getter]
     fn data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         numpy_from_typed(py, &self.inner.data)
+    }
+
+    /// Build a `NonSequentialTimeSeries` from a `pyarrow.Table` — the inverse of
+    /// `to_arrow()`. See `SingleTimeSeries.from_arrow` for the full rules; the
+    /// only difference is that the timestamps are taken as they are and need not
+    /// walk a grid.
+    #[classmethod]
+    #[pyo3(signature = (
+        table, *, name=None, application_data=None, element_type=None, units=None,
+        quantity_kind=None, unit_system=None, component_field=None, time_reference=None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn from_arrow(
+        _cls: &Bound<'_, pyo3::types::PyType>,
+        py: Python<'_>,
+        table: &Bound<'_, PyAny>,
+        name: Option<String>,
+        application_data: Option<String>,
+        element_type: Option<String>,
+        units: Option<String>,
+        quantity_kind: Option<String>,
+        unit_system: Option<String>,
+        component_field: Option<String>,
+        time_reference: Option<String>,
+    ) -> PyResult<Self> {
+        let parts = arrow_parts(py, table)?;
+        let name = arrow_name(&parts, name)?;
+        let instants = arrow_instant_vec(&parts.millis)?;
+        let typed = typed_array_from_numpy(&parts.values)?;
+        let mut inner = core_lib::NonSequentialTimeSeries::new(instants, typed, name)
+            .map_err(InvalidParameterError::new_err)?;
+        let descriptors = arrow_descriptor_args(
+            &parts,
+            application_data,
+            element_type,
+            units,
+            quantity_kind,
+            unit_system,
+            component_field,
+            time_reference,
+        )?
+        .resolve(py, inner.element_type, None)?;
+        apply_descriptors!(inner, descriptors);
+        Ok(Self { inner })
     }
 
     /// This series as a two-column `pyarrow.Table`: `timestamp` and `value`.
@@ -2748,6 +3264,54 @@ impl PyPersistentTimeSeries {
             self.inner.timestamps[index],
             self.inner.time_reference.as_ref(),
         )
+    }
+
+    /// Build a `PersistentTimeSeries` from a `pyarrow.Table` — the inverse of
+    /// `to_arrow()`. See `SingleTimeSeries.from_arrow` for the full rules.
+    ///
+    /// The rows are **breakpoints**, not instants: a step function is stored
+    /// sparsely and the table is that sparse form. This class has to be named,
+    /// because a `PersistentTimeSeries` table is shaped exactly like a
+    /// `NonSequentialTimeSeries` one — the two differ only in what the values
+    /// mean between the rows.
+    #[classmethod]
+    #[pyo3(signature = (
+        table, *, name=None, application_data=None, element_type=None, units=None,
+        quantity_kind=None, unit_system=None, component_field=None, time_reference=None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn from_arrow(
+        _cls: &Bound<'_, pyo3::types::PyType>,
+        py: Python<'_>,
+        table: &Bound<'_, PyAny>,
+        name: Option<String>,
+        application_data: Option<String>,
+        element_type: Option<String>,
+        units: Option<String>,
+        quantity_kind: Option<String>,
+        unit_system: Option<String>,
+        component_field: Option<String>,
+        time_reference: Option<String>,
+    ) -> PyResult<Self> {
+        let parts = arrow_parts(py, table)?;
+        let name = arrow_name(&parts, name)?;
+        let instants = arrow_instant_vec(&parts.millis)?;
+        let typed = typed_array_from_numpy(&parts.values)?;
+        let mut inner = core_lib::PersistentTimeSeries::new(instants, typed, name)
+            .map_err(InvalidParameterError::new_err)?;
+        let descriptors = arrow_descriptor_args(
+            &parts,
+            application_data,
+            element_type,
+            units,
+            quantity_kind,
+            unit_system,
+            component_field,
+            time_reference,
+        )?
+        .resolve(py, inner.element_type, None)?;
+        apply_descriptors!(inner, descriptors);
+        Ok(Self { inner })
     }
 
     /// This series as a two-column `pyarrow.Table`: `timestamp` and `value`.
@@ -3942,7 +4506,7 @@ impl PyStore {
     }
 
     /// Return True if the store holds no persistent content of any kind — no
-    /// time series, and no associations in any catalog.
+    /// time series, no associations in any catalog, and no store attributes.
     ///
     /// Answered by short-circuited existence probes, one per catalog table, so
     /// the cost does not grow with the store. Prefer it over a conjunction over
@@ -5259,6 +5823,56 @@ impl PyStore {
         let filter = build_parent_child_filter(parent_id, parent_types, child_id, child_types);
         self.store()?
             .count_parent_child_associations(&filter)
+            .map_err(map_err)
+    }
+
+    // ---- Store attributes --------------------------------------------------
+    //
+    // Key/value provenance about the artifact as a whole. Every name carries the
+    // `store_` prefix because a bare "attribute" already means a supplemental
+    // attribute here, and a bare "metadata" already means a time-series row.
+
+    /// Record ``key`` -> ``value`` as provenance about the whole artifact — who
+    /// built it, from what source system, under which of your own schema
+    /// versions. The store never interprets a value, in the same spirit as a
+    /// series' ``application_data``; a caller wanting structure stores JSON.
+    ///
+    /// Setting a key that is already there replaces its value: an artifact
+    /// records one creator, not a history of them.
+    ///
+    /// Raises `InvalidParameterError` for an empty key or one beginning with the
+    /// reserved ``infrastore.`` prefix, and `ReadOnlyStoreError` on a read-only
+    /// store.
+    fn set_store_attribute(&mut self, key: &str, value: &str) -> PyResult<()> {
+        self.store_mut()?
+            .set_store_attribute(key, value)
+            .map_err(map_err)
+    }
+
+    /// The value recorded for ``key``, or ``None`` if the artifact carries no
+    /// such key.
+    ///
+    /// ``None`` rather than an exception because a consumer asking whether a key
+    /// is there is asking a question. ``None`` and ``""`` are different answers:
+    /// a key may legitimately hold the empty string.
+    fn get_store_attribute(&self, key: &str) -> PyResult<Option<String>> {
+        self.store()?.get_store_attribute(key).map_err(map_err)
+    }
+
+    /// Every store attribute as a ``dict``, sorted by key. Empty for a store
+    /// carrying none.
+    fn list_store_attributes(&self) -> PyResult<BTreeMap<String, String>> {
+        self.store()?.list_store_attributes().map_err(map_err)
+    }
+
+    /// Remove ``key``, returning whether it was there. Removing an absent key is
+    /// ``False``, not an error.
+    ///
+    /// A key in the reserved ``infrastore.`` namespace is refused here as well
+    /// as on write, so the reservation cannot be worked around by deleting one.
+    fn remove_store_attribute(&mut self, key: &str) -> PyResult<bool> {
+        self.store_mut()?
+            .remove_store_attribute(key)
             .map_err(map_err)
     }
 

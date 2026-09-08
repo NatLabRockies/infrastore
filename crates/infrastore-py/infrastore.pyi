@@ -134,6 +134,21 @@ class SingleTimeSeries:
         component_field: str | None = None,
         time_reference: str | None = None,
     ) -> SingleTimeSeries: ...
+    @classmethod
+    def from_arrow(
+        cls,
+        table: ArrowTable,
+        *,
+        name: str | None = None,
+        resolution: Period | None = None,
+        application_data: str | None = None,
+        element_type: str | None = None,
+        units: str | None = None,
+        quantity_kind: str | None = None,
+        unit_system: str | None = None,
+        component_field: str | None = None,
+        time_reference: str | None = None,
+    ) -> SingleTimeSeries: ...
     def decoded_values(self) -> list[Any] | None: ...
     @property
     def name(self) -> str: ...
@@ -219,6 +234,20 @@ class NonSequentialTimeSeries:
     def unit_system(self) -> str | None: ...
     @property
     def component_field(self) -> str | None: ...
+    @classmethod
+    def from_arrow(
+        cls,
+        table: ArrowTable,
+        *,
+        name: str | None = None,
+        application_data: str | None = None,
+        element_type: str | None = None,
+        units: str | None = None,
+        quantity_kind: str | None = None,
+        unit_system: str | None = None,
+        component_field: str | None = None,
+        time_reference: str | None = None,
+    ) -> NonSequentialTimeSeries: ...
     def to_arrow(self) -> ArrowTable: ...
     def __eq__(self, value: object) -> bool: ...
     def __len__(self) -> int: ...
@@ -280,6 +309,20 @@ class PersistentTimeSeries:
     def value_at(self, at: datetime) -> Any: ...
     def index_at(self, at: datetime) -> int: ...
     def breakpoint_at(self, at: datetime) -> datetime: ...
+    @classmethod
+    def from_arrow(
+        cls,
+        table: ArrowTable,
+        *,
+        name: str | None = None,
+        application_data: str | None = None,
+        element_type: str | None = None,
+        units: str | None = None,
+        quantity_kind: str | None = None,
+        unit_system: str | None = None,
+        component_field: str | None = None,
+        time_reference: str | None = None,
+    ) -> PersistentTimeSeries: ...
     def to_arrow(self) -> ArrowTable: ...
     def __eq__(self, value: object) -> bool: ...
     def __len__(self) -> int: ...
@@ -1005,6 +1048,13 @@ class Store:
         child_id: int | None = None,
         child_types: list[str] | None = None,
     ) -> int: ...
+
+    # ---- Store attributes --------------------------------------------------
+
+    def set_store_attribute(self, key: str, value: str) -> None: ...
+    def get_store_attribute(self, key: str) -> str | None: ...
+    def list_store_attributes(self) -> dict[str, str]: ...
+    def remove_store_attribute(self, key: str) -> bool: ...
 
     # ---- OpenAPI-row association serde -------------------------------------
 

@@ -162,9 +162,11 @@ asymmetry is that the read-only gRPC server does not accept any writes:
 | Forecast metadata / counts    | ✅        | ✅    | ✅              | ✅    | ✅           | list/counts |
 | Readers (columnar sweep)      | ✅        | ✅    | ✅              | ✅    | `grid`       | ❌          |
 | Association catalogs          | ✅        | ✅    | ✅              | ✅    | ✅           | ❌          |
+| Store attributes              | ✅        | ✅    | ✅              | ✅    | `store-attr` | read-only   |
 | Materialized timestamps       | ✅        | ✅    | ✅              | ✅    | ✅           | ❌          |
 | `from_timestamps` (verified)  | ✅        | ✅    | ✅              | ✅    | ❌           | ❌          |
 | Arrow tables (`to_arrow`)     | ❌        | ❌    | ✅              | ❌    | ❌           | ❌          |
+| Parquet files                 | crate     | ❌    | ❌              | ❌    | `-f parquet` | ❌          |
 | Store summary (`show`)        | ❌        | ❌    | ✅              | ❌    | `store-info` | ❌          |
 | Forecast windows as Arrow     | ❌        | ❌    | `Deterministic` | ❌    | ❌           | ❌          |
 
@@ -175,6 +177,26 @@ local filesystem access, so the read-only gRPC server serves forecast reads but 
 already has one of its own — Julia has `Base.show`, and the CLI has `store-info` plus the `list`
 family. It composes existing catalog aggregate queries and adds no core API, so any binding that
 wants it can grow one without a change underneath.
+
+**Parquet** lives in a crate of its own, `infrastore-parquet`, which the CLI depends on behind a
+cargo feature that is **on by default** — the `infrastore` binary anyone installs can read and write
+Parquet, because handing an analyst a file for DuckDB or polars is an ordinary reason to reach for
+the CLI. The feature stays switchable (`--no-default-features --features vendored` builds a lean
+binary), and the line it draws is between the binary and the **libraries**: `infrastore-core`,
+`infrastore-py`, and `infrastore-ffi` never link Arrow, which `cargo tree --edges normal` on each is
+the check for. The CLI is the only surface that reads and writes Parquet _files_
+(`export -f parquet`, `add --parquet`): a **normalized, partitioned** layout of two files per
+partition — a values file holding each distinct array once and a series file holding the catalog
+rows that name it, joined on `(data_hash, time_axis)` — specified in the
+[Parquet layout](../reference/parquet-format.md) reference. Python's `to_arrow()` / `from_arrow` are
+a different, in-memory thing — one two-column table per series, with the descriptors in the schema
+metadata rather than in columns — and are not a reader or writer for the CLI's files; a Python user
+who wants one writes the per-series table with `pyarrow.parquet`, or hands the CLI's directory to
+DuckDB or polars. The relationship between the two is one sentence: a series file's columns are
+`to_arrow()`'s metadata keys turned into columns, and the values file is its two columns keyed by
+the array. Nothing else has it: the C ABI and Julia would need the whole Arrow tree in the cdylib
+for a format their host languages already have readers for, and the gRPC server serves values, not
+files.
 
 **Materialized timestamps** and **`from_timestamps`** both run in the core and reach Julia through
 two stateless ABI entry points, `infrastore_grid_timestamps` and `infrastore_infer_period`. That

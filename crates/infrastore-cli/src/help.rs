@@ -114,7 +114,12 @@ pub const EXPORT: &str = "\
 Examples:
   infrastore --store demo.h5 -f csv export --owner-id 42 --name load
   infrastore --store demo.h5 -f csv export --name-glob 'load_*' --dir out/
-  infrastore --store demo.h5 -f json export --dir out/";
+  infrastore --store demo.h5 -f json export --dir out/
+  infrastore --store demo.h5 -f parquet export --dir out/
+
+-f parquet writes one <stem>.values.parquet / <stem>.series.parquet pair per
+(type, value type, time reference) partition into --dir, which must hold no
+.parquet files yet; `add --parquet <DIR>` reads them back.";
 
 pub const TRANSFORM: &str = "\
 Examples:
@@ -249,6 +254,22 @@ pub const STORE_INFO: &str = "\
 Examples:
   infrastore --store demo.h5 store-info
   infrastore --store demo.h5 -f json store-info";
+
+pub const STORE_ATTR: &str = "\
+Examples:
+  infrastore --store demo.h5 store-attr list
+  infrastore --store demo.h5 store-attr set creator sienna-build
+  infrastore --store demo.h5 store-attr get creator
+  infrastore --store demo.h5 store-attr remove creator
+  infrastore --store demo.h5 -f json store-attr list
+
+Free-form provenance about the whole artifact -- who built it, from what source
+system, under which of your own schema versions. The store never interprets a
+value; a caller wanting structure stores JSON. Not to be confused with
+\"attributes\", which lists component <-> supplemental-attribute associations.
+
+Keys beginning with \"infrastore.\" are reserved. `get` exits 1 when the key is
+unset, so a script can branch on it.";
 
 pub const UPGRADE: &str = "\
 Examples:

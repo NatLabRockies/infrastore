@@ -239,11 +239,13 @@ Beyond add / list / get / grid / info / transform, the CLI covers discovery (`na
 `owners`, `exists` — the last as an exit status), visualization
 (`plot --kind
 line|duration|heatmap|fan|overlay`, writing one self-contained SVG or HTML file),
-inspection (`stats`, `store-info`, `summary`, `verify`, `check-consistency`, `resolutions`,
-`params`), content addressing (`arrays`, and the `data_hash` + HDF5 location on `list`/`info`), both
-association catalogs read _and_ write (`attributes`, `links`, `attach`, `detach`, `link`, `unlink`,
-`reassign`), bulk export (`export`, one timestamped CSV or JSON file per series, re-readable by
-`add`), cross-store work (`diff`, which exits nonzero when two catalogs differ, and `merge`), and
+inspection (`stats`, `store-info`, `store-attr` for the artifact's own key/value provenance,
+`summary`, `verify`, `check-consistency`, `resolutions`, `params`), content addressing (`arrays`,
+and the `data_hash` + HDF5 location on `list`/`info`), both association catalogs read _and_ write
+(`attributes`, `links`, `attach`, `detach`, `link`, `unlink`, `reassign`), bulk export (`export`,
+one timestamped CSV or JSON file per series, or a partitioned Parquet values/series file pair per
+`(type, value type, time reference)` triple holding many series each, all re-readable by `add`),
+cross-store work (`diff`, which exits nonzero when two catalogs differ, and `merge`), and
 maintenance (`init`, `copy`, `replace-owner`, `clear`, `persist`, `compact`, `remove --all`).
 Destructive commands take `--dry-run`, and `persist` refuses an existing destination without
 `--force`. `infrastore completions <shell>` emits shell completions. Full reference:

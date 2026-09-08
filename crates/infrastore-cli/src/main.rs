@@ -67,6 +67,7 @@ const COMMAND_GROUPS: &[(&str, &[&str])] = &[
         &[
             "stats",
             "store-info",
+            "store-attr",
             "upgrade",
             "arrays",
             "summary",
@@ -253,6 +254,16 @@ enum Commands {
         /// (single-series descriptors only); without one it starts an inline add.
         #[arg(long)]
         csv: Option<PathBuf>,
+        /// Parquet partition to load, repeatable: a file, a directory, or a
+        /// partition stem. A pair written by `export -f parquet` is
+        /// self-describing and needs no other flag; a foreign values file needs
+        /// at least --owner-id and --owner-type.
+        #[arg(long, value_name = "PATH")]
+        parquet: Vec<PathBuf>,
+        /// Waive the data_hash check on a --parquet load, for values edited in a
+        /// query engine without the hash being recomputed.
+        #[arg(long)]
+        no_checksum: bool,
         #[command(flatten)]
         inline: commands::add::InlineArgs,
         /// Resolve every descriptor and print what would be written, without
@@ -531,11 +542,14 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
-    /// Write series values to CSV or JSON files.
+    /// Write series values to CSV, JSON, or Parquet files.
     ///
-    /// The read-direction inverse of `add`: one file per matched series into
-    /// --dir, or stdout when the selector matches exactly one series. The CSV it
-    /// writes is re-readable by `add`, which detects the layout from the header.
+    /// The read-direction inverse of `add`. CSV and JSON write one file per
+    /// matched series into --dir, or to stdout when the selector matches
+    /// exactly one series; Parquet writes one values/series file pair per
+    /// partition into --dir, which is then required. Both come back through
+    /// `add`: CSV by detecting the layout from the header, Parquet via
+    /// --parquet.
     #[command(after_help = help::EXPORT)]
     Export {
         #[command(flatten)]
@@ -569,6 +583,16 @@ enum Commands {
     /// HDF5 + SQLite paths, on-disk format version, catalog revision, and compression.
     #[command(after_help = help::STORE_INFO)]
     StoreInfo,
+    /// Key/value provenance stamped on the whole artifact.
+    ///
+    /// Named `store-attr` rather than `attr`: `attributes` already lists
+    /// component <-> supplemental-attribute associations, which are a different
+    /// thing entirely.
+    #[command(after_help = help::STORE_ATTR)]
+    StoreAttr {
+        #[command(subcommand)]
+        action: StoreAttrAction,
+    },
     /// Bring a store written by an older build up to this one's catalog revision.
     ///
     /// Every read command opens the store read-only and so cannot upgrade it;
@@ -800,6 +824,35 @@ enum Commands {
     },
 }
 
+/// What `store-attr` does. Four subcommands over the store's key/value
+/// provenance table, one per core call.
+///
+/// A subcommand group rather than four top-level commands: `store-attr-set` and
+/// friends would put four more names into the flat command list for one
+/// concept, and none of them means anything without the others.
+#[derive(Subcommand, Debug)]
+enum StoreAttrAction {
+    /// Every store attribute.
+    List,
+    /// One attribute's value. Exits 1 if the key is unset.
+    Get {
+        #[arg(value_name = "KEY")]
+        key: String,
+    },
+    /// Record a value, replacing any the key already had.
+    Set {
+        #[arg(value_name = "KEY")]
+        key: String,
+        #[arg(value_name = "VALUE")]
+        value: String,
+    },
+    /// Remove an attribute. Removing one that is not there is not an error.
+    Remove {
+        #[arg(value_name = "KEY")]
+        key: String,
+    },
+}
+
 /// The stack `real_main` is given, which is more than the 1 MiB Windows hands
 /// the main thread by default.
 ///
@@ -848,10 +901,18 @@ fn real_main() {
 }
 
 fn run(cli: &Cli) -> Result<(), String> {
+    // `-f` is global, but Parquet is not a rendering of a result -- it is a
+    // binary container. Refusing it here, once, beats each command's `match`
+    // falling through to its `_` arm and quietly printing a table.
+    if cli.format.is_parquet() && !matches!(cli.command, Commands::Export { .. }) {
+        return Err("the parquet format is only available on `export`".to_string());
+    }
     match &cli.command {
         Commands::Add {
             descriptor,
             csv,
+            parquet,
+            no_checksum,
             inline,
             dry_run,
             replace,
@@ -870,6 +931,8 @@ fn run(cli: &Cli) -> Result<(), String> {
                 &commands::add::Options {
                     descriptor: descriptor.as_deref(),
                     csv: csv.as_deref(),
+                    parquet,
+                    no_checksum: *no_checksum,
                     inline,
                     compression,
                     catalog: *catalog,
@@ -1085,6 +1148,21 @@ fn run(cli: &Cli) -> Result<(), String> {
         }
         Commands::Stats => commands::admin::stats(&require_store(cli)?, cli.format),
         Commands::StoreInfo => commands::admin::store_info(&require_store(cli)?, cli.format),
+        Commands::StoreAttr { action } => {
+            let store_path = require_store(cli)?;
+            match action {
+                StoreAttrAction::List => commands::admin::store_attr_list(&store_path, cli.format),
+                StoreAttrAction::Get { key } => {
+                    commands::admin::store_attr_get(&store_path, key, cli.format)
+                }
+                StoreAttrAction::Set { key, value } => {
+                    commands::admin::store_attr_set(&store_path, key, value, cli.format)
+                }
+                StoreAttrAction::Remove { key } => {
+                    commands::admin::store_attr_remove(&store_path, key, cli.format)
+                }
+            }
+        }
         Commands::Upgrade => commands::admin::upgrade(&require_store(cli)?, cli.format),
         Commands::Arrays {
             selector,

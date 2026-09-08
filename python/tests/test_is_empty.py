@@ -65,6 +65,16 @@ def test_parent_child_associations_alone_are_not_empty():
     assert store.is_empty()
 
 
+def test_store_attributes_alone_are_not_empty():
+    """Provenance is the consumer's own text, recoverable from nowhere else."""
+    store = _store()
+    store.set_store_attribute("creator", "sienna-build")
+    assert not store.is_empty()
+
+    assert store.remove_store_attribute("creator")
+    assert store.is_empty()
+
+
 def test_no_single_table_short_circuits_the_answer():
     store = _store()
     key = store.add_time_series(1, "Generator", OwnerCategory.Component, _sts())
@@ -72,10 +82,13 @@ def test_no_single_table_short_circuits_the_answer():
         SupplementalAttributeAssociation(1, "Generator", 10, "GeographicInfo")
     )
     store.add_parent_child_association(ParentChildAssociation(1, "Generator", 20, "Bus"))
+    store.set_store_attribute("creator", "sienna-build")
 
     store.remove_by_ids([key])
     assert not store.is_empty()
     store.remove_supplemental_attribute_associations()
     assert not store.is_empty()
     store.remove_parent_child_associations()
+    assert not store.is_empty()
+    store.remove_store_attribute("creator")
     assert store.is_empty()

@@ -19,6 +19,7 @@ flowchart TB
     PYMOD["infrastore<br/>(Python module)"]
     JL["InfraStore.jl<br/>(Julia package)"]
     PROTO["infrastore-proto<br/>protobuf + tonic"]
+    PARQ["infrastore-parquet<br/>Parquet export/import"]
 
     subgraph core["infrastore-core"]
         STORE["Store"]
@@ -39,6 +40,8 @@ flowchart TB
     PYMOD -->|"import"| PY
     JL -->|"ccall"| FFI
     SRV --> PROTO
+    CLI --> PARQ
+    PARQ --> STORE
 
     style STORE fill:#28a745,color:#fff
     style META fill:#28a745,color:#fff
@@ -52,19 +55,21 @@ flowchart TB
     style SRV fill:#ffc107,color:#000
     style PROTO fill:#ffc107,color:#000
     style CLI fill:#fd7e14,color:#fff
+    style PARQ fill:#fd7e14,color:#fff
 ```
 
-| Crate / package     | Role                                                                           |
-| ------------------- | ------------------------------------------------------------------------------ |
-| `infrastore-core`   | The whole engine: types, storage backends, hashing, the `Store` API            |
-| `infrastore-proto`  | The `.proto` service compiled with `tonic`; shared message types               |
-| `infrastore-server` | A `tonic` gRPC server wrapping a `Store`, plus an async `RemoteClient`         |
-| `infrastore-py`     | PyO3 classes exposing `Store` as the `infrastore` module                       |
-| `infrastore`        | The importable Python module — user-facing surface of the PyO3 wheel           |
-| `infrastore-ffi`    | A `extern "C"` cdylib with an opaque-handle API over `Store`                   |
-| `InfraStore.jl`     | A Julia package that `ccall`s into the FFI cdylib                              |
-| `infrastore-cli`    | The `infrastore` binary: read+write access to an on-disk store from a terminal |
-| `infrastore-bench`  | The `infrastore-bench` binary: ingestion and simulation-read benchmarks        |
+| Crate / package      | Role                                                                           |
+| -------------------- | ------------------------------------------------------------------------------ |
+| `infrastore-core`    | The whole engine: types, storage backends, hashing, the `Store` API            |
+| `infrastore-proto`   | The `.proto` service compiled with `tonic`; shared message types               |
+| `infrastore-server`  | A `tonic` gRPC server wrapping a `Store`, plus an async `RemoteClient`         |
+| `infrastore-py`      | PyO3 classes exposing `Store` as the `infrastore` module                       |
+| `infrastore`         | The importable Python module — user-facing surface of the PyO3 wheel           |
+| `infrastore-ffi`     | A `extern "C"` cdylib with an opaque-handle API over `Store`                   |
+| `InfraStore.jl`      | A Julia package that `ccall`s into the FFI cdylib                              |
+| `infrastore-cli`     | The `infrastore` binary: read+write access to an on-disk store from a terminal |
+| `infrastore-parquet` | Partitioned Parquet export/import, linked only by the CLI (`parquet` feature)  |
+| `infrastore-bench`   | The `infrastore-bench` binary: ingestion and simulation-read benchmarks        |
 
 ## The Core: `Store`
 

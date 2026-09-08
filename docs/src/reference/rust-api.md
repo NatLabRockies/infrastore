@@ -808,6 +808,35 @@ target.add_parent_child_associations(exported)?;
 Neither association catalog is exposed over the [gRPC server](./grpc-api.md) or the
 [`infrastore` CLI](./cli.md).
 
+### Store attributes
+
+Key/value provenance about the **artifact as a whole**, as opposed to a row. See
+[Store attributes](../explanation/data-model.md#store-attributes) for the model.
+
+```rust
+fn set_store_attribute(&mut self, key: &str, value: &str) -> Result<()>;
+fn get_store_attribute(&self, key: &str) -> Result<Option<String>>;
+fn list_store_attributes(&self) -> Result<BTreeMap<String, String>>;
+fn remove_store_attribute(&mut self, key: &str) -> Result<bool>;
+```
+
+```rust,ignore
+store.set_store_attribute("creator", "sienna-build")?;
+store.set_store_attribute("source_system", "WECC 2032 ADS")?;
+
+assert_eq!(store.get_store_attribute("creator")?.as_deref(), Some("sienna-build"));
+assert_eq!(store.get_store_attribute("absent")?, None);   // a question, not an error
+assert!(store.remove_store_attribute("creator")?);        // true: it was there
+assert!(!store.remove_store_attribute("creator")?);       // false: it was not
+```
+
+A `set` replaces rather than appending. Both writers take part in the ambient transaction and return
+[`TimeSeriesError::ReadOnlyStore`](#errors) on a read-only store; both refuse an empty key and any
+key beginning with `RESERVED_STORE_ATTRIBUTE_PREFIX` (`"infrastore."`) with `InvalidParameter`.
+
+`list_store_attributes` returns a `BTreeMap`, so the ordering does not depend on insertion history —
+two stores' attribute sets compare and print the same way.
+
 ### Restoring a catalog from a document
 
 An artifact is two files, but a consumer that already carries the association rows in JSON of its
@@ -1914,4 +1943,6 @@ These define the cross-language content-addressing contract; see
 
 ```rust
 pub const DATA_FORMAT_VERSION: &str = "0.11.0";
+// The key prefix `set_store_attribute` / `remove_store_attribute` refuse.
+pub const RESERVED_STORE_ATTRIBUTE_PREFIX: &str = "infrastore.";
 ```

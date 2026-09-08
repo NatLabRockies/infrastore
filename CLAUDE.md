@@ -16,7 +16,32 @@ SQLite. It exposes multiple bindings over a shared core:
 - **Julia** — `infrastore-ffi` C ABI cdylib, wrapped by `julia/InfraStore.jl`
 - **CLI** — `infrastore-cli` (`infrastore` binary): loads time series from CSV + a descriptor JSON
   and inspects a store, talking directly to the on-disk HDF5 + SQLite artifact (read+write; no
-  gRPC). Output uses a global `-f/--format table|json|jsonl|csv`.
+  gRPC). Output uses a global `-f/--format table|json|jsonl|csv|parquet`.
+- **Parquet** — `infrastore-parquet`, a crate the CLI depends on behind a `parquet` cargo feature
+  that is **on by default**, so the shipped `infrastore` binary carries it; the line Arrow must not
+  cross is into the _libraries_ — `infrastore-core`, `infrastore-py`, and `infrastore-ffi` never
+  link it, and `cargo tree --edges normal` on each is the check. The feature stays switchable
+  (`--no-default-features --features vendored`), and a binary without it still parses `-f parquet`
+  and `--parquet` and names the feature to rebuild with. `export -f parquet --dir` writes a
+  **normalized, partitioned** layout — per `(time_series_type, value type, time_reference)` triple,
+  two files sharing a stem: `<stem>.values.parquet` holds every distinct array once, one row per
+  value, and `<stem>.series.parquet` holds one catalog row per series. Both carry the **array key**
+  `(data_hash, time_axis)` and are sorted by it. The triple partitions because those three cannot
+  vary inside one table without nullable or ill-typed columns; the payoff is that **every column is
+  required**, which the five free-form descriptors pay for with the empty string. The split is
+  because the store is content-addressed: a thousand components sharing one profile hold one array,
+  and a denormalized table would write it a thousand times. `time_axis` spells whatever decides a
+  series' timestamps for its type (a repeating interval for a grid, the `timestamps_hash` for an
+  irregular axis, count/interval/horizon/resolution for a forecast) and is read off the values
+  exported, not the catalog row. Composite kinds partition by kind alone and are re-padded to the
+  partition's widest series, so their `data_hash` is taken over the decoded points — which is also
+  what lets two paddings of one curve share a values group. `add --parquet` takes a file, a
+  directory, or a partition stem and reads the pair as a **merge join**, one transaction per
+  partition, with a dangling key on either side an error and `--no-checksum` waiving the `data_hash`
+  check. A values file with no series file beside it is a **foreign** file. An empty series
+  **fails** the export, naming every one and writing nothing. Python's `to_arrow()`/`from_arrow()`
+  are per-series in-memory conveniences, **not** this format — "one schema, two producers" was
+  withdrawn. See `docs/src/reference/parquet-format.md`.
 
 **Current feature coverage:** `SingleTimeSeries`, `NonSequentialTimeSeries`, and
 `PersistentTimeSeries` are implemented end-to-end (read+write in the Rust core, C ABI, Python,
@@ -85,13 +110,22 @@ the Rust core, C ABI, Julia, Python, and the CLI (read via `attributes` / `links
 `supplemental_attribute_associations` (component ↔ supplemental attribute, the wider surface —
 counts, counts-by-type, grouped summary) and `parent_child_associations` (directed component ↔
 component edges, e.g. a generator connected to a bus, deliberately narrower until a consumer needs
-more). Both are independent of time series in both directions, and of each other. Every catalog row
-carries an **`id`** — an `INTEGER PRIMARY KEY AUTOINCREMENT`, so it is never reissued once its row
-is deleted — and it is **the only way to address a stored time series**. A consumer records the id
-in its own object model and references the series by it (a generator's `operation_cost` naming the
-series that varies it). In the Rust core it is the newtype `TimeSeriesId(i64)`, so an `owner_id`
-cannot be passed where a series id belongs; it is `#[serde(transparent)]`, so SQLite, the gRPC wire
-and the OpenAPI document are unchanged and every binding still exchanges a plain integer.
+more). Both are independent of time series in both directions, and of each other. Beside them sits
+**`store_attributes`**, free-form key/value provenance about the _artifact_ rather than a row (who
+built it, from what source system, under which of the consumer's own schema versions) — never
+interpreted, TEXT values, one value per key so a set is an upsert, `infrastore.` reserved on removal
+as well as on write, and probed by `is_empty` because those rows are the consumer's own text and
+recoverable nowhere else. Available in the Rust core, C ABI, Julia, Python, and the CLI
+(`store-attr`, plus `store_attributes` in `store-info`), with `ListStoreAttributes` /
+`GetStoreAttribute` as the gRPC read half. The `store_` prefix is load-bearing: a bare "attribute"
+means a supplemental attribute here and a bare "metadata" means a `TimeSeriesMetadata` row. Every
+catalog row carries an **`id`** — an `INTEGER PRIMARY KEY AUTOINCREMENT`, so it is never reissued
+once its row is deleted — and it is **the only way to address a stored time series**. A consumer
+records the id in its own object model and references the series by it (a generator's
+`operation_cost` naming the series that varies it). In the Rust core it is the newtype
+`TimeSeriesId(i64)`, so an `owner_id` cannot be passed where a series id belongs; it is
+`#[serde(transparent)]`, so SQLite, the gRPC wire and the OpenAPI document are unchanged and every
+binding still exchanges a plain integer.
 
 The surface splits into _identify_ and _act_. Identifying is four calls, all returning the same
 `TimeSeriesMetadata` row: `list_metadata(filter)` (by attributes, 0..N), `list_metadata_by_ids(ids)`

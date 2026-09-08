@@ -1,8 +1,9 @@
 //! Write-side maintenance commands: `remove`, `transform`, and `template`.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::color;
 use crate::confirm;
@@ -480,6 +481,59 @@ pub fn init(
     )
 }
 
+/// Decide what a merge does to the destination's store attributes: the keys to
+/// copy across, and the keys both sides hold with different values.
+///
+/// **The destination wins.** A merge brings data *into* an artifact that already
+/// has an identity; silently restamping its `creator` with the source's would
+/// rewrite the provenance of the thing being added to. So a key the destination
+/// lacks is copied, a key it already agrees on is a no-op, and a disagreement is
+/// reported and left alone — the operator is the only one who can say which
+/// creator the merged artifact has, and a report is how they find out there is a
+/// question. Merging repeatedly is therefore idempotent.
+fn plan_store_attribute_merge(
+    source: &BTreeMap<String, String>,
+    destination: &BTreeMap<String, String>,
+) -> (BTreeMap<String, String>, Vec<Value>) {
+    let mut to_copy = BTreeMap::new();
+    let mut conflicts = Vec::new();
+    for (key, value) in source {
+        match destination.get(key) {
+            None => {
+                to_copy.insert(key.clone(), value.clone());
+            }
+            Some(existing) if existing == value => {}
+            Some(existing) => conflicts.push(json!({
+                "key": key,
+                "source": value,
+                "destination": existing,
+            })),
+        }
+    }
+    (to_copy, conflicts)
+}
+
+/// Print the conflicts [`plan_store_attribute_merge`] found, for the non-JSON
+/// formats. Silent when there are none.
+fn report_attribute_conflicts(conflicts: &[Value]) {
+    if conflicts.is_empty() {
+        return;
+    }
+    println!(
+        "{}",
+        color::dim(&format!(
+            "{} store attributes differ and were left as the destination has them:",
+            conflicts.len()
+        ))
+    );
+    for conflict in conflicts {
+        println!(
+            "  - {} (destination {}, source {})",
+            conflict["key"], conflict["destination"], conflict["source"]
+        );
+    }
+}
+
 /// `merge`: copy matching series from another store into this one.
 ///
 /// The in-store form of `export` to a directory followed by `add` back, without
@@ -491,6 +545,10 @@ pub fn init(
 /// lands in the destination as a real `Deterministic` rather than as a
 /// transform of a source series. Merging the underlying `SingleTimeSeries` and
 /// re-running `infrastore transform` reproduces the original arrangement.
+///
+/// Store attributes come across too, on the additive rule described in
+/// [`plan_store_attribute_merge`]. They describe the artifact rather than a row,
+/// so the selector does not reach them and an empty match still carries them.
 pub fn merge(
     store_path: &Path,
     from: &Path,
@@ -506,12 +564,29 @@ pub fn merge(
     let metas = source
         .list_metadata(selector.to_filter()?)
         .map_err(|e| e.to_string())?;
-    if metas.is_empty() {
+    let source_attributes = source.list_store_attributes().map_err(|e| e.to_string())?;
+    let destination_attributes = {
+        let destination = store_access::open_readonly(store_path)?;
+        destination
+            .list_store_attributes()
+            .map_err(|e| e.to_string())?
+    };
+    let (new_attributes, conflicts) =
+        plan_store_attribute_merge(&source_attributes, &destination_attributes);
+
+    if metas.is_empty() && new_attributes.is_empty() {
         return report(
             format,
-            || json!({ "merged": 0 }),
+            || {
+                json!({
+                    "merged": 0,
+                    "store_attributes_copied": 0,
+                    "store_attribute_conflicts": conflicts,
+                })
+            },
             || {
                 println!("{}", color::dim("No time series matched the selector."));
+                report_attribute_conflicts(&conflicts);
             },
         );
     }
@@ -523,6 +598,8 @@ pub fn merge(
                     "dry_run": true,
                     "would_merge": metas.len(),
                     "matches": metas.iter().map(identity_json).collect::<Vec<_>>(),
+                    "would_copy_store_attributes": new_attributes.keys().collect::<Vec<_>>(),
+                    "store_attribute_conflicts": conflicts,
                 })
             },
             || {
@@ -530,6 +607,13 @@ pub fn merge(
                 for m in &metas {
                     println!("  - {}", crate::fields::identity_line(m));
                 }
+                if !new_attributes.is_empty() {
+                    println!("Would copy {} store attributes:", new_attributes.len());
+                    for key in new_attributes.keys() {
+                        println!("  - {key}");
+                    }
+                }
+                report_attribute_conflicts(&conflicts);
             },
         );
     }
@@ -569,7 +653,13 @@ pub fn merge(
         .add_time_series_bulk(requests)
         .map_err(|e| e.to_string())?
         .len();
+    for (key, value) in &new_attributes {
+        store
+            .set_store_attribute(key, value)
+            .map_err(|e| e.to_string())?;
+    }
     store.flush().map_err(|e| e.to_string())?;
+    let copied = new_attributes.len();
     report(
         format,
         || {
@@ -577,6 +667,8 @@ pub fn merge(
                 "merged": n,
                 "from": from.display().to_string(),
                 "into": store_path.display().to_string(),
+                "store_attributes_copied": copied,
+                "store_attribute_conflicts": conflicts,
             })
         },
         || {
@@ -588,6 +680,13 @@ pub fn merge(
                     store_path.display()
                 ))
             );
+            if copied > 0 {
+                println!(
+                    "{}",
+                    color::header(&format!("Copied {copied} store attributes."))
+                );
+            }
+            report_attribute_conflicts(&conflicts);
         },
     )
 }

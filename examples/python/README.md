@@ -52,17 +52,18 @@ python examples/python/single_floats.py
 
 Read them in this order; each builds on the vocabulary of the one before.
 
-| Script                                                                   | What it demonstrates                                                                               |
-| ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
-| [`single_floats.py`](./single_floats.py)                                 | A day of hourly MW and per-unit values; `units`, `quantity_kind`, `unit_system`, `component_field` |
-| [`single_features.py`](./single_features.py)                             | One component field, many series: scenario and weather-year tags as identity and as a query        |
-| [`single_fixed_tuples.py`](./single_fixed_tuples.py)                     | Active and reactive power stored together as one `tuple(2,f64)` value per timestep                 |
-| [`single_custom_elements.py`](./single_custom_elements.py)               | Cost curves as values: the four function element types                                             |
-| [`nonsequential_floats.py`](./nonsequential_floats.py)                   | Measurements at the instants they were taken, with no value in between                             |
-| [`deterministic_floats.py`](./deterministic_floats.py)                   | Rolling forecasts: `resolution` / `horizon` / `interval` / `count`, and why windows overlap        |
-| [`deterministic_custom_elements.py`](./deterministic_custom_elements.py) | A market offer curve re-submitted every hour — a forecast whose values are curves                  |
-| [`probabilistic_floats.py`](./probabilistic_floats.py)                   | p10/p50/p90 forecast bands, and why the band is one-sided at solar noon                            |
-| [`scenarios_floats.py`](./scenarios_floats.py)                           | Ensemble members, and what they say that per-hour quantiles cannot                                 |
+| Script                                                                   | What it demonstrates                                                                                                                |
+| ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
+| [`single_floats.py`](./single_floats.py)                                 | A day of hourly MW and per-unit values; `units`, `quantity_kind`, `unit_system`, `component_field`                                  |
+| [`single_features.py`](./single_features.py)                             | One component field, many series: scenario and weather-year tags as identity and as a query                                         |
+| [`single_fixed_tuples.py`](./single_fixed_tuples.py)                     | Active and reactive power stored together as one `tuple(2,f64)` value per timestep                                                  |
+| [`single_custom_elements.py`](./single_custom_elements.py)               | Cost curves as values: the four function element types                                                                              |
+| [`nonsequential_floats.py`](./nonsequential_floats.py)                   | Measurements at the instants they were taken, with no value in between                                                              |
+| [`deterministic_floats.py`](./deterministic_floats.py)                   | Rolling forecasts: `resolution` / `horizon` / `interval` / `count`, and why windows overlap                                         |
+| [`deterministic_custom_elements.py`](./deterministic_custom_elements.py) | A market offer curve re-submitted every hour — a forecast whose values are curves                                                   |
+| [`probabilistic_floats.py`](./probabilistic_floats.py)                   | p10/p50/p90 forecast bands, and why the band is one-sided at solar noon                                                             |
+| [`scenarios_floats.py`](./scenarios_floats.py)                           | Ensemble members, and what they say that per-hour quantiles cannot                                                                  |
+| [`bulk_add_static_reader.py`](./bulk_add_static_reader.py)               | A 19-series fleet written one `add_time_series` at a time inside one `transaction()`, then swept hour by hour with a `StaticReader` |
 
 `_shared.py` holds the three components, the load / solar / thermal-derate profiles the scripts draw
 on, and the two display helpers. Everything else — every `add_time_series` and every read — stays

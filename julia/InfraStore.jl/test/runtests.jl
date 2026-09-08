@@ -5554,3 +5554,60 @@ end
     @test Base.length(list_metadata(store; initial_timestamp=t0, length=24)) == 1
     @test isempty(list_metadata(store; initial_timestamp=t0, length=99))
 end
+
+@testset "store attributes: provenance about the artifact, not a row" begin
+    store = Store(in_memory=true)
+
+    @test list_store_attributes(store) == Dict{String, String}()
+    @test get_store_attribute(store, "creator") === nothing
+    @test is_empty(store)
+
+    set_store_attribute!(store, "creator", "sienna-build")
+    set_store_attribute!(store, "source_system", "WECC 2032 ADS")
+    @test get_store_attribute(store, "creator") == "sienna-build"
+    @test list_store_attributes(store) ==
+        Dict("creator" => "sienna-build", "source_system" => "WECC 2032 ADS")
+    # Provenance is content: a store carrying only attributes is not empty, or a
+    # consumer that skips writing an empty store would drop them.
+    @test !is_empty(store)
+
+    # A set replaces; an artifact records one creator, not a history of them.
+    set_store_attribute!(store, "creator", "sienna-build 2")
+    @test get_store_attribute(store, "creator") == "sienna-build 2"
+
+    # `nothing` and `""` are different answers.
+    set_store_attribute!(store, "note", "")
+    @test get_store_attribute(store, "note") == ""
+    @test get_store_attribute(store, "absent") === nothing
+
+    @test remove_store_attribute!(store, "note")
+    @test !remove_store_attribute!(store, "note")
+
+    @test_throws InfraStore.InvalidParameterError set_store_attribute!(store, "", "x")
+    @test_throws InfraStore.InvalidParameterError set_store_attribute!(
+        store, "infrastore.generation", "1"
+    )
+    @test_throws InfraStore.InvalidParameterError remove_store_attribute!(
+        store, "infrastore.generation"
+    )
+
+    close!(store)
+end
+
+@testset "store attributes survive a save and refuse a read-only write" begin
+    dir = mktempdir()
+    path = joinpath(dir, "attrs.h5")
+
+    store = Store(path=path)
+    set_store_attribute!(store, "creator", "sienna-build")
+    flush!(store)
+    close!(store)
+
+    reopened = open_store(path; read_only=true)
+    @test get_store_attribute(reopened, "creator") == "sienna-build"
+    @test_throws InfraStore.ReadOnlyStoreError set_store_attribute!(
+        reopened, "creator", "someone else"
+    )
+    @test_throws InfraStore.ReadOnlyStoreError remove_store_attribute!(reopened, "creator")
+    close!(reopened)
+end

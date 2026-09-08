@@ -297,6 +297,39 @@ CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
 -- absent, because a read-only open cannot run this DDL.
 CREATE TABLE IF NOT EXISTS catalog_identity (generation TEXT NOT NULL);
 
+-- Store attributes: free-form key/value provenance stamped on the artifact as a
+-- whole -- who built it, from what source system, under which of the consumer's
+-- own schema versions. The store never interprets a value, in the same spirit as
+-- a row's `application_data`, and nothing here participates in any identity,
+-- hash, or query plan.
+--
+-- The name carries the `store_` prefix throughout because "attribute" already
+-- means a *supplemental* attribute in this project (see
+-- `supplemental_attribute_associations` above) and "metadata" already means a
+-- `TimeSeriesMetadata` row. A store attribute describes the artifact; neither of
+-- those does.
+--
+-- TEXT values, not a typed column set: a caller wanting structure stores JSON,
+-- which is what `application_data` already asks of them. A typed variant column
+-- would buy type fidelity that no consumer of an opaque provenance string has
+-- asked for, and would then have to be threaded through five bindings.
+--
+-- `key` is the PRIMARY KEY, so a set is an upsert rather than an append: an
+-- artifact records one creator, not a history of them. Keys beginning with
+-- `infrastore.` are refused on the write path (not by a CHECK, so the store can
+-- still stamp its own facts through a deliberate internal write later) --
+-- reserving that prefix now is what keeps a future built-in key from colliding
+-- with a consumer's.
+--
+-- Additive, like the association tables: an existing store gains it on its first
+-- writable open, so no `CATALOG_SCHEMA_REVISION` bump is needed. A read-only
+-- open of a store written before it existed cannot run this DDL, so reads must
+-- degrade to the empty answer rather than erroring.
+CREATE TABLE IF NOT EXISTS store_attributes (
+    key   TEXT PRIMARY KEY NOT NULL,
+    value TEXT NOT NULL
+);
+
 -- The two association tables below record relationships between catalog
 -- entities, independent of time series. They are deliberately separate rather
 -- than one generic endpoint table: attaching an attribute to a component and

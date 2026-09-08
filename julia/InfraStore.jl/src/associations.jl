@@ -729,8 +729,8 @@ end
 """
     is_empty(store) -> Bool
 
-Whether the store holds no persistent content of any kind — no time series, and
-no associations in any catalog.
+Whether the store holds no persistent content of any kind — no time series, no
+associations in any catalog, and no store attributes.
 
 Answered by short-circuited existence probes, one per catalog table, so the cost
 does not grow with the store. Prefer it over a conjunction over the counting

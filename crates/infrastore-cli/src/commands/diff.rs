@@ -74,6 +74,11 @@ pub fn run(
     let filter = selector.to_filter()?;
     let left = load(left_path, filter.clone())?;
     let right = load(right_path, filter)?;
+    // Store attributes describe the artifact rather than a row, so they get a
+    // section of their own rather than lines in the series table: there is no
+    // series identity to pair them on, and a changed `creator` is not a changed
+    // series. The selector does not reach them either.
+    let attributes = diff_store_attributes(left_path, right_path)?;
 
     let mut rows: Vec<Row> = Vec::new();
     for (id, (key, hash)) in &left {
@@ -157,6 +162,12 @@ pub fn run(
                     "changed": counts(Status::Changed),
                     "same": counts(Status::Same),
                     "items": items,
+                    "store_attributes": attributes.iter().map(|a| json!({
+                        "status": a.status.as_str(),
+                        "key": a.key,
+                        "left": a.left,
+                        "right": a.right,
+                    })).collect::<Vec<_>>(),
                 }),
             )?;
         }
@@ -173,16 +184,101 @@ pub fn run(
                     counts(Status::Same),
                 ))
             );
+            render_attribute_section(&attributes, all);
         }
     }
 
     // Nonzero when the stores differ, so `diff` drops into a CI gate the same
     // way `verify` does. A read or open failure is also nonzero, but with a
     // message on stderr.
-    if differing > 0 {
+    //
+    // A store attribute that differs counts. The gate's question is "is this
+    // artifact the one I expected", and an artifact whose recorded source system
+    // changed is not — reporting the difference in the output while exiting 0
+    // would make the section decorative.
+    let attributes_differ = attributes.iter().any(|a| a.status != Status::Same);
+    if differing > 0 || attributes_differ {
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// One line of the store-attribute section: what the two stores record for one
+/// key.
+struct AttributeRow {
+    key: String,
+    status: Status,
+    left: Option<String>,
+    right: Option<String>,
+}
+
+/// Compare the two stores' store attributes, keyed by name.
+///
+/// Reuses [`Status`] because the four outcomes are the same four: a key only the
+/// left has is `removed`, only the right `added`, both with different values
+/// `changed`, both alike `same`.
+fn diff_store_attributes(left_path: &Path, right_path: &Path) -> Result<Vec<AttributeRow>, String> {
+    let left = store_access::open_readonly(left_path)?
+        .list_store_attributes()
+        .map_err(|e| e.to_string())?;
+    let right = store_access::open_readonly(right_path)?
+        .list_store_attributes()
+        .map_err(|e| e.to_string())?;
+    // Both sides are `BTreeMap`s, so the union is already sorted by key.
+    let mut keys: Vec<&String> = left.keys().chain(right.keys()).collect();
+    keys.sort_unstable();
+    keys.dedup();
+    Ok(keys
+        .into_iter()
+        .map(|key| {
+            let l = left.get(key).cloned();
+            let r = right.get(key).cloned();
+            let status = match (&l, &r) {
+                (Some(_), None) => Status::Removed,
+                (None, Some(_)) => Status::Added,
+                (Some(a), Some(b)) if a == b => Status::Same,
+                _ => Status::Changed,
+            };
+            AttributeRow {
+                key: key.clone(),
+                status,
+                left: l,
+                right: r,
+            }
+        })
+        .collect())
+}
+
+/// Print the store-attribute section for the human-readable formats. Silent when
+/// neither store carries any, and — like the series table — hides the identical
+/// rows unless `all` is set.
+fn render_attribute_section(rows: &[AttributeRow], all: bool) {
+    let shown: Vec<&AttributeRow> = rows
+        .iter()
+        .filter(|r| all || r.status != Status::Same)
+        .collect();
+    if shown.is_empty() {
+        return;
+    }
+    println!();
+    println!("{}", color::header("Store attributes"));
+    let headers: Vec<String> = ["", "Status", "Key", "Left", "Right"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let table: Vec<Vec<String>> = shown
+        .iter()
+        .map(|r| {
+            vec![
+                r.status.marker().to_string(),
+                r.status.as_str().to_string(),
+                r.key.clone(),
+                r.left.clone().unwrap_or_else(|| "-".to_string()),
+                r.right.clone().unwrap_or_else(|| "-".to_string()),
+            ]
+        })
+        .collect();
+    output::display_table_dyn(&headers, &table);
 }
 
 /// `identity_key -> (key, hex hash)` for one store.

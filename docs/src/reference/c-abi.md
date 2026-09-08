@@ -1080,6 +1080,63 @@ free(json);
 Neither association catalog is exposed over the [gRPC server](./grpc-api.md) or the
 [`infrastore` CLI](./cli.md).
 
+## Store Attributes
+
+Key/value provenance about the artifact as a whole. See
+[Store attributes](../explanation/data-model.md#store-attributes) for the model.
+
+```c
+int32_t infrastore_store_set_store_attribute(InfraStore *store,
+                                             const char *key,
+                                             const char *value);
+int32_t infrastore_store_get_store_attribute(const InfraStore *store,
+                                             const char *key,
+                                             char **out_value,
+                                             uint64_t *out_len);
+int32_t infrastore_store_list_store_attributes(const InfraStore *store,
+                                               char **out_json,
+                                               uint64_t *out_len);
+int32_t infrastore_store_remove_store_attribute(InfraStore *store,
+                                                const char *key,
+                                                bool *out_removed);
+```
+
+```c
+infrastore_store_set_store_attribute(store, "creator", "sienna-build");
+
+char *value = NULL;
+uint64_t len = 0;
+infrastore_store_get_store_attribute(store, "creator", &value, &len);
+if (value != NULL) {          /* NULL means the key is unset */
+    puts(value);
+    infrastore_string_free(value);
+}
+
+char *json = NULL;
+infrastore_store_list_store_attributes(store, &json, &len);   /* {"creator":"sienna-build"} */
+infrastore_string_free(json);
+
+bool removed = false;
+infrastore_store_remove_store_attribute(store, "creator", &removed);
+```
+
+Two conventions to note:
+
+- **`get` spells "unset" as a null `*out_value`, not as a zero `*out_len`.** A key set to the empty
+  string is a legitimate value, and the two must stay distinguishable. An unset key is
+  `INFRASTORE_OK`, not `INFRASTORE_ERR_NOT_FOUND`.
+- **`list` returns a JSON object**, following the owned-string convention, rather than an
+  array-of-pairs buffer — the ABI has no pair type and this needs no new one.
+
+Unlike the JSON payloads every other owned-string export produces, a value is the caller's own text
+and can contain an interior NUL; `get` reports one as `INFRASTORE_ERR_INTEGRITY` rather than
+returning a value truncated at it. An empty key or one beginning with `infrastore.` (reserved, on
+removal as well as on write) is `INFRASTORE_ERR_INVALID_PARAMETER`; a write to a read-only store is
+`INFRASTORE_ERR_READ_ONLY`.
+
+The read half is available over the [gRPC server](./grpc-api.md); the writes are not, like every
+other write.
+
 ## OpenAPI-row Association Serde
 
 Direct JSON serde of the two association catalogs, in the wire spelling

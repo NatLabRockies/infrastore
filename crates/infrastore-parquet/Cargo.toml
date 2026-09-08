@@ -1,0 +1,37 @@
+[package]
+name = "infrastore-parquet"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Apache Parquet export and import for infrastore time series"
+homepage = "https://natlabrockies.github.io/infrastore/"
+keywords = ["time-series", "parquet", "arrow", "energy", "infrastore"]
+categories = ["encoding", "science"]
+
+# A crate of its own rather than a feature on `infrastore-core`, so the Arrow
+# dependency tree is visible in the workspace graph instead of hiding behind a
+# feature flag, and so core's feature surface stays flat. `infrastore-cli`
+# depends on it through its own `parquet` feature, which is on by default -- the
+# shipped binary carries Parquet -- while the library crates (`infrastore-core`,
+# `infrastore-py`, `infrastore-ffi`) never reach it.
+[features]
+default = ["vendored"]
+vendored = ["infrastore-core/vendored"]
+
+[dependencies]
+# `default-features = false` on both: the defaults pull in the CSV, JSON, IPC
+# and FFI sub-crates, none of which this uses. `snap` and `zstd` are the two
+# Parquet codecs worth having -- zstd for archival size, snappy because it is
+# what every other Parquet writer defaults to and therefore what a foreign
+# reader is guaranteed to handle.
+arrow = { version = "59", default-features = false }
+chrono = { workspace = true }
+infrastore-core = { workspace = true }
+parquet = { version = "59", default-features = false, features = ["arrow", "snap", "zstd"] }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

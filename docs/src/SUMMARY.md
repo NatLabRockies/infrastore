@@ -32,6 +32,7 @@
   - [Benchmarks](./guides/benchmarks.md)
 - [Reference](./reference/index.md)
   - [On-Disk File Format](./reference/file-format.md)
+  - [Parquet Layout](./reference/parquet-format.md)
   - [Element Types](./reference/element-types.md)
   - [Rust API](./reference/rust-api.md)
   - [Python API](./reference/python-api.md)

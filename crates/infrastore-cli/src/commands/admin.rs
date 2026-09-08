@@ -268,9 +268,124 @@ pub fn store_info(store_path: &Path, format: Format) -> Result<(), String> {
             "time_references".into(),
             json!(time_reference_audit(&store)?),
         ),
+        // Whatever provenance the consumer stamped on the artifact. Reported
+        // here because this command is "what is this file", and a creator or a
+        // source-system tag answers that better than any of the mechanical
+        // facts above. Spelled `store_attributes`, not `attributes`, for the
+        // same reason the command is `store-attr`: `attributes` means
+        // supplemental-attribute associations everywhere else in this CLI.
+        (
+            "store_attributes".into(),
+            json!(store.list_store_attributes().map_err(|e| e.to_string())?),
+        ),
         ("cli_version".into(), json!(env!("CARGO_PKG_VERSION"))),
     ];
     render_kv("Store", pairs, format)
+}
+
+// ---- store-attr -------------------------------------------------------------
+//
+// Free-form key/value provenance about the whole artifact. Four subcommands, one
+// per core call. `list` renders as a two-column table because that is what it
+// is; the other three report status through `output::report` like every other
+// write command.
+
+/// `store-attr list`: every attribute, sorted by key.
+pub fn store_attr_list(store_path: &Path, format: Format) -> Result<(), String> {
+    let store = store_access::open_readonly(store_path)?;
+    let attributes = store.list_store_attributes().map_err(|e| e.to_string())?;
+    match format {
+        f if f.is_json() => output::print_value(f, &json!(attributes)),
+        Format::Csv => {
+            let headers = vec!["Key".to_string(), "Value".to_string()];
+            let rows: Vec<Vec<String>> = attributes
+                .iter()
+                .map(|(k, v)| vec![k.clone(), v.clone()])
+                .collect();
+            output::display_csv_rows(&headers, &rows)
+        }
+        _ => {
+            if attributes.is_empty() {
+                println!("{}", color::dim("No store attributes."));
+                return Ok(());
+            }
+            let headers = vec!["Key".to_string(), "Value".to_string()];
+            let rows: Vec<Vec<String>> = attributes
+                .iter()
+                .map(|(k, v)| vec![k.clone(), v.clone()])
+                .collect();
+            output::display_table_dyn(&headers, &rows);
+            Ok(())
+        }
+    }
+}
+
+/// `store-attr get`: one value.
+///
+/// An unset key exits 1 with a message on stderr rather than printing nothing
+/// and exiting 0. The value is the command's whole output, so the two would be
+/// indistinguishable from a key set to the empty string — and a script asking
+/// for a key it expects wants to hear that it is missing.
+pub fn store_attr_get(store_path: &Path, key: &str, format: Format) -> Result<(), String> {
+    let store = store_access::open_readonly(store_path)?;
+    let value = store
+        .get_store_attribute(key)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("no store attribute named '{key}'"))?;
+    match format {
+        f if f.is_json() => output::print_value(f, &json!({ "key": key, "value": value })),
+        // Bare, so `$(infrastore store-attr get creator)` is the value and
+        // nothing else.
+        _ => output::write_raw(&format!("{value}\n")),
+    }
+}
+
+/// `store-attr set`: record a value, replacing any the key already had.
+pub fn store_attr_set(
+    store_path: &Path,
+    key: &str,
+    value: &str,
+    format: Format,
+) -> Result<(), String> {
+    let mut store = store_access::open_writable(store_path)?;
+    store
+        .set_store_attribute(key, value)
+        .map_err(|e| e.to_string())?;
+    // One command per process, so a catalog still in RAM at exit is lost rather
+    // than deferred -- the same reason `add` and `init` land theirs.
+    store.persist_catalog().map_err(|e| e.to_string())?;
+    output::report(
+        format,
+        || json!({ "key": key, "value": value, "set": true }),
+        || {
+            println!("{}", color::header(&format!("Set {key}.")));
+        },
+    )
+}
+
+/// `store-attr remove`: drop a key, reporting whether it was there.
+///
+/// Removing an absent key succeeds. The store has no view of whether the caller
+/// expected a hit, so the outcome is reported rather than made an error — unlike
+/// `get`, where the value *is* the output and there would be nothing to print.
+pub fn store_attr_remove(store_path: &Path, key: &str, format: Format) -> Result<(), String> {
+    let mut store = store_access::open_writable(store_path)?;
+    let removed = store
+        .remove_store_attribute(key)
+        .map_err(|e| e.to_string())?;
+    store.persist_catalog().map_err(|e| e.to_string())?;
+    output::report(
+        format,
+        || json!({ "key": key, "removed": removed }),
+        || {
+            let line = if removed {
+                format!("Removed {key}.")
+            } else {
+                format!("No store attribute named '{key}'.")
+            };
+            println!("{}", color::header(&line));
+        },
+    )
 }
 
 /// `upgrade`: open the store for **writing**, which is what runs the catalog

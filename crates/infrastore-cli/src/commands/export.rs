@@ -36,8 +36,28 @@ pub fn run(
     let file_ext = match format {
         Format::Csv => "csv",
         Format::Jsonl => "jsonl",
+        Format::Parquet => "parquet",
         _ => "json",
     };
+    // Parquet's footer sits at the *end* of the file and its offsets point
+    // backwards, so a writer has to seek. A pipe cannot, which is why this is
+    // refused rather than buffered: buffering would make `export -f parquet >
+    // one.parquet` work for one series and silently mean something else for two.
+    if format.is_parquet() && dir.is_none() {
+        return Err(
+            "the parquet format writes files, not stdout; pass --dir to name a directory"
+                .to_string(),
+        );
+    }
+    // Before the selection is even resolved: a selection that matches nothing
+    // writes nothing, and an earlier export's partitions left standing behind
+    // a report of "exported 0" is exactly the stale directory the writer's own
+    // check exists to refuse.
+    if format.is_parquet()
+        && let Some(dir) = dir
+    {
+        check_parquet_destination(dir)?;
+    }
 
     let range = crate::parse::parse_time_range(time_range)?;
     let store = store_access::open_readonly(store_path)?;
@@ -84,6 +104,14 @@ pub fn run(
         None => {
             let content = render(&metas[0], &datas[0], format)?;
             output::write_raw(&content)?;
+        }
+        // Parquet is not a rendering of one series: the whole selection becomes
+        // a handful of partition file pairs, so it never walks the per-series
+        // loop below.
+        Some(dir) if format.is_parquet() => {
+            let pairs: Vec<(TimeSeriesMetadata, TimeSeriesData)> =
+                metas.iter().cloned().zip(datas).collect();
+            return write_parquet(dir, &pairs, format);
         }
         Some(dir) => {
             std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
@@ -414,4 +442,118 @@ fn render_json(
         _ => serde_json::to_string_pretty(&value),
     };
     text.map(|s| s + "\n").map_err(|e| e.to_string())
+}
+
+/// Write the whole selection as partition file pairs, or explain that this
+/// binary cannot.
+///
+/// Two files per `(type, value type, time reference)` triple -- a values file
+/// holding each distinct array once and a series file naming the array each
+/// series reads -- rather than one file per series, or one table with the
+/// catalog row beside every value. The store is content-addressed, so a thousand
+/// components sharing one profile hold one array; a denormalized table would
+/// write that profile a thousand times.
+///
+/// Parquet is a cargo feature -- on by default, so the shipped binary has it,
+/// but switchable so `--no-default-features` builds without the Arrow tree. The
+/// flags keep *parsing* either way, which is what makes `--help`, the
+/// completions, and the documented examples read the same in both builds; a
+/// build without the feature fails here naming the feature to rebuild with.
+#[cfg(feature = "parquet")]
+fn write_parquet(
+    dir: &Path,
+    pairs: &[(TimeSeriesMetadata, TimeSeriesData)],
+    format: Format,
+) -> Result<(), String> {
+    let report = infrastore_parquet::write_partitions(dir, pairs)
+        .map_err(|e| format!("writing to {}: {e}", dir.display()))?;
+
+    let files: Vec<String> = report
+        .files()
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect();
+    let series = report.series();
+    output::report(
+        format_for_status(format),
+        || {
+            json!({
+                "exported": series,
+                "dir": dir.display().to_string(),
+                "files": files,
+                "arrays": report.arrays(),
+                "rows": report.rows(),
+                "partitions": report
+                    .partitions
+                    .iter()
+                    .map(|p| json!({
+                        "stem": p.stem,
+                        "values": p.values_path.display().to_string(),
+                        "series_file": p.series_path.display().to_string(),
+                        "time_series_type": p.time_series_type.as_str(),
+                        "value_type": p.value_slug,
+                        "time_reference": p.reference,
+                        "arrays": p.arrays,
+                        "series": p.series,
+                        "rows": p.rows,
+                    }))
+                    .collect::<Vec<_>>(),
+            })
+        },
+        || {
+            for partition in &report.partitions {
+                println!(
+                    "exported {} ({} series over {} arrays, {} rows)",
+                    partition.stem, partition.series, partition.arrays, partition.rows
+                );
+            }
+            println!(
+                "{}",
+                color::header(&format!(
+                    "Exported {series} time series as {} distinct arrays in {} partitions \
+                     under {}.",
+                    report.arrays(),
+                    report.partitions.len(),
+                    dir.display()
+                ))
+            );
+        },
+    )
+}
+
+/// `-f parquet` names the *payload*, not how the status report renders, so the
+/// report falls back to the table form unless JSON was asked for.
+#[cfg(feature = "parquet")]
+fn format_for_status(format: Format) -> Format {
+    if format.is_json() {
+        format
+    } else {
+        Format::Table
+    }
+}
+
+#[cfg(feature = "parquet")]
+fn check_parquet_destination(dir: &Path) -> Result<(), String> {
+    infrastore_parquet::check_destination(dir).map_err(|e| e.to_string())
+}
+
+/// Without the feature there is no destination to check and nothing that could
+/// ever write one, so this is where the export fails.
+///
+/// It runs before the selection is resolved, which is the only place the failure
+/// is reliable: a selector matching nothing returns early and never reaches
+/// [`write_parquet`], so a lean binary used to report "exported 0" for a command
+/// it cannot carry out.
+#[cfg(not(feature = "parquet"))]
+fn check_parquet_destination(_dir: &Path) -> Result<(), String> {
+    Err(crate::commands::without_parquet())
+}
+
+#[cfg(not(feature = "parquet"))]
+fn write_parquet(
+    _dir: &Path,
+    _pairs: &[(TimeSeriesMetadata, TimeSeriesData)],
+    _format: Format,
+) -> Result<(), String> {
+    Err(crate::commands::without_parquet())
 }

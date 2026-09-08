@@ -32,12 +32,13 @@ Every global option is accepted after the command too (`infrastore add --store d
 
 `-f`/`--format` applies to every command, read and write alike. The read/inspection commands
 (`list`, `get`, `grid`, `info`, `export`, `names`, `owner-types`, `owners`, `exists`, `stats`,
-`store-info`, `arrays`, `summary`, `attributes`, `links`, `diff`, `verify`, `check-consistency`,
-`resolutions`, `params`, `compact`, and `add --dry-run`) render their results in it. The write
-commands (`init`, `add`, `merge`, `remove`, `copy`, `replace-owner`, `clear`, `transform`,
-`persist`, `plot`, `attach`, `detach`, `link`, `unlink`, `reassign`) report their outcome in it:
-prose under `table`, and a one-object status document under `json`/`jsonl`, so a scripted mutation
-pipes into `jq` the way a scripted query does.
+`store-info`, `store-attr list`, `store-attr get`, `arrays`, `summary`, `attributes`, `links`,
+`diff`, `verify`, `check-consistency`, `resolutions`, `params`, `compact`, and `add --dry-run`)
+render their results in it. The write commands (`init`, `add`, `merge`, `remove`, `copy`,
+`replace-owner`, `clear`, `transform`, `persist`, `plot`, `attach`, `detach`, `link`, `unlink`,
+`reassign`, `store-attr set`, `store-attr remove`) report their outcome in it: prose under `table`,
+and a one-object status document under `json`/`jsonl`, so a scripted mutation pipes into `jq` the
+way a scripted query does.
 
 ```console
 $ infrastore --store s.h5 -f json --yes remove --all --owner-id 42 | jq .removed
@@ -167,13 +168,13 @@ example can never name a flag the command does not have.
 
 ### Read data
 
-| Command  | Purpose                                                                   |
-| -------- | ------------------------------------------------------------------------- |
-| `list`   | List stored series matching the selector filters.                         |
-| `get`    | Read and display a single series' values.                                 |
-| `grid`   | Render N series as N columns against one shared time axis.                |
-| `info`   | Metadata, content hash, HDF5 location, and stats for one series.          |
-| `export` | Write series values to CSV/JSON files (`--dir`), or stdout for one match. |
+| Command  | Purpose                                                                           |
+| -------- | --------------------------------------------------------------------------------- |
+| `list`   | List stored series matching the selector filters.                                 |
+| `get`    | Read and display a single series' values.                                         |
+| `grid`   | Render N series as N columns against one shared time axis.                        |
+| `info`   | Metadata, content hash, HDF5 location, and stats for one series.                  |
+| `export` | Write series values to CSV/JSON/Parquet files (`--dir`), or stdout for one match. |
 
 ```sh
 infrastore --store demo.h5 list                                   # everything in the store
@@ -184,7 +185,57 @@ infrastore --store demo.h5 get --name load --tail --limit 24      # the last day
 infrastore --store demo.h5 -f csv grid --name-glob 'load_*' --resolution PT1H
 infrastore --store demo.h5 info --name load --no-stats            # catalog only, no array read
 infrastore --store demo.h5 -f csv export --name-glob 'load_*' --dir out/
+infrastore --store demo.h5 -f parquet export --name-glob 'load_*' --dir out/
 ```
+
+#### Parquet
+
+`-f parquet export --dir <DIR>` writes one **file pair** per `(type, value type, time reference)`
+partition: `<stem>.values.parquet` holds every distinct array once, one row per value, and
+`<stem>.series.parquet` holds one catalog row per series. Both carry the array key
+`(data_hash, time_axis)` and are sorted by it, so they join on it — which is what keeps a profile
+shared by a thousand components from being written a thousand times.
+
+`add --parquet <PATH>` reads them back, from a file, a directory, or a partition stem
+(`out/SingleTimeSeries.f64.utc` names the pair). The import is a merge join over the two halves, one
+transaction per partition, and a dangling key on either side is an error — as is a pair whose
+footers disagree about the partition they describe, which is what half of one export beside half of
+another looks like. `--no-checksum` waives the `data_hash` comparison for values edited in a query
+engine.
+
+The inline flags split three ways: the owner, the name, the features and the five free-form
+descriptors are **overrides**; `--element-type`, `--element-shape`, `--resolution` and `--type` are
+**assertions**, which a contradicting file turns into an error and which name the reading for a
+foreign file; and the grid flags (`--initial-timestamp`, `--interval`, `--horizon`, `--count`,
+`--percentile`, `--scenario-count`) and the CSV layout flags (`--layout`, `--owner-map`,
+`--owner-id-from`) are **refused**, because the values already carry the grid.
+[Parquet layout](parquet-format.md) is the format reference — both column sets, the array key,
+`time_axis` per type, footer keys, and the rules the import applies to a foreign file.
+
+Three limits on the export, all deliberate:
+
+- **`--dir` is required.** Parquet's footer sits at the end of the file and its offsets point
+  backwards, so a writer has to seek and a pipe cannot.
+- **`--dir` must hold no `.parquet` files yet.** `add --parquet <dir>` imports every partition it
+  finds, so a narrower export written over an earlier one would leave the earlier partitions in
+  place for the next import to file silently. The export neither merges nor sweeps; empty the
+  directory or name a fresh one. Other files in it are not in the way.
+- **An empty series fails it.** Every selected series with no values is named, and nothing is
+  written — a series row whose key matches no values rows is indistinguishable from a truncated
+  export, so it is refused rather than represented. Narrow the selection past it.
+- **`-f parquet` is only accepted on `export`.** It is a binary container, not a rendering of a
+  result; there is no `list -f parquet`.
+
+Parquet is **on by default** -- in the released binaries and in `cargo install infrastore-cli`
+alike. It is still a cargo feature (`parquet`), so `--no-default-features --features vendored`
+builds a binary without the Arrow dependency tree. That binary accepts `-f parquet` and `--parquet`
+and fails with the feature to rebuild with, rather than reporting `parquet` as an unknown format --
+which is also why `--help`, the shell completions, and the examples on this page read the same in
+both builds.
+
+The Arrow tree deliberately stays out of the **library** crates: `infrastore-core`, `infrastore-py`,
+and `infrastore-ffi` never link it. A binding that wants Parquet has `to_arrow()` and its host
+language's own writer, which is a much smaller ask than linking Arrow into a wheel or a cdylib.
 
 #### Bounding the rows
 
@@ -233,16 +284,16 @@ usually a different component, not a shorter view of the same sweep.
 
 ### Write data
 
-| Command         | Purpose                                                                         |
-| --------------- | ------------------------------------------------------------------------------- |
-| `init`          | Create an empty store with an explicit compression and catalog policy.          |
-| `add`           | Add one or more series from a descriptor JSON + CSV, or from flags.             |
-| `merge`         | Copy matching series from another store into this one.                          |
-| `transform`     | Derive `DeterministicSingleTimeSeries` from stored `SingleTimeSeries`.          |
-| `remove`        | Delete a single series, or every match with `--all` (prompts unless `--force`). |
-| `copy`          | Copy the single series a selector resolves to onto another owner.               |
-| `replace-owner` | Reassign every series from one owner to another.                                |
-| `clear`         | Remove all series, or all for one owner (prompts unless `--force`).             |
+| Command         | Purpose                                                                           |
+| --------------- | --------------------------------------------------------------------------------- |
+| `init`          | Create an empty store with an explicit compression and catalog policy.            |
+| `add`           | Add one or more series from a descriptor JSON + CSV, from Parquet, or from flags. |
+| `merge`         | Copy matching series from another store into this one.                            |
+| `transform`     | Derive `DeterministicSingleTimeSeries` from stored `SingleTimeSeries`.            |
+| `remove`        | Delete a single series, or every match with `--all` (prompts unless `--force`).   |
+| `copy`          | Copy the single series a selector resolves to onto another owner.                 |
+| `replace-owner` | Reassign every series from one owner to another.                                  |
+| `clear`         | Remove all series, or all for one owner (prompts unless `--force`).               |
 
 ```sh
 infrastore --store demo.h5 init --compression deflate:6
@@ -252,6 +303,7 @@ infrastore --store demo.h5 add --descriptor batch.json --replace --batch-size 50
 infrastore --store demo.h5 add --csv load.csv --owner-id 42 --owner-type Generator \
     --name load --type SingleTimeSeries --element-type f64 \
     --resolution PT1H --initial-timestamp 2024-01-01T00:00:00Z
+infrastore --store demo.h5 add --parquet out/
 infrastore --store demo.h5 merge --from other.h5 --name-glob 'load_*'
 infrastore --store demo.h5 transform --horizon PT24H --interval PT1H
 infrastore --store demo.h5 remove --owner-id 42 --name load --type SingleTimeSeries
@@ -303,25 +355,49 @@ in-terminal check, `get --plot` draws a sparkline with no file involved.
 
 ### Inspect the store
 
-| Command       | Purpose                                                                       |
-| ------------- | ----------------------------------------------------------------------------- |
-| `stats`       | Association, owner, and distinct-array counts.                                |
-| `store-info`  | HDF5 + SQLite paths and sizes, on-disk format version, catalog revision.      |
-| `upgrade`     | Bring a store written by an older build up to this one's catalog revision.    |
-| `arrays`      | Distinct stored arrays: content hash, HDF5 location, series sharing each.     |
-| `summary`     | Grouped static and/or forecast summaries (`--static-only`/`--forecast-only`). |
-| `resolutions` | List distinct resolutions and forecast intervals.                             |
-| `params`      | Show the store's forecast parameters (`--resolution`/`--interval`).           |
+| Command       | Purpose                                                                           |
+| ------------- | --------------------------------------------------------------------------------- |
+| `stats`       | Association, owner, and distinct-array counts.                                    |
+| `store-info`  | HDF5 + SQLite paths and sizes, on-disk format version, catalog revision.          |
+| `store-attr`  | Key/value provenance stamped on the whole artifact (`list`/`get`/`set`/`remove`). |
+| `upgrade`     | Bring a store written by an older build up to this one's catalog revision.        |
+| `arrays`      | Distinct stored arrays: content hash, HDF5 location, series sharing each.         |
+| `summary`     | Grouped static and/or forecast summaries (`--static-only`/`--forecast-only`).     |
+| `resolutions` | List distinct resolutions and forecast intervals.                                 |
+| `params`      | Show the store's forecast parameters (`--resolution`/`--interval`).               |
 
 ```sh
 infrastore --store demo.h5 stats
 infrastore --store demo.h5 store-info
+infrastore --store demo.h5 store-attr list
+infrastore --store demo.h5 store-attr set creator sienna-build
+infrastore --store demo.h5 store-attr get creator
+infrastore --store demo.h5 store-attr remove creator
 infrastore --store demo.h5 upgrade
 infrastore --store demo.h5 arrays --data-hash 2018057b
 infrastore --store demo.h5 summary --static-only
 infrastore --store demo.h5 resolutions
 infrastore --store demo.h5 params --resolution PT1H --interval PT1H
 ```
+
+`store-attr` reads and writes **store attributes** — free-form key/value provenance about the
+artifact as a whole: who built it, from what source system, under which of your own schema versions.
+The store never interprets a value, in the same spirit as a series' `application_data`; store JSON
+if you want structure. See [Store attributes](../explanation/data-model.md#store-attributes).
+
+Do not confuse it with `attributes`, which lists component <-> supplemental-attribute associations —
+a different thing entirely, which is why this command carries the `store-` prefix.
+
+Three details worth knowing:
+
+- `set` replaces rather than appending. An artifact records one creator, not a history of them.
+- `get` prints the bare value, so `$(infrastore store-attr get creator)` is the value and nothing
+  else, and **exits 1 when the key is unset** so a script can branch on it. `remove` instead reports
+  `removed: false` and exits 0 — there the outcome is the output.
+- Keys beginning with `infrastore.` are reserved, on removal as well as on write.
+
+`store-info` reports whatever is there under `store_attributes`, so `infrastore -f json store-info`
+is the one call that answers "what is this artifact" completely.
 
 `upgrade` is the writable open that runs the catalog migration ladder. It is needed only for a store
 written by an older infrastore: such a store reports `the store's catalog is at revision N …` on
@@ -415,6 +491,7 @@ infrastore completions zsh > ~/.zfunc/_infrastore
 infrastore --store <PATH> init [--compression <none|deflate[:LEVEL]>] [--no-shuffle] [--catalog <attached|in-memory>]
 infrastore --store <PATH> add --descriptor <FILE.json|-> [--csv <FILE.csv>] [--dry-run] [--replace] [--batch-size N] [-q|--quiet] [--compression <SPEC>] [--no-shuffle] [--catalog <MODE>]
 infrastore --store <PATH> add --csv <FILE.csv> --owner-id <I> --owner-type <T> --name <N> --type <T> --element-type <E> [DESCRIPTOR FIELDS...]
+infrastore --store <PATH> add --parquet <PATH> [--parquet <PATH>...] [--no-checksum] [DESCRIPTOR FIELDS...]
 infrastore --store <PATH> merge --from <PATH.h5> [SELECTOR...] [--replace] [--dry-run]
 infrastore --store <PATH> list    [SELECTOR...] [--limit N] [--wide]
 infrastore --store <PATH> get     [SELECTOR...] [--time-range START..END] [--limit N | --full] [--tail] [--stride N] [--plot [--plot-width COLS]] [--window N | --issue-time <TS>]
@@ -436,6 +513,10 @@ infrastore --store <PATH> persist --dest <PATH.h5> [--force] [--dry-run]
 infrastore --store <PATH> compact [--force]
 infrastore --store <PATH> stats
 infrastore --store <PATH> store-info
+infrastore --store <PATH> store-attr list
+infrastore --store <PATH> store-attr get    <KEY>
+infrastore --store <PATH> store-attr set    <KEY> <VALUE>
+infrastore --store <PATH> store-attr remove <KEY>
 infrastore --store <PATH> upgrade
 infrastore --store <PATH> arrays [SELECTOR...] [--data-hash <HEX>]
 infrastore --store <PATH> attributes [--component-id <I>] [--attribute-id <I>] [--component-type <T>] [--attribute-type <T>] [--summary]

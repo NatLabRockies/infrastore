@@ -17,6 +17,17 @@ pub enum Format {
     /// consumer expects.
     Jsonl,
     Csv,
+    /// Apache Parquet, on `export` only.
+    ///
+    /// Unlike the four above, this is not a *rendering* of a result: it is a
+    /// binary container with a footer, so it needs a seekable sink and there is
+    /// no sensible `list -f parquet`. The variant exists unconditionally rather
+    /// than under the `parquet` cargo feature so that `--help`, the shell
+    /// completions, and the documented examples read the same in both builds --
+    /// and so a binary built without the feature can say so, instead of
+    /// reporting `parquet` as an unknown value. `main` rejects it for every
+    /// command but `export`, and `export` rejects it when the feature is off.
+    Parquet,
 }
 
 impl Format {
@@ -24,6 +35,11 @@ impl Format {
     /// table/CSV ones.
     pub fn is_json(self) -> bool {
         matches!(self, Format::Json | Format::Jsonl)
+    }
+
+    /// Whether this format writes a binary container rather than text.
+    pub fn is_parquet(self) -> bool {
+        matches!(self, Format::Parquet)
     }
 }
 
@@ -34,6 +50,7 @@ impl std::fmt::Display for Format {
             Format::Json => "json",
             Format::Jsonl => "jsonl",
             Format::Csv => "csv",
+            Format::Parquet => "parquet",
         })
     }
 }

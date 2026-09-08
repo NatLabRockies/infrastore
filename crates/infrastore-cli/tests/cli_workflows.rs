@@ -4521,3 +4521,979 @@ fn line_points(svg: &str) -> Vec<(f64, f64)> {
         })
         .collect()
 }
+
+// ---- store-attr -------------------------------------------------------------
+
+#[test]
+fn store_attr_round_trips_through_the_command_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("attrs.h5");
+    seed_one(dir.path(), &store);
+
+    let empty = run(&store, &["store-attr", "list"]);
+    assert!(empty.contains("No store attributes"), "{empty}");
+
+    run(&store, &["store-attr", "set", "creator", "sienna-build"]);
+    run(&store, &["store-attr", "set", "source_system", "WECC"]);
+
+    // `get` prints the bare value, so `$(...)` in a script is the value itself.
+    let value = run(&store, &["store-attr", "get", "creator"]);
+    assert_eq!(value.trim_end(), "sienna-build");
+
+    let listed = run(&store, &["-f", "json", "store-attr", "list"]);
+    let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    assert_eq!(listed["creator"], "sienna-build");
+    assert_eq!(listed["source_system"], "WECC");
+
+    // A set replaces rather than appending.
+    run(&store, &["store-attr", "set", "creator", "someone else"]);
+    assert_eq!(
+        run(&store, &["store-attr", "get", "creator"]).trim_end(),
+        "someone else"
+    );
+
+    let removed = run(&store, &["-f", "json", "store-attr", "remove", "creator"]);
+    let removed: serde_json::Value = serde_json::from_str(&removed).unwrap();
+    assert_eq!(removed["removed"], true);
+    // Removing an absent key succeeds and says so, unlike `get`.
+    let again = run(&store, &["-f", "json", "store-attr", "remove", "creator"]);
+    let again: serde_json::Value = serde_json::from_str(&again).unwrap();
+    assert_eq!(again["removed"], false);
+}
+
+#[test]
+fn store_attr_get_exits_nonzero_for_an_unset_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("missing.h5");
+    seed_one(dir.path(), &store);
+    let err = run_err(&store, &["store-attr", "get", "creator"]);
+    assert!(err.contains("creator"), "{err}");
+}
+
+#[test]
+fn store_attr_refuses_the_reserved_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("reserved.h5");
+    seed_one(dir.path(), &store);
+    let err = run_err(&store, &["store-attr", "set", "infrastore.generation", "1"]);
+    assert!(err.contains("infrastore."), "{err}");
+}
+
+#[test]
+fn store_info_reports_the_artifact_s_attributes() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("info.h5");
+    seed_one(dir.path(), &store);
+    run(&store, &["store-attr", "set", "creator", "sienna-build"]);
+
+    let info = run(&store, &["-f", "json", "store-info"]);
+    let info: serde_json::Value = serde_json::from_str(&info).unwrap();
+    assert_eq!(info["store_attributes"]["creator"], "sienna-build");
+}
+
+#[test]
+fn merge_copies_the_source_s_new_attributes_and_reports_the_conflicts() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.h5");
+    let dest = dir.path().join("dest.h5");
+    seed_one(dir.path(), &source);
+    run(&source, &["store-attr", "set", "creator", "source-build"]);
+    run(&source, &["store-attr", "set", "source_system", "WECC"]);
+
+    run(&dest, &["init"]);
+    run(&dest, &["store-attr", "set", "creator", "dest-build"]);
+
+    let out = run(
+        &dest,
+        &["-f", "json", "merge", "--from", source.to_str().unwrap()],
+    );
+    let out: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(out["store_attributes_copied"], 1);
+    let conflicts = out["store_attribute_conflicts"].as_array().unwrap();
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(conflicts[0]["key"], "creator");
+
+    // The destination's own value survives; the key it lacked came across.
+    let listed = run(&dest, &["-f", "json", "store-attr", "list"]);
+    let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    assert_eq!(
+        listed["creator"], "dest-build",
+        "the destination's provenance is not restamped by the source's"
+    );
+    assert_eq!(listed["source_system"], "WECC");
+}
+
+#[test]
+fn diff_reports_store_attributes_in_their_own_section_and_gates_on_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let left = dir.path().join("left.h5");
+    let right = dir.path().join("right.h5");
+    seed_one(dir.path(), &left);
+    run(&left, &["persist", "--dest", right.to_str().unwrap()]);
+
+    // Identical artifacts, no attributes anywhere: exit 0 and no section.
+    let same = run(&left, &["diff", "--against", right.to_str().unwrap()]);
+    assert!(!same.contains("Store attributes"), "{same}");
+
+    // A store attribute on one side only is a difference the gate must catch,
+    // even though every series is identical.
+    run(&left, &["store-attr", "set", "creator", "sienna-build"]);
+    let output = raw(&left, &["diff", "--against", right.to_str().unwrap()]);
+    assert!(
+        !output.status.success(),
+        "an attribute-only difference must exit nonzero"
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("Store attributes"), "{text}");
+    assert!(text.contains("creator"), "{text}");
+
+    let json = raw(
+        &left,
+        &["-f", "json", "diff", "--against", right.to_str().unwrap()],
+    );
+    let doc: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    let rows = doc["store_attributes"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["key"], "creator");
+    assert_eq!(rows[0]["status"], "removed");
+}
+
+// ---- Parquet export ---------------------------------------------------------
+
+#[test]
+fn parquet_is_only_offered_where_it_means_something() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("pq.h5");
+    seed_one(dir.path(), &store);
+
+    // Not a rendering of a result: refused for every command but `export`,
+    // once and centrally, rather than falling through to a table.
+    let err = run_err(&store, &["-f", "parquet", "list"]);
+    assert!(err.contains("only available on `export`"), "{err}");
+
+    // A footer at the end of the file needs a seekable sink, which a pipe is
+    // not.
+    let err = run_err(&store, &["-f", "parquet", "export"]);
+    assert!(err.contains("--dir"), "{err}");
+}
+
+#[cfg(feature = "parquet")]
+#[test]
+fn export_writes_one_file_pair_per_partition() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("pq.h5");
+    seed_one(dir.path(), &store);
+    let out = dir.path().join("out");
+
+    let report = run(
+        &store,
+        &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
+    );
+    assert!(report.contains("1 partitions"), "{report}");
+
+    let mut files: Vec<String> = fs::read_dir(&out)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    files.sort();
+    // Two files sharing a stem, not one file per series.
+    assert_eq!(
+        files,
+        vec![
+            "SingleTimeSeries.f64.utc.series.parquet".to_string(),
+            "SingleTimeSeries.f64.utc.values.parquet".to_string(),
+        ]
+    );
+
+    let columns = |name: &str| -> Vec<String> {
+        let file = fs::File::open(out.join(name)).unwrap();
+        parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
+            .unwrap()
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect()
+    };
+    // The values half is the array and the key that names it, and nothing about
+    // who owns it -- which is what stops a shared profile being written once per
+    // component.
+    let values = columns("SingleTimeSeries.f64.utc.values.parquet");
+    assert_eq!(values, vec!["data_hash", "time_axis", "timestamp", "value"]);
+    // The series half is the catalog row, joined on the same pair.
+    let series = columns("SingleTimeSeries.f64.utc.series.parquet");
+    for expected in [
+        "data_hash",
+        "time_axis",
+        "id",
+        "owner_id",
+        "owner_type",
+        "name",
+        "initial_timestamp",
+        "resolution",
+        "length",
+        "features",
+        "element_type",
+        "time_reference",
+        "units",
+    ] {
+        assert!(series.contains(&expected.to_string()), "{series:?}");
+    }
+}
+
+#[cfg(feature = "parquet")]
+#[test]
+fn a_parquet_export_honors_the_time_range() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("pq_range.h5");
+    seed_one(dir.path(), &store);
+    let out = dir.path().join("out");
+
+    run(
+        &store,
+        &[
+            "-f",
+            "parquet",
+            "export",
+            "--dir",
+            out.to_str().unwrap(),
+            "--time-range",
+            "2024-01-01T01:00:00Z..2024-01-01T03:00:00Z",
+        ],
+    );
+    // The values half, named rather than whichever `read_dir` returns first:
+    // the series half has one row whatever the range selects.
+    let file = out.join("SingleTimeSeries.f64.utc.values.parquet");
+    let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+        fs::File::open(file).unwrap(),
+    )
+    .unwrap()
+    .build()
+    .unwrap();
+    let rows: usize = reader.map(|b| b.unwrap().num_rows()).sum();
+    assert_eq!(rows, 2, "the range selects two of the three steps");
+}
+
+#[cfg(feature = "parquet")]
+#[test]
+fn a_directory_import_commits_partition_by_partition() {
+    // The guarantee is per partition: a malformed later one fails the load, but
+    // the partitions before it are already committed and stay that way.
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("src.h5");
+    let dest = dir.path().join("dest.h5");
+    seed_one(dir.path(), &source);
+    let out = dir.path().join("out");
+    run(
+        &source,
+        &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
+    );
+    let stem = parquet_stem(&out);
+
+    // Sorted import order: `a_good` is committed before `b_bad` is opened.
+    let batch = dir.path().join("batch");
+    fs::create_dir(&batch).unwrap();
+    fs::copy(
+        out.join(format!("{stem}.values.parquet")),
+        batch.join("a_good.values.parquet"),
+    )
+    .unwrap();
+    fs::copy(
+        out.join(format!("{stem}.series.parquet")),
+        batch.join("a_good.series.parquet"),
+    )
+    .unwrap();
+    fs::write(batch.join("b_bad.parquet"), b"this is not a parquet file").unwrap();
+
+    let err = run_err(&dest, &["add", "--parquet", batch.to_str().unwrap()]);
+    assert!(err.contains("b_bad.parquet"), "{err}");
+
+    let listed = run(&dest, &["-f", "json", "list"]);
+    let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    let rows = listed["items"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "the good file's series survived: {rows:?}");
+    assert_eq!(rows[0]["name"], "load");
+}
+
+/// A build without the feature must say so, whatever the selector matched.
+///
+/// Only compiled into a lean test build
+/// (`--no-default-features --features vendored`), which is what the flags are
+/// there to be exercised by: the default build has the feature and would take
+/// the real path.
+#[cfg(not(feature = "parquet"))]
+#[test]
+fn a_lean_build_refuses_a_parquet_export_even_when_nothing_matches() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("lean.h5");
+    seed_one(dir.path(), &store);
+    let out = dir.path().join("out");
+
+    // The empty-selection path returns before anything is written, so this is
+    // the case that used to report "exported 0" for a command the binary cannot
+    // carry out at all.
+    let err = run_err(
+        &store,
+        &[
+            "-f",
+            "parquet",
+            "export",
+            "--dir",
+            out.to_str().unwrap(),
+            "--name-glob",
+            "matches_nothing_*",
+        ],
+    );
+    assert!(err.contains("without Parquet support"), "{err}");
+    assert!(!out.exists(), "nothing is written either");
+
+    // And the same for a selection that does match, which reaches the writer.
+    let err = run_err(
+        &store,
+        &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
+    );
+    assert!(err.contains("without Parquet support"), "{err}");
+
+    // `add --parquet` says the same thing, from the same string.
+    let err = run_err(&store, &["add", "--parquet", out.to_str().unwrap()]);
+    assert!(err.contains("without Parquet support"), "{err}");
+}
+
+#[cfg(feature = "parquet")]
+#[test]
+fn a_stale_parquet_directory_is_refused_even_when_nothing_matches() {
+    // "exported 0" with last week's partitions still in the directory is the
+    // stale export the empty-directory rule exists to prevent.
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("pq.h5");
+    seed_one(dir.path(), &store);
+    let out = dir.path().join("out");
+    run(
+        &store,
+        &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
+    );
+    let err = run_err(
+        &store,
+        &[
+            "-f",
+            "parquet",
+            "export",
+            "--dir",
+            out.to_str().unwrap(),
+            "--name-glob",
+            "matches_nothing_*",
+        ],
+    );
+    assert!(err.contains("already holds"), "{err}");
+    // And the same for a selection that does match.
+    let err = run_err(
+        &store,
+        &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
+    );
+    assert!(err.contains("already holds"), "{err}");
+}
+
+#[cfg(feature = "parquet")]
+#[test]
+fn a_parquet_export_re_adds_with_no_flags() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("src.h5");
+    let dest = dir.path().join("dest.h5");
+    seed_one(dir.path(), &source);
+    let out = dir.path().join("out");
+
+    run(
+        &source,
+        &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
+    );
+    // Self-describing: the series half is the descriptor. The whole directory
+    // is what a user points at, and the pair is found by its stem.
+    run(&dest, &["add", "--parquet", out.to_str().unwrap()]);
+
+    let listed = run(&dest, &["-f", "json", "list"]);
+    let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    let rows = listed["items"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["name"], "load");
+    assert_eq!(rows[0]["owner_id"], 42);
+    assert_eq!(rows[0]["owner_type"], "Generator");
+    assert_eq!(rows[0]["type"], "SingleTimeSeries");
+
+    // And the *values* are the same bytes, which is what a content hash says.
+    let src_hash = {
+        let listed = run(&source, &["-f", "json", "list"]);
+        let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
+        listed["items"][0]["data_hash"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(rows[0]["data_hash"].as_str().unwrap(), src_hash);
+}
+
+#[cfg(feature = "parquet")]
+#[test]
+fn a_parquet_dry_run_reports_the_plan_and_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("src.h5");
+    let dest = dir.path().join("dest.h5");
+    seed_one(dir.path(), &source);
+    let out = dir.path().join("out");
+    run(
+        &source,
+        &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
+    );
+    // A stem names the pair, which is the third thing `--parquet` accepts.
+    let stem = out.join(parquet_stem(&out));
+
+    let plan = run(
+        &dest,
+        &[
+            "-f",
+            "json",
+            "add",
+            "--parquet",
+            stem.to_str().unwrap(),
+            "--dry-run",
+        ],
+    );
+    let plan: serde_json::Value = serde_json::from_str(&plan).unwrap();
+    assert_eq!(plan["would_add"], 1);
+    let file = &plan["files"][0];
+    assert_eq!(file["series"], 1);
+    // The count this layout exists for: one series over one distinct array.
+    assert_eq!(file["arrays"], 1);
+    assert_eq!(file["matches"][0]["name"], "load");
+    assert_eq!(file["matches"][0]["owner_id"], 42);
+    // The file records an id; `add` never accepts one, so it is reported here
+    // and then dropped.
+    assert_eq!(file["ignored_ids"][0], 1);
+    // And the descriptors the file left empty, since an empty string is how
+    // this format writes "absent" and a stored empty string is the same text.
+    assert!(
+        file["matches"][0]["empty_descriptors"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::Value::from("units")),
+        "{plan}"
+    );
+    assert!(!dest.exists(), "--dry-run must not create the store");
+}
+
+#[cfg(feature = "parquet")]
+#[test]
+fn a_foreign_parquet_file_needs_its_owner_supplied() {
+    // What `to_arrow()` produces: a value object has no owner and no catalog id.
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("foreign.h5");
+    let path = dir.path().join("naked.parquet");
+    write_naked_parquet(&path);
+
+    // A name is part of a series' identity, so it is the first thing missing.
+    let err = run_err(&store, &["add", "--parquet", path.to_str().unwrap()]);
+    assert!(err.contains("name"), "{err}");
+
+    // With a name, the owner is what is left to supply.
+    let err = run_err(
+        &store,
+        &[
+            "add",
+            "--parquet",
+            path.to_str().unwrap(),
+            "--name",
+            "voltage",
+        ],
+    );
+    assert!(err.contains("--owner-id"), "{err}");
+
+    run(
+        &store,
+        &[
+            "add",
+            "--parquet",
+            path.to_str().unwrap(),
+            "--owner-id",
+            "7",
+            "--owner-type",
+            "Bus",
+            "--name",
+            "voltage",
+        ],
+    );
+    let listed = run(&store, &["-f", "json", "list"]);
+    let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    assert_eq!(listed["items"][0]["name"], "voltage");
+    assert_eq!(listed["items"][0]["owner_id"], 7);
+    // Evenly spaced rows with no footer read as a grid.
+    assert_eq!(listed["items"][0]["type"], "SingleTimeSeries");
+}
+
+#[cfg(feature = "parquet")]
+#[test]
+fn a_values_file_without_its_partner_is_a_foreign_file() {
+    // Copying half a partition is easy to do and impossible to detect after the
+    // fact, so it is not treated as an error: it is a values file like any
+    // other, and everything the series file carried has to be supplied.
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("src.h5");
+    let dest = dir.path().join("dest.h5");
+    seed_one(dir.path(), &source);
+    let out = dir.path().join("out");
+    run(
+        &source,
+        &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
+    );
+    let stem = parquet_stem(&out);
+    fs::remove_file(out.join(format!("{stem}.series.parquet"))).unwrap();
+    let values = out.join(format!("{stem}.values.parquet"));
+
+    let err = run_err(&dest, &["add", "--parquet", values.to_str().unwrap()]);
+    assert!(err.contains("--name"), "{err}");
+
+    // The key columns survive, so the dry run can still say how many distinct
+    // arrays the file holds.
+    let plan = run(
+        &dest,
+        &[
+            "-f",
+            "json",
+            "add",
+            "--parquet",
+            values.to_str().unwrap(),
+            "--dry-run",
+            "--name",
+            "load",
+            "--owner-id",
+            "7",
+            "--owner-type",
+            "Bus",
+        ],
+    );
+    let plan: serde_json::Value = serde_json::from_str(&plan).unwrap();
+    assert_eq!(plan["would_add"], 1);
+    assert_eq!(plan["files"][0]["arrays"], 1);
+
+    run(
+        &dest,
+        &[
+            "add",
+            "--parquet",
+            values.to_str().unwrap(),
+            "--name",
+            "load",
+            "--owner-id",
+            "7",
+            "--owner-type",
+            "Bus",
+        ],
+    );
+    let listed = run(&dest, &["-f", "json", "list"]);
+    let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    assert_eq!(listed["items"][0]["owner_id"], 7);
+    // Same bytes, which is what the surviving key column says they are.
+    let src = run(&source, &["-f", "json", "list"]);
+    let src: serde_json::Value = serde_json::from_str(&src).unwrap();
+    assert_eq!(
+        listed["items"][0]["data_hash"],
+        src["items"][0]["data_hash"]
+    );
+}
+
+#[cfg(feature = "parquet")]
+#[test]
+fn a_series_file_without_its_partner_is_refused() {
+    // The mirror case is not survivable: its rows name arrays that are not
+    // there, so the message says that rather than reporting a missing column.
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("src.h5");
+    let dest = dir.path().join("dest.h5");
+    seed_one(dir.path(), &source);
+    let out = dir.path().join("out");
+    run(
+        &source,
+        &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
+    );
+    let stem = parquet_stem(&out);
+    fs::remove_file(out.join(format!("{stem}.values.parquet"))).unwrap();
+
+    let err = run_err(&dest, &["add", "--parquet", out.to_str().unwrap()]);
+    assert!(err.contains("not there"), "{err}");
+}
+
+#[cfg(feature = "parquet")]
+#[test]
+fn inline_descriptors_override_every_series_in_a_partition() {
+    // §2.10 says an inline flag overrides a column for every series in the
+    // partition. The five free-form descriptors used to be parsed and dropped.
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("src.h5");
+    let dest = dir.path().join("dest.h5");
+    seed_one(dir.path(), &source);
+    let out = dir.path().join("out");
+    run(
+        &source,
+        &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
+    );
+
+    run(
+        &dest,
+        &[
+            "add",
+            "--parquet",
+            out.to_str().unwrap(),
+            "--units",
+            "MW",
+            "--quantity-kind",
+            "ActivePower",
+            "--unit-system",
+            "natural_units",
+            "--component-field",
+            "max_active_power",
+            "--application-data",
+            "{\"note\":\"overridden\"}",
+        ],
+    );
+    let listed = run(&dest, &["-f", "json", "list", "--wide"]);
+    let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    let row = &listed["items"][0];
+    assert_eq!(row["units"], "MW", "{row}");
+    assert_eq!(row["quantity_kind"], "ActivePower", "{row}");
+    assert_eq!(row["unit_system"], "natural_units", "{row}");
+    assert_eq!(row["component_field"], "max_active_power", "{row}");
+}
+
+#[cfg(feature = "parquet")]
+#[test]
+fn element_shape_and_resolution_are_assertions_on_a_parquet_import() {
+    // Like --element-type: they state what the file already implies, so a
+    // contradiction is an error rather than a silent replacement.
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("src.h5");
+    let dest = dir.path().join("dest.h5");
+    seed_one(dir.path(), &source);
+    let out = dir.path().join("out");
+    run(
+        &source,
+        &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
+    );
+    let path = out.to_str().unwrap().to_string();
+
+    let err = run_err(&dest, &["add", "--parquet", &path, "--resolution", "PT30M"]);
+    assert!(err.contains("asserted"), "{err}");
+    assert!(err.contains("PT1H"), "{err}");
+
+    let err = run_err(&dest, &["add", "--parquet", &path, "--element-shape", "3"]);
+    assert!(err.contains("asserted"), "{err}");
+    assert!(err.contains("per-step shape"), "{err}");
+
+    // Agreeing with the file is not an error, and changes nothing.
+    run(&dest, &["add", "--parquet", &path, "--resolution", "PT1H"]);
+    let listed = run(&dest, &["-f", "json", "list"]);
+    let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    assert_eq!(listed["items"][0]["resolution"], "PT1H");
+}
+
+#[cfg(feature = "parquet")]
+#[test]
+fn resolution_names_the_grid_of_a_foreign_file() {
+    // The other half of an assertion: a foreign file says nothing to contradict,
+    // so --resolution is simply the answer -- and the rows are then checked
+    // against the grid it generates.
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("foreign.h5");
+    let path = dir.path().join("naked.parquet");
+    write_naked_parquet(&path);
+
+    let err = run_err(
+        &store,
+        &[
+            "add",
+            "--parquet",
+            path.to_str().unwrap(),
+            "--owner-id",
+            "7",
+            "--owner-type",
+            "Bus",
+            "--name",
+            "voltage",
+            "--resolution",
+            "PT30M",
+        ],
+    );
+    assert!(err.contains("does not sit on"), "{err}");
+
+    run(
+        &store,
+        &[
+            "add",
+            "--parquet",
+            path.to_str().unwrap(),
+            "--owner-id",
+            "7",
+            "--owner-type",
+            "Bus",
+            "--name",
+            "voltage",
+            "--resolution",
+            "PT1H",
+        ],
+    );
+    let listed = run(&store, &["-f", "json", "list"]);
+    let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    assert_eq!(listed["items"][0]["resolution"], "PT1H");
+}
+
+#[cfg(feature = "parquet")]
+#[test]
+fn the_grid_flags_are_refused_with_parquet_rather_than_dropped() {
+    // The values imply the grid, so a flag naming one is either redundant or a
+    // contradiction nothing should have to adjudicate -- and it used to be
+    // parsed and thrown away. See Finding 7.27.
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("src.h5");
+    let dest = dir.path().join("dest.h5");
+    seed_one(dir.path(), &source);
+    let out = dir.path().join("out");
+    run(
+        &source,
+        &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
+    );
+    let path = out.to_str().unwrap().to_string();
+
+    for (flag, value) in [
+        ("--initial-timestamp", "2024-01-01T00:00:00Z"),
+        ("--interval", "PT1H"),
+        ("--horizon", "PT2H"),
+        ("--count", "24"),
+        ("--percentile", "0.5"),
+        ("--scenario-count", "3"),
+        ("--layout", "wide"),
+        ("--owner-map", "map.csv"),
+        ("--owner-id-from", "header"),
+    ] {
+        let err = run_err(&dest, &["add", "--parquet", &path, flag, value]);
+        assert!(err.contains(flag), "{flag}: {err}");
+        assert!(err.contains("does not apply"), "{flag}: {err}");
+    }
+    assert!(!dest.exists(), "a refused flag writes nothing");
+}
+
+#[cfg(feature = "parquet")]
+#[test]
+fn parquet_and_the_csv_forms_are_mutually_exclusive() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("both.h5");
+    let path = dir.path().join("naked.parquet");
+    write_naked_parquet(&path);
+    write(dir.path(), "v.csv", "value\n1\n2\n3\n");
+
+    let err = run_err(
+        &store,
+        &[
+            "add",
+            "--parquet",
+            path.to_str().unwrap(),
+            "--csv",
+            dir.path().join("v.csv").to_str().unwrap(),
+        ],
+    );
+    assert!(err.contains("carries its own descriptor"), "{err}");
+}
+
+/// The single partition stem an export left in `dir`.
+#[cfg(feature = "parquet")]
+fn parquet_stem(dir: &Path) -> String {
+    fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .find_map(|name| name.strip_suffix(".values.parquet").map(str::to_string))
+        .expect("an export writes a values file")
+}
+
+/// A Parquet file with the right columns and no footer at all.
+#[cfg(feature = "parquet")]
+fn write_naked_parquet(path: &Path) {
+    use std::sync::Arc;
+
+    use arrow::array::{ArrayRef, Float64Array, RecordBatch, TimestampMillisecondArray};
+    use arrow::datatypes::{Field, Schema};
+
+    let t0 = 1_704_067_200_000i64; // 2024-01-01T00:00:00Z
+    let timestamps: ArrayRef = Arc::new(
+        TimestampMillisecondArray::from(vec![t0, t0 + 3_600_000, t0 + 7_200_000])
+            .with_timezone("UTC"),
+    );
+    let values: ArrayRef = Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0]));
+    let schema = Schema::new(vec![
+        Field::new("timestamp", timestamps.data_type().clone(), false),
+        Field::new("value", values.data_type().clone(), false),
+    ]);
+    let batch = RecordBatch::try_new(Arc::new(schema), vec![timestamps, values]).unwrap();
+    let file = fs::File::create(path).unwrap();
+    let mut writer = parquet::arrow::ArrowWriter::try_new(file, batch.schema(), None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+}
+
+#[cfg(feature = "parquet")]
+#[test]
+fn a_dense_forecast_round_trips_through_its_own_partition() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("fc.h5");
+    let dest = dir.path().join("fc_dest.h5");
+    seed_day_of_windows(dir.path(), &source);
+    let out = dir.path().join("out");
+
+    run(
+        &source,
+        &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
+    );
+    let mut files: Vec<String> = fs::read_dir(&out)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    files.sort();
+    assert_eq!(
+        files,
+        vec![
+            "Deterministic.f64.utc.series.parquet".to_string(),
+            "Deterministic.f64.utc.values.parquet".to_string(),
+        ]
+    );
+
+    let builder = |name: &str| {
+        parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+            fs::File::open(out.join(name)).unwrap(),
+        )
+        .unwrap()
+    };
+    let columns = |name: &str| -> Vec<String> {
+        builder(name)
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect()
+    };
+
+    // A forecast's second time column is why it cannot share a values file with
+    // a static series -- and every column is still required.
+    let values = builder("Deterministic.f64.utc.values.parquet");
+    assert_eq!(
+        columns("Deterministic.f64.utc.values.parquet"),
+        vec!["data_hash", "time_axis", "timestamp", "issue_time", "value"]
+    );
+    assert!(values.schema().fields().iter().all(|f| !f.is_nullable()));
+    // The grid the coordinates belong to is the series half's, once per series.
+    let series = columns("Deterministic.f64.utc.series.parquet");
+    for expected in ["interval", "horizon", "resolution", "count"] {
+        assert!(series.contains(&expected.to_string()), "{series:?}");
+    }
+    // 24 windows x 2 steps, flattened -- once, however many series read it.
+    let rows: usize = values.build().unwrap().map(|b| b.unwrap().num_rows()).sum();
+    assert_eq!(rows, 48);
+
+    run(&dest, &["add", "--parquet", out.to_str().unwrap()]);
+    let listed = run(&dest, &["-f", "json", "list"]);
+    let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    let row = &listed["items"][0];
+    assert_eq!(row["type"], "Deterministic");
+    assert_eq!(row["name"], "load_det");
+    assert_eq!(row["count"], 24);
+    assert_eq!(row["horizon"], "PT2H");
+    assert_eq!(row["interval"], "PT1H");
+
+    // The values are the same bytes, which is what a content hash says.
+    let src = run(&source, &["-f", "json", "list"]);
+    let src: serde_json::Value = serde_json::from_str(&src).unwrap();
+    assert_eq!(row["data_hash"], src["items"][0]["data_hash"]);
+}
+
+#[cfg(feature = "parquet")]
+#[test]
+fn a_whole_directory_of_partitions_re_imports() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("src.h5");
+    let dest = dir.path().join("dest.h5");
+    let out = dir.path().join("out");
+
+    // Two partitions: a regular series and an irregular one, which differ in
+    // their key columns and so cannot share a table.
+    write(dir.path(), "v.csv", "value\n1\n2\n3\n");
+    write(
+        dir.path(),
+        "n.csv",
+        "timestamp,value\n2024-01-01T00:00:00Z,1\n2024-01-01T05:00:00Z,2\n",
+    );
+    let d = write(
+        dir.path(),
+        "both.json",
+        r#"[{"owner_id": 42, "owner_type": "Generator", "name": "load",
+             "type": "SingleTimeSeries", "element_type": "f64", "csv": "v.csv",
+             "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H"},
+            {"owner_id": 43, "owner_type": "Generator", "name": "irregular",
+             "type": "NonSequentialTimeSeries", "element_type": "f64", "csv": "n.csv"}]"#,
+    );
+    run(&source, &["add", "--descriptor", d.to_str().unwrap()]);
+
+    let report = run(
+        &source,
+        &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
+    );
+    assert!(report.contains("2 partitions"), "{report}");
+    assert_eq!(fs::read_dir(&out).unwrap().count(), 4, "two pairs");
+
+    // One `--parquet` pointing at the directory takes both partitions.
+    run(&dest, &["add", "--parquet", out.to_str().unwrap()]);
+    let listed = run(&dest, &["-f", "json", "list"]);
+    let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    let rows = listed["items"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+
+    // The values are the same bytes, which is what a content hash says.
+    let src = run(&source, &["-f", "json", "list"]);
+    let src: serde_json::Value = serde_json::from_str(&src).unwrap();
+    let hashes = |doc: &serde_json::Value| {
+        let mut out: Vec<String> = doc["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["data_hash"].as_str().unwrap().to_string())
+            .collect();
+        out.sort();
+        out
+    };
+    assert_eq!(hashes(&listed), hashes(&src));
+}
+
+#[cfg(feature = "parquet")]
+#[test]
+fn an_empty_series_fails_the_export() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("empty.h5");
+    let out = dir.path().join("out");
+
+    write(dir.path(), "v.csv", "value\n");
+    let d = write(
+        dir.path(),
+        "empty.json",
+        r#"{"owner_id": 42, "owner_type": "Generator", "name": "nothing",
+            "type": "SingleTimeSeries", "element_type": "f64", "csv": "v.csv",
+            "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H"}"#,
+    );
+    run(&store, &["add", "--descriptor", d.to_str().unwrap()]);
+
+    // A values file has one row per value, so an empty series would be a series
+    // row with no values group -- which is what a truncated file looks like.
+    // Refused, naming it, and nothing is written.
+    let err = run_err(
+        &store,
+        &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
+    );
+    assert!(err.contains("'nothing'"), "{err}");
+    assert!(err.contains("Narrow the selection"), "{err}");
+    assert!(
+        !out.exists() || fs::read_dir(&out).unwrap().count() == 0,
+        "nothing may be written"
+    );
+}

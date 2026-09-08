@@ -20,8 +20,28 @@ path = "src/main.rs"
 # dev-dependency below picks this up through feature unification -- there is
 # only ever one `hdf5-metno-sys` in the graph.
 [features]
-default = ["vendored"]
-vendored = ["infrastore-core/vendored"]
+default = ["vendored", "parquet"]
+vendored = ["infrastore-core/vendored", "infrastore-parquet?/vendored"]
+# `export -f parquet` and `add --parquet`.
+#
+# **On by default**, so the `infrastore` binary anyone installs can read and
+# write Parquet. Handing an analyst a file for DuckDB or polars is the ordinary
+# reason to reach for this CLI at all, and a default that needs a flag to turn
+# on is a default that most people never find. The release archives were already
+# built `--all-features`, so this changes what a source build gets, not what
+# ships.
+#
+# Where Arrow deliberately does *not* go is the library crates:
+# `infrastore-core`, `infrastore-py` and `infrastore-ffi` stay free of it, and
+# `cargo tree --edges normal` on each is the check. A binding that wants Parquet
+# has `to_arrow()` and its host language's own writer, which is a far smaller
+# ask than linking the Arrow tree into a wheel or a cdylib.
+#
+# Still switchable: `--no-default-features --features vendored` builds a lean
+# binary. `-f parquet` and `--parquet` keep *parsing* there -- so `--help`, the
+# completions, and the documented examples read the same in both builds -- and
+# fail with the flag that turns the feature back on.
+parquet = ["dep:infrastore-parquet"]
 
 [dependencies]
 chrono = { workspace = true }
@@ -41,6 +61,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tabled = { workspace = true }
 infrastore-core = { workspace = true }
+infrastore-parquet = { workspace = true, optional = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
@@ -48,5 +69,10 @@ tracing-subscriber = { workspace = true }
 # `cli_errors.rs` builds deliberately corrupt stores: `hdf5-metno` to perturb a
 # stored array behind its recorded hash, `rusqlite` to corrupt the catalog half.
 hdf5-metno = "0.14.0"
+# The Parquet round-trip tests read back what `export -f parquet` wrote, so they
+# need a reader. Only reachable under the `parquet` feature, which is what gates
+# those tests.
+arrow = { version = "59", default-features = false }
+parquet = { version = "59", default-features = false, features = ["arrow", "snap", "zstd"] }
 rusqlite = { workspace = true }
 tempfile = "3"
