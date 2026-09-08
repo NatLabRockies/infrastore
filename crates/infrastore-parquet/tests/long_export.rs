@@ -105,6 +105,59 @@ fn read_file(path: &Path) -> (RecordBatch, std::collections::HashMap<String, Str
     (batch, schema.metadata().clone())
 }
 
+/// The two file names a partition stem produces.
+fn values_and_series(stem: &str) -> [String; 2] {
+    [
+        format!("{stem}.values.parquet"),
+        format!("{stem}.series.parquet"),
+    ]
+}
+
+/// One partition's two halves, read whole.
+fn read_partition(
+    partition: &infrastore_parquet::WrittenPartition,
+) -> (
+    RecordBatch,
+    RecordBatch,
+    std::collections::HashMap<String, String>,
+) {
+    let (values, footer) = read_file(&partition.values_path);
+    let (series, _) = read_file(&partition.series_path);
+    (values, series, footer)
+}
+
+/// The `timestamp` column's type. Not field 0 any more: the array key leads.
+fn stamp_type(batch: &RecordBatch) -> arrow::datatypes::DataType {
+    batch
+        .schema()
+        .field_with_name("timestamp")
+        .expect("a timestamp column")
+        .data_type()
+        .clone()
+}
+
+fn stamps(batch: &RecordBatch, name: &str) -> Vec<i64> {
+    batch
+        .column_by_name(name)
+        .unwrap_or_else(|| panic!("column {name}"))
+        .as_any()
+        .downcast_ref::<arrow::array::TimestampMillisecondArray>()
+        .expect("a millisecond timestamp column")
+        .values()
+        .to_vec()
+}
+
+fn ints(batch: &RecordBatch, name: &str) -> Vec<i64> {
+    batch
+        .column_by_name(name)
+        .unwrap_or_else(|| panic!("column {name}"))
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .expect("an int64 column")
+        .values()
+        .to_vec()
+}
+
 fn file_names(dir: &Path) -> BTreeSet<String> {
     std::fs::read_dir(dir)
         .expect("the directory should exist")
@@ -144,28 +197,56 @@ fn one_file_holds_many_series() {
     ]);
     let report = write_partitions(dir.path(), &series).expect("the export should succeed");
 
-    assert_eq!(report.files.len(), 1, "one partition, one file");
-    assert_eq!(report.files[0].series, 3);
+    assert_eq!(report.partitions.len(), 1, "one partition, one file pair");
+    assert_eq!(report.partitions[0].series, 3);
+    assert_eq!(report.partitions[0].arrays, 3, "three distinct profiles");
     assert_eq!(report.rows(), 6);
     assert_eq!(
         file_names(dir.path()),
-        BTreeSet::from(["SingleTimeSeries.f64.utc.parquet".to_string()])
+        BTreeSet::from(values_and_series("SingleTimeSeries.f64.utc"))
     );
 
-    let (batch, _) = read_file(&report.files[0].path);
-    assert_eq!(batch.num_rows(), 6);
-    // Contiguous per series, and the whole catalog row travels with each value.
-    assert_eq!(
-        batch
-            .column_by_name("owner_id")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<arrow::array::Int64Array>()
-            .unwrap()
-            .values()
-            .to_vec(),
-        vec![1, 1, 2, 2, 3, 3]
+    let (values, series_rows, _) = read_partition(&report.partitions[0]);
+    // The values file holds the arrays and the key that names them, and nothing
+    // about who owns them.
+    assert_eq!(values.num_rows(), 6);
+    assert!(values.column_by_name("owner_id").is_none());
+    assert_eq!(series_rows.num_rows(), 3, "one row per series");
+    assert_eq!(ints(&series_rows, "owner_id"), vec![1, 2, 3]);
+    // Every series row names an array the values file holds.
+    let keys: BTreeSet<String> = strings(&values, "data_hash").into_iter().collect();
+    for hash in strings(&series_rows, "data_hash") {
+        assert!(keys.contains(&hash), "{hash} is in no values group");
+    }
+}
+
+#[test]
+fn one_array_shared_by_many_series_is_written_once() {
+    // The whole reason for normalizing: the store holds one array for a
+    // thousand components on one profile, and so does the export.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shared: Vec<f64> = (0..24).map(|i| i as f64).collect();
+    let series = stored(
+        (1..=200)
+            .map(|owner| {
+                (
+                    owner,
+                    TimeSeriesData::SingleTimeSeries(hourly("load", &shared)),
+                )
+            })
+            .collect(),
     );
+    let report = write_partitions(dir.path(), &series).expect("export");
+
+    assert_eq!(report.partitions[0].series, 200);
+    assert_eq!(report.partitions[0].arrays, 1, "one array, not two hundred");
+    assert_eq!(report.rows(), 24, "24 values, not 4800");
+
+    let (values, series_rows, _) = read_partition(&report.partitions[0]);
+    assert_eq!(values.num_rows(), 24);
+    assert_eq!(series_rows.num_rows(), 200);
+    let distinct: BTreeSet<String> = strings(&values, "data_hash").into_iter().collect();
+    assert_eq!(distinct.len(), 1);
 }
 
 #[test]
@@ -177,7 +258,7 @@ fn every_column_is_required() {
         TimeSeriesData::SingleTimeSeries(hourly("load", &[1.0, 2.0])),
     )]);
     let report = write_partitions(dir.path(), &series).expect("the export should succeed");
-    let (batch, _) = read_file(&report.files[0].path);
+    let (batch, _) = read_file(&report.partitions[0].values_path);
     for field in batch.schema().fields() {
         assert!(!field.is_nullable(), "column {} is nullable", field.name());
         assert_eq!(batch.column_by_name(field.name()).unwrap().null_count(), 0);
@@ -212,41 +293,43 @@ fn the_catalog_row_becomes_columns() {
         .unwrap();
 
     let report = write_partitions(dir.path(), &[(row, values)]).expect("export");
-    let (batch, footer) = read_file(&report.files[0].path);
+    let (values_rows, batch, footer) = read_partition(&report.partitions[0]);
+    // One row per series, not per value: that is the point of the split.
+    assert_eq!(batch.num_rows(), 1);
+    assert_eq!(values_rows.num_rows(), 2);
 
-    assert_eq!(strings(&batch, "owner_type"), vec!["Generator"; 2]);
-    assert_eq!(strings(&batch, "owner_category"), vec!["Component"; 2]);
+    assert_eq!(strings(&batch, "owner_type"), vec!["Generator"; 1]);
+    assert_eq!(strings(&batch, "owner_category"), vec!["Component"; 1]);
     assert_eq!(
         strings(&batch, "time_series_type"),
-        vec!["SingleTimeSeries"; 2]
+        vec!["SingleTimeSeries"; 1]
     );
-    assert_eq!(strings(&batch, "name"), vec!["load"; 2]);
-    assert_eq!(strings(&batch, "resolution"), vec!["PT1H"; 2]);
+    assert_eq!(strings(&batch, "name"), vec!["load"; 1]);
+    assert_eq!(strings(&batch, "resolution"), vec!["PT1H"; 1]);
     assert_eq!(
         strings(&batch, "features"),
-        vec![r#"{"model_year":2030}"#; 2]
+        vec![r#"{"model_year":2030}"#; 1]
     );
-    assert_eq!(strings(&batch, "element_type"), vec!["f64"; 2]);
-    assert_eq!(strings(&batch, "time_reference"), vec!["utc"; 2]);
-    assert_eq!(strings(&batch, "units"), vec!["MW"; 2]);
-    assert_eq!(strings(&batch, "quantity_kind"), vec!["ActivePower"; 2]);
-    assert_eq!(strings(&batch, "unit_system"), vec!["natural_units"; 2]);
+    assert_eq!(strings(&batch, "element_type"), vec!["f64"; 1]);
+    assert_eq!(strings(&batch, "element_shape"), vec!["[]"; 1]);
+    assert_eq!(strings(&batch, "time_reference"), vec!["utc"; 1]);
+    assert_eq!(strings(&batch, "units"), vec!["MW"; 1]);
+    assert_eq!(strings(&batch, "quantity_kind"), vec!["ActivePower"; 1]);
+    assert_eq!(strings(&batch, "unit_system"), vec!["natural_units"; 1]);
     assert_eq!(
         strings(&batch, "component_field"),
-        vec!["max_active_power"; 2]
+        vec!["max_active_power"; 1]
     );
-    assert_eq!(strings(&batch, "application_data"), vec![r#"{"k":1}"#; 2]);
-    // The id travels for provenance; the import ignores it.
+    assert_eq!(strings(&batch, "application_data"), vec![r#"{"k":1}"#; 1]);
+    // `initial_timestamp` and `length` are also inside `time_axis`; they are
+    // real columns so a reader need not parse one.
+    assert_eq!(ints(&batch, "length"), vec![2]);
     assert_eq!(
-        batch
-            .column_by_name("id")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<arrow::array::Int64Array>()
-            .unwrap()
-            .value(0),
-        1
+        strings(&batch, "time_axis"),
+        vec!["R2/2024-01-01T00:00:00Z/PT1H".to_string()]
     );
+    // The id travels for provenance; the import ignores it.
+    assert_eq!(ints(&batch, "id"), vec![1]);
 
     // The footer states the partition exactly, since the filename does not.
     assert_eq!(footer[table::FORMAT], table::FORMAT_V1);
@@ -266,7 +349,7 @@ fn an_absent_descriptor_is_the_empty_string() {
         TimeSeriesData::SingleTimeSeries(hourly("load", &[1.0])),
     )]);
     let report = write_partitions(dir.path(), &series).expect("export");
-    let (batch, _) = read_file(&report.files[0].path);
+    let (_, batch, _) = read_partition(&report.partitions[0]);
     for name in [
         "units",
         "quantity_kind",
@@ -314,29 +397,38 @@ fn the_partition_splits_by_type_value_and_reference() {
     ]);
     let report = write_partitions(dir.path(), &series).expect("export");
 
-    assert_eq!(report.files.len(), 5, "every axis of the triple splits");
+    assert_eq!(
+        report.partitions.len(),
+        5,
+        "every axis of the triple splits"
+    );
     assert_eq!(
         file_names(dir.path()),
-        BTreeSet::from([
-            "SingleTimeSeries.f64.utc.parquet".to_string(),
-            "SingleTimeSeries.f64.America_Denver.parquet".to_string(),
-            "SingleTimeSeries.f64_3.utc.parquet".to_string(),
-            "SingleTimeSeries.i64.utc.parquet".to_string(),
-            "NonSequentialTimeSeries.f64.utc.parquet".to_string(),
-        ])
+        [
+            "SingleTimeSeries.f64.utc",
+            "SingleTimeSeries.f64.America_Denver",
+            "SingleTimeSeries.f64_3.utc",
+            "SingleTimeSeries.i64.utc",
+            "NonSequentialTimeSeries.f64.utc",
+        ]
+        .iter()
+        .flat_map(|stem| values_and_series(stem))
+        .collect::<BTreeSet<String>>()
     );
 
     // A zoned file's timestamp column states the zone; an irregular file has no
     // `resolution` column at all, because its type never carries one.
     let zoned_path = dir
         .path()
-        .join("SingleTimeSeries.f64.America_Denver.parquet");
+        .join("SingleTimeSeries.f64.America_Denver.values.parquet");
     let (batch, _) = read_file(&zoned_path);
     assert_eq!(
-        *batch.schema().field(0).data_type(),
+        stamp_type(&batch),
         DataType::Timestamp(TimeUnit::Millisecond, Some("America/Denver".into()))
     );
-    let irregular_path = dir.path().join("NonSequentialTimeSeries.f64.utc.parquet");
+    let irregular_path = dir
+        .path()
+        .join("NonSequentialTimeSeries.f64.utc.values.parquet");
     let (batch, _) = read_file(&irregular_path);
     assert!(batch.column_by_name("resolution").is_none());
 }
@@ -361,9 +453,13 @@ fn a_persistent_series_is_told_from_an_irregular_one_by_its_partition() {
         ),
     ]);
     let report = write_partitions(dir.path(), &series).expect("export");
-    assert_eq!(report.files.len(), 2, "the two share a shape, not a file");
+    assert_eq!(
+        report.partitions.len(),
+        2,
+        "the two share a shape, not a file"
+    );
     assert!(
-        file_names(dir.path()).contains("PersistentTimeSeries.f64.utc.parquet"),
+        file_names(dir.path()).contains("PersistentTimeSeries.f64.utc.values.parquet"),
         "{:?}",
         file_names(dir.path())
     );
@@ -394,12 +490,16 @@ fn composites_share_a_file_and_are_repadded_to_its_widest() {
     ]);
     let report = write_partitions(dir.path(), &series).expect("export");
 
-    assert_eq!(report.files.len(), 1, "a composite kind partitions by kind");
+    assert_eq!(
+        report.partitions.len(),
+        1,
+        "a composite kind partitions by kind"
+    );
     assert_eq!(
         file_names(dir.path()),
-        BTreeSet::from(["SingleTimeSeries.piecewise_linear.utc.parquet".to_string()])
+        BTreeSet::from(values_and_series("SingleTimeSeries.piecewise_linear.utc"))
     );
-    let (batch, footer) = read_file(&report.files[0].path);
+    let (batch, footer) = read_file(&report.partitions[0].values_path);
     assert_eq!(footer["element_shape"], "[5]", "the file's widest");
     let list = batch
         .column_by_name("value")
@@ -421,18 +521,32 @@ fn composites_share_a_file_and_are_repadded_to_its_widest() {
 }
 
 #[test]
-fn an_empty_series_is_warned_about_rather_than_written() {
-    // A long table has one row per value, so a series with no values has no
-    // rows to contribute.
+fn an_empty_series_fails_the_export_and_writes_nothing() {
+    // A values file has one row per value, so an empty series would be a series
+    // row with no values group -- which is also what a truncated file looks
+    // like. Refusing here keeps the import's rule simple, and refusing *before*
+    // anything is written leaves the destination as it was found.
     let dir = tempfile::tempdir().expect("tempdir");
     let series = stored(vec![
         (1, TimeSeriesData::SingleTimeSeries(hourly("empty", &[]))),
         (2, TimeSeriesData::SingleTimeSeries(hourly("load", &[1.0]))),
+        (
+            3,
+            TimeSeriesData::SingleTimeSeries(hourly("also_empty", &[])),
+        ),
     ]);
-    let report = write_partitions(dir.path(), &series).expect("export");
-    assert_eq!(report.empty, vec!["empty".to_string()]);
-    assert_eq!(report.files.len(), 1);
-    assert_eq!(report.rows(), 1);
+    let err = write_partitions(dir.path(), &series).expect_err("an empty series is refused");
+    let message = err.to_string();
+    // Every one of them, so the caller fixes the selection once rather than
+    // running into them one at a time.
+    assert!(message.contains("'empty'"), "{message}");
+    assert!(message.contains("'also_empty'"), "{message}");
+    assert!(message.contains("Narrow the selection"), "{message}");
+    assert!(
+        file_names(dir.path()).is_empty(),
+        "nothing may be written: {:?}",
+        file_names(dir.path())
+    );
 }
 
 #[test]
@@ -471,27 +585,33 @@ fn rows_are_contiguous_and_sorted_by_time() {
         ),
     ]);
     let report = write_partitions(dir.path(), &series).expect("export");
-    let (batch, footer) = read_file(&report.files[0].path);
+    let (batch, series_rows, footer) = read_partition(&report.partitions[0]);
     assert_eq!(footer[table::ROWS_CONTIGUOUS], "true");
 
     let stamps: Vec<i64> = batch
-        .column(0)
+        .column_by_name("timestamp")
+        .unwrap()
         .as_any()
         .downcast_ref::<arrow::array::TimestampMillisecondArray>()
         .unwrap()
         .values()
         .to_vec();
-    let owners: Vec<i64> = batch
-        .column_by_name("owner_id")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<arrow::array::Int64Array>()
-        .unwrap()
-        .values()
-        .to_vec();
-    assert_eq!(owners, vec![1, 1, 1, 2, 2, 2], "contiguous per series");
+    // Two series, two different sets of values, so two array keys -- contiguous
+    // and in key order, with the rows inside each sorted by time.
+    let keys = strings(&batch, "data_hash");
+    assert_eq!(keys.len(), 6);
+    assert_eq!(keys[0], keys[1]);
+    assert_eq!(keys[1], keys[2]);
+    assert_ne!(keys[2], keys[3], "a new array starts here");
+    assert_eq!(keys[3], keys[5]);
+    assert!(keys[0] < keys[3], "keys ascend");
     assert!(stamps[..3].windows(2).all(|w| w[0] < w[1]), "sorted within");
     assert!(stamps[3..].windows(2).all(|w| w[0] < w[1]), "sorted within");
+    // The series file is sorted the same way, so a reader walks both together.
+    assert_eq!(
+        strings(&series_rows, "data_hash"),
+        vec![keys[0].clone(), keys[3].clone()]
+    );
 }
 
 #[test]
@@ -515,29 +635,39 @@ fn the_unspecified_reference_is_its_own_partition() {
     ]);
     let report = write_partitions(dir.path(), &series).expect("export");
     assert_eq!(
-        report.files.len(),
+        report.partitions.len(),
         2,
         "a series that declared nothing must not pool with one that declared UTC"
     );
     let names = file_names(dir.path());
     assert!(
-        names.contains("SingleTimeSeries.f64.utc.parquet"),
+        names.contains("SingleTimeSeries.f64.utc.values.parquet"),
         "{names:?}"
     );
     assert!(
-        names.contains("SingleTimeSeries.f64.unspecified.parquet"),
+        names.contains("SingleTimeSeries.f64.unspecified.values.parquet"),
         "{names:?}"
     );
 
     // Both write a UTC-zoned column -- Arrow has no third spelling -- and the
     // column is what keeps the claim honest.
-    let (batch, footer) = read_file(&dir.path().join("SingleTimeSeries.f64.unspecified.parquet"));
+    let (batch, footer) = read_file(
+        &dir.path()
+            .join("SingleTimeSeries.f64.unspecified.values.parquet"),
+    );
     assert_eq!(
-        *batch.schema().field(0).data_type(),
+        stamp_type(&batch),
         DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into()))
     );
     assert_eq!(footer["time_reference"], "unspecified");
-    assert_eq!(strings(&batch, "time_reference"), vec!["unspecified"]);
+    let (_, series_rows, _) = read_partition(
+        report
+            .partitions
+            .iter()
+            .find(|p| p.reference == "unspecified")
+            .unwrap(),
+    );
+    assert_eq!(strings(&series_rows, "time_reference"), vec!["unspecified"]);
 }
 
 // ---- Slugs -----------------------------------------------------------------
@@ -626,8 +756,8 @@ fn row_groups_are_cut_on_series_boundaries() {
         (2, TimeSeriesData::SingleTimeSeries(hourly("b", &small))),
     ]);
     let report = write_partitions(dir.path(), &series).expect("export");
-    assert_eq!(report.files.len(), 1);
-    let file = std::fs::File::open(&report.files[0].path).unwrap();
+    assert_eq!(report.partitions.len(), 1);
+    let file = std::fs::File::open(&report.partitions[0].values_path).unwrap();
     let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
     let rows: Vec<i64> = builder
         .metadata()
@@ -648,7 +778,7 @@ fn a_series_larger_than_the_target_is_the_only_one_split() {
         (2, TimeSeriesData::SingleTimeSeries(hourly("b", &huge))),
     ]);
     let report = write_partitions(dir.path(), &series).expect("export");
-    let file = std::fs::File::open(&report.files[0].path).unwrap();
+    let file = std::fs::File::open(&report.partitions[0].values_path).unwrap();
     let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
     let rows: Vec<i64> = builder
         .metadata()
@@ -677,7 +807,10 @@ fn colliding_partitions_get_distinct_files() {
     let names = disambiguate(&keys);
     let distinct: BTreeSet<&String> = names.values().collect();
     assert_eq!(distinct.len(), 2, "{names:?}");
-    assert!(names.values().all(|n| n.ends_with(".parquet")), "{names:?}");
+    assert!(
+        names.values().all(|n| !n.ends_with(".parquet")),
+        "a stem, not a file name: {names:?}"
+    );
 }
 
 #[test]
@@ -711,7 +844,7 @@ fn a_collision_suffix_is_itself_reserved() {
         time_reference: Some(TimeReference::Zone(zone.into())),
     };
     // The zone `a_b_2` slugs to exactly the name the collision suffix produces.
-    let natural_2 = key("a_b_2").file_name();
+    let natural_2 = key("a_b_2").stem();
     let keys = vec![key("a/b"), key("a_b"), key("a_b_2")];
     let names = disambiguate(&keys);
     let distinct: BTreeSet<&String> = names.values().collect();
@@ -772,18 +905,21 @@ fn an_offset_reference_slugs_without_a_colon_or_a_leading_dash() {
     let stored = stored(vec![(1, TimeSeriesData::SingleTimeSeries(series))]);
     let report = write_partitions(dir.path(), &stored).expect("export");
 
-    let name = report.files[0]
-        .path
+    let name = report.partitions[0]
+        .values_path
         .file_name()
         .unwrap()
         .to_string_lossy()
         .into_owned();
-    assert_eq!(name, "SingleTimeSeries.f64.offset_minus07_00.parquet");
+    assert_eq!(
+        name,
+        "SingleTimeSeries.f64.offset_minus07_00.values.parquet"
+    );
     // The column still carries the real offset.
-    let (batch, footer) = read_file(&report.files[0].path);
+    let (batch, footer) = read_file(&report.partitions[0].values_path);
     assert_eq!(footer["time_reference"], "-07:00");
     assert_eq!(
-        *batch.schema().field(0).data_type(),
+        stamp_type(&batch),
         DataType::Timestamp(TimeUnit::Millisecond, Some("-07:00".into()))
     );
 }
@@ -800,7 +936,7 @@ fn a_monthly_grid_is_materialized_on_the_calendar() {
     );
     let stored = stored(vec![(1, utc(TimeSeriesData::SingleTimeSeries(series)))]);
     let report = write_partitions(dir.path(), &stored).expect("export");
-    let (batch, _) = read_file(&report.files[0].path);
+    let (batch, _) = read_file(&report.partitions[0].values_path);
     let expected: Vec<i64> = [(2024, 1, 31), (2024, 2, 29), (2024, 3, 31)]
         .iter()
         .map(|(y, m, d)| {
@@ -809,16 +945,7 @@ fn a_monthly_grid_is_materialized_on_the_calendar() {
                 .timestamp_millis()
         })
         .collect();
-    assert_eq!(
-        batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<arrow::array::TimestampMillisecondArray>()
-            .unwrap()
-            .values()
-            .to_vec(),
-        expected
-    );
+    assert_eq!(stamps(&batch, "timestamp"), expected);
 }
 
 #[test]
@@ -840,36 +967,47 @@ fn a_forecast_gets_key_columns_a_static_series_does_not() {
 
     assert_eq!(
         file_names(dir.path()),
-        BTreeSet::from(["Deterministic.f64.utc.parquet".to_string()])
+        BTreeSet::from(values_and_series("Deterministic.f64.utc"))
     );
-    let (batch, footer) = read_file(&report.files[0].path);
+    let (batch, footer) = read_file(&report.partitions[0].values_path);
     let columns: Vec<String> = batch
         .schema()
         .fields()
         .iter()
         .map(|f| f.name().clone())
         .collect();
-    // `issue_time` is why a forecast cannot share a table with a static series.
-    assert_eq!(columns[0], "timestamp");
-    assert_eq!(columns[1], "issue_time");
-    assert!(columns.contains(&"interval".to_string()));
-    assert!(columns.contains(&"horizon".to_string()));
+    // The array key leads, then the time columns. `issue_time` is why a forecast
+    // cannot share a values file with a static series.
+    assert_eq!(columns[0], "data_hash");
+    assert_eq!(columns[1], "time_axis");
+    assert_eq!(columns[2], "timestamp");
+    assert_eq!(columns[3], "issue_time");
+    // `interval` and `horizon` describe the series, so they are in the other
+    // half -- but the values file's `time_axis` still carries them, because two
+    // forecasts sharing an array and an anchor but not a horizon have different
+    // target-time rows.
+    assert!(!columns.contains(&"interval".to_string()));
+    let (_, series_rows, _) = read_partition(&report.partitions[0]);
+    assert_eq!(strings(&series_rows, "interval"), vec!["PT1H"]);
+    assert_eq!(strings(&series_rows, "horizon"), vec!["PT2H"]);
+    assert_eq!(ints(&series_rows, "count"), vec![2]);
+    assert_eq!(
+        strings(&series_rows, "time_axis"),
+        vec!["R2/2024-01-01T00:00:00Z/PT1H/PT2H/PT1H".to_string()]
+    );
     assert_eq!(batch.num_rows(), 4, "2 windows x 2 steps");
     assert_eq!(footer["time_series_type"], "Deterministic");
 
     // Window-major, so `GROUP BY issue_time` scans contiguously.
     let ms = |h: i64| (t0() + Duration::hours(h)).timestamp_millis();
-    let column = |i: usize| {
-        batch
-            .column(i)
-            .as_any()
-            .downcast_ref::<arrow::array::TimestampMillisecondArray>()
-            .unwrap()
-            .values()
-            .to_vec()
-    };
-    assert_eq!(column(1), vec![ms(0), ms(0), ms(1), ms(1)]);
-    assert_eq!(column(0), vec![ms(0), ms(1), ms(1), ms(2)]);
+    assert_eq!(
+        stamps(&batch, "issue_time"),
+        vec![ms(0), ms(0), ms(1), ms(1)]
+    );
+    assert_eq!(
+        stamps(&batch, "timestamp"),
+        vec![ms(0), ms(1), ms(1), ms(2)]
+    );
     // `[H, count]` gathered into window-major order.
     assert_eq!(
         batch
@@ -918,9 +1056,9 @@ fn the_lane_column_names_the_third_axis() {
         (2, TimeSeriesData::Scenarios(scen)),
     ]);
     let report = write_partitions(dir.path(), &series).expect("export");
-    assert_eq!(report.files.len(), 2, "two types, two partitions");
+    assert_eq!(report.partitions.len(), 2, "two types, two partitions");
 
-    let (batch, _) = read_file(&dir.path().join("Probabilistic.f64.utc.parquet"));
+    let (batch, _) = read_file(&dir.path().join("Probabilistic.f64.utc.values.parquet"));
     let percentile = batch
         .column_by_name("percentile")
         .expect("a Probabilistic carries its percentiles")
@@ -932,7 +1070,7 @@ fn the_lane_column_names_the_third_axis() {
     assert_eq!(percentile.value(1), 0.9);
     assert!(batch.column_by_name("scenario").is_none());
 
-    let (batch, _) = read_file(&dir.path().join("Scenarios.f64.utc.parquet"));
+    let (batch, _) = read_file(&dir.path().join("Scenarios.f64.utc.values.parquet"));
     let scenario = batch
         .column_by_name("scenario")
         .expect("a Scenarios carries its trajectory index")
@@ -972,10 +1110,178 @@ fn a_forecasts_per_step_shape_is_not_the_catalogs_element_shape() {
     let report = write_partitions(dir.path(), &series).expect("export");
     assert_eq!(
         file_names(dir.path()),
-        BTreeSet::from(["Deterministic.f64_3.utc.parquet".to_string()]),
+        BTreeSet::from(values_and_series("Deterministic.f64_3.utc")),
         "the partition is keyed on the per-step shape"
     );
-    let (batch, footer) = read_file(&report.files[0].path);
+    let (batch, footer) = read_file(&report.partitions[0].values_path);
     assert_eq!(footer["element_shape"], "[3]");
     assert_eq!(batch.num_rows(), 4);
+}
+
+// ---- The array key ---------------------------------------------------------
+
+/// The `time_axis` a stored series ends up with, without exporting it.
+fn axis_of(data: TimeSeriesData) -> String {
+    let series = stored(vec![(1, data)]);
+    infrastore_parquet::table::time_axis_of(&series[0].0).expect("a time axis")
+}
+
+#[test]
+fn a_regular_grid_spells_its_axis_as_a_repeating_interval() {
+    // ISO 8601's own notation for "n repetitions from here, this far apart",
+    // which is exactly what a `SingleTimeSeries` grid is.
+    assert_eq!(
+        axis_of(utc(TimeSeriesData::SingleTimeSeries(
+            SingleTimeSeries::new(
+                t0(),
+                Duration::hours(1),
+                TypedArray::from_f64(vec![3], &[1.0, 2.0, 3.0]),
+                "load",
+            )
+        ))),
+        "R3/2024-01-01T00:00:00Z/PT1H"
+    );
+    // A calendar period keeps its own spelling, since it is not a duration.
+    assert_eq!(
+        axis_of(utc(TimeSeriesData::SingleTimeSeries(
+            SingleTimeSeries::new(
+                Utc.with_ymd_and_hms(2024, 1, 31, 0, 0, 0).unwrap(),
+                Period::Months(1),
+                TypedArray::from_f64(vec![2], &[1.0, 2.0]),
+                "monthly",
+            )
+        ))),
+        "R2/2024-01-31T00:00:00Z/P1M"
+    );
+}
+
+#[test]
+fn an_irregular_axis_is_the_catalogs_own_timestamps_hash() {
+    // Not a rendering of the timestamps: the catalog's key for the axis, so the
+    // column joins against `time_series_readable.timestamps_hash`.
+    let stamps = vec![t0(), t0() + Duration::hours(5)];
+    let axis = axis_of(utc(TimeSeriesData::NonSequentialTimeSeries(
+        NonSequentialTimeSeries::new(
+            stamps.clone(),
+            TypedArray::from_f64(vec![2], &[1.0, 2.0]),
+            "irregular",
+        )
+        .unwrap(),
+    )));
+    assert_eq!(
+        axis,
+        infrastore_core::hash_hex(&infrastore_core::timestamps_hash(&stamps))
+    );
+    assert_eq!(axis.len(), 64, "hex of a 32-byte hash");
+}
+
+#[test]
+fn a_forecast_axis_carries_its_horizon_as_well_as_its_interval() {
+    // The horizon's own step decides how many `target_time` rows a window has,
+    // so two forecasts sharing an array, an anchor and an interval but not a
+    // horizon are different tables.
+    let forecast = |horizon: Duration| {
+        let mut f = infrastore_core::Deterministic::new(
+            t0(),
+            Duration::hours(1),
+            horizon,
+            Duration::hours(1),
+            2,
+            TypedArray::from_f64(
+                vec![horizon.num_hours() as usize, 2],
+                &vec![1.0; horizon.num_hours() as usize * 2],
+            ),
+            "fc",
+        )
+        .expect("the forecast should build");
+        f.time_reference = Some(TimeReference::Utc);
+        TimeSeriesData::Deterministic(f)
+    };
+    assert_eq!(
+        axis_of(forecast(Duration::hours(2))),
+        "R2/2024-01-01T00:00:00Z/PT1H/PT2H/PT1H"
+    );
+    assert_ne!(
+        axis_of(forecast(Duration::hours(2))),
+        axis_of(forecast(Duration::hours(3)))
+    );
+}
+
+#[test]
+fn one_array_on_two_anchors_is_two_keys() {
+    // `data_hash` covers the bytes and not the axis: the same profile anchored
+    // on two years is one stored array with two different timestamp columns, so
+    // it must be two values groups.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let values = [1.0, 2.0, 3.0];
+    let anchored = |year: i32| {
+        let mut s = SingleTimeSeries::new(
+            Utc.with_ymd_and_hms(year, 1, 1, 0, 0, 0).unwrap(),
+            Duration::hours(1),
+            TypedArray::from_f64(vec![3], &values),
+            "load",
+        );
+        s.time_reference = Some(TimeReference::Utc);
+        TimeSeriesData::SingleTimeSeries(s)
+    };
+    let series = stored(vec![(1, anchored(2024)), (2, anchored(2025))]);
+    let report = write_partitions(dir.path(), &series).expect("export");
+
+    assert_eq!(report.partitions[0].arrays, 2, "same bytes, two axes");
+    assert_eq!(report.partitions[0].rows, 6);
+    let (values_rows, series_rows, _) = read_partition(&report.partitions[0]);
+    // One `data_hash`, two `time_axis` values -- which is why the key is a pair.
+    let hashes: BTreeSet<String> = strings(&values_rows, "data_hash").into_iter().collect();
+    assert_eq!(hashes.len(), 1);
+    let axes: BTreeSet<String> = strings(&series_rows, "time_axis").into_iter().collect();
+    assert_eq!(axes.len(), 2, "{axes:?}");
+}
+
+#[test]
+fn two_irregular_series_on_different_axes_are_two_keys() {
+    // The case the project's own docs call out: identical values on different
+    // axes share one stored array, and only `timestamps_hash` tells them apart.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let values = TypedArray::from_f64(vec![2], &[1.0, 2.0]);
+    let on = |offset: i64| {
+        utc(TimeSeriesData::NonSequentialTimeSeries(
+            NonSequentialTimeSeries::new(
+                vec![
+                    t0() + Duration::hours(offset),
+                    t0() + Duration::hours(offset + 5),
+                ],
+                values.clone(),
+                "irregular",
+            )
+            .unwrap(),
+        ))
+    };
+    let series = stored(vec![(1, on(0)), (2, on(1))]);
+    let report = write_partitions(dir.path(), &series).expect("export");
+    assert_eq!(report.partitions[0].arrays, 2);
+    let (values_rows, _, _) = read_partition(&report.partitions[0]);
+    let hashes: BTreeSet<String> = strings(&values_rows, "data_hash").into_iter().collect();
+    assert_eq!(hashes.len(), 1, "one stored array");
+    let axes: BTreeSet<String> = strings(&values_rows, "time_axis").into_iter().collect();
+    assert_eq!(axes.len(), 2, "two axes");
+}
+
+#[test]
+fn the_two_halves_say_which_they_are() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let series = stored(vec![(
+        1,
+        TimeSeriesData::SingleTimeSeries(hourly("load", &[1.0])),
+    )]);
+    let report = write_partitions(dir.path(), &series).expect("export");
+    let (_, values_footer) = read_file(&report.partitions[0].values_path);
+    let (_, series_footer) = read_file(&report.partitions[0].series_path);
+    assert_eq!(values_footer[table::FORMAT], table::FORMAT_V1);
+    assert_eq!(values_footer[table::ROLE], table::ROLE_VALUES);
+    assert_eq!(series_footer[table::ROLE], table::ROLE_SERIES);
+    // Both halves state the partition, so either can be opened alone.
+    assert_eq!(
+        values_footer["time_reference"],
+        series_footer["time_reference"]
+    );
 }

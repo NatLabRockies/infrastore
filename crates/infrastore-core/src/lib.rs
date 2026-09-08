@@ -30,9 +30,12 @@ pub use codec::{
     element_type_of, encode, encode_as,
 };
 pub use error::{Result, TimeSeriesError};
-// The two hashing utilities a binding genuinely needs: `array_hash` to
-// content-address an array and `hash_hex` to render a 32-byte hash as hex.
-pub use hash::{array_hash, hash_hex};
+// The three hashing utilities a binding genuinely needs: `array_hash` to
+// content-address an array, `timestamps_hash` to content-address the time axis
+// an irregular series sits on -- the catalog's own key for it, and the only
+// thing that tells two irregular series with identical values on different axes
+// apart -- and `hash_hex` to render a 32-byte hash as hex.
+pub use hash::{array_hash, hash_hex, timestamps_hash};
 pub use metadata::{
     ForecastSummaryRow, ParentChildAssociation, ParentChildFilter, StaticSummaryRow,
     SupplementalAttributeAssociation, SupplementalAttributeFilter, SupplementalAttributeSummaryRow,

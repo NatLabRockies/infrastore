@@ -1,16 +1,20 @@
-//! The long table's shape: its columns, its footer, and the canonical form its
-//! `data_hash` is taken over.
+//! A partition's two schemas, its footer, and the array key that joins them.
 //!
-//! One row per value, many series per file. Every catalog column is a table
-//! column, so a reader that opens the file in DuckDB has the whole row without
-//! attaching the SQLite catalog — and every column is **required**, which is
-//! what the partitioning in [`crate::partition`] buys.
+//! A partition is a **values** file holding every distinct array once, one row
+//! per value, and a **series** file holding one catalog row per series naming the
+//! array it reads. Both are keyed by `(data_hash, time_axis)` and sorted by it,
+//! which is what lets the import walk them as a merge join.
+//!
+//! Every column in both is **required**, which is what the partitioning in
+//! [`crate::partition`] buys.
 
 use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
+use chrono::{DateTime, SecondsFormat, Utc};
 use infrastore_core::{
-    ElementType, TimeReference, TimeSeriesType, TypedArray, array_hash, hash_hex,
+    ElementType, Period, TimeReference, TimeSeriesMetadata, TimeSeriesType, TypedArray, array_hash,
+    hash_hex, timestamps_hash,
 };
 
 use crate::partition::{PartitionKey, ValueKind};
@@ -27,8 +31,12 @@ pub const PERCENTILE: &str = "percentile";
 pub const SCENARIO: &str = "scenario";
 /// The value.
 pub const VALUE: &str = "value";
-/// The series' content hash, hex, as a checksum — see [`canonical_hash`].
+/// Half the array key: the hex content hash of the array — see
+/// [`canonical_hash`]. Also a checksum on import.
 pub const DATA_HASH: &str = "data_hash";
+/// The other half: what determines the timestamps a value row sits at, spelled
+/// per type — see [`time_axis_of`].
+pub const TIME_AXIS: &str = "time_axis";
 
 /// Footer key marking a file as this format, and saying which version of it.
 ///
@@ -36,32 +44,144 @@ pub const DATA_HASH: &str = "data_hash";
 /// version rather than by whichever column it happens to be missing.
 pub const FORMAT: &str = "infrastore.format";
 /// The value [`FORMAT`] carries.
-pub const FORMAT_V1: &str = "long_table_v1";
-/// Footer key asserting the property the import depends on: every series' rows
-/// are contiguous. Stated rather than assumed, so a file that has been through a
-/// tool that reordered rows can say so.
-pub const ROWS_CONTIGUOUS: &str = "rows_contiguous_by_series";
+pub const FORMAT_V1: &str = "normalized_v1";
+/// Footer key saying which half of a partition a file is.
+pub const ROLE: &str = "infrastore.role";
+/// The values half.
+pub const ROLE_VALUES: &str = "values";
+/// The series half.
+pub const ROLE_SERIES: &str = "series";
+/// Footer key asserting the property the import depends on: rows are contiguous
+/// per array key, in both files. Stated rather than assumed, so a file that has
+/// been through a tool that reordered rows can say so.
+pub const ROWS_CONTIGUOUS: &str = "rows_contiguous_by_key";
 
-/// Rows per row group, targeted rather than enforced — groups are cut at series
-/// boundaries where they can be, so a group is at most this plus the tail of one
-/// series, and a series larger than this spans several.
+/// Rows per row group in the values file, targeted rather than enforced — groups
+/// are cut at array-key boundaries where they can be, so a group is at most this
+/// plus the tail of one array, and an array larger than this spans several.
 ///
-/// A million rows of a scalar `f64` series is 8 MB of values before compression,
-/// which is a comfortable read unit and small enough that row-group statistics
-/// on `id`, `owner_id`, and `name` are worth consulting.
+/// A million rows of a scalar `f64` array is 8 MB of values before compression,
+/// which is a comfortable read unit and small enough that row-group statistics on
+/// `data_hash` are worth consulting. The series file is small and needs no
+/// policy: it has one row per series, not per value.
 pub const ROW_GROUP_TARGET: usize = 1_000_000;
 
-/// The Arrow schema one partition writes, plus what the partition settled on.
-pub struct TableSchema {
-    pub key: PartitionKey,
-    /// The width every composite row in this file is padded to; `None` for the
-    /// non-composite kinds, whose width is fixed by the value kind itself.
-    pub composite_width: Option<usize>,
-    pub schema: SchemaRef,
+/// The identity of one stored array within a partition.
+///
+/// **Both halves are needed.** `data_hash` covers the array bytes and not the
+/// time axis: the same 8760-value profile anchored on two different years is one
+/// stored array with two different timestamp columns, and for the irregular
+/// types the project is explicit that two series with identical values on
+/// different axes share one array and only the catalog's `timestamps_hash` tells
+/// them apart.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ArrayKey {
+    pub data_hash: String,
+    pub time_axis: String,
 }
 
-impl TableSchema {
-    /// Build the schema for `key`.
+/// The `time_axis` spelling for one catalog row.
+///
+/// One string per type, spelling the catalog fields that decide where a value
+/// row sits in time — because those, not the array bytes, are what a shared
+/// array does *not* carry:
+///
+/// | Type | `time_axis` |
+/// | --- | --- |
+/// | `SingleTimeSeries` | `R<length>/<initial>/<resolution>`, an ISO 8601 repeating interval |
+/// | the two irregular types | the catalog's `timestamps_hash`, hex |
+/// | dense forecasts | `R<count>/<initial>/<interval>/<horizon>/<resolution>` |
+///
+/// The instant is spelled in **UTC** whatever the partition's `time_reference`;
+/// the reference is a partition key, so nothing is lost by not repeating it.
+///
+/// A forecast needs its horizon as well as its interval because the horizon's own
+/// step decides how many `target_time` rows a window has — two forecasts sharing
+/// an array, an anchor and an interval but not a horizon are different tables.
+pub fn time_axis_of(row: &TimeSeriesMetadata) -> Result<String> {
+    match row.time_series_type {
+        TimeSeriesType::SingleTimeSeries => Ok(format!(
+            "R{}/{}/{}",
+            required_usize(row.length, "length", row)?,
+            instant(required_instant(
+                row.initial_timestamp,
+                "initial_timestamp",
+                row
+            )?),
+            required_period(row.resolution, "resolution", row)?.to_iso8601(),
+        )),
+        TimeSeriesType::NonSequentialTimeSeries | TimeSeriesType::PersistentTimeSeries => {
+            let timestamps = row.timestamps.as_ref().ok_or_else(|| {
+                unsupported(format!(
+                    "series '{}' is a {} but its catalog row carries no timestamps",
+                    row.name,
+                    row.time_series_type.as_str()
+                ))
+            })?;
+            Ok(hash_hex(&timestamps_hash(timestamps)))
+        }
+        ts_type if ts_type.is_forecast() => Ok(format!(
+            "R{}/{}/{}/{}/{}",
+            required_usize(row.count, "count", row)?,
+            instant(required_instant(
+                row.initial_timestamp,
+                "initial_timestamp",
+                row
+            )?),
+            required_period(row.interval, "interval", row)?.to_iso8601(),
+            required_period(row.horizon, "horizon", row)?.to_iso8601(),
+            required_period(row.resolution, "resolution", row)?.to_iso8601(),
+        )),
+        other => Err(unsupported(format!(
+            "no time_axis spelling for {}",
+            other.as_str()
+        ))),
+    }
+}
+
+/// An instant as it appears inside a `time_axis`: UTC, `Z`-suffixed, with
+/// sub-second digits only when there are any.
+fn instant(at: DateTime<Utc>) -> String {
+    at.to_rfc3339_opts(SecondsFormat::AutoSi, true)
+}
+
+fn required_usize(value: Option<usize>, field: &str, row: &TimeSeriesMetadata) -> Result<usize> {
+    value.ok_or_else(|| missing(field, row))
+}
+
+fn required_instant(
+    value: Option<DateTime<Utc>>,
+    field: &str,
+    row: &TimeSeriesMetadata,
+) -> Result<DateTime<Utc>> {
+    value.ok_or_else(|| missing(field, row))
+}
+
+fn required_period(value: Option<Period>, field: &str, row: &TimeSeriesMetadata) -> Result<Period> {
+    value.ok_or_else(|| missing(field, row))
+}
+
+fn missing(field: &str, row: &TimeSeriesMetadata) -> infrastore_core::TimeSeriesError {
+    unsupported(format!(
+        "series '{}' is a {} but its catalog row carries no {field}, which its time axis needs",
+        row.name,
+        row.time_series_type.as_str()
+    ))
+}
+
+/// The two Arrow schemas one partition writes, plus what the partition settled
+/// on.
+pub struct PartitionSchema {
+    pub key: PartitionKey,
+    /// The width every composite row in this partition is padded to; `None` for
+    /// the non-composite kinds, whose width is fixed by the value kind itself.
+    pub composite_width: Option<usize>,
+    pub values: SchemaRef,
+    pub series: SchemaRef,
+}
+
+impl PartitionSchema {
+    /// Build both schemas for `key`.
     ///
     /// `composite_width` must be the widest stored width among the partition's
     /// series, and is required exactly when the kind is composite.
@@ -70,50 +190,66 @@ impl TableSchema {
         let stamp = timestamp_type(key.time_reference.as_ref());
         let ts_type = key.time_series_type;
 
-        let mut fields: Vec<Field> = Vec::new();
-        // Key columns first, in the order rows are sorted by, so the file reads
-        // the way it is ordered.
-        fields.push(Field::new(TIMESTAMP, stamp.clone(), false));
+        // ---- values ----
+        //
+        // The array key first, because that is what the rows are sorted by, then
+        // the time columns, then the value. The file reads the way it is ordered.
+        let mut values: Vec<Field> = vec![
+            Field::new(DATA_HASH, DataType::Utf8, false),
+            Field::new(TIME_AXIS, DataType::Utf8, false),
+            Field::new(TIMESTAMP, stamp.clone(), false),
+        ];
         if ts_type.is_forecast() {
-            fields.push(Field::new(ISSUE_TIME, stamp, false));
+            values.push(Field::new(ISSUE_TIME, stamp.clone(), false));
         }
         match ts_type {
             TimeSeriesType::Probabilistic => {
-                fields.push(Field::new(PERCENTILE, DataType::Float64, false));
+                values.push(Field::new(PERCENTILE, DataType::Float64, false));
             }
             TimeSeriesType::Scenarios => {
-                fields.push(Field::new(SCENARIO, DataType::Int64, false));
+                values.push(Field::new(SCENARIO, DataType::Int64, false));
             }
             _ => {}
         }
-        fields.push(Field::new(VALUE, value_type, false));
+        values.push(Field::new(VALUE, value_type, false));
 
-        // Then the catalog row, one column each.
-        fields.push(Field::new(schema::ID, DataType::Int64, false));
-        fields.push(Field::new(DATA_HASH, DataType::Utf8, false));
-        fields.push(Field::new(schema::OWNER_ID, DataType::Int64, false));
+        // ---- series ----
+        let mut series: Vec<Field> = vec![
+            Field::new(DATA_HASH, DataType::Utf8, false),
+            Field::new(TIME_AXIS, DataType::Utf8, false),
+            Field::new(schema::ID, DataType::Int64, false),
+            Field::new(schema::OWNER_ID, DataType::Int64, false),
+        ];
         for name in [
             schema::OWNER_TYPE,
             schema::OWNER_CATEGORY,
             schema::TIME_SERIES_TYPE,
             schema::NAME,
         ] {
-            fields.push(Field::new(name, DataType::Utf8, false));
+            series.push(Field::new(name, DataType::Utf8, false));
         }
-        // The temporal descriptors a type actually has. Absent from the files
-        // whose type never carries them, rather than present and empty: a column
-        // that is always the empty string is noise a reader has to learn to
-        // ignore.
+        // The temporal descriptors a type actually has. Absent from the
+        // partitions whose type never carries them, rather than present and
+        // empty: a column that is always the empty string is noise a reader has
+        // to learn to ignore. `initial_timestamp` and `length` are also inside
+        // `time_axis`, and are here as real columns so a reader need not parse
+        // one.
         if ts_type == TimeSeriesType::SingleTimeSeries || ts_type.is_forecast() {
-            fields.push(Field::new(schema::RESOLUTION, DataType::Utf8, false));
+            series.push(Field::new(schema::INITIAL_TIMESTAMP, stamp, false));
+            series.push(Field::new(schema::RESOLUTION, DataType::Utf8, false));
+        }
+        if ts_type == TimeSeriesType::SingleTimeSeries {
+            series.push(Field::new(schema::LENGTH, DataType::Int64, false));
         }
         if ts_type.is_forecast() {
-            fields.push(Field::new(schema::INTERVAL, DataType::Utf8, false));
-            fields.push(Field::new(schema::HORIZON, DataType::Utf8, false));
+            series.push(Field::new(schema::INTERVAL, DataType::Utf8, false));
+            series.push(Field::new(schema::HORIZON, DataType::Utf8, false));
+            series.push(Field::new(schema::COUNT, DataType::Int64, false));
         }
         for name in [
             schema::FEATURES,
             schema::ELEMENT_TYPE,
+            schema::ELEMENT_SHAPE,
             schema::TIME_REFERENCE,
             schema::UNITS,
             schema::QUANTITY_KIND,
@@ -121,14 +257,20 @@ impl TableSchema {
             schema::COMPONENT_FIELD,
             schema::APPLICATION_DATA,
         ] {
-            fields.push(Field::new(name, DataType::Utf8, false));
+            series.push(Field::new(name, DataType::Utf8, false));
         }
 
-        let metadata = footer(&key, composite_width);
         Ok(Self {
+            values: Arc::new(Schema::new_with_metadata(
+                values,
+                footer(&key, composite_width, ROLE_VALUES),
+            )),
+            series: Arc::new(Schema::new_with_metadata(
+                series,
+                footer(&key, composite_width, ROLE_SERIES),
+            )),
             key,
             composite_width,
-            schema: Arc::new(Schema::new_with_metadata(fields, metadata)),
         })
     }
 
@@ -142,7 +284,7 @@ impl TableSchema {
         }
     }
 
-    /// The per-step element shape rows in this file carry.
+    /// The per-step element shape rows in this partition carry.
     pub fn element_shape(&self) -> Vec<usize> {
         match (&self.key.value_kind, self.composite_width) {
             (ValueKind::Composite(_), Some(w)) => vec![w],
@@ -160,6 +302,7 @@ impl TableSchema {
 fn footer(
     key: &PartitionKey,
     composite_width: Option<usize>,
+    role: &str,
 ) -> std::collections::HashMap<String, String> {
     let element_type = key.value_kind.element_type();
     let shape = match (&key.value_kind, composite_width) {
@@ -170,6 +313,7 @@ fn footer(
     };
     [
         (FORMAT.to_string(), FORMAT_V1.to_string()),
+        (ROLE.to_string(), role.to_string()),
         (ROWS_CONTIGUOUS.to_string(), "true".to_string()),
         (
             schema::TIME_SERIES_TYPE.to_string(),

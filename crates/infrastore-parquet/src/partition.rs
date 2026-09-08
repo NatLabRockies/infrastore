@@ -144,21 +144,49 @@ impl PartialOrd for PartitionKey {
 }
 
 impl PartitionKey {
-    /// `<type>.<value-slug>.<reference-slug>.parquet`.
+    /// `<type>.<value-slug>.<reference-slug>` — the **stem** the partition's two
+    /// files share.
+    ///
+    /// A partition is two files, `<stem>.values.parquet` and
+    /// `<stem>.series.parquet`, and sharing a stem is how the import pairs them.
     ///
     /// A **convenience, not the truth**: the slug function is one-way (two zone
     /// names differing only in a character the slug flattens produce the same
-    /// text), so the footer carries the exact key and
-    /// [`disambiguate`] is what guarantees two partitions never land on one
-    /// path.
-    pub fn file_name(&self) -> String {
+    /// text), so the footer carries the exact key and [`disambiguate`] is what
+    /// guarantees two partitions never land on one stem.
+    pub fn stem(&self) -> String {
         format!(
-            "{}.{}.{}.parquet",
+            "{}.{}.{}",
             sanitize(self.time_series_type.as_str()),
             sanitize(&self.value_kind.slug()),
             sanitize(&reference_slug(self.time_reference.as_ref())),
         )
     }
+}
+
+/// The suffix of the file holding every distinct array in a partition, once.
+pub const VALUES_SUFFIX: &str = ".values.parquet";
+/// The suffix of the file holding one catalog row per series.
+pub const SERIES_SUFFIX: &str = ".series.parquet";
+
+/// `<stem>.values.parquet`.
+pub fn values_name(stem: &str) -> String {
+    format!("{stem}{VALUES_SUFFIX}")
+}
+
+/// `<stem>.series.parquet`.
+pub fn series_name(stem: &str) -> String {
+    format!("{stem}{SERIES_SUFFIX}")
+}
+
+/// The stem a partition file belongs to, whichever half it is.
+///
+/// `None` for a `.parquet` file that is neither half — a foreign file, which the
+/// import reads as a values file with no series file beside it.
+pub fn stem_of(file_name: &str) -> Option<&str> {
+    file_name
+        .strip_suffix(VALUES_SUFFIX)
+        .or_else(|| file_name.strip_suffix(SERIES_SUFFIX))
 }
 
 /// The filename fragment for a time reference.
@@ -231,31 +259,30 @@ pub fn sanitize(fragment: &str) -> String {
     bare.to_string()
 }
 
-/// Assign every partition a distinct file name.
+/// Assign every partition a distinct stem.
 ///
 /// [`sanitize`] is many-to-one — the zones `a/b` and `a_b` both flatten to `a_b`
-/// — so two partitions really can want one path, and the second would silently
-/// overwrite the first. Collisions get a numeric suffix, in the keys' own sort
-/// order so a re-run of the same export produces the same names.
+/// — so two partitions really can want one stem, and the second would silently
+/// overwrite the first's two files. Collisions get a numeric suffix, in the
+/// keys' own sort order so a re-run of the same export produces the same names.
 pub fn disambiguate(keys: &[PartitionKey]) -> BTreeMap<PartitionKey, String> {
     let mut sorted: Vec<&PartitionKey> = keys.iter().collect();
     sorted.sort();
     sorted.dedup();
 
-    // Every name handed out, case-folded because macOS and Windows filesystems
-    // treat two names differing only in case as one path. The suffixed names
-    // are tracked too: a key that naturally slugs to `foo_2` must not land on
-    // the file a collision was just moved to.
+    // Every stem handed out, case-folded because macOS and Windows filesystems
+    // treat two names differing only in case as one path. The suffixed stems are
+    // tracked too: a key that naturally slugs to `foo_2` must not land on the
+    // stem a collision was just moved to.
     let mut taken: BTreeSet<String> = BTreeSet::new();
     let mut out = BTreeMap::new();
     for key in sorted {
-        let base = key.file_name();
-        let stem = base.strip_suffix(".parquet").unwrap_or(&base).to_string();
+        let base = key.stem();
         let mut candidate = base.clone();
         let mut n = 1usize;
         while taken.contains(&candidate.to_lowercase()) {
             n += 1;
-            candidate = format!("{stem}_{n}.parquet");
+            candidate = format!("{base}_{n}");
         }
         taken.insert(candidate.to_lowercase());
         out.insert(key.clone(), candidate);

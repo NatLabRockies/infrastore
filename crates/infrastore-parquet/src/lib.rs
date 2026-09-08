@@ -7,18 +7,31 @@
 //! so the shipped binary carries Parquet; the library crates (`infrastore-core`,
 //! `infrastore-py`, `infrastore-ffi`) never reach it.
 //!
-//! # Long tables, partitioned
+//! # Normalized, partitioned
 //!
 //! Not one file per series -- a store with thousands of series would become
-//! thousands of files, which defeats every reader worth exporting for. Instead
-//! **many series per file, one row per value**, with every catalog column a
-//! table column, so a reader opens the directory and has the whole row without
-//! attaching the SQLite catalog.
+//! thousands of files. And not one table with the catalog row beside every
+//! value either: the store is content-addressed, so a thousand components
+//! sharing one profile hold **one** array, and a denormalized table would write
+//! that profile a thousand times. Parquet's compression does not find repeats
+//! across pages, so the file really would be a thousand times larger.
 //!
-//! Three things cannot vary inside one table without nullable or ill-typed
-//! columns: the set of key columns, the Arrow type of `value`, and the zone of
-//! `timestamp`. So a selection is partitioned by that triple ([`partition`]) and
-//! written one file per part, which is what makes **every column required**.
+//! So the layout is normalized the way the store is. Per partition, two files
+//! sharing a stem:
+//!
+//! - `<stem>.values.parquet` — every distinct array once, one row per value.
+//! - `<stem>.series.parquet` — one catalog row per series, naming the array it
+//!   reads.
+//!
+//! Both are keyed by [`ArrayKey`][table::ArrayKey], the pair
+//! `(data_hash, time_axis)`, and sorted by it, so the import walks them as a
+//! merge join. `data_hash` alone will not do: it covers the array bytes and not
+//! the time axis, and the same profile on two anchors is one stored array with
+//! two different timestamp columns.
+//!
+//! A partition is a `(time_series_type, value type, time_reference)` triple,
+//! because those three cannot vary inside one table without nullable or
+//! ill-typed columns — which is what makes **every column required**.
 //!
 //! ```no_run
 //! use std::path::Path;
@@ -31,17 +44,20 @@
 //! let pairs: Vec<_> = rows.into_iter().zip(values).collect();
 //!
 //! let report = infrastore_parquet::write_partitions(Path::new("out"), &pairs)?;
-//! for file in &report.files {
-//!     let back = infrastore_parquet::read_file(&file.path, &Default::default())?;
-//!     assert_eq!(back.len(), file.series);
+//! for partition in &report.partitions {
+//!     println!(
+//!         "{}: {} series over {} arrays",
+//!         partition.stem, partition.series, partition.arrays
+//!     );
 //! }
 //! # Ok::<(), infrastore_core::TimeSeriesError>(())
 //! ```
 //!
 //! Python's `to_arrow()` / `from_arrow()` are **not** this format: they are
-//! per-series, in-memory conveniences. The relationship is one sentence -- a long
-//! table's columns are `to_arrow()`'s schema-metadata keys turned into columns --
-//! and nothing depends on the two agreeing.
+//! per-series, in-memory conveniences. The relationship is one sentence -- a
+//! series file's columns are `to_arrow()`'s metadata keys turned into columns,
+//! and the values file is its two columns keyed by the array -- and nothing
+//! depends on the two agreeing.
 //!
 //! # Errors
 //!
@@ -63,7 +79,7 @@ pub mod write;
 pub use read::{
     ImportOptions, ImportedSeries, SeriesSink, parquet_files, read_file, read_file_with,
 };
-pub use write::{ExportReport, WrittenFile, check_destination, write_partitions};
+pub use write::{ExportReport, WrittenPartition, check_destination, write_partitions};
 
 use infrastore_core::TimeSeriesError;
 

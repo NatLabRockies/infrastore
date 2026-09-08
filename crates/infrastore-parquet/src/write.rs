@@ -1,10 +1,16 @@
-//! Writing a selection as partitioned long tables.
+//! Writing a selection as partitioned, normalized Parquet.
 //!
-//! One file per `(time_series_type, value type, time_reference)` triple, many
-//! series per file, one row per value. Within a file each series' rows are
-//! **contiguous** and sorted by the key columns, which is what lets the import
-//! stream row groups and what makes row-group statistics on `id`, `owner_id`,
-//! and `name` worth consulting.
+//! Two files per `(time_series_type, value type, time_reference)` triple: a
+//! **values** file holding every distinct array once, one row per value, and a
+//! **series** file holding one catalog row per series naming the array it reads.
+//!
+//! Normalized because the store is. A thousand components sharing one profile
+//! hold one array in the store, and a table with the catalog row beside every
+//! value would write that profile a thousand times — Parquet's compression does
+//! not find repeats across pages, so the file really is a thousand times larger.
+//!
+//! Both files are sorted by the array key `(data_hash, time_axis)`, which is what
+//! lets the import walk them as a merge join.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -16,7 +22,7 @@ use arrow::array::{
     Int32Array, Int64Array, RecordBatch, StringArray, TimestampMillisecondArray, UInt8Array,
     UInt16Array, UInt32Array, UInt64Array,
 };
-use arrow::datatypes::Field;
+use arrow::datatypes::{Field, SchemaRef};
 use chrono::{DateTime, Utc};
 use infrastore_core::{
     Dtype, Period, TimeSeriesData, TimeSeriesMetadata, TimeSeriesType, TypedArray,
@@ -25,45 +31,61 @@ use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 
-use crate::partition::{PartitionKey, ValueKind, disambiguate};
+use crate::partition::{PartitionKey, ValueKind, disambiguate, series_name, values_name};
 use crate::schema;
-use crate::table::{self, ROW_GROUP_TARGET, TableSchema};
+use crate::table::{self, ArrayKey, PartitionSchema, ROW_GROUP_TARGET};
 use crate::{Result, arrow_err, parquet_err, unsupported};
 
-/// One file the export wrote.
+/// One partition the export wrote: its two files and what they hold.
 #[derive(Debug, Clone)]
-pub struct WrittenFile {
-    pub path: PathBuf,
+pub struct WrittenPartition {
+    pub stem: String,
+    pub values_path: PathBuf,
+    pub series_path: PathBuf,
     pub time_series_type: TimeSeriesType,
     pub value_slug: String,
     pub reference: String,
+    /// Distinct arrays, which is how many groups the values file holds.
+    pub arrays: usize,
+    /// Series, which is how many rows the series file holds.
     pub series: usize,
+    /// Value rows, which is how many the values file holds.
     pub rows: usize,
 }
 
 /// What an export did.
 #[derive(Debug, Clone, Default)]
 pub struct ExportReport {
-    pub files: Vec<WrittenFile>,
-    /// Series that contributed no rows, and so appear in no file.
-    ///
-    /// A long table has one row per value, so a series with no values has
-    /// nothing to put in one. Reported rather than silently dropped: "it is not
-    /// in the export" is a fact the caller has to be told, and the CLI warns.
-    pub empty: Vec<String>,
+    pub partitions: Vec<WrittenPartition>,
 }
 
 impl ExportReport {
     pub fn rows(&self) -> usize {
-        self.files.iter().map(|f| f.rows).sum()
+        self.partitions.iter().map(|p| p.rows).sum()
+    }
+
+    pub fn series(&self) -> usize {
+        self.partitions.iter().map(|p| p.series).sum()
+    }
+
+    pub fn arrays(&self) -> usize {
+        self.partitions.iter().map(|p| p.arrays).sum()
+    }
+
+    /// Every file written, values and series alike.
+    pub fn files(&self) -> Vec<&Path> {
+        self.partitions
+            .iter()
+            .flat_map(|p| [p.values_path.as_path(), p.series_path.as_path()])
+            .collect()
     }
 }
 
 /// Refuse a destination that already holds `.parquet` files.
 ///
-/// `add --parquet <dir>` imports every such file it finds, so a narrower export
-/// written over an earlier one would leave the earlier partitions in place and
-/// a later import would file them too, silently. The export neither merges nor
+/// `add --parquet <dir>` imports every partition it finds, so a narrower export
+/// written over an earlier one would leave the earlier partitions in place and a
+/// later import would file them too, silently. The export neither merges nor
 /// sweeps: the caller empties the directory, or names a fresh one.
 ///
 /// Public so a caller can check *before* it knows whether anything will be
@@ -89,39 +111,63 @@ pub fn check_destination(dir: &Path) -> Result<()> {
     }
     Err(unsupported(format!(
         "{} already holds {} .parquet file(s) ({}); export into an empty directory, since \
-         `add --parquet <dir>` imports every .parquet file it finds",
+         `add --parquet <dir>` imports every partition it finds",
         dir.display(),
         stale.len(),
         stale.iter().take(3).cloned().collect::<Vec<_>>().join(", "),
     )))
 }
 
-/// Write `series` into `dir` as one Parquet file per partition.
+/// Write `series` into `dir` as one file pair per partition.
 ///
 /// The pairs are `(catalog row, values)`, as `Store::list_metadata` and
-/// `read_by_ids` hand them back. Order within a partition follows the input,
-/// which for the CLI is catalog order.
+/// `read_by_ids` hand them back.
+///
+/// **Fails if any selected series is empty**, naming every one of them, and
+/// writes nothing. A series with no values has a catalog row and a zero-length
+/// array; the format could represent it as a series row whose values group has
+/// no rows, but that would make "a series row with no values group" legal on
+/// import too, and that is the shape a truncated or half-written file takes.
+/// Refusing here keeps the import's rule simple and its diagnosis honest. The
+/// remedy is to narrow the selection past the empty series.
 pub fn write_partitions(
     dir: &Path,
     series: &[(TimeSeriesMetadata, TimeSeriesData)],
 ) -> Result<ExportReport> {
-    std::fs::create_dir_all(dir)?;
     check_destination(dir)?;
 
-    let mut report = ExportReport::default();
+    // Before anything is written, so a refusal leaves the destination exactly as
+    // it was found -- which the check above has just established is empty.
+    let empty: Vec<String> = series
+        .iter()
+        .map(|(row, data)| Ok((row, row_count(row, data)?)))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|(_, n)| *n == 0)
+        .map(|(row, _)| format!("'{}' (owner {})", row.name, row.owner_id))
+        .collect();
+    if !empty.is_empty() {
+        return Err(unsupported(format!(
+            "{} of the selected series hold no values and cannot be exported: {}. A values file \
+             has one row per value, so an empty series would be a series row with no values \
+             group -- which is also what a truncated file looks like. Narrow the selection past \
+             them.",
+            empty.len(),
+            empty.join(", ")
+        )));
+    }
+
     let mut groups: BTreeMap<PartitionKey, Vec<usize>> = BTreeMap::new();
-    for (index, (row, data)) in series.iter().enumerate() {
-        if row_count(row, data)? == 0 {
-            report.empty.push(row.name.clone());
-            continue;
-        }
+    for (index, (row, _)) in series.iter().enumerate() {
         groups.entry(partition_of(row)).or_default().push(index);
     }
 
-    let names = disambiguate(&groups.keys().cloned().collect::<Vec<_>>());
+    std::fs::create_dir_all(dir)?;
+    let stems = disambiguate(&groups.keys().cloned().collect::<Vec<_>>());
+    let mut report = ExportReport::default();
     for (key, members) in &groups {
-        // The file's composite width comes from the catalog rows alone — a
-        // composite `element_shape` is `[w]` — so no array is read to decide it.
+        // The partition's composite width comes from the catalog rows alone -- a
+        // composite `element_shape` is `[w]` -- so no array is read to decide it.
         let composite_width = if key.value_kind.is_composite() {
             Some(
                 members
@@ -134,12 +180,58 @@ pub fn write_partitions(
         } else {
             None
         };
-        let table = TableSchema::new(key.clone(), composite_width)?;
-        let path = dir.join(names.get(key).expect("every partition was named"));
-        let written = write_one(&path, &table, series, members)?;
-        report.files.push(written);
+        let table = PartitionSchema::new(key.clone(), composite_width)?;
+
+        // Group the partition's series by the array each reads. `BTreeMap` is
+        // the sort both files promise.
+        let mut arrays: BTreeMap<ArrayKey, Vec<usize>> = BTreeMap::new();
+        for index in members {
+            let (row, data) = &series[*index];
+            arrays
+                .entry(array_key(row, data)?)
+                .or_default()
+                .push(*index);
+        }
+        // Within a key, by id: the series file's second sort key, so a reader
+        // walking it sees the same order twice.
+        for members in arrays.values_mut() {
+            members.sort_by_key(|i| series[*i].0.id.map_or(0, |id| id.get()));
+        }
+
+        let stem = stems.get(key).expect("every partition was named").clone();
+        let values_path = dir.join(values_name(&stem));
+        let series_path = dir.join(series_name(&stem));
+        let rows = write_values(&values_path, &table, series, &arrays)?;
+        write_series_file(&series_path, &table, series, &arrays)?;
+
+        report.partitions.push(WrittenPartition {
+            stem,
+            values_path,
+            series_path,
+            time_series_type: key.time_series_type,
+            value_slug: key.value_kind.slug(),
+            reference: table::reference_literal(key.time_reference.as_ref()),
+            arrays: arrays.len(),
+            series: members.len(),
+            rows,
+        });
     }
     Ok(report)
+}
+
+/// The array a series reads: its content hash and its time axis.
+///
+/// The hash is the **canonical** one, which for a composite kind is the
+/// minimum-width re-encoding rather than the stored bytes — so two series whose
+/// curves are the same points at different paddings share one values group, which
+/// is the whole point of normalizing.
+pub fn array_key(row: &TimeSeriesMetadata, data: &TimeSeriesData) -> Result<ArrayKey> {
+    let array = series_rows(row, data)?.array;
+    let leading = leading_shape(row, array);
+    Ok(ArrayKey {
+        data_hash: table::canonical_hash(array, row.element_type, &leading)?,
+        time_axis: table::time_axis_of(row)?,
+    })
 }
 
 /// The partition a catalog row belongs to.
@@ -165,32 +257,42 @@ pub fn per_step_shape(row: &TimeSeriesMetadata) -> Vec<usize> {
     row.element_shape.get(skip..).unwrap_or_default().to_vec()
 }
 
-fn write_one(
-    path: &Path,
-    table: &TableSchema,
-    series: &[(TimeSeriesMetadata, TimeSeriesData)],
-    members: &[usize],
-) -> Result<WrittenFile> {
-    let file = File::create(path)?;
-    let props = WriterProperties::builder()
+fn writer_properties() -> WriterProperties {
+    WriterProperties::builder()
         // Archival files: zstd pays for itself several times over against the
         // HDF5 read that produced the values.
         .set_compression(Compression::ZSTD(ZstdLevel::default()))
-        // Every catalog column is constant per series and most are constant per
-        // file, so this is the whole reason the column set is affordable.
+        // The array key repeats for every row of a group, and every series
+        // column is constant per series; this is the whole reason the column
+        // sets are affordable.
         .set_dictionary_enabled(true)
-        .build();
-    let mut writer =
-        ArrowWriter::try_new(file, table.schema.clone(), Some(props)).map_err(parquet_err)?;
+        .build()
+}
 
-    let mut buffer = RowBuffer::new(table);
+/// Write the values file: each distinct array once, in key order.
+///
+/// Returns the row count. Only the **first** series of each key is read: the key
+/// is a content hash plus a time axis, so every series sharing it has the same
+/// values at the same instants by construction, and a composite's re-padding to
+/// the partition width makes even its bytes identical.
+fn write_values(
+    path: &Path,
+    table: &PartitionSchema,
+    series: &[(TimeSeriesMetadata, TimeSeriesData)],
+    arrays: &BTreeMap<ArrayKey, Vec<usize>>,
+) -> Result<usize> {
+    let file = File::create(path)?;
+    let mut writer = ArrowWriter::try_new(file, table.values.clone(), Some(writer_properties()))
+        .map_err(parquet_err)?;
+
+    let mut buffer = ValuesBuffer::new(table);
     let mut rows = 0usize;
-    for index in members {
-        let (row, data) = &series[*index];
-        // A group ends on a series boundary whenever it can: if the next series
+    for (key, members) in arrays {
+        let (row, data) = &series[members[0]];
+        // A group ends on an array boundary whenever it can: if the coming array
         // would carry the buffer past the target, the buffer is cut first, so
-        // the group holds whole series. Only a series larger than the target on
-        // its own is split, below.
+        // row-group statistics on `data_hash` mean something. Only an array
+        // larger than the target on its own is split, below.
         let coming = row_count(row, data)?;
         if !buffer.is_empty() && buffer.len() + coming > ROW_GROUP_TARGET {
             let held = buffer.len();
@@ -198,8 +300,7 @@ fn write_one(
             writer.write(&batch).map_err(parquet_err)?;
             writer.flush().map_err(parquet_err)?;
         }
-        let appended = buffer.push_series(row, data)?;
-        rows += appended;
+        rows += buffer.push_array(key, row, data)?;
         while buffer.len() >= ROW_GROUP_TARGET {
             let batch = buffer.take(ROW_GROUP_TARGET)?;
             writer.write(&batch).map_err(parquet_err)?;
@@ -213,15 +314,262 @@ fn write_one(
     }
     // `close` writes the footer; without it the file is a headerless blob.
     writer.close().map_err(parquet_err)?;
+    Ok(rows)
+}
 
-    Ok(WrittenFile {
-        path: path.to_path_buf(),
-        time_series_type: table.key.time_series_type,
-        value_slug: table.key.value_kind.slug(),
-        reference: table::reference_literal(table.key.time_reference.as_ref()),
-        series: members.len(),
-        rows,
+/// Write the series file: one row per series, in `(key, id)` order.
+///
+/// One batch, with no row-group policy: this file has one row per series rather
+/// than one per value, so even a store with a million series produces a file a
+/// reader loads whole.
+fn write_series_file(
+    path: &Path,
+    table: &PartitionSchema,
+    series: &[(TimeSeriesMetadata, TimeSeriesData)],
+    arrays: &BTreeMap<ArrayKey, Vec<usize>>,
+) -> Result<()> {
+    let file = File::create(path)?;
+    let mut writer = ArrowWriter::try_new(file, table.series.clone(), Some(writer_properties()))
+        .map_err(parquet_err)?;
+
+    let mut builder = SeriesFileBuilder::new(table);
+    for (key, members) in arrays {
+        for index in members {
+            builder.push(key, &series[*index].0)?;
+        }
+    }
+    if !builder.is_empty() {
+        let batch = builder.finish()?;
+        writer.write(&batch).map_err(parquet_err)?;
+    }
+    writer.close().map_err(parquet_err)?;
+    Ok(())
+}
+
+/// The series file's columns, accumulated.
+struct SeriesFileBuilder<'a> {
+    table: &'a PartitionSchema,
+    data_hash: Vec<String>,
+    time_axis: Vec<String>,
+    id: Vec<i64>,
+    owner_id: Vec<i64>,
+    initial_timestamp: Vec<i64>,
+    length: Vec<i64>,
+    count: Vec<i64>,
+    text: BTreeMap<&'static str, Vec<String>>,
+}
+
+/// The series file's text columns, in schema order.
+fn series_text_columns(ts_type: TimeSeriesType) -> Vec<&'static str> {
+    let mut names = vec![
+        schema::OWNER_TYPE,
+        schema::OWNER_CATEGORY,
+        schema::TIME_SERIES_TYPE,
+        schema::NAME,
+    ];
+    if ts_type == TimeSeriesType::SingleTimeSeries || ts_type.is_forecast() {
+        names.push(schema::RESOLUTION);
+    }
+    if ts_type.is_forecast() {
+        names.push(schema::INTERVAL);
+        names.push(schema::HORIZON);
+    }
+    names.extend([
+        schema::FEATURES,
+        schema::ELEMENT_TYPE,
+        schema::ELEMENT_SHAPE,
+        schema::TIME_REFERENCE,
+        schema::UNITS,
+        schema::QUANTITY_KIND,
+        schema::UNIT_SYSTEM,
+        schema::COMPONENT_FIELD,
+        schema::APPLICATION_DATA,
+    ]);
+    names
+}
+
+impl<'a> SeriesFileBuilder<'a> {
+    fn new(table: &'a PartitionSchema) -> Self {
+        Self {
+            table,
+            data_hash: Vec::new(),
+            time_axis: Vec::new(),
+            id: Vec::new(),
+            owner_id: Vec::new(),
+            initial_timestamp: Vec::new(),
+            length: Vec::new(),
+            count: Vec::new(),
+            text: series_text_columns(table.key.time_series_type)
+                .into_iter()
+                .map(|n| (n, Vec::new()))
+                .collect(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.data_hash.is_empty()
+    }
+
+    fn push(&mut self, key: &ArrayKey, row: &TimeSeriesMetadata) -> Result<()> {
+        let ts_type = self.table.key.time_series_type;
+        self.data_hash.push(key.data_hash.clone());
+        self.time_axis.push(key.time_axis.clone());
+        self.id.push(row.id.map_or(0, |i| i.get()));
+        self.owner_id.push(row.owner_id);
+        if ts_type == TimeSeriesType::SingleTimeSeries || ts_type.is_forecast() {
+            self.initial_timestamp.push(
+                row.initial_timestamp
+                    .ok_or_else(|| {
+                        unsupported(format!(
+                            "series '{}' is a {} but carries no initial_timestamp",
+                            row.name,
+                            ts_type.as_str()
+                        ))
+                    })?
+                    .timestamp_millis(),
+            );
+        }
+        if ts_type == TimeSeriesType::SingleTimeSeries {
+            self.length.push(row.length.unwrap_or(0) as i64);
+        }
+        if ts_type.is_forecast() {
+            self.count.push(row.count.unwrap_or(0) as i64);
+        }
+        for (name, value) in descriptor_row(ts_type, row) {
+            self.text
+                .get_mut(name)
+                .expect("every descriptor names a column of this file")
+                .push(value);
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<RecordBatch> {
+        let mut columns: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from(std::mem::take(&mut self.data_hash))),
+            Arc::new(StringArray::from(std::mem::take(&mut self.time_axis))),
+            Arc::new(Int64Array::from(std::mem::take(&mut self.id))),
+            Arc::new(Int64Array::from(std::mem::take(&mut self.owner_id))),
+        ];
+        let ts_type = self.table.key.time_series_type;
+        // In schema order: the four text columns that always come next, then the
+        // temporal ones interleaved exactly as `PartitionSchema` lays them out.
+        let mut text = series_text_columns(ts_type).into_iter();
+        for _ in 0..4 {
+            let name = text.next().expect("four leading text columns");
+            columns.push(self.take_text(name));
+        }
+        if ts_type == TimeSeriesType::SingleTimeSeries || ts_type.is_forecast() {
+            columns.push(zoned(
+                std::mem::take(&mut self.initial_timestamp),
+                &self.table.key,
+            ));
+            let name = text.next().expect("resolution");
+            columns.push(self.take_text(name));
+        }
+        if ts_type == TimeSeriesType::SingleTimeSeries {
+            columns.push(Arc::new(Int64Array::from(std::mem::take(&mut self.length))));
+        }
+        if ts_type.is_forecast() {
+            for _ in 0..2 {
+                let name = text.next().expect("interval and horizon");
+                columns.push(self.take_text(name));
+            }
+            columns.push(Arc::new(Int64Array::from(std::mem::take(&mut self.count))));
+        }
+        for name in text {
+            columns.push(self.take_text(name));
+        }
+        RecordBatch::try_new(self.table.series.clone(), columns).map_err(arrow_err)
+    }
+
+    fn take_text(&mut self, name: &'static str) -> ArrayRef {
+        let column = self
+            .text
+            .get_mut(name)
+            .expect("every text column was created with the builder");
+        Arc::new(StringArray::from(std::mem::take(column)))
+    }
+}
+
+/// A millisecond column in the partition's own spelling.
+fn zoned(millis: Vec<i64>, key: &PartitionKey) -> ArrayRef {
+    let array = TimestampMillisecondArray::from(millis);
+    Arc::new(match key.time_reference.as_ref() {
+        Some(infrastore_core::TimeReference::Zoneless) => array,
+        None | Some(infrastore_core::TimeReference::Utc) => array.with_timezone("UTC"),
+        Some(other) => array.with_timezone(other.as_storage_string()),
     })
+}
+
+/// The per-series text columns, one per name `series_text_columns` lists.
+///
+/// Absent free-form descriptors are the **empty string**, which is what keeps
+/// every column required. A stored empty string therefore reads back as absent;
+/// §2.8 of the plan documents that, and it is the price of not having five
+/// nullable columns.
+fn descriptor_row(
+    ts_type: TimeSeriesType,
+    row: &TimeSeriesMetadata,
+) -> Vec<(&'static str, String)> {
+    let mut out: Vec<(&'static str, String)> = vec![
+        (schema::OWNER_TYPE, row.owner_type.clone()),
+        (
+            schema::OWNER_CATEGORY,
+            row.owner_category.as_str().to_string(),
+        ),
+        (
+            schema::TIME_SERIES_TYPE,
+            row.time_series_type.as_str().to_string(),
+        ),
+        (schema::NAME, row.name.clone()),
+    ];
+    if ts_type == TimeSeriesType::SingleTimeSeries || ts_type.is_forecast() {
+        out.push((
+            schema::RESOLUTION,
+            row.resolution.map(|p| p.to_iso8601()).unwrap_or_default(),
+        ));
+    }
+    if ts_type.is_forecast() {
+        out.push((
+            schema::INTERVAL,
+            row.interval.map(|p| p.to_iso8601()).unwrap_or_default(),
+        ));
+        out.push((
+            schema::HORIZON,
+            row.horizon.map(|p| p.to_iso8601()).unwrap_or_default(),
+        ));
+    }
+    out.extend([
+        (schema::FEATURES, schema::encode_features(&row.features)),
+        (schema::ELEMENT_TYPE, row.element_type.to_string()),
+        (
+            schema::ELEMENT_SHAPE,
+            schema::encode_element_shape(&row.element_shape),
+        ),
+        (
+            schema::TIME_REFERENCE,
+            table::reference_literal(row.time_reference.as_ref()),
+        ),
+        (schema::UNITS, row.units.clone().unwrap_or_default()),
+        (
+            schema::QUANTITY_KIND,
+            row.quantity_kind.clone().unwrap_or_default(),
+        ),
+        (
+            schema::UNIT_SYSTEM,
+            row.unit_system.map_or("", |u| u.as_str()).to_string(),
+        ),
+        (
+            schema::COMPONENT_FIELD,
+            row.component_field.clone().unwrap_or_default(),
+        ),
+        (
+            schema::APPLICATION_DATA,
+            row.application_data.clone().unwrap_or_default(),
+        ),
+    ]);
+    out
 }
 
 /// How many rows a series contributes.
@@ -397,75 +745,39 @@ fn static_parts(data: &TimeSeriesData) -> Result<(Vec<DateTime<Utc>>, &TypedArra
     }
 }
 
-/// Rows accumulated for the current row group.
+/// Value rows accumulated for the current row group.
 ///
 /// Columns are plain Rust vectors until a flush, which keeps appending cheap and
 /// leaves the Arrow arrays to be built once per group. The value column is raw
 /// little-endian bytes so it stays dtype-agnostic: one code path serves every
 /// dtype, and a value never passes through a wider type on its way out.
-struct RowBuffer<'a> {
-    table: &'a TableSchema,
+struct ValuesBuffer<'a> {
+    table: &'a PartitionSchema,
     width: usize,
     element_bytes: usize,
+    data_hash: Vec<String>,
+    time_axis: Vec<String>,
     timestamp: Vec<i64>,
     /// The forecast key columns, left empty for a static partition.
     issue_time: Vec<i64>,
     percentile: Vec<f64>,
     scenario: Vec<i64>,
     value: Vec<u8>,
-    id: Vec<i64>,
-    data_hash: Vec<String>,
-    owner_id: Vec<i64>,
-    text: BTreeMap<&'static str, Vec<String>>,
 }
 
-/// The text columns this file carries, in schema order after `owner_id`.
-fn text_columns(ts_type: TimeSeriesType) -> Vec<&'static str> {
-    let mut names = vec![
-        schema::OWNER_TYPE,
-        schema::OWNER_CATEGORY,
-        schema::TIME_SERIES_TYPE,
-        schema::NAME,
-    ];
-    if ts_type == TimeSeriesType::SingleTimeSeries || ts_type.is_forecast() {
-        names.push(schema::RESOLUTION);
-    }
-    if ts_type.is_forecast() {
-        names.push(schema::INTERVAL);
-        names.push(schema::HORIZON);
-    }
-    names.extend([
-        schema::FEATURES,
-        schema::ELEMENT_TYPE,
-        schema::TIME_REFERENCE,
-        schema::UNITS,
-        schema::QUANTITY_KIND,
-        schema::UNIT_SYSTEM,
-        schema::COMPONENT_FIELD,
-        schema::APPLICATION_DATA,
-    ]);
-    names
-}
-
-impl<'a> RowBuffer<'a> {
-    fn new(table: &'a TableSchema) -> Self {
-        let width = table.element_width();
+impl<'a> ValuesBuffer<'a> {
+    fn new(table: &'a PartitionSchema) -> Self {
         Self {
             table,
-            width,
+            width: table.element_width(),
             element_bytes: 0,
+            data_hash: Vec::new(),
+            time_axis: Vec::new(),
             timestamp: Vec::new(),
             issue_time: Vec::new(),
             percentile: Vec::new(),
             scenario: Vec::new(),
             value: Vec::new(),
-            id: Vec::new(),
-            data_hash: Vec::new(),
-            owner_id: Vec::new(),
-            text: text_columns(table.key.time_series_type)
-                .into_iter()
-                .map(|n| (n, Vec::new()))
-                .collect(),
         }
     }
 
@@ -477,22 +789,26 @@ impl<'a> RowBuffer<'a> {
         self.timestamp.is_empty()
     }
 
-    /// Append every row of one series, returning how many there were.
-    fn push_series(&mut self, row: &TimeSeriesMetadata, data: &TimeSeriesData) -> Result<usize> {
+    /// Append every value row of one array, returning how many there were.
+    fn push_array(
+        &mut self,
+        key: &ArrayKey,
+        row: &TimeSeriesMetadata,
+        data: &TimeSeriesData,
+    ) -> Result<usize> {
         let rows = series_rows(row, data)?;
         let array = rows.array;
-        let dtype = array.dtype;
-        let stride = dtype.size();
+        let stride = array.dtype.size();
         if self.element_bytes == 0 {
             self.element_bytes = stride;
         } else if self.element_bytes != stride {
             return Err(unsupported(
-                "two series in one partition disagree about their dtype",
+                "two arrays in one partition disagree about their dtype",
             ));
         }
 
         // What one stored row occupies, which for a composite kind is the
-        // series' own width rather than the file's.
+        // series' own width rather than the partition's.
         let stored_width = rows.per_step;
         if !self.table.key.value_kind.is_composite() && stored_width != self.width {
             return Err(unsupported(format!(
@@ -502,19 +818,14 @@ impl<'a> RowBuffer<'a> {
         }
         if stored_width > self.width {
             return Err(unsupported(format!(
-                "series '{}' is wider ({stored_width}) than the file it was placed in ({})",
+                "series '{}' is wider ({stored_width}) than the partition it was placed in ({})",
                 row.name, self.width
             )));
         }
 
-        // The hash is over the *stored* cube, not the emitted rows: it
-        // identifies the series' values, which a permutation into row order does
-        // not change.
-        let leading = leading_shape(row, array);
-        let hash = table::canonical_hash(array, row.element_type, &leading)?;
-        let descriptors = self.descriptor_row(row);
-
         for (k, offset) in rows.offsets.iter().enumerate() {
+            self.data_hash.push(key.data_hash.clone());
+            self.time_axis.push(key.time_axis.clone());
             self.timestamp.push(rows.target[k]);
             if !rows.issue.is_empty() {
                 self.issue_time.push(rows.issue[k]);
@@ -531,89 +842,15 @@ impl<'a> RowBuffer<'a> {
                 unsupported(format!("series '{}' is shorter than its shape", row.name))
             })?;
             self.value.extend_from_slice(slice);
-            // Re-pad a composite row to the file's width. Zero is what the
+            // Re-pad a composite row to the partition's width. Zero is what the
             // layout pads with, and the leading count `n` keeps the row
             // self-describing whatever follows it.
             self.value.extend(std::iter::repeat_n(
                 0u8,
                 (self.width - stored_width) * stride,
             ));
-
-            self.id.push(row.id.map_or(0, |i| i.get()));
-            self.data_hash.push(hash.clone());
-            self.owner_id.push(row.owner_id);
-            for (name, value) in &descriptors {
-                self.text
-                    .get_mut(name)
-                    .expect("every descriptor names a column of this file")
-                    .push(value.clone());
-            }
         }
         Ok(rows.offsets.len())
-    }
-
-    /// The per-series constants, one per text column.
-    ///
-    /// Absent free-form descriptors are the **empty string**, which is what
-    /// keeps every column required. A stored empty string therefore reads back
-    /// as absent; §2.7 of the plan documents that, and it is the price of not
-    /// having five nullable columns.
-    fn descriptor_row(&self, row: &TimeSeriesMetadata) -> Vec<(&'static str, String)> {
-        let mut out: Vec<(&'static str, String)> = vec![
-            (schema::OWNER_TYPE, row.owner_type.clone()),
-            (
-                schema::OWNER_CATEGORY,
-                row.owner_category.as_str().to_string(),
-            ),
-            (
-                schema::TIME_SERIES_TYPE,
-                row.time_series_type.as_str().to_string(),
-            ),
-            (schema::NAME, row.name.clone()),
-        ];
-        let ts_type = self.table.key.time_series_type;
-        if ts_type == TimeSeriesType::SingleTimeSeries || ts_type.is_forecast() {
-            out.push((
-                schema::RESOLUTION,
-                row.resolution.map(|p| p.to_iso8601()).unwrap_or_default(),
-            ));
-        }
-        if ts_type.is_forecast() {
-            out.push((
-                schema::INTERVAL,
-                row.interval.map(|p| p.to_iso8601()).unwrap_or_default(),
-            ));
-            out.push((
-                schema::HORIZON,
-                row.horizon.map(|p| p.to_iso8601()).unwrap_or_default(),
-            ));
-        }
-        out.extend([
-            (schema::FEATURES, schema::encode_features(&row.features)),
-            (schema::ELEMENT_TYPE, row.element_type.to_string()),
-            (
-                schema::TIME_REFERENCE,
-                table::reference_literal(row.time_reference.as_ref()),
-            ),
-            (schema::UNITS, row.units.clone().unwrap_or_default()),
-            (
-                schema::QUANTITY_KIND,
-                row.quantity_kind.clone().unwrap_or_default(),
-            ),
-            (
-                schema::UNIT_SYSTEM,
-                row.unit_system.map_or("", |u| u.as_str()).to_string(),
-            ),
-            (
-                schema::COMPONENT_FIELD,
-                row.component_field.clone().unwrap_or_default(),
-            ),
-            (
-                schema::APPLICATION_DATA,
-                row.application_data.clone().unwrap_or_default(),
-            ),
-        ]);
-        out
     }
 
     /// Take the first `n` rows as a `RecordBatch`, leaving the rest buffered.
@@ -622,30 +859,17 @@ impl<'a> RowBuffer<'a> {
         let stride = self.element_bytes.max(1);
         let value_bytes: Vec<u8> = self.value.drain(..n * self.width * stride).collect();
 
-        let timestamps: Vec<i64> = self.timestamp.drain(..n).collect();
-        let stamp_array = TimestampMillisecondArray::from(timestamps);
-        let stamp_array = match self.table.key.time_reference.as_ref() {
-            Some(infrastore_core::TimeReference::Zoneless) => stamp_array,
-            None | Some(infrastore_core::TimeReference::Utc) => stamp_array.with_timezone("UTC"),
-            Some(other) => stamp_array.with_timezone(other.as_storage_string()),
-        };
-
-        let dtype = self.table.key.value_kind.leaf_dtype();
-        let mut shape = vec![n];
-        shape.extend(self.table.element_shape());
-        let values = TypedArray::new(dtype, shape, value_bytes).map_err(unsupported)?;
-
-        // Key columns first, in schema order: `issue_time` then the lane, both
-        // present only for the partitions whose type has them.
-        let mut columns: Vec<ArrayRef> = vec![Arc::new(stamp_array)];
+        let mut columns: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from(
+                self.data_hash.drain(..n).collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                self.time_axis.drain(..n).collect::<Vec<_>>(),
+            )),
+            zoned(self.timestamp.drain(..n).collect(), &self.table.key),
+        ];
         if !self.issue_time.is_empty() {
-            let issued =
-                TimestampMillisecondArray::from(self.issue_time.drain(..n).collect::<Vec<_>>());
-            columns.push(Arc::new(match self.table.key.time_reference.as_ref() {
-                Some(infrastore_core::TimeReference::Zoneless) => issued,
-                None | Some(infrastore_core::TimeReference::Utc) => issued.with_timezone("UTC"),
-                Some(other) => issued.with_timezone(other.as_storage_string()),
-            }));
+            columns.push(zoned(self.issue_time.drain(..n).collect(), &self.table.key));
         }
         if !self.percentile.is_empty() {
             columns.push(Arc::new(Float64Array::from(
@@ -657,27 +881,20 @@ impl<'a> RowBuffer<'a> {
                 self.scenario.drain(..n).collect::<Vec<_>>(),
             )));
         }
+
+        let dtype = self.table.key.value_kind.leaf_dtype();
+        let mut shape = vec![n];
+        shape.extend(self.table.element_shape());
+        let values = TypedArray::new(dtype, shape, value_bytes).map_err(unsupported)?;
         columns.push(value_array(&values)?);
-        columns.push(Arc::new(Int64Array::from(
-            self.id.drain(..n).collect::<Vec<_>>(),
-        )));
-        columns.push(Arc::new(StringArray::from(
-            self.data_hash.drain(..n).collect::<Vec<_>>(),
-        )));
-        columns.push(Arc::new(Int64Array::from(
-            self.owner_id.drain(..n).collect::<Vec<_>>(),
-        )));
-        for name in text_columns(self.table.key.time_series_type) {
-            let column = self
-                .text
-                .get_mut(name)
-                .expect("every text column was created with the buffer");
-            columns.push(Arc::new(StringArray::from(
-                column.drain(..n).collect::<Vec<_>>(),
-            )));
-        }
-        RecordBatch::try_new(self.table.schema.clone(), columns).map_err(arrow_err)
+
+        batch_of(self.table.values.clone(), columns)
     }
+}
+
+/// Assemble a batch, mapping Arrow's own error.
+fn batch_of(schema: SchemaRef, columns: Vec<ArrayRef>) -> Result<RecordBatch> {
+    RecordBatch::try_new(schema, columns).map_err(arrow_err)
 }
 
 impl ValueKind {

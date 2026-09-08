@@ -96,6 +96,13 @@ pub const FEATURES: &str = "features";
 // value belongs, not what the grid it belongs to *is*, so the interval and
 // horizon travel as columns of their own.
 
+/// The first instant a regular series or a forecast is anchored at. Also inside
+/// the `time_axis`, and here as a real column so a reader need not parse one.
+pub const INITIAL_TIMESTAMP: &str = "initial_timestamp";
+/// How many steps a `SingleTimeSeries` holds. Likewise.
+pub const LENGTH: &str = "length";
+/// How many windows a forecast holds.
+pub const COUNT: &str = "count";
 /// ISO-8601 forecast interval: how far apart two windows are issued.
 pub const INTERVAL: &str = "interval";
 /// ISO-8601 forecast horizon: how far ahead one window reaches.
