@@ -65,12 +65,12 @@ flowchart TB
 - **Columns are series, rows are timesteps.** Chunking spans the whole width,
   `(rows, cols, *element_shape)` — one row, so that one chunk is one timestamp across every column,
   unless the dataset is narrow enough that a single row would make the chunk too small to be worth
-  one ([file format](../reference/file-format.md#packed-datasets)). The layout favors **bulk
-  writes** (a batch fills whole chunks in one pass) and **reads across series by timestamp** (one
-  timestamp is a chunk per dataset, and a sweep costs the same whatever the row count). The reverse
-  directions are the slow ones, by design: reading a single series in full touches every chunk band,
-  and adding one series at a time rewrites a chunk band per timestep — which is why a run of single
-  adds belongs inside a transaction, where they are buffered and written as one block instead.
+  one ([file format](../reference/file-format.md#packed-mode)). The layout favors **bulk writes** (a
+  batch fills whole chunks in one pass) and **reads across series by timestamp** (one timestamp is a
+  chunk per dataset, and a sweep costs the same whatever the row count). The reverse directions are
+  the slow ones, by design: reading a single series in full touches every chunk band, and adding one
+  series at a time rewrites a chunk band per timestep — which is why a run of single adds belongs
+  inside a transaction, where they are buffered and written as one block instead.
 - **A companion dataset holds the hashes.** For each packed dataset there is a sibling
   `{dataset}_h`, a `(cols, 64)` array of `u8`; row `i` holds the SHA-256 hex of column `i` as raw
   bytes, or is all-zero if the slot is free. This is the on-disk index the backend rebuilds on open.

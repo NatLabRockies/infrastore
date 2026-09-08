@@ -100,9 +100,9 @@ The two metrics to watch:
   much higher for on-disk than in-memory, the bottleneck is HDF5 chunk reads or SQLite metadata
   queries rather than Rust overhead. The packed `SingleTimeSeries` layout chunks `(rows, cols)`
   across the whole width — one timestamp per chunk, or a few for a narrow dataset
-  ([file format](../reference/file-format.md#packed-datasets)) — so reading one timestamp across
-  many series is a chunk read per dataset, while reading one full series touches every chunk band
-  (the slow direction, expected for exploration/plotting rather than hot loops).
+  ([file format](../reference/file-format.md#packed-mode)) — so reading one timestamp across many
+  series is a chunk read per dataset, while reading one full series touches every chunk band (the
+  slow direction, expected for exploration/plotting rather than hot loops).
 
 ## Tracing spans for deeper diagnosis
 

@@ -17,9 +17,9 @@ The practical counterpart — which calls a parent package should make, and in w
 series, rows are timesteps**, and the HDF5 chunking spans the whole width —
 `(rows, cols, *element_shape)`, one row unless the dataset is narrow enough that a single timestamp
 row would make an uneconomically small chunk
-([file format](../reference/file-format.md#packed-datasets)). A chunk therefore holds one timestamp,
-or a few consecutive ones, across every column. We optimize for reading **all components' values at
-a given timestamp**, and accept that reading **one component's entire array** is comparatively slow.
+([file format](../reference/file-format.md#packed-mode)). A chunk therefore holds one timestamp, or
+a few consecutive ones, across every column. We optimize for reading **all components' values at a
+given timestamp**, and accept that reading **one component's entire array** is comparatively slow.
 
 **Why.** The workload that matters is simulation. A production-cost or power-flow model steps
 through time and, at each step, needs the value of every generator, load, and branch for that one
