@@ -114,7 +114,12 @@ pub const EXPORT: &str = "\
 Examples:
   infrastore --store demo.h5 -f csv export --owner-id 42 --name load
   infrastore --store demo.h5 -f csv export --name-glob 'load_*' --dir out/
-  infrastore --store demo.h5 -f json export --dir out/";
+  infrastore --store demo.h5 -f json export --dir out/
+  infrastore --store demo.h5 -f parquet export --dir out/
+
+-f parquet writes one <stem>.values.parquet / <stem>.series.parquet pair per
+(type, value type, time reference) partition into --dir, which must hold no
+.parquet files yet; `add --parquet <DIR>` reads them back.";
 
 pub const TRANSFORM: &str = "\
 Examples:

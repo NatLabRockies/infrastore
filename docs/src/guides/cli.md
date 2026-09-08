@@ -255,9 +255,11 @@ the grids a store holds (`list --length 24`) and retire a stray cohort without n
 
 `export` is the bulk read-direction inverse of `add`: every series the selector matches is written
 to its own CSV or JSON file under `--dir` (or to stdout when exactly one matches), optionally sliced
-with `--time-range`. Setting `INFRASTORE_STORE` in the environment stands in for `--store`, every
-destructive command except `compact` accepts `--dry-run` to preview its effect, and the global
-`-y`/`--yes` answers every confirmation prompt so a script does not have to know which commands ask:
+with `--time-range`; `-f parquet` instead writes
+[one file pair per partition](#hand-it-to-something-else-parquet). Setting `INFRASTORE_STORE` in the
+environment stands in for `--store`, every destructive command except `compact` accepts `--dry-run`
+to preview its effect, and the global `-y`/`--yes` answers every confirmation prompt so a script
+does not have to know which commands ask:
 
 ```sh
 export INFRASTORE_STORE=demo.h5

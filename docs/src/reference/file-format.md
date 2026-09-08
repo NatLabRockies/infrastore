@@ -591,6 +591,31 @@ DDL at all**, so reads of a missing table return empty results (`0`, `false`, no
 failing. That tolerance is not vestigial — it is what lets a read-only open work on a store whose
 catalog was never opened for writing.
 
+### `store_attributes`
+
+Free-form key/value provenance about the **artifact as a whole** — who built it, from what source
+system, under which of the consumer's own schema versions. The store never interprets a value, in
+the same spirit as a row's `application_data`, and nothing here participates in any identity, hash,
+or query plan. See [Store attributes](../explanation/data-model.md#store-attributes) for the model.
+
+```sql
+CREATE TABLE store_attributes (
+    key   TEXT PRIMARY KEY NOT NULL,
+    value TEXT NOT NULL
+);
+```
+
+`key` is the primary key, so a set is an **upsert** rather than an append: an artifact records one
+creator, not a history of them. Values are `TEXT`; a caller wanting structure stores JSON, which is
+what `application_data` already asks of them. Keys beginning with `infrastore.` are reserved and
+refused on the write path — by the store, not by a `CHECK`, so a future build can stamp its own
+facts through a deliberate internal write without a format change.
+
+The table is **additive**, like the two association tables: an existing store gains it on its first
+writable open, so it needed no `CATALOG_SCHEMA_REVISION` bump. A read-only open of a catalog written
+before it existed cannot run that DDL, so reads degrade to the empty answer rather than erroring.
+The table is not carried by the OpenAPI export or import, which have no place for it.
+
 ### `schema_version`
 
 ```sql

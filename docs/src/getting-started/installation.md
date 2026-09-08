@@ -165,15 +165,16 @@ Add it to your shell profile to make it permanent. The Python wheel is built sep
 
 ## Crates in the Workspace
 
-| Crate               | What it builds                                                       |
-| ------------------- | -------------------------------------------------------------------- |
-| `infrastore-core`   | Types, HDF5 + SQLite storage, hashing, Rust API                      |
-| `infrastore-proto`  | Protobuf service definition + `tonic` codegen                        |
-| `infrastore-server` | gRPC server binary + Rust client                                     |
-| `infrastore-py`     | PyO3 bindings, `abi3-py311` wheel                                    |
-| `infrastore-ffi`    | C ABI cdylib (the foundation of the Julia binding)                   |
-| `infrastore-cli`    | `infrastore` CLI binary (CSV add/read, inspect on-disk stores)       |
-| `infrastore-bench`  | `infrastore-bench` binary (bulk-ingest + simulation-read benchmarks) |
+| Crate                | What it builds                                                       |
+| -------------------- | -------------------------------------------------------------------- |
+| `infrastore-core`    | Types, HDF5 + SQLite storage, hashing, Rust API                      |
+| `infrastore-proto`   | Protobuf service definition + `tonic` codegen                        |
+| `infrastore-server`  | gRPC server binary + Rust client                                     |
+| `infrastore-py`      | PyO3 bindings, `abi3-py311` wheel                                    |
+| `infrastore-ffi`     | C ABI cdylib (the foundation of the Julia binding)                   |
+| `infrastore-cli`     | `infrastore` CLI binary (CSV add/read, inspect on-disk stores)       |
+| `infrastore-parquet` | Parquet export/import behind the CLI's default-on `parquet` feature  |
+| `infrastore-bench`   | `infrastore-bench` binary (bulk-ingest + simulation-read benchmarks) |
 
 ## Next Steps
 

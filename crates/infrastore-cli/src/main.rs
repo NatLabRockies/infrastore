@@ -542,11 +542,14 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
-    /// Write series values to CSV or JSON files.
+    /// Write series values to CSV, JSON, or Parquet files.
     ///
-    /// The read-direction inverse of `add`: one file per matched series into
-    /// --dir, or stdout when the selector matches exactly one series. The CSV it
-    /// writes is re-readable by `add`, which detects the layout from the header.
+    /// The read-direction inverse of `add`. CSV and JSON write one file per
+    /// matched series into --dir, or to stdout when the selector matches
+    /// exactly one series; Parquet writes one values/series file pair per
+    /// partition into --dir, which is then required. Both come back through
+    /// `add`: CSV by detecting the layout from the header, Parquet via
+    /// --parquet.
     #[command(after_help = help::EXPORT)]
     Export {
         #[command(flatten)]
