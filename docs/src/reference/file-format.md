@@ -280,13 +280,13 @@ them share one content-addressed array. The full 64-char hash is used, not a pre
 parsed back into the pool key when the index is rebuilt at open, so a truncated form could let two
 distinct time axes collide into one pool.
 
-The dataset shape is `(length, cols, *element_shape)` and chunking is `(1, cols, *element_shape)`,
-so one HDF5 chunk holds a single timestamp across every column — making a read across series by
-timestamp one chunk, and a buffered bulk write fill whole chunks. `cols` is chosen per dataset: a
-managed write sizes it to the batch it has in hand, while an incremental one-at-a-time write path
-uses a default width (`DEFAULT_COLS_PER_DATASET = 1000`) and fills one of its slots per call. In
-both cases `cols` is capped so one chunk stays within a byte budget (`MAX_CHUNK_BYTES = 1 MiB`); a
-batch wider than the cap spills across datasets.
+The dataset shape is `(length, cols, *element_shape)` and chunking is `(rows, cols, *element_shape)`
+with `rows = 1` in the ordinary case, so one HDF5 chunk holds a single timestamp across every column
+— making a read across series by timestamp one chunk, and a buffered bulk write fill whole chunks.
+`cols` is chosen per dataset: a managed write sizes it to the batch it has in hand, while an
+incremental one-at-a-time write path uses a default width (`DEFAULT_COLS_PER_DATASET = 1000`) and
+fills one of its slots per call. In both cases `cols` is capped so one chunk stays within a byte
+budget (`MAX_CHUNK_BYTES = 1 MiB`); a batch wider than the cap spills across datasets.
 
 "The batch it has in hand" is the whole of an `add_time_series_bulk` call — **or the whole span of
 an open transaction**, for irregular cohorts as well as regular pools: whether an irregular series
@@ -329,6 +329,42 @@ columns up the block is what the bulk add of those items writes.
 This is a write-time policy like every other choice on this page: the layouts it produces are ones
 the format already had, so it does not affect `data_format_version` and stores written either way
 stay mutually readable.
+
+`rows` rises above one when a single timestamp row would leave the chunk under
+`MIN_CHUNK_BYTES = 32 KiB`. A narrow dataset is where that bites hardest, and a dataset is narrow
+when the width had to be small — which above is `MAX_PENDING_BYTES / length` for a span, so a long
+series got a 512-byte chunk. That is small enough to cost on both sides: deflate has too little to
+work with, and HDF5's fixed per-chunk cost stops being rounding error.
+
+Measured on 512 series of 262,144 `f64` steps written one at a time in one span — a 64-column block,
+so a 512-byte timestamp row — carrying a daily-plus-annual profile with AR(1) noise rather than
+anything conveniently compressible:
+
+| chunk                |  write | file (1.074 GB raw) | 8,760 consecutive timestamp reads |
+| -------------------- | -----: | ------------------: | --------------------------------: |
+| `(1, 64)` = 512 B    | 59.5 s |            1.098 GB |                            0.97 s |
+| `(8, 64)` = 4 KiB    | 19.1 s |            0.909 GB |                            1.26 s |
+| `(32, 64)` = 16 KiB  | 13.8 s |            0.843 GB |                            1.26 s |
+| `(64, 64)` = 32 KiB  | 14.8 s |            0.813 GB |                            1.24 s |
+| `(128, 64)` = 64 KiB | 16.5 s |            0.787 GB |                            1.21 s |
+
+The 512-byte chunking wrote a file _larger than the raw data_: at that size deflate's per-chunk
+overhead exceeds what it saves. Write time bottoms out around 16–32 KiB and file size keeps falling
+past it. **Sweeps are flat at every chunk size** — a sweep visits every chunk regardless, and the
+rows a chunk brings along are the next ones it wants, so the reader's main pattern is untouched.
+
+Scattered _single-timestamp_ reads are the one thing taller chunks cost in principle, since they
+decompress rows nobody asked for. In practice the measurement varied by ±0.4 s run to run and could
+not separate 4 KiB from 32 KiB; a consumer whose access pattern is genuinely scattered rather than
+swept should benchmark it rather than trust this note.
+
+The floor reaches past the narrow blocks it is aimed at. A 1,000-column `f64` growth pool is an
+8,000-byte row and takes five rows per chunk; a year of hourly `f64` in a 1,915-column span block is
+15 KiB and takes three. On that wide shape the trade measured as about 15% more write time for about
+3% less on disk.
+
+Chunking is a write-time policy: it is not recorded in `data_format_version`, HDF5 readers do not
+care, and files written under either rule stay readable.
 
 - **Rows are timesteps, columns are series.** Column `i` holds one complete series.
 - **Hash companion dataset.** Each packed dataset has a sibling `{dataset}_h` dataset of `u8`,

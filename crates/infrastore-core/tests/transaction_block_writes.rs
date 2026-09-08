@@ -26,6 +26,13 @@
 //! buffered the same way, and a thousand-column cap cut a wide one into ten
 //! times the datasets it writes outside a transaction, which a columnar read
 //! then pays for chunk by chunk.
+//!
+//! Chunk shapes below are `(rows, cols)` with `rows > 1` wherever one timestamp
+//! row would fall under `MIN_CHUNK_BYTES`. At 24 f64 steps that is every layout
+//! here -- a thousand columns is an 8,000-byte row -- so the small ones take
+//! every row they have and the thousand-column pool takes five. Only a very
+//! wide element shape clears the floor on one row: the `[1024]` elements in the
+//! spill test are 8 KiB each, so 128 of them are a 1 MiB row.
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use hdf5_metno as h5;
@@ -55,6 +62,18 @@ fn request(owner: i64, base: f64) -> AddRequest {
             "load",
         )),
     )
+}
+
+/// The chunk rows `MIN_CHUNK_BYTES` gives a `cols`-wide `f64` dataset of
+/// `length` rows, mirroring `storage::common::packed_chunk_rows` so a test can
+/// name a chunk without hard-coding the floor.
+fn rows_per_chunk(cols: usize, length: usize) -> usize {
+    let row = cols * 8;
+    if row >= 32 * 1024 {
+        1
+    } else {
+        (32 * 1024usize).div_ceil(row).clamp(1, length)
+    }
 }
 
 /// Every packed dataset in the file, by name, with its shape and chunk dims.
@@ -118,7 +137,7 @@ fn single_adds_in_a_transaction_match_a_bulk_add_of_the_same_items() {
         looped_layout,
         BTreeMap::from([(
             "sts_f64_s_24_PT1H".to_string(),
-            (vec![24, 7], Some(vec![1, 7]))
+            (vec![24, 7], Some(vec![24, 7]))
         )])
     );
 
@@ -151,7 +170,7 @@ fn a_single_add_outside_a_transaction_still_fills_a_growth_pool() {
             "sts_f64_s_24_PT1H".to_string(),
             (
                 vec![24, DEFAULT_COLS_PER_DATASET],
-                Some(vec![1, DEFAULT_COLS_PER_DATASET])
+                Some(vec![5, DEFAULT_COLS_PER_DATASET])
             )
         )])
     );
@@ -198,7 +217,7 @@ fn one_item_bulk_adds_fill_a_slot_outside_a_transaction_and_coalesce_inside_one(
         packed_layout(&spanned),
         BTreeMap::from([(
             "sts_f64_s_24_PT1H".to_string(),
-            (vec![24, 3], Some(vec![1, 3]))
+            (vec![24, 3], Some(vec![24, 3]))
         )])
     );
 }
@@ -269,7 +288,7 @@ fn a_transaction_around_one_add_fills_a_slot_rather_than_sizing_a_dataset() {
             "sts_f64_s_24_PT1H".to_string(),
             (
                 vec![24, DEFAULT_COLS_PER_DATASET],
-                Some(vec![1, DEFAULT_COLS_PER_DATASET])
+                Some(vec![5, DEFAULT_COLS_PER_DATASET])
             )
         )]),
         "five one-add transactions share one pool, not five datasets"
@@ -589,7 +608,7 @@ fn a_repeated_array_is_buffered_once() {
         packed_layout(&path),
         BTreeMap::from([(
             "sts_f64_s_24_PT1H".to_string(),
-            (vec![24, 1000], Some(vec![1, 1000]))
+            (vec![24, 1000], Some(vec![5, 1000]))
         )])
     );
 }
@@ -645,7 +664,7 @@ fn an_inner_rollback_drops_only_its_own_arrays_from_the_block() {
         packed_layout(&path),
         BTreeMap::from([(
             "sts_f64_s_24_PT1H".to_string(),
-            (vec![24, 3], Some(vec![1, 3]))
+            (vec![24, 3], Some(vec![24, 3]))
         )])
     );
     for (owner, base) in [(1, 100.0), (2, 200.0), (4, 400.0)] {
@@ -720,7 +739,10 @@ fn a_scalar_span_wider_than_the_growth_pool_stays_one_block() {
 
     let expected = BTreeMap::from([(
         "sts_f64_s_24_PT1H".to_string(),
-        (vec![24, TOTAL as usize], Some(vec![1, TOTAL as usize])),
+        (
+            vec![24, TOTAL as usize],
+            Some(vec![rows_per_chunk(TOTAL as usize, 24), TOTAL as usize]),
+        ),
     )]);
     assert_eq!(
         packed_layout(&looped),
@@ -796,7 +818,10 @@ fn a_bulk_add_inside_a_transaction_writes_the_dataset_it_writes_outside_one() {
         layout,
         BTreeMap::from([(
             "sts_f64_s_24_PT1H".to_string(),
-            (vec![24, TOTAL as usize], Some(vec![1, TOTAL as usize])),
+            (
+                vec![24, TOTAL as usize],
+                Some(vec![rows_per_chunk(TOTAL as usize, 24), TOTAL as usize]),
+            ),
         )]),
         "one batch-wide dataset, not growth-pool-sized pieces"
     );
@@ -851,7 +876,7 @@ fn a_pending_block_spills_at_the_width_the_block_writer_spills_at() {
             ),
             (
                 format!("{base}__1"),
-                (vec![2, 3, ELEMENTS], Some(vec![1, 3, ELEMENTS]))
+                (vec![2, 3, ELEMENTS], Some(vec![2, 3, ELEMENTS]))
             ),
         ]),
         "a full-width block mid-span, the remainder at commit"

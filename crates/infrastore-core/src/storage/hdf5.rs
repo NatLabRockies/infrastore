@@ -52,8 +52,8 @@ use crate::version::{Compat, DATA_FORMAT_VERSION};
 use super::common::{
     COMPRESSION_ATTR, HASH_SUFFIX, MAX_CHUNK_BYTES, MAX_PENDING_BYTES, PackGroup, ROOT_GROUP,
     SINGLE_GROUP, STANDALONE_PREFIX, TIMESTAMPS_GROUP, TIMESTAMPS_PREFIX, dataset_base_name,
-    element_block_bytes, hex_to_hash, parse_dataset_name, resolve_dataset_cols, spill_name,
-    standalone_chunks,
+    element_block_bytes, hex_to_hash, packed_chunk_rows, parse_dataset_name, resolve_dataset_cols,
+    spill_name, standalone_chunks,
 };
 use super::{ArrayLocation, BackendStats, CompactionReport, IntegrityReport, StorageBackend};
 
@@ -962,10 +962,13 @@ impl Inner {
         let cols = resolve_dataset_cols(requested_cols, dtype, element_shape);
         let mut shape = vec![length, cols];
         shape.extend_from_slice(element_shape);
-        // Chunk one timestamp row across every column, matching the packed
-        // backend: a read-by-timestamp gathers one chunk and a full-width bulk
-        // write fills whole chunks.
-        let mut chunks = vec![1, cols];
+        // Chunk one timestamp row across every column: a read-by-timestamp
+        // gathers one chunk and a full-width bulk write fills whole chunks.
+        // More than one row only when a single row would leave the chunk under
+        // `MIN_CHUNK_BYTES`, which a narrow block does -- see
+        // `packed_chunk_rows`. A block write still fills whole chunks either
+        // way, because it covers every row of every column it claims.
+        let mut chunks = vec![packed_chunk_rows(dtype, element_shape, cols, length), cols];
         chunks.extend_from_slice(element_shape);
         let hash_name = format!("{name}{HASH_SUFFIX}");
         let single = self.single()?;
@@ -2899,7 +2902,10 @@ mod tests {
             assert!(inner.pending.is_empty());
             let ds = inner.dataset(&name).unwrap();
             assert_eq!(ds.shape(), vec![6, 5]);
-            assert_eq!(ds.chunk(), Some(vec![1, 5]));
+            // Five f64 columns is a 40-byte timestamp row, far under
+            // `MIN_CHUNK_BYTES`, so the chunk takes every row the dataset has
+            // rather than leaving 40-byte chunks on disk.
+            assert_eq!(ds.chunk(), Some(vec![6, 5]));
         }
         // Columns in the order the puts arrived.
         for (i, (hash, array)) in hashes.iter().zip(&arrays).enumerate() {
