@@ -14,17 +14,21 @@ The practical counterpart — which calls a parent package should make, and in w
 
 **The decision.** In the HDF5 file, `SingleTimeSeries` arrays that share a
 `(dtype, element_shape, length, resolution)` are packed as columns of one dataset: **columns are
-series, rows are timesteps**, and the HDF5 chunking is `(1, cols, *element_shape)` so that a single
-chunk holds one timestamp across every column. We optimize for reading **all components' values at a
-given timestamp**, and accept that reading **one component's entire array** is comparatively slow.
+series, rows are timesteps**, and the HDF5 chunking spans the whole width —
+`(rows, cols, *element_shape)`, one row unless the dataset is narrow enough that a single timestamp
+row would make an uneconomically small chunk
+([file format](../reference/file-format.md#packed-datasets)). A chunk therefore holds one timestamp,
+or a few consecutive ones, across every column. We optimize for reading **all components' values at
+a given timestamp**, and accept that reading **one component's entire array** is comparatively slow.
 
 **Why.** The workload that matters is simulation. A production-cost or power-flow model steps
 through time and, at each step, needs the value of every generator, load, and branch for that one
-timestamp — a slice _across_ series, not _down_ one. With this layout that slice is a single chunk
-read; the [`ForecastReader` / `StaticReader`](./readers.md) columnar surface is built directly on
-it. The inverse access — pulling one component's full history — has to touch every chunk band and is
-slow by design. That trade is deliberate: the simulation read path is the hot one, and it is the one
-parent packages hand to their users.
+timestamp — a slice _across_ series, not _down_ one. With this layout that slice is one chunk read
+per dataset, and a sweep of them costs the same whatever the chunk's row count, since it visits
+every chunk anyway; the [`ForecastReader` / `StaticReader`](./readers.md) columnar surface is built
+directly on it. The inverse access — pulling one component's full history — has to touch every chunk
+band and is slow by design. That trade is deliberate: the simulation read path is the hot one, and
+it is the one parent packages hand to their users.
 
 **What this means for parent-package developers.**
 

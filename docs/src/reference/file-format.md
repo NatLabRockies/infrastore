@@ -307,15 +307,22 @@ chunk-aligned.
 Two limits keep that buffer from being unbounded, and both simply write a block out early — the same
 spill a too-wide batch already performs, costing an extra dataset and nothing else:
 
+A pool's block width is the **lower of two** ceilings, and the buffer as a whole has a third:
+
 - **Per pool, one chunk row of columns** — `MAX_CHUNK_BYTES` over the element block, exactly the
   width a bulk add's block spills at, so the span's datasets are the bulk add's datasets. It is
   deliberately not `DEFAULT_COLS_PER_DATASET`: a bulk add issued inside a transaction is buffered
   too, and a thousand-column cap cut a 100,000-series batch into a hundred datasets where the same
   batch outside a transaction writes ten, which every per-timestep read then paid for chunk by
   chunk.
-- **Across every pool, `MAX_PENDING_BYTES = 128 MiB`** of unwritten arrays, since a chunk row of
-  columns of a multi-year series is far more than the same columns of a day. Crossing it writes out
-  the widest block.
+- **Per pool, `MAX_PENDING_BYTES` over one column's bytes** — `length × element_block`. A chunk row
+  is a count of columns and says nothing about how long they are, so for anything but a short series
+  this is the ceiling that actually binds: scalar `f64` is 131,072 columns by the rule above, but
+  30,500 steps is 244,000 bytes a column, so the pool spills at 550. The two together are
+  `min(MAX_CHUNK_BYTES / element_block, MAX_PENDING_BYTES / (length × element_block))`.
+- **Across every pool, `MAX_PENDING_BYTES = 128 MiB`** of unwritten arrays. Per-pool shares do not
+  add up to a global one, so a span touching several shapes is held to the total as well; crossing
+  it writes out the widest block.
 
 **A block of one is not a block.** If a span ends up holding a single array for a pool, it fills a
 growth-pool slot rather than claiming a dataset sized to one column — chunked `(1, 1)`, that would
