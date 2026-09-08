@@ -450,17 +450,19 @@ form, the feature sets, the association tables:
 INSTALL sqlite; LOAD sqlite;
 ATTACH 'demo.h5.sqlite' AS catalog (TYPE sqlite);
 
-SELECT p.name, p.owner_id, max(p.value) AS peak, c.data_hash
-FROM 'parquet/SingleTimeSeries.f64.utc.parquet' AS p
-JOIN catalog.time_series_readable AS c ON c.id = p.id
-GROUP BY p.name, p.owner_id, c.data_hash;
+-- Two joins: the array key pairs the halves, then `id` reaches the catalog.
+SELECT s.name, s.owner_id, max(v.value) AS peak, c.timestamps_hash
+FROM 'parquet/SingleTimeSeries.f64.utc.values.parquet' v
+JOIN 'parquet/SingleTimeSeries.f64.utc.series.parquet' s USING (data_hash, time_axis)
+JOIN catalog.time_series_readable AS c ON c.id = s.id
+GROUP BY s.name, s.owner_id, c.timestamps_hash;
 ```
 
 `time_series_readable` is the catalog's hand-inspection view -- it hex-encodes the two content
 hashes and decodes the integer type codes, so the rows read as text (see
 [Reading the SQLite catalog by hand](../reference/cli.md#reading-the-sqlite-catalog-by-hand)). The
-`id` column is what joins the two halves; it is provenance only, and `add` assigns fresh ids rather
-than reusing it.
+`id` column on the **series** half is what reaches it; it is provenance only, and `add` assigns
+fresh ids rather than reusing it.
 
 ## Stamp Provenance on the Artifact
 
