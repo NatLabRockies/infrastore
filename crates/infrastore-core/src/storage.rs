@@ -99,8 +99,9 @@ pub(crate) enum WriteMode {
     /// and the only one a backend without a buffer implements.
     Immediate,
     /// May be buffered and written by [`StorageBackend::materialize_pending`],
-    /// by [`StorageBackend::flush`], or when the buffer reaches the width the
-    /// block writer would spill at.
+    /// by [`StorageBackend::flush`], or when the buffer reaches a bound the
+    /// backend sets on it — a column width per pool, and a byte ceiling across
+    /// all of them, so that buffering cannot grow without limit.
     Deferred,
 }
 

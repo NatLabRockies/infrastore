@@ -1608,7 +1608,7 @@ impl Store {
     /// chunking. A block is written out at the outermost commit, when a read
     /// needs a physical position for one of its arrays ([`Self::locate_array`],
     /// or an explicit [`Self::flush`] — an ordinary value read is served from
-    /// the block), and when it reaches the width the block writer spills at.
+    /// the block), and when it hits either of the bounds below.
     ///
     /// Measured on 19 hourly `f64` `SingleTimeSeries` of 30,500 steps added one
     /// at a time inside one transaction, against an on-disk store through the
@@ -1616,9 +1616,23 @@ impl Store {
     /// and the file 6.0 MB before against 3.3 MB after — one 1000-column pool
     /// against the single 19-column dataset the bulk add writes.
     ///
+    /// **A transaction around a single packed add is not this.** A block of one
+    /// fills a growth-pool slot instead, exactly as the same add outside a
+    /// transaction does, because sizing a dataset to one column gives a scalar
+    /// `f64` series an eight-byte chunk per timestep — the mistake
+    /// [`Self::add_time_series_bulk`] already refuses for a batch of one. Two
+    /// or more is a block, and is what the bulk add of those items writes.
+    ///
     /// The price is memory: a pool's pending block holds its not-yet-written
     /// arrays, which is the same memory the block writer allocates for the
-    /// equivalent bulk add, and is bounded per pool by the width it spills at.
+    /// equivalent bulk add. It is bounded twice — per pool at the growth-pool
+    /// width (1,000 columns, or fewer when one chunk row or that ceiling would
+    /// not take a thousand), and across every pool at a fixed byte ceiling,
+    /// currently 128 MiB. Crossing either writes blocks out early,
+    /// which costs an extra dataset and nothing else. A span far larger than
+    /// the ceiling therefore stays bounded, at the price of spilling — but the
+    /// arrays a caller has not yet handed over are not the store's memory, so
+    /// the honest way to ingest more than that is still a bulk add per cohort.
     ///
     /// # Concurrency
     ///
@@ -1991,9 +2005,10 @@ impl Store {
     /// 30,500 steps left 19 one-column datasets and a 36 MB file. It therefore
     /// delegates to the per-column path, which drops the array into the first
     /// free slot of the shared pool, exactly as [`Self::add`] does. Inside a
-    /// transaction it does not, because there the deferred block writer already
-    /// coalesces successive one-item batches into one dataset — which is the
-    /// better answer, and the one this delegation cannot give.
+    /// transaction it does not need to: successive one-item batches coalesce
+    /// into one block there, which is the better answer and the one this
+    /// delegation cannot give — and a span that ends up holding just the one
+    /// array fills a slot anyway, by the same rule applied one layer down.
     #[tracing::instrument(skip(self, items), fields(count = items.len()))]
     pub fn add_time_series_bulk(&mut self, items: Vec<AddRequest>) -> Result<Vec<TimeSeriesId>> {
         if items.len() == 1 && !self.in_transaction() {

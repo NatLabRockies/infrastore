@@ -12,7 +12,15 @@
 //! What these tests pin is that the two really are the same file — same dataset
 //! names, same widths, same chunk dims — and that "accepted but not yet
 //! written" is invisible everywhere else: reads see it, dedup sees it, rollback
-//! unwinds it, and an abandoned transaction leaves nothing behind.
+//! unwinds it, and an abandoned transaction leaves behind nothing it was still
+//! holding.
+//!
+//! Two edges bound the buffering, and both are pinned here too. A block of one
+//! is not a block: it fills a growth-pool slot, because sizing a dataset to one
+//! column is the mistake `add_time_series_bulk` already refuses for a batch of
+//! one. And the memory an open span holds is capped twice — per pool at the
+//! growth-pool width, and across every pool at a byte budget — so a long enough
+//! span writes blocks out early instead of growing without limit.
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use hdf5_metno as h5;
@@ -190,6 +198,56 @@ fn one_item_bulk_adds_fill_a_slot_outside_a_transaction_and_coalesce_inside_one(
     );
 }
 
+/// A transaction spanning a *single* packed add fills a growth-pool slot, the
+/// way that add would outside one — it does not size a dataset to a block of
+/// one.
+///
+/// This is the shape the feature is most often used in: "several operations
+/// atomic together" is usually a removal and a replacement, or one add beside
+/// some catalog work, not a bulk ingest. Sizing a dataset to it would chunk
+/// `(1, 1)`, giving a scalar `f64` series an eight-byte chunk and one chunk per
+/// timestep — the same per-chunk overhead that made nineteen one-item bulk adds
+/// write a 36 MB file, which is what the delegation above exists to avoid.
+/// Nineteen 30,500-step series added in nineteen separate transactions measured
+/// 36 MB written that way against 5.9 MB through the pool.
+///
+/// From two columns up the block is what a bulk add of the same items writes,
+/// and stays that way — that is the invariant this file's first test pins.
+#[test]
+fn a_transaction_around_one_add_fills_a_slot_rather_than_sizing_a_dataset() {
+    use infrastore_core::storage::common::DEFAULT_COLS_PER_DATASET;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("one_at_a_time.h5");
+    {
+        let mut store = create_store(Some(&path), false).unwrap();
+        for owner in 1..6 {
+            store.begin_transaction().unwrap();
+            store.add(request(owner, owner as f64 * 100.0)).unwrap();
+            store.commit_transaction().unwrap();
+        }
+        store.flush().unwrap();
+    }
+    assert_eq!(
+        packed_layout(&path),
+        BTreeMap::from([(
+            "sts_f64_s_24_PT1H".to_string(),
+            (
+                vec![24, DEFAULT_COLS_PER_DATASET],
+                Some(vec![1, DEFAULT_COLS_PER_DATASET])
+            )
+        )]),
+        "five one-add transactions share one pool, not five datasets"
+    );
+
+    let store = open_store(&path, true).unwrap();
+    assert_eq!(store.list_metadata(ListFilter::new()).unwrap().len(), 5);
+    for owner in 1..6 {
+        assert_eq!(first_value(&store, owner), owner as f64 * 100.0);
+    }
+    assert!(store.verify_integrity().unwrap().ok());
+}
+
 // --- Reads inside the span --------------------------------------------------
 
 fn first_value(store: &Store, owner: i64) -> f64 {
@@ -299,11 +357,14 @@ fn a_repeated_array_is_buffered_once() {
         store.locate_array(&ha).unwrap(),
         store.locate_array(&hb).unwrap()
     );
+    // One distinct array is a block of one, which fills a growth-pool slot
+    // rather than claiming a one-column dataset — see
+    // `a_transaction_holding_one_array_fills_a_slot_rather_than_sizing_a_dataset`.
     assert_eq!(
         packed_layout(&path),
         BTreeMap::from([(
             "sts_f64_s_24_PT1H".to_string(),
-            (vec![24, 1], Some(vec![1, 1]))
+            (vec![24, 1000], Some(vec![1, 1000]))
         )])
     );
 }
@@ -370,9 +431,16 @@ fn an_inner_rollback_drops_only_its_own_arrays_from_the_block() {
 }
 
 /// A transaction abandoned by dropping the store — the shape a killed process
-/// leaves — no longer strands its arrays in the file. They were never written,
-/// so there is nothing to strand: `compact` used to be the only way to reclaim
-/// the columns such a span had already filled.
+/// leaves — no longer strands the arrays it was still holding. They were never
+/// written, so there is nothing to strand: `compact` used to be the only way to
+/// reclaim the columns such a span had already filled.
+///
+/// The guarantee is exactly that, and no wider: it covers what is *still
+/// buffered* when the store goes away. A span that spilled a block first — by
+/// filling a pool to its width cap, crossing the byte budget, flushing, or
+/// asking for a physical location — has written those arrays, and an
+/// abandonment after that leaves them behind for `compact`, as every add
+/// already did before any of this.
 #[test]
 fn an_abandoned_transaction_leaves_no_orphan_arrays() {
     let dir = tempfile::tempdir().unwrap();
@@ -405,13 +473,55 @@ fn an_abandoned_transaction_leaves_no_orphan_arrays() {
 // --- Spilling ---------------------------------------------------------------
 
 /// A pending block is not unbounded: it is written out once it reaches the
-/// width the block writer itself spills at, so the memory one pool holds is the
-/// memory the equivalent bulk add allocates — and the datasets are the ones
-/// that bulk add would have produced.
+/// width its pool spills at, so the datasets are the ones the equivalent bulk
+/// add would have produced.
 ///
-/// The cap is a per-chunk byte budget, so a wide element shape makes it small
-/// enough to cross in a test: `f64` elements of `[1024]` are 8 KiB each, which
-/// caps a 1 MiB timestamp-row chunk at 128 columns.
+/// One of the two ceilings on that width is the per-chunk byte budget, which a
+/// wide element shape makes small enough to cross in a test: `f64` elements of
+/// `[1024]` are 8 KiB each, which caps a 1 MiB timestamp-row chunk at 128
+/// columns — below `DEFAULT_COLS_PER_DATASET`, so it is what binds here.
+/// The other ceiling: a scalar `f64` pool spills at
+/// `DEFAULT_COLS_PER_DATASET`, not at the 131,072 columns a 1 MiB chunk of
+/// eight-byte elements would allow.
+///
+/// The chunk budget alone bounds the buffer in *columns*, and 131,072 columns of
+/// anything longer than a toy series is more memory than a store may take
+/// without being asked. A thousand is also the width the un-managed path gives
+/// a growth pool, so a span wider than that spills into datasets no wider than
+/// the ones a store accumulates anyway.
+#[test]
+fn a_scalar_pool_spills_at_the_growth_pool_width() {
+    use infrastore_core::storage::common::DEFAULT_COLS_PER_DATASET;
+
+    const TOTAL: i64 = DEFAULT_COLS_PER_DATASET as i64 + 2;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("wide_span.h5");
+    add_singly_in_a_transaction(&path, 1..TOTAL + 1);
+
+    let layout = packed_layout(&path);
+    assert_eq!(
+        layout["sts_f64_s_24_PT1H"].0,
+        vec![24, DEFAULT_COLS_PER_DATASET],
+        "the block spilled at the growth-pool width"
+    );
+    assert_eq!(
+        layout["sts_f64_s_24_PT1H__1"].0,
+        vec![24, 2],
+        "the remainder is its own block at the commit"
+    );
+
+    let store = open_store(&path, true).unwrap();
+    assert_eq!(
+        store.list_metadata(ListFilter::new()).unwrap().len(),
+        TOTAL as usize
+    );
+    for owner in [1, DEFAULT_COLS_PER_DATASET as i64, TOTAL] {
+        assert_eq!(first_value(&store, owner), owner as f64 * 100.0);
+    }
+    assert!(store.verify_integrity().unwrap().ok());
+}
+
 #[test]
 fn a_pending_block_spills_at_the_width_the_block_writer_spills_at() {
     const ELEMENTS: usize = 1024;

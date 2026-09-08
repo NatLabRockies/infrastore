@@ -193,7 +193,9 @@ sequenceDiagram
   path and fills a shared pool's slot instead.
 - **Single adds inside a transaction take the block path too.** Nothing a transaction wrote is
   durable until its outermost commit, so its packed adds are buffered per pool and written together
-  by the same block writer at the commit — see
+  by the same block writer at the commit — bounded per pool by a column width and across all pools
+  by a byte ceiling, and with a span holding one array falling back to a growth-pool slot for the
+  same reason a one-item batch does. See
   [Make Transactions Span Operations](./design-choices.md#make-transactions-span-operations-without-enlisting-hdf5).
 
 On delete, the order reverses and is reference-counted: the association rows are removed inside a

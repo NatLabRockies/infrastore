@@ -45,6 +45,24 @@ pub const DEFAULT_COLS_PER_DATASET: usize = 1000;
 /// wider than the cap spill into additional datasets.
 pub(crate) const MAX_CHUNK_BYTES: usize = 1 << 20; // 1 MiB
 
+/// Ceiling on the bytes a backend may hold in *unwritten* packed blocks across
+/// every pool at once — the memory a transaction's buffered adds occupy before
+/// its commit writes them (see `Hdf5Backend`'s pending blocks).
+///
+/// A ceiling is required, not merely nice: a packed single add outside a
+/// transaction is O(1) in memory, and buffering makes a span O(its own bytes).
+/// Crossing it writes whole blocks out early, which costs an extra dataset per
+/// eviction and nothing else — the same spill a batch wider than
+/// [`MAX_CHUNK_BYTES`] allows already performs.
+///
+/// 128 MiB is chosen to sit above the batches this is for and below anything a
+/// consumer would notice: the shipped consumers build stores of a few thousand
+/// hourly series, and a year of hourly `f64` is 70 KiB, so a span of two
+/// thousand of them fits. A decade of 5-minute data is 8 MiB a series, and
+/// sixteen of those spill — which is the right answer, because a block that
+/// size is already worth its own dataset.
+pub(crate) const MAX_PENDING_BYTES: usize = 128 << 20; // 128 MiB
+
 /// Bytes in one column's element block at a single timestep.
 pub(crate) fn element_block_bytes(dtype: Dtype, element_shape: &[usize]) -> usize {
     element_shape.iter().product::<usize>() * dtype.size()

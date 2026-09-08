@@ -134,10 +134,19 @@ slot of a thousand-column growth pool, and because that pool is chunked one time
 every column, filling one column rewrites every chunk in it. Inside a transaction that write is owed
 to nobody until the outermost commit, so it is buffered per pool instead and the buffered arrays are
 written together with the same block writer a bulk add uses — at the commit, when a read needs one
-of them to have a physical position, or when the buffer reaches the width the block writer itself
-spills at. A loop of single adds inside one transaction therefore produces the file one bulk add of
-the same items produces: same dataset names, same widths, same chunking. Nothing about the format
-changes; these are layouts the bulk path already wrote.
+of them to have a physical position, or when the buffer hits one of the bounds below. A loop of
+single adds inside one transaction therefore produces the file one bulk add of the same items
+produces: same dataset names, same widths, same chunking. Nothing about the format changes; these
+are layouts the bulk path already wrote.
+
+Two edges keep that from being a worse trade than the one it replaces. **A block of one is not a
+block**: a span holding a single array for a pool fills a growth-pool slot, because a dataset sized
+to one column is chunked `(1, 1)` and gives a scalar `f64` series an eight-byte chunk per timestep,
+whose per-chunk overhead dwarfs the data — the same reason `add_time_series_bulk` sends a batch of
+one down the single-add path. That matters because "several operations atomic together" is most
+often a removal and its replacement, not an ingest. And **the buffer is bounded**, per pool at the
+growth-pool width and across every pool at a fixed byte ceiling; crossing either writes a block out
+early, which costs an extra dataset and nothing else.
 
 The costs are real and bound where this is worth using. A transaction holds the SQLite write lock
 until it finishes, so a concurrent writer on the same artifact blocks and then fails on its busy

@@ -50,9 +50,10 @@ use crate::types::array::{Dtype, TypedArray};
 use crate::version::{Compat, DATA_FORMAT_VERSION};
 
 use super::common::{
-    COMPRESSION_ATTR, HASH_SUFFIX, MAX_CHUNK_BYTES, PackGroup, ROOT_GROUP, SINGLE_GROUP,
-    STANDALONE_PREFIX, TIMESTAMPS_GROUP, TIMESTAMPS_PREFIX, dataset_base_name, element_block_bytes,
-    hex_to_hash, parse_dataset_name, resolve_dataset_cols, spill_name, standalone_chunks,
+    COMPRESSION_ATTR, HASH_SUFFIX, MAX_CHUNK_BYTES, MAX_PENDING_BYTES, PackGroup, ROOT_GROUP,
+    SINGLE_GROUP, STANDALONE_PREFIX, TIMESTAMPS_GROUP, TIMESTAMPS_PREFIX, dataset_base_name,
+    element_block_bytes, hex_to_hash, parse_dataset_name, resolve_dataset_cols, spill_name,
+    standalone_chunks,
 };
 use super::{ArrayLocation, BackendStats, CompactionReport, IntegrityReport, StorageBackend};
 
@@ -549,13 +550,17 @@ type DatasetGroupKey = (Dtype, Vec<usize>, usize, PackGroup);
 ///
 /// The arrays are owned copies: the caller's borrow ends when `put_array`
 /// returns, and the block outlives it. The cost is that an open transaction
-/// holds its not-yet-written arrays in memory — the same memory the block
-/// writer allocates for the equivalent bulk add, and bounded per pool by the
-/// width it spills at (see [`Inner::defer_packed`]).
+/// holds its not-yet-written arrays in memory, which is why the buffer is
+/// bounded twice over — per pool by [`Inner::pending_width_cap`], and across
+/// every pool by [`MAX_PENDING_BYTES`]. See [`Inner::defer_packed`].
 #[derive(Debug, Default)]
 struct PendingBlock {
     hashes: Vec<[u8; 32]>,
     arrays: Vec<TypedArray>,
+    /// Running sum of `arrays[i].bytes.len()`, so the byte budget can be kept
+    /// without walking the block and the widest holder can be found in one
+    /// pass over the (few) pools.
+    bytes: usize,
 }
 
 pub(crate) struct Hdf5Backend {
@@ -584,6 +589,15 @@ struct Inner {
     /// written, one block per pool. Always empty at open and after a flush;
     /// `rebuild_index` therefore never sees one and nothing on disk records it.
     pending: HashMap<DatasetGroupKey, PendingBlock>,
+    /// `pending.values().map(|b| b.bytes).sum()`, maintained rather than
+    /// recomputed. This is the figure [`MAX_PENDING_BYTES`] caps: the per-pool
+    /// width cap alone bounds *columns*, and a thousand columns of a
+    /// multi-year series is hundreds of megabytes.
+    pending_bytes: usize,
+    /// The ceiling `pending_bytes` is held to, [`MAX_PENDING_BYTES`] outside
+    /// tests. A field rather than the constant so a test can lower it and cross
+    /// it with kilobytes instead of the hundred megabytes it takes in earnest.
+    max_pending_bytes: usize,
     /// Content hashes of the timestamp vectors present in the file, so a
     /// re-store of a known axis is answered without touching HDF5.
     timestamp_hashes: HashSet<[u8; 32]>,
@@ -635,6 +649,8 @@ impl Hdf5Backend {
                 standalone_vars: HashSet::new(),
                 by_hash: HashMap::new(),
                 pending: HashMap::new(),
+                pending_bytes: 0,
+                max_pending_bytes: MAX_PENDING_BYTES,
                 timestamp_hashes: HashSet::new(),
                 compression,
                 // A file this build just created carries this build's stamp.
@@ -691,6 +707,8 @@ impl Hdf5Backend {
                 standalone_vars: HashSet::new(),
                 by_hash: HashMap::new(),
                 pending: HashMap::new(),
+                pending_bytes: 0,
+                max_pending_bytes: MAX_PENDING_BYTES,
                 timestamp_hashes: HashSet::new(),
                 compression,
                 format_version: found,
@@ -1040,16 +1058,52 @@ impl Inner {
         Ok(())
     }
 
-    /// The width one pending block grows to before it is written out: the same
-    /// cap [`Self::put_packed_block`] spills a batch at, so a pool that fills up
-    /// mid-transaction produces exactly the datasets the equivalent bulk add
-    /// would have.
-    fn pending_width_cap(dtype: Dtype, element_shape: &[usize]) -> usize {
-        // `usize::MAX` asks for "as wide as the chunk budget allows", which is
-        // what `resolve_dataset_cols(Some(remaining), ..)` clamps a large batch
-        // to. `DEFAULT_COLS_PER_DATASET` is the *un-managed* default and
-        // deliberately does not apply here.
-        resolve_dataset_cols(Some(usize::MAX), dtype, element_shape)
+    /// The width one pending block grows to before it is written out.
+    ///
+    /// Two ceilings, whichever is lower. The first is
+    /// [`DEFAULT_COLS_PER_DATASET`](super::common::DEFAULT_COLS_PER_DATASET),
+    /// already clamped to the per-chunk byte budget: it is the width the
+    /// un-managed path gives a growth pool, so a span wider than that spills
+    /// into datasets no wider than the ones a store accumulates anyway, and the
+    /// buffer's column count is bounded by a number rather than by the chunk
+    /// budget's 131,072-for-scalar-`f64`.
+    ///
+    /// The second converts [`MAX_PENDING_BYTES`] into columns *for this pool*,
+    /// because a column's cost is `length × element_block` and a thousand
+    /// columns of a multi-year series is hundreds of megabytes. It is a
+    /// per-pool share of a global budget rather than the budget itself; the
+    /// global total is what [`Self::evict_pending_over_budget`] enforces.
+    fn pending_width_cap(&self, dtype: Dtype, element_shape: &[usize], length: usize) -> usize {
+        let per_column = length
+            .saturating_mul(element_block_bytes(dtype, element_shape))
+            .max(1);
+        let by_bytes = (self.max_pending_bytes / per_column).max(1);
+        resolve_dataset_cols(None, dtype, element_shape).min(by_bytes)
+    }
+
+    /// Write out whole blocks, widest first, until the buffer is back inside
+    /// [`MAX_PENDING_BYTES`].
+    ///
+    /// The width cap bounds one pool; this bounds the sum. A transaction
+    /// touching many pools — several resolutions, several lengths, several
+    /// irregular axes — would otherwise hold a per-pool budget for each.
+    ///
+    /// Widest first because it frees the most memory for the fewest datasets,
+    /// and because a wide block is exactly the one whose dataset is worth
+    /// writing; the narrow ones are left to keep growing.
+    fn evict_pending_over_budget(&mut self) -> Result<()> {
+        while self.pending_bytes > self.max_pending_bytes {
+            let Some(key) = self
+                .pending
+                .iter()
+                .max_by_key(|(_, block)| block.bytes)
+                .map(|(key, _)| key.clone())
+            else {
+                return Ok(());
+            };
+            self.materialize_block(&key)?;
+        }
+        Ok(())
     }
 
     /// Accept a packed array into its pool's pending block instead of writing
@@ -1057,19 +1111,27 @@ impl Inner {
     ///
     /// The array is stored from this moment on — `by_hash` names it, so
     /// `contains` is true, reads serve it, and `remove_array` unwinds it — it
-    /// simply has no physical position yet. Reaching the pool's width cap
-    /// writes the block immediately, which both bounds the memory one pool can
-    /// hold and reproduces the spill the block writer performs on a batch that
-    /// wide.
+    /// simply has no physical position yet.
+    ///
+    /// Two things write a block out from here, and both exist to bound the
+    /// memory an open transaction holds: the pool reaching its width cap
+    /// ([`Self::pending_width_cap`]), and the buffer as a whole crossing
+    /// [`MAX_PENDING_BYTES`] ([`Self::evict_pending_over_budget`]). Either way
+    /// the result is a spill into an extra dataset, which is what the block
+    /// writer already does to a batch too wide for one chunk.
     fn defer_packed(&mut self, hash: &[u8; 32], data: &TypedArray, group: PackGroup) -> Result<()> {
         let element_shape = data.element_shape().to_vec();
-        let key = (data.dtype, element_shape.clone(), data.length(), group);
-        let cap = Self::pending_width_cap(data.dtype, &element_shape);
+        let length = data.length();
+        let key = (data.dtype, element_shape.clone(), length, group);
+        let cap = self.pending_width_cap(data.dtype, &element_shape, length);
+        let bytes = data.bytes.len();
         let block = self.pending.entry(key.clone()).or_default();
         let idx = block.hashes.len();
         block.hashes.push(*hash);
         block.arrays.push(data.clone());
+        block.bytes += bytes;
         let full = block.hashes.len() >= cap;
+        self.pending_bytes += bytes;
         self.by_hash.insert(
             *hash,
             Location::Pending {
@@ -1077,20 +1139,49 @@ impl Inner {
                 idx,
             },
         );
-        if full && let Err(e) = self.materialize_block(&key) {
-            // The block came back intact, this array included — but this call
-            // is about to report that it stored nothing, and the caller stages
-            // for rollback only what a put said it wrote. Take the array back
-            // out so the two agree; the arrays that were already in the block
-            // belong to earlier calls and stay.
+        // The width cap first, so a pool that is full writes *its own* block
+        // rather than whichever one the budget happens to pick.
+        let spilled = if full {
+            self.materialize_block(&key)
+        } else {
+            Ok(())
+        };
+        if let Err(e) = spilled.and_then(|()| self.evict_pending_over_budget()) {
+            // This call is about to report that it stored nothing, and the
+            // caller stages for rollback only what a put said it wrote. Take
+            // the array back out so the two agree, wherever it ended up: still
+            // buffered if its own block failed, or a written column if its
+            // block landed and some *other* pool's eviction is what failed.
+            // The arrays that were already buffered belong to earlier calls and
+            // stay.
             let _ = self.remove_array_locked(hash);
             return Err(e);
         }
         Ok(())
     }
 
-    /// Write one pool's pending block with the block writer and drop it from
-    /// the buffer. A no-op if the pool has no block.
+    /// Write one pool's pending block and drop it from the buffer. A no-op if
+    /// the pool has no block.
+    ///
+    /// A block of two or more goes to [`Self::put_packed_segment`], which sizes
+    /// a fresh dataset to it — the whole point of buffering. **A block of one
+    /// goes to [`Self::put_packed`] instead**, filling a slot of the shared
+    /// growth pool exactly as an un-transactioned single add does.
+    ///
+    /// Sizing a dataset to a block of one is the same mistake sizing one to a
+    /// batch of one is, and `Store::add_time_series_bulk` already refuses it for
+    /// that reason: the dataset is chunked `(1, 1, *element_shape)`, so a scalar
+    /// `f64` series gets an eight-byte chunk and one chunk per timestep, whose
+    /// per-chunk overhead dwarfs the data. Nineteen 30,500-step series added in
+    /// nineteen separate transactions wrote a 36 MB file that way, against 5.9 MB
+    /// through the growth pool. A transaction spanning *one* packed add is the
+    /// ordinary shape of the feature — "several operations atomic together" is
+    /// usually a removal and a replacement — so it cannot be the pathological
+    /// one.
+    ///
+    /// The cutoff is one and not more, because from two columns up the block is
+    /// what a bulk add of the same items would write, and matching that is the
+    /// invariant this whole path exists to hold.
     ///
     /// On failure the block goes back exactly as it was, `by_hash` still names
     /// its arrays as pending, and the error is returned: the transaction that
@@ -1103,23 +1194,34 @@ impl Inner {
         if block.hashes.is_empty() {
             return Ok(());
         }
-        // The index is only used by `put_packed_block` for its own `written`
-        // bookkeeping, which this caller does not need; the position in the
-        // block is what decides the column, and that is `seg`'s own order.
-        let seg: Vec<(usize, [u8; 32], &TypedArray)> = block
-            .hashes
-            .iter()
-            .zip(&block.arrays)
-            .enumerate()
-            .map(|(i, (&hash, array))| (i, hash, array))
-            .collect();
+        // Saturating because this runs on unwind paths too, where a panic on
+        // drifted bookkeeping would be far worse than an inexact budget.
+        self.pending_bytes = self.pending_bytes.saturating_sub(block.bytes);
         let (dtype, element_shape, length, group) = key;
-        // `put_packed_segment` overwrites each hash's `Location::Pending` with
-        // the packed one it just wrote, so a success needs no further fixup.
-        match self.put_packed_segment(&seg, *dtype, element_shape, *length, *group) {
+        let outcome = if block.hashes.len() == 1 {
+            // Overwrites the `Location::Pending` with the packed one, like the
+            // block writer below.
+            self.put_packed(&block.hashes[0], &block.arrays[0], *group)
+        } else {
+            // The index is only used by `put_packed_block` for its own `written`
+            // bookkeeping, which this caller does not need; the position in the
+            // block is what decides the column, and that is `seg`'s own order.
+            let seg: Vec<(usize, [u8; 32], &TypedArray)> = block
+                .hashes
+                .iter()
+                .zip(&block.arrays)
+                .enumerate()
+                .map(|(i, (&hash, array))| (i, hash, array))
+                .collect();
+            // `put_packed_segment` overwrites each hash's `Location::Pending`
+            // with the packed one it just wrote, so a success needs no further
+            // fixup.
+            self.put_packed_segment(&seg, *dtype, element_shape, *length, *group)
+        };
+        match outcome {
             Ok(()) => Ok(()),
             Err(e) => {
-                drop(seg);
+                self.pending_bytes += block.bytes;
                 self.pending.insert(key.clone(), block);
                 Err(e)
             }
@@ -2013,8 +2115,12 @@ impl Inner {
                     return Ok(());
                 }
                 block.hashes.swap_remove(idx);
-                block.arrays.swap_remove(idx);
-                if let Some(&moved) = block.hashes.get(idx) {
+                let dropped = block.arrays.swap_remove(idx).bytes.len();
+                block.bytes = block.bytes.saturating_sub(dropped);
+                let moved = block.hashes.get(idx).copied();
+                let emptied = block.hashes.is_empty();
+                self.pending_bytes = self.pending_bytes.saturating_sub(dropped);
+                if let Some(moved) = moved {
                     self.by_hash.insert(
                         moved,
                         Location::Pending {
@@ -2023,7 +2129,7 @@ impl Inner {
                         },
                     );
                 }
-                if block.hashes.is_empty() {
+                if emptied {
                     self.pending.remove(&key);
                 }
                 Ok(())
@@ -2454,6 +2560,7 @@ pub(crate) fn is_hdf5_backend_file(path: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::hash::array_hash;
+    use crate::storage::common::DEFAULT_COLS_PER_DATASET;
     use crate::types::array::TypedArray;
     use crate::types::period::Period;
 
@@ -2773,6 +2880,147 @@ mod tests {
             );
             assert_eq!(&be.get_array(hash, Dtype::F64).unwrap(), array);
         }
+    }
+
+    /// A block that never grew past one array fills a growth-pool slot instead
+    /// of claiming a dataset sized to it.
+    ///
+    /// Sizing a dataset to one column gives a scalar `f64` series an eight-byte
+    /// chunk and one chunk per timestep, whose per-chunk overhead dwarfs the
+    /// data — the same reason `Store::add_time_series_bulk` refuses to size a
+    /// dataset to a batch of one. From two columns up the block is what a bulk
+    /// add of the same arrays writes, and stays that way.
+    #[test]
+    fn a_block_of_one_fills_a_slot_and_a_block_of_two_sizes_a_dataset() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.h5");
+        let a = f64_array(vec![6], 0.0);
+        let ha = array_hash(&a);
+        let mut be = Hdf5Backend::create(&path, Compression::None).unwrap();
+        be.put_array(&ha, &a, res(), ArrayLayout::Packed, WriteMode::Deferred)
+            .unwrap();
+        be.flush().unwrap();
+
+        let name = dataset_base_name(Dtype::F64, &[], 6, res());
+        {
+            let inner = be.inner.lock().unwrap();
+            let ds = inner.dataset(&name).unwrap();
+            assert_eq!(
+                ds.shape(),
+                vec![6, DEFAULT_COLS_PER_DATASET],
+                "the growth pool, not a one-column dataset"
+            );
+        }
+        assert_eq!(be.get_array(&ha, Dtype::F64).unwrap(), a);
+
+        // Two arrays in one block do get a dataset of their own, in a fresh
+        // store so the pool above cannot absorb them.
+        let path2 = dir.path().join("s2.h5");
+        let arrays: Vec<TypedArray> = (0..2).map(|i| f64_array(vec![6], i as f64)).collect();
+        let hashes: Vec<[u8; 32]> = arrays.iter().map(array_hash).collect();
+        let mut be2 = Hdf5Backend::create(&path2, Compression::None).unwrap();
+        for (hash, array) in hashes.iter().zip(&arrays) {
+            be2.put_array(hash, array, res(), ArrayLayout::Packed, WriteMode::Deferred)
+                .unwrap();
+        }
+        be2.flush().unwrap();
+        let inner = be2.inner.lock().unwrap();
+        assert_eq!(inner.dataset(&name).unwrap().shape(), vec![6, 2]);
+    }
+
+    /// The pending buffer is bounded twice: by columns per pool, and by bytes
+    /// across every pool.
+    ///
+    /// The width cap is [`DEFAULT_COLS_PER_DATASET`] rather than the chunk
+    /// budget's 131,072-for-scalar-`f64`, and it shrinks further for a series
+    /// long enough that a thousand columns of it would not fit the byte budget.
+    #[test]
+    fn the_pending_width_cap_is_bounded_by_columns_and_by_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let be = Hdf5Backend::create(&dir.path().join("s.h5"), Compression::None).unwrap();
+        let inner = be.inner.lock().unwrap();
+
+        // Short scalar series: the column cap binds.
+        assert_eq!(
+            inner.pending_width_cap(Dtype::F64, &[], 24),
+            DEFAULT_COLS_PER_DATASET
+        );
+        // A wide element shape still meets the chunk budget first.
+        assert_eq!(inner.pending_width_cap(Dtype::F64, &[1024], 2), 128);
+        // Long enough that a thousand columns would exceed the byte budget:
+        // the cap falls to what does fit, and never below one.
+        let long = MAX_PENDING_BYTES / std::mem::size_of::<f64>();
+        assert_eq!(inner.pending_width_cap(Dtype::F64, &[], long), 1);
+        assert_eq!(
+            inner.pending_width_cap(Dtype::F64, &[], long / 4),
+            4,
+            "the byte budget divided by one column's bytes"
+        );
+    }
+
+    /// Crossing the global byte budget writes the widest block out, and the
+    /// running total is exact through every path that touches the buffer:
+    /// accepting an array, writing a block, and unwinding one.
+    ///
+    /// The budget is lowered here rather than crossed in earnest, which would
+    /// take the hundred-plus megabytes `MAX_PENDING_BYTES` is set to.
+    #[test]
+    fn the_byte_budget_evicts_the_widest_block_and_the_total_stays_exact() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.h5");
+        let mut be = Hdf5Backend::create(&path, Compression::None).unwrap();
+        // Two pools: length 4 (32 bytes an array) and length 6 (48). Against a
+        // 200-byte budget their width caps are 6 and 4, so neither pool fills
+        // below — what fires here is the budget, not the width.
+        be.inner.lock().unwrap().max_pending_bytes = 200;
+
+        let short: Vec<TypedArray> = (0..4).map(|i| f64_array(vec![4], i as f64)).collect();
+        let long: Vec<TypedArray> = (0..2)
+            .map(|i| f64_array(vec![6], 50.0 + i as f64))
+            .collect();
+        let short_h: Vec<[u8; 32]> = short.iter().map(array_hash).collect();
+        let long_h: Vec<[u8; 32]> = long.iter().map(array_hash).collect();
+        fn put(be: &mut Hdf5Backend, hash: &[u8; 32], array: &TypedArray) {
+            be.put_array(hash, array, res(), ArrayLayout::Packed, WriteMode::Deferred)
+                .unwrap();
+        }
+
+        for (hash, array) in short_h.iter().zip(&short).take(3) {
+            put(&mut be, hash, array);
+        }
+        for (hash, array) in long_h.iter().zip(&long) {
+            put(&mut be, hash, array);
+        }
+        assert_eq!(be.inner.lock().unwrap().pending_bytes, 3 * 32 + 2 * 48);
+
+        // 224 bytes against a 200-byte budget: the widest pool — now four
+        // length-4 arrays — is written out, and the other is left to grow.
+        put(&mut be, &short_h[3], &short[3]);
+        {
+            let inner = be.inner.lock().unwrap();
+            assert_eq!(inner.pending_bytes, 2 * 48);
+            assert_eq!(inner.pending.len(), 1);
+        }
+        assert_eq!(
+            be.locate(&short_h[0]).unwrap(),
+            ArrayLocation::Packed {
+                dataset: format!(
+                    "/{ROOT_GROUP}/{SINGLE_GROUP}/{}",
+                    dataset_base_name(Dtype::F64, &[], 4, res())
+                ),
+                column: 0,
+            }
+        );
+        assert_eq!(be.get_array(&short_h[3], Dtype::F64).unwrap(), short[3]);
+
+        // Unwinding a buffered array gives its bytes back...
+        be.remove_array(&long_h[1]).unwrap();
+        assert_eq!(be.inner.lock().unwrap().pending_bytes, 48);
+        // ...and writing the rest out returns the total to zero.
+        be.flush().unwrap();
+        let inner = be.inner.lock().unwrap();
+        assert_eq!(inner.pending_bytes, 0);
+        assert!(inner.pending.is_empty());
     }
 
     #[test]

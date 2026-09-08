@@ -291,12 +291,30 @@ batch wider than the cap spills across datasets.
 "The batch it has in hand" is the whole of an `add_time_series_bulk` call — **or the whole span of
 an open transaction**. Nothing a transaction writes is durable until its outermost commit, so a
 single add inside one is buffered per pool rather than dropped into a growth-pool slot, and the
-buffered arrays are written with the same block writer at the commit (or when a read needs one of
-them to have a physical position, or when the buffer reaches the column cap above). A loop of single
-adds inside one transaction therefore produces exactly the datasets one bulk add of the same items
-produces; only an un-transactioned single add takes the default width. This is a write-time policy
-like every other choice on this page: the layouts it produces are ones the format already had, so it
-does not affect `data_format_version` and stores written either way stay mutually readable.
+buffered arrays are written with the same block writer at the commit, or when a read needs one of
+them to have a physical position. A loop of single adds inside one transaction therefore produces
+exactly the datasets one bulk add of the same items produces; only an un-transactioned single add
+takes the default width.
+
+Two limits keep that buffer from being unbounded, and both simply write a block out early — the same
+spill a too-wide batch already performs, costing an extra dataset and nothing else:
+
+- **Per pool, `DEFAULT_COLS_PER_DATASET` columns**, itself capped by `MAX_CHUNK_BYTES` as above. So
+  a span wider than a thousand series of one shape spills into datasets no wider than the ones a
+  store accumulates anyway.
+- **Across every pool, `MAX_PENDING_BYTES = 128 MiB`** of unwritten arrays, since a thousand columns
+  of a multi-year series is far more than a thousand columns of a day. Crossing it writes out the
+  widest block.
+
+**A block of one is not a block.** If a span ends up holding a single array for a pool, it fills a
+growth-pool slot rather than claiming a dataset sized to one column — chunked `(1, 1)`, that would
+give a scalar `f64` series an eight-byte chunk per timestep, whose per-chunk overhead dwarfs the
+data. It is the same rule `add_time_series_bulk` applies to a batch of one. From two columns up the
+block is what the bulk add of those items writes.
+
+This is a write-time policy like every other choice on this page: the layouts it produces are ones
+the format already had, so it does not affect `data_format_version` and stores written either way
+stay mutually readable.
 
 - **Rows are timesteps, columns are series.** Column `i` holds one complete series.
 - **Hash companion dataset.** Each packed dataset has a sibling `{dataset}_h` dataset of `u8`,
