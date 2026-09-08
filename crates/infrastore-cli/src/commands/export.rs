@@ -49,6 +49,15 @@ pub fn run(
                 .to_string(),
         );
     }
+    // Before the selection is even resolved: a selection that matches nothing
+    // writes nothing, and an earlier export's partitions left standing behind
+    // a report of "exported 0" is exactly the stale directory the writer's own
+    // check exists to refuse.
+    if format.is_parquet()
+        && let Some(dir) = dir
+    {
+        check_parquet_destination(dir)?;
+    }
 
     let range = crate::parse::parse_time_range(time_range)?;
     let store = store_access::open_readonly(store_path)?;
@@ -527,6 +536,16 @@ fn format_for_status(format: Format) -> Format {
     } else {
         Format::Table
     }
+}
+
+#[cfg(feature = "parquet")]
+fn check_parquet_destination(dir: &Path) -> Result<(), String> {
+    infrastore_parquet::check_destination(dir).map_err(|e| e.to_string())
+}
+
+#[cfg(not(feature = "parquet"))]
+fn check_parquet_destination(_dir: &Path) -> Result<(), String> {
+    Ok(())
 }
 
 #[cfg(not(feature = "parquet"))]

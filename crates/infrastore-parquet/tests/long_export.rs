@@ -614,6 +614,54 @@ fn a_directory_that_already_holds_parquet_files_is_refused() {
 }
 
 #[test]
+fn row_groups_are_cut_on_series_boundaries() {
+    // 900k rows of one series then 200k of another: the second must not be
+    // split 100k/100k across the target just because the first fell short of
+    // it. The first group is cut at the boundary, the second holds the rest.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let big: Vec<f64> = (0..900_000).map(|i| i as f64).collect();
+    let small: Vec<f64> = (0..200_000).map(|i| -(i as f64)).collect();
+    let series = stored(vec![
+        (1, TimeSeriesData::SingleTimeSeries(hourly("a", &big))),
+        (2, TimeSeriesData::SingleTimeSeries(hourly("b", &small))),
+    ]);
+    let report = write_partitions(dir.path(), &series).expect("export");
+    assert_eq!(report.files.len(), 1);
+    let file = std::fs::File::open(&report.files[0].path).unwrap();
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
+    let rows: Vec<i64> = builder
+        .metadata()
+        .row_groups()
+        .iter()
+        .map(|g| g.num_rows())
+        .collect();
+    assert_eq!(rows, vec![900_000, 200_000], "{rows:?}");
+}
+
+#[test]
+fn a_series_larger_than_the_target_is_the_only_one_split() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let small: Vec<f64> = (0..10).map(|i| i as f64).collect();
+    let huge: Vec<f64> = (0..1_500_000).map(|i| i as f64).collect();
+    let series = stored(vec![
+        (1, TimeSeriesData::SingleTimeSeries(hourly("a", &small))),
+        (2, TimeSeriesData::SingleTimeSeries(hourly("b", &huge))),
+    ]);
+    let report = write_partitions(dir.path(), &series).expect("export");
+    let file = std::fs::File::open(&report.files[0].path).unwrap();
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
+    let rows: Vec<i64> = builder
+        .metadata()
+        .row_groups()
+        .iter()
+        .map(|g| g.num_rows())
+        .collect();
+    // The ten-row series gets a group of its own rather than sharing one with
+    // the first tenth of the next; the huge one is split at the target.
+    assert_eq!(rows, vec![10, 1_000_000, 500_000], "{rows:?}");
+}
+
+#[test]
 fn colliding_partitions_get_distinct_files() {
     // The consequence of a one-way slug: without this the second file would
     // silently overwrite the first.

@@ -4771,6 +4771,72 @@ fn a_parquet_export_honors_the_time_range() {
 
 #[cfg(feature = "parquet")]
 #[test]
+fn a_directory_import_commits_file_by_file() {
+    // The guarantee is per file: a malformed later partition fails the load,
+    // but the files before it are already committed and stay that way.
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("src.h5");
+    let dest = dir.path().join("dest.h5");
+    seed_one(dir.path(), &source);
+    let out = dir.path().join("out");
+    run(
+        &source,
+        &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
+    );
+    let good = fs::read_dir(&out).unwrap().next().unwrap().unwrap().path();
+
+    // Sorted import order: `a_good` is committed before `b_bad` is opened.
+    let batch = dir.path().join("batch");
+    fs::create_dir(&batch).unwrap();
+    fs::copy(&good, batch.join("a_good.parquet")).unwrap();
+    fs::write(batch.join("b_bad.parquet"), b"this is not a parquet file").unwrap();
+
+    let err = run_err(&dest, &["add", "--parquet", batch.to_str().unwrap()]);
+    assert!(err.contains("b_bad.parquet"), "{err}");
+
+    let listed = run(&dest, &["-f", "json", "list"]);
+    let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    let rows = listed["items"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "the good file's series survived: {rows:?}");
+    assert_eq!(rows[0]["name"], "load");
+}
+
+#[cfg(feature = "parquet")]
+#[test]
+fn a_stale_parquet_directory_is_refused_even_when_nothing_matches() {
+    // "exported 0" with last week's partitions still in the directory is the
+    // stale export the empty-directory rule exists to prevent.
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("pq.h5");
+    seed_one(dir.path(), &store);
+    let out = dir.path().join("out");
+    run(
+        &store,
+        &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
+    );
+    let err = run_err(
+        &store,
+        &[
+            "-f",
+            "parquet",
+            "export",
+            "--dir",
+            out.to_str().unwrap(),
+            "--name-glob",
+            "matches_nothing_*",
+        ],
+    );
+    assert!(err.contains("already holds"), "{err}");
+    // And the same for a selection that does match.
+    let err = run_err(
+        &store,
+        &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
+    );
+    assert!(err.contains("already holds"), "{err}");
+}
+
+#[cfg(feature = "parquet")]
+#[test]
 fn a_parquet_export_re_adds_with_no_flags() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("src.h5");

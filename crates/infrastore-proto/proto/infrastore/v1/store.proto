@@ -417,7 +417,9 @@ message CheckStaticConsistencyResp {
 
 message ListStoreAttributesReq {}
 message ListStoreAttributesResp {
-  // Sorted by key, as the core returns them.
+  // A protobuf map carries no order. The core returns the attributes sorted by
+  // key, and the Rust client rebuilds a BTreeMap so callers see them that way;
+  // any other client that wants an order sorts.
   map<string, string> attributes = 1;
 }
 

@@ -808,6 +808,46 @@ fn a_null_in_a_text_or_integer_column_is_refused() {
 }
 
 #[test]
+fn a_file_streams_into_its_sink_one_series_at_a_time() {
+    use infrastore_parquet::read_file_with;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let series = stored(plain(vec![
+        (1, hourly("a", &[1.0, 2.0])),
+        (2, hourly("b", &[3.0, 4.0])),
+        (3, hourly("c", &[5.0, 6.0])),
+    ]));
+    let report = write_partitions(dir.path(), &series).expect("export");
+    let path = &report.files[0].path;
+
+    // Every series reaches the sink, in file order, and the count says so.
+    let mut names = Vec::new();
+    let filed = read_file_with(path, &ImportOptions::default(), &mut |one| {
+        names.push(one.data.name().to_string());
+        Ok(())
+    })
+    .expect("streams");
+    assert_eq!(filed, 3);
+    assert_eq!(names, ["a", "b", "c"]);
+
+    // A sink error stops the read where it happened and comes back as it is.
+    let mut seen = 0;
+    let err = read_file_with(path, &ImportOptions::default(), &mut |_| {
+        seen += 1;
+        if seen == 2 {
+            Err(infrastore_core::TimeSeriesError::InvalidParameter(
+                "the sink said no".into(),
+            ))
+        } else {
+            Ok(())
+        }
+    })
+    .expect_err("the sink's error propagates");
+    assert!(err.to_string().contains("the sink said no"), "{err}");
+    assert_eq!(seen, 2, "nothing is read past the failure");
+}
+
+#[test]
 fn a_contradicting_assertion_is_an_error() {
     let dir = tempfile::tempdir().expect("tempdir");
     let series = stored(plain(vec![(1, hourly("load", &[1.0]))]));

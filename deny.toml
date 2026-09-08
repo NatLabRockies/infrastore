@@ -46,8 +46,9 @@ confidence-threshold = 0.8
 # which is why several organizations' policies treat it as a review item rather
 # than as a permissive license.
 #
-# It reaches the graph only through `infrastore-parquet` (off by default), and
-# only at build time: arrow-array -> ahash -> const-random -> const-random-macro,
+# It reaches the graph only through `infrastore-parquet` -- a default feature of
+# the `infrastore` CLI binary, and never of the library crates -- and only at
+# build time: arrow-array -> ahash -> const-random -> const-random-macro,
 # a proc macro that seeds a compile-time hash. No CC0 code is linked into any
 # shipped artifact.
 [[licenses.exceptions]]

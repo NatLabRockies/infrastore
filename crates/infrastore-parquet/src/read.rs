@@ -105,12 +105,20 @@ pub fn parquet_files(path: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-/// Read one file into the series it holds.
+/// A place each completed series goes as soon as its last row is read.
 ///
-/// The row groups are streamed; the series are collected, because the caller
-/// files a whole file in one transaction (§2.8) and so needs them together. A
-/// file is one partition, so this is bounded by one partition's worth.
-pub fn read_file(path: &Path, options: &ImportOptions) -> Result<Vec<ImportedSeries>> {
+/// The whole point of a long table is that a partition can be far larger than
+/// memory, so the reader never holds more than the series it is in the middle
+/// of. A caller filing a file in one transaction opens the transaction, hands
+/// this a closure that adds each series, and commits when the call returns.
+pub type SeriesSink<'a> = &'a mut dyn FnMut(ImportedSeries) -> Result<()>;
+
+/// Stream one file's series into `sink`, returning how many were handed over.
+///
+/// Row groups are read one at a time and each series is released to the sink
+/// the moment its rows end, so peak memory is one row group plus one series,
+/// not the file. A sink error stops the read and is returned as it is.
+pub fn read_file_with(path: &Path, options: &ImportOptions, sink: SeriesSink<'_>) -> Result<usize> {
     let file = std::fs::File::open(path)?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(parquet_err)?;
     let schema = builder.schema().clone();
@@ -121,13 +129,27 @@ pub fn read_file(path: &Path, options: &ImportOptions) -> Result<Vec<ImportedSer
         .collect();
     check_format(&footer, path)?;
 
-    let mut grouper = Grouper::new(options, &footer);
+    let mut grouper = Grouper::new(options, &footer, sink);
     let reader = builder.build().map_err(parquet_err)?;
     for batch in reader {
         let batch = batch.map_err(arrow_err)?;
         grouper.push_batch(&batch)?;
     }
     grouper.finish()
+}
+
+/// Read one file into the series it holds, all at once.
+///
+/// The collecting form of [`read_file_with`], for a caller that wants the
+/// partition in hand — a test, a dry run over a small file. A load should
+/// stream instead: this holds every series of the file until the end.
+pub fn read_file(path: &Path, options: &ImportOptions) -> Result<Vec<ImportedSeries>> {
+    let mut out = Vec::new();
+    read_file_with(path, options, &mut |series| {
+        out.push(series);
+        Ok(())
+    })?;
+    Ok(out)
 }
 
 /// Refuse a file this build cannot read, by version rather than by whichever
@@ -200,11 +222,18 @@ struct Grouper<'a> {
     /// names no `time_reference` anywhere.
     zone: Option<Option<String>>,
     seen: HashSet<SeriesKey>,
-    out: Vec<ImportedSeries>,
+    /// Where a finished series goes; see [`SeriesSink`].
+    sink: SeriesSink<'a>,
+    /// How many the sink has taken.
+    filed: usize,
 }
 
 impl<'a> Grouper<'a> {
-    fn new(options: &'a ImportOptions, footer: &'a BTreeMap<String, String>) -> Self {
+    fn new(
+        options: &'a ImportOptions,
+        footer: &'a BTreeMap<String, String>,
+        sink: SeriesSink<'a>,
+    ) -> Self {
         Self {
             options,
             footer,
@@ -217,7 +246,8 @@ impl<'a> Grouper<'a> {
             element_dims: Vec::new(),
             zone: None,
             seen: HashSet::new(),
-            out: Vec::new(),
+            sink,
+            filed: 0,
         }
     }
 
@@ -292,9 +322,9 @@ impl<'a> Grouper<'a> {
         Ok(())
     }
 
-    fn finish(mut self) -> Result<Vec<ImportedSeries>> {
+    fn finish(mut self) -> Result<usize> {
         self.flush()?;
-        Ok(self.out)
+        Ok(self.filed)
     }
 
     fn flush(&mut self) -> Result<()> {
@@ -320,7 +350,8 @@ impl<'a> Grouper<'a> {
             },
             array,
         )?;
-        self.out.push(series);
+        (self.sink)(series)?;
+        self.filed += 1;
         Ok(())
     }
 

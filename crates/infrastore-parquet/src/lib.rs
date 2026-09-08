@@ -2,9 +2,10 @@
 //!
 //! A crate of its own rather than a feature on `infrastore-core`, so the Arrow
 //! dependency tree is visible in the workspace graph instead of hiding behind a
-//! feature flag, and so core's feature surface stays flat. Nothing in the
-//! default build reaches it: `infrastore-cli` depends on it behind its own
-//! `parquet` feature, which is off.
+//! feature flag, and so core's feature surface stays flat. `infrastore-cli`
+//! depends on it through its own `parquet` feature, which is **on by default**
+//! so the shipped binary carries Parquet; the library crates (`infrastore-core`,
+//! `infrastore-py`, `infrastore-ffi`) never reach it.
 //!
 //! # Long tables, partitioned
 //!
@@ -59,8 +60,10 @@ pub mod schema;
 pub mod table;
 pub mod write;
 
-pub use read::{ImportOptions, ImportedSeries, parquet_files, read_file};
-pub use write::{ExportReport, WrittenFile, write_partitions};
+pub use read::{
+    ImportOptions, ImportedSeries, SeriesSink, parquet_files, read_file, read_file_with,
+};
+pub use write::{ExportReport, WrittenFile, check_destination, write_partitions};
 
 use infrastore_core::TimeSeriesError;
 

@@ -13,9 +13,10 @@ categories = ["encoding", "science"]
 
 # A crate of its own rather than a feature on `infrastore-core`, so the Arrow
 # dependency tree is visible in the workspace graph instead of hiding behind a
-# feature flag, and so core's feature surface stays flat. Nothing in the default
-# build reaches it: `infrastore-cli` depends on it behind its own `parquet`
-# feature, which is off.
+# feature flag, and so core's feature surface stays flat. `infrastore-cli`
+# depends on it through its own `parquet` feature, which is on by default -- the
+# shipped binary carries Parquet -- while the library crates (`infrastore-core`,
+# `infrastore-py`, `infrastore-ffi`) never reach it.
 [features]
 default = ["vendored"]
 vendored = ["infrastore-core/vendored"]

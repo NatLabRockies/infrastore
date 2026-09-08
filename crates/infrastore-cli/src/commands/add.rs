@@ -252,16 +252,18 @@ pub fn run(store_path: &Path, opts: &Options<'_>) -> Result<(), String> {
     // Resolved up front, because a Parquet file *is* the descriptor: there is
     // nothing to load from a JSON file and nothing for a relative `csv` path to
     // sit beside.
-    let (batches, descriptors, base_dir, csv_override) = if opts.parquet.is_empty() {
+    let (parquet, descriptors, base_dir, csv_override) = if opts.parquet.is_empty() {
         let (descriptors, base_dir, csv_override) = load_descriptors(opts)?;
         (None, descriptors, base_dir, csv_override)
     } else {
-        (Some(parquet_batches(opts)?), Vec::new(), None, None)
+        (Some(parquet_import(opts)?), Vec::new(), None, None)
     };
 
     if opts.dry_run {
-        return match &batches {
-            Some(batches) => report_parquet_dry_run(batches, opts.format),
+        return match &parquet {
+            Some((setup, files)) => {
+                report_parquet_dry_run(&parquet_dry_run(setup, files)?, opts.format)
+            }
             None => dry_run(&descriptors, base_dir.as_deref(), csv_override, opts.format),
         };
     }
@@ -281,7 +283,9 @@ pub fn run(store_path: &Path, opts: &Options<'_>) -> Result<(), String> {
         store_access::open_writable_with(store_path, compression, catalog)
     };
     let mut progress = Progress::new(
-        batches.as_ref().map_or(descriptors.len(), Vec::len),
+        parquet
+            .as_ref()
+            .map_or(descriptors.len(), |(_, files)| files.len()),
         opts.quiet,
     );
     let mut pending: Vec<AddRequest> = Vec::new();
@@ -293,18 +297,20 @@ pub fn run(store_path: &Path, opts: &Options<'_>) -> Result<(), String> {
     let loaded = (|| -> Result<(), String> {
         // One transaction per Parquet file, whatever --batch-size says: a
         // directory import is all-or-nothing *per file*, so a partition that
-        // fails leaves the ones already committed alone. Splitting a file
-        // further would give up that guarantee for no gain -- a file is one
-        // partition, which is already a bounded unit.
-        if let Some(batches) = &batches {
-            for (i, one) in batches.iter().enumerate() {
-                pending.extend(one.requests.iter().cloned());
-                progress.tick(i + 1, total + pending.len());
-                if store.is_none() {
-                    store = Some(open(opts.compression, opts.catalog)?);
-                }
-                let store = store.as_mut().expect("just opened");
-                total += flush(store, &mut pending, opts.replace, &mut added)?;
+        // fails leaves the ones already committed alone. Each file is streamed
+        // into its transaction one series at a time -- a partition can be
+        // larger than memory, and holding it would defeat the format.
+        if let Some((setup, files)) = &parquet {
+            for (i, file) in files.iter().enumerate() {
+                total += import_parquet_file(
+                    file,
+                    setup,
+                    &mut store,
+                    &|| open(opts.compression, opts.catalog),
+                    opts.replace,
+                    &mut added,
+                )?;
+                progress.tick(i + 1, total);
             }
         }
         for (i, desc) in descriptors.iter().enumerate() {
@@ -646,13 +652,7 @@ impl Progress {
 
 // ---- Parquet ----------------------------------------------------------------
 
-/// Resolve every `--parquet` path into [`AddRequest`]s, one batch per file.
-///
-/// A path may be a **file or a directory**; a directory takes every `.parquet`
-/// in it, sorted. Each file is its own batch, so a directory import is
-/// all-or-nothing per file rather than all-or-nothing across the whole
-/// directory: a partition that fails leaves the ones already committed alone,
-/// and re-running after the fix does not have to redo them.
+/// What every `--parquet` file is read with: the inline flags, resolved once.
 ///
 /// A file written by `export -f parquet` carries the whole catalog row as
 /// columns, so this needs no other flag. A **foreign** file — anything else's
@@ -665,65 +665,217 @@ impl Progress {
 /// cannot say whether a `FixedSizeList<double>[3]` is a tuple or a dense row,
 /// and a contradiction is an error rather than a silent replacement.
 #[cfg(feature = "parquet")]
-fn parquet_batches(opts: &Options<'_>) -> Result<Vec<ParquetBatch>, String> {
+struct ParquetImport {
+    options: infrastore_parquet::read::ImportOptions,
+    features: Option<infrastore_core::Features>,
+    owner_category: Option<infrastore_core::OwnerCategory>,
+}
+
+#[cfg(feature = "parquet")]
+impl ParquetImport {
+    /// One read series as the request that files it.
+    fn request(&self, one: infrastore_parquet::ImportedSeries) -> AddRequest {
+        AddRequest {
+            owner_id: one.owner_id,
+            owner_type: one.owner_type,
+            owner_category: self.owner_category.unwrap_or(one.owner_category),
+            data: one.data,
+            // The flags replace the file's map rather than merging into it: a
+            // feature set is part of a series' identity, so a half-replaced one
+            // would file the row under an identity nobody named.
+            features: self.features.clone().unwrap_or(one.features),
+        }
+    }
+}
+
+/// Resolve the flags and discover every file, before anything is read.
+///
+/// A path may be a **file or a directory**; a directory takes every `.parquet`
+/// in it, sorted. Discovery is separate from reading so that a malformed later
+/// file is found while its predecessors are being committed, not before any of
+/// them is: each file is its own transaction (see [`import_parquet_file`]),
+/// and a directory import is all-or-nothing per file rather than across the
+/// whole directory. Re-running after a fix does not redo the committed ones.
+#[cfg(feature = "parquet")]
+fn parquet_import(opts: &Options<'_>) -> Result<(ParquetImport, Vec<PathBuf>), String> {
     if opts.descriptor.is_some() || opts.csv.is_some() {
         return Err(
             "--parquet carries its own descriptors; drop --descriptor and --csv".to_string(),
         );
     }
-    let options = parquet_options(opts)?;
-    let features = inline_features(opts)?;
-    let owner_category = opts
-        .inline
-        .owner_category
-        .as_deref()
-        .map(parse::parse_owner_category)
-        .transpose()?;
-
-    let mut batches = Vec::new();
+    let setup = ParquetImport {
+        options: parquet_options(opts)?,
+        features: inline_features(opts)?,
+        owner_category: opts
+            .inline
+            .owner_category
+            .as_deref()
+            .map(parse::parse_owner_category)
+            .transpose()?,
+    };
+    let mut files = Vec::new();
     for path in opts.parquet {
-        for file in infrastore_parquet::parquet_files(path).map_err(|e| e.to_string())? {
-            let series = infrastore_parquet::read_file(&file, &options)
-                .map_err(|e| format!("reading {}: {e}", file.display()))?;
-            let mut requests = Vec::with_capacity(series.len());
-            let mut ignored_ids = Vec::new();
-            for one in series {
-                if let Some(id) = one.recorded_id {
-                    ignored_ids.push(id);
+        files.extend(infrastore_parquet::parquet_files(path).map_err(|e| e.to_string())?);
+    }
+    Ok((setup, files))
+}
+
+/// Stream one file into the store as one transaction.
+///
+/// Each series is added the moment the reader finishes it, inside a transaction
+/// opened on the first one and committed after the last, so the file is
+/// all-or-nothing without ever being in memory at once. A read or write error
+/// rolls the transaction back, leaving the store as it was before this file and
+/// every earlier file's commit intact.
+///
+/// The store is still opened lazily, on the first series: `add` creates a
+/// missing store, and a file that turns out to hold nothing readable should not
+/// leave an empty artifact behind.
+#[cfg(feature = "parquet")]
+fn import_parquet_file(
+    file: &Path,
+    setup: &ParquetImport,
+    store: &mut Option<Store>,
+    open: &dyn Fn() -> Result<Store, String>,
+    replace: bool,
+    added: &mut Vec<AddedRow>,
+) -> Result<usize, String> {
+    // The sink speaks the core's error type. A failure that starts life as a
+    // String (opening the store, the `--replace` removal) is parked here and
+    // reported in place of the placeholder the sink returns for it.
+    let mut side_error: Option<String> = None;
+    let mut in_transaction = false;
+    let mut count = 0usize;
+
+    let streamed = infrastore_parquet::read_file_with(file, &setup.options, &mut |one| {
+        let request = setup.request(one);
+        if store.is_none() {
+            match open() {
+                Ok(opened) => *store = Some(opened),
+                Err(message) => {
+                    side_error = Some(message);
+                    return Err(infrastore_core::TimeSeriesError::InvalidParameter(
+                        "store could not be opened".to_string(),
+                    ));
                 }
-                requests.push(AddRequest {
-                    owner_id: one.owner_id,
-                    owner_type: one.owner_type,
-                    owner_category: owner_category.unwrap_or(one.owner_category),
-                    data: one.data,
-                    // The flags replace the file's map rather than merging into
-                    // it: a feature set is part of a series' identity, so a
-                    // half-replaced one would file the row under an identity
-                    // nobody named.
-                    features: features.clone().unwrap_or(one.features),
-                });
             }
-            batches.push(ParquetBatch {
-                path: file,
-                requests,
-                ignored_ids,
-            });
         }
+        let target = store.as_mut().expect("just opened");
+        if !in_transaction {
+            target.begin_transaction()?;
+            in_transaction = true;
+        }
+        if replace
+            && let Err(message) =
+                store_access::remove_existing(target, &[request_identity(&request)])
+        {
+            side_error = Some(message);
+            return Err(infrastore_core::TimeSeriesError::InvalidParameter(
+                "replacement failed".to_string(),
+            ));
+        }
+        let echo = (
+            request.data.time_series_type().as_str(),
+            request.data.name().to_string(),
+            request.owner_id,
+        );
+        let id = target.add(request)?;
+        added.push(AddedRow {
+            id: id.get(),
+            time_series_type: echo.0,
+            name: echo.1,
+            owner_id: echo.2,
+        });
+        count += 1;
+        Ok(())
+    });
+
+    let outcome = match streamed {
+        Ok(_) => Ok(count),
+        Err(e) => Err(side_error
+            .take()
+            .unwrap_or_else(|| format!("reading {}: {e}", file.display()))),
+    };
+    if in_transaction {
+        let target = store.as_mut().expect("a transaction is open on it");
+        match &outcome {
+            Ok(_) => target.commit_transaction().map_err(|e| e.to_string())?,
+            Err(_) => {
+                if let Err(e) = target.rollback_transaction() {
+                    tracing::warn!(error = %e, file = %file.display(), "rolling back the file's transaction failed");
+                }
+            }
+        }
+    }
+    outcome
+}
+
+/// Collect what a load would write, per file, without writing.
+///
+/// Still streamed: each series is reduced to its summary line as it is read,
+/// so a dry run over a large directory costs no more memory than the load.
+#[cfg(feature = "parquet")]
+fn parquet_dry_run(setup: &ParquetImport, files: &[PathBuf]) -> Result<Vec<ParquetBatch>, String> {
+    let mut batches = Vec::with_capacity(files.len());
+    for file in files {
+        let mut series = Vec::new();
+        let mut ignored_ids = Vec::new();
+        infrastore_parquet::read_file_with(file, &setup.options, &mut |one| {
+            if let Some(id) = one.recorded_id {
+                ignored_ids.push(id);
+            }
+            series.push(ParquetSummary::of(&setup.request(one)));
+            Ok(())
+        })
+        .map_err(|e| format!("reading {}: {e}", file.display()))?;
+        batches.push(ParquetBatch {
+            path: file.clone(),
+            series,
+            ignored_ids,
+        });
     }
     Ok(batches)
 }
 
-/// One file's worth of work: what it holds and what was thrown away.
-#[cfg(feature = "parquet")]
+/// One file's worth of a dry run: what it holds and what was thrown away.
 pub struct ParquetBatch {
-    pub path: std::path::PathBuf,
-    pub requests: Vec<AddRequest>,
+    pub path: PathBuf,
+    pub series: Vec<ParquetSummary>,
     /// The ids the file recorded, reported at `--dry-run` and then dropped.
     ///
     /// `add` never accepts an id: "never reissued" is a guarantee of the
     /// catalog's `AUTOINCREMENT`, and a caller free to name one could re-file a
     /// retired id. The destination assigns fresh ones.
     pub ignored_ids: Vec<i64>,
+}
+
+/// One series of a dry run, reduced to what the report prints so the values
+/// can be dropped as soon as they are read.
+pub struct ParquetSummary {
+    pub owner_id: i64,
+    pub owner_type: String,
+    pub owner_category: &'static str,
+    pub time_series_type: &'static str,
+    pub name: String,
+    pub element_type: String,
+    pub features: Value,
+    pub empty_descriptors: Vec<&'static str>,
+}
+
+#[cfg(feature = "parquet")]
+impl ParquetSummary {
+    fn of(request: &AddRequest) -> Self {
+        Self {
+            owner_id: request.owner_id,
+            owner_type: request.owner_type.clone(),
+            owner_category: request.owner_category.as_str(),
+            time_series_type: request.data.time_series_type().as_str(),
+            name: request.data.name().to_string(),
+            element_type: request.data.element_type().to_string(),
+            features: crate::fields::features_json(&request.features),
+            empty_descriptors: empty_descriptors(request),
+        }
+    }
 }
 
 #[cfg(feature = "parquet")]
@@ -778,19 +930,38 @@ fn inline_features(opts: &Options<'_>) -> Result<Option<infrastore_core::Feature
 }
 
 #[cfg(not(feature = "parquet"))]
-pub struct ParquetBatch {
-    pub path: std::path::PathBuf,
-    pub requests: Vec<AddRequest>,
-    pub ignored_ids: Vec<i64>,
+struct ParquetImport;
+
+#[cfg(not(feature = "parquet"))]
+fn parquet_import(_opts: &Options<'_>) -> Result<(ParquetImport, Vec<PathBuf>), String> {
+    Err(without_parquet())
 }
 
 #[cfg(not(feature = "parquet"))]
-fn parquet_batches(_opts: &Options<'_>) -> Result<Vec<ParquetBatch>, String> {
-    Err(
-        "this infrastore was built without Parquet support; rebuild with \
-         `cargo install infrastore-cli --features parquet`"
-            .to_string(),
-    )
+fn import_parquet_file(
+    _file: &Path,
+    _setup: &ParquetImport,
+    _store: &mut Option<Store>,
+    _open: &dyn Fn() -> Result<Store, String>,
+    _replace: bool,
+    _added: &mut Vec<AddedRow>,
+) -> Result<usize, String> {
+    Err(without_parquet())
+}
+
+#[cfg(not(feature = "parquet"))]
+fn parquet_dry_run(
+    _setup: &ParquetImport,
+    _files: &[PathBuf],
+) -> Result<Vec<ParquetBatch>, String> {
+    Err(without_parquet())
+}
+
+#[cfg(not(feature = "parquet"))]
+fn without_parquet() -> String {
+    "this infrastore was built without Parquet support; rebuild with \
+     `cargo install infrastore-cli --features parquet`"
+        .to_string()
 }
 
 /// Report what a Parquet load would write, per file.
@@ -800,7 +971,7 @@ fn parquet_batches(_opts: &Options<'_>) -> Result<Vec<ParquetBatch>, String> {
 /// The ignored ids are reported here and nowhere else: this is the only moment
 /// where saying "the file names id 7 and the store will not use it" is useful.
 fn report_parquet_dry_run(batches: &[ParquetBatch], format: Format) -> Result<(), String> {
-    let total: usize = batches.iter().map(|b| b.requests.len()).sum();
+    let total: usize = batches.iter().map(|b| b.series.len()).sum();
     match format {
         f if f.is_json() => {
             let items: Vec<Value> = batches
@@ -808,20 +979,20 @@ fn report_parquet_dry_run(batches: &[ParquetBatch], format: Format) -> Result<()
                 .map(|b| {
                     json!({
                         "file": b.path.display().to_string(),
-                        "series": b.requests.len(),
+                        "series": b.series.len(),
                         "ignored_ids": b.ignored_ids,
                         "matches": b
-                            .requests
+                            .series
                             .iter()
                             .map(|r| json!({
                                 "owner_id": r.owner_id,
                                 "owner_type": r.owner_type,
-                                "owner_category": r.owner_category.as_str(),
-                                "type": r.data.time_series_type().as_str(),
-                                "name": r.data.name(),
-                                "element_type": r.data.element_type().to_string(),
-                                "features": crate::fields::features_json(&r.features),
-                                "empty_descriptors": empty_descriptors(r),
+                                "owner_category": r.owner_category,
+                                "type": r.time_series_type,
+                                "name": r.name,
+                                "element_type": r.element_type,
+                                "features": r.features,
+                                "empty_descriptors": r.empty_descriptors,
                             }))
                             .collect::<Vec<_>>(),
                     })
@@ -837,25 +1008,22 @@ fn report_parquet_dry_run(batches: &[ParquetBatch], format: Format) -> Result<()
                 println!(
                     "{} — {} series{}",
                     one.path.display(),
-                    one.requests.len(),
+                    one.series.len(),
                     if one.ignored_ids.is_empty() {
                         String::new()
                     } else {
                         format!(", ignoring {} recorded ids", one.ignored_ids.len())
                     }
                 );
-                for request in &one.requests {
-                    let empty = empty_descriptors(request);
-                    let note = if empty.is_empty() {
+                for one in &one.series {
+                    let note = if one.empty_descriptors.is_empty() {
                         String::new()
                     } else {
-                        format!("  (no {})", empty.join(", "))
+                        format!("  (no {})", one.empty_descriptors.join(", "))
                     };
                     println!(
                         "  - owner={} type={} name={}{note}",
-                        request.owner_id,
-                        request.data.time_series_type().as_str(),
-                        request.data.name(),
+                        one.owner_id, one.time_series_type, one.name,
                     );
                 }
             }
@@ -875,6 +1043,7 @@ fn report_parquet_dry_run(batches: &[ParquetBatch], format: Format) -> Result<()
 /// An empty string is how the format writes "absent", so a file that genuinely
 /// stored an empty string is indistinguishable from one that stored nothing.
 /// Naming them at `--dry-run` is what makes that visible before it is committed.
+#[cfg(feature = "parquet")]
 fn empty_descriptors(request: &AddRequest) -> Vec<&'static str> {
     let mut out = Vec::new();
     if request.data.units().is_none() {

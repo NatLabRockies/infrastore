@@ -646,3 +646,25 @@ against the code and fixed in one commit, each with a test:
   reference say so.
 - `bindings.md` still described "one schema, two producers", and a CLI reference example named a
   per-series file the partitioned export never writes.
+
+### 7.20 What the second review found (fixed 2026-09-08)
+
+Two posted comments and six the reviewer had missed the first time, all confirmed and fixed with
+tests:
+
+- The CLI parsed **every** Parquet file before writing any, so a malformed later partition failed
+  the whole load with nothing committed, contrary to the documented one-transaction-per-file rule,
+  and every partition's decoded data was held at once. The reader now has a streaming form,
+  `read_file_with`, that hands each series to a sink the moment its rows end; the CLI opens one
+  transaction per file, adds each series as it arrives, and commits or rolls back per file. The
+  collecting `read_file` remains for tests, and the dry run streams too, keeping one summary line
+  per series rather than its values.
+- `export -f parquet` returned early on an empty selection before the writer's stale-directory check
+  ran, so "exported 0" could leave an earlier export's partitions in place. The check runs before
+  the selection is resolved; `check_destination` is public for that.
+- Row groups were cut only after the next series had been appended, so a 900k-row series followed by
+  a 200k-row one produced a group ending 100k rows into the second. The buffer is now cut at the
+  boundary whenever the coming series would carry it past the target; only a series larger than the
+  target on its own is split.
+- Three comments (the crate manifest, its crate-level doc, `deny.toml`) still said the CLI feature
+  was off by default, and a proto field comment promised an order a protobuf map cannot carry.

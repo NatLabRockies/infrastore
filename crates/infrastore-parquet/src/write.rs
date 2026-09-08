@@ -65,7 +65,15 @@ impl ExportReport {
 /// written over an earlier one would leave the earlier partitions in place and
 /// a later import would file them too, silently. The export neither merges nor
 /// sweeps: the caller empties the directory, or names a fresh one.
-fn refuse_stale_partitions(dir: &Path) -> Result<()> {
+///
+/// Public so a caller can check *before* it knows whether anything will be
+/// written: a selection that matches nothing writes nothing, and must still not
+/// leave a stale export standing behind a report that says "exported 0". A
+/// directory that does not exist yet passes.
+pub fn check_destination(dir: &Path) -> Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
     let stale: Vec<String> = std::fs::read_dir(dir)?
         .filter_map(|entry| entry.ok())
         .filter(|entry| {
@@ -98,7 +106,7 @@ pub fn write_partitions(
     series: &[(TimeSeriesMetadata, TimeSeriesData)],
 ) -> Result<ExportReport> {
     std::fs::create_dir_all(dir)?;
-    refuse_stale_partitions(dir)?;
+    check_destination(dir)?;
 
     let mut report = ExportReport::default();
     let mut groups: BTreeMap<PartitionKey, Vec<usize>> = BTreeMap::new();
@@ -179,11 +187,19 @@ fn write_one(
     let mut rows = 0usize;
     for index in members {
         let (row, data) = &series[*index];
+        // A group ends on a series boundary whenever it can: if the next series
+        // would carry the buffer past the target, the buffer is cut first, so
+        // the group holds whole series. Only a series larger than the target on
+        // its own is split, below.
+        let coming = row_count(row, data)?;
+        if !buffer.is_empty() && buffer.len() + coming > ROW_GROUP_TARGET {
+            let held = buffer.len();
+            let batch = buffer.take(held)?;
+            writer.write(&batch).map_err(parquet_err)?;
+            writer.flush().map_err(parquet_err)?;
+        }
         let appended = buffer.push_series(row, data)?;
         rows += appended;
-        // Cut whole target-sized groups only when one series has filled the
-        // buffer on its own. Otherwise the buffer waits for the next series, so
-        // the flush below lands on a boundary.
         while buffer.len() >= ROW_GROUP_TARGET {
             let batch = buffer.take(ROW_GROUP_TARGET)?;
             writer.write(&batch).map_err(parquet_err)?;
