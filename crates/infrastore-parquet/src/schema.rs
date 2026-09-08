@@ -1,29 +1,17 @@
-//! The footer: which key/value pairs describe a series, and how each is spelled.
+//! The names a long table uses, and the codecs for the values that are not
+//! plain text.
 //!
-//! **One schema, two producers.** Python's `SingleTimeSeries.to_arrow()` and
-//! this crate's export write the same table for the same series, so a Parquet
-//! file has one shape whichever wrote it and the import reads that one shape.
-//! Every key here is either one `to_arrow()` already writes or one it was
-//! extended to write in the same change.
+//! Every one of these is a **column** of the table (and, for the three partition
+//! keys, also a footer entry). They are gathered here rather than beside the
+//! writer because the reader has to agree with them exactly, and a name that
+//! drifts between the two is a bug neither side can see.
 //!
-//! Five keys are the exception, and they are the *row-level* ones —
-//! [`ID`], [`OWNER_ID`], [`OWNER_TYPE`], [`OWNER_CATEGORY`], [`FEATURES`].
-//! `to_arrow()` is a method on a value object, which has no owner and no catalog
-//! id: a `SingleTimeSeries` built in Python is not filed anywhere. So a
-//! CLI-written file is self-describing enough to `add` back with no flags, while
-//! a `to_arrow()` file needs the owner supplied — by a descriptor or by the
-//! inline flags — exactly as a CSV does. The import reads whichever keys are
-//! present.
-//!
-//! Values are UTF-8 strings, because Parquet key/value metadata is. Structure
-//! (`element_shape`, `features`) rides as JSON, which is the spelling the rest
-//! of the project already uses for the same values.
-
-use std::collections::BTreeMap;
+//! Values are UTF-8, because a Parquet string column is. Structure —
+//! `element_shape`, `features` — rides as JSON, which is the spelling the rest of
+//! the project already uses for the same values.
 
 use infrastore_core::{
-    ElementType, FeatureValue, Features, OwnerCategory, TimeReference, TimeSeriesMetadata,
-    TimeSeriesType, UnitSystem,
+    ElementType, FeatureValue, Features, OwnerCategory, TimeReference, TimeSeriesType, UnitSystem,
 };
 
 /// Which of the six types the rows describe. Present on every file, and the one
@@ -101,110 +89,17 @@ pub const OWNER_CATEGORY: &str = "owner_category";
 /// The feature map as a JSON object, in the spelling `Features` serializes to.
 pub const FEATURES: &str = "features";
 
-// ---- Forecast keys ---------------------------------------------------------
+// ---- Forecast columns -------------------------------------------------------
 //
-// Written only for the dense forecast types, whose long table cannot be read
-// back without them: a `(issue_time, target_time, value)` row says where a value
-// belongs but not what the grid it belongs to *is*, and inferring five
-// parameters from a set of rows would be guessing.
+// Present only in the partitions whose type has them. A forecast's grid is what
+// the rows cannot say: a `(issue_time, target_time, value)` row states where a
+// value belongs, not what the grid it belongs to *is*, so the interval and
+// horizon travel as columns of their own.
 
-/// The first window's issue time, RFC 3339. The anchor of the window grid.
-pub const INITIAL_TIMESTAMP: &str = "initial_timestamp";
-/// ISO-8601 forecast horizon: how far ahead one window reaches.
-pub const HORIZON: &str = "horizon";
 /// ISO-8601 forecast interval: how far apart two windows are issued.
 pub const INTERVAL: &str = "interval";
-/// Number of windows.
-pub const COUNT: &str = "count";
-/// `Probabilistic` only: the percentiles, as a JSON array of numbers, in the
-/// order the stored array's leading axis is in.
-pub const PERCENTILES: &str = "percentiles";
-/// `Scenarios` only: how many trajectories each window carries.
-pub const SCENARIO_COUNT: &str = "scenario_count";
-
-/// The footer for one catalog row.
-///
-/// Absent descriptors are **left out** rather than written as an empty string,
-/// so `metadata.contains_key(UNITS)` answers "was a label declared?" — the same
-/// rule `to_arrow()` follows, and the reason the import can tell "no units" from
-/// `units = ""`.
-pub fn metadata_for_row(row: &TimeSeriesMetadata) -> BTreeMap<String, String> {
-    let mut meta = BTreeMap::new();
-    meta.insert(
-        TIME_SERIES_TYPE.to_string(),
-        row.time_series_type.as_str().to_string(),
-    );
-    meta.insert(NAME.to_string(), row.name.clone());
-    meta.insert(ELEMENT_TYPE.to_string(), row.element_type.to_string());
-    meta.insert(
-        ELEMENT_SHAPE.to_string(),
-        encode_element_shape(&row.element_shape),
-    );
-    if let Some(resolution) = row.resolution {
-        meta.insert(RESOLUTION.to_string(), resolution.to_iso8601());
-    }
-    // Forecast-only. A static row leaves all of these unset, so nothing here
-    // changes the footer `to_arrow()` writes for the three static types.
-    if row.time_series_type.is_forecast() {
-        if let Some(initial) = row.initial_timestamp {
-            meta.insert(INITIAL_TIMESTAMP.to_string(), initial.to_rfc3339());
-        }
-        if let Some(horizon) = row.horizon {
-            meta.insert(HORIZON.to_string(), horizon.to_iso8601());
-        }
-        if let Some(interval) = row.interval {
-            meta.insert(INTERVAL.to_string(), interval.to_iso8601());
-        }
-        if let Some(count) = row.count {
-            meta.insert(COUNT.to_string(), count.to_string());
-        }
-        if let Some(percentiles) = &row.percentiles {
-            meta.insert(
-                PERCENTILES.to_string(),
-                serde_json::to_string(percentiles).expect("a list of floats always serializes"),
-            );
-        }
-    }
-    // Written for every row, unlike the descriptors below. An absent descriptor
-    // means "not declared"; an absent reference would mean "read it off the
-    // column's zone", which for an unspecified reference gives `utc` -- a claim
-    // the series never made. The literal says so instead.
-    meta.insert(
-        TIME_REFERENCE.to_string(),
-        row.time_reference.as_ref().map_or_else(
-            || UNSPECIFIED_REFERENCE.to_string(),
-            |r| r.as_storage_string(),
-        ),
-    );
-    insert_opt(&mut meta, UNITS, row.units.as_deref());
-    insert_opt(&mut meta, QUANTITY_KIND, row.quantity_kind.as_deref());
-    insert_opt(&mut meta, UNIT_SYSTEM, row.unit_system.map(|u| u.as_str()));
-    insert_opt(&mut meta, COMPONENT_FIELD, row.component_field.as_deref());
-    insert_opt(&mut meta, APPLICATION_DATA, row.application_data.as_deref());
-
-    // Row-level keys. `id` is descriptive of the row rather than the data, and
-    // is written for provenance only.
-    if let Some(id) = row.id {
-        meta.insert(ID.to_string(), id.get().to_string());
-    }
-    meta.insert(OWNER_ID.to_string(), row.owner_id.to_string());
-    meta.insert(OWNER_TYPE.to_string(), row.owner_type.clone());
-    meta.insert(
-        OWNER_CATEGORY.to_string(),
-        row.owner_category.as_str().to_string(),
-    );
-    // Always present, `{}` for the common empty map: a reader distinguishing
-    // "no features" from "features not recorded" would be drawing a line the
-    // store does not draw, since every row has a feature map.
-    meta.insert(FEATURES.to_string(), encode_features(&row.features));
-    meta
-}
-
-fn insert_opt(meta: &mut BTreeMap<String, String>, key: &str, value: Option<&str>) {
-    if let Some(value) = value {
-        meta.insert(key.to_string(), value.to_string());
-    }
-}
+/// ISO-8601 forecast horizon: how far ahead one window reaches.
+pub const HORIZON: &str = "horizon";
 
 /// `[2,3]`, or `[]` for a scalar element.
 pub fn encode_element_shape(shape: &[usize]) -> String {
@@ -216,9 +111,9 @@ pub fn encode_element_shape(shape: &[usize]) -> String {
 /// Deliberately **not** `serde_json::to_string(features)`, which would emit
 /// `FeatureValue`'s externally tagged form `{"model_year":{"Int":2030}}`. The
 /// plain form is the spelling every other wire in this project uses for a
-/// feature map — the C ABI's `features_json`, the CLI's `--features` — and a
-/// foreign reader of this footer should see the value, not the discriminant that
-/// happens to carry it.
+/// feature map — the C ABI's `features_json`, the CLI's `--features` — and
+/// someone reading this column in DuckDB should see the value, not the
+/// discriminant that happens to carry it.
 pub fn encode_features(features: &Features) -> String {
     let object: serde_json::Map<String, serde_json::Value> = features
         .iter()
@@ -233,12 +128,6 @@ pub fn encode_features(features: &Features) -> String {
         })
         .collect();
     serde_json::Value::Object(object).to_string()
-}
-
-/// Parse an `element_shape` value back.
-pub fn decode_element_shape(text: &str) -> Result<Vec<usize>, String> {
-    serde_json::from_str(text)
-        .map_err(|e| format!("{ELEMENT_SHAPE} is not a list of integers: {e}"))
 }
 
 /// Parse a `features` value back, inferring each value's kind from its JSON
@@ -269,11 +158,6 @@ pub fn decode_features(text: &str) -> Result<Features, String> {
         features.insert(key.clone(), feature);
     }
     Ok(features)
-}
-
-/// Parse a `percentiles` value back.
-pub fn decode_percentiles(text: &str) -> Result<Vec<f64>, String> {
-    serde_json::from_str(text).map_err(|e| format!("{PERCENTILES} is not a list of numbers: {e}"))
 }
 
 /// Parse a `time_series_type` value back.

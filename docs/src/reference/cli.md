@@ -188,95 +188,14 @@ infrastore --store demo.h5 -f csv export --name-glob 'load_*' --dir out/
 infrastore --store demo.h5 -f parquet export --name-glob 'load_*' --dir out/
 ```
 
-#### Parquet import
+#### Parquet
 
-`add --parquet <FILE>` is a third `add` form beside the descriptor and inline ones, repeatable so a
-whole `export --dir` lands in one command. **The file's footer is the descriptor**: a file written
-by `export -f parquet` round-trips back with no other flag.
+`-f parquet export --dir <DIR>` writes **partitioned long tables**: many series per file, one row
+per value, and every catalog column a table column. `add --parquet <PATH>` reads them back, from a
+file or a whole directory. [Parquet layout](parquet-format.md) is the format reference — columns,
+partitioning, filenames, footer keys, and the rules the import applies to a foreign file.
 
-A **foreign** file — anything else's Parquet, including one Python's `to_arrow()` wrote — carries
-less, and what is missing has to be supplied:
-
-```sh
-infrastore --store demo.h5 add --parquet from_pandas.parquet \
-    --owner-id 42 --owner-type Generator --name load
-```
-
-What the import concludes when the footer is silent:
-
-| Missing            | Read as                                                                                                                                                                   |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `time_series_type` | `SingleTimeSeries` when the timestamps walk a grid, `NonSequentialTimeSeries` otherwise. `PersistentTimeSeries` is never inferred — name it with `--type`.                |
-| `element_type`     | The leaf Arrow type. A `FixedSizeList<T>[N]` becomes dtype `T` with element shape `[N]` — _dense_, not `tuple(N,T)`, because the bytes cannot say and dense assumes less. |
-| `time_reference`   | The timestamp column's Arrow zone; a column with no zone reads as `zoneless`, since a naive timestamp is a wall clock.                                                    |
-| `name`             | Nothing. A name is part of a series' identity, so `--name` is required.                                                                                                   |
-
-The inline flags fill those in, with one exception that follows the project's usual rule:
-`--element-type` is an **assertion**, not an override. `--element-type 'tuple(3,f64)'` states the
-reading the bytes cannot, and a value that contradicts the footer is an error rather than a silent
-replacement. `--type` behaves the same way.
-
-Four refusals:
-
-- **Nulls**, in either column. The store holds none, and NaN is a value rather than an absence, so a
-  null is refused rather than coerced.
-- **Timestamps finer than a millisecond.** Seconds and milliseconds cross as they are; microseconds
-  and nanoseconds only when every value is a whole millisecond. That is the same rule the write path
-  enforces on every instant the store records.
-- **Rows that leave the declared grid.** A `SingleTimeSeries` whose footer names `PT1H` must
-  actually walk one, checked against the grid that resolution generates rather than against
-  successive differences — `Period::Months` clamps to month end, so the two are not the same test.
-- **`Struct` and `List` value columns.** Those are the _decoded_ form of a composite element type,
-  which this version does not write and so does not claim to read.
-
-A dense forecast's long table is read back the same way, with one addition: **its footer's forecast
-parameters are required.** Resolution, horizon, interval, window count and the percentile list could
-in principle be reverse-engineered from a complete set of rows, but a merely self-consistent set
-would produce a plausible wrong answer -- a one-window forecast is indistinguishable from a static
-series, and overlapping windows make the interval ambiguous -- so they are read, not guessed. Rows
-are placed by their coordinates rather than by their order, so a file a query engine rewrote still
-reads correctly; every slot must be filled exactly once, since a forecast cube has no hole to leave
-and two rows for one slot means they disagree.
-
-Three things a Parquet round trip does not preserve, all worth knowing:
-
-- **The catalog id.** `add` never accepts one — "never reissued" is a guarantee of the catalog's
-  `AUTOINCREMENT`, and a caller free to name an id could re-file a retired one — so the footer's
-  `id` is reported at `--dry-run` and then ignored. The destination assigns a fresh one.
-- **A composite series' `data_hash`.** Values round-trip exactly, which is an improvement over CSV
-  where floats pass through decimal text. But a composite element type re-encodes at the minimum
-  padding width, so one stored wider comes back with a different content hash.
-- **An _unspecified_ `time_reference`.** It comes back as `utc`. Arrow's timestamp type has a zone
-  or it has none, and _unspecified_ has no third spelling; the export writes a UTC-zoned column for
-  it, the same mapping `to_arrow()` has always used. The instants are unchanged -- only the label
-  moves from "not stated" to "UTC".
-
-#### Parquet export
-
-`-f parquet` writes one `.parquet` file per matched series, with the same two-column table Python's
-`to_arrow()` builds: `timestamp` (Arrow `timestamp[ms, tz]`, in the series' own spelling) and
-`value` (a primitive for a scalar series, nested `FixedSizeList` for a multidimensional per-timestep
-value). The row's descriptors ride in the file's key/value footer — `name`, `time_series_type`,
-`element_type`, `element_shape`, `resolution`, `time_reference`, `units`, `quantity_kind`,
-`unit_system`, `component_field`, `application_data` — plus the row-level `id`, `owner_id`,
-`owner_type`, `owner_category`, and `features` that a value object has no way to know.
-`time_reference` is always present, spelling a series that declared none as `unspecified`.
-
-Composite element types (`piecewise_linear` and friends) keep their stored packing, a
-`FixedSizeList<double>[w]`; `element_type` in the footer is what names them, and every binding has a
-decoder. Both columns are non-nullable: the store has no nulls, and NaN is a value.
-
-A **dense forecast** takes a different shape, because a forecast is a cube and a Parquet file is one
-flat table. It exports as a **long table** -- `issue_time`, `target_time`, `value`, plus
-`percentile` for a `Probabilistic` and `scenario` for a `Scenarios` -- which is the same
-three-column description of a window the CSV export already uses. Rows come out window-major, so
-`GROUP BY issue_time` scans contiguously, and one instant's percentiles sit together. The footer
-additionally carries `initial_timestamp`, `horizon`, `interval`, `count`, and `percentiles` or
-`scenario_count`: the rows say where each value belongs, not what the grid it belongs to is, so
-those are what make the file readable back. A stored `DeterministicSingleTimeSeries` exports under
-its own name and comes back as the `Deterministic` it is a view of, exactly as `merge` does.
-
-Two limits, both deliberate:
+Two limits on the export, both deliberate:
 
 - **`--dir` is required.** Parquet's footer sits at the end of the file and its offsets point
   backwards, so a writer has to seek and a pipe cannot.

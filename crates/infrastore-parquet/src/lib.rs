@@ -6,25 +6,41 @@
 //! default build reaches it: `infrastore-cli` depends on it behind its own
 //! `parquet` feature, which is off.
 //!
-//! # One schema, two producers
+//! # Long tables, partitioned
 //!
-//! Python's `to_arrow()` and this crate write the **same table** for the same
-//! series — two columns, `timestamp` and `value`, plus a footer of UTF-8
-//! key/value pairs — so a Parquet file has one shape whichever wrote it, and one
-//! import reads both. [`schema`] is the definition of that footer and the place
-//! to look before changing either producer.
+//! Not one file per series -- a store with thousands of series would become
+//! thousands of files, which defeats every reader worth exporting for. Instead
+//! **many series per file, one row per value**, with every catalog column a
+//! table column, so a reader opens the directory and has the whole row without
+//! attaching the SQLite catalog.
+//!
+//! Three things cannot vary inside one table without nullable or ill-typed
+//! columns: the set of key columns, the Arrow type of `value`, and the zone of
+//! `timestamp`. So a selection is partitioned by that triple ([`partition`]) and
+//! written one file per part, which is what makes **every column required**.
 //!
 //! ```no_run
 //! use std::path::Path;
 //! use infrastore_core::{ListFilter, ReadWindow, open_store};
 //!
 //! let store = open_store(Path::new("demo.h5"), true)?;
-//! let row = store.list_metadata(ListFilter::new().name("load"))?.remove(0);
-//! let id = row.id.expect("a catalog row carries its id");
-//! let data = store.read_by_id(id, ReadWindow::full())?;
-//! infrastore_parquet::write_series(Path::new("load.parquet"), &row, &data)?;
+//! let rows = store.list_metadata(ListFilter::new())?;
+//! let ids: Vec<_> = rows.iter().filter_map(|r| r.id).collect();
+//! let values = store.read_by_ids(&ids, ReadWindow::full())?;
+//! let pairs: Vec<_> = rows.into_iter().zip(values).collect();
+//!
+//! let report = infrastore_parquet::write_partitions(Path::new("out"), &pairs)?;
+//! for file in &report.files {
+//!     let back = infrastore_parquet::read_file(&file.path, &Default::default())?;
+//!     assert_eq!(back.len(), file.series);
+//! }
 //! # Ok::<(), infrastore_core::TimeSeriesError>(())
 //! ```
+//!
+//! Python's `to_arrow()` / `from_arrow()` are **not** this format: they are
+//! per-series, in-memory conveniences. The relationship is one sentence -- a long
+//! table's columns are `to_arrow()`'s schema-metadata keys turned into columns --
+//! and nothing depends on the two agreeing.
 //!
 //! # Errors
 //!
@@ -37,17 +53,13 @@
 //! [`Io`][infrastore_core::TimeSeriesError::Io]. Neither library's own error type
 //! leaks, so a caller matching on `TimeSeriesError` needs no new arm.
 
-pub mod export;
-pub mod import;
 pub mod partition;
 pub mod read;
 pub mod schema;
 pub mod table;
 pub mod write;
 
-pub use export::{TIMESTAMP_COLUMN, VALUE_COLUMN, record_batch, timestamp_data_type, write_series};
-pub use import::{ImportOptions, ImportedSeries, read_series};
-pub use read::{parquet_files, read_file};
+pub use read::{ImportOptions, ImportedSeries, parquet_files, read_file};
 pub use write::{ExportReport, WrittenFile, write_partitions};
 
 use infrastore_core::TimeSeriesError;

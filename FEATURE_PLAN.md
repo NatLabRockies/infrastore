@@ -396,6 +396,19 @@ tagged serde form (`{"model_year":{"Int":2030}}`). The plain form is what the C 
 `features_json` and the CLI's `--features` already use, and a foreign reader of this footer should
 see the value rather than the discriminant carrying it.
 
+**Superseded 2026-09-07 by the §2 revision.** There is no footer of descriptors any more: every one
+of those keys is a **column** of the long table, and the row-level ones (`id`, `owner_id`,
+`owner_type`, `owner_category`, `features`) are ordinary columns like the rest. The asymmetry the
+finding recorded is gone along with the principle that created it — §2.9 withdraws "one schema, two
+producers", so `to_arrow()` is no longer a second producer of the same artifact and has nothing to
+stay identical to.
+
+Two decisions survive the move and are now properties of columns rather than of footer keys.
+`features` is still written as plain JSON scalars (`{"model_year":2030}`) rather than
+`FeatureValue`'s externally tagged serde form, and for a stronger reason than before: this column is
+read in DuckDB by hand. And `element_shape` is still written even when empty, as a footer entry
+describing the partition rather than a row.
+
 ### 7.7 `Format::Parquet` exists in every build (§2.1)
 
 Gating the clap variant on the `parquet` cargo feature would make `--help`, the shell completions,
@@ -428,6 +441,11 @@ No CI or release change was needed. Both `cargo build` steps in `.github/workflo
 `--all-features`, so the released `infrastore` binary already carried Parquet; nothing in the
 workflows builds the CLI with `--no-default-features` or an explicit feature list.
 
+**Still current after the §2 revision (2026-09-07).** Nothing here depends on the file layout: the
+clap variant is unconditional, `-f parquet` is refused for every command but `export`, and a build
+without the feature names the feature to rebuild with. The revision changes what `export` then
+writes, not whether the flag parses.
+
 ### 7.8 `tiny-keccak` is CC0-1.0, allowed as a scoped exception (§1)
 
 Arrow reaches it through `arrow-array -> ahash -> const-random -> const-random-macro`, a build-time
@@ -450,6 +468,17 @@ A **type that cannot be inferred**: with no `time_series_type` in the footer, a 
 inferred — it is structurally identical to the irregular type and differs only in what the values
 mean between rows, so guessing it would be guessing that. `--type` names it.
 
+**Half superseded 2026-09-07 by the §2 revision.**
+
+The **empty-series** refusal is gone, and §2.8 says so outright: a long table has one row per value,
+so a series with no values contributes no rows and is simply not in the output. The export warns,
+naming it, and the question of anchoring an empty `SingleTimeSeries` on import never arises.
+
+The **`PersistentTimeSeries` is never inferred** half stands unchanged, and §2.8 restates it. It is
+structurally identical to `NonSequentialTimeSeries` and differs only in what the values mean between
+rows, so guessing it would be guessing that; `--type` names it. The type is a partition key now, so
+a file this project wrote always states it.
+
 ### 7.10 A dense forecast's grid is required, not inferred (§2.4)
 
 §2.4 specifies the long table but not what the import may assume. Resolution, horizon, interval,
@@ -460,6 +489,18 @@ indistinguishable from a static series, and overlapping windows make the interva
 refused naming the missing key. Rows are then placed by their coordinates rather than their order,
 so a file a query engine rewrote still reads correctly.
 
+**Still current after the §2 revision (2026-09-07), with the source moved.** The grid is still
+required rather than reverse-engineered, for the reason the finding gives: a merely self-consistent
+set of rows would give a plausible wrong answer. What changed is where it comes from — `resolution`,
+`interval` and `horizon` are **columns** now, not footer keys, so a query that selects a subset of a
+forecast's rows carries the grid with them.
+
+The revision also tightened one thing the finding claimed. Placing rows by their coordinates is only
+order-independent if the coordinates themselves are, and the first cut of the long-table import took
+the window anchor from the first issue time it saw and the percentile labels in first-appearance
+order — both of which depend on file order. Both are now derived from the values (minimum issue
+time, sorted percentiles), which is what the claim was always meant to say.
+
 ### 7.11 `to_arrow_windows()` does not gain a long form (§2.4)
 
 §2.4 asks this phase to settle it. **Decision: no.** It returns a dict of per-window tables, which
@@ -468,6 +509,13 @@ spelling of the file format and "one schema, two producers" has nothing to recon
 has one producer, the CLI, and one consumer, the CLI. A Python `to_arrow_long()` /
 `from_arrow_long()` pair is a reasonable follow-up; §2.6 scopes Python's Arrow inverse to the three
 static types, and that is what phase 3 delivered.
+
+**Reframed 2026-09-07 by the §2 revision.** The decision stands, and its reason is now the project's
+stated position rather than one phase's judgement: §2.9 withdraws "one schema, two producers"
+outright and says `to_arrow()` and `from_arrow()` are per-series in-memory conveniences rather than
+a file format. So there is no principle left for `to_arrow_windows()` to violate and no long form
+for it to grow. A forecast Parquet file comes from `export -f parquet` and goes back through
+`add --parquet`.
 
 ### 7.12 An unspecified `time_reference` comes back as `utc` (§2.2)
 
@@ -503,3 +551,11 @@ untouched. One collision follows and is accepted rather than engineered around: 
 reference is literally `Zone("unspecified")` writes the same footer value and comes back as
 unspecified. It is not an IANA zone, so nothing could ever resolve such a reference, and every
 alternative encoding is collidable the same way.
+
+**Carried forward 2026-09-07 into the §2 revision.** The fix survives the rework unchanged in
+substance, and the rework strengthens it: `time_reference` is a **partition key**, so a series that
+declares no spelling gets a file of its own rather than sharing one with a series that declared UTC,
+and the `unspecified` literal appears in both the column and the footer. §2.4 states it as part of
+the format. The literal is still not a `TimeReference` and `TimeReference::parse` is still
+untouched, so the collision noted above — a series whose reference is literally
+`Zone("unspecified")` — is still accepted rather than engineered around, for the same reason.
