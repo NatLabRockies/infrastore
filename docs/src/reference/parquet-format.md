@@ -278,10 +278,28 @@ What the columns do not say is inferred, and each inference takes the reading th
 | `time_reference`                 | The timestamp column's Arrow zone; a column with no zone reads as `zoneless`, since a naive timestamp is a wall clock.                                     |
 | `name`, `owner_id`, `owner_type` | Nothing. All three are refused rather than defaulted — owner 0 is a real owner, not a sentinel — so pass `--name`, `--owner-id`, `--owner-type`.           |
 
-The inline flags fill those in and override a column for every series in the partition, with one
-exception that follows the project's usual rule: `--element-type` is an **assertion**.
-`--element-type 'tuple(3,f64)'` states the reading the bytes cannot, and a value contradicting the
-file is an error rather than a silent replacement. `--type` behaves the same way.
+### Inline flags
+
+They fall into three groups, and the split follows the project's usual rule.
+
+**Overrides** replace a column for every series in the partition: `--owner-id`, `--owner-type`,
+`--owner-category`, `--name`, `--feature`, `--time-reference`, and the five free-form descriptors
+`--units`, `--quantity-kind`, `--unit-system`, `--component-field`, `--application-data`. Passing an
+empty string clears a descriptor, since the empty string is how this format spells "absent" anyway.
+
+**Assertions** state something a file cannot, so a file that contradicts one is an error rather than
+being silently replaced: `--element-type` (`tuple(3,f64)` states the reading the bytes cannot),
+`--element-shape`, `--resolution`, and `--type`. On a foreign file, which says nothing to
+contradict, an assertion is simply the answer — `--resolution PT1H` names the grid, and the rows are
+then checked against the grid it generates.
+
+**Refused** with `--parquet`, by name rather than silently dropped: `--initial-timestamp`,
+`--interval`, `--horizon`, `--count`, `--percentile`, `--scenario-count`, `--layout`, `--owner-map`,
+`--owner-id-from`. The values imply the grid — a `SingleTimeSeries`' anchor is its first timestamp
+and a forecast's windows are its `issue_time` column — so a flag naming one is either redundant or a
+contradiction nothing should have to adjudicate, and `--layout` describes a CSV's columns. A foreign
+**forecast** — a values file with an `issue_time` column and no series file — is consequently not
+supported; export one and keep both halves.
 
 ## Querying it
 

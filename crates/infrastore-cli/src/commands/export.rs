@@ -537,9 +537,16 @@ fn check_parquet_destination(dir: &Path) -> Result<(), String> {
     infrastore_parquet::check_destination(dir).map_err(|e| e.to_string())
 }
 
+/// Without the feature there is no destination to check and nothing that could
+/// ever write one, so this is where the export fails.
+///
+/// It runs before the selection is resolved, which is the only place the failure
+/// is reliable: a selector matching nothing returns early and never reaches
+/// [`write_parquet`], so a lean binary used to report "exported 0" for a command
+/// it cannot carry out.
 #[cfg(not(feature = "parquet"))]
 fn check_parquet_destination(_dir: &Path) -> Result<(), String> {
-    Ok(())
+    Err(crate::commands::without_parquet())
 }
 
 #[cfg(not(feature = "parquet"))]
@@ -548,9 +555,5 @@ fn write_parquet(
     _pairs: &[(TimeSeriesMetadata, TimeSeriesData)],
     _format: Format,
 ) -> Result<(), String> {
-    Err(
-        "this infrastore was built without Parquet support; rebuild with \
-         `cargo install infrastore-cli --features parquet`"
-            .to_string(),
-    )
+    Err(crate::commands::without_parquet())
 }

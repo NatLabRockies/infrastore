@@ -830,3 +830,74 @@ CLI forecast test keep an `#[ignore]` whose reason now names phase 3. They still
 new reader, so the attribute is the only thing phase 3 removes. (Phase 5 renamed the file to
 `partition_round_trip.rs`, and `long_export.rs` to `partition_export.rs`, since "long table" is not
 what either describes any more.)
+
+### 7.25 A partition's halves must agree before they are joined (§2.7, decided 2026-09-08)
+
+The merge join pairs by **file name**, and a name is easy to arrange by accident: copy one half of
+one export next to the other half of another and the stems match while the contents do not. If the
+two happen to share array keys the join succeeds and the checksum passes — the values really do hash
+to what the values file says — while every catalog field comes from the wrong export. Pairing a UTC
+values file with an `unspecified` series file changes a series' `time_reference` silently, and the
+values file has nothing in it that could object.
+
+**Decision:** compare the footers before streaming. Each half carries the role it plays and the
+whole `PartitionKey` — `time_series_type`, `element_type`, `element_shape`, `time_reference` — so a
+disagreement in any of them is refused naming the field and both files. `SeriesReader` keeps its
+footer for this rather than dropping it after the version check. Two **unmarked** files named as a
+pair are left alone, since a pair of foreign files is not something this format can have opinions
+about; one marked and one not is refused, because our export writes the marker on both.
+
+### 7.26 Every column of a marked file is checked before a row is read (§2.4, found 2026-09-08)
+
+"Every column is required" is the payoff the partitioning buys, and the reader was not keeping it:
+`text_column` returns `None` for an absent column, `cell` turns that into the empty string, and
+`build` reads the empty string as absent. So a series file with `features` projected away imported
+an empty feature set — and `features` is part of a series' `KeyIdentity`, so every row landed under
+an identity nobody named, without a word.
+
+**Decision:** a file carrying the format marker is held to the complete per-type column set for its
+role, checked by name against the Arrow schema before any row is read, and a missing column is
+refused naming it. `table::required_columns` is the single list, and a unit test asserts it equals
+what `PartitionSchema::new` emits for every type and both roles, so the two cannot drift. Files
+**without** the marker keep every fallback: a foreign file is allowed to carry two columns and let
+the inline options say the rest, which is the whole point of §2.7's foreign-file rules.
+
+### 7.27 The grid flags are refused with `--parquet`, not dropped (§2.10, decided 2026-09-08)
+
+§2.10 says "inline flags override a column for every series in the partition", and `--parquet`
+honoured six of them and silently ignored the rest. Three groups, three answers:
+
+- **Overrides.** `--units`, `--quantity-kind`, `--unit-system`, `--component-field` and
+  `--application-data` now reach the reader through `ImportOptions` and replace the column for every
+  series, as §2.10 already promised. An empty string clears the descriptor, since the empty string
+  is how this format writes "absent" (§2.8).
+- **Assertions.** `--element-shape` and `--resolution` join `--element-type` and `--type`: they must
+  equal what the file implies, a contradiction is an error rather than a silent replacement, and on
+  a foreign file — which says nothing to contradict — they are what names the reading. A
+  `--resolution` on a foreign grid file is then checked against the grid it _generates_, not against
+  successive differences.
+- **Refused.** `--initial-timestamp`, `--interval`, `--horizon`, `--count`, `--percentile`,
+  `--scenario-count`, `--layout`, and (added on the same reasoning, since they are `--layout`'s
+  companions) `--owner-map` and `--owner-id-from`. The values imply the grid — a `SingleTimeSeries`'
+  anchor is its first timestamp, a forecast's windows are its `issue_time` column — so a flag naming
+  one is either redundant or a contradiction nothing should have to adjudicate, and `--layout`
+  describes a CSV's columns, which a Parquet file does not have.
+
+The consequence to record: **a foreign forecast is not supported.** A values file with an
+`issue_time` column and no series file beside it has the coordinates but not the grid, and §2.7
+gives no way to supply one — the refused flags are exactly what would have to describe it. Adding it
+would mean accepting `--interval`, `--horizon`, `--count` and `--percentile`/`--scenario-count` for
+a foreign file only, building the lane labels from the flags rather than the rows, and deciding what
+a partial cube means; none of that is asked for, and a forecast that came from an infrastore export
+has its series file. The remedy today is to keep both halves.
+
+### 7.28 A lean build must refuse a Parquet export before the selection (§2.10, fixed 2026-09-08)
+
+`check_parquet_destination` runs before the selector is resolved, so that "exported 0" cannot leave
+an earlier export standing (Finding 7.20). In a build without the `parquet` feature it returned
+`Ok`, and the empty-selection path then returned before ever reaching `write_parquet` — so
+`-f parquet export --dir` with a selector matching nothing _succeeded_ on a binary that cannot write
+Parquet at all, reporting a zero. It now returns the same refusal, and the message itself is one
+string in `commands::without_parquet` rather than two copies that had already drifted apart in
+wording. A `#[cfg(not(feature = "parquet"))]` test in `cli_workflows.rs` covers both the empty and
+the matching selection, and `add --parquet` saying the same thing.

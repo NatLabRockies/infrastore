@@ -10,7 +10,7 @@ use std::path::Path;
 use infrastore_core::{
     AddRequest, Descriptors, Deterministic, ElementType, Features, NonSequentialTimeSeries,
     PersistentTimeSeries, Probabilistic, Scenarios, SingleTimeSeries, TimeReference,
-    TimeSeriesData, TimeSeriesType, UnitSystem,
+    TimeSeriesData, TimeSeriesType,
 };
 use serde::Deserialize;
 
@@ -557,12 +557,11 @@ impl Descriptor {
     /// spelling names the valid ones in the error, instead of producing serde's
     /// "unknown variant" against a field the user cannot see the type of.
     fn descriptors(&self, element_type: ElementType) -> Result<Descriptors, String> {
-        let unit_system = match self.unit_system.as_deref() {
-            None => None,
-            Some(s) => Some(UnitSystem::parse(s).ok_or_else(|| {
-                format!("invalid unit_system {s:?}; expected natural_units or component_base")
-            })?),
-        };
+        let unit_system = self
+            .unit_system
+            .as_deref()
+            .map(crate::parse::parse_unit_system)
+            .transpose()?;
         Ok(Descriptors {
             element_type,
             units: self.units.clone(),

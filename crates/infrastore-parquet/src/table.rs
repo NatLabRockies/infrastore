@@ -199,6 +199,78 @@ fn instant(at: DateTime<Utc>) -> String {
     at.to_rfc3339_opts(SecondsFormat::AutoSi, true)
 }
 
+/// Every column a file of this role and type must carry, in schema order.
+///
+/// The single source of truth for "the format promises every column is
+/// required": [`PartitionSchema::new`] builds these fields and the reader checks
+/// for them by name before it reads a row, so a file of ours that is missing one
+/// is refused naming the column rather than silently defaulting it. A unit test
+/// below holds the two in step.
+///
+/// Only files carrying the [`FORMAT`] marker are held to it. A foreign file is
+/// allowed to carry almost nothing — that is what the inline options are for.
+pub fn required_columns(ts_type: TimeSeriesType, role: &str) -> Vec<&'static str> {
+    if role == ROLE_VALUES {
+        let mut names = vec![DATA_HASH, TIME_AXIS, TIMESTAMP];
+        if ts_type.is_forecast() {
+            names.push(ISSUE_TIME);
+        }
+        match ts_type {
+            TimeSeriesType::Probabilistic => names.push(PERCENTILE),
+            TimeSeriesType::Scenarios => names.push(SCENARIO),
+            _ => {}
+        }
+        names.push(VALUE);
+        return names;
+    }
+    let mut names = vec![
+        DATA_HASH,
+        TIME_AXIS,
+        schema::ID,
+        schema::OWNER_ID,
+        schema::OWNER_TYPE,
+        schema::OWNER_CATEGORY,
+        schema::TIME_SERIES_TYPE,
+        schema::NAME,
+    ];
+    if ts_type == TimeSeriesType::SingleTimeSeries || ts_type.is_forecast() {
+        names.push(schema::INITIAL_TIMESTAMP);
+        names.push(schema::RESOLUTION);
+    }
+    if ts_type == TimeSeriesType::SingleTimeSeries {
+        names.push(schema::LENGTH);
+    }
+    if ts_type.is_forecast() {
+        names.push(schema::INTERVAL);
+        names.push(schema::HORIZON);
+        names.push(schema::COUNT);
+    }
+    names.extend([
+        schema::FEATURES,
+        schema::ELEMENT_TYPE,
+        schema::ELEMENT_SHAPE,
+        schema::TIME_REFERENCE,
+        schema::UNITS,
+        schema::QUANTITY_KIND,
+        schema::UNIT_SYSTEM,
+        schema::COMPONENT_FIELD,
+        schema::APPLICATION_DATA,
+    ]);
+    names
+}
+
+/// The footer keys that describe the **partition**, as opposed to the file.
+///
+/// Both halves of a pair carry them and must agree: they are the same
+/// `PartitionKey` written twice, so a disagreement means the two files came from
+/// different exports.
+pub const PARTITION_KEYS: [&str; 4] = [
+    schema::TIME_SERIES_TYPE,
+    schema::ELEMENT_TYPE,
+    schema::ELEMENT_SHAPE,
+    schema::TIME_REFERENCE,
+];
+
 /// The two Arrow schemas one partition writes, plus what the partition settled
 /// on.
 pub struct PartitionSchema {
@@ -479,4 +551,46 @@ pub fn is_composite(element_type: ElementType) -> bool {
         element_type,
         ElementType::Scalar(_) | ElementType::Tuple { .. }
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use infrastore_core::Dtype;
+
+    /// [`required_columns`] is what the reader checks for; the schemas are what
+    /// the writer emits. They are two lists of the same thing, so this holds
+    /// them in step -- a column added to one and not the other would otherwise
+    /// be an export no import accepts, or a promise the reader does not keep.
+    #[test]
+    fn the_required_columns_are_exactly_what_the_schemas_carry() {
+        for ts_type in [
+            TimeSeriesType::SingleTimeSeries,
+            TimeSeriesType::NonSequentialTimeSeries,
+            TimeSeriesType::PersistentTimeSeries,
+            TimeSeriesType::Deterministic,
+            TimeSeriesType::Probabilistic,
+            TimeSeriesType::Scenarios,
+        ] {
+            let key = PartitionKey {
+                time_series_type: ts_type,
+                value_kind: ValueKind::Dense {
+                    dtype: Dtype::F64,
+                    shape: Vec::new(),
+                },
+                time_reference: Some(TimeReference::Utc),
+            };
+            let table = PartitionSchema::new(key, None).expect("the schemas should build");
+            for (role, schema) in [(ROLE_VALUES, &table.values), (ROLE_SERIES, &table.series)] {
+                let written: Vec<&str> =
+                    schema.fields().iter().map(|f| f.name().as_str()).collect();
+                assert_eq!(
+                    written,
+                    required_columns(ts_type, role),
+                    "{} {role}",
+                    ts_type.as_str()
+                );
+            }
+        }
+    }
 }

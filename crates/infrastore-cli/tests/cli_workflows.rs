@@ -4815,6 +4815,50 @@ fn a_directory_import_commits_partition_by_partition() {
     assert_eq!(rows[0]["name"], "load");
 }
 
+/// A build without the feature must say so, whatever the selector matched.
+///
+/// Only compiled into a lean test build
+/// (`--no-default-features --features vendored`), which is what the flags are
+/// there to be exercised by: the default build has the feature and would take
+/// the real path.
+#[cfg(not(feature = "parquet"))]
+#[test]
+fn a_lean_build_refuses_a_parquet_export_even_when_nothing_matches() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("lean.h5");
+    seed_one(dir.path(), &store);
+    let out = dir.path().join("out");
+
+    // The empty-selection path returns before anything is written, so this is
+    // the case that used to report "exported 0" for a command the binary cannot
+    // carry out at all.
+    let err = run_err(
+        &store,
+        &[
+            "-f",
+            "parquet",
+            "export",
+            "--dir",
+            out.to_str().unwrap(),
+            "--name-glob",
+            "matches_nothing_*",
+        ],
+    );
+    assert!(err.contains("without Parquet support"), "{err}");
+    assert!(!out.exists(), "nothing is written either");
+
+    // And the same for a selection that does match, which reaches the writer.
+    let err = run_err(
+        &store,
+        &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
+    );
+    assert!(err.contains("without Parquet support"), "{err}");
+
+    // `add --parquet` says the same thing, from the same string.
+    let err = run_err(&store, &["add", "--parquet", out.to_str().unwrap()]);
+    assert!(err.contains("without Parquet support"), "{err}");
+}
+
 #[cfg(feature = "parquet")]
 #[test]
 fn a_stale_parquet_directory_is_refused_even_when_nothing_matches() {
@@ -5074,6 +5118,164 @@ fn a_series_file_without_its_partner_is_refused() {
 
     let err = run_err(&dest, &["add", "--parquet", out.to_str().unwrap()]);
     assert!(err.contains("not there"), "{err}");
+}
+
+#[cfg(feature = "parquet")]
+#[test]
+fn inline_descriptors_override_every_series_in_a_partition() {
+    // §2.10 says an inline flag overrides a column for every series in the
+    // partition. The five free-form descriptors used to be parsed and dropped.
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("src.h5");
+    let dest = dir.path().join("dest.h5");
+    seed_one(dir.path(), &source);
+    let out = dir.path().join("out");
+    run(
+        &source,
+        &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
+    );
+
+    run(
+        &dest,
+        &[
+            "add",
+            "--parquet",
+            out.to_str().unwrap(),
+            "--units",
+            "MW",
+            "--quantity-kind",
+            "ActivePower",
+            "--unit-system",
+            "natural_units",
+            "--component-field",
+            "max_active_power",
+            "--application-data",
+            "{\"note\":\"overridden\"}",
+        ],
+    );
+    let listed = run(&dest, &["-f", "json", "list", "--wide"]);
+    let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    let row = &listed["items"][0];
+    assert_eq!(row["units"], "MW", "{row}");
+    assert_eq!(row["quantity_kind"], "ActivePower", "{row}");
+    assert_eq!(row["unit_system"], "natural_units", "{row}");
+    assert_eq!(row["component_field"], "max_active_power", "{row}");
+}
+
+#[cfg(feature = "parquet")]
+#[test]
+fn element_shape_and_resolution_are_assertions_on_a_parquet_import() {
+    // Like --element-type: they state what the file already implies, so a
+    // contradiction is an error rather than a silent replacement.
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("src.h5");
+    let dest = dir.path().join("dest.h5");
+    seed_one(dir.path(), &source);
+    let out = dir.path().join("out");
+    run(
+        &source,
+        &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
+    );
+    let path = out.to_str().unwrap().to_string();
+
+    let err = run_err(&dest, &["add", "--parquet", &path, "--resolution", "PT30M"]);
+    assert!(err.contains("asserted"), "{err}");
+    assert!(err.contains("PT1H"), "{err}");
+
+    let err = run_err(&dest, &["add", "--parquet", &path, "--element-shape", "3"]);
+    assert!(err.contains("asserted"), "{err}");
+    assert!(err.contains("per-step shape"), "{err}");
+
+    // Agreeing with the file is not an error, and changes nothing.
+    run(&dest, &["add", "--parquet", &path, "--resolution", "PT1H"]);
+    let listed = run(&dest, &["-f", "json", "list"]);
+    let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    assert_eq!(listed["items"][0]["resolution"], "PT1H");
+}
+
+#[cfg(feature = "parquet")]
+#[test]
+fn resolution_names_the_grid_of_a_foreign_file() {
+    // The other half of an assertion: a foreign file says nothing to contradict,
+    // so --resolution is simply the answer -- and the rows are then checked
+    // against the grid it generates.
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("foreign.h5");
+    let path = dir.path().join("naked.parquet");
+    write_naked_parquet(&path);
+
+    let err = run_err(
+        &store,
+        &[
+            "add",
+            "--parquet",
+            path.to_str().unwrap(),
+            "--owner-id",
+            "7",
+            "--owner-type",
+            "Bus",
+            "--name",
+            "voltage",
+            "--resolution",
+            "PT30M",
+        ],
+    );
+    assert!(err.contains("does not sit on"), "{err}");
+
+    run(
+        &store,
+        &[
+            "add",
+            "--parquet",
+            path.to_str().unwrap(),
+            "--owner-id",
+            "7",
+            "--owner-type",
+            "Bus",
+            "--name",
+            "voltage",
+            "--resolution",
+            "PT1H",
+        ],
+    );
+    let listed = run(&store, &["-f", "json", "list"]);
+    let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    assert_eq!(listed["items"][0]["resolution"], "PT1H");
+}
+
+#[cfg(feature = "parquet")]
+#[test]
+fn the_grid_flags_are_refused_with_parquet_rather_than_dropped() {
+    // The values imply the grid, so a flag naming one is either redundant or a
+    // contradiction nothing should have to adjudicate -- and it used to be
+    // parsed and thrown away. See Finding 7.27.
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("src.h5");
+    let dest = dir.path().join("dest.h5");
+    seed_one(dir.path(), &source);
+    let out = dir.path().join("out");
+    run(
+        &source,
+        &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
+    );
+    let path = out.to_str().unwrap().to_string();
+
+    for (flag, value) in [
+        ("--initial-timestamp", "2024-01-01T00:00:00Z"),
+        ("--interval", "PT1H"),
+        ("--horizon", "PT2H"),
+        ("--count", "24"),
+        ("--percentile", "0.5"),
+        ("--scenario-count", "3"),
+        ("--layout", "wide"),
+        ("--owner-map", "map.csv"),
+        ("--owner-id-from", "header"),
+    ] {
+        let err = run_err(&dest, &["add", "--parquet", &path, flag, value]);
+        assert!(err.contains(flag), "{flag}: {err}");
+        assert!(err.contains("does not apply"), "{flag}: {err}");
+    }
+    assert!(!dest.exists(), "a refused flag writes nothing");
 }
 
 #[cfg(feature = "parquet")]

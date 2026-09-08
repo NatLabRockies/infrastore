@@ -36,7 +36,7 @@ use chrono::{DateTime, TimeZone, Utc};
 use infrastore_core::{
     Dtype, ElementType, Features, NonSequentialTimeSeries, OwnerCategory, Period,
     PersistentTimeSeries, SingleTimeSeries, TimeReference, TimeSeriesData, TimeSeriesType,
-    TypedArray,
+    TypedArray, UnitSystem,
 };
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 
@@ -72,21 +72,39 @@ pub struct ImportedSeries {
 
 /// What the caller asserts or supplies on top of the files.
 ///
-/// Every field **overrides** the corresponding column for every series in the
-/// partition, except `element_type`, which is an **assertion**: it states the
-/// reading the bytes cannot — whether a `FixedSizeList<double>[3]` is a tuple or
-/// a dense row — and a value contradicting the file is an error rather than a
-/// silent replacement.
+/// Two kinds of field, and the difference is the project's usual one.
+///
+/// An **override** replaces the corresponding column for every series in the
+/// partition: the owner, the name, the feature set, and the five free-form
+/// descriptors. An override of `Some("")` clears a descriptor rather than
+/// storing an empty one, since the empty string is how this format spells
+/// "absent" anyway.
+///
+/// An **assertion** states something the file cannot, and a file that
+/// contradicts it is an error rather than being silently replaced:
+/// `time_series_type`, `element_type` (whether a `FixedSizeList<double>[3]` is a
+/// tuple or a dense row — the bytes cannot say), `element_shape` and
+/// `resolution`. On a foreign file, which says nothing to contradict, an
+/// assertion is simply the answer.
 #[derive(Debug, Default, Clone)]
 pub struct ImportOptions {
     pub time_series_type: Option<TimeSeriesType>,
     pub element_type: Option<ElementType>,
+    /// Assertion: the per-step shape the `value` column carries.
+    pub element_shape: Option<Vec<usize>>,
+    /// Assertion, and the grid for a foreign file whose rows walk one.
+    pub resolution: Option<Period>,
     pub name: Option<String>,
     pub owner_id: Option<i64>,
     pub owner_type: Option<String>,
     pub owner_category: Option<OwnerCategory>,
     pub time_reference: Option<TimeReference>,
     pub features: Option<Features>,
+    pub units: Option<String>,
+    pub quantity_kind: Option<String>,
+    pub unit_system: Option<UnitSystem>,
+    pub component_field: Option<String>,
+    pub application_data: Option<String>,
     /// Waive the `data_hash` comparison, leaving the pair as nothing but a join
     /// key. `--no-checksum` on the CLI; the alternative is to recompute the hash
     /// after editing values.
@@ -240,6 +258,7 @@ pub fn read_partition_with(
     };
     let mut values = ValuesReader::open(&files.values)?;
     let mut rows = SeriesReader::open(series_path)?;
+    check_pair(&values.footer, &rows.footer, files)?;
     let footer = values.footer.clone();
 
     let mut filed = 0usize;
@@ -351,6 +370,130 @@ fn check_format(footer: &BTreeMap<String, String>, path: &Path) -> Result<()> {
     }
 }
 
+/// Refuse two halves that do not describe the same partition.
+///
+/// The merge join pairs by **file name**, and a name is easy to arrange by
+/// accident: copying one half of one export next to the other half of another
+/// leaves two files whose stems match and whose contents do not. If they happen
+/// to share array keys the join succeeds and the checksum passes -- the values
+/// really do hash to what the values file says -- while every catalog field
+/// comes from the wrong export. A UTC values file paired with an `unspecified`
+/// series file changes a series' `time_reference` and says nothing.
+///
+/// So the footers are compared first. Each half carries the whole
+/// `PartitionKey`, written twice by one export, plus the role it plays; a
+/// disagreement in either is refused naming the field and both files.
+///
+/// Two **unmarked** files are left alone: a pair of foreign files that happen to
+/// be named as a partition is not something this format can have opinions about.
+/// One marked and one not is refused, because our export writes the marker on
+/// both.
+fn check_pair(
+    values: &BTreeMap<String, String>,
+    series: &BTreeMap<String, String>,
+    files: &PartitionFiles,
+) -> Result<()> {
+    let series_path = files.series.as_ref().expect("only called on a pair");
+    let names = || {
+        (
+            files.values.display().to_string(),
+            series_path.display().to_string(),
+        )
+    };
+    match (
+        values.contains_key(table::FORMAT),
+        series.contains_key(table::FORMAT),
+    ) {
+        (false, false) => return Ok(()),
+        (true, true) => {}
+        (marked, _) => {
+            let (v, s) = names();
+            let (with, without) = if marked { (v, s) } else { (s, v) };
+            return Err(unsupported(format!(
+                "{with} is an infrastore partition file and {without} is not; a partition's two \
+                 halves are written together, so this pair was assembled by hand"
+            )));
+        }
+    }
+    for (footer, expected, path) in [
+        (values, table::ROLE_VALUES, &files.values),
+        (series, table::ROLE_SERIES, series_path),
+    ] {
+        let role = footer.get(table::ROLE).map(String::as_str);
+        if role != Some(expected) {
+            return Err(unsupported(format!(
+                "{} says it is the `{}` half of a partition, but it is being read as the \
+                 `{expected}` half",
+                path.display(),
+                role.unwrap_or("unnamed"),
+            )));
+        }
+    }
+    for key in table::PARTITION_KEYS {
+        let mine = values.get(key).map(String::as_str).unwrap_or_default();
+        let theirs = series.get(key).map(String::as_str).unwrap_or_default();
+        if mine != theirs {
+            let (v, s) = names();
+            return Err(unsupported(format!(
+                "the two halves disagree about `{key}`: {v} says {mine:?} and {s} says \
+                 {theirs:?}. A partition's halves are one export's, so these came from two."
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Refuse a file of **ours** that is missing a column the format requires.
+///
+/// Every column in both halves is required -- that is what the partitioning
+/// buys -- and the reader used to treat almost all of them as optional, so a
+/// series file with `features` projected away imported an empty feature set and
+/// changed every series' identity without a word. Checked up front, by name,
+/// against the whole per-type column set.
+///
+/// Only files carrying the format marker are held to it: a foreign file is
+/// allowed to carry two columns and let the inline options say the rest.
+fn check_columns(
+    arrow: &arrow::datatypes::Schema,
+    footer: &BTreeMap<String, String>,
+    path: &Path,
+    role: &str,
+) -> Result<()> {
+    if !footer.contains_key(table::FORMAT) {
+        return Ok(());
+    }
+    let Some(declared) = footer
+        .get(schema::TIME_SERIES_TYPE)
+        .filter(|t| !t.is_empty())
+    else {
+        return Err(unsupported(format!(
+            "{} is an infrastore partition file with no `{}` in its footer, so there is no \
+             telling which columns it should have",
+            path.display(),
+            schema::TIME_SERIES_TYPE
+        )));
+    };
+    let ts_type = schema::decode_time_series_type(declared).map_err(unsupported)?;
+    let missing: Vec<&str> = table::required_columns(ts_type, role)
+        .into_iter()
+        .filter(|name| arrow.field_with_name(name).is_err())
+        .collect();
+    if !missing.is_empty() {
+        return Err(unsupported(format!(
+            "{} is the {role} half of a {} partition and is missing {}: every column of this \
+             format is required, so a reader never has to guess what an absent one meant",
+            path.display(),
+            ts_type.as_str(),
+            missing
+                .iter()
+                .map(|n| format!("`{n}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+    Ok(())
+}
+
 /// One array's rows, as the values file holds them.
 struct ValuesGroup {
     key: ArrayKey,
@@ -398,6 +541,7 @@ impl ValuesReader {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         check_format(&footer, path)?;
+        check_columns(builder.schema(), &footer, path, table::ROLE_VALUES)?;
         Ok(Self {
             reader: builder.build().map_err(parquet_err)?,
             footer,
@@ -550,6 +694,9 @@ impl SeriesRow {
 /// Streams a series file, yielding every row of one array key at a time.
 struct SeriesReader {
     reader: ParquetRecordBatchReader,
+    /// Kept rather than dropped after the version check: [`check_pair`] compares
+    /// it against the values half's.
+    footer: BTreeMap<String, String>,
     open: Vec<SeriesRow>,
     ready: VecDeque<Vec<SeriesRow>>,
     seen: HashSet<ArrayKey>,
@@ -567,8 +714,10 @@ impl SeriesReader {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         check_format(&footer, path)?;
+        check_columns(builder.schema(), &footer, path, table::ROLE_SERIES)?;
         Ok(Self {
             reader: builder.build().map_err(parquet_err)?,
+            footer,
             open: Vec::new(),
             ready: VecDeque::new(),
             seen: HashSet::new(),
@@ -678,23 +827,28 @@ fn build(
     let name = resolve_name(row, options)?;
     let owner_id = resolve_owner_id(row, &name, options)?;
     let owner_type = resolve_owner_type(row, &name, options)?;
+    check_element_shape(&group.dims, options)?;
+    let resolution = resolve_resolution(row, &name, options)?;
 
     let rows = Rows {
         timestamps: group.timestamps.clone(),
         issue: group.issue.clone(),
         lanes: group.lanes.clone(),
     };
-    let mut data = assemble(ts_type, row, rows, array, name.clone())?;
+    let mut data = assemble(ts_type, row, resolution, rows, array, name.clone())?;
     let descriptors = infrastore_core::Descriptors {
         element_type,
-        units: optional(&row.units),
-        quantity_kind: optional(&row.quantity_kind),
-        unit_system: optional(&row.unit_system)
-            .map(|text| schema::decode_unit_system(&text).map_err(unsupported))
-            .transpose()?,
+        units: override_text(options.units.as_deref(), &row.units),
+        quantity_kind: override_text(options.quantity_kind.as_deref(), &row.quantity_kind),
+        unit_system: match options.unit_system {
+            Some(system) => Some(system),
+            None => optional(&row.unit_system)
+                .map(|text| schema::decode_unit_system(&text).map_err(unsupported))
+                .transpose()?,
+        },
         time_reference: reference,
-        component_field: optional(&row.component_field),
-        application_data: optional(&row.application_data),
+        component_field: override_text(options.component_field.as_deref(), &row.component_field),
+        application_data: override_text(options.application_data.as_deref(), &row.application_data),
     };
     // Before canonicalizing: the constructor resolved the element type from the
     // array's dtype, and only the declared one says whether these rows are a
@@ -882,6 +1036,66 @@ fn resolve_reference(
     }
 }
 
+/// A free-form descriptor: the option when there is one, else the column.
+///
+/// Either way the empty string is *absent*, which is what this format writes for
+/// an unset descriptor — so `--units ''` clears one rather than storing a series
+/// whose units are the empty string.
+fn override_text(option: Option<&str>, column: &str) -> Option<String> {
+    optional(option.unwrap_or(column))
+}
+
+/// Check an asserted `--element-shape` against the shape the `value` column
+/// carries.
+///
+/// An assertion rather than an override because the column's nesting states it
+/// exactly: there is no reading here the bytes cannot give, only a claim to
+/// agree or disagree with. It earns its place on a foreign file, where it says
+/// out loud what a `FixedSizeList<double>[3]` was meant to be.
+fn check_element_shape(dims: &[usize], options: &ImportOptions) -> Result<()> {
+    let Some(asserted) = &options.element_shape else {
+        return Ok(());
+    };
+    if asserted != dims {
+        return Err(unsupported(format!(
+            "the `{VALUE}` column carries a per-step shape of {dims:?}, but {asserted:?} was \
+             asserted"
+        )));
+    }
+    Ok(())
+}
+
+/// The grid step: the column, checked against an assertion, or the assertion
+/// alone when the file records none.
+///
+/// A foreign file's rows imply a step but do not state one, so `--resolution`
+/// there *names* the grid — and [`single`] then checks the rows really walk it,
+/// against the grid that resolution generates rather than against successive
+/// differences.
+fn resolve_resolution(
+    row: &SeriesRow,
+    name: &str,
+    options: &ImportOptions,
+) -> Result<Option<Period>> {
+    let recorded = if row.resolution.is_empty() {
+        None
+    } else {
+        Some(
+            Period::from_iso8601(&row.resolution)
+                .map_err(|e| unsupported(format!("resolution: {e}")))?,
+        )
+    };
+    match (recorded, options.resolution) {
+        (Some(from_file), Some(asserted)) if from_file != asserted => Err(unsupported(format!(
+            "series '{name}' records a resolution of {}, but {} was asserted",
+            from_file.to_iso8601(),
+            asserted.to_iso8601()
+        ))),
+        (Some(from_file), _) => Ok(Some(from_file)),
+        (None, asserted) => Ok(asserted),
+    }
+}
+
 /// Compare the recorded `data_hash` against the group as re-encoded.
 ///
 /// The key doubles as a checksum, which matters more here than it would in one
@@ -914,28 +1128,19 @@ fn verify_checksum(
 fn assemble(
     ts_type: TimeSeriesType,
     row: &SeriesRow,
+    resolution: Option<Period>,
     rows: Rows,
     array: TypedArray,
     name: String,
 ) -> Result<TimeSeriesData> {
     if ts_type.is_forecast() {
-        return forecast(ts_type, row, rows, array, name);
+        return forecast(ts_type, row, resolution, rows, array, name);
     }
     let Rows { timestamps, .. } = rows;
     match ts_type {
-        TimeSeriesType::SingleTimeSeries => {
-            let resolution = if row.resolution.is_empty() {
-                None
-            } else {
-                Some(
-                    Period::from_iso8601(&row.resolution)
-                        .map_err(|e| unsupported(format!("resolution: {e}")))?,
-                )
-            };
-            Ok(TimeSeriesData::SingleTimeSeries(single(
-                timestamps, array, &name, resolution,
-            )?))
-        }
+        TimeSeriesType::SingleTimeSeries => Ok(TimeSeriesData::SingleTimeSeries(single(
+            timestamps, array, &name, resolution,
+        )?)),
         TimeSeriesType::NonSequentialTimeSeries => Ok(TimeSeriesData::NonSequentialTimeSeries(
             NonSequentialTimeSeries::new(timestamps, array, name).map_err(unsupported)?,
         )),
@@ -1305,11 +1510,12 @@ fn read_lanes(batch: &RecordBatch) -> Result<Option<Vec<LaneValue>>> {
 fn forecast(
     ts_type: TimeSeriesType,
     row: &SeriesRow,
+    resolution: Option<Period>,
     rows: Rows,
     array: TypedArray,
     name: String,
 ) -> Result<TimeSeriesData> {
-    let resolution = required_period(&row.resolution, "resolution", &name)?;
+    let resolution = resolution.ok_or_else(|| missing_grid("resolution", &name))?;
     let interval = required_period(&row.interval, "interval", &name)?;
     let horizon = required_period(&row.horizon, "horizon", &name)?;
     if rows.issue.len() != rows.timestamps.len() {
@@ -1593,12 +1799,16 @@ fn step_of(
 
 fn required_period(text: &str, column: &str, name: &str) -> Result<Period> {
     if text.is_empty() {
-        return Err(unsupported(format!(
-            "series '{name}' is a forecast and needs a `{column}`: the rows say where each \
-             value belongs, not what the grid it belongs to is"
-        )));
+        return Err(missing_grid(column, name));
     }
     Period::from_iso8601(text).map_err(|e| unsupported(format!("{column}: {e}")))
+}
+
+fn missing_grid(column: &str, name: &str) -> infrastore_core::TimeSeriesError {
+    unsupported(format!(
+        "series '{name}' is a forecast and needs a `{column}`: the rows say where each value \
+         belongs, not what the grid it belongs to is"
+    ))
 }
 
 /// The stored cube and its leading axes, for hashing.

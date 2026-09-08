@@ -198,10 +198,19 @@ shared by a thousand components from being written a thousand times.
 
 `add --parquet <PATH>` reads them back, from a file, a directory, or a partition stem
 (`out/SingleTimeSeries.f64.utc` names the pair). The import is a merge join over the two halves, one
-transaction per partition, and a dangling key on either side is an error. `--no-checksum` waives the
-`data_hash` comparison for values edited in a query engine. [Parquet layout](parquet-format.md) is
-the format reference — both column sets, the array key, `time_axis` per type, footer keys, and the
-rules the import applies to a foreign file.
+transaction per partition, and a dangling key on either side is an error — as is a pair whose
+footers disagree about the partition they describe, which is what half of one export beside half of
+another looks like. `--no-checksum` waives the `data_hash` comparison for values edited in a query
+engine.
+
+The inline flags split three ways: the owner, the name, the features and the five free-form
+descriptors are **overrides**; `--element-type`, `--element-shape`, `--resolution` and `--type` are
+**assertions**, which a contradicting file turns into an error and which name the reading for a
+foreign file; and the grid flags (`--initial-timestamp`, `--interval`, `--horizon`, `--count`,
+`--percentile`, `--scenario-count`) and the CSV layout flags (`--layout`, `--owner-map`,
+`--owner-id-from`) are **refused**, because the values already carry the grid.
+[Parquet layout](parquet-format.md) is the format reference — both column sets, the array key,
+`time_axis` per type, footer keys, and the rules the import applies to a foreign file.
 
 Three limits on the export, all deliberate:
 

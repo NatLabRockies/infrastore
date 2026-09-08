@@ -745,6 +745,129 @@ fn a_deterministic_single_time_series_points_at_transform() {
     );
 }
 
+// ---- Crossed and truncated halves -------------------------------------------
+
+/// Export one series into its own directory, returning the pair.
+fn export_one(dir: &Path, data: TimeSeriesData) -> infrastore_parquet::WrittenPartition {
+    let series = stored(plain(vec![(1, data)]));
+    let mut report = write_partitions(dir, &series).expect("export");
+    report.partitions.pop().expect("one partition")
+}
+
+#[test]
+fn crossed_halves_are_refused_by_their_footers() {
+    // The join pairs by *file name*, which is easy to arrange by accident: half
+    // of one export beside half of another. These two describe the same array --
+    // same values, same grid, so the same key -- and differ only in a spelling
+    // the values file cannot show, which is exactly the case a checksum cannot
+    // catch.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let zoned = dir.path().join("zoned");
+    let bare = dir.path().join("bare");
+
+    let with_zone = export_one(&zoned, hourly("load", &[1.0, 2.0, 3.0]));
+    let without = export_one(
+        &bare,
+        TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+            t0(),
+            Duration::hours(1),
+            TypedArray::from_f64(vec![3], &[1.0, 2.0, 3.0]),
+            "load",
+        )),
+    );
+
+    // Put the unspecified partition's series half under the UTC one's stem.
+    std::fs::copy(&without.series_path, &with_zone.series_path).unwrap();
+    let crossed = PartitionFiles {
+        stem: with_zone.stem.clone(),
+        values: with_zone.values_path.clone(),
+        series: Some(with_zone.series_path.clone()),
+    };
+
+    let err = read_partition(&crossed, &ImportOptions::default()).expect_err("two exports");
+    assert!(err.to_string().contains("time_reference"), "{err}");
+    assert!(err.to_string().contains("utc"), "{err}");
+    assert!(err.to_string().contains("unspecified"), "{err}");
+}
+
+#[test]
+fn a_half_read_as_the_wrong_role_is_refused() {
+    // Both halves carry the role they play, so a values file handed over as a
+    // series file is refused by name rather than by whichever column it turns
+    // out not to have.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let written = export_one(dir.path(), hourly("load", &[1.0, 2.0]));
+    let doubled = PartitionFiles {
+        stem: written.stem.clone(),
+        values: written.values_path.clone(),
+        series: Some(written.values_path.clone()),
+    };
+
+    let err = read_partition(&doubled, &ImportOptions::default()).expect_err("wrong role");
+    assert!(err.to_string().contains("values"), "{err}");
+    assert!(err.to_string().contains("series"), "{err}");
+}
+
+#[test]
+fn one_marked_half_beside_an_unmarked_one_is_refused() {
+    // Our export writes the marker on both, so a marked half next to an unmarked
+    // one was assembled by hand.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let written = export_one(dir.path(), hourly("load", &[1.0, 2.0]));
+    let (schema, batch) = read_one(&written.series_path);
+    let stripped = std::sync::Arc::new(arrow::datatypes::Schema::new(schema.fields().clone()));
+    write_batch(
+        &written.series_path,
+        &arrow::array::RecordBatch::try_new(stripped, batch.columns().to_vec()).unwrap(),
+    );
+
+    let err = read_partition(&pair_of(&written), &ImportOptions::default())
+        .expect_err("half a partition");
+    assert!(err.to_string().contains("assembled by hand"), "{err}");
+}
+
+#[test]
+fn a_series_file_missing_a_required_column_is_refused() {
+    // `features` is part of a series' identity, so reading a file without it as
+    // "no features" files every row under an identity nobody named. Every column
+    // of this format is required; the reader now says so.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let written = export_one(dir.path(), hourly("load", &[1.0, 2.0]));
+    let (schema, batch) = read_one(&written.series_path);
+    let keep: Vec<usize> = (0..schema.fields().len())
+        .filter(|i| schema.field(*i).name() != "features")
+        .collect();
+    write_batch(
+        &written.series_path,
+        &batch.project(&keep).expect("project"),
+    );
+
+    let err = read_partition(&pair_of(&written), &ImportOptions::default())
+        .expect_err("a required column");
+    assert!(err.to_string().contains("`features`"), "{err}");
+    assert!(err.to_string().contains("required"), "{err}");
+}
+
+#[test]
+fn a_values_file_missing_a_required_column_is_refused() {
+    // Half the array key, dropped: every row would key on the empty axis and the
+    // whole file would read as one array.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let written = export_one(dir.path(), hourly("load", &[1.0, 2.0]));
+    let (schema, batch) = read_one(&written.values_path);
+    let keep: Vec<usize> = (0..schema.fields().len())
+        .filter(|i| schema.field(*i).name() != "time_axis")
+        .collect();
+    write_batch(
+        &written.values_path,
+        &batch.project(&keep).expect("project"),
+    );
+
+    let err = read_partition(&pair_of(&written), &ImportOptions::default())
+        .expect_err("a required column");
+    assert!(err.to_string().contains("`time_axis`"), "{err}");
+}
+
 // ---- Foreign values files ---------------------------------------------------
 //
 // A values file with no series file beside it. It may be a stranger's Parquet,
@@ -1141,6 +1264,15 @@ fn a_contradicting_assertion_is_an_error() {
 /// The one partition an export wrote, as the pair the import takes.
 fn pair(report: &infrastore_parquet::ExportReport) -> PartitionFiles {
     let written = &report.partitions[0];
+    PartitionFiles {
+        stem: written.stem.clone(),
+        values: written.values_path.clone(),
+        series: Some(written.series_path.clone()),
+    }
+}
+
+/// One written partition as the pair the import takes.
+fn pair_of(written: &infrastore_parquet::WrittenPartition) -> PartitionFiles {
     PartitionFiles {
         stem: written.stem.clone(),
         values: written.values_path.clone(),

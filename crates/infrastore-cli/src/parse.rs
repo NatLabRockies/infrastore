@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 
 use chrono::{DateTime, Duration, FixedOffset, NaiveDate, NaiveDateTime, Offset, TimeZone, Utc};
 use infrastore_core::{
-    ElementType, FeatureValue, OwnerCategory, Period, TimeReference, TimeSeriesType,
+    ElementType, FeatureValue, OwnerCategory, Period, TimeReference, TimeSeriesType, UnitSystem,
 };
 
 /// Representative ISO-8601 durations, for the error message a caller sees when
@@ -365,6 +365,17 @@ pub fn parse_owner_category(s: &str) -> Result<OwnerCategory, String> {
             "invalid owner_category '{s}' (use 'Component' or 'SupplementalAttribute')"
         )),
     }
+}
+
+/// Parse a `unit_system`, in the same two spellings the descriptor JSON takes.
+///
+/// Only the two the core defines: unset means *unspecified* rather than natural
+/// units, and there is no flag value for it -- omitting the flag is how it is
+/// said.
+pub fn parse_unit_system(s: &str) -> Result<UnitSystem, String> {
+    UnitSystem::parse(s).ok_or_else(|| {
+        format!("invalid unit_system {s:?}; expected natural_units or component_base")
+    })
 }
 
 /// Parse an `element_type` in its canonical string form. This is the only

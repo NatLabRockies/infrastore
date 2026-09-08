@@ -717,6 +717,7 @@ fn parquet_import(
             "--parquet carries its own descriptors; drop --descriptor and --csv".to_string(),
         );
     }
+    refuse_grid_flags(opts.inline)?;
     let setup = ParquetImport {
         options: parquet_options(opts)?,
         features: inline_features(opts)?,
@@ -905,6 +906,63 @@ impl ParquetSummary {
     }
 }
 
+/// The inline flags that describe a **grid**, which a Parquet import never
+/// takes.
+///
+/// The values imply the grid — a `SingleTimeSeries`' anchor is its first
+/// timestamp and a forecast's windows are its `issue_time` column — so a flag
+/// naming one is either redundant or a contradiction the import would have to
+/// adjudicate. `--layout` and its two companions describe a CSV's column shape,
+/// which a Parquet file does not have. Each is refused by name rather than
+/// silently dropped, which is what they were.
+///
+/// See Finding 7.27: a foreign *forecast* — a values file with an `issue_time`
+/// column and no series file — is not supported, and these flags are what would
+/// have to describe one.
+#[cfg(feature = "parquet")]
+fn refuse_grid_flags(inline: &InlineArgs) -> Result<(), String> {
+    let mut named: Vec<&str> = Vec::new();
+    if inline.initial_timestamp.is_some() {
+        named.push("--initial-timestamp");
+    }
+    if inline.interval.is_some() {
+        named.push("--interval");
+    }
+    if inline.horizon.is_some() {
+        named.push("--horizon");
+    }
+    if inline.count.is_some() {
+        named.push("--count");
+    }
+    if !inline.percentile.is_empty() {
+        named.push("--percentile");
+    }
+    if inline.scenario_count.is_some() {
+        named.push("--scenario-count");
+    }
+    for (present, flag) in [
+        (inline.layout.is_some(), "--layout"),
+        (inline.owner_map.is_some(), "--owner-map"),
+        (inline.owner_id_from.is_some(), "--owner-id-from"),
+    ] {
+        if present {
+            named.push(flag);
+        }
+    }
+    if named.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "{} {} not apply to --parquet: the rows carry the grid ({} is in the values file, and \
+         a forecast's windows are its issue_time column), and --layout describes a CSV's \
+         columns. Drop {}.",
+        named.join(", "),
+        if named.len() == 1 { "does" } else { "do" },
+        "every timestamp",
+        if named.len() == 1 { "it" } else { "them" },
+    ))
+}
+
 #[cfg(feature = "parquet")]
 fn parquet_options(opts: &Options<'_>) -> Result<infrastore_parquet::read::ImportOptions, String> {
     Ok(infrastore_parquet::read::ImportOptions {
@@ -919,6 +977,18 @@ fn parquet_options(opts: &Options<'_>) -> Result<infrastore_parquet::read::Impor
             .element_type
             .as_deref()
             .map(parse::parse_element_type)
+            .transpose()?,
+        // An assertion, like `--element-type`: the `value` column's nesting
+        // already states the per-step shape, so this agrees with it or errors.
+        element_shape: (!opts.inline.element_shape.is_empty())
+            .then(|| opts.inline.element_shape.clone()),
+        // An assertion against the `resolution` column, and the grid itself for
+        // a foreign file that records none.
+        resolution: opts
+            .inline
+            .resolution
+            .as_deref()
+            .map(parse::parse_period)
             .transpose()?,
         name: opts.inline.name.clone(),
         owner_id: opts.inline.owner_id,
@@ -939,6 +1009,19 @@ fn parquet_options(opts: &Options<'_>) -> Result<infrastore_parquet::read::Impor
             })
             .transpose()?,
         features: inline_features(opts)?,
+        // Overrides, applied to every series in the partition, as §2.10 promises
+        // of an inline flag. An empty string clears the descriptor, since that
+        // is how this format spells "absent" in the first place.
+        units: opts.inline.units.clone(),
+        quantity_kind: opts.inline.quantity_kind.clone(),
+        unit_system: opts
+            .inline
+            .unit_system
+            .as_deref()
+            .map(parse::parse_unit_system)
+            .transpose()?,
+        component_field: opts.inline.component_field.clone(),
+        application_data: opts.inline.application_data.clone(),
         skip_checksum: opts.no_checksum,
     })
 }
@@ -986,9 +1069,7 @@ fn parquet_dry_run(
 
 #[cfg(not(feature = "parquet"))]
 fn without_parquet() -> String {
-    "this infrastore was built without Parquet support; rebuild with \
-     `cargo install infrastore-cli --features parquet`"
-        .to_string()
+    crate::commands::without_parquet()
 }
 
 /// Report what a Parquet load would write, per partition.
