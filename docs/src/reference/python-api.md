@@ -719,11 +719,11 @@ checked against the grid the resolution generates rather than against successive
 result to `Store.add_time_series` with the owner you want, as you would any other series.
 
 `from_arrow` covers the three static types. A **dense forecast** has a file shape of its own -- a
-long table of `issue_time`, `target_time`, `value` (plus `percentile` or `scenario`), which the CLI
-writes and reads with `export -f parquet` and `add --parquet`. `to_arrow_windows()` is deliberately
-not that shape: it returns a dict of per-window tables, which is an in-memory analysis form rather
-than anything that could be one Parquet file, so the two are not competing spellings of the same
-thing.
+values file of `issue_time`, `timestamp`, `value` (plus `percentile` or `scenario`) keyed by the
+array, which the CLI writes and reads with `export -f parquet` and `add --parquet`.
+`to_arrow_windows()` is deliberately not that shape: it returns a dict of per-window tables, which
+is an in-memory analysis form rather than anything that could be one Parquet file, so the two are
+not competing spellings of the same thing.
 
 ## `NonSequentialTimeSeries`
 

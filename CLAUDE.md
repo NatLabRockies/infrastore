@@ -22,17 +22,26 @@ SQLite. It exposes multiple bindings over a shared core:
   cross is into the _libraries_ — `infrastore-core`, `infrastore-py`, and `infrastore-ffi` never
   link it, and `cargo tree --edges normal` on each is the check. The feature stays switchable
   (`--no-default-features --features vendored`), and a binary without it still parses `-f parquet`
-  and `--parquet` and names the feature to rebuild with. `export -f parquet --dir` writes
-  **partitioned long tables** — many series per file, one row per value, every catalog column a
-  table column — and `add --parquet` reads a file or a directory back. One file per
-  `(time_series_type, value type, time_reference)` triple, because those three cannot vary inside
-  one table without nullable or ill-typed columns; the payoff is that **every column is required**,
-  which the five free-form descriptors pay for with the empty string. Composite kinds partition by
-  kind alone and are re-padded to the file's widest series, so their `data_hash` is taken over the
-  decoded points. Rows are contiguous per series and the import streams row groups, grouping by the
-  `KeyIdentity` columns and ignoring `id`. Python's `to_arrow()`/`from_arrow()` are per-series
-  in-memory conveniences, **not** this format — "one schema, two producers" was withdrawn. See
-  `docs/src/reference/parquet-format.md`.
+  and `--parquet` and names the feature to rebuild with. `export -f parquet --dir` writes a
+  **normalized, partitioned** layout — per `(time_series_type, value type, time_reference)` triple,
+  two files sharing a stem: `<stem>.values.parquet` holds every distinct array once, one row per
+  value, and `<stem>.series.parquet` holds one catalog row per series. Both carry the **array key**
+  `(data_hash, time_axis)` and are sorted by it. The triple partitions because those three cannot
+  vary inside one table without nullable or ill-typed columns; the payoff is that **every column is
+  required**, which the five free-form descriptors pay for with the empty string. The split is
+  because the store is content-addressed: a thousand components sharing one profile hold one array,
+  and a denormalized table would write it a thousand times. `time_axis` spells whatever decides a
+  series' timestamps for its type (a repeating interval for a grid, the `timestamps_hash` for an
+  irregular axis, count/interval/horizon/resolution for a forecast) and is read off the values
+  exported, not the catalog row. Composite kinds partition by kind alone and are re-padded to the
+  partition's widest series, so their `data_hash` is taken over the decoded points — which is also
+  what lets two paddings of one curve share a values group. `add --parquet` takes a file, a
+  directory, or a partition stem and reads the pair as a **merge join**, one transaction per
+  partition, with a dangling key on either side an error and `--no-checksum` waiving the `data_hash`
+  check. A values file with no series file beside it is a **foreign** file. An empty series
+  **fails** the export, naming every one and writing nothing. Python's `to_arrow()`/`from_arrow()`
+  are per-series in-memory conveniences, **not** this format — "one schema, two producers" was
+  withdrawn. See `docs/src/reference/parquet-format.md`.
 
 **Current feature coverage:** `SingleTimeSeries`, `NonSequentialTimeSeries`, and
 `PersistentTimeSeries` are implemented end-to-end (read+write in the Rust core, C ABI, Python,

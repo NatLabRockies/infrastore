@@ -190,19 +190,30 @@ infrastore --store demo.h5 -f parquet export --name-glob 'load_*' --dir out/
 
 #### Parquet
 
-`-f parquet export --dir <DIR>` writes **partitioned long tables**: many series per file, one row
-per value, and every catalog column a table column. `add --parquet <PATH>` reads them back, from a
-file or a whole directory. [Parquet layout](parquet-format.md) is the format reference — columns,
-partitioning, filenames, footer keys, and the rules the import applies to a foreign file.
+`-f parquet export --dir <DIR>` writes one **file pair** per `(type, value type, time reference)`
+partition: `<stem>.values.parquet` holds every distinct array once, one row per value, and
+`<stem>.series.parquet` holds one catalog row per series. Both carry the array key
+`(data_hash, time_axis)` and are sorted by it, so they join on it — which is what keeps a profile
+shared by a thousand components from being written a thousand times.
+
+`add --parquet <PATH>` reads them back, from a file, a directory, or a partition stem
+(`out/SingleTimeSeries.f64.utc` names the pair). The import is a merge join over the two halves, one
+transaction per partition, and a dangling key on either side is an error. `--no-checksum` waives the
+`data_hash` comparison for values edited in a query engine. [Parquet layout](parquet-format.md) is
+the format reference — both column sets, the array key, `time_axis` per type, footer keys, and the
+rules the import applies to a foreign file.
 
 Three limits on the export, all deliberate:
 
 - **`--dir` is required.** Parquet's footer sits at the end of the file and its offsets point
   backwards, so a writer has to seek and a pipe cannot.
-- **`--dir` must hold no `.parquet` files yet.** `add --parquet <dir>` imports every one it finds,
-  so a narrower export written over an earlier one would leave the earlier partitions in place for
-  the next import to file silently. The export neither merges nor sweeps; empty the directory or
-  name a fresh one. Other files in it are not in the way.
+- **`--dir` must hold no `.parquet` files yet.** `add --parquet <dir>` imports every partition it
+  finds, so a narrower export written over an earlier one would leave the earlier partitions in
+  place for the next import to file silently. The export neither merges nor sweeps; empty the
+  directory or name a fresh one. Other files in it are not in the way.
+- **An empty series fails it.** Every selected series with no values is named, and nothing is
+  written — a series row whose key matches no values rows is indistinguishable from a truncated
+  export, so it is refused rather than represented. Narrow the selection past it.
 - **`-f parquet` is only accepted on `export`.** It is a binary container, not a rendering of a
   result; there is no `list -f parquet`.
 
@@ -471,7 +482,7 @@ infrastore completions zsh > ~/.zfunc/_infrastore
 infrastore --store <PATH> init [--compression <none|deflate[:LEVEL]>] [--no-shuffle] [--catalog <attached|in-memory>]
 infrastore --store <PATH> add --descriptor <FILE.json|-> [--csv <FILE.csv>] [--dry-run] [--replace] [--batch-size N] [-q|--quiet] [--compression <SPEC>] [--no-shuffle] [--catalog <MODE>]
 infrastore --store <PATH> add --csv <FILE.csv> --owner-id <I> --owner-type <T> --name <N> --type <T> --element-type <E> [DESCRIPTOR FIELDS...]
-infrastore --store <PATH> add --parquet <FILE.parquet> [--parquet <FILE.parquet>...] [DESCRIPTOR FIELDS...]
+infrastore --store <PATH> add --parquet <PATH> [--parquet <PATH>...] [--no-checksum] [DESCRIPTOR FIELDS...]
 infrastore --store <PATH> merge --from <PATH.h5> [SELECTOR...] [--replace] [--dry-run]
 infrastore --store <PATH> list    [SELECTOR...] [--limit N] [--wide]
 infrastore --store <PATH> get     [SELECTOR...] [--time-range START..END] [--limit N | --full] [--tail] [--stride N] [--plot [--plot-width COLS]] [--window N | --issue-time <TS>]

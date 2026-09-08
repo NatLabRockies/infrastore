@@ -350,38 +350,49 @@ infrastore --store demo.h5 -f parquet export --name-glob 'load_*' --dir parquet/
 infrastore --store other.h5 add --parquet parquet/
 ```
 
-What comes out is a handful of **long tables**, not a file per series: many series per file, one row
-per value, and every catalog column a table column, so a reader has the whole row without attaching
-the SQLite catalog. A store with thousands of series would otherwise become thousands of files.
+What comes out is a handful of **partitions**, not a file per series -- a store with thousands of
+series would otherwise become thousands of files. Each partition is a **pair**:
 
 ```text
 parquet/
-  SingleTimeSeries.f64.utc.parquet
-  SingleTimeSeries.f64.America_Denver.parquet
-  NonSequentialTimeSeries.f64.utc.parquet
-  Deterministic.f64.utc.parquet
+  SingleTimeSeries.f64.utc.values.parquet            every distinct array once, one row per value
+  SingleTimeSeries.f64.utc.series.parquet            one catalog row per series
+  SingleTimeSeries.f64.America_Denver.values.parquet
+  SingleTimeSeries.f64.America_Denver.series.parquet
+  Deterministic.f64.utc.values.parquet
+  Deterministic.f64.utc.series.parquet
 ```
 
-One file per `(type, value type, time reference)` triple, because those three cannot vary inside one
+One pair per `(type, value type, time reference)` triple, because those three cannot vary inside one
 table without nullable or ill-typed columns -- a forecast has an `issue_time` and a static series
 does not, and a table has one Arrow type per column. The payoff is that **every column is
-required**, which is worth more to whoever queries the file than the files it costs.
+required**, which is worth more to whoever queries the files than the files it costs.
 
-`add --parquet` takes a file or a whole directory, and commits one transaction per file, so a
-partition that fails leaves the ones already committed alone. A file `export` wrote re-adds with no
-other flag; a foreign file -- one from a dataframe -- carries less, and is told what it is missing:
+The split is the other half of it. The store is content-addressed, so a thousand components sharing
+one profile hold **one** array; writing the catalog row beside every value would write that profile
+a thousand times, and Parquet's compression does not find repeats across pages. So the values file
+holds each array once, keyed by the pair `(data_hash, time_axis)`, and the series file carries that
+same pair beside each catalog row. They join on it.
+
+`add --parquet` takes a file, a whole directory, or a partition stem, and commits one transaction
+per partition, so a partition that fails leaves the ones already committed alone. A pair `export`
+wrote re-adds with no other flag; a foreign file -- one from a dataframe, or a values file whose
+partner was not copied -- carries less, and is told what it is missing:
 
 ```sh
 infrastore --store demo.h5 add --parquet from_pandas.parquet \
     --owner-id 42 --owner-type Generator --name load
 ```
 
-Two things to know. `-f parquet` requires `--dir`, because Parquet's footer sits at the end of the
-file and a writer has to seek back to it -- a pipe cannot. And the `data_hash` column is a checksum
-on the way back in: if you edited values in DuckDB, drop the column.
+Three things to know. `-f parquet` requires `--dir`, because Parquet's footer sits at the end of the
+file and a writer has to seek back to it -- a pipe cannot. The `data_hash` half of the key is a
+checksum on the way back in: if you edited values in DuckDB, recompute it or pass `--no-checksum`.
+And a series with no values **fails** the export, naming every one -- an empty series would be a
+catalog row whose key matches no values rows, which is also what a truncated export looks like.
 
-The full layout -- every column, the partition rules, the filenames, the footer, and what a foreign
-file has to supply -- is in [Parquet Layout](../reference/parquet-format.md).
+The full layout -- both column sets, the array key, the partition rules, the filenames, the footer,
+the merge join, and what a foreign file has to supply -- is in
+[Parquet Layout](../reference/parquet-format.md).
 
 Parquet is on by default, in the released binaries and in `cargo install infrastore-cli` alike. It
 _is_ a cargo feature, so `--no-default-features --features vendored` builds a binary without the
@@ -390,29 +401,45 @@ with, rather than reporting `parquet` as an unknown format.
 
 ### Querying it with DuckDB
 
-The reason to write Parquet rather than to embed a query engine here. Because a file is a long table
-with every catalog column in it, most questions need nothing but the directory:
+The reason to write Parquet rather than to embed a query engine here. Every question starts with the
+same join, on the pair that keys both halves:
 
 ```sql
--- Every partition at once: the columns line up, so the glob is one table.
-SELECT name, owner_id, units, max(value) AS peak
-FROM 'parquet/*.parquet'
-GROUP BY name, owner_id, units;
-
--- One component's day, in its own spelling -- the timestamp column is zoned.
-SELECT timestamp, value
-FROM 'parquet/SingleTimeSeries.f64.America_Denver.parquet'
-WHERE owner_id = 42 AND name = 'load'
-ORDER BY timestamp;
-
--- A forecast: the window is a column, so this is a GROUP BY rather than a join.
-SELECT issue_time, count(*) AS steps, max(value) AS peak
-FROM 'parquet/Deterministic.f64.utc.parquet'
-GROUP BY issue_time
-ORDER BY issue_time;
+SELECT s.name, s.owner_id, s.units, max(v.value) AS peak
+FROM 'parquet/SingleTimeSeries.f64.utc.values.parquet' v
+JOIN 'parquet/SingleTimeSeries.f64.utc.series.parquet' s USING (data_hash, time_axis)
+GROUP BY s.name, s.owner_id, s.units;
 ```
 
-Note what the glob does _not_ mix: `SELECT * FROM 'parquet/*.parquet'` only works across files whose
+Write it once as a view and nothing after has to think about it:
+
+```sql
+CREATE VIEW load AS
+SELECT s.*, v.timestamp, v.value
+FROM 'parquet/SingleTimeSeries.f64.America_Denver.values.parquet' v
+JOIN 'parquet/SingleTimeSeries.f64.America_Denver.series.parquet' s USING (data_hash, time_axis);
+
+-- One component's day, in its own spelling -- the timestamp column is zoned.
+SELECT timestamp, value FROM load
+WHERE owner_id = 42 AND name = 'load'
+ORDER BY timestamp;
+```
+
+That view is the denormalized table the format deliberately does not write. Materializing it costs
+exactly what the split saves; keeping it as a view costs nothing.
+
+A forecast joins the same way, and its window is a column of the values half:
+
+```sql
+SELECT v.issue_time, count(*) AS steps, max(v.value) AS peak
+FROM 'parquet/Deterministic.f64.utc.values.parquet' v
+JOIN 'parquet/Deterministic.f64.utc.series.parquet' s USING (data_hash, time_axis)
+WHERE s.name = 'load_det'
+GROUP BY v.issue_time
+ORDER BY v.issue_time;
+```
+
+Note what a glob does _not_ mix: `'parquet/*.values.parquet'` only works across partitions whose
 columns agree, which is to say within one `time_series_type`. Reading a static partition and a
 forecast one together needs the columns named, since only the latter has `issue_time`.
 
