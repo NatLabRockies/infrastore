@@ -221,9 +221,16 @@ end   # committed if the block returns, rolled back if it throws
 ```
 
 Blocks nest (each level is a savepoint), and the store holds the SQLite write lock until the
-outermost one ends. A transaction does not batch: use `add_time_series_bulk!` inside it for the
-writes themselves. `begin_transaction!` / `commit_transaction!` / `rollback_transaction!` are the
+outermost one ends. `begin_transaction!` / `commit_transaction!` / `rollback_transaction!` are the
 explicit form.
+
+A transaction is also where a **run of single adds** belongs. Nothing it writes is durable until the
+outermost commit, so packed adds inside one are buffered per shape group and written as one block at
+the commit — the datasets `add_time_series_bulk!` of the same series would produce, without having
+to hold the batch yourself. Two things qualify it: the buffer spills a block early once a group
+reaches 1,000 columns or the unwritten arrays cross 128 MiB (an extra dataset, nothing else), and a
+span holding a single array fills a shared-pool slot rather than claiming a dataset one column wide.
+`add_time_series_bulk!` is still the direct way to say it when you already have the batch in hand.
 
 ### Values that are not numbers
 

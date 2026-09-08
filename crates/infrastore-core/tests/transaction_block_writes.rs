@@ -198,6 +198,36 @@ fn one_item_bulk_adds_fill_a_slot_outside_a_transaction_and_coalesce_inside_one(
     );
 }
 
+/// The same, through the buffered guard: a `BulkAdd` holding one request is the
+/// single add too.
+///
+/// `BulkAdd::commit` does not go through `add_time_series_bulk`, so the one-item
+/// test has to live below both of them — in `flush_bulk_add` — or a Rust caller
+/// buffering exactly one request still claims a one-column dataset per commit.
+#[test]
+fn a_one_item_bulk_add_guard_fills_a_slot_outside_a_transaction() {
+    use infrastore_core::storage::common::DEFAULT_COLS_PER_DATASET;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("guarded.h5");
+    {
+        let mut store = create_store(Some(&path), false).unwrap();
+        for owner in 1..4 {
+            let mut batch = store.bulk_add();
+            batch.push(request(owner, owner as f64 * 100.0));
+            batch.commit().unwrap();
+        }
+        store.flush().unwrap();
+    }
+    let layout = packed_layout(&path);
+    assert_eq!(layout.len(), 1, "one shared pool, not three datasets");
+    assert_eq!(layout["sts_f64_s_24_PT1H"].0[0], 24);
+    assert_eq!(
+        layout["sts_f64_s_24_PT1H"].0[1], DEFAULT_COLS_PER_DATASET,
+        "the growth pool's default width, not a block of one"
+    );
+}
+
 /// A transaction spanning a *single* packed add fills a growth-pool slot, the
 /// way that add would outside one — it does not size a dataset to a block of
 /// one.

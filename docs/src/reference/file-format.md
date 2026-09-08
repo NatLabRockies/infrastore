@@ -293,8 +293,14 @@ an open transaction**. Nothing a transaction writes is durable until its outermo
 single add inside one is buffered per pool rather than dropped into a growth-pool slot, and the
 buffered arrays are written with the same block writer at the commit, or when a read needs one of
 them to have a physical position. A loop of single adds inside one transaction therefore produces
-exactly the datasets one bulk add of the same items produces; only an un-transactioned single add
-takes the default width.
+exactly the datasets one bulk add of the same items produces — **so long as the span reaches its
+commit without materializing early**; only an un-transactioned single add takes the default width.
+
+The two limits below are what can break that equivalence, since they bound the buffer and a bulk
+add's own `cols` only by `MAX_CHUNK_BYTES`. 1,002 scalar `f64` adds inside a transaction split at
+1,000 columns, where the bulk add of the same 1,002 writes one dataset; crossing the byte ceiling or
+asking a buffered array for its physical location splits a span the same way. Each split costs an
+extra dataset and nothing else — the datasets are still block-written and chunk-aligned.
 
 Two limits keep that buffer from being unbounded, and both simply write a block out early — the same
 spill a too-wide batch already performs, costing an extra dataset and nothing else:

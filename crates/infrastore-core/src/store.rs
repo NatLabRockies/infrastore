@@ -1997,23 +1997,10 @@ impl Store {
     /// incrementally into shared datasets; inside one, either spelling is
     /// buffered and written as a block (see [`Self::begin_transaction`]).
     ///
-    /// **A single-item batch outside a transaction is the single add.** Sizing a
-    /// dataset to the batch is right for a cohort and wrong for a lone series: a
-    /// batch of one would claim a one-column dataset with an eight-byte chunk,
-    /// and a binding whose `add_time_series` *is* a one-item batch — Julia's,
-    /// through the C ABI — produced one such dataset per call: 19 series of
-    /// 30,500 steps left 19 one-column datasets and a 36 MB file. It therefore
-    /// delegates to the per-column path, which drops the array into the first
-    /// free slot of the shared pool, exactly as [`Self::add`] does. Inside a
-    /// transaction it does not need to: successive one-item batches coalesce
-    /// into one block there, which is the better answer and the one this
-    /// delegation cannot give — and a span that ends up holding just the one
-    /// array fills a slot anyway, by the same rule applied one layer down.
+    /// **A single-item batch outside a transaction is the single add**, whether it
+    /// arrives here or through [`BulkAdd::commit`] — see [`Self::bulk_add`].
     #[tracing::instrument(skip(self, items), fields(count = items.len()))]
     pub fn add_time_series_bulk(&mut self, items: Vec<AddRequest>) -> Result<Vec<TimeSeriesId>> {
-        if items.len() == 1 && !self.in_transaction() {
-            return self.add_per_column(items);
-        }
         self.flush_bulk_add(items)
     }
 
@@ -2109,6 +2096,9 @@ impl Store {
     /// which packs each shape group into batch-sized datasets so the timestamp-
     /// major chunks are filled whole rather than one slow column at a time.
     /// Dropping the guard without committing discards the buffer (writes nothing).
+    ///
+    /// A buffer holding a single request commits as the single add would, for the
+    /// reason [`Self::flush_bulk_add`] gives.
     pub fn bulk_add(&mut self) -> BulkAdd<'_> {
         BulkAdd {
             store: self,
@@ -2122,8 +2112,27 @@ impl Store {
     /// standalone types individually — then insert all associations in one
     /// transaction. All-or-nothing: any metadata error rolls the transaction back
     /// and removes every array staged in this call.
+    ///
+    /// **A batch of one outside a transaction is not a batch.** Sizing a dataset
+    /// to the batch is right for a cohort and wrong for a lone series: a batch of
+    /// one would claim a one-column dataset with an eight-byte chunk, and a
+    /// binding whose `add_time_series` *is* a one-item batch — Julia's, through
+    /// the C ABI — produced one such dataset per call: 19 series of 30,500 steps
+    /// left 19 one-column datasets and a 36 MB file. Such a batch therefore
+    /// delegates to the per-column path, which drops the array into the first
+    /// free slot of the shared pool, exactly as [`Self::add`] does. The test
+    /// sits here rather than in the two public entry points so that both
+    /// [`Self::add_time_series_bulk`] and [`BulkAdd::commit`] get it.
+    ///
+    /// Inside a transaction it does not need to: successive one-item batches
+    /// coalesce into one block there, which is the better answer and the one this
+    /// delegation cannot give — and a span that ends up holding just the one
+    /// array fills a slot anyway, by the same rule applied one layer down.
     #[tracing::instrument(skip(self, items), fields(count = items.len()))]
     fn flush_bulk_add(&mut self, items: Vec<AddRequest>) -> Result<Vec<TimeSeriesId>> {
+        if items.len() == 1 && !self.in_transaction() {
+            return self.add_per_column(items);
+        }
         let mut staged = StagedWrites::default();
         let result = self.flush_bulk_add_staged(items, &mut staged);
         self.settle(staged, result)
@@ -5540,7 +5549,9 @@ impl BulkAdd<'_> {
 
     /// Flush the buffer: write all arrays as batch-sized blocks and insert every
     /// association in one transaction, returning the ids in push order. On any
-    /// error nothing is committed and staged arrays are rolled back.
+    /// error nothing is committed and staged arrays are rolled back. A buffer of
+    /// one outside a transaction fills a growth-pool slot instead of claiming a
+    /// one-column dataset, exactly as [`Store::add_time_series_bulk`] does.
     pub fn commit(mut self) -> Result<Vec<TimeSeriesId>> {
         self.committed = true;
         let items = std::mem::take(&mut self.items);
