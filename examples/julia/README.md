@@ -53,18 +53,19 @@ julia --project=examples/julia examples/julia/single_floats.jl
 
 Read them in this order; each builds on the vocabulary of the one before.
 
-| Script                                                                   | What it demonstrates                                                                               |
-| ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
-| [`single_floats.jl`](./single_floats.jl)                                 | A day of hourly MW and per-unit values; `units`, `quantity_kind`, `unit_system`, `component_field` |
-| [`single_features.jl`](./single_features.jl)                             | One component field, many series: scenario and weather-year tags as identity and as a query        |
-| [`single_fixed_tuples.jl`](./single_fixed_tuples.jl)                     | Active and reactive power as one `tuple(2,f64)` value per timestep, from a `Vector{NTuple{2}}`     |
-| [`single_custom_elements.jl`](./single_custom_elements.jl)               | Cost curves as values: the four function element types                                             |
-| [`nonsequential_floats.jl`](./nonsequential_floats.jl)                   | Measurements at the instants they were taken, with no value in between                             |
-| [`persistent_floats.jl`](./persistent_floats.jl)                         | A step function: a fuel price that holds until the next nomination, and `value_at` any instant     |
-| [`deterministic_floats.jl`](./deterministic_floats.jl)                   | Rolling forecasts: `resolution` / `horizon` / `interval` / `count`, and why windows overlap        |
-| [`deterministic_custom_elements.jl`](./deterministic_custom_elements.jl) | A market offer curve re-submitted every hour — a forecast whose values are curves                  |
-| [`probabilistic_floats.jl`](./probabilistic_floats.jl)                   | p10/p50/p90 forecast bands, and why the band is one-sided at solar noon                            |
-| [`scenarios_floats.jl`](./scenarios_floats.jl)                           | Ensemble members, and what they say that per-hour quantiles cannot                                 |
+| Script                                                                   | What it demonstrates                                                                                                               |
+| ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
+| [`single_floats.jl`](./single_floats.jl)                                 | A day of hourly MW and per-unit values; `units`, `quantity_kind`, `unit_system`, `component_field`                                 |
+| [`single_features.jl`](./single_features.jl)                             | One component field, many series: scenario and weather-year tags as identity and as a query                                        |
+| [`single_fixed_tuples.jl`](./single_fixed_tuples.jl)                     | Active and reactive power as one `tuple(2,f64)` value per timestep, from a `Vector{NTuple{2}}`                                     |
+| [`single_custom_elements.jl`](./single_custom_elements.jl)               | Cost curves as values: the four function element types                                                                             |
+| [`nonsequential_floats.jl`](./nonsequential_floats.jl)                   | Measurements at the instants they were taken, with no value in between                                                             |
+| [`persistent_floats.jl`](./persistent_floats.jl)                         | A step function: a fuel price that holds until the next nomination, and `value_at` any instant                                     |
+| [`deterministic_floats.jl`](./deterministic_floats.jl)                   | Rolling forecasts: `resolution` / `horizon` / `interval` / `count`, and why windows overlap                                        |
+| [`deterministic_custom_elements.jl`](./deterministic_custom_elements.jl) | A market offer curve re-submitted every hour — a forecast whose values are curves                                                  |
+| [`probabilistic_floats.jl`](./probabilistic_floats.jl)                   | p10/p50/p90 forecast bands, and why the band is one-sided at solar noon                                                            |
+| [`scenarios_floats.jl`](./scenarios_floats.jl)                           | Ensemble members, and what they say that per-hour quantiles cannot                                                                 |
+| [`bulk_add_static_reader.jl`](./bulk_add_static_reader.jl)               | A 19-series fleet written one `add_time_series!` at a time inside one `transaction`, then swept hour by hour with a `StaticReader` |
 
 `shared.jl` holds the three components, the load / solar / thermal-derate profiles the scripts draw
 on, and the display helpers. Everything else — every `add_time_series!` and every read — stays
