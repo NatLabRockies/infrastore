@@ -166,7 +166,7 @@ asymmetry is that the read-only gRPC server does not accept any writes:
 | Materialized timestamps       | ✅        | ✅    | ✅              | ✅    | ✅           | ❌          |
 | `from_timestamps` (verified)  | ✅        | ✅    | ✅              | ✅    | ❌           | ❌          |
 | Arrow tables (`to_arrow`)     | ❌        | ❌    | ✅              | ❌    | ❌           | ❌          |
-| Parquet files                 | crate     | ❌    | via `to_arrow`  | ❌    | `-f parquet` | ❌          |
+| Parquet files                 | crate     | ❌    | ❌              | ❌    | `-f parquet` | ❌          |
 | Store summary (`show`)        | ❌        | ❌    | ✅              | ❌    | `store-info` | ❌          |
 | Forecast windows as Arrow     | ❌        | ❌    | `Deterministic` | ❌    | ❌           | ❌          |
 

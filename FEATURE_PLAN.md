@@ -559,3 +559,67 @@ and the `unspecified` literal appears in both the column and the footer. §2.4 s
 the format. The literal is still not a `TimeReference` and `TimeReference::parse` is still
 untouched, so the collision noted above — a series whose reference is literally
 `Zone("unspecified")` — is still accepted rather than engineered around, for the same reason.
+
+### 7.13 Two partitions can want one filename (§2.2, decided 2026-09-07)
+
+§2.2 says the slug function is one-way and the footer carries the exact key, which leaves open what
+happens when two partitions slug alike — and they can: the zones `a/b` and `a_b` both flatten to
+`a_b`. Writing both would mean the second silently overwrote the first. **Decision:** collisions get
+a numeric suffix, assigned in the partition keys' own sort order so a re-run of the same export
+produces the same names. `disambiguate` is the function and it is tested from both input orders.
+
+Ordering the keys needed a total order over `TimeSeriesType` and `TimeReference`, neither of which
+is `Ord` and neither of which should become one for this crate's convenience — neither has a
+meaningful order of its own. `PartitionKey` implements `Ord` over a rendered form instead.
+
+### 7.14 A composite series' `data_hash` is not the catalog's (§2.6, decided 2026-09-07)
+
+§2.6 says the import "compares the hash of the **decoded** points for composite kinds rather than of
+the packed bytes", which is only coherent if the export writes that hash — there is nothing else for
+the import to compare a decoded-points hash against. **Decision:** the `data_hash` column holds
+`hash(canonical(array))`, where the canonical form is the array itself for every kind but the
+composite ones and its minimum-width re-encoding for those. `encode(decode(x))` drops the padding,
+because `encode` derives the width from the widest timestep.
+
+The consequence to know, and the format reference says it: for a composite series this column is
+**not** the `data_hash` the catalog holds, and `id` is the way back to that. Every other kind's is
+identical to the catalog's.
+
+### 7.15 A missing owner is refused, not defaulted (§2.8, decided 2026-09-07)
+
+§2.8 says "a missing `name` or `owner_id` is an error". Before that was implemented a foreign file
+with neither filed itself silently as `''` under owner 0 — owner 0 is a real owner, not a sentinel,
+so the series landed somewhere nobody named. **Decision:** all three of `name`, `owner_id` and
+`owner_type` are refused when neither the file nor a flag supplies them, each naming the flag that
+would. `owner_type` is the addition to §2.8's list, on the same reasoning: a series owned by `""` is
+not something any consumer means, and `AddRequest` has nowhere to put "unknown".
+
+This is why the import's `owner_id` is `Option<i64>` internally rather than defaulting to 0: "the
+file has no such column" and "the file says owner 0" have to stay distinguishable.
+
+### 7.16 Placing rows by coordinate requires order-independent coordinates (§2.6, found 2026-09-07)
+
+§2.6 asks the forecast import to place rows by their coordinates so that a file a query engine
+rewrote still reads. The first implementation did not deliver that: the window grid's anchor was the
+**first issue time seen** and the percentile labels were in **first-appearance order**, so a
+reversed file produced a wrong answer rather than an error. **Decision:** both are derived from the
+values — the minimum issue time, and sorted percentiles. Sorting the percentiles loses nothing,
+because the core already refuses a `Probabilistic` whose percentiles are not strictly increasing, so
+there is no stored order to preserve.
+
+### 7.17 A forecast's per-step shape is not the catalog's `element_shape` (§2.2, found 2026-09-07)
+
+The catalog stores `TypedArray::element_shape` — everything after the leading axis — which is the
+per-step shape only for a static series. A `Deterministic`'s cube is `[H, count, *E]`, so the
+catalog records `[count, *E]`, and keying the partition on it would have produced a `value` column
+claiming the window count is part of one timestep. **Decision:** `per_step_shape` counts from the
+type's own `leading_dims`, and the same correction applies to the composite width a partition
+settles on.
+
+### 7.18 `-f parquet` names the payload, not the status report (§2.8, decided 2026-09-07)
+
+`export` prints a status document saying what it wrote. `-f` selects both the payload format and the
+report's, which cannot both be Parquet. **Decision:** the report renders as a table unless
+`-f json`/`-f jsonl` was asked for, so `-f parquet export` prints a readable summary and
+`-f json ... export` still gives a script one object — with `partitions`, `rows` and `empty` in it,
+since the partition layout is what a caller most wants to know afterwards.

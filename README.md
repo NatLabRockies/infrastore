@@ -243,12 +243,12 @@ inspection (`stats`, `store-info`, `store-attr` for the artifact's own key/value
 `summary`, `verify`, `check-consistency`, `resolutions`, `params`), content addressing (`arrays`,
 and the `data_hash` + HDF5 location on `list`/`info`), both association catalogs read _and_ write
 (`attributes`, `links`, `attach`, `detach`, `link`, `unlink`, `reassign`), bulk export (`export`,
-one timestamped CSV, JSON, or Parquet file per series, re-readable by `add`), cross-store work
-(`diff`, which exits nonzero when two catalogs differ, and `merge`), and maintenance (`init`,
-`copy`, `replace-owner`, `clear`, `persist`, `compact`, `remove --all`). Destructive commands take
-`--dry-run`, and `persist` refuses an existing destination without `--force`.
-`infrastore completions <shell>` emits shell completions. Full reference:
-[CLI](https://natlabrockies.github.io/infrastore/latest/reference/cli.html).
+one timestamped CSV or JSON file per series, or partitioned Parquet long tables holding many series
+each, all re-readable by `add`), cross-store work (`diff`, which exits nonzero when two catalogs
+differ, and `merge`), and maintenance (`init`, `copy`, `replace-owner`, `clear`, `persist`,
+`compact`, `remove --all`). Destructive commands take `--dry-run`, and `persist` refuses an existing
+destination without `--force`. `infrastore completions <shell>` emits shell completions. Full
+reference: [CLI](https://natlabrockies.github.io/infrastore/latest/reference/cli.html).
 
 ## Server
 

@@ -316,9 +316,13 @@ method on a value object and a series built here is not filed anywhere. You supp
 
 The inference rules and the four things that are refused rather than coerced (nulls, sub-millisecond
 timestamps, rows that leave a declared grid, decoded `struct`/`list` value columns) are in the
-[reference](../reference/python-api.md#from_arrow). They are the same rules
-`infrastore add --parquet` applies, so a file moves between the CLI and here without changing
-meaning.
+[reference](../reference/python-api.md#from_arrow).
+
+`to_arrow()` and `from_arrow()` are **per-series, in-memory conveniences** -- one series, one table.
+They are not the CLI's file format: `infrastore export -f parquet` writes
+[partitioned long tables](../reference/parquet-format.md), many series per file with every catalog
+column a table column, which `from_arrow` does not read. To move a whole store through Parquet, use
+the CLI at both ends.
 
 ### Datetimes and precision
 

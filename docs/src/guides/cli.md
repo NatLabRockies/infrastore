@@ -347,29 +347,41 @@ problem, and every analysis tool worth the name reads it:
 
 ```sh
 infrastore --store demo.h5 -f parquet export --name-glob 'load_*' --dir parquet/
-infrastore --store other.h5 add --parquet parquet/42_Generator_load_SingleTimeSeries.parquet
+infrastore --store other.h5 add --parquet parquet/
 ```
 
-One file per series, two columns (`timestamp` and `value`), and the whole catalog row in the file's
-footer -- so a file written by `export` re-adds with no other flag. A dense forecast comes out as a
-long table instead (`issue_time`, `target_time`, `value`, plus `percentile` or `scenario`), which is
-the same shape the CSV export uses for a forecast.
+What comes out is a handful of **long tables**, not a file per series: many series per file, one row
+per value, and every catalog column a table column, so a reader has the whole row without attaching
+the SQLite catalog. A store with thousands of series would otherwise become thousands of files.
 
-It reads foreign files too. A Parquet file from a dataframe carries no footer, so the pieces it does
-not have are inferred -- a grid becomes a `SingleTimeSeries`, the timestamp column's zone becomes
-the `time_reference` -- and what cannot be inferred is asked for:
+```text
+parquet/
+  SingleTimeSeries.f64.utc.parquet
+  SingleTimeSeries.f64.America_Denver.parquet
+  NonSequentialTimeSeries.f64.utc.parquet
+  Deterministic.f64.utc.parquet
+```
+
+One file per `(type, value type, time reference)` triple, because those three cannot vary inside one
+table without nullable or ill-typed columns -- a forecast has an `issue_time` and a static series
+does not, and a table has one Arrow type per column. The payoff is that **every column is
+required**, which is worth more to whoever queries the file than the files it costs.
+
+`add --parquet` takes a file or a whole directory, and commits one transaction per file, so a
+partition that fails leaves the ones already committed alone. A file `export` wrote re-adds with no
+other flag; a foreign file -- one from a dataframe -- carries less, and is told what it is missing:
 
 ```sh
 infrastore --store demo.h5 add --parquet from_pandas.parquet \
     --owner-id 42 --owner-type Generator --name load
 ```
 
-Python's `to_arrow()` writes the same table, so
-`pyarrow.parquet.write_table(series.to_arrow(), ...)` produces a file `add --parquet` reads, and
-`SingleTimeSeries.from_arrow` reads one this wrote.
+Two things to know. `-f parquet` requires `--dir`, because Parquet's footer sits at the end of the
+file and a writer has to seek back to it -- a pipe cannot. And the `data_hash` column is a checksum
+on the way back in: if you edited values in DuckDB, drop the column.
 
-One thing to know: `-f parquet` requires `--dir`, because the footer sits at the end of the file and
-a writer has to seek back to it -- a pipe cannot.
+The full layout -- every column, the partition rules, the filenames, the footer, and what a foreign
+file has to supply -- is in [Parquet Layout](../reference/parquet-format.md).
 
 Parquet is on by default, in the released binaries and in `cargo install infrastore-cli` alike. It
 _is_ a cargo feature, so `--no-default-features --features vendored` builds a binary without the
@@ -378,27 +390,50 @@ with, rather than reporting `parquet` as an unknown format.
 
 ### Querying it with DuckDB
 
-The reason to write Parquet rather than to embed a query engine here. The arrays and the catalog are
-two files, and DuckDB reads both:
+The reason to write Parquet rather than to embed a query engine here. Because a file is a long table
+with every catalog column in it, most questions need nothing but the directory:
+
+```sql
+-- Every partition at once: the columns line up, so the glob is one table.
+SELECT name, owner_id, units, max(value) AS peak
+FROM 'parquet/*.parquet'
+GROUP BY name, owner_id, units;
+
+-- One component's day, in its own spelling -- the timestamp column is zoned.
+SELECT timestamp, value
+FROM 'parquet/SingleTimeSeries.f64.America_Denver.parquet'
+WHERE owner_id = 42 AND name = 'load'
+ORDER BY timestamp;
+
+-- A forecast: the window is a column, so this is a GROUP BY rather than a join.
+SELECT issue_time, count(*) AS steps, max(value) AS peak
+FROM 'parquet/Deterministic.f64.utc.parquet'
+GROUP BY issue_time
+ORDER BY issue_time;
+```
+
+Note what the glob does _not_ mix: `SELECT * FROM 'parquet/*.parquet'` only works across files whose
+columns agree, which is to say within one `time_series_type`. Reading a static partition and a
+forecast one together needs the columns named, since only the latter has `issue_time`.
+
+The catalog is still there when you want what the files leave out -- the `data_hash` in its binary
+form, the feature sets, the association tables:
 
 ```sql
 INSTALL sqlite; LOAD sqlite;
 ATTACH 'demo.h5.sqlite' AS catalog (TYPE sqlite);
 
--- The values, straight out of the directory `export` wrote.
-SELECT timestamp, value FROM 'parquet/*.parquet' WHERE value > 100;
-
--- Every series' peak, joined to what the catalog knows about it.
-SELECT c.name, c.owner_id, c.units, max(p.value) AS peak
-FROM 'parquet/*.parquet' AS p, catalog.time_series_readable AS c
-GROUP BY c.name, c.owner_id, c.units;
+SELECT p.name, p.owner_id, max(p.value) AS peak, c.data_hash
+FROM 'parquet/SingleTimeSeries.f64.utc.parquet' AS p
+JOIN catalog.time_series_readable AS c ON c.id = p.id
+GROUP BY p.name, p.owner_id, c.data_hash;
 ```
 
 `time_series_readable` is the catalog's hand-inspection view -- it hex-encodes the two content
 hashes and decodes the integer type codes, so the rows read as text (see
-[Reading the SQLite catalog by hand](../reference/cli.md#reading-the-sqlite-catalog-by-hand)). Each
-Parquet file also carries its own row in its footer, which `parquet_kv_metadata` exposes if you
-would rather not attach the catalog at all.
+[Reading the SQLite catalog by hand](../reference/cli.md#reading-the-sqlite-catalog-by-hand)). The
+`id` column is what joins the two halves; it is provenance only, and `add` assigns fresh ids rather
+than reusing it.
 
 ## Stamp Provenance on the Artifact
 
