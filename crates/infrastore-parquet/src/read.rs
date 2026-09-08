@@ -30,7 +30,7 @@ use infrastore_core::{
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use crate::schema;
-use crate::table::{self, DATA_HASH, TIMESTAMP, VALUE};
+use crate::table::{self, DATA_HASH, ISSUE_TIME, PERCENTILE, SCENARIO, TIMESTAMP, VALUE};
 use crate::{Result, arrow_err, parquet_err, unsupported};
 
 /// One series read out of a long table, with the catalog fields a caller needs
@@ -189,6 +189,9 @@ struct Grouper<'a> {
     footer: &'a BTreeMap<String, String>,
     current: Option<(SeriesKey, SeriesFields)>,
     timestamps: Vec<DateTime<Utc>>,
+    /// The forecast key columns, empty for a static partition.
+    issue: Vec<DateTime<Utc>>,
+    lanes: Vec<LaneValue>,
     values: Vec<u8>,
     dtype: Option<Dtype>,
     element_dims: Vec<usize>,
@@ -203,6 +206,8 @@ impl<'a> Grouper<'a> {
             footer,
             current: None,
             timestamps: Vec::new(),
+            issue: Vec::new(),
+            lanes: Vec::new(),
             values: Vec::new(),
             dtype: None,
             element_dims: Vec::new(),
@@ -216,6 +221,11 @@ impl<'a> Grouper<'a> {
             return Ok(());
         }
         let stamps = read_timestamps(batch, TIMESTAMP)?;
+        let issued = batch
+            .column_by_name(ISSUE_TIME)
+            .map(|_| read_timestamps(batch, ISSUE_TIME))
+            .transpose()?;
+        let lanes = read_lanes(batch)?;
         let (dims, values) = batch_values(batch)?;
         match self.dtype {
             None => {
@@ -261,6 +271,12 @@ impl<'a> Grouper<'a> {
                 )));
             }
             self.timestamps.push(stamps[row]);
+            if let Some(issued) = &issued {
+                self.issue.push(issued[row]);
+            }
+            if let Some(lanes) = &lanes {
+                self.lanes.push(lanes[row]);
+            }
             let start = row * width * stride;
             self.values
                 .extend_from_slice(&values.bytes[start..start + width * stride]);
@@ -278,13 +294,24 @@ impl<'a> Grouper<'a> {
             return Ok(());
         };
         let timestamps = std::mem::take(&mut self.timestamps);
+        let issue = std::mem::take(&mut self.issue);
+        let lanes = std::mem::take(&mut self.lanes);
         let bytes = std::mem::take(&mut self.values);
         let dtype = self.dtype.expect("a flushed group has seen a batch");
 
         let mut shape = vec![timestamps.len()];
         shape.extend_from_slice(&self.element_dims);
         let array = TypedArray::new(dtype, shape, bytes).map_err(unsupported)?;
-        let series = self.build(&key, &fields, timestamps, array)?;
+        let series = self.build(
+            &key,
+            &fields,
+            Rows {
+                timestamps,
+                issue,
+                lanes,
+            },
+            array,
+        )?;
         self.out.push(series);
         Ok(())
     }
@@ -293,24 +320,17 @@ impl<'a> Grouper<'a> {
         &self,
         key: &SeriesKey,
         fields: &SeriesFields,
-        timestamps: Vec<DateTime<Utc>>,
+        rows: Rows,
         array: TypedArray,
     ) -> Result<ImportedSeries> {
-        let ts_type = self.resolve_type(key, &timestamps)?;
+        let ts_type = self.resolve_type(key, &rows.timestamps)?;
         let element_type = self.resolve_element_type(fields, &array)?;
         let reference = self.resolve_reference(fields)?;
         let name = self.resolve_name(key)?;
-
-        // A composite row was padded to the file's width; shrink it back to the
-        // width its own points need, which is both the canonical form and what
-        // makes the checksum below agree with the export's.
-        let array = table::canonical_array(&array, element_type, &[timestamps.len()])?;
-        self.verify_checksum(key, fields, &array, element_type, &timestamps)?;
-
-        // Resolved before `assemble` takes the name.
         let owner_id = self.resolve_owner_id(key, &name)?;
         let owner_type = self.resolve_owner_type(fields, &name)?;
-        let mut data = self.assemble(ts_type, key, timestamps, array, name)?;
+
+        let mut data = self.assemble(ts_type, key, fields, rows, array, name.clone())?;
         let descriptors = infrastore_core::Descriptors {
             element_type,
             units: optional(&fields.units),
@@ -322,7 +342,17 @@ impl<'a> Grouper<'a> {
             component_field: optional(&fields.component_field),
             application_data: optional(&fields.application_data),
         };
+        // Before canonicalizing: the constructor resolved the element type from
+        // the array's dtype, and only the declared one says whether these rows
+        // are a curve or a dense block of doubles.
         data.set_descriptors(descriptors);
+
+        // A composite row was padded to the file's width; shrink it back to the
+        // width its own points need. Unconditional, not part of the checksum:
+        // the narrower array is the right one to store whether or not there is a
+        // hash to compare it against.
+        canonicalize(&mut data)?;
+        self.verify_checksum(fields, &data, &name)?;
 
         Ok(ImportedSeries {
             recorded_id: (fields.id != 0).then_some(fields.id),
@@ -495,22 +525,21 @@ impl<'a> Grouper<'a> {
     /// column rather than recomputing it.
     fn verify_checksum(
         &self,
-        key: &SeriesKey,
         fields: &SeriesFields,
-        array: &TypedArray,
-        element_type: ElementType,
-        timestamps: &[DateTime<Utc>],
+        data: &TimeSeriesData,
+        name: &str,
     ) -> Result<()> {
         if self.options.skip_checksum || fields.data_hash.is_empty() {
             return Ok(());
         }
-        let actual = table::canonical_hash(array, element_type, &[timestamps.len()])?;
+        let (array, leading) = cube_of(data);
+        let actual = table::canonical_hash(array, data.element_type(), &leading)?;
         if actual != fields.data_hash {
             return Err(unsupported(format!(
-                "series '{}' does not match its recorded data_hash: the file says {} and its \
-                 rows hash to {actual}. If the values were edited, drop the `{DATA_HASH}` \
+                "series '{name}' does not match its recorded data_hash: the file says {} and \
+                 its rows hash to {actual}. If the values were edited, drop the `{DATA_HASH}` \
                  column.",
-                key.name, fields.data_hash
+                fields.data_hash
             )));
         }
         Ok(())
@@ -520,10 +549,15 @@ impl<'a> Grouper<'a> {
         &self,
         ts_type: TimeSeriesType,
         key: &SeriesKey,
-        timestamps: Vec<DateTime<Utc>>,
+        fields: &SeriesFields,
+        rows: Rows,
         array: TypedArray,
         name: String,
     ) -> Result<TimeSeriesData> {
+        if ts_type.is_forecast() {
+            return forecast(ts_type, key, fields, rows, array, name);
+        }
+        let Rows { timestamps, .. } = rows;
         match ts_type {
             TimeSeriesType::SingleTimeSeries => {
                 let resolution = if key.resolution.is_empty() {
@@ -545,7 +579,7 @@ impl<'a> Grouper<'a> {
                 PersistentTimeSeries::new(timestamps, array, name).map_err(unsupported)?,
             )),
             other => Err(unsupported(format!(
-                "the long-table import does not yet cover {}",
+                "{} is not a static series",
                 other.as_str()
             ))),
         }
@@ -867,4 +901,396 @@ fn leaf_to_typed(leaf: &ArrayRef, shape: Vec<usize>) -> Result<TypedArray> {
             )));
         }
     })
+}
+
+// ---- Dense forecasts --------------------------------------------------------
+
+/// A group's rows, as the key columns describe them.
+struct Rows {
+    timestamps: Vec<DateTime<Utc>>,
+    /// Empty for a static partition.
+    issue: Vec<DateTime<Utc>>,
+    /// Empty for a static partition and for `Deterministic`.
+    lanes: Vec<LaneValue>,
+}
+
+/// A forecast's third axis, whichever column carries it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum LaneValue {
+    Percentile(f64),
+    Scenario(i64),
+}
+
+/// The lane column of one batch, or `None` when the partition has none.
+fn read_lanes(batch: &RecordBatch) -> Result<Option<Vec<LaneValue>>> {
+    if batch.column_by_name(PERCENTILE).is_some() {
+        let column = batch.column_by_name(PERCENTILE).expect("just checked");
+        if column.null_count() > 0 {
+            return Err(unsupported(format!("the `{PERCENTILE}` column has nulls")));
+        }
+        let a = downcast::<Float64Array>(column, "float64")?;
+        return Ok(Some(
+            (0..a.len())
+                .map(|i| LaneValue::Percentile(a.value(i)))
+                .collect(),
+        ));
+    }
+    if let Some(scenario) = int_column(batch, SCENARIO)? {
+        return Ok(Some(
+            scenario.into_iter().map(LaneValue::Scenario).collect(),
+        ));
+    }
+    Ok(None)
+}
+
+/// Rebuild a forecast's cube from its long table.
+///
+/// Rows are placed by their **coordinates**, not by their order, so a file a
+/// query engine sorted or partitioned still reads correctly. Every slot must be
+/// filled exactly once: a cube has no hole to leave, and two rows for one slot
+/// means they disagree.
+///
+/// The grid comes from the columns — `resolution`, `interval`, `horizon`, and
+/// the issue times themselves — rather than from anything inferred. A window
+/// count read off the distinct issue times is a fact about the rows; a horizon
+/// guessed from them would not be, because overlapping windows make the step
+/// count ambiguous.
+fn forecast(
+    ts_type: TimeSeriesType,
+    key: &SeriesKey,
+    fields: &SeriesFields,
+    rows: Rows,
+    array: TypedArray,
+    name: String,
+) -> Result<TimeSeriesData> {
+    let resolution = required_period(&key.resolution, "resolution", &name)?;
+    let interval = required_period(&key.interval, "interval", &name)?;
+    let horizon = required_period(&fields.horizon, "horizon", &name)?;
+    if rows.issue.len() != rows.timestamps.len() {
+        return Err(unsupported(format!(
+            "series '{name}' is a forecast but has no `{ISSUE_TIME}` column"
+        )));
+    }
+
+    // The window grid: its anchor is the first issue time, and its count is how
+    // many distinct ones there are. Both are facts about the rows.
+    let issues = distinct_sorted(&rows.issue);
+    let initial_timestamp = *issues
+        .first()
+        .ok_or_else(|| unsupported(format!("series '{name}' is a forecast with no rows")))?;
+    let count = issues.len();
+    let window_of: BTreeMap<DateTime<Utc>, usize> =
+        issues.iter().enumerate().map(|(i, t)| (*t, i)).collect();
+    for (window, issued) in issues.iter().enumerate() {
+        let expected = interval
+            .add_to(initial_timestamp, window as i64)
+            .ok_or_else(|| unsupported("a forecast window overflows the calendar"))?;
+        if expected != *issued {
+            return Err(unsupported(format!(
+                "series '{name}' has an issue time of {issued}, which is not window {window} \
+                 of a {} grid anchored at {initial_timestamp}",
+                interval.to_iso8601()
+            )));
+        }
+    }
+
+    let horizon_steps = steps_in(initial_timestamp, resolution, horizon, &name)?;
+    let lane_labels = lane_labels(&rows.lanes, ts_type, &name)?;
+    let lane_count = lane_labels.count();
+    let expected = lane_count * horizon_steps * count;
+    if rows.timestamps.len() != expected {
+        return Err(unsupported(format!(
+            "series '{name}' has {} rows, but its grid holds {expected} values \
+             ({lane_count} lanes x {horizon_steps} steps x {count} windows)",
+            rows.timestamps.len()
+        )));
+    }
+
+    // Place each row by its coordinates. `filled` catches a hole and a duplicate
+    // in one pass, which is what makes row order irrelevant.
+    let per_step = array.element_shape().iter().product::<usize>().max(1);
+    let width = array.dtype.size() * per_step;
+    let mut bytes = vec![0u8; expected * width];
+    let mut filled = vec![false; expected];
+    for row in 0..rows.timestamps.len() {
+        let window = window_of[&rows.issue[row]];
+        let step = step_of(
+            rows.issue[row],
+            rows.timestamps[row],
+            resolution,
+            horizon_steps,
+            &name,
+        )?;
+        let lane = lane_labels.index_of(rows.lanes.get(row).copied())?;
+        let slot = (lane * horizon_steps + step) * count + window;
+        if filled[slot] {
+            return Err(unsupported(format!(
+                "series '{name}' has two rows for window {window}, step {step}, lane {lane}"
+            )));
+        }
+        filled[slot] = true;
+        bytes[slot * width..(slot + 1) * width]
+            .copy_from_slice(&array.bytes[row * width..(row + 1) * width]);
+    }
+    if let Some(slot) = filled.iter().position(|f| !f) {
+        let window = slot % count;
+        let step = (slot / count) % horizon_steps;
+        return Err(unsupported(format!(
+            "series '{name}' has no row for window {window}, step {step}; a forecast cube \
+             has no hole to put one in"
+        )));
+    }
+
+    let mut shape = match &lane_labels {
+        LaneLabels::None => vec![horizon_steps, count],
+        _ => vec![lane_count, horizon_steps, count],
+    };
+    shape.extend_from_slice(array.element_shape());
+    let cube = TypedArray::new(array.dtype, shape, bytes).map_err(unsupported)?;
+
+    Ok(match (ts_type, lane_labels) {
+        (TimeSeriesType::Probabilistic, LaneLabels::Percentiles(percentiles)) => {
+            TimeSeriesData::Probabilistic(
+                infrastore_core::Probabilistic::new(
+                    initial_timestamp,
+                    resolution,
+                    horizon,
+                    interval,
+                    count,
+                    percentiles,
+                    cube,
+                    name,
+                )
+                .map_err(unsupported)?,
+            )
+        }
+        (TimeSeriesType::Scenarios, LaneLabels::Scenarios(scenario_count)) => {
+            TimeSeriesData::Scenarios(
+                infrastore_core::Scenarios::new(
+                    initial_timestamp,
+                    resolution,
+                    horizon,
+                    interval,
+                    count,
+                    scenario_count,
+                    cube,
+                    name,
+                )
+                .map_err(unsupported)?,
+            )
+        }
+        // A stored `DeterministicSingleTimeSeries` reads back as the
+        // `Deterministic` it is a view of, so it lands as one here too — the
+        // import refuses the type by name before this, so only a real
+        // `Deterministic` reaches it.
+        (_, LaneLabels::None) => TimeSeriesData::Deterministic(
+            infrastore_core::Deterministic::new(
+                initial_timestamp,
+                resolution,
+                horizon,
+                interval,
+                count,
+                cube,
+                name,
+            )
+            .map_err(unsupported)?,
+        ),
+        (ts_type, _) => {
+            return Err(unsupported(format!(
+                "series '{name}' is a {} but carries the wrong lane column",
+                ts_type.as_str()
+            )));
+        }
+    })
+}
+
+/// What a partition's lane axis is, and how wide.
+enum LaneLabels {
+    None,
+    Percentiles(Vec<f64>),
+    Scenarios(usize),
+}
+
+impl LaneLabels {
+    fn count(&self) -> usize {
+        match self {
+            LaneLabels::None => 1,
+            LaneLabels::Percentiles(p) => p.len(),
+            LaneLabels::Scenarios(n) => *n,
+        }
+    }
+
+    /// Which slot on the lane axis a row's label names.
+    fn index_of(&self, lane: Option<LaneValue>) -> Result<usize> {
+        match (self, lane) {
+            (LaneLabels::None, _) => Ok(0),
+            (LaneLabels::Percentiles(labels), Some(LaneValue::Percentile(p))) => labels
+                .iter()
+                .position(|q| *q == p)
+                .ok_or_else(|| unsupported(format!("percentile {p} is not one of {labels:?}"))),
+            (LaneLabels::Scenarios(n), Some(LaneValue::Scenario(s))) => usize::try_from(s)
+                .ok()
+                .filter(|s| s < n)
+                .ok_or_else(|| unsupported(format!("scenario {s} is outside 0..{n}"))),
+            _ => Err(unsupported(
+                "a row's lane column does not match its partition",
+            )),
+        }
+    }
+}
+
+/// The lane axis a group's rows describe.
+///
+/// Percentiles are sorted **ascending**, which is both order-independent -- the
+/// same reason the window grid's anchor is the minimum issue time -- and exactly
+/// the order the core requires of a `Probabilistic`, whose constructor refuses
+/// percentiles that are not strictly increasing. So there is no stored order for
+/// sorting to lose.
+fn lane_labels(lanes: &[LaneValue], ts_type: TimeSeriesType, name: &str) -> Result<LaneLabels> {
+    match ts_type {
+        TimeSeriesType::Probabilistic => {
+            let mut labels: Vec<f64> = Vec::new();
+            for lane in lanes {
+                let LaneValue::Percentile(p) = lane else {
+                    return Err(unsupported(format!(
+                        "series '{name}' is a Probabilistic but its lane column is not \
+                         `{PERCENTILE}`"
+                    )));
+                };
+                labels.push(*p);
+            }
+            labels.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            labels.dedup();
+            Ok(LaneLabels::Percentiles(labels))
+        }
+        TimeSeriesType::Scenarios => {
+            let mut highest = 0i64;
+            for lane in lanes {
+                let LaneValue::Scenario(s) = lane else {
+                    return Err(unsupported(format!(
+                        "series '{name}' is a Scenarios but its lane column is not `{SCENARIO}`"
+                    )));
+                };
+                highest = highest.max(*s);
+            }
+            Ok(LaneLabels::Scenarios(highest as usize + 1))
+        }
+        _ => Ok(LaneLabels::None),
+    }
+}
+
+/// The distinct values of a column, **ascending**.
+///
+/// Sorted rather than in first-appearance order, because the window grid's
+/// anchor is its earliest issue time and that has to be true however a query
+/// engine left the rows. Taking the first row's would make the whole placement
+/// depend on file order, which is the one thing the coordinates exist to avoid.
+fn distinct_sorted(values: &[DateTime<Utc>]) -> Vec<DateTime<Utc>> {
+    let mut out: Vec<DateTime<Utc>> = values.to_vec();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// How many `resolution` steps fit in `horizon`.
+///
+/// Counted by walking the grid rather than dividing: a month is not a fixed
+/// number of milliseconds, so the quotient would be wrong for a monthly
+/// resolution inside a yearly horizon.
+fn steps_in(
+    anchor: DateTime<Utc>,
+    resolution: Period,
+    horizon: Period,
+    name: &str,
+) -> Result<usize> {
+    let end = horizon
+        .add_to(anchor, 1)
+        .ok_or_else(|| unsupported("the forecast horizon overflows the calendar"))?;
+    let mut steps = 0usize;
+    loop {
+        let at = resolution
+            .add_to(anchor, steps as i64)
+            .ok_or_else(|| unsupported("the forecast horizon overflows the calendar"))?;
+        if at >= end {
+            return Ok(steps);
+        }
+        steps += 1;
+        if steps > 1_000_000 {
+            return Err(unsupported(format!(
+                "series '{name}' claims a horizon of more than a million steps; its \
+                 `resolution` and `horizon` columns are probably not the ones that wrote it"
+            )));
+        }
+    }
+}
+
+fn step_of(
+    issue: DateTime<Utc>,
+    target: DateTime<Utc>,
+    resolution: Period,
+    horizon_steps: usize,
+    name: &str,
+) -> Result<usize> {
+    for step in 0..horizon_steps {
+        let at = resolution
+            .add_to(issue, step as i64)
+            .ok_or_else(|| unsupported("a forecast step overflows the calendar"))?;
+        if at == target {
+            return Ok(step);
+        }
+    }
+    Err(unsupported(format!(
+        "series '{name}' has a target time of {target}, which is not on the \
+         {horizon_steps}-step grid starting at {issue}"
+    )))
+}
+
+fn required_period(text: &str, column: &str, name: &str) -> Result<Period> {
+    if text.is_empty() {
+        return Err(unsupported(format!(
+            "series '{name}' is a forecast and needs a `{column}`: the rows say where each \
+             value belongs, not what the grid it belongs to is"
+        )));
+    }
+    Period::from_iso8601(text).map_err(|e| unsupported(format!("{column}: {e}")))
+}
+
+/// The stored cube and its leading axes, for hashing.
+fn cube_of(data: &TimeSeriesData) -> (&TypedArray, Vec<usize>) {
+    let array = match data {
+        TimeSeriesData::SingleTimeSeries(s) => &s.data,
+        TimeSeriesData::NonSequentialTimeSeries(s) => &s.data,
+        TimeSeriesData::PersistentTimeSeries(s) => &s.data,
+        TimeSeriesData::Deterministic(f) => &f.data,
+        TimeSeriesData::Probabilistic(f) => &f.data,
+        TimeSeriesData::Scenarios(f) => &f.data,
+    };
+    let leading = data
+        .time_series_type()
+        .leading_dims()
+        .min(array.shape.len());
+    (array, array.shape[..leading].to_vec())
+}
+
+/// Shrink a composite series back to the width its own points need.
+///
+/// The file padded every composite row to the widest series it shares a file
+/// with; this undoes that, which is both the canonical form and what makes the
+/// checksum agree with the export's.
+fn canonicalize(data: &mut TimeSeriesData) -> Result<()> {
+    let element_type = data.element_type();
+    if !table::is_composite(element_type) {
+        return Ok(());
+    }
+    let (array, leading) = cube_of(data);
+    let shrunk = table::canonical_array(array, element_type, &leading)?;
+    match data {
+        TimeSeriesData::SingleTimeSeries(s) => s.data = shrunk,
+        TimeSeriesData::NonSequentialTimeSeries(s) => s.data = shrunk,
+        TimeSeriesData::PersistentTimeSeries(s) => s.data = shrunk,
+        TimeSeriesData::Deterministic(f) => f.data = shrunk,
+        TimeSeriesData::Probabilistic(f) => f.data = shrunk,
+        TimeSeriesData::Scenarios(f) => f.data = shrunk,
+    }
+    Ok(())
 }

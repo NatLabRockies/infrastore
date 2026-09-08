@@ -712,9 +712,9 @@ fn a_monthly_grid_is_materialized_on_the_calendar() {
 }
 
 #[test]
-fn a_forecast_is_not_yet_written() {
+fn a_forecast_gets_key_columns_a_static_series_does_not() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let forecast = infrastore_core::Deterministic::new(
+    let mut forecast = infrastore_core::Deterministic::new(
         t0(),
         Duration::hours(1),
         Duration::hours(2),
@@ -724,7 +724,148 @@ fn a_forecast_is_not_yet_written() {
         "fc",
     )
     .expect("the forecast should build");
-    let series = stored(vec![(1, utc(TimeSeriesData::Deterministic(forecast)))]);
-    let err = write_partitions(dir.path(), &series).expect_err("forecasts land in phase 3");
-    assert!(err.to_string().contains("Deterministic"), "{err}");
+    forecast.time_reference = Some(TimeReference::Utc);
+    let series = stored(vec![(1, TimeSeriesData::Deterministic(forecast))]);
+    let report = write_partitions(dir.path(), &series).expect("export");
+
+    assert_eq!(
+        file_names(dir.path()),
+        BTreeSet::from(["Deterministic.f64.utc.parquet".to_string()])
+    );
+    let (batch, footer) = read_file(&report.files[0].path);
+    let columns: Vec<String> = batch
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .collect();
+    // `issue_time` is why a forecast cannot share a table with a static series.
+    assert_eq!(columns[0], "timestamp");
+    assert_eq!(columns[1], "issue_time");
+    assert!(columns.contains(&"interval".to_string()));
+    assert!(columns.contains(&"horizon".to_string()));
+    assert_eq!(batch.num_rows(), 4, "2 windows x 2 steps");
+    assert_eq!(footer["time_series_type"], "Deterministic");
+
+    // Window-major, so `GROUP BY issue_time` scans contiguously.
+    let ms = |h: i64| (t0() + Duration::hours(h)).timestamp_millis();
+    let column = |i: usize| {
+        batch
+            .column(i)
+            .as_any()
+            .downcast_ref::<arrow::array::TimestampMillisecondArray>()
+            .unwrap()
+            .values()
+            .to_vec()
+    };
+    assert_eq!(column(1), vec![ms(0), ms(0), ms(1), ms(1)]);
+    assert_eq!(column(0), vec![ms(0), ms(1), ms(1), ms(2)]);
+    // `[H, count]` gathered into window-major order.
+    assert_eq!(
+        batch
+            .column_by_name("value")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Float64Array>()
+            .unwrap()
+            .values()
+            .to_vec(),
+        vec![1.0, 3.0, 2.0, 4.0]
+    );
+}
+
+#[test]
+fn the_lane_column_names_the_third_axis() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let values: Vec<f64> = (0..8).map(|i| i as f64).collect();
+    let mut prob = infrastore_core::Probabilistic::new(
+        t0(),
+        Duration::hours(1),
+        Duration::hours(2),
+        Duration::hours(1),
+        2,
+        vec![0.1, 0.9],
+        TypedArray::from_f64(vec![2, 2, 2], &values),
+        "prob",
+    )
+    .expect("the forecast should build");
+    prob.time_reference = Some(TimeReference::Utc);
+    let mut scen = infrastore_core::Scenarios::new(
+        t0(),
+        Duration::hours(1),
+        Duration::hours(2),
+        Duration::hours(1),
+        2,
+        2,
+        TypedArray::from_f64(vec![2, 2, 2], &values),
+        "scen",
+    )
+    .expect("the forecast should build");
+    scen.time_reference = Some(TimeReference::Utc);
+
+    let series = stored(vec![
+        (1, TimeSeriesData::Probabilistic(prob)),
+        (2, TimeSeriesData::Scenarios(scen)),
+    ]);
+    let report = write_partitions(dir.path(), &series).expect("export");
+    assert_eq!(report.files.len(), 2, "two types, two partitions");
+
+    let (batch, _) = read_file(&dir.path().join("Probabilistic.f64.utc.parquet"));
+    let percentile = batch
+        .column_by_name("percentile")
+        .expect("a Probabilistic carries its percentiles")
+        .as_any()
+        .downcast_ref::<arrow::array::Float64Array>()
+        .unwrap();
+    // One instant's percentiles sit together, which is how a fan chart reads.
+    assert_eq!(percentile.value(0), 0.1);
+    assert_eq!(percentile.value(1), 0.9);
+    assert!(batch.column_by_name("scenario").is_none());
+
+    let (batch, _) = read_file(&dir.path().join("Scenarios.f64.utc.parquet"));
+    let scenario = batch
+        .column_by_name("scenario")
+        .expect("a Scenarios carries its trajectory index")
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .unwrap();
+    assert_eq!(scenario.values().to_vec(), vec![0, 1, 0, 1, 0, 1, 0, 1]);
+    assert!(batch.column_by_name("percentile").is_none());
+}
+
+#[test]
+fn a_forecasts_per_step_shape_is_not_the_catalogs_element_shape() {
+    // The catalog stores `TypedArray::element_shape` -- everything after the
+    // leading axis -- which for a `[H, count, *E]` cube is `[count, *E]`. Using
+    // it as the partition's value shape would claim the window count is part of
+    // one timestep.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let values: Vec<f64> = (0..12).map(|i| i as f64).collect();
+    let mut forecast = infrastore_core::Deterministic::new(
+        t0(),
+        Duration::hours(1),
+        Duration::hours(2),
+        Duration::hours(1),
+        2,
+        TypedArray::from_f64(vec![2, 2, 3], &values),
+        "nd",
+    )
+    .expect("the forecast should build");
+    forecast.time_reference = Some(TimeReference::Utc);
+    let series = stored(vec![(1, TimeSeriesData::Deterministic(forecast))]);
+    assert_eq!(
+        series[0].0.element_shape,
+        vec![2, 3],
+        "the catalog counts from the wrong axis for a forecast"
+    );
+
+    let report = write_partitions(dir.path(), &series).expect("export");
+    assert_eq!(
+        file_names(dir.path()),
+        BTreeSet::from(["Deterministic.f64_3.utc.parquet".to_string()]),
+        "the partition is keyed on the per-step shape"
+    );
+    let (batch, footer) = read_file(&report.files[0].path);
+    assert_eq!(footer["element_shape"], "[3]");
+    assert_eq!(batch.num_rows(), 4);
 }

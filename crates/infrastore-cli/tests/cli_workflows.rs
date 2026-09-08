@@ -4951,21 +4951,59 @@ fn write_naked_parquet(path: &Path) {
 
 #[cfg(feature = "parquet")]
 #[test]
-fn a_dense_forecast_is_refused_until_its_partition_exists() {
-    // A forecast's long table carries key columns a static one does not -- an
-    // `issue_time`, and a `percentile` or `scenario` -- so it is a partition of
-    // its own rather than a variation on this one. Refused with the type named
-    // rather than mis-shaped into the static columns.
+fn a_dense_forecast_round_trips_through_its_own_partition() {
     let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("fc.h5");
-    seed_day_of_windows(dir.path(), &store);
+    let source = dir.path().join("fc.h5");
+    let dest = dir.path().join("fc_dest.h5");
+    seed_day_of_windows(dir.path(), &source);
     let out = dir.path().join("out");
 
-    let err = run_err(
-        &store,
+    run(
+        &source,
         &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
     );
-    assert!(err.contains("Deterministic"), "{err}");
+    let file = fs::read_dir(&out).unwrap().next().unwrap().unwrap().path();
+    assert_eq!(file.file_name().unwrap(), "Deterministic.f64.utc.parquet");
+
+    let reader = fs::File::open(&file).unwrap();
+    let builder =
+        parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(reader).unwrap();
+    let columns: Vec<String> = builder
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .collect();
+    // A forecast's key columns are why it cannot share a table with a static
+    // series -- and every one of them is still required.
+    assert_eq!(columns[0], "timestamp");
+    assert_eq!(columns[1], "issue_time");
+    for expected in ["interval", "horizon", "resolution"] {
+        assert!(columns.contains(&expected.to_string()), "{columns:?}");
+    }
+    assert!(builder.schema().fields().iter().all(|f| !f.is_nullable()));
+    // 24 windows x 2 steps, flattened.
+    let rows: usize = builder
+        .build()
+        .unwrap()
+        .map(|b| b.unwrap().num_rows())
+        .sum();
+    assert_eq!(rows, 48);
+
+    run(&dest, &["add", "--parquet", file.to_str().unwrap()]);
+    let listed = run(&dest, &["-f", "json", "list"]);
+    let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    let row = &listed["items"][0];
+    assert_eq!(row["type"], "Deterministic");
+    assert_eq!(row["name"], "load_det");
+    assert_eq!(row["count"], 24);
+    assert_eq!(row["horizon"], "PT2H");
+    assert_eq!(row["interval"], "PT1H");
+
+    // The values are the same bytes, which is what a content hash says.
+    let src = run(&source, &["-f", "json", "list"]);
+    let src: serde_json::Value = serde_json::from_str(&src).unwrap();
+    assert_eq!(row["data_hash"], src["items"][0]["data_hash"]);
 }
 
 #[cfg(feature = "parquet")]

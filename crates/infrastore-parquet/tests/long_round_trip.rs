@@ -725,3 +725,241 @@ fn write_batch(path: &Path, batch: &arrow::array::RecordBatch) {
     writer.write(batch).unwrap();
     writer.close().unwrap();
 }
+
+// ---- Dense forecasts --------------------------------------------------------
+
+fn deterministic(name: &str) -> TimeSeriesData {
+    let mut forecast = infrastore_core::Deterministic::new(
+        t0(),
+        Duration::hours(1),
+        Duration::hours(3),
+        Duration::hours(1),
+        2,
+        TypedArray::from_f64(vec![3, 2], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+        name,
+    )
+    .expect("the forecast should build");
+    forecast.time_reference = Some(TimeReference::Utc);
+    TimeSeriesData::Deterministic(forecast)
+}
+
+#[test]
+fn a_deterministic_forecast_round_trips() {
+    let original = deterministic("day_ahead");
+    let (back, _dir) = round_trip(plain(vec![(1, original.clone())]));
+    assert_eq!(back.len(), 1);
+    let (TimeSeriesData::Deterministic(got), TimeSeriesData::Deterministic(want)) =
+        (&back[0].data, &original)
+    else {
+        panic!("expected a Deterministic, got {:?}", back[0].data);
+    };
+    assert_eq!(got, want, "the cube comes back identical");
+}
+
+#[test]
+fn a_probabilistic_forecast_keeps_its_percentiles() {
+    // The core requires percentiles to be strictly increasing, so the import can
+    // sort the lane labels -- which is what makes it independent of the row
+    // order a query engine happened to leave behind.
+    let values: Vec<f64> = (0..12).map(|i| i as f64).collect();
+    let mut forecast = infrastore_core::Probabilistic::new(
+        t0(),
+        Duration::hours(1),
+        Duration::hours(3),
+        Duration::hours(1),
+        2,
+        vec![0.1, 0.9],
+        TypedArray::from_f64(vec![2, 3, 2], &values),
+        "prob",
+    )
+    .expect("the forecast should build");
+    forecast.time_reference = Some(TimeReference::Utc);
+
+    let (back, _dir) = round_trip(plain(vec![(
+        1,
+        TimeSeriesData::Probabilistic(forecast.clone()),
+    )]));
+    let TimeSeriesData::Probabilistic(got) = &back[0].data else {
+        panic!("expected a Probabilistic, got {:?}", back[0].data);
+    };
+    assert_eq!(got.percentiles, vec![0.1, 0.9]);
+    assert_eq!(got, &forecast);
+}
+
+#[test]
+fn a_scenarios_forecast_round_trips() {
+    let values: Vec<f64> = (0..12).map(|i| i as f64).collect();
+    let mut forecast = infrastore_core::Scenarios::new(
+        t0(),
+        Duration::hours(1),
+        Duration::hours(3),
+        Duration::hours(1),
+        2,
+        2,
+        TypedArray::from_f64(vec![2, 3, 2], &values),
+        "scen",
+    )
+    .expect("the forecast should build");
+    forecast.time_reference = Some(TimeReference::Utc);
+
+    let (back, _dir) = round_trip(plain(vec![(
+        1,
+        TimeSeriesData::Scenarios(forecast.clone()),
+    )]));
+    let TimeSeriesData::Scenarios(got) = &back[0].data else {
+        panic!("expected a Scenarios, got {:?}", back[0].data);
+    };
+    assert_eq!(got, &forecast);
+}
+
+#[test]
+fn a_multidimensional_forecast_round_trips() {
+    let values: Vec<f64> = (0..12).map(|i| i as f64).collect();
+    let mut forecast = infrastore_core::Deterministic::new(
+        t0(),
+        Duration::hours(1),
+        Duration::hours(2),
+        Duration::hours(1),
+        2,
+        TypedArray::from_f64(vec![2, 2, 3], &values),
+        "nd",
+    )
+    .expect("the forecast should build");
+    forecast.time_reference = Some(TimeReference::Utc);
+
+    let (back, _dir) = round_trip(plain(vec![(
+        1,
+        TimeSeriesData::Deterministic(forecast.clone()),
+    )]));
+    let TimeSeriesData::Deterministic(got) = &back[0].data else {
+        panic!("expected a Deterministic");
+    };
+    assert_eq!(got, &forecast);
+}
+
+#[test]
+fn a_calendar_horizon_counts_its_steps_by_walking_the_grid() {
+    // A month is not a fixed number of milliseconds, so `horizon / resolution`
+    // is the wrong arithmetic.
+    let mut forecast = infrastore_core::Deterministic::new(
+        Utc.with_ymd_and_hms(2024, 1, 31, 0, 0, 0).unwrap(),
+        Period::Months(1),
+        Period::Months(2),
+        Period::Months(1),
+        2,
+        TypedArray::from_f64(vec![2, 2], &[1.0, 2.0, 3.0, 4.0]),
+        "monthly",
+    )
+    .expect("the forecast should build");
+    forecast.time_reference = Some(TimeReference::Utc);
+
+    let (back, _dir) = round_trip(plain(vec![(
+        1,
+        TimeSeriesData::Deterministic(forecast.clone()),
+    )]));
+    let TimeSeriesData::Deterministic(got) = &back[0].data else {
+        panic!("expected a Deterministic");
+    };
+    assert_eq!(got, &forecast);
+}
+
+#[test]
+fn forecast_rows_are_placed_by_coordinates_not_order() {
+    // A query engine may rewrite a file in any order within a series; the
+    // coordinates are what put each value back where it belongs.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let original = deterministic("day_ahead");
+    let series = stored(plain(vec![(1, original.clone())]));
+    let report = write_partitions(dir.path(), &series).expect("export");
+    let (schema, batch) = read_one(&report.files[0].path);
+
+    let n = batch.num_rows() as u32;
+    let indices = arrow::array::UInt32Array::from((0..n).rev().collect::<Vec<_>>());
+    let reversed: Vec<arrow::array::ArrayRef> = batch
+        .columns()
+        .iter()
+        .map(|c| arrow::compute::take(c, &indices, None).unwrap())
+        .collect();
+    let reversed = arrow::array::RecordBatch::try_new(schema.clone(), reversed).expect("rebuild");
+    let path = dir.path().join("reversed.parquet");
+    write_batch(&path, &reversed);
+
+    let back = read_file(&path, &ImportOptions::default()).expect("import");
+    let (TimeSeriesData::Deterministic(got), TimeSeriesData::Deterministic(want)) =
+        (&back[0].data, &original)
+    else {
+        panic!("expected a Deterministic");
+    };
+    assert_eq!(got, want);
+}
+
+#[test]
+fn a_forecast_missing_its_grid_columns_is_refused() {
+    // The rows say where a value belongs, not what the grid it belongs to is.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let series = stored(plain(vec![(1, deterministic("day_ahead"))]));
+    let report = write_partitions(dir.path(), &series).expect("export");
+    let (schema, batch) = read_one(&report.files[0].path);
+
+    let keep: Vec<usize> = (0..schema.fields().len())
+        .filter(|i| schema.field(*i).name() != "horizon")
+        .collect();
+    let projected = batch.project(&keep).expect("project");
+    let path = dir.path().join("no_horizon.parquet");
+    write_batch(&path, &projected);
+
+    let err = read_file(&path, &ImportOptions::default()).expect_err("no horizon");
+    assert!(err.to_string().contains("horizon"), "{err}");
+}
+
+#[test]
+fn a_forecast_short_of_its_grid_is_refused() {
+    // A cube has no hole to leave, so a missing row cannot be filled in. The
+    // count is checked first, which is the more useful message.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let series = stored(plain(vec![(1, deterministic("day_ahead"))]));
+    let report = write_partitions(dir.path(), &series).expect("export");
+    let (schema, batch) = read_one(&report.files[0].path);
+
+    let keep: Vec<usize> = (0..schema.fields().len())
+        .filter(|i| schema.field(*i).name() != "data_hash")
+        .collect();
+    let projected = batch.project(&keep).expect("project");
+    let short = projected.slice(0, projected.num_rows() - 1);
+    let path = dir.path().join("short.parquet");
+    write_batch(&path, &short);
+
+    let err = read_file(&path, &ImportOptions::default()).expect_err("a hole");
+    assert!(err.to_string().contains("its grid holds"), "{err}");
+}
+
+#[test]
+fn a_forecast_with_two_rows_for_one_slot_is_refused() {
+    // The right number of rows, but one coordinate twice -- so somewhere else
+    // has none, and the two rows disagree about the same value.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let series = stored(plain(vec![(1, deterministic("day_ahead"))]));
+    let report = write_partitions(dir.path(), &series).expect("export");
+    let (schema, batch) = read_one(&report.files[0].path);
+
+    let keep: Vec<usize> = (0..schema.fields().len())
+        .filter(|i| schema.field(*i).name() != "data_hash")
+        .collect();
+    let projected = batch.project(&keep).expect("project");
+    let n = projected.num_rows() as u32;
+    // Repeat row 0 in place of the last one.
+    let mut indices: Vec<u32> = (0..n - 1).collect();
+    indices.push(0);
+    let indices = arrow::array::UInt32Array::from(indices);
+    let doubled: Vec<arrow::array::ArrayRef> = projected
+        .columns()
+        .iter()
+        .map(|c| arrow::compute::take(c, &indices, None).unwrap())
+        .collect();
+    let doubled = arrow::array::RecordBatch::try_new(projected.schema(), doubled).expect("rebuild");
+    let path = dir.path().join("doubled.parquet");
+    write_batch(&path, &doubled);
+
+    let err = read_file(&path, &ImportOptions::default()).expect_err("a duplicate");
+    assert!(err.to_string().contains("two rows for"), "{err}");
+}
