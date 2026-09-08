@@ -30,8 +30,8 @@
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use hdf5_metno as h5;
 use infrastore_core::{
-    AddRequest, ListFilter, OwnerCategory, ReadWindow, SingleTimeSeries, Store, TimeSeriesData,
-    TypedArray, create_store, open_store,
+    AddRequest, ListFilter, NonSequentialTimeSeries, OwnerCategory, PersistentTimeSeries,
+    ReadWindow, SingleTimeSeries, Store, TimeSeriesData, TypedArray, create_store, open_store,
 };
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -280,6 +280,196 @@ fn a_transaction_around_one_add_fills_a_slot_rather_than_sizing_a_dataset() {
     for owner in 1..6 {
         assert_eq!(first_value(&store, owner), owner as f64 * 100.0);
     }
+    assert!(store.verify_integrity().unwrap().ok());
+}
+
+/// The twelve-point event timeline every irregular series below shares, so they
+/// all land in one [`PackGroup::Irregular`] cohort.
+fn axis() -> Vec<DateTime<Utc>> {
+    (0..12).map(|i| t0() + Duration::hours(3 * i)).collect()
+}
+
+/// One `NonSequentialTimeSeries` on that axis, distinct per `base`.
+fn irregular(owner: i64, base: f64) -> AddRequest {
+    let vals: Vec<f64> = (0..12).map(|i| base + i as f64).collect();
+    AddRequest::new(
+        owner,
+        "Generator",
+        OwnerCategory::Component,
+        TimeSeriesData::NonSequentialTimeSeries(
+            NonSequentialTimeSeries::new(axis(), TypedArray::from_f64(vec![12], &vals), "spot")
+                .unwrap(),
+        ),
+    )
+}
+
+/// A `PersistentTimeSeries` on the same axis. It pools with the above: a
+/// `PackGroup` is keyed by the time axis, never by the series type.
+fn persistent(owner: i64, base: f64) -> AddRequest {
+    let vals: Vec<f64> = (0..12).map(|i| base + i as f64).collect();
+    AddRequest::new(
+        owner,
+        "Generator",
+        OwnerCategory::Component,
+        TimeSeriesData::PersistentTimeSeries(
+            PersistentTimeSeries::new(axis(), TypedArray::from_f64(vec![12], &vals), "sp").unwrap(),
+        ),
+    )
+}
+
+/// [`first_value`] for an irregular row, which reads back as its own type.
+fn first_irregular_value(store: &Store, owner: i64) -> f64 {
+    let row = store
+        .list_metadata(ListFilter::new().owner_id(owner))
+        .unwrap()
+        .pop()
+        .expect("a row for this owner");
+    store
+        .read_by_id(row.id.unwrap(), ReadWindow::full())
+        .unwrap()
+        .as_non_sequential()
+        .expect("a NonSequentialTimeSeries")
+        .data
+        .to_f64_vec()
+        .unwrap()[0]
+}
+
+/// `packed_layout` keyed by dataset *kind* rather than name, because a
+/// standalone dataset is named for its content hash. `nsts` is a pooled
+/// irregular cohort, `arr` a standalone array.
+fn kinds(path: &Path) -> BTreeMap<String, Vec<Vec<usize>>> {
+    let mut out: BTreeMap<String, Vec<Vec<usize>>> = BTreeMap::new();
+    for (name, (shape, _)) in packed_layout(path) {
+        let kind = name.split('_').next().unwrap().to_string();
+        out.entry(kind).or_default().push(shape);
+    }
+    out
+}
+
+// --- Irregular cohorts ------------------------------------------------------
+
+/// A cohort of irregular series added one at a time inside a span pools into
+/// one dataset, exactly as the bulk add of the same requests does.
+///
+/// Packing an irregular series is a bet that its axis will be shared, and
+/// `resolve_irregular_layouts` settles that bet before the write from the
+/// requests it can see. Inside a span it cannot see them: each add is one
+/// request against a file holding no pool for the axis -- and because a
+/// standalone array never *becomes* a pool, the next add saw exactly the same
+/// thing. Six series on one timeline came out as six standalone datasets where
+/// the bulk add of them writes one `(12, 6)` cohort. The bet is now settled
+/// where the answer is known, in the block.
+#[test]
+fn irregular_singles_in_a_span_pool_like_a_bulk_add_of_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let looped = dir.path().join("looped.h5");
+    let bulked = dir.path().join("bulked.h5");
+    {
+        let mut store = create_store(Some(&looped), false).unwrap();
+        store.begin_transaction().unwrap();
+        for owner in 1..7 {
+            store.add(irregular(owner, owner as f64 * 100.0)).unwrap();
+        }
+        store.commit_transaction().unwrap();
+        store.flush().unwrap();
+    }
+    {
+        let mut store = create_store(Some(&bulked), false).unwrap();
+        store
+            .add_time_series_bulk((1..7).map(|o| irregular(o, o as f64 * 100.0)).collect())
+            .unwrap();
+        store.flush().unwrap();
+    }
+
+    let layout = kinds(&looped);
+    assert_eq!(
+        layout,
+        kinds(&bulked),
+        "the span writes the bulk add's file"
+    );
+    assert_eq!(layout.get("nsts").map(Vec::len), Some(1), "{layout:?}");
+    assert_eq!(layout["nsts"][0], vec![12, 6]);
+    assert!(!layout.contains_key("arr"), "nothing left standalone");
+
+    let store = open_store(&looped, true).unwrap();
+    for owner in 1..7 {
+        assert_eq!(first_irregular_value(&store, owner), owner as f64 * 100.0);
+    }
+    assert!(store.verify_integrity().unwrap().ok());
+}
+
+/// Both irregular types pool together when they share an axis, which is what
+/// keying a `PackGroup` by the time axis rather than the series type means --
+/// and buffering must not quietly change it.
+#[test]
+fn the_two_irregular_types_share_one_buffered_cohort() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mixed.h5");
+    {
+        let mut store = create_store(Some(&path), false).unwrap();
+        store.begin_transaction().unwrap();
+        store.add(irregular(1, 100.0)).unwrap();
+        store.add(persistent(2, 200.0)).unwrap();
+        store.add(irregular(3, 300.0)).unwrap();
+        store.commit_transaction().unwrap();
+        store.flush().unwrap();
+    }
+    let layout = kinds(&path);
+    assert_eq!(layout.get("nsts").map(Vec::len), Some(1), "{layout:?}");
+    assert_eq!(layout["nsts"][0], vec![12, 3]);
+}
+
+/// A span holding a *single* irregular series still writes it standalone: the
+/// bet is settled the same way, just with the answer "no cohort".
+///
+/// This is the irregular half of the block-of-one rule. Its regular sibling
+/// fills a growth-pool slot, because a `SingleTimeSeries` pool is shared by
+/// every series on the resolution; an irregular pool is shared only by the
+/// series on that exact axis, so a cohort of one is a dataset spread across
+/// `length` chunks for no reason.
+#[test]
+fn a_lone_irregular_series_in_a_span_stays_standalone() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lone.h5");
+    {
+        let mut store = create_store(Some(&path), false).unwrap();
+        store.begin_transaction().unwrap();
+        store.add(irregular(1, 100.0)).unwrap();
+        store.commit_transaction().unwrap();
+        store.flush().unwrap();
+    }
+    let layout = kinds(&path);
+    assert_eq!(layout.get("arr").map(Vec::len), Some(1), "{layout:?}");
+    assert!(!layout.contains_key("nsts"), "no cohort of one");
+}
+
+/// ...unless the file already holds a pool for that axis, which is the other
+/// half of the bet and outlives the span that made it.
+#[test]
+fn a_lone_irregular_series_joins_a_pool_the_file_already_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("join.h5");
+    {
+        let mut store = create_store(Some(&path), false).unwrap();
+        store
+            .add_time_series_bulk(vec![irregular(1, 100.0), irregular(2, 200.0)])
+            .unwrap();
+        store.flush().unwrap();
+    }
+    assert_eq!(kinds(&path)["nsts"], vec![vec![12, 2]]);
+    {
+        let mut store = open_store(&path, false).unwrap();
+        store.begin_transaction().unwrap();
+        store.add(irregular(3, 300.0)).unwrap();
+        store.commit_transaction().unwrap();
+        store.flush().unwrap();
+    }
+    let layout = kinds(&path);
+    assert!(!layout.contains_key("arr"), "joined the pool: {layout:?}");
+    assert_eq!(layout["nsts"].len(), 2, "a sibling of the same pool");
+
+    let store = open_store(&path, true).unwrap();
+    assert_eq!(first_irregular_value(&store, 3), 300.0);
     assert!(store.verify_integrity().unwrap().ok());
 }
 

@@ -289,12 +289,15 @@ both cases `cols` is capped so one chunk stays within a byte budget (`MAX_CHUNK_
 batch wider than the cap spills across datasets.
 
 "The batch it has in hand" is the whole of an `add_time_series_bulk` call — **or the whole span of
-an open transaction**. Nothing a transaction writes is durable until its outermost commit, so a
-single add inside one is buffered per pool rather than dropped into a growth-pool slot, and the
-buffered arrays are written with the same block writer at the commit, or when a read needs one of
-them to have a physical position. A loop of single adds inside one transaction therefore produces
-exactly the datasets one bulk add of the same items produces — **so long as the span reaches its
-commit without materializing early**; only an un-transactioned single add takes the default width.
+an open transaction**, for irregular cohorts as well as regular pools: whether an irregular series
+packs with others on its axis or stands alone is decided from the block's final membership at the
+commit, not from the one request an add can see. Nothing a transaction writes is durable until its
+outermost commit, so a single add inside one is buffered per pool rather than dropped into a
+growth-pool slot, and the buffered arrays are written with the same block writer at the commit, or
+when a read needs one of them to have a physical position. A loop of single adds inside one
+transaction therefore produces exactly the datasets one bulk add of the same items produces — **so
+long as the span reaches its commit without materializing early**; only an un-transactioned single
+add takes the default width.
 
 The byte ceiling below and an early materialization are what can break that equivalence: crossing
 the ceiling, or asking a buffered array for its physical location, writes the span out as it stands.
@@ -317,8 +320,11 @@ spill a too-wide batch already performs, costing an extra dataset and nothing el
 **A block of one is not a block.** If a span ends up holding a single array for a pool, it fills a
 growth-pool slot rather than claiming a dataset sized to one column — chunked `(1, 1)`, that would
 give a scalar `f64` series an eight-byte chunk per timestep, whose per-chunk overhead dwarfs the
-data. It is the same rule `add_time_series_bulk` applies to a batch of one. From two columns up the
-block is what the bulk add of those items writes.
+data. It is the same rule `add_time_series_bulk` applies to a batch of one. For an **irregular**
+pool the fallback is a standalone `arr_` dataset instead of a slot, because an `nsts_` pool is
+shared only by the series on that exact axis: a cohort of one is a dataset spread over `length`
+chunks for no reason, where a regular pool is shared by every series on the resolution. From two
+columns up the block is what the bulk add of those items writes.
 
 This is a write-time policy like every other choice on this page: the layouts it produces are ones
 the format already had, so it does not affect `data_format_version` and stores written either way

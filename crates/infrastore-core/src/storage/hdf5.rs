@@ -1195,6 +1195,20 @@ impl Inner {
     /// what a bulk add of the same items would write, and matching that is the
     /// invariant this whole path exists to hold.
     ///
+    /// **An irregular block of one is a standalone array**, not a growth-pool
+    /// slot, and this is where that bet is settled for a span. Packing is the
+    /// right default for an irregular series because they arrive in cohorts on
+    /// one event timeline, but it is a bet the pool will be wider than one
+    /// column: a packed dataset spreads a single array over `length` chunks,
+    /// which costs far more than the one standalone dataset it replaces.
+    /// `Store::resolve_irregular_layouts` settles that bet before the write for
+    /// an un-transactioned add, from the requests it can see; inside a span it
+    /// cannot, because the cohort is still arriving. Deciding it here — where
+    /// the block's final membership *is* known — is what makes a cohort added
+    /// one series at a time pool exactly as the bulk add of it does. A pool the
+    /// file already holds still wins over standalone, which is the other half of
+    /// the same bet.
+    ///
     /// On failure the block goes back exactly as it was, `by_hash` still names
     /// its arrays as pending, and the error is returned: the transaction that
     /// owns these writes is still open, and both committing again and rolling
@@ -1211,9 +1225,15 @@ impl Inner {
         self.pending_bytes = self.pending_bytes.saturating_sub(block.bytes);
         let (dtype, element_shape, length, group) = key;
         let outcome = if block.hashes.len() == 1 {
-            // Overwrites the `Location::Pending` with the packed one, like the
-            // block writer below.
-            self.put_packed(&block.hashes[0], &block.arrays[0], *group)
+            let (hash, array) = (&block.hashes[0], &block.arrays[0]);
+            // Both arms overwrite the `Location::Pending` with the physical one
+            // they write, like the block writer below.
+            match group {
+                PackGroup::Irregular(_) if !self.dataset_groups.contains_key(key) => {
+                    self.put_standalone(hash, array, None)
+                }
+                _ => self.put_packed(hash, array, *group),
+            }
         } else {
             // The index is only used by `put_packed_block` for its own `written`
             // bookkeeping, which this caller does not need; the position in the

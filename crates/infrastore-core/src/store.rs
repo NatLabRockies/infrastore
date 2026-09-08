@@ -2037,11 +2037,17 @@ impl Store {
             .iter()
             .map(build_request_parts)
             .collect::<Result<_>>()?;
-        resolve_irregular_layouts(&*self.backend, &items, &mut parts);
         // Read before the savepoint borrows `self.metadata`: it cannot change
         // during the loop, since opening a transaction is not something an add
-        // does.
+        // does. It also decides whether the irregular layouts are settled now or
+        // left to the block that buffering is about to build.
         let mode = self.write_mode();
+        resolve_irregular_layouts(
+            &*self.backend,
+            &items,
+            &mut parts,
+            mode == WriteMode::Deferred,
+        );
 
         let tx = self.metadata.savepoint()?;
         let mut added = Vec::with_capacity(items.len());
@@ -2158,7 +2164,13 @@ impl Store {
             .iter()
             .map(build_request_parts)
             .collect::<Result<_>>()?;
-        resolve_irregular_layouts(&*self.backend, &items, &mut parts);
+        let mode = self.write_mode();
+        resolve_irregular_layouts(
+            &*self.backend,
+            &items,
+            &mut parts,
+            mode == WriteMode::Deferred,
+        );
         // Shared across the whole call: the timestamp vectors are written in the
         // loop below, the feature sets by `insert_association` further down, and
         // both are deduplicated over the same batch.
@@ -2187,7 +2199,6 @@ impl Store {
                     .push(i);
             } else {
                 let already = self.backend.contains(&p.hash)?;
-                let mode = self.write_mode();
                 self.backend
                     .put_array(&p.hash, array, p.group, p.layout, mode)?;
                 if !already {
@@ -2198,7 +2209,6 @@ impl Store {
         for (pool, idxs) in &packed_groups {
             let hashes: Vec<[u8; 32]> = idxs.iter().map(|&i| parts[i].hash).collect();
             let arrays: Vec<&TypedArray> = idxs.iter().map(|&i| request_array(&items[i])).collect();
-            let mode = self.write_mode();
             let written = self
                 .backend
                 .put_packed_block(&hashes, &arrays, pool.3, mode)?;
@@ -5944,13 +5954,25 @@ fn pool_key(array: &TypedArray, group: PackGroup) -> PoolKey {
 ///
 /// Getting it "wrong" costs space, never correctness: reads resolve an array by
 /// content hash and handle either layout, and a group can hold columns of both
-/// (see `Hdf5Backend::read_index_locked`). So a cohort that arrives one series
-/// at a time simply leaves its first member standalone and packs the rest.
+/// (see `Hdf5Backend::read_index_locked`).
+///
+/// `deferred` says a transaction is open, and then this does **nothing**: the
+/// bet is settled later, by `Hdf5Backend::materialize_block`, from the block's
+/// final membership. Settling it here would get it wrong every time, because a
+/// span's cohort is still arriving: each add sees one request and no pool — a
+/// standalone array never makes one — so a cohort added one series at a time
+/// came out as N standalone datasets where the bulk add of it writes one pooled
+/// cohort. Deferring the decision is what makes those two the same file, which
+/// is the whole promise of writing inside a span.
 fn resolve_irregular_layouts(
     backend: &dyn StorageBackend,
     items: &[AddRequest],
     parts: &mut [RequestParts],
+    deferred: bool,
 ) {
+    if deferred {
+        return;
+    }
     let mut in_batch: HashMap<PoolKey, usize> = HashMap::new();
     for (item, part) in items.iter().zip(parts.iter()) {
         if matches!(part.group, PackGroup::Irregular(_)) {
