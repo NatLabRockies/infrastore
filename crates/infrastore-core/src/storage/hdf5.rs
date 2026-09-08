@@ -517,8 +517,16 @@ enum Location {
     /// it does with a buffered array: the compiler asks at each `match`, and the
     /// answer is either "serve it from the buffer" or "write the block out
     /// first", never "not found".
+    ///
+    /// The key is boxed so that this variant does not set the enum's size. A
+    /// `DatasetGroupKey` is some eighty bytes inline — a `Vec`, a `PackGroup`
+    /// carrying a 32-byte hash — and holding it here made every `by_hash`
+    /// entry nearly twice as wide, for every array, to serve the few that are
+    /// ever pending. A columnar read probes that map once per column, and at
+    /// 100,000 columns the wider entries cost 12% per timestep read on an
+    /// otherwise identical file.
     Pending {
-        key: DatasetGroupKey,
+        key: Box<DatasetGroupKey>,
         idx: usize,
     },
 }
@@ -591,8 +599,8 @@ struct Inner {
     pending: HashMap<DatasetGroupKey, PendingBlock>,
     /// `pending.values().map(|b| b.bytes).sum()`, maintained rather than
     /// recomputed. This is the figure [`MAX_PENDING_BYTES`] caps: the per-pool
-    /// width cap alone bounds *columns*, and a thousand columns of a
-    /// multi-year series is hundreds of megabytes.
+    /// width cap alone bounds *columns*, and a chunk row's worth of columns
+    /// of a multi-year series is gigabytes.
     pending_bytes: usize,
     /// The ceiling `pending_bytes` is held to, [`MAX_PENDING_BYTES`] outside
     /// tests. A field rather than the constant so a test can lower it and cross
@@ -1060,13 +1068,17 @@ impl Inner {
 
     /// The width one pending block grows to before it is written out.
     ///
-    /// Two ceilings, whichever is lower. The first is
-    /// [`DEFAULT_COLS_PER_DATASET`](super::common::DEFAULT_COLS_PER_DATASET),
-    /// already clamped to the per-chunk byte budget: it is the width the
-    /// un-managed path gives a growth pool, so a span wider than that spills
-    /// into datasets no wider than the ones a store accumulates anyway, and the
-    /// buffer's column count is bounded by a number rather than by the chunk
-    /// budget's 131,072-for-scalar-`f64`.
+    /// Two ceilings, whichever is lower. The first is the per-chunk byte
+    /// budget, [`MAX_CHUNK_BYTES`] over one column's element block — the width
+    /// the block writer itself spills a batch at, so a span produces the
+    /// datasets the bulk add of the same items would. It is deliberately *not*
+    /// [`DEFAULT_COLS_PER_DATASET`](super::common::DEFAULT_COLS_PER_DATASET):
+    /// that ceiling bounded the buffer by a round number, but it also cut a
+    /// bulk add issued inside a transaction into growth-pool-sized pieces — a
+    /// 100,000-series batch became a hundred datasets of a thousand columns
+    /// where the same batch outside a transaction wrote ten of ten thousand —
+    /// and a columnar read pays one chunk per dataset per timestep, which
+    /// measured as 10% on every read of that store.
     ///
     /// The second converts [`MAX_PENDING_BYTES`] into columns *for this pool*,
     /// because a column's cost is `length × element_block` and a thousand
@@ -1078,7 +1090,7 @@ impl Inner {
             .saturating_mul(element_block_bytes(dtype, element_shape))
             .max(1);
         let by_bytes = (self.max_pending_bytes / per_column).max(1);
-        resolve_dataset_cols(None, dtype, element_shape).min(by_bytes)
+        resolve_dataset_cols(Some(usize::MAX), dtype, element_shape).min(by_bytes)
     }
 
     /// Write out whole blocks, widest first, until the buffer is back inside
@@ -1135,7 +1147,7 @@ impl Inner {
         self.by_hash.insert(
             *hash,
             Location::Pending {
-                key: key.clone(),
+                key: Box::new(key.clone()),
                 idx,
             },
         );
@@ -1247,9 +1259,9 @@ impl Inner {
         let mut keys: Vec<DatasetGroupKey> = Vec::new();
         for hash in hashes {
             if let Some(Location::Pending { key, .. }) = self.by_hash.get(&hash)
-                && !keys.contains(key)
+                && !keys.contains(key.as_ref())
             {
-                keys.push(key.clone());
+                keys.push((**key).clone());
             }
         }
         for key in &keys {
@@ -2108,7 +2120,7 @@ impl Inner {
             // which only decides which column they land in — and a rolled-back
             // span has no column order to preserve.
             Location::Pending { key, idx } => {
-                let Some(block) = self.pending.get_mut(&key) else {
+                let Some(block) = self.pending.get_mut(key.as_ref()) else {
                     return Ok(());
                 };
                 if idx >= block.hashes.len() {
@@ -2130,7 +2142,7 @@ impl Inner {
                     );
                 }
                 if emptied {
-                    self.pending.remove(&key);
+                    self.pending.remove(key.as_ref());
                 }
                 Ok(())
             }
@@ -2928,26 +2940,30 @@ mod tests {
         assert_eq!(inner.dataset(&name).unwrap().shape(), vec![6, 2]);
     }
 
-    /// The pending buffer is bounded twice: by columns per pool, and by bytes
-    /// across every pool.
+    /// The pending buffer is bounded twice: by the chunk budget per pool, and
+    /// by bytes across every pool.
     ///
-    /// The width cap is [`DEFAULT_COLS_PER_DATASET`] rather than the chunk
-    /// budget's 131,072-for-scalar-`f64`, and it shrinks further for a series
-    /// long enough that a thousand columns of it would not fit the byte budget.
+    /// The width cap is the chunk budget's own — 131,072 for scalar `f64`, the
+    /// width a bulk add's block spills at — and never the growth pool's
+    /// [`DEFAULT_COLS_PER_DATASET`], which would cut a wide batch inside a
+    /// transaction into datasets ten times narrower than the same batch writes
+    /// outside one. It shrinks below the chunk budget only for a series long
+    /// enough that a chunk row's worth of columns would not fit the byte budget.
     #[test]
-    fn the_pending_width_cap_is_bounded_by_columns_and_by_bytes() {
+    fn the_pending_width_cap_is_the_chunk_budget_bounded_by_bytes() {
         let dir = tempfile::tempdir().unwrap();
         let be = Hdf5Backend::create(&dir.path().join("s.h5"), Compression::None).unwrap();
         let inner = be.inner.lock().unwrap();
 
-        // Short scalar series: the column cap binds.
+        // Short scalar series: the chunk budget binds, not the growth pool.
         assert_eq!(
             inner.pending_width_cap(Dtype::F64, &[], 24),
-            DEFAULT_COLS_PER_DATASET
+            MAX_CHUNK_BYTES / std::mem::size_of::<f64>()
         );
-        // A wide element shape still meets the chunk budget first.
+        assert!(inner.pending_width_cap(Dtype::F64, &[], 24) > DEFAULT_COLS_PER_DATASET);
+        // A wide element shape meets the chunk budget sooner.
         assert_eq!(inner.pending_width_cap(Dtype::F64, &[1024], 2), 128);
-        // Long enough that a thousand columns would exceed the byte budget:
+        // Long enough that a chunk row of columns would exceed the byte budget:
         // the cap falls to what does fit, and never below one.
         let long = MAX_PENDING_BYTES / std::mem::size_of::<f64>();
         assert_eq!(inner.pending_width_cap(Dtype::F64, &[], long), 1);

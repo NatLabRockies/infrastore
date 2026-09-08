@@ -145,8 +145,11 @@ to one column is chunked `(1, 1)` and gives a scalar `f64` series an eight-byte 
 whose per-chunk overhead dwarfs the data — the same reason `add_time_series_bulk` sends a batch of
 one down the single-add path. That matters because "several operations atomic together" is most
 often a removal and its replacement, not an ingest. And **the buffer is bounded**, per pool at the
-growth-pool width and across every pool at a fixed byte ceiling; crossing either writes a block out
-early, which costs an extra dataset and nothing else.
+width the block writer spills a batch at and across every pool at a fixed byte ceiling; crossing
+either writes a block out early, which costs an extra dataset and nothing else. The per-pool bound
+is the chunk budget rather than the growth pool's thousand columns because a bulk add inside a
+transaction is buffered too, and a narrower cap gave it ten times the datasets — and a columnar read
+ten times the chunks — of the same add outside one.
 
 The costs are real and bound where this is worth using. A transaction holds the SQLite write lock
 until it finishes, so a concurrent writer on the same artifact blocks and then fails on its busy

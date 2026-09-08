@@ -1625,9 +1625,10 @@ impl Store {
     ///
     /// The price is memory: a pool's pending block holds its not-yet-written
     /// arrays, which is the same memory the block writer allocates for the
-    /// equivalent bulk add. It is bounded twice — per pool at the growth-pool
-    /// width (1,000 columns, or fewer when one chunk row or that ceiling would
-    /// not take a thousand), and across every pool at a fixed byte ceiling,
+    /// equivalent bulk add. It is bounded twice — per pool at the width the
+    /// block writer spills a batch at (one chunk row: 131,072 columns of scalar
+    /// `f64`, fewer for wider elements or when that many columns would not fit
+    /// the byte ceiling), and across every pool at a fixed byte ceiling,
     /// currently 128 MiB. Crossing either writes blocks out early,
     /// which costs an extra dataset and nothing else. A span far larger than
     /// the ceiling therefore stays bounded, at the price of spilling — but the

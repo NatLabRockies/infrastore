@@ -19,8 +19,13 @@
 //! is not a block: it fills a growth-pool slot, because sizing a dataset to one
 //! column is the mistake `add_time_series_bulk` already refuses for a batch of
 //! one. And the memory an open span holds is capped twice — per pool at the
-//! growth-pool width, and across every pool at a byte budget — so a long enough
-//! span writes blocks out early instead of growing without limit.
+//! width the block writer spills a batch at, and across every pool at a byte
+//! budget — so a long enough span writes blocks out early instead of growing
+//! without limit. The per-pool cap is the chunk budget and not the growth
+//! pool's thousand columns on purpose: a bulk add issued inside a transaction is
+//! buffered the same way, and a thousand-column cap cut a wide one into ten
+//! times the datasets it writes outside a transaction, which a columnar read
+//! then pays for chunk by chunk.
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use hdf5_metno as h5;
@@ -509,44 +514,105 @@ fn an_abandoned_transaction_leaves_no_orphan_arrays() {
 /// One of the two ceilings on that width is the per-chunk byte budget, which a
 /// wide element shape makes small enough to cross in a test: `f64` elements of
 /// `[1024]` are 8 KiB each, which caps a 1 MiB timestamp-row chunk at 128
-/// columns — below `DEFAULT_COLS_PER_DATASET`, so it is what binds here.
-/// The other ceiling: a scalar `f64` pool spills at
-/// `DEFAULT_COLS_PER_DATASET`, not at the 131,072 columns a 1 MiB chunk of
-/// eight-byte elements would allow.
-///
-/// The chunk budget alone bounds the buffer in *columns*, and 131,072 columns of
-/// anything longer than a toy series is more memory than a store may take
-/// without being asked. A thousand is also the width the un-managed path gives
-/// a growth pool, so a span wider than that spills into datasets no wider than
-/// the ones a store accumulates anyway.
+/// columns. The other is the global byte budget, exercised in the backend's own
+/// tests. What is *not* a ceiling is the growth pool's thousand columns: a
+/// scalar `f64` span of 1,002 stays one block, exactly as the bulk add of the
+/// same 1,002 writes one dataset.
 #[test]
-fn a_scalar_pool_spills_at_the_growth_pool_width() {
+fn a_scalar_span_wider_than_the_growth_pool_stays_one_block() {
     use infrastore_core::storage::common::DEFAULT_COLS_PER_DATASET;
 
     const TOTAL: i64 = DEFAULT_COLS_PER_DATASET as i64 + 2;
 
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("wide_span.h5");
-    add_singly_in_a_transaction(&path, 1..TOTAL + 1);
+    let looped = dir.path().join("wide_span.h5");
+    add_singly_in_a_transaction(&looped, 1..TOTAL + 1);
 
-    let layout = packed_layout(&path);
+    let expected = BTreeMap::from([(
+        "sts_f64_s_24_PT1H".to_string(),
+        (vec![24, TOTAL as usize], Some(vec![1, TOTAL as usize])),
+    )]);
     assert_eq!(
-        layout["sts_f64_s_24_PT1H"].0,
-        vec![24, DEFAULT_COLS_PER_DATASET],
-        "the block spilled at the growth-pool width"
-    );
-    assert_eq!(
-        layout["sts_f64_s_24_PT1H__1"].0,
-        vec![24, 2],
-        "the remainder is its own block at the commit"
+        packed_layout(&looped),
+        expected,
+        "one block wider than the growth pool, not a spill at a thousand"
     );
 
-    let store = open_store(&path, true).unwrap();
+    let bulked = dir.path().join("bulked.h5");
+    {
+        let mut store = create_store(Some(&bulked), false).unwrap();
+        store
+            .add_time_series_bulk(
+                (1..TOTAL + 1)
+                    .map(|o| request(o, o as f64 * 100.0))
+                    .collect(),
+            )
+            .unwrap();
+        store.flush().unwrap();
+    }
+    assert_eq!(packed_layout(&bulked), expected);
+
+    let store = open_store(&looped, true).unwrap();
     assert_eq!(
         store.list_metadata(ListFilter::new()).unwrap().len(),
         TOTAL as usize
     );
     for owner in [1, DEFAULT_COLS_PER_DATASET as i64, TOTAL] {
+        assert_eq!(first_value(&store, owner), owner as f64 * 100.0);
+    }
+    assert!(store.verify_integrity().unwrap().ok());
+}
+
+/// A bulk add issued *inside* a transaction is buffered like the single adds
+/// are, and must come out as the dataset it writes outside one.
+///
+/// This is the shape the Julia binding's transaction takes — it stages its
+/// adds client-side and commits them as bulk adds of ten thousand inside an
+/// open transaction — and it is where a growth-pool-width cap on the buffer
+/// was first felt: a hundred-thousand-series store came out as a hundred
+/// datasets of a thousand columns instead of ten of ten thousand, and every
+/// per-timestep read across it paid the tenfold chunk count.
+#[test]
+fn a_bulk_add_inside_a_transaction_writes_the_dataset_it_writes_outside_one() {
+    const TOTAL: i64 = 1_200;
+    let items = || {
+        (1..=TOTAL)
+            .map(|o| request(o, o as f64 * 100.0))
+            .collect::<Vec<_>>()
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let outside = dir.path().join("outside.h5");
+    {
+        let mut store = create_store(Some(&outside), false).unwrap();
+        store.add_time_series_bulk(items()).unwrap();
+        store.flush().unwrap();
+    }
+    let inside = dir.path().join("inside.h5");
+    {
+        let mut store = create_store(Some(&inside), false).unwrap();
+        store.begin_transaction().unwrap();
+        store.add_time_series_bulk(items()).unwrap();
+        // The binding flushes between its batches; a flush inside the span
+        // writes the block out as it stands and must not narrow it.
+        store.flush().unwrap();
+        store.commit_transaction().unwrap();
+        store.flush().unwrap();
+    }
+
+    let layout = packed_layout(&inside);
+    assert_eq!(layout, packed_layout(&outside));
+    assert_eq!(
+        layout,
+        BTreeMap::from([(
+            "sts_f64_s_24_PT1H".to_string(),
+            (vec![24, TOTAL as usize], Some(vec![1, TOTAL as usize])),
+        )]),
+        "one batch-wide dataset, not growth-pool-sized pieces"
+    );
+
+    let store = open_store(&inside, true).unwrap();
+    for owner in [1, 1_000, 1_001, TOTAL] {
         assert_eq!(first_value(&store, owner), owner as f64 * 100.0);
     }
     assert!(store.verify_integrity().unwrap().ok());

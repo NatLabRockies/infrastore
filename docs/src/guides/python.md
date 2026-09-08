@@ -226,8 +226,9 @@ A transaction is also where a **run of single adds** belongs. Nothing it writes 
 outermost commit, so packed adds inside one are buffered per shape group and written as one block at
 the commit — the datasets `add_time_series_bulk` of the same series would produce, without having to
 hold the batch yourself. Two things qualify it: the buffer spills a block early once a group reaches
-1,000 columns or the unwritten arrays cross 128 MiB (an extra dataset, nothing else), and a span
-holding a single array fills a shared-pool slot rather than claiming a dataset one column wide.
+the width one chunk row holds (131,072 scalar `float64` columns) or the unwritten arrays cross 128
+MiB (an extra dataset, nothing else — the same split a batch that wide gets), and a span holding a
+single array fills a shared-pool slot rather than claiming a dataset one column wide.
 `add_time_series_bulk` is still the direct way to say it when you already have the batch in hand.
 
 ## Read a Series

@@ -296,21 +296,23 @@ them to have a physical position. A loop of single adds inside one transaction t
 exactly the datasets one bulk add of the same items produces — **so long as the span reaches its
 commit without materializing early**; only an un-transactioned single add takes the default width.
 
-The two limits below are what can break that equivalence, since they bound the buffer and a bulk
-add's own `cols` only by `MAX_CHUNK_BYTES`. 1,002 scalar `f64` adds inside a transaction split at
-1,000 columns, where the bulk add of the same 1,002 writes one dataset; crossing the byte ceiling or
-asking a buffered array for its physical location splits a span the same way. Each split costs an
-extra dataset and nothing else — the datasets are still block-written and chunk-aligned.
+The byte ceiling below and an early materialization are what can break that equivalence: crossing
+the ceiling, or asking a buffered array for its physical location, writes the span out as it stands.
+Each split costs an extra dataset and nothing else — the datasets are still block-written and
+chunk-aligned.
 
 Two limits keep that buffer from being unbounded, and both simply write a block out early — the same
 spill a too-wide batch already performs, costing an extra dataset and nothing else:
 
-- **Per pool, `DEFAULT_COLS_PER_DATASET` columns**, itself capped by `MAX_CHUNK_BYTES` as above. So
-  a span wider than a thousand series of one shape spills into datasets no wider than the ones a
-  store accumulates anyway.
-- **Across every pool, `MAX_PENDING_BYTES = 128 MiB`** of unwritten arrays, since a thousand columns
-  of a multi-year series is far more than a thousand columns of a day. Crossing it writes out the
-  widest block.
+- **Per pool, one chunk row of columns** — `MAX_CHUNK_BYTES` over the element block, exactly the
+  width a bulk add's block spills at, so the span's datasets are the bulk add's datasets. It is
+  deliberately not `DEFAULT_COLS_PER_DATASET`: a bulk add issued inside a transaction is buffered
+  too, and a thousand-column cap cut a 100,000-series batch into a hundred datasets where the same
+  batch outside a transaction writes ten, which every per-timestep read then paid for chunk by
+  chunk.
+- **Across every pool, `MAX_PENDING_BYTES = 128 MiB`** of unwritten arrays, since a chunk row of
+  columns of a multi-year series is far more than the same columns of a day. Crossing it writes out
+  the widest block.
 
 **A block of one is not a block.** If a span ends up holding a single array for a pool, it fills a
 growth-pool slot rather than claiming a dataset sized to one column — chunked `(1, 1)`, that would
