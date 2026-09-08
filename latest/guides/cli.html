@@ -367,9 +367,11 @@ series not on it drops out:</p>
 the grids a store holds (<code>list --length 24</code>) and retire a stray cohort without naming its owners.</p>
 <p><code>export</code> is the bulk read-direction inverse of <code>add</code>: every series the selector matches is written
 to its own CSV or JSON file under <code>--dir</code> (or to stdout when exactly one matches), optionally sliced
-with <code>--time-range</code>. Setting <code>INFRASTORE_STORE</code> in the environment stands in for <code>--store</code>, every
-destructive command except <code>compact</code> accepts <code>--dry-run</code> to preview its effect, and the global
-<code>-y</code>/<code>--yes</code> answers every confirmation prompt so a script does not have to know which commands ask:</p>
+with <code>--time-range</code>; <code>-f parquet</code> instead writes
+<a href="#hand-it-to-something-else-parquet">one file pair per partition</a>. Setting <code>INFRASTORE_STORE</code> in the
+environment stands in for <code>--store</code>, every destructive command except <code>compact</code> accepts <code>--dry-run</code>
+to preview its effect, and the global <code>-y</code>/<code>--yes</code> answers every confirmation prompt so a script
+does not have to know which commands ask:</p>
 <pre><code class="language-sh">export INFRASTORE_STORE=demo.h5
 infrastore remove --name-glob 'scratch_*' --dry-run      # what would go
 infrastore -y remove --name-glob 'scratch_*'             # no prompt
@@ -429,6 +431,122 @@ metadata alone.</p>
 hashes as garbage bytes, and in <code>.mode box</code> it mangles the table borders:</p>
 <pre><code class="language-sh">sqlite3 demo.h5.sqlite 'SELECT name, data_hash FROM time_series_readable;'
 </code></pre>
+<h2 id="hand-it-to-something-else-parquet"><a class="header" href="#hand-it-to-something-else-parquet">Hand It to Something Else: Parquet</a></h2>
+<p>CSV is the interchange format <code>add</code> and <code>export</code> default to, and it has one real cost: a float goes
+out as decimal text and comes back as whatever parsing that text gives. Parquet does not have that
+problem, and every analysis tool worth the name reads it:</p>
+<pre><code class="language-sh">infrastore --store demo.h5 -f parquet export --name-glob 'load_*' --dir parquet/
+infrastore --store other.h5 add --parquet parquet/
+</code></pre>
+<p>What comes out is a handful of <strong>partitions</strong>, not a file per series -- a store with thousands of
+series would otherwise become thousands of files. Each partition is a <strong>pair</strong>:</p>
+<pre><code class="language-text">parquet/
+  SingleTimeSeries.f64.utc.values.parquet            every distinct array once, one row per value
+  SingleTimeSeries.f64.utc.series.parquet            one catalog row per series
+  SingleTimeSeries.f64.America_Denver.values.parquet
+  SingleTimeSeries.f64.America_Denver.series.parquet
+  Deterministic.f64.utc.values.parquet
+  Deterministic.f64.utc.series.parquet
+</code></pre>
+<p>One pair per <code>(type, value type, time reference)</code> triple, because those three cannot vary inside one
+table without nullable or ill-typed columns -- a forecast has an <code>issue_time</code> and a static series
+does not, and a table has one Arrow type per column. The payoff is that <strong>every column is
+required</strong>, which is worth more to whoever queries the files than the files it costs.</p>
+<p>The split is the other half of it. The store is content-addressed, so a thousand components sharing
+one profile hold <strong>one</strong> array; writing the catalog row beside every value would write that profile
+a thousand times, and Parquet's compression does not find repeats across pages. So the values file
+holds each array once, keyed by the pair <code>(data_hash, time_axis)</code>, and the series file carries that
+same pair beside each catalog row. They join on it.</p>
+<p><code>add --parquet</code> takes a file, a whole directory, or a partition stem, and commits one transaction
+per partition, so a partition that fails leaves the ones already committed alone. A pair <code>export</code>
+wrote re-adds with no other flag; a foreign file -- one from a dataframe, or a values file whose
+partner was not copied -- carries less, and is told what it is missing:</p>
+<pre><code class="language-sh">infrastore --store demo.h5 add --parquet from_pandas.parquet \
+    --owner-id 42 --owner-type Generator --name load
+</code></pre>
+<p>Three things to know. <code>-f parquet</code> requires <code>--dir</code>, because Parquet's footer sits at the end of the
+file and a writer has to seek back to it -- a pipe cannot. The <code>data_hash</code> half of the key is a
+checksum on the way back in: if you edited values in DuckDB, recompute it or pass <code>--no-checksum</code>.
+And a series with no values <strong>fails</strong> the export, naming every one -- an empty series would be a
+catalog row whose key matches no values rows, which is also what a truncated export looks like.</p>
+<p>The full layout -- both column sets, the array key, the partition rules, the filenames, the footer,
+the merge join, and what a foreign file has to supply -- is in
+<a href="../reference/parquet-format.html">Parquet Layout</a>.</p>
+<p>Parquet is on by default, in the released binaries and in <code>cargo install infrastore-cli</code> alike. It
+<em>is</em> a cargo feature, so <code>--no-default-features --features vendored</code> builds a binary without the
+Arrow dependency tree; that binary still accepts the flags and tells you which feature to rebuild
+with, rather than reporting <code>parquet</code> as an unknown format.</p>
+<h3 id="querying-it-with-duckdb"><a class="header" href="#querying-it-with-duckdb">Querying it with DuckDB</a></h3>
+<p>The reason to write Parquet rather than to embed a query engine here. Every question starts with the
+same join, on the pair that keys both halves:</p>
+<pre><code class="language-sql">SELECT s.name, s.owner_id, s.units, max(v.value) AS peak
+FROM 'parquet/SingleTimeSeries.f64.utc.values.parquet' v
+JOIN 'parquet/SingleTimeSeries.f64.utc.series.parquet' s USING (data_hash, time_axis)
+GROUP BY s.name, s.owner_id, s.units;
+</code></pre>
+<p>Write it once as a view and nothing after has to think about it:</p>
+<pre><code class="language-sql">CREATE VIEW load AS
+SELECT s.*, v.timestamp, v.value
+FROM 'parquet/SingleTimeSeries.f64.America_Denver.values.parquet' v
+JOIN 'parquet/SingleTimeSeries.f64.America_Denver.series.parquet' s USING (data_hash, time_axis);
+
+-- One component's day, in its own spelling -- the timestamp column is zoned.
+SELECT timestamp, value FROM load
+WHERE owner_id = 42 AND name = 'load'
+ORDER BY timestamp;
+</code></pre>
+<p>That view is the denormalized table the format deliberately does not write. Materializing it costs
+exactly what the split saves; keeping it as a view costs nothing.</p>
+<p>A forecast joins the same way, and its window is a column of the values half:</p>
+<pre><code class="language-sql">SELECT v.issue_time, count(*) AS steps, max(v.value) AS peak
+FROM 'parquet/Deterministic.f64.utc.values.parquet' v
+JOIN 'parquet/Deterministic.f64.utc.series.parquet' s USING (data_hash, time_axis)
+WHERE s.name = 'load_det'
+GROUP BY v.issue_time
+ORDER BY v.issue_time;
+</code></pre>
+<p>Note what a glob does <em>not</em> mix: <code>'parquet/*.values.parquet'</code> only works across partitions whose
+columns agree, which is to say within one <code>time_series_type</code>. Reading a static partition and a
+forecast one together needs the columns named, since only the latter has <code>issue_time</code>.</p>
+<p>The catalog is still there when you want what the files leave out -- the <code>data_hash</code> in its binary
+form, the feature sets, the association tables:</p>
+<pre><code class="language-sql">INSTALL sqlite; LOAD sqlite;
+ATTACH 'demo.h5.sqlite' AS catalog (TYPE sqlite);
+
+-- Two joins: the array key pairs the halves, then `id` reaches the catalog.
+SELECT s.name, s.owner_id, max(v.value) AS peak, c.timestamps_hash
+FROM 'parquet/SingleTimeSeries.f64.utc.values.parquet' v
+JOIN 'parquet/SingleTimeSeries.f64.utc.series.parquet' s USING (data_hash, time_axis)
+JOIN catalog.time_series_readable AS c ON c.id = s.id
+GROUP BY s.name, s.owner_id, c.timestamps_hash;
+</code></pre>
+<p><code>time_series_readable</code> is the catalog's hand-inspection view -- it hex-encodes the two content
+hashes and decodes the integer type codes, so the rows read as text (see
+<a href="../reference/cli.html#reading-the-sqlite-catalog-by-hand">Reading the SQLite catalog by hand</a>). The
+<code>id</code> column on the <strong>series</strong> half is what reaches it; it is provenance only, and <code>add</code> assigns
+fresh ids rather than reusing it.</p>
+<h2 id="stamp-provenance-on-the-artifact"><a class="header" href="#stamp-provenance-on-the-artifact">Stamp Provenance on the Artifact</a></h2>
+<p>A store built by a model run should say so. <code>store-attr</code> records free-form key/value provenance
+about the whole artifact -- who built it, from what source system, under which of your own schema
+versions:</p>
+<pre><code class="language-sh">infrastore --store demo.h5 store-attr set creator sienna-build
+infrastore --store demo.h5 store-attr set source_system WECC-2032-ADS
+infrastore --store demo.h5 store-attr list
+infrastore --store demo.h5 store-attr get creator     # bare value on stdout
+infrastore --store demo.h5 store-attr remove creator
+</code></pre>
+<p>The store never interprets a value, so structure rides in the text -- store JSON if you need it. The
+attributes live in the catalog, which means they travel with <code>persist</code>, survive <code>compact</code>, and show
+up under <code>store_attributes</code> in <code>infrastore -f json store-info</code>.</p>
+<p>Three things to know. <code>set</code> replaces rather than appending: an artifact records one creator, not a
+history of them. <code>get</code> exits 1 when the key is unset, so a script can branch on it, while <code>remove</code>
+reports <code>removed: false</code> and exits 0. And keys beginning with <code>infrastore.</code> are reserved.</p>
+<p><code>merge</code> brings a source's attributes across without overwriting: a key the destination lacks is
+copied, a key both sides agree on is a no-op, and a disagreement is reported and left as the
+destination has it. <code>diff</code> gives them a section of their own and gates on them -- an artifact whose
+recorded source system changed is not the artifact you expected, even when every series is
+identical.</p>
+<p>Note the name. <code>attributes</code> (below) is a different command about a different thing.</p>
 <h2 id="associations"><a class="header" href="#associations">Associations</a></h2>
 <p>Two association catalogs live alongside the time series, readable and writable here:</p>
 <pre><code class="language-sh">infrastore --store demo.h5 attributes                 # component &lt;-&gt; supplemental attribute

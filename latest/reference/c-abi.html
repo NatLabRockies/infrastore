@@ -1156,6 +1156,55 @@ free(json);
 </code></pre>
 <p>Neither association catalog is exposed over the <a href="./grpc-api.html">gRPC server</a> or the
 <a href="./cli.html"><code>infrastore</code> CLI</a>.</p>
+<h2 id="store-attributes"><a class="header" href="#store-attributes">Store Attributes</a></h2>
+<p>Key/value provenance about the artifact as a whole. See
+<a href="../explanation/data-model.html#store-attributes">Store attributes</a> for the model.</p>
+<pre><code class="language-c">int32_t infrastore_store_set_store_attribute(InfraStore *store,
+                                             const char *key,
+                                             const char *value);
+int32_t infrastore_store_get_store_attribute(const InfraStore *store,
+                                             const char *key,
+                                             char **out_value,
+                                             uint64_t *out_len);
+int32_t infrastore_store_list_store_attributes(const InfraStore *store,
+                                               char **out_json,
+                                               uint64_t *out_len);
+int32_t infrastore_store_remove_store_attribute(InfraStore *store,
+                                                const char *key,
+                                                bool *out_removed);
+</code></pre>
+<pre><code class="language-c">infrastore_store_set_store_attribute(store, "creator", "sienna-build");
+
+char *value = NULL;
+uint64_t len = 0;
+infrastore_store_get_store_attribute(store, "creator", &amp;value, &amp;len);
+if (value != NULL) {          /* NULL means the key is unset */
+    puts(value);
+    infrastore_string_free(value);
+}
+
+char *json = NULL;
+infrastore_store_list_store_attributes(store, &amp;json, &amp;len);   /* {"creator":"sienna-build"} */
+infrastore_string_free(json);
+
+bool removed = false;
+infrastore_store_remove_store_attribute(store, "creator", &amp;removed);
+</code></pre>
+<p>Two conventions to note:</p>
+<ul>
+<li><strong><code>get</code> spells "unset" as a null <code>*out_value</code>, not as a zero <code>*out_len</code>.</strong> A key set to the empty
+string is a legitimate value, and the two must stay distinguishable. An unset key is
+<code>INFRASTORE_OK</code>, not <code>INFRASTORE_ERR_NOT_FOUND</code>.</li>
+<li><strong><code>list</code> returns a JSON object</strong>, following the owned-string convention, rather than an
+array-of-pairs buffer — the ABI has no pair type and this needs no new one.</li>
+</ul>
+<p>Unlike the JSON payloads every other owned-string export produces, a value is the caller's own text
+and can contain an interior NUL; <code>get</code> reports one as <code>INFRASTORE_ERR_INTEGRITY</code> rather than
+returning a value truncated at it. An empty key or one beginning with <code>infrastore.</code> (reserved, on
+removal as well as on write) is <code>INFRASTORE_ERR_INVALID_PARAMETER</code>; a write to a read-only store is
+<code>INFRASTORE_ERR_READ_ONLY</code>.</p>
+<p>The read half is available over the <a href="./grpc-api.html">gRPC server</a>; the writes are not, like every
+other write.</p>
 <h2 id="openapi-row-association-serde"><a class="header" href="#openapi-row-association-serde">OpenAPI-row Association Serde</a></h2>
 <p>Direct JSON serde of the two association catalogs, in the wire spelling
 <a href="https://github.com/Sienna-Platform/SiennaSchemas">SiennaSchemas</a> defines (<code>TimeSeries/*.json</code>,

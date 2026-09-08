@@ -407,6 +407,28 @@ forecast has two grids that overlap — windows step by <code>interval</code>, r
 <code>resolution</code> — so a day-ahead forecast reissued hourly shares 23 of every 24 instants between
 neighbouring windows. The dict iterates chronologically. See
 <a href="../reference/python-api.html#to_arrow_windows"><code>to_arrow_windows()</code></a>.</p>
+<h3 id="back-from-a-table"><a class="header" href="#back-from-a-table">Back from a table</a></h3>
+<p><code>from_arrow</code> is the inverse, on the same three types — and it reads a table anything wrote, not just
+one <code>to_arrow()</code> produced:</p>
+<pre><code class="language-python">import pyarrow.parquet as pq
+
+series = SingleTimeSeries.from_arrow(pq.read_table("load.parquet"))
+store.add_time_series(42, "Generator", OwnerCategory.Component, series)
+</code></pre>
+<p>A table <code>to_arrow()</code> wrote round-trips with no arguments, because the metadata is the descriptor. A
+<strong>foreign</strong> table — from a dataframe, or a Parquet file someone else wrote — needs a <code>name=</code> at
+minimum, since a name is part of a series' identity; everything else is inferred from the Arrow
+schema. Note what a table does not carry: the owner and the catalog id, because <code>to_arrow()</code> is a
+method on a value object and a series built here is not filed anywhere. You supply the owner to
+<code>add_time_series</code>, as you would for any other series.</p>
+<p>The inference rules and the four things that are refused rather than coerced (nulls, sub-millisecond
+timestamps, rows that leave a declared grid, decoded <code>struct</code>/<code>list</code> value columns) are in the
+<a href="../reference/python-api.html#from_arrow">reference</a>.</p>
+<p><code>to_arrow()</code> and <code>from_arrow()</code> are <strong>per-series, in-memory conveniences</strong> -- one series, one table.
+They are not the CLI's file format: <code>infrastore export -f parquet</code> writes
+<a href="../reference/parquet-format.html">a values/series file pair per partition</a>, each distinct array once
+and one catalog row per series, which <code>from_arrow</code> does not read. To move a whole store through
+Parquet, use the CLI at both ends.</p>
 <h3 id="datetimes-and-precision"><a class="header" href="#datetimes-and-precision">Datetimes and precision</a></h3>
 <p>Every <code>datetime</code> must be timezone-aware (any zone; converted to UTC on the way in, UTC on the way
 out), and a naive one raises <code>InvalidParameterError</code>. A <strong>stored</strong> instant — an initial timestamp, a

@@ -1234,6 +1234,27 @@ remove_parent_child_associations!(store; parent_types=["Bus"])   # 1
 </code></pre>
 <p>Neither association catalog is exposed over the <a href="./grpc-api.html">gRPC server</a> or the
 <a href="./cli.html"><code>infrastore</code> CLI</a>.</p>
+<h3 id="store-attributes"><a class="header" href="#store-attributes">Store attributes</a></h3>
+<p>Key/value provenance about the <strong>artifact as a whole</strong>, as opposed to a supplemental attribute
+(which belongs to a component) or <code>application_data</code> (which belongs to one series). See
+<a href="../explanation/data-model.html#store-attributes">Store attributes</a> for the model.</p>
+<pre><code class="language-julia">set_store_attribute!(store, key::AbstractString, value::AbstractString) -&gt; Nothing
+get_store_attribute(store, key::AbstractString)  -&gt; Union{Nothing,String}
+list_store_attributes(store)                     -&gt; Dict{String,String}
+remove_store_attribute!(store, key::AbstractString) -&gt; Bool
+</code></pre>
+<pre><code class="language-julia">set_store_attribute!(store, "creator", "sienna-build")
+set_store_attribute!(store, "source_system", "WECC 2032 ADS")
+
+get_store_attribute(store, "creator")      # "sienna-build"
+get_store_attribute(store, "absent")       # nothing — a question, not an error
+list_store_attributes(store)               # Dict("creator" =&gt; ..., "source_system" =&gt; ...)
+remove_store_attribute!(store, "creator")  # true; a second call is false
+</code></pre>
+<p>A <code>set</code> replaces rather than appending. <code>nothing</code> and <code>""</code> are different answers: a key set to the
+empty string is present. An empty key or one beginning with <code>infrastore.</code> — reserved, on removal as
+well as on write — throws <code>InvalidParameterError</code>; a write to a read-only store throws
+<code>ReadOnlyStoreError</code>.</p>
 <h3 id="openapi-row-association-serde"><a class="header" href="#openapi-row-association-serde">OpenAPI-row association serde</a></h3>
 <p>Direct JSON serde of the two association catalogs, in the wire spelling
 <a href="https://github.com/Sienna-Platform/SiennaSchemas">SiennaSchemas</a> defines (<code>TimeSeries/*.json</code>,

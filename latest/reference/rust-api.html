@@ -955,6 +955,28 @@ target.add_parent_child_associations(exported)?;
 <span class="boring">}</span></code></pre></pre>
 <p>Neither association catalog is exposed over the <a href="./grpc-api.html">gRPC server</a> or the
 <a href="./cli.html"><code>infrastore</code> CLI</a>.</p>
+<h3 id="store-attributes"><a class="header" href="#store-attributes">Store attributes</a></h3>
+<p>Key/value provenance about the <strong>artifact as a whole</strong>, as opposed to a row. See
+<a href="../explanation/data-model.html#store-attributes">Store attributes</a> for the model.</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>fn set_store_attribute(&amp;mut self, key: &amp;str, value: &amp;str) -&gt; Result&lt;()&gt;;
+fn get_store_attribute(&amp;self, key: &amp;str) -&gt; Result&lt;Option&lt;String&gt;&gt;;
+fn list_store_attributes(&amp;self) -&gt; Result&lt;BTreeMap&lt;String, String&gt;&gt;;
+fn remove_store_attribute(&amp;mut self, key: &amp;str) -&gt; Result&lt;bool&gt;;
+<span class="boring">}</span></code></pre></pre>
+<pre><code class="language-rust ignore">store.set_store_attribute("creator", "sienna-build")?;
+store.set_store_attribute("source_system", "WECC 2032 ADS")?;
+
+assert_eq!(store.get_store_attribute("creator")?.as_deref(), Some("sienna-build"));
+assert_eq!(store.get_store_attribute("absent")?, None);   // a question, not an error
+assert!(store.remove_store_attribute("creator")?);        // true: it was there
+assert!(!store.remove_store_attribute("creator")?);       // false: it was not</code></pre>
+<p>A <code>set</code> replaces rather than appending. Both writers take part in the ambient transaction and return
+<a href="#errors"><code>TimeSeriesError::ReadOnlyStore</code></a> on a read-only store; both refuse an empty key and any
+key beginning with <code>RESERVED_STORE_ATTRIBUTE_PREFIX</code> (<code>"infrastore."</code>) with <code>InvalidParameter</code>.</p>
+<p><code>list_store_attributes</code> returns a <code>BTreeMap</code>, so the ordering does not depend on insertion history —
+two stores' attribute sets compare and print the same way.</p>
 <h3 id="restoring-a-catalog-from-a-document"><a class="header" href="#restoring-a-catalog-from-a-document">Restoring a catalog from a document</a></h3>
 <p>An artifact is two files, but a consumer that already carries the association rows in JSON of its
 own — PowerSystems ships a <code>system.json</code> beside a <code>time_series.h5</code> — has no reason to move the
@@ -1966,6 +1988,8 @@ pub fn hash_hex(hash: &amp;[u8; 32]) -&gt; String;
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>pub const DATA_FORMAT_VERSION: &amp;str = "0.11.0";
+// The key prefix `set_store_attribute` / `remove_store_attribute` refuse.
+pub const RESERVED_STORE_ATTRIBUTE_PREFIX: &amp;str = "infrastore.";
 <span class="boring">}</span></code></pre></pre>
 
                     </main>

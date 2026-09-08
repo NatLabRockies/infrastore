@@ -1,0 +1,521 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Parquet Layout - infrastore Documentation</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Time-series storage for power-systems and energy simulations, with Rust, Python, and Julia bindings">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../custom.css">
+        <link rel="stylesheet" href="../pagetoc.css">
+        <link rel="stylesheet" href="../version-selector.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">infrastore Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/NatLabRockies/infrastore" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/NatLabRockies/infrastore/edit/main/docs/src/reference/parquet-format.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="parquet-layout"><a class="header" href="#parquet-layout">Parquet Layout</a></h1>
+<p>What <code>infrastore export -f parquet</code> writes and <code>infrastore add --parquet</code> reads: a <strong>normalized,
+partitioned</strong> layout. Per partition, two files sharing a stem — one holding every distinct array
+once, one holding the catalog rows that name them.</p>
+<p>Two things it is not. Not one file per series: a store with thousands of series would become
+thousands of files, which defeats every reader worth exporting for. And not one table with the
+catalog row beside every value: the store is content-addressed, so a thousand components sharing one
+profile hold <strong>one</strong> array, and a denormalized table would write that profile a thousand times.
+Parquet's compression does not find repeats across pages, so the file really would be a thousand
+times larger.</p>
+<blockquote>
+<p>This is a <strong>file interchange</strong> format, not the store's own. The on-disk store is
+<a href="file-format.html">HDF5 plus SQLite</a>, and nothing here is load-bearing for it. Python's <code>to_arrow()</code>
+and <code>from_arrow()</code> are a different thing again: per-series, in-memory conveniences. The
+relationship is one sentence — a series file's columns are <code>to_arrow()</code>'s schema-metadata keys
+turned into columns, and the values file is its two columns keyed by the array — and neither side
+depends on the other.</p>
+</blockquote>
+<h2 id="the-two-files"><a class="header" href="#the-two-files">The two files</a></h2>
+<pre><code class="language-text">parquet/
+  SingleTimeSeries.f64.utc.values.parquet     one row per value, each array once
+  SingleTimeSeries.f64.utc.series.parquet     one row per series
+</code></pre>
+<div class="table-wrapper"><table><thead><tr><th>File</th><th>Rows</th><th>Carries</th></tr></thead><tbody>
+<tr><td><code>&lt;stem&gt;.values</code></td><td>one per value</td><td>the array key, the time coordinates, the value</td></tr>
+<tr><td><code>&lt;stem&gt;.series</code></td><td>one per series</td><td>the array key and the whole catalog row</td></tr>
+</tbody></table>
+</div>
+<p>They join on the <strong>array key</strong>, and both are sorted by it. That is the entire relationship: a values
+row belongs to whichever series rows carry its key, and a series row reads whichever values group
+carries its key.</p>
+<h2 id="the-array-key"><a class="header" href="#the-array-key">The array key</a></h2>
+<pre><code class="language-text">(data_hash, time_axis)
+</code></pre>
+<p><code>data_hash</code> alone will not do. It covers the array's bytes and not the axis those bytes sit on, and
+the store pools irregular series by time axis precisely because two series with identical values on
+different timelines are one stored array. So the key is the pair.</p>
+<p><code>time_axis</code> is a string spelling whatever decides where a value sits in time, per type:</p>
+<div class="table-wrapper"><table><thead><tr><th>Type</th><th><code>time_axis</code></th></tr></thead><tbody>
+<tr><td><code>SingleTimeSeries</code></td><td><code>R&lt;length&gt;/&lt;initial&gt;/&lt;resolution&gt;</code>, an ISO 8601 repeat</td></tr>
+<tr><td><code>NonSequentialTimeSeries</code>, <code>PersistentTimeSeries</code></td><td>the axis's <code>timestamps_hash</code>, hex — the catalog's own key for it</td></tr>
+<tr><td>dense forecasts</td><td><code>R&lt;count&gt;/&lt;initial&gt;/&lt;interval&gt;/&lt;horizon&gt;/&lt;resolution&gt;</code></td></tr>
+</tbody></table>
+</div>
+<pre><code class="language-text">R24/2024-01-01T00:00:00Z/PT1H
+9f0c4e...                                        (an irregular axis)
+R24/2024-01-01T00:00:00Z/PT1H/PT2H/PT1H          (a forecast)
+</code></pre>
+<p>The instant is spelled in <strong>UTC</strong> whatever the partition's <code>time_reference</code>, because the reference
+is a partition key and repeating it would say nothing. A forecast needs its horizon as well as its
+interval: the horizon's own step decides how many target times a window has, so two forecasts
+sharing an array, an anchor and an interval but not a horizon are different tables.</p>
+<p>The axis is read off the <strong>values being exported</strong>, not off the catalog row. The two agree for a
+whole-series export; where they disagree — <code>export --time-range</code> writes a slice whose anchor and
+length are its own — the values are what the file holds, and <code>data_hash</code> beside them is computed
+from the same slice.</p>
+<h2 id="partitioning"><a class="header" href="#partitioning">Partitioning</a></h2>
+<p>Three things cannot vary within one Parquet file without nullable or ill-typed columns: the <strong>set of
+key columns</strong> (a forecast has an <code>issue_time</code>, a static series does not), the <strong>Arrow type of
+<code>value</code></strong>, and the <strong>zone of <code>timestamp</code></strong>. So an export partitions its selection by the triple</p>
+<pre><code class="language-text">(time_series_type, value type, time_reference)
+</code></pre>
+<p>and writes one file <strong>pair</strong> per distinct triple. The payoff is that <strong>every column in both files is
+required</strong>: there are no nullable columns anywhere in this format, and a reader never has to ask
+whether a null means "absent" or "unknown".</p>
+<p>The <strong>value type</strong> is the element type with its per-step shape, except that the four composite kinds
+(<code>linear_function</code>, <code>quadratic_function</code>, <code>piecewise_linear</code>, <code>piecewise_step</code>) partition by <strong>kind
+alone</strong>. Their stored width varies per series — a <code>piecewise_linear</code> row is <code>[n, x₁, y₁, …]</code>
+zero-padded to the widest timestep in that series — so keying by width would scatter one kind across
+a file per width. Instead every composite row in a partition is re-padded to the widest series in
+it, which the layout allows: the leading count <code>n</code> keeps each row self-describing whatever the
+padding. The cost is a <code>data_hash</code> caveat, below.</p>
+<p>An <strong>unspecified</strong> <code>time_reference</code> is a partition of its own. A series that declared no spelling
+must not pool with one that declared UTC, even though both write a UTC-zoned column.</p>
+<h3 id="file-names"><a class="header" href="#file-names">File names</a></h3>
+<p><code>&lt;type&gt;.&lt;value-slug&gt;.&lt;reference-slug&gt;</code> plus <code>.values.parquet</code> or <code>.series.parquet</code>:</p>
+<pre><code class="language-text">SingleTimeSeries.f64.utc.values.parquet
+SingleTimeSeries.f64_2x3.America_Denver.series.parquet
+Deterministic.tuple3_f64.offset_minus07_00.values.parquet
+NonSequentialTimeSeries.piecewise_linear.zoneless.series.parquet
+PersistentTimeSeries.f64.unspecified.values.parquet
+</code></pre>
+<p>Slugs avoid every character Windows forbids (<code>&lt;&gt;:"/\|?*</code>), which matters because a zone name carries
+<code>/</code> and a fixed offset carries <code>:</code>; a leading <code>-</code> is avoided too, since it reads as a flag wherever
+the name is passed to a command. Trailing dots go (Windows strips them, so <code>a.</code> and <code>a</code> would be one
+file there), and a fragment that would be a device name (<code>CON</code>, <code>NUL</code>, <code>LPT9</code>, …) gets a prefix.</p>
+<p><strong>The name is a convenience, not the truth.</strong> The slug function is one-way — the zones <code>a/b</code> and
+<code>a_b</code> both flatten to <code>a_b</code> — so nothing parses a partition back out of a filename, and two
+partitions that would collide get a numeric suffix in the keys' own sort order, so a re-run of the
+same export produces the same names. The footer carries the exact key.</p>
+<h2 id="values-file-columns"><a class="header" href="#values-file-columns">Values file columns</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Column</th><th>Type</th><th>Files</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>data_hash</code></td><td><code>utf8</code> (hex)</td><td>all</td><td>Half the array key; also a checksum on import.</td></tr>
+<tr><td><code>time_axis</code></td><td><code>utf8</code></td><td>all</td><td>The other half.</td></tr>
+<tr><td><code>timestamp</code></td><td><code>timestamp(ms, zone)</code></td><td>all</td><td>The target time for a forecast, the breakpoint for a <code>PersistentTimeSeries</code>.</td></tr>
+<tr><td><code>issue_time</code></td><td><code>timestamp(ms, zone)</code></td><td>forecasts</td><td>Which window the row belongs to. Same zone as <code>timestamp</code>.</td></tr>
+<tr><td><code>percentile</code></td><td><code>float64</code></td><td><code>Probabilistic</code></td><td>One row per (issue, target, percentile).</td></tr>
+<tr><td><code>scenario</code></td><td><code>int64</code></td><td><code>Scenarios</code></td><td>Zero-based trajectory index.</td></tr>
+<tr><td><code>value</code></td><td>see below</td><td>all</td><td></td></tr>
+</tbody></table>
+</div>
+<p>Nothing about who owns the array is here, which is exactly what stops a shared profile being written
+once per component.</p>
+<h2 id="series-file-columns"><a class="header" href="#series-file-columns">Series file columns</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Column</th><th>Type</th><th>Files</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>data_hash</code>, <code>time_axis</code></td><td><code>utf8</code></td><td>all</td><td>The array this series reads.</td></tr>
+<tr><td><code>id</code></td><td><code>int64</code></td><td>all</td><td>Provenance only; ignored on import.</td></tr>
+<tr><td><code>owner_id</code></td><td><code>int64</code></td><td>all</td><td></td></tr>
+<tr><td><code>owner_type</code></td><td><code>utf8</code></td><td>all</td><td></td></tr>
+<tr><td><code>owner_category</code></td><td><code>utf8</code></td><td>all</td><td><code>Component</code> or <code>SupplementalAttribute</code>.</td></tr>
+<tr><td><code>time_series_type</code></td><td><code>utf8</code></td><td>all</td><td>Constant per partition.</td></tr>
+<tr><td><code>name</code></td><td><code>utf8</code></td><td>all</td><td></td></tr>
+<tr><td><code>initial_timestamp</code></td><td><code>timestamp(ms,zone)</code></td><td><code>SingleTimeSeries</code>, forecasts</td><td>The anchor the values start at.</td></tr>
+<tr><td><code>resolution</code></td><td><code>utf8</code> (ISO-8601)</td><td><code>SingleTimeSeries</code>, forecasts</td><td>Absent from the irregular types, which have no constant step.</td></tr>
+<tr><td><code>length</code></td><td><code>int64</code></td><td><code>SingleTimeSeries</code></td><td></td></tr>
+<tr><td><code>interval</code>, <code>horizon</code></td><td><code>utf8</code> (ISO-8601)</td><td>forecasts</td><td></td></tr>
+<tr><td><code>count</code></td><td><code>int64</code></td><td>forecasts</td><td>Windows.</td></tr>
+<tr><td><code>features</code></td><td><code>utf8</code> (JSON object)</td><td>all</td><td><code>{}</code> when empty. Plain scalars: <code>{"model_year":2030}</code>.</td></tr>
+<tr><td><code>element_type</code>, <code>element_shape</code></td><td><code>utf8</code></td><td>all</td><td>Constant per partition except a composite's width.</td></tr>
+<tr><td><code>time_reference</code></td><td><code>utf8</code></td><td>all</td><td>Constant per partition; the literal <code>unspecified</code> when the series has none.</td></tr>
+<tr><td><code>units</code>, <code>quantity_kind</code>, <code>unit_system</code>, <code>component_field</code>, <code>application_data</code></td><td><code>utf8</code></td><td>all</td><td><strong>Empty string when absent</strong>, which is what keeps every column required.</td></tr>
+</tbody></table>
+</div>
+<p>The grid columns come from the values being exported, for the same reason <code>time_axis</code> does. Every
+string column is dictionary-encoded; compression is zstd on both files.</p>
+<h3 id="the-value-column"><a class="header" href="#the-value-column">The <code>value</code> column</a></h3>
+<p>Its Arrow type follows the element type alone. Nesting is innermost-first, which is the order the
+flat row-major buffer is already in.</p>
+<div class="table-wrapper"><table><thead><tr><th><code>element_type</code> and shape</th><th>Arrow type</th></tr></thead><tbody>
+<tr><td>scalar dtype, shape <code>[]</code></td><td>primitive (<code>double</code>, <code>int32</code>, <code>bool</code>, …)</td></tr>
+<tr><td><code>tuple(N,T)</code></td><td><code>FixedSizeList&lt;T&gt;[N]</code></td></tr>
+<tr><td>scalar dtype with dense shape <code>[N]</code></td><td><code>FixedSizeList&lt;T&gt;[N]</code></td></tr>
+<tr><td>scalar dtype with shape <code>[M,N]</code></td><td><code>FixedSizeList&lt;FixedSizeList&lt;T&gt;[N]&gt;[M]</code></td></tr>
+<tr><td>composite kinds</td><td><code>FixedSizeList&lt;double&gt;[w]</code>, stored packing, <code>w</code> the partition's widest series</td></tr>
+</tbody></table>
+</div>
+<p>Composites keep their <strong>stored packing</strong> rather than being decoded into <code>Struct</code>/<code>List</code>. That
+packing is the documented cross-language wire form, held to <code>conformance/element_type_vectors.json</code>,
+and every binding has a decoder for it; a <code>--decode</code> option is a possible follow-up. Casting to a
+common dtype is ruled out — the dtype round trip is a project promise.</p>
+<h3 id="row-order-and-row-groups"><a class="header" href="#row-order-and-row-groups">Row order and row groups</a></h3>
+<p>Both files are sorted by <code>data_hash</code>, <code>time_axis</code>; the series file then sorts by <code>id</code>. Within one
+array the values rows are sorted by <code>issue_time</code>, then <code>timestamp</code>, then <code>percentile</code> or <code>scenario</code>,
+so a forecast comes out window-major and <code>GROUP BY issue_time</code> scans contiguously.</p>
+<p>Row groups in the values file target roughly one million rows and are cut at an <strong>array boundary</strong>
+whenever the coming array would carry the group past the target, so row-group statistics on
+<code>data_hash</code> mean something and a reader can skip whole groups. An array larger than the target on
+its own spans several. The series file is one row group: it has one row per series rather than one
+per value, so even a store with a million series is a file a reader loads whole.</p>
+<h2 id="footer"><a class="header" href="#footer">Footer</a></h2>
+<p>Both files carry it.</p>
+<div class="table-wrapper"><table><thead><tr><th>Key</th><th>Value</th></tr></thead><tbody>
+<tr><td><code>infrastore.format</code></td><td><code>normalized_v1</code>. Read first, so a later format is refused by version rather than by a missing column.</td></tr>
+<tr><td><code>infrastore.role</code></td><td><code>values</code> or <code>series</code>.</td></tr>
+<tr><td><code>time_series_type</code></td><td>The partition's type.</td></tr>
+<tr><td><code>element_type</code></td><td>The partition's element type.</td></tr>
+<tr><td><code>element_shape</code></td><td>JSON list; a composite's is the width the partition settled on.</td></tr>
+<tr><td><code>time_reference</code></td><td>The partition's spelling, <code>unspecified</code> included.</td></tr>
+<tr><td><code>rows_contiguous_by_key</code></td><td><code>true</code>.</td></tr>
+</tbody></table>
+</div>
+<p>The three partition keys are here <strong>exactly</strong>, because the filename is one-way.</p>
+<h2 id="reading-it-back"><a class="header" href="#reading-it-back">Reading it back</a></h2>
+<p><code>add --parquet</code> takes a <strong>file, a directory, or a partition stem</strong> — <code>out/SingleTimeSeries.f64.utc</code>
+names the pair — and commits <strong>one transaction per partition</strong>, so a partition that fails leaves the
+ones already committed alone.</p>
+<p>The import is a <strong>merge join</strong>. Both files are sorted by the array key, so it walks them together:
+read the next values group into one array, file every series row carrying that key, move on. Peak
+memory is one values group plus one row group of each file, never a partition. The store's write
+path already recognizes an array it holds, so the second through thousandth adds of one array are
+catalog inserts only.</p>
+<p>Both dangling sides are errors, each naming the key:</p>
+<ul>
+<li>a <strong>series row whose key names no values group</strong> has no array to read;</li>
+<li>a <strong>values group no series row claims</strong> is an array nothing would file.</li>
+</ul>
+<p>Either means the two halves came from different exports, or one was truncated. A <code>.series.parquet</code>
+with no <code>.values.parquet</code> beside it is refused for the same reason, before anything is read.</p>
+<p><strong>Keys must be contiguous.</strong> A key that reappears after another key's rows, in either file, is
+refused with a message saying to sort by <code>data_hash</code>, <code>time_axis</code>. Stitching it back together would
+mean holding the whole file, which is what the layout exists to avoid. A file you have re-sorted in
+a query engine must meet the same rule.</p>
+<p><code>add</code> never accepts an id, so the <code>id</code> column is reported at <code>--dry-run</code> and then dropped. Identity
+on import is the row's own <code>KeyIdentity</code> columns, as for any add.</p>
+<p>Refused rather than coerced:</p>
+<ul>
+<li><strong>Nulls</strong>, in any column. The store holds none, and NaN is a value rather than an absence.</li>
+<li><strong>Timestamps finer than a millisecond.</strong> Seconds and milliseconds cross as they are; microseconds
+and nanoseconds only when every value is a whole millisecond, the rule the store's write path
+enforces on every instant it records.</li>
+<li><strong>Rows that leave a declared grid.</strong> A <code>SingleTimeSeries</code> whose <code>resolution</code> says <code>PT1H</code> must walk
+one — checked against the grid that resolution <em>generates</em>, not against successive differences,
+since <code>P1M</code> clamps to month end.</li>
+<li><strong><code>Struct</code> and <code>List</code> value columns.</strong> Those are the decoded form this version does not write.</li>
+<li><strong>A <code>DeterministicSingleTimeSeries</code> partition.</strong> The type is derived from a stored
+<code>SingleTimeSeries</code> rather than added; import that and run <code>transform</code>.</li>
+</ul>
+<p>A dense forecast is placed by its <strong>coordinates</strong>, not its row order, so a file a query engine
+sorted or partitioned still reads correctly. Every slot must be filled exactly once: a cube has no
+hole to leave, and two rows for one slot means they disagree. Its grid comes from the series file's
+<code>resolution</code>, <code>interval</code> and <code>horizon</code> rather than being reverse-engineered — a merely
+self-consistent set of rows would give a plausible wrong answer, since a one-window forecast is
+indistinguishable from a static series and overlapping windows make the interval ambiguous.</p>
+<h3 id="data_hash-is-a-checksum"><a class="header" href="#data_hash-is-a-checksum"><code>data_hash</code> is a checksum</a></h3>
+<p>The import re-encodes each group, hashes it, and refuses a mismatch naming the key. If you edited
+values in a query engine, either recompute the hash or pass <strong><code>--no-checksum</code></strong>, which waives the
+comparison and leaves the pair as nothing but a join key. Dropping the column is not the remedy: a
+values file without it has no key, and no key means no series file to join to.</p>
+<p>For composite kinds the hash is over the <strong>decoded points</strong>, not the packed bytes: a partition
+re-pads them to its widest series, so hashing the padding would make an untouched export fail its
+own checksum — and it is what lets two composite series whose curves are the same points at
+different paddings share one values group. One consequence: for a composite series this column is
+not the <code>data_hash</code> the catalog holds, and <code>id</code> is the way back to that.</p>
+<h3 id="foreign-files"><a class="header" href="#foreign-files">Foreign files</a></h3>
+<p>A values file with <strong>no series file beside it</strong> is a foreign file — anything with a <code>timestamp</code> and
+a <code>value</code> column. It carries no catalog rows, so the inline flags supply what a series row would
+have. It is read as one series per distinct <code>(data_hash, time_axis)</code> if those columns exist, and as
+exactly one series if they do not.</p>
+<p>What the columns do not say is inferred, and each inference takes the reading that assumes least:</p>
+<div class="table-wrapper"><table><thead><tr><th>Missing</th><th>Read as</th></tr></thead><tbody>
+<tr><td><code>time_series_type</code></td><td><code>SingleTimeSeries</code> when the timestamps walk a grid, <code>NonSequentialTimeSeries</code> otherwise. <code>PersistentTimeSeries</code> is never inferred — name it with <code>--type</code>.</td></tr>
+<tr><td><code>element_type</code></td><td>The leaf Arrow type. A <code>FixedSizeList&lt;double&gt;[3]</code> becomes <code>f64</code> with element shape <code>[3]</code> — <em>dense</em>, not <code>tuple(3,f64)</code>, because the bytes cannot say.</td></tr>
+<tr><td><code>time_reference</code></td><td>The timestamp column's Arrow zone; a column with no zone reads as <code>zoneless</code>, since a naive timestamp is a wall clock.</td></tr>
+<tr><td><code>name</code>, <code>owner_id</code>, <code>owner_type</code></td><td>Nothing. All three are refused rather than defaulted — owner 0 is a real owner, not a sentinel — so pass <code>--name</code>, <code>--owner-id</code>, <code>--owner-type</code>.</td></tr>
+</tbody></table>
+</div>
+<h3 id="inline-flags"><a class="header" href="#inline-flags">Inline flags</a></h3>
+<p>They fall into three groups, and the split follows the project's usual rule.</p>
+<p><strong>Overrides</strong> replace a column for every series in the partition: <code>--owner-id</code>, <code>--owner-type</code>,
+<code>--owner-category</code>, <code>--name</code>, <code>--feature</code>, <code>--time-reference</code>, and the five free-form descriptors
+<code>--units</code>, <code>--quantity-kind</code>, <code>--unit-system</code>, <code>--component-field</code>, <code>--application-data</code>. Passing an
+empty string clears a descriptor, since the empty string is how this format spells "absent" anyway.</p>
+<p><strong>Assertions</strong> state something a file cannot, so a file that contradicts one is an error rather than
+being silently replaced: <code>--element-type</code> (<code>tuple(3,f64)</code> states the reading the bytes cannot),
+<code>--element-shape</code>, <code>--resolution</code>, and <code>--type</code>. On a foreign file, which says nothing to
+contradict, an assertion is simply the answer — <code>--resolution PT1H</code> names the grid, and the rows are
+then checked against the grid it generates.</p>
+<p><strong>Refused</strong> with <code>--parquet</code>, by name rather than silently dropped: <code>--initial-timestamp</code>,
+<code>--interval</code>, <code>--horizon</code>, <code>--count</code>, <code>--percentile</code>, <code>--scenario-count</code>, <code>--layout</code>, <code>--owner-map</code>,
+<code>--owner-id-from</code>. The values imply the grid — a <code>SingleTimeSeries</code>' anchor is its first timestamp
+and a forecast's windows are its <code>issue_time</code> column — so a flag naming one is either redundant or a
+contradiction nothing should have to adjudicate, and <code>--layout</code> describes a CSV's columns. A foreign
+<strong>forecast</strong> — a values file with an <code>issue_time</code> column and no series file — is consequently not
+supported; export one and keep both halves.</p>
+<h2 id="querying-it"><a class="header" href="#querying-it">Querying it</a></h2>
+<p>The join is the whole idiom:</p>
+<pre><code class="language-sql">SELECT s.name, s.owner_id, s.units, max(v.value) AS peak
+FROM 'parquet/SingleTimeSeries.f64.utc.values.parquet' v
+JOIN 'parquet/SingleTimeSeries.f64.utc.series.parquet' s USING (data_hash, time_axis)
+GROUP BY s.name, s.owner_id, s.units;
+</code></pre>
+<p>A view flattens it once and hides the join from everything after:</p>
+<pre><code class="language-sql">CREATE VIEW load AS
+SELECT s.*, v.timestamp, v.value
+FROM 'parquet/SingleTimeSeries.f64.utc.values.parquet' v
+JOIN 'parquet/SingleTimeSeries.f64.utc.series.parquet' s USING (data_hash, time_axis);
+
+SELECT timestamp, value FROM load WHERE owner_id = 42 AND name = 'load' ORDER BY timestamp;
+</code></pre>
+<p>That view is the denormalized table this format deliberately does not write: materializing it costs
+exactly what the layout saves, and a query engine that keeps it as a view pays nothing.</p>
+<h2 id="what-a-round-trip-does-not-preserve"><a class="header" href="#what-a-round-trip-does-not-preserve">What a round trip does not preserve</a></h2>
+<ul>
+<li><strong>The catalog id.</strong> <code>add</code> never accepts one — "never reissued" is a guarantee of the catalog's
+<code>AUTOINCREMENT</code>, and a caller free to name an id could re-file a retired one — so the <code>id</code> column
+is reported at <code>--dry-run</code> and then ignored. The destination assigns fresh ids.</li>
+<li><strong>An empty-string descriptor.</strong> The empty string is how the format writes "absent", so a stored
+empty string reads back as absent. <code>unit_system</code>'s unset state means <em>unspecified</em> rather than
+natural units, and the empty string preserves that.</li>
+<li><strong>A composite series' padding.</strong> Values round-trip exactly — an improvement over CSV, where floats
+pass through decimal text — but a composite is re-padded on the way out and shrunk to its own
+width on the way back, so its stored <code>data_hash</code> may differ from the original's.</li>
+</ul>
+<p>An <strong>empty series</strong> is not a round-trip caveat but a refusal: the export <strong>fails</strong>, naming every
+empty series it was asked for and writing nothing. A values file has one row per value, so an empty
+series would be a series row whose key matches no values group — which is exactly what a truncated
+export looks like, and there is no way to write one a reader could tell apart from damage. Narrow
+the selection past it.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../reference/file-format.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../reference/element-types.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../reference/file-format.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../reference/element-types.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="../mermaid.min.js"></script>
+        <script src="../mermaid-init.js"></script>
+        <script src="../pagetoc.js"></script>
+        <script src="../version-selector.js"></script>
+
+
+
+    </div>
+    </body>
+</html>

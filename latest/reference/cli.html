@@ -209,12 +209,13 @@ in the consumer's object graph — which is why the association flags are bare i
 <p><code>--store</code> (or <code>INFRASTORE_STORE</code>) is required by every command except <code>template</code> and <code>completions</code>.</p>
 <p><code>-f</code>/<code>--format</code> applies to every command, read and write alike. The read/inspection commands
 (<code>list</code>, <code>get</code>, <code>grid</code>, <code>info</code>, <code>export</code>, <code>names</code>, <code>owner-types</code>, <code>owners</code>, <code>exists</code>, <code>stats</code>,
-<code>store-info</code>, <code>arrays</code>, <code>summary</code>, <code>attributes</code>, <code>links</code>, <code>diff</code>, <code>verify</code>, <code>check-consistency</code>,
-<code>resolutions</code>, <code>params</code>, <code>compact</code>, and <code>add --dry-run</code>) render their results in it. The write
-commands (<code>init</code>, <code>add</code>, <code>merge</code>, <code>remove</code>, <code>copy</code>, <code>replace-owner</code>, <code>clear</code>, <code>transform</code>,
-<code>persist</code>, <code>plot</code>, <code>attach</code>, <code>detach</code>, <code>link</code>, <code>unlink</code>, <code>reassign</code>) report their outcome in it:
-prose under <code>table</code>, and a one-object status document under <code>json</code>/<code>jsonl</code>, so a scripted mutation
-pipes into <code>jq</code> the way a scripted query does.</p>
+<code>store-info</code>, <code>store-attr list</code>, <code>store-attr get</code>, <code>arrays</code>, <code>summary</code>, <code>attributes</code>, <code>links</code>,
+<code>diff</code>, <code>verify</code>, <code>check-consistency</code>, <code>resolutions</code>, <code>params</code>, <code>compact</code>, and <code>add --dry-run</code>)
+render their results in it. The write commands (<code>init</code>, <code>add</code>, <code>merge</code>, <code>remove</code>, <code>copy</code>,
+<code>replace-owner</code>, <code>clear</code>, <code>transform</code>, <code>persist</code>, <code>plot</code>, <code>attach</code>, <code>detach</code>, <code>link</code>, <code>unlink</code>,
+<code>reassign</code>, <code>store-attr set</code>, <code>store-attr remove</code>) report their outcome in it: prose under <code>table</code>,
+and a one-object status document under <code>json</code>/<code>jsonl</code>, so a scripted mutation pipes into <code>jq</code> the
+way a scripted query does.</p>
 <pre><code class="language-console">$ infrastore --store s.h5 -f json --yes remove --all --owner-id 42 | jq .removed
 3
 </code></pre>
@@ -315,7 +316,7 @@ example can never name a flag the command does not have.</p>
 <tr><td><code>get</code></td><td>Read and display a single series' values.</td></tr>
 <tr><td><code>grid</code></td><td>Render N series as N columns against one shared time axis.</td></tr>
 <tr><td><code>info</code></td><td>Metadata, content hash, HDF5 location, and stats for one series.</td></tr>
-<tr><td><code>export</code></td><td>Write series values to CSV/JSON files (<code>--dir</code>), or stdout for one match.</td></tr>
+<tr><td><code>export</code></td><td>Write series values to CSV/JSON/Parquet files (<code>--dir</code>), or stdout for one match.</td></tr>
 </tbody></table>
 </div>
 <pre><code class="language-sh">infrastore --store demo.h5 list                                   # everything in the store
@@ -326,7 +327,51 @@ infrastore --store demo.h5 get --name load --tail --limit 24      # the last day
 infrastore --store demo.h5 -f csv grid --name-glob 'load_*' --resolution PT1H
 infrastore --store demo.h5 info --name load --no-stats            # catalog only, no array read
 infrastore --store demo.h5 -f csv export --name-glob 'load_*' --dir out/
+infrastore --store demo.h5 -f parquet export --name-glob 'load_*' --dir out/
 </code></pre>
+<h4 id="parquet"><a class="header" href="#parquet">Parquet</a></h4>
+<p><code>-f parquet export --dir &lt;DIR&gt;</code> writes one <strong>file pair</strong> per <code>(type, value type, time reference)</code>
+partition: <code>&lt;stem&gt;.values.parquet</code> holds every distinct array once, one row per value, and
+<code>&lt;stem&gt;.series.parquet</code> holds one catalog row per series. Both carry the array key
+<code>(data_hash, time_axis)</code> and are sorted by it, so they join on it — which is what keeps a profile
+shared by a thousand components from being written a thousand times.</p>
+<p><code>add --parquet &lt;PATH&gt;</code> reads them back, from a file, a directory, or a partition stem
+(<code>out/SingleTimeSeries.f64.utc</code> names the pair). The import is a merge join over the two halves, one
+transaction per partition, and a dangling key on either side is an error — as is a pair whose
+footers disagree about the partition they describe, which is what half of one export beside half of
+another looks like. <code>--no-checksum</code> waives the <code>data_hash</code> comparison for values edited in a query
+engine.</p>
+<p>The inline flags split three ways: the owner, the name, the features and the five free-form
+descriptors are <strong>overrides</strong>; <code>--element-type</code>, <code>--element-shape</code>, <code>--resolution</code> and <code>--type</code> are
+<strong>assertions</strong>, which a contradicting file turns into an error and which name the reading for a
+foreign file; and the grid flags (<code>--initial-timestamp</code>, <code>--interval</code>, <code>--horizon</code>, <code>--count</code>,
+<code>--percentile</code>, <code>--scenario-count</code>) and the CSV layout flags (<code>--layout</code>, <code>--owner-map</code>,
+<code>--owner-id-from</code>) are <strong>refused</strong>, because the values already carry the grid.
+<a href="parquet-format.html">Parquet layout</a> is the format reference — both column sets, the array key,
+<code>time_axis</code> per type, footer keys, and the rules the import applies to a foreign file.</p>
+<p>Three limits on the export, all deliberate:</p>
+<ul>
+<li><strong><code>--dir</code> is required.</strong> Parquet's footer sits at the end of the file and its offsets point
+backwards, so a writer has to seek and a pipe cannot.</li>
+<li><strong><code>--dir</code> must hold no <code>.parquet</code> files yet.</strong> <code>add --parquet &lt;dir&gt;</code> imports every partition it
+finds, so a narrower export written over an earlier one would leave the earlier partitions in
+place for the next import to file silently. The export neither merges nor sweeps; empty the
+directory or name a fresh one. Other files in it are not in the way.</li>
+<li><strong>An empty series fails it.</strong> Every selected series with no values is named, and nothing is
+written — a series row whose key matches no values rows is indistinguishable from a truncated
+export, so it is refused rather than represented. Narrow the selection past it.</li>
+<li><strong><code>-f parquet</code> is only accepted on <code>export</code>.</strong> It is a binary container, not a rendering of a
+result; there is no <code>list -f parquet</code>.</li>
+</ul>
+<p>Parquet is <strong>on by default</strong> -- in the released binaries and in <code>cargo install infrastore-cli</code>
+alike. It is still a cargo feature (<code>parquet</code>), so <code>--no-default-features --features vendored</code>
+builds a binary without the Arrow dependency tree. That binary accepts <code>-f parquet</code> and <code>--parquet</code>
+and fails with the feature to rebuild with, rather than reporting <code>parquet</code> as an unknown format --
+which is also why <code>--help</code>, the shell completions, and the examples on this page read the same in
+both builds.</p>
+<p>The Arrow tree deliberately stays out of the <strong>library</strong> crates: <code>infrastore-core</code>, <code>infrastore-py</code>,
+and <code>infrastore-ffi</code> never link it. A binding that wants Parquet has <code>to_arrow()</code> and its host
+language's own writer, which is a much smaller ask than linking Arrow into a wheel or a cdylib.</p>
 <h4 id="bounding-the-rows"><a class="header" href="#bounding-the-rows">Bounding the rows</a></h4>
 <p><code>get</code> and <code>grid</code> separate the flags that <em>select data</em> from the flags that <em>bound a display</em>, and
 the two reach different formats:</p>
@@ -365,7 +410,7 @@ usually a different component, not a shorter view of the same sweep.</p>
 <h3 id="write-data"><a class="header" href="#write-data">Write data</a></h3>
 <div class="table-wrapper"><table><thead><tr><th>Command</th><th>Purpose</th></tr></thead><tbody>
 <tr><td><code>init</code></td><td>Create an empty store with an explicit compression and catalog policy.</td></tr>
-<tr><td><code>add</code></td><td>Add one or more series from a descriptor JSON + CSV, or from flags.</td></tr>
+<tr><td><code>add</code></td><td>Add one or more series from a descriptor JSON + CSV, from Parquet, or from flags.</td></tr>
 <tr><td><code>merge</code></td><td>Copy matching series from another store into this one.</td></tr>
 <tr><td><code>transform</code></td><td>Derive <code>DeterministicSingleTimeSeries</code> from stored <code>SingleTimeSeries</code>.</td></tr>
 <tr><td><code>remove</code></td><td>Delete a single series, or every match with <code>--all</code> (prompts unless <code>--force</code>).</td></tr>
@@ -381,6 +426,7 @@ infrastore --store demo.h5 add --descriptor batch.json --replace --batch-size 50
 infrastore --store demo.h5 add --csv load.csv --owner-id 42 --owner-type Generator \
     --name load --type SingleTimeSeries --element-type f64 \
     --resolution PT1H --initial-timestamp 2024-01-01T00:00:00Z
+infrastore --store demo.h5 add --parquet out/
 infrastore --store demo.h5 merge --from other.h5 --name-glob 'load_*'
 infrastore --store demo.h5 transform --horizon PT24H --interval PT1H
 infrastore --store demo.h5 remove --owner-id 42 --name load --type SingleTimeSeries
@@ -424,6 +470,7 @@ in-terminal check, <code>get --plot</code> draws a sparkline with no file involv
 <div class="table-wrapper"><table><thead><tr><th>Command</th><th>Purpose</th></tr></thead><tbody>
 <tr><td><code>stats</code></td><td>Association, owner, and distinct-array counts.</td></tr>
 <tr><td><code>store-info</code></td><td>HDF5 + SQLite paths and sizes, on-disk format version, catalog revision.</td></tr>
+<tr><td><code>store-attr</code></td><td>Key/value provenance stamped on the whole artifact (<code>list</code>/<code>get</code>/<code>set</code>/<code>remove</code>).</td></tr>
 <tr><td><code>upgrade</code></td><td>Bring a store written by an older build up to this one's catalog revision.</td></tr>
 <tr><td><code>arrays</code></td><td>Distinct stored arrays: content hash, HDF5 location, series sharing each.</td></tr>
 <tr><td><code>summary</code></td><td>Grouped static and/or forecast summaries (<code>--static-only</code>/<code>--forecast-only</code>).</td></tr>
@@ -433,12 +480,32 @@ in-terminal check, <code>get --plot</code> draws a sparkline with no file involv
 </div>
 <pre><code class="language-sh">infrastore --store demo.h5 stats
 infrastore --store demo.h5 store-info
+infrastore --store demo.h5 store-attr list
+infrastore --store demo.h5 store-attr set creator sienna-build
+infrastore --store demo.h5 store-attr get creator
+infrastore --store demo.h5 store-attr remove creator
 infrastore --store demo.h5 upgrade
 infrastore --store demo.h5 arrays --data-hash 2018057b
 infrastore --store demo.h5 summary --static-only
 infrastore --store demo.h5 resolutions
 infrastore --store demo.h5 params --resolution PT1H --interval PT1H
 </code></pre>
+<p><code>store-attr</code> reads and writes <strong>store attributes</strong> — free-form key/value provenance about the
+artifact as a whole: who built it, from what source system, under which of your own schema versions.
+The store never interprets a value, in the same spirit as a series' <code>application_data</code>; store JSON
+if you want structure. See <a href="../explanation/data-model.html#store-attributes">Store attributes</a>.</p>
+<p>Do not confuse it with <code>attributes</code>, which lists component &lt;-&gt; supplemental-attribute associations —
+a different thing entirely, which is why this command carries the <code>store-</code> prefix.</p>
+<p>Three details worth knowing:</p>
+<ul>
+<li><code>set</code> replaces rather than appending. An artifact records one creator, not a history of them.</li>
+<li><code>get</code> prints the bare value, so <code>$(infrastore store-attr get creator)</code> is the value and nothing
+else, and <strong>exits 1 when the key is unset</strong> so a script can branch on it. <code>remove</code> instead reports
+<code>removed: false</code> and exits 0 — there the outcome is the output.</li>
+<li>Keys beginning with <code>infrastore.</code> are reserved, on removal as well as on write.</li>
+</ul>
+<p><code>store-info</code> reports whatever is there under <code>store_attributes</code>, so <code>infrastore -f json store-info</code>
+is the one call that answers "what is this artifact" completely.</p>
 <p><code>upgrade</code> is the writable open that runs the catalog migration ladder. It is needed only for a store
 written by an older infrastore: such a store reports <code>the store's catalog is at revision N …</code> on
 every read, because every read command opens it <strong>read-only</strong> and therefore cannot upgrade it.
@@ -515,6 +582,7 @@ infrastore completions zsh &gt; ~/.zfunc/_infrastore
 <pre><code class="language-text">infrastore --store &lt;PATH&gt; init [--compression &lt;none|deflate[:LEVEL]&gt;] [--no-shuffle] [--catalog &lt;attached|in-memory&gt;]
 infrastore --store &lt;PATH&gt; add --descriptor &lt;FILE.json|-&gt; [--csv &lt;FILE.csv&gt;] [--dry-run] [--replace] [--batch-size N] [-q|--quiet] [--compression &lt;SPEC&gt;] [--no-shuffle] [--catalog &lt;MODE&gt;]
 infrastore --store &lt;PATH&gt; add --csv &lt;FILE.csv&gt; --owner-id &lt;I&gt; --owner-type &lt;T&gt; --name &lt;N&gt; --type &lt;T&gt; --element-type &lt;E&gt; [DESCRIPTOR FIELDS...]
+infrastore --store &lt;PATH&gt; add --parquet &lt;PATH&gt; [--parquet &lt;PATH&gt;...] [--no-checksum] [DESCRIPTOR FIELDS...]
 infrastore --store &lt;PATH&gt; merge --from &lt;PATH.h5&gt; [SELECTOR...] [--replace] [--dry-run]
 infrastore --store &lt;PATH&gt; list    [SELECTOR...] [--limit N] [--wide]
 infrastore --store &lt;PATH&gt; get     [SELECTOR...] [--time-range START..END] [--limit N | --full] [--tail] [--stride N] [--plot [--plot-width COLS]] [--window N | --issue-time &lt;TS&gt;]
@@ -536,6 +604,10 @@ infrastore --store &lt;PATH&gt; persist --dest &lt;PATH.h5&gt; [--force] [--dry-
 infrastore --store &lt;PATH&gt; compact [--force]
 infrastore --store &lt;PATH&gt; stats
 infrastore --store &lt;PATH&gt; store-info
+infrastore --store &lt;PATH&gt; store-attr list
+infrastore --store &lt;PATH&gt; store-attr get    &lt;KEY&gt;
+infrastore --store &lt;PATH&gt; store-attr set    &lt;KEY&gt; &lt;VALUE&gt;
+infrastore --store &lt;PATH&gt; store-attr remove &lt;KEY&gt;
 infrastore --store &lt;PATH&gt; upgrade
 infrastore --store &lt;PATH&gt; arrays [SELECTOR...] [--data-hash &lt;HEX&gt;]
 infrastore --store &lt;PATH&gt; attributes [--component-id &lt;I&gt;] [--attribute-id &lt;I&gt;] [--component-type &lt;T&gt;] [--attribute-type &lt;T&gt;] [--summary]

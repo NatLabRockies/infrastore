@@ -808,12 +808,61 @@ the object it came from and survives a Parquet round trip: <code>name</code>, <c
 has no constant step), and whichever of <code>units</code>, <code>quantity_kind</code>, <code>unit_system</code>, <code>component_field</code>,
 and <code>application_data</code> were declared. An undeclared one is <strong>absent</strong> rather than empty, so
 <code>b"units" in table.schema.metadata</code> answers "was a label declared?".</p>
+<p><code>time_reference</code> is the exception: it is always written, and a series that records no spelling gets
+the literal <code>b"unspecified"</code>. Arrow's timestamp type has a zone or it has none, and <em>unspecified</em>
+has no third spelling — an unspecified reference produces a UTC-zoned column, the same as <code>"utc"</code> —
+so omitting the key would leave that column as the only evidence and <code>from_arrow</code> would hand back a
+series claiming <code>utc</code>, which it never did. <code>unspecified</code> is a metadata encoding only: it is not a
+value <code>time_reference=</code> accepts on any constructor.</p>
 <p>The value column is named <code>value</code> rather than after the series so that tables from different
 components concatenate without renaming; the series' own name is in the metadata.</p>
 <p>A <code>PersistentTimeSeries</code> table has <strong>one row per breakpoint, not per instant</strong> — it is the sparse
 step function as stored. Resampling onto a dense grid is the caller's to do, and needs a grid the
 series does not carry: there is no value before the first breakpoint, so a grid starting earlier has
 no answer to give.</p>
+<p>Also written, and not part of the descriptive set above: <code>element_shape</code>, as a JSON list (<code>[]</code> for a
+scalar element). It is a fact about the data rather than a label, so it is written even when empty,
+and the CLI's Parquet export writes the same key — the two producers write one schema.</p>
+<h3 id="from_arrow"><a class="header" href="#from_arrow"><code>from_arrow()</code></a></h3>
+<p>The inverse, on the same three types, and a reader of <strong>foreign</strong> tables too — anything with a
+<code>timestamp</code> and a <code>value</code> column, whether or not it carries the metadata <code>to_arrow()</code> writes:</p>
+<pre><code class="language-python">series = SingleTimeSeries.from_arrow(series.to_arrow())            # exact round trip
+
+import pyarrow.parquet as pq
+SingleTimeSeries.from_arrow(pq.read_table("load.parquet"))         # written by anything
+NonSequentialTimeSeries.from_arrow(table, name="irregular")
+PersistentTimeSeries.from_arrow(table, name="steps")
+</code></pre>
+<p>The inference rules are the ones <code>infrastore add --parquet</code> applies to a foreign file, stated once
+under <a href="parquet-format.html#foreign-files">Foreign files</a> in the Parquet layout reference so the two
+implementations cannot drift apart quietly. In short: what the metadata says is used; what it does
+not say is inferred from the Arrow schema, taking the reading that assumes least.</p>
+<div class="table-wrapper"><table><thead><tr><th>Missing</th><th>Read as</th></tr></thead><tbody>
+<tr><td><code>resolution</code></td><td>Inferred from the timestamps, which must then walk a grid.</td></tr>
+<tr><td><code>element_type</code></td><td>The leaf Arrow type. A <code>fixed_size_list&lt;double&gt;[3]</code> becomes <code>f64</code> with shape <code>(rows, 3)</code> — <em>dense</em>, not <code>tuple(3,f64)</code>, because the bytes cannot say.</td></tr>
+<tr><td><code>time_reference</code></td><td>The timestamp column's zone; a column with no zone reads as <code>zoneless</code>, since a naive timestamp is a wall clock. A metadata <code>unspecified</code> beats the zone and gives back <code>None</code>.</td></tr>
+<tr><td><code>name</code></td><td>Nothing. A name is part of a series' identity, so pass <code>name=</code>.</td></tr>
+</tbody></table>
+</div>
+<p>Every keyword overrides the metadata, with one exception: <strong><code>element_type</code> is an assertion.</strong>
+<code>element_type="tuple(3,f64)"</code> states the reading the bytes cannot, and a value that contradicts the
+table's own raises <code>InvalidParameterError</code> rather than replacing it — the rule this project applies
+to every assertion.</p>
+<p>Refused rather than coerced: <strong>nulls</strong> in either column (the store holds none, and NaN is a value
+rather than an absence); a <strong>microsecond or nanosecond timestamp that is not a whole millisecond</strong>
+(the store's own precision, and rounding one would move it); <strong>rows that leave a declared grid</strong>,
+checked against the grid the resolution generates rather than against successive differences, since
+<code>P1M</code> clamps to month end; and <strong><code>struct</code>/<code>list</code> value columns</strong>, which are the decoded form
+<code>to_arrow()</code> does not produce.</p>
+<p><code>from_arrow</code> is not the whole catalog row: a table records no owner and no catalog id, because
+<code>to_arrow()</code> is a method on a value object and a series built here is not filed anywhere. Pass the
+result to <code>Store.add_time_series</code> with the owner you want, as you would any other series.</p>
+<p><code>from_arrow</code> covers the three static types. A <strong>dense forecast</strong> has a file shape of its own -- a
+values file of <code>issue_time</code>, <code>timestamp</code>, <code>value</code> (plus <code>percentile</code> or <code>scenario</code>) keyed by the
+array, which the CLI writes and reads with <code>export -f parquet</code> and <code>add --parquet</code>.
+<code>to_arrow_windows()</code> is deliberately not that shape: it returns a dict of per-window tables, which
+is an in-memory analysis form rather than anything that could be one Parquet file, so the two are
+not competing spellings of the same thing.</p>
 <h2 id="nonsequentialtimeseries"><a class="header" href="#nonsequentialtimeseries"><code>NonSequentialTimeSeries</code></a></h2>
 <pre><code class="language-python">NonSequentialTimeSeries(
     timestamps: list[datetime],
@@ -1389,6 +1438,32 @@ store.remove_parent_child_associations(parent_types=["Bus"])   # -&gt; 1
 </code></pre>
 <p>Neither association catalog is exposed over the <a href="grpc-api.html">gRPC server</a> or the
 <a href="cli.html"><code>infrastore</code> CLI</a>.</p>
+<h3 id="store-attributes"><a class="header" href="#store-attributes">Store attributes</a></h3>
+<p>Key/value provenance about the <strong>artifact as a whole</strong>, as opposed to a supplemental attribute
+(which belongs to a component) or <code>application_data</code> (which belongs to one series). See
+<a href="../explanation/data-model.html#store-attributes">Store attributes</a> for the model.</p>
+<pre><code class="language-python">def set_store_attribute(self, key: str, value: str) -&gt; None: ...
+def get_store_attribute(self, key: str) -&gt; str | None: ...
+def list_store_attributes(self) -&gt; dict[str, str]: ...
+def remove_store_attribute(self, key: str) -&gt; bool: ...
+</code></pre>
+<pre><code class="language-python">store.set_store_attribute("creator", "sienna-build")
+store.set_store_attribute("source_system", "WECC 2032 ADS")
+
+store.get_store_attribute("creator")      # 'sienna-build'
+store.get_store_attribute("absent")       # None — a question, not an exception
+store.list_store_attributes()             # {'creator': ..., 'source_system': ...}
+store.remove_store_attribute("creator")   # True; a second call is False
+</code></pre>
+<p>A <code>set</code> replaces rather than appending. <code>None</code> and <code>""</code> are different answers: a key set to the
+empty string is present. An empty key or one beginning with <code>infrastore.</code> — reserved, on removal as
+well as on write — raises <code>InvalidParameterError</code>; a write to a read-only store raises
+<code>ReadOnlyStoreError</code>.</p>
+<p>The store never interprets a value, so structure rides in the text:</p>
+<pre><code class="language-python">import json
+store.set_store_attribute("provenance", json.dumps({"pipeline": "nightly", "run": 412}))
+json.loads(store.get_store_attribute("provenance"))   # {'pipeline': 'nightly', 'run': 412}
+</code></pre>
 <h3 id="openapi-row-association-serde"><a class="header" href="#openapi-row-association-serde">OpenAPI-row association serde</a></h3>
 <p>Direct JSON serde of the two association catalogs, in the wire spelling
 <a href="https://github.com/Sienna-Platform/SiennaSchemas">SiennaSchemas</a> defines (<code>TimeSeries/*.json</code>,

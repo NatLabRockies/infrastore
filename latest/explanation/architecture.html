@@ -201,6 +201,7 @@ on-disk format.</p>
     PYMOD[&quot;infrastore&lt;br/&gt;(Python module)&quot;]
     JL[&quot;InfraStore.jl&lt;br/&gt;(Julia package)&quot;]
     PROTO[&quot;infrastore-proto&lt;br/&gt;protobuf + tonic&quot;]
+    PARQ[&quot;infrastore-parquet&lt;br/&gt;Parquet export/import&quot;]
 
     subgraph core[&quot;infrastore-core&quot;]
         STORE[&quot;Store&quot;]
@@ -221,6 +222,8 @@ on-disk format.</p>
     PYMOD --&gt;|&quot;import&quot;| PY
     JL --&gt;|&quot;ccall&quot;| FFI
     SRV --&gt; PROTO
+    CLI --&gt; PARQ
+    PARQ --&gt; STORE
 
     style STORE fill:#28a745,color:#fff
     style META fill:#28a745,color:#fff
@@ -234,6 +237,7 @@ on-disk format.</p>
     style SRV fill:#ffc107,color:#000
     style PROTO fill:#ffc107,color:#000
     style CLI fill:#fd7e14,color:#fff
+    style PARQ fill:#fd7e14,color:#fff
 </pre>
 <div class="table-wrapper"><table><thead><tr><th>Crate / package</th><th>Role</th></tr></thead><tbody>
 <tr><td><code>infrastore-core</code></td><td>The whole engine: types, storage backends, hashing, the <code>Store</code> API</td></tr>
@@ -244,6 +248,7 @@ on-disk format.</p>
 <tr><td><code>infrastore-ffi</code></td><td>A <code>extern "C"</code> cdylib with an opaque-handle API over <code>Store</code></td></tr>
 <tr><td><code>InfraStore.jl</code></td><td>A Julia package that <code>ccall</code>s into the FFI cdylib</td></tr>
 <tr><td><code>infrastore-cli</code></td><td>The <code>infrastore</code> binary: read+write access to an on-disk store from a terminal</td></tr>
+<tr><td><code>infrastore-parquet</code></td><td>Partitioned Parquet export/import, linked only by the CLI (<code>parquet</code> feature)</td></tr>
 <tr><td><code>infrastore-bench</code></td><td>The <code>infrastore-bench</code> binary: ingestion and simulation-read benchmarks</td></tr>
 </tbody></table>
 </div>

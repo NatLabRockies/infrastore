@@ -683,6 +683,25 @@ contain them, and it always does.</p>
 DDL at all</strong>, so reads of a missing table return empty results (<code>0</code>, <code>false</code>, no rows) rather than
 failing. That tolerance is not vestigial — it is what lets a read-only open work on a store whose
 catalog was never opened for writing.</p>
+<h3 id="store_attributes"><a class="header" href="#store_attributes"><code>store_attributes</code></a></h3>
+<p>Free-form key/value provenance about the <strong>artifact as a whole</strong> — who built it, from what source
+system, under which of the consumer's own schema versions. The store never interprets a value, in
+the same spirit as a row's <code>application_data</code>, and nothing here participates in any identity, hash,
+or query plan. See <a href="../explanation/data-model.html#store-attributes">Store attributes</a> for the model.</p>
+<pre><code class="language-sql">CREATE TABLE store_attributes (
+    key   TEXT PRIMARY KEY NOT NULL,
+    value TEXT NOT NULL
+);
+</code></pre>
+<p><code>key</code> is the primary key, so a set is an <strong>upsert</strong> rather than an append: an artifact records one
+creator, not a history of them. Values are <code>TEXT</code>; a caller wanting structure stores JSON, which is
+what <code>application_data</code> already asks of them. Keys beginning with <code>infrastore.</code> are reserved and
+refused on the write path — by the store, not by a <code>CHECK</code>, so a future build can stamp its own
+facts through a deliberate internal write without a format change.</p>
+<p>The table is <strong>additive</strong>, like the two association tables: an existing store gains it on its first
+writable open, so it needed no <code>CATALOG_SCHEMA_REVISION</code> bump. A read-only open of a catalog written
+before it existed cannot run that DDL, so reads degrade to the empty answer rather than erroring.
+The table is not carried by the OpenAPI export or import, which have no place for it.</p>
 <h3 id="schema_version"><a class="header" href="#schema_version"><code>schema_version</code></a></h3>
 <pre><code class="language-sql">CREATE TABLE schema_version (version INTEGER NOT NULL);
 </code></pre>
@@ -877,7 +896,7 @@ order.</p>
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
-                            <a rel="next prefetch" href="../reference/element-types.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../reference/parquet-format.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <i class="fa fa-angle-right"></i>
                             </a>
 
@@ -891,7 +910,7 @@ order.</p>
                         <i class="fa fa-angle-left"></i>
                     </a>
 
-                    <a rel="next prefetch" href="../reference/element-types.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../reference/parquet-format.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <i class="fa fa-angle-right"></i>
                     </a>
             </nav>

@@ -215,6 +215,8 @@ too, reads included: no message or RPC covers <code>supplemental_attribute_assoc
 <tr><td><code>GetForecastSummary</code></td><td><code>GetForecastSummaryReq</code></td><td><code>GetForecastSummaryResp</code></td><td>Grouped forecast summary</td></tr>
 <tr><td><code>CheckStaticConsistency</code></td><td><code>CheckStaticConsistencyReq</code></td><td><code>CheckStaticConsistencyResp</code></td><td>Per-resolution static-grid check</td></tr>
 <tr><td><code>VerifyIntegrity</code></td><td><code>VerifyIntegrityReq</code></td><td><code>VerifyIntegrityResp</code></td><td>Recompute and compare stored hashes</td></tr>
+<tr><td><code>ListStoreAttributes</code></td><td><code>ListStoreAttributesReq</code></td><td><code>ListStoreAttributesResp</code></td><td>Every store attribute</td></tr>
+<tr><td><code>GetStoreAttribute</code></td><td><code>GetStoreAttributeReq</code></td><td><code>GetStoreAttributeResp</code></td><td>One store attribute's value</td></tr>
 </tbody></table>
 </div>
 <p>Every RPC is named for the <code>Store</code> method it exposes, and its request and response are <code>&lt;Rpc&gt;Req</code> /
@@ -451,6 +453,24 @@ store is readable, which is how to confirm the upgrade landed.</p>
 <p>A catalog written by a <em>newer</em> build is <code>CatalogTooNew</code> and is refused outright; there is no
 downgrade. See
 <a href="../explanation/design-choices.html#upgrade-a-store-in-place-rather-than-bricking-it">Upgrade a store in place</a>.</p>
+<h2 id="store-attributes"><a class="header" href="#store-attributes">Store Attributes</a></h2>
+<p>The read half of the artifact's key/value provenance — see
+<a href="../explanation/data-model.html#store-attributes">Store attributes</a>. Setting one is a write, and
+writes need local filesystem access, so they stay off this service.</p>
+<pre><code class="language-proto">message ListStoreAttributesReq {}
+message ListStoreAttributesResp {
+  map&lt;string, string&gt; attributes = 1;
+}
+
+message GetStoreAttributeReq  { string key = 1; }
+message GetStoreAttributeResp { optional string value = 1; }
+</code></pre>
+<p><code>value</code> is <strong>absent</strong> when the artifact carries no such key — not <code>NOT_FOUND</code>, mirroring
+<code>Store::get_store_attribute</code>: a caller asking whether a key is there is asking a question, where
+<code>GetMetadataById</code> deals with a caller holding an id it believes in. <code>optional</code> rather than an empty
+string, because a key set to <code>""</code> is a legitimate value.</p>
+<p>A protobuf map is unordered on the wire, so the core's sorted-by-key ordering does not survive the
+trip; <code>RemoteClient::list_store_attributes</code> collects into a <code>BTreeMap</code> and restores it.</p>
 <h2 id="authentication"><a class="header" href="#authentication">Authentication</a></h2>
 <p>When the server is configured with <code>method = "api_key"</code>, clients must send the key in the
 <strong><code>x-api-key</code></strong> request metadata (header). The server checks the supplied key against every
@@ -496,10 +516,11 @@ let hydrated = client.list_metadata_by_ids(&amp;live).await?;
 <code>list_metadata_by_ids</code>, <code>get_metadata_by_id</code>, <code>association_exists</code>, <code>has_any_time_series</code>,
 <code>read_by_id</code>, <code>read_by_ids</code>, <code>get_resolutions</code>, <code>get_intervals</code>, <code>get_counts</code>, <code>counts_by_type</code>,
 <code>time_series_counts_detailed</code>, <code>get_forecast_parameters</code>, <code>list_owner_ids</code>, <code>static_summary</code>,
-<code>forecast_summary</code>, <code>check_static_consistency</code>, <code>verify_integrity</code>. The id-taking ones accept
-<code>infrastore_core::TimeSeriesId</code>, the same newtype the local <code>Store</code> uses, so an <code>owner_id</code> cannot be
-passed where a series id belongs. See the <a href="../guides/server.html">gRPC Server guide</a> for end-to-end
-usage and adding an API key to client requests.</p>
+<code>forecast_summary</code>, <code>check_static_consistency</code>, <code>verify_integrity</code>, <code>list_store_attributes</code>,
+<code>get_store_attribute</code>. The id-taking ones accept <code>infrastore_core::TimeSeriesId</code>, the same newtype
+the local <code>Store</code> uses, so an <code>owner_id</code> cannot be passed where a series id belongs. See the
+<a href="../guides/server.html">gRPC Server guide</a> for end-to-end usage and adding an API key to client
+requests.</p>
 
                     </main>
 

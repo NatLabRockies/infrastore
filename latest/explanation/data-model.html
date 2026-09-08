@@ -525,6 +525,46 @@ are unrelated to the entity-to-entity tables described in this section.</p>
 supplemental-attribute surface is the wider of the two (it carries counts and a grouped summary)
 because each of its operations is driven by an existing consumer; the parent/child surface is
 deliberately narrower for now.</p>
+<h2 id="store-attributes"><a class="header" href="#store-attributes">Store attributes</a></h2>
+<p>Everything above describes a <em>row</em>: a series' <code>application_data</code>, a component's supplemental
+attributes, an edge between two components. <strong>Store attributes</strong> describe the artifact itself.</p>
+<p>A store attribute is a key/value pair recorded once per store — who built it, from what source
+system, under which of the consumer's own schema versions. The store never interprets a value, in
+exactly the same spirit as <code>application_data</code>: keys and values are TEXT, nothing here participates
+in any identity, hash, or query, and a caller wanting structure stores JSON.</p>
+<pre><code class="language-rust ignore">store.set_store_attribute("creator", "sienna-build")?;
+store.set_store_attribute("source_system", "WECC 2032 ADS")?;
+assert_eq!(store.get_store_attribute("creator")?.as_deref(), Some("sienna-build"));</code></pre>
+<p>Note the term and the prefix. In this project a bare "attribute" means a <em>supplemental</em> attribute
+(above) and a bare "metadata" means a <code>TimeSeriesMetadata</code> row, so every identifier for this feature
+carries <code>store_</code>: <code>set_store_attribute</code>, <code>list_store_attributes</code>, the CLI's <code>store-attr</code>, the
+<code>store_attributes</code> table. Neither misreading is available.</p>
+<p>Four rules are worth stating outright:</p>
+<ul>
+<li><strong>A set replaces.</strong> <code>key</code> is the primary key, so an artifact records one creator rather than a
+history of them.</li>
+<li><strong>An absent key is <code>None</code>, not an error.</strong> A consumer asking whether the artifact carries a key is
+asking a question, the same reading <a href="#association-ids"><code>get_metadata_by_id</code></a> takes. A key set to
+the empty string is <em>present</em>; every binding keeps the two distinguishable.</li>
+<li><strong><code>infrastore.</code> is reserved</strong>, refused on removal as well as on write, so the store can stamp
+facts of its own later without colliding with a consumer's keys — and so a reserved key cannot be
+worked around by deleting it.</li>
+<li><strong>Attributes are content.</strong> <code>is_empty</code> reports <code>false</code> for a store holding nothing but provenance:
+those rows are the consumer's own text, recoverable from nowhere else, and a consumer that skips
+writing an "empty" store would drop them with no error.</li>
+</ul>
+<p>They live in the catalog, so they travel with <code>persist_to</code> and <code>persist_catalog</code>, survive <code>compact</code>
+(which rewrites only the array half), and come across with <code>open_copy</code>. <code>open_without_catalog</code> mints
+an empty set, since there is nowhere else for them to have been. They are <strong>not</strong> carried by the
+OpenAPI export or import: the vendored schema has no place for them.</p>
+<p>Available in the Rust core, the C ABI, Julia, Python, and the CLI (<code>store-attr</code>, plus
+<code>store_attributes</code> in <code>store-info</code>); the read-only gRPC server carries the read half
+(<code>ListStoreAttributes</code>, <code>GetStoreAttribute</code>).</p>
+<p>The CLI's two cross-store commands take a position rather than ignoring the table. <code>merge</code> is
+additive with the <strong>destination winning</strong>: a merge brings data into an artifact that already has an
+identity, so a key the destination lacks is copied, a key both sides agree on is a no-op, and a
+disagreement is reported and left as the destination has it. <code>diff</code> gives them a section of their
+own — there is no series identity to pair them on — and counts a difference toward its nonzero exit.</p>
 
                     </main>
 

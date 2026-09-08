@@ -598,6 +598,14 @@ executable. Clear the quarantine flag with <code>xattr -d com.apple.quarantine .
 </code></pre>
 <p>This compiles HDF5 from vendored sources, so it needs <code>cmake</code> and a C compiler (see
 <a href="getting-started/installation.html#build-prerequisites">Build Prerequisites</a>) and takes a few minutes on the first build.</p>
+<p>Parquet support (<code>export -f parquet</code>, <code>add --parquet</code>) is on by default, which is what pulls in the
+Arrow dependency tree. To leave it out -- a smaller binary and a shorter build, at the cost of those
+two flags:</p>
+<pre><code class="language-sh">cargo install infrastore-cli --no-default-features --features vendored
+</code></pre>
+<p>That binary still accepts the flags and names the feature to rebuild with, rather than reporting
+<code>parquet</code> as an unknown format. The Arrow tree reaches only the CLI: <code>infrastore-core</code>, the Python
+wheel, and the FFI cdylib never link it.</p>
 <h2 id="julia"><a class="header" href="#julia">Julia</a></h2>
 <p><code>InfraStore.jl</code> is registered in the Julia General registry:</p>
 <pre><code class="language-julia">using Pkg
@@ -665,6 +673,7 @@ installed:</p>
 <tr><td><code>infrastore-py</code></td><td>PyO3 bindings, <code>abi3-py311</code> wheel</td></tr>
 <tr><td><code>infrastore-ffi</code></td><td>C ABI cdylib (the foundation of the Julia binding)</td></tr>
 <tr><td><code>infrastore-cli</code></td><td><code>infrastore</code> CLI binary (CSV add/read, inspect on-disk stores)</td></tr>
+<tr><td><code>infrastore-parquet</code></td><td>Parquet export/import behind the CLI's default-on <code>parquet</code> feature</td></tr>
 <tr><td><code>infrastore-bench</code></td><td><code>infrastore-bench</code> binary (bulk-ingest + simulation-read benchmarks)</td></tr>
 </tbody></table>
 </div>
@@ -1009,6 +1018,7 @@ on-disk format.</p>
     PYMOD[&quot;infrastore&lt;br/&gt;(Python module)&quot;]
     JL[&quot;InfraStore.jl&lt;br/&gt;(Julia package)&quot;]
     PROTO[&quot;infrastore-proto&lt;br/&gt;protobuf + tonic&quot;]
+    PARQ[&quot;infrastore-parquet&lt;br/&gt;Parquet export/import&quot;]
 
     subgraph core[&quot;infrastore-core&quot;]
         STORE[&quot;Store&quot;]
@@ -1029,6 +1039,8 @@ on-disk format.</p>
     PYMOD --&gt;|&quot;import&quot;| PY
     JL --&gt;|&quot;ccall&quot;| FFI
     SRV --&gt; PROTO
+    CLI --&gt; PARQ
+    PARQ --&gt; STORE
 
     style STORE fill:#28a745,color:#fff
     style META fill:#28a745,color:#fff
@@ -1042,6 +1054,7 @@ on-disk format.</p>
     style SRV fill:#ffc107,color:#000
     style PROTO fill:#ffc107,color:#000
     style CLI fill:#fd7e14,color:#fff
+    style PARQ fill:#fd7e14,color:#fff
 </pre>
 <div class="table-wrapper"><table><thead><tr><th>Crate / package</th><th>Role</th></tr></thead><tbody>
 <tr><td><code>infrastore-core</code></td><td>The whole engine: types, storage backends, hashing, the <code>Store</code> API</td></tr>
@@ -1052,6 +1065,7 @@ on-disk format.</p>
 <tr><td><code>infrastore-ffi</code></td><td>A <code>extern "C"</code> cdylib with an opaque-handle API over <code>Store</code></td></tr>
 <tr><td><code>InfraStore.jl</code></td><td>A Julia package that <code>ccall</code>s into the FFI cdylib</td></tr>
 <tr><td><code>infrastore-cli</code></td><td>The <code>infrastore</code> binary: read+write access to an on-disk store from a terminal</td></tr>
+<tr><td><code>infrastore-parquet</code></td><td>Partitioned Parquet export/import, linked only by the CLI (<code>parquet</code> feature)</td></tr>
 <tr><td><code>infrastore-bench</code></td><td>The <code>infrastore-bench</code> binary: ingestion and simulation-read benchmarks</td></tr>
 </tbody></table>
 </div>
@@ -1917,6 +1931,46 @@ are unrelated to the entity-to-entity tables described in this section.</p>
 supplemental-attribute surface is the wider of the two (it carries counts and a grouped summary)
 because each of its operations is driven by an existing consumer; the parent/child surface is
 deliberately narrower for now.</p>
+<h2 id="store-attributes"><a class="header" href="#store-attributes">Store attributes</a></h2>
+<p>Everything above describes a <em>row</em>: a series' <code>application_data</code>, a component's supplemental
+attributes, an edge between two components. <strong>Store attributes</strong> describe the artifact itself.</p>
+<p>A store attribute is a key/value pair recorded once per store — who built it, from what source
+system, under which of the consumer's own schema versions. The store never interprets a value, in
+exactly the same spirit as <code>application_data</code>: keys and values are TEXT, nothing here participates
+in any identity, hash, or query, and a caller wanting structure stores JSON.</p>
+<pre><code class="language-rust ignore">store.set_store_attribute("creator", "sienna-build")?;
+store.set_store_attribute("source_system", "WECC 2032 ADS")?;
+assert_eq!(store.get_store_attribute("creator")?.as_deref(), Some("sienna-build"));</code></pre>
+<p>Note the term and the prefix. In this project a bare "attribute" means a <em>supplemental</em> attribute
+(above) and a bare "metadata" means a <code>TimeSeriesMetadata</code> row, so every identifier for this feature
+carries <code>store_</code>: <code>set_store_attribute</code>, <code>list_store_attributes</code>, the CLI's <code>store-attr</code>, the
+<code>store_attributes</code> table. Neither misreading is available.</p>
+<p>Four rules are worth stating outright:</p>
+<ul>
+<li><strong>A set replaces.</strong> <code>key</code> is the primary key, so an artifact records one creator rather than a
+history of them.</li>
+<li><strong>An absent key is <code>None</code>, not an error.</strong> A consumer asking whether the artifact carries a key is
+asking a question, the same reading <a href="explanation/data-model.html#association-ids"><code>get_metadata_by_id</code></a> takes. A key set to
+the empty string is <em>present</em>; every binding keeps the two distinguishable.</li>
+<li><strong><code>infrastore.</code> is reserved</strong>, refused on removal as well as on write, so the store can stamp
+facts of its own later without colliding with a consumer's keys — and so a reserved key cannot be
+worked around by deleting it.</li>
+<li><strong>Attributes are content.</strong> <code>is_empty</code> reports <code>false</code> for a store holding nothing but provenance:
+those rows are the consumer's own text, recoverable from nowhere else, and a consumer that skips
+writing an "empty" store would drop them with no error.</li>
+</ul>
+<p>They live in the catalog, so they travel with <code>persist_to</code> and <code>persist_catalog</code>, survive <code>compact</code>
+(which rewrites only the array half), and come across with <code>open_copy</code>. <code>open_without_catalog</code> mints
+an empty set, since there is nowhere else for them to have been. They are <strong>not</strong> carried by the
+OpenAPI export or import: the vendored schema has no place for them.</p>
+<p>Available in the Rust core, the C ABI, Julia, Python, and the CLI (<code>store-attr</code>, plus
+<code>store_attributes</code> in <code>store-info</code>); the read-only gRPC server carries the read half
+(<code>ListStoreAttributes</code>, <code>GetStoreAttribute</code>).</p>
+<p>The CLI's two cross-store commands take a position rather than ignoring the table. <code>merge</code> is
+additive with the <strong>destination winning</strong>: a merge brings data into an artifact that already has an
+identity, so a key the destination lacks is copied, a key both sides agree on is a no-op, and a
+disagreement is reported and left as the destination has it. <code>diff</code> gives them a section of their
+own — there is no series identity to pair them on — and counts a difference toward its nonzero exit.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="time-references"><a class="header" href="#time-references">Time References</a></h1>
 <p>The store records <strong>instants</strong>. A <code>time_reference</code> records what those instants were <em>written as</em>, so
 a series comes back the way it went in instead of being relabeled UTC at every boundary.</p>
@@ -2871,9 +2925,11 @@ asymmetry is that the read-only gRPC server does not accept any writes:</p>
 <tr><td>Forecast metadata / counts</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>list/counts</td></tr>
 <tr><td>Readers (columnar sweep)</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td><code>grid</code></td><td>❌</td></tr>
 <tr><td>Association catalogs</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>❌</td></tr>
+<tr><td>Store attributes</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td><code>store-attr</code></td><td>read-only</td></tr>
 <tr><td>Materialized timestamps</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>❌</td></tr>
 <tr><td><code>from_timestamps</code> (verified)</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>❌</td><td>❌</td></tr>
 <tr><td>Arrow tables (<code>to_arrow</code>)</td><td>❌</td><td>❌</td><td>✅</td><td>❌</td><td>❌</td><td>❌</td></tr>
+<tr><td>Parquet files</td><td>crate</td><td>❌</td><td>❌</td><td>❌</td><td><code>-f parquet</code></td><td>❌</td></tr>
 <tr><td>Store summary (<code>show</code>)</td><td>❌</td><td>❌</td><td>✅</td><td>❌</td><td><code>store-info</code></td><td>❌</td></tr>
 <tr><td>Forecast windows as Arrow</td><td>❌</td><td>❌</td><td><code>Deterministic</code></td><td>❌</td><td>❌</td><td>❌</td></tr>
 </tbody></table>
@@ -2884,6 +2940,25 @@ local filesystem access, so the read-only gRPC server serves forecast reads but 
 already has one of its own — Julia has <code>Base.show</code>, and the CLI has <code>store-info</code> plus the <code>list</code>
 family. It composes existing catalog aggregate queries and adds no core API, so any binding that
 wants it can grow one without a change underneath.</p>
+<p><strong>Parquet</strong> lives in a crate of its own, <code>infrastore-parquet</code>, which the CLI depends on behind a
+cargo feature that is <strong>on by default</strong> — the <code>infrastore</code> binary anyone installs can read and write
+Parquet, because handing an analyst a file for DuckDB or polars is an ordinary reason to reach for
+the CLI. The feature stays switchable (<code>--no-default-features --features vendored</code> builds a lean
+binary), and the line it draws is between the binary and the <strong>libraries</strong>: <code>infrastore-core</code>,
+<code>infrastore-py</code>, and <code>infrastore-ffi</code> never link Arrow, which <code>cargo tree --edges normal</code> on each is
+the check for. The CLI is the only surface that reads and writes Parquet <em>files</em>
+(<code>export -f parquet</code>, <code>add --parquet</code>): a <strong>normalized, partitioned</strong> layout of two files per
+partition — a values file holding each distinct array once and a series file holding the catalog
+rows that name it, joined on <code>(data_hash, time_axis)</code> — specified in the
+<a href="explanation/../reference/parquet-format.html">Parquet layout</a> reference. Python's <code>to_arrow()</code> / <code>from_arrow</code> are
+a different, in-memory thing — one two-column table per series, with the descriptors in the schema
+metadata rather than in columns — and are not a reader or writer for the CLI's files; a Python user
+who wants one writes the per-series table with <code>pyarrow.parquet</code>, or hands the CLI's directory to
+DuckDB or polars. The relationship between the two is one sentence: a series file's columns are
+<code>to_arrow()</code>'s metadata keys turned into columns, and the values file is its two columns keyed by
+the array. Nothing else has it: the C ABI and Julia would need the whole Arrow tree in the cdylib
+for a format their host languages already have readers for, and the gRPC server serves values, not
+files.</p>
 <p><strong>Materialized timestamps</strong> and <strong><code>from_timestamps</code></strong> both run in the core and reach Julia through
 two stateless ABI entry points, <code>infrastore_grid_timestamps</code> and <code>infrastore_infer_period</code>. That
 matters more than it looks: Julia is the one binding whose date library has calendar arithmetic of
@@ -3744,6 +3819,28 @@ forecast has two grids that overlap — windows step by <code>interval</code>, r
 <code>resolution</code> — so a day-ahead forecast reissued hourly shares 23 of every 24 instants between
 neighbouring windows. The dict iterates chronologically. See
 <a href="guides/../reference/python-api.html#to_arrow_windows"><code>to_arrow_windows()</code></a>.</p>
+<h3 id="back-from-a-table"><a class="header" href="#back-from-a-table">Back from a table</a></h3>
+<p><code>from_arrow</code> is the inverse, on the same three types — and it reads a table anything wrote, not just
+one <code>to_arrow()</code> produced:</p>
+<pre><code class="language-python">import pyarrow.parquet as pq
+
+series = SingleTimeSeries.from_arrow(pq.read_table("load.parquet"))
+store.add_time_series(42, "Generator", OwnerCategory.Component, series)
+</code></pre>
+<p>A table <code>to_arrow()</code> wrote round-trips with no arguments, because the metadata is the descriptor. A
+<strong>foreign</strong> table — from a dataframe, or a Parquet file someone else wrote — needs a <code>name=</code> at
+minimum, since a name is part of a series' identity; everything else is inferred from the Arrow
+schema. Note what a table does not carry: the owner and the catalog id, because <code>to_arrow()</code> is a
+method on a value object and a series built here is not filed anywhere. You supply the owner to
+<code>add_time_series</code>, as you would for any other series.</p>
+<p>The inference rules and the four things that are refused rather than coerced (nulls, sub-millisecond
+timestamps, rows that leave a declared grid, decoded <code>struct</code>/<code>list</code> value columns) are in the
+<a href="guides/../reference/python-api.html#from_arrow">reference</a>.</p>
+<p><code>to_arrow()</code> and <code>from_arrow()</code> are <strong>per-series, in-memory conveniences</strong> -- one series, one table.
+They are not the CLI's file format: <code>infrastore export -f parquet</code> writes
+<a href="guides/../reference/parquet-format.html">a values/series file pair per partition</a>, each distinct array once
+and one catalog row per series, which <code>from_arrow</code> does not read. To move a whole store through
+Parquet, use the CLI at both ends.</p>
 <h3 id="datetimes-and-precision"><a class="header" href="#datetimes-and-precision">Datetimes and precision</a></h3>
 <p>Every <code>datetime</code> must be timezone-aware (any zone; converted to UTC on the way in, UTC on the way
 out), and a naive one raises <code>InvalidParameterError</code>. A <strong>stored</strong> instant — an initial timestamp, a
@@ -5125,9 +5222,11 @@ series not on it drops out:</p>
 the grids a store holds (<code>list --length 24</code>) and retire a stray cohort without naming its owners.</p>
 <p><code>export</code> is the bulk read-direction inverse of <code>add</code>: every series the selector matches is written
 to its own CSV or JSON file under <code>--dir</code> (or to stdout when exactly one matches), optionally sliced
-with <code>--time-range</code>. Setting <code>INFRASTORE_STORE</code> in the environment stands in for <code>--store</code>, every
-destructive command except <code>compact</code> accepts <code>--dry-run</code> to preview its effect, and the global
-<code>-y</code>/<code>--yes</code> answers every confirmation prompt so a script does not have to know which commands ask:</p>
+with <code>--time-range</code>; <code>-f parquet</code> instead writes
+<a href="guides/cli.html#hand-it-to-something-else-parquet">one file pair per partition</a>. Setting <code>INFRASTORE_STORE</code> in the
+environment stands in for <code>--store</code>, every destructive command except <code>compact</code> accepts <code>--dry-run</code>
+to preview its effect, and the global <code>-y</code>/<code>--yes</code> answers every confirmation prompt so a script
+does not have to know which commands ask:</p>
 <pre><code class="language-sh">export INFRASTORE_STORE=demo.h5
 infrastore remove --name-glob 'scratch_*' --dry-run      # what would go
 infrastore -y remove --name-glob 'scratch_*'             # no prompt
@@ -5187,6 +5286,122 @@ metadata alone.</p>
 hashes as garbage bytes, and in <code>.mode box</code> it mangles the table borders:</p>
 <pre><code class="language-sh">sqlite3 demo.h5.sqlite 'SELECT name, data_hash FROM time_series_readable;'
 </code></pre>
+<h2 id="hand-it-to-something-else-parquet"><a class="header" href="#hand-it-to-something-else-parquet">Hand It to Something Else: Parquet</a></h2>
+<p>CSV is the interchange format <code>add</code> and <code>export</code> default to, and it has one real cost: a float goes
+out as decimal text and comes back as whatever parsing that text gives. Parquet does not have that
+problem, and every analysis tool worth the name reads it:</p>
+<pre><code class="language-sh">infrastore --store demo.h5 -f parquet export --name-glob 'load_*' --dir parquet/
+infrastore --store other.h5 add --parquet parquet/
+</code></pre>
+<p>What comes out is a handful of <strong>partitions</strong>, not a file per series -- a store with thousands of
+series would otherwise become thousands of files. Each partition is a <strong>pair</strong>:</p>
+<pre><code class="language-text">parquet/
+  SingleTimeSeries.f64.utc.values.parquet            every distinct array once, one row per value
+  SingleTimeSeries.f64.utc.series.parquet            one catalog row per series
+  SingleTimeSeries.f64.America_Denver.values.parquet
+  SingleTimeSeries.f64.America_Denver.series.parquet
+  Deterministic.f64.utc.values.parquet
+  Deterministic.f64.utc.series.parquet
+</code></pre>
+<p>One pair per <code>(type, value type, time reference)</code> triple, because those three cannot vary inside one
+table without nullable or ill-typed columns -- a forecast has an <code>issue_time</code> and a static series
+does not, and a table has one Arrow type per column. The payoff is that <strong>every column is
+required</strong>, which is worth more to whoever queries the files than the files it costs.</p>
+<p>The split is the other half of it. The store is content-addressed, so a thousand components sharing
+one profile hold <strong>one</strong> array; writing the catalog row beside every value would write that profile
+a thousand times, and Parquet's compression does not find repeats across pages. So the values file
+holds each array once, keyed by the pair <code>(data_hash, time_axis)</code>, and the series file carries that
+same pair beside each catalog row. They join on it.</p>
+<p><code>add --parquet</code> takes a file, a whole directory, or a partition stem, and commits one transaction
+per partition, so a partition that fails leaves the ones already committed alone. A pair <code>export</code>
+wrote re-adds with no other flag; a foreign file -- one from a dataframe, or a values file whose
+partner was not copied -- carries less, and is told what it is missing:</p>
+<pre><code class="language-sh">infrastore --store demo.h5 add --parquet from_pandas.parquet \
+    --owner-id 42 --owner-type Generator --name load
+</code></pre>
+<p>Three things to know. <code>-f parquet</code> requires <code>--dir</code>, because Parquet's footer sits at the end of the
+file and a writer has to seek back to it -- a pipe cannot. The <code>data_hash</code> half of the key is a
+checksum on the way back in: if you edited values in DuckDB, recompute it or pass <code>--no-checksum</code>.
+And a series with no values <strong>fails</strong> the export, naming every one -- an empty series would be a
+catalog row whose key matches no values rows, which is also what a truncated export looks like.</p>
+<p>The full layout -- both column sets, the array key, the partition rules, the filenames, the footer,
+the merge join, and what a foreign file has to supply -- is in
+<a href="guides/../reference/parquet-format.html">Parquet Layout</a>.</p>
+<p>Parquet is on by default, in the released binaries and in <code>cargo install infrastore-cli</code> alike. It
+<em>is</em> a cargo feature, so <code>--no-default-features --features vendored</code> builds a binary without the
+Arrow dependency tree; that binary still accepts the flags and tells you which feature to rebuild
+with, rather than reporting <code>parquet</code> as an unknown format.</p>
+<h3 id="querying-it-with-duckdb"><a class="header" href="#querying-it-with-duckdb">Querying it with DuckDB</a></h3>
+<p>The reason to write Parquet rather than to embed a query engine here. Every question starts with the
+same join, on the pair that keys both halves:</p>
+<pre><code class="language-sql">SELECT s.name, s.owner_id, s.units, max(v.value) AS peak
+FROM 'parquet/SingleTimeSeries.f64.utc.values.parquet' v
+JOIN 'parquet/SingleTimeSeries.f64.utc.series.parquet' s USING (data_hash, time_axis)
+GROUP BY s.name, s.owner_id, s.units;
+</code></pre>
+<p>Write it once as a view and nothing after has to think about it:</p>
+<pre><code class="language-sql">CREATE VIEW load AS
+SELECT s.*, v.timestamp, v.value
+FROM 'parquet/SingleTimeSeries.f64.America_Denver.values.parquet' v
+JOIN 'parquet/SingleTimeSeries.f64.America_Denver.series.parquet' s USING (data_hash, time_axis);
+
+-- One component's day, in its own spelling -- the timestamp column is zoned.
+SELECT timestamp, value FROM load
+WHERE owner_id = 42 AND name = 'load'
+ORDER BY timestamp;
+</code></pre>
+<p>That view is the denormalized table the format deliberately does not write. Materializing it costs
+exactly what the split saves; keeping it as a view costs nothing.</p>
+<p>A forecast joins the same way, and its window is a column of the values half:</p>
+<pre><code class="language-sql">SELECT v.issue_time, count(*) AS steps, max(v.value) AS peak
+FROM 'parquet/Deterministic.f64.utc.values.parquet' v
+JOIN 'parquet/Deterministic.f64.utc.series.parquet' s USING (data_hash, time_axis)
+WHERE s.name = 'load_det'
+GROUP BY v.issue_time
+ORDER BY v.issue_time;
+</code></pre>
+<p>Note what a glob does <em>not</em> mix: <code>'parquet/*.values.parquet'</code> only works across partitions whose
+columns agree, which is to say within one <code>time_series_type</code>. Reading a static partition and a
+forecast one together needs the columns named, since only the latter has <code>issue_time</code>.</p>
+<p>The catalog is still there when you want what the files leave out -- the <code>data_hash</code> in its binary
+form, the feature sets, the association tables:</p>
+<pre><code class="language-sql">INSTALL sqlite; LOAD sqlite;
+ATTACH 'demo.h5.sqlite' AS catalog (TYPE sqlite);
+
+-- Two joins: the array key pairs the halves, then `id` reaches the catalog.
+SELECT s.name, s.owner_id, max(v.value) AS peak, c.timestamps_hash
+FROM 'parquet/SingleTimeSeries.f64.utc.values.parquet' v
+JOIN 'parquet/SingleTimeSeries.f64.utc.series.parquet' s USING (data_hash, time_axis)
+JOIN catalog.time_series_readable AS c ON c.id = s.id
+GROUP BY s.name, s.owner_id, c.timestamps_hash;
+</code></pre>
+<p><code>time_series_readable</code> is the catalog's hand-inspection view -- it hex-encodes the two content
+hashes and decodes the integer type codes, so the rows read as text (see
+<a href="guides/../reference/cli.html#reading-the-sqlite-catalog-by-hand">Reading the SQLite catalog by hand</a>). The
+<code>id</code> column on the <strong>series</strong> half is what reaches it; it is provenance only, and <code>add</code> assigns
+fresh ids rather than reusing it.</p>
+<h2 id="stamp-provenance-on-the-artifact"><a class="header" href="#stamp-provenance-on-the-artifact">Stamp Provenance on the Artifact</a></h2>
+<p>A store built by a model run should say so. <code>store-attr</code> records free-form key/value provenance
+about the whole artifact -- who built it, from what source system, under which of your own schema
+versions:</p>
+<pre><code class="language-sh">infrastore --store demo.h5 store-attr set creator sienna-build
+infrastore --store demo.h5 store-attr set source_system WECC-2032-ADS
+infrastore --store demo.h5 store-attr list
+infrastore --store demo.h5 store-attr get creator     # bare value on stdout
+infrastore --store demo.h5 store-attr remove creator
+</code></pre>
+<p>The store never interprets a value, so structure rides in the text -- store JSON if you need it. The
+attributes live in the catalog, which means they travel with <code>persist</code>, survive <code>compact</code>, and show
+up under <code>store_attributes</code> in <code>infrastore -f json store-info</code>.</p>
+<p>Three things to know. <code>set</code> replaces rather than appending: an artifact records one creator, not a
+history of them. <code>get</code> exits 1 when the key is unset, so a script can branch on it, while <code>remove</code>
+reports <code>removed: false</code> and exits 0. And keys beginning with <code>infrastore.</code> are reserved.</p>
+<p><code>merge</code> brings a source's attributes across without overwriting: a key the destination lacks is
+copied, a key both sides agree on is a no-op, and a disagreement is reported and left as the
+destination has it. <code>diff</code> gives them a section of their own and gates on them -- an artifact whose
+recorded source system changed is not the artifact you expected, even when every series is
+identical.</p>
+<p>Note the name. <code>attributes</code> (below) is a different command about a different thing.</p>
 <h2 id="associations-3"><a class="header" href="#associations-3">Associations</a></h2>
 <p>Two association catalogs live alongside the time series, readable and writable here:</p>
 <pre><code class="language-sh">infrastore --store demo.h5 attributes                 # component &lt;-&gt; supplemental attribute
@@ -5522,6 +5737,8 @@ the <a href="reference/../guides/index.html">Developer Guides</a>; for concepts,
 section.</p>
 <ul>
 <li><a href="reference/./file-format.html">On-Disk File Format</a> — The HDF5 layout and SQLite schema, byte for byte.</li>
+<li><a href="reference/./parquet-format.html">Parquet Layout</a> — The values/series file pairs <code>export -f parquet</code> writes
+and <code>add --parquet</code> reads.</li>
 <li><a href="reference/./element-types.html">Element Types</a> — What <code>element_type</code> means, the row layouts it names, and the
 conformance corpus every binding's codec is tested against.</li>
 <li><a href="reference/./rust-api.html">Rust API</a> — <code>infrastore-core</code> public types and <code>Store</code> methods.</li>
@@ -6030,6 +6247,25 @@ contain them, and it always does.</p>
 DDL at all</strong>, so reads of a missing table return empty results (<code>0</code>, <code>false</code>, no rows) rather than
 failing. That tolerance is not vestigial — it is what lets a read-only open work on a store whose
 catalog was never opened for writing.</p>
+<h3 id="store_attributes"><a class="header" href="#store_attributes"><code>store_attributes</code></a></h3>
+<p>Free-form key/value provenance about the <strong>artifact as a whole</strong> — who built it, from what source
+system, under which of the consumer's own schema versions. The store never interprets a value, in
+the same spirit as a row's <code>application_data</code>, and nothing here participates in any identity, hash,
+or query plan. See <a href="reference/../explanation/data-model.html#store-attributes">Store attributes</a> for the model.</p>
+<pre><code class="language-sql">CREATE TABLE store_attributes (
+    key   TEXT PRIMARY KEY NOT NULL,
+    value TEXT NOT NULL
+);
+</code></pre>
+<p><code>key</code> is the primary key, so a set is an <strong>upsert</strong> rather than an append: an artifact records one
+creator, not a history of them. Values are <code>TEXT</code>; a caller wanting structure stores JSON, which is
+what <code>application_data</code> already asks of them. Keys beginning with <code>infrastore.</code> are reserved and
+refused on the write path — by the store, not by a <code>CHECK</code>, so a future build can stamp its own
+facts through a deliberate internal write without a format change.</p>
+<p>The table is <strong>additive</strong>, like the two association tables: an existing store gains it on its first
+writable open, so it needed no <code>CATALOG_SCHEMA_REVISION</code> bump. A read-only open of a catalog written
+before it existed cannot run that DDL, so reads degrade to the empty answer rather than erroring.
+The table is not carried by the OpenAPI export or import, which have no place for it.</p>
 <h3 id="schema_version"><a class="header" href="#schema_version"><code>schema_version</code></a></h3>
 <pre><code class="language-sql">CREATE TABLE schema_version (version INTEGER NOT NULL);
 </code></pre>
@@ -6215,6 +6451,284 @@ given array is not derivable from its metadata — scan the <code>_h</code> data
 <p>A <code>NonSequentialTimeSeries</code> row's time axis needs no scan: hex-encode its <code>timestamps_hash</code> and read
 <code>time_series/timestamps/tsv_&lt;hex_hash&gt;</code>, an <code>i64</code> vector of unix milliseconds in the row's own
 order.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="parquet-layout"><a class="header" href="#parquet-layout">Parquet Layout</a></h1>
+<p>What <code>infrastore export -f parquet</code> writes and <code>infrastore add --parquet</code> reads: a <strong>normalized,
+partitioned</strong> layout. Per partition, two files sharing a stem — one holding every distinct array
+once, one holding the catalog rows that name them.</p>
+<p>Two things it is not. Not one file per series: a store with thousands of series would become
+thousands of files, which defeats every reader worth exporting for. And not one table with the
+catalog row beside every value: the store is content-addressed, so a thousand components sharing one
+profile hold <strong>one</strong> array, and a denormalized table would write that profile a thousand times.
+Parquet's compression does not find repeats across pages, so the file really would be a thousand
+times larger.</p>
+<blockquote>
+<p>This is a <strong>file interchange</strong> format, not the store's own. The on-disk store is
+<a href="reference/file-format.html">HDF5 plus SQLite</a>, and nothing here is load-bearing for it. Python's <code>to_arrow()</code>
+and <code>from_arrow()</code> are a different thing again: per-series, in-memory conveniences. The
+relationship is one sentence — a series file's columns are <code>to_arrow()</code>'s schema-metadata keys
+turned into columns, and the values file is its two columns keyed by the array — and neither side
+depends on the other.</p>
+</blockquote>
+<h2 id="the-two-files"><a class="header" href="#the-two-files">The two files</a></h2>
+<pre><code class="language-text">parquet/
+  SingleTimeSeries.f64.utc.values.parquet     one row per value, each array once
+  SingleTimeSeries.f64.utc.series.parquet     one row per series
+</code></pre>
+<div class="table-wrapper"><table><thead><tr><th>File</th><th>Rows</th><th>Carries</th></tr></thead><tbody>
+<tr><td><code>&lt;stem&gt;.values</code></td><td>one per value</td><td>the array key, the time coordinates, the value</td></tr>
+<tr><td><code>&lt;stem&gt;.series</code></td><td>one per series</td><td>the array key and the whole catalog row</td></tr>
+</tbody></table>
+</div>
+<p>They join on the <strong>array key</strong>, and both are sorted by it. That is the entire relationship: a values
+row belongs to whichever series rows carry its key, and a series row reads whichever values group
+carries its key.</p>
+<h2 id="the-array-key"><a class="header" href="#the-array-key">The array key</a></h2>
+<pre><code class="language-text">(data_hash, time_axis)
+</code></pre>
+<p><code>data_hash</code> alone will not do. It covers the array's bytes and not the axis those bytes sit on, and
+the store pools irregular series by time axis precisely because two series with identical values on
+different timelines are one stored array. So the key is the pair.</p>
+<p><code>time_axis</code> is a string spelling whatever decides where a value sits in time, per type:</p>
+<div class="table-wrapper"><table><thead><tr><th>Type</th><th><code>time_axis</code></th></tr></thead><tbody>
+<tr><td><code>SingleTimeSeries</code></td><td><code>R&lt;length&gt;/&lt;initial&gt;/&lt;resolution&gt;</code>, an ISO 8601 repeat</td></tr>
+<tr><td><code>NonSequentialTimeSeries</code>, <code>PersistentTimeSeries</code></td><td>the axis's <code>timestamps_hash</code>, hex — the catalog's own key for it</td></tr>
+<tr><td>dense forecasts</td><td><code>R&lt;count&gt;/&lt;initial&gt;/&lt;interval&gt;/&lt;horizon&gt;/&lt;resolution&gt;</code></td></tr>
+</tbody></table>
+</div>
+<pre><code class="language-text">R24/2024-01-01T00:00:00Z/PT1H
+9f0c4e...                                        (an irregular axis)
+R24/2024-01-01T00:00:00Z/PT1H/PT2H/PT1H          (a forecast)
+</code></pre>
+<p>The instant is spelled in <strong>UTC</strong> whatever the partition's <code>time_reference</code>, because the reference
+is a partition key and repeating it would say nothing. A forecast needs its horizon as well as its
+interval: the horizon's own step decides how many target times a window has, so two forecasts
+sharing an array, an anchor and an interval but not a horizon are different tables.</p>
+<p>The axis is read off the <strong>values being exported</strong>, not off the catalog row. The two agree for a
+whole-series export; where they disagree — <code>export --time-range</code> writes a slice whose anchor and
+length are its own — the values are what the file holds, and <code>data_hash</code> beside them is computed
+from the same slice.</p>
+<h2 id="partitioning"><a class="header" href="#partitioning">Partitioning</a></h2>
+<p>Three things cannot vary within one Parquet file without nullable or ill-typed columns: the <strong>set of
+key columns</strong> (a forecast has an <code>issue_time</code>, a static series does not), the <strong>Arrow type of
+<code>value</code></strong>, and the <strong>zone of <code>timestamp</code></strong>. So an export partitions its selection by the triple</p>
+<pre><code class="language-text">(time_series_type, value type, time_reference)
+</code></pre>
+<p>and writes one file <strong>pair</strong> per distinct triple. The payoff is that <strong>every column in both files is
+required</strong>: there are no nullable columns anywhere in this format, and a reader never has to ask
+whether a null means "absent" or "unknown".</p>
+<p>The <strong>value type</strong> is the element type with its per-step shape, except that the four composite kinds
+(<code>linear_function</code>, <code>quadratic_function</code>, <code>piecewise_linear</code>, <code>piecewise_step</code>) partition by <strong>kind
+alone</strong>. Their stored width varies per series — a <code>piecewise_linear</code> row is <code>[n, x₁, y₁, …]</code>
+zero-padded to the widest timestep in that series — so keying by width would scatter one kind across
+a file per width. Instead every composite row in a partition is re-padded to the widest series in
+it, which the layout allows: the leading count <code>n</code> keeps each row self-describing whatever the
+padding. The cost is a <code>data_hash</code> caveat, below.</p>
+<p>An <strong>unspecified</strong> <code>time_reference</code> is a partition of its own. A series that declared no spelling
+must not pool with one that declared UTC, even though both write a UTC-zoned column.</p>
+<h3 id="file-names"><a class="header" href="#file-names">File names</a></h3>
+<p><code>&lt;type&gt;.&lt;value-slug&gt;.&lt;reference-slug&gt;</code> plus <code>.values.parquet</code> or <code>.series.parquet</code>:</p>
+<pre><code class="language-text">SingleTimeSeries.f64.utc.values.parquet
+SingleTimeSeries.f64_2x3.America_Denver.series.parquet
+Deterministic.tuple3_f64.offset_minus07_00.values.parquet
+NonSequentialTimeSeries.piecewise_linear.zoneless.series.parquet
+PersistentTimeSeries.f64.unspecified.values.parquet
+</code></pre>
+<p>Slugs avoid every character Windows forbids (<code>&lt;&gt;:"/\|?*</code>), which matters because a zone name carries
+<code>/</code> and a fixed offset carries <code>:</code>; a leading <code>-</code> is avoided too, since it reads as a flag wherever
+the name is passed to a command. Trailing dots go (Windows strips them, so <code>a.</code> and <code>a</code> would be one
+file there), and a fragment that would be a device name (<code>CON</code>, <code>NUL</code>, <code>LPT9</code>, …) gets a prefix.</p>
+<p><strong>The name is a convenience, not the truth.</strong> The slug function is one-way — the zones <code>a/b</code> and
+<code>a_b</code> both flatten to <code>a_b</code> — so nothing parses a partition back out of a filename, and two
+partitions that would collide get a numeric suffix in the keys' own sort order, so a re-run of the
+same export produces the same names. The footer carries the exact key.</p>
+<h2 id="values-file-columns"><a class="header" href="#values-file-columns">Values file columns</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Column</th><th>Type</th><th>Files</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>data_hash</code></td><td><code>utf8</code> (hex)</td><td>all</td><td>Half the array key; also a checksum on import.</td></tr>
+<tr><td><code>time_axis</code></td><td><code>utf8</code></td><td>all</td><td>The other half.</td></tr>
+<tr><td><code>timestamp</code></td><td><code>timestamp(ms, zone)</code></td><td>all</td><td>The target time for a forecast, the breakpoint for a <code>PersistentTimeSeries</code>.</td></tr>
+<tr><td><code>issue_time</code></td><td><code>timestamp(ms, zone)</code></td><td>forecasts</td><td>Which window the row belongs to. Same zone as <code>timestamp</code>.</td></tr>
+<tr><td><code>percentile</code></td><td><code>float64</code></td><td><code>Probabilistic</code></td><td>One row per (issue, target, percentile).</td></tr>
+<tr><td><code>scenario</code></td><td><code>int64</code></td><td><code>Scenarios</code></td><td>Zero-based trajectory index.</td></tr>
+<tr><td><code>value</code></td><td>see below</td><td>all</td><td></td></tr>
+</tbody></table>
+</div>
+<p>Nothing about who owns the array is here, which is exactly what stops a shared profile being written
+once per component.</p>
+<h2 id="series-file-columns"><a class="header" href="#series-file-columns">Series file columns</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Column</th><th>Type</th><th>Files</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>data_hash</code>, <code>time_axis</code></td><td><code>utf8</code></td><td>all</td><td>The array this series reads.</td></tr>
+<tr><td><code>id</code></td><td><code>int64</code></td><td>all</td><td>Provenance only; ignored on import.</td></tr>
+<tr><td><code>owner_id</code></td><td><code>int64</code></td><td>all</td><td></td></tr>
+<tr><td><code>owner_type</code></td><td><code>utf8</code></td><td>all</td><td></td></tr>
+<tr><td><code>owner_category</code></td><td><code>utf8</code></td><td>all</td><td><code>Component</code> or <code>SupplementalAttribute</code>.</td></tr>
+<tr><td><code>time_series_type</code></td><td><code>utf8</code></td><td>all</td><td>Constant per partition.</td></tr>
+<tr><td><code>name</code></td><td><code>utf8</code></td><td>all</td><td></td></tr>
+<tr><td><code>initial_timestamp</code></td><td><code>timestamp(ms,zone)</code></td><td><code>SingleTimeSeries</code>, forecasts</td><td>The anchor the values start at.</td></tr>
+<tr><td><code>resolution</code></td><td><code>utf8</code> (ISO-8601)</td><td><code>SingleTimeSeries</code>, forecasts</td><td>Absent from the irregular types, which have no constant step.</td></tr>
+<tr><td><code>length</code></td><td><code>int64</code></td><td><code>SingleTimeSeries</code></td><td></td></tr>
+<tr><td><code>interval</code>, <code>horizon</code></td><td><code>utf8</code> (ISO-8601)</td><td>forecasts</td><td></td></tr>
+<tr><td><code>count</code></td><td><code>int64</code></td><td>forecasts</td><td>Windows.</td></tr>
+<tr><td><code>features</code></td><td><code>utf8</code> (JSON object)</td><td>all</td><td><code>{}</code> when empty. Plain scalars: <code>{"model_year":2030}</code>.</td></tr>
+<tr><td><code>element_type</code>, <code>element_shape</code></td><td><code>utf8</code></td><td>all</td><td>Constant per partition except a composite's width.</td></tr>
+<tr><td><code>time_reference</code></td><td><code>utf8</code></td><td>all</td><td>Constant per partition; the literal <code>unspecified</code> when the series has none.</td></tr>
+<tr><td><code>units</code>, <code>quantity_kind</code>, <code>unit_system</code>, <code>component_field</code>, <code>application_data</code></td><td><code>utf8</code></td><td>all</td><td><strong>Empty string when absent</strong>, which is what keeps every column required.</td></tr>
+</tbody></table>
+</div>
+<p>The grid columns come from the values being exported, for the same reason <code>time_axis</code> does. Every
+string column is dictionary-encoded; compression is zstd on both files.</p>
+<h3 id="the-value-column"><a class="header" href="#the-value-column">The <code>value</code> column</a></h3>
+<p>Its Arrow type follows the element type alone. Nesting is innermost-first, which is the order the
+flat row-major buffer is already in.</p>
+<div class="table-wrapper"><table><thead><tr><th><code>element_type</code> and shape</th><th>Arrow type</th></tr></thead><tbody>
+<tr><td>scalar dtype, shape <code>[]</code></td><td>primitive (<code>double</code>, <code>int32</code>, <code>bool</code>, …)</td></tr>
+<tr><td><code>tuple(N,T)</code></td><td><code>FixedSizeList&lt;T&gt;[N]</code></td></tr>
+<tr><td>scalar dtype with dense shape <code>[N]</code></td><td><code>FixedSizeList&lt;T&gt;[N]</code></td></tr>
+<tr><td>scalar dtype with shape <code>[M,N]</code></td><td><code>FixedSizeList&lt;FixedSizeList&lt;T&gt;[N]&gt;[M]</code></td></tr>
+<tr><td>composite kinds</td><td><code>FixedSizeList&lt;double&gt;[w]</code>, stored packing, <code>w</code> the partition's widest series</td></tr>
+</tbody></table>
+</div>
+<p>Composites keep their <strong>stored packing</strong> rather than being decoded into <code>Struct</code>/<code>List</code>. That
+packing is the documented cross-language wire form, held to <code>conformance/element_type_vectors.json</code>,
+and every binding has a decoder for it; a <code>--decode</code> option is a possible follow-up. Casting to a
+common dtype is ruled out — the dtype round trip is a project promise.</p>
+<h3 id="row-order-and-row-groups"><a class="header" href="#row-order-and-row-groups">Row order and row groups</a></h3>
+<p>Both files are sorted by <code>data_hash</code>, <code>time_axis</code>; the series file then sorts by <code>id</code>. Within one
+array the values rows are sorted by <code>issue_time</code>, then <code>timestamp</code>, then <code>percentile</code> or <code>scenario</code>,
+so a forecast comes out window-major and <code>GROUP BY issue_time</code> scans contiguously.</p>
+<p>Row groups in the values file target roughly one million rows and are cut at an <strong>array boundary</strong>
+whenever the coming array would carry the group past the target, so row-group statistics on
+<code>data_hash</code> mean something and a reader can skip whole groups. An array larger than the target on
+its own spans several. The series file is one row group: it has one row per series rather than one
+per value, so even a store with a million series is a file a reader loads whole.</p>
+<h2 id="footer"><a class="header" href="#footer">Footer</a></h2>
+<p>Both files carry it.</p>
+<div class="table-wrapper"><table><thead><tr><th>Key</th><th>Value</th></tr></thead><tbody>
+<tr><td><code>infrastore.format</code></td><td><code>normalized_v1</code>. Read first, so a later format is refused by version rather than by a missing column.</td></tr>
+<tr><td><code>infrastore.role</code></td><td><code>values</code> or <code>series</code>.</td></tr>
+<tr><td><code>time_series_type</code></td><td>The partition's type.</td></tr>
+<tr><td><code>element_type</code></td><td>The partition's element type.</td></tr>
+<tr><td><code>element_shape</code></td><td>JSON list; a composite's is the width the partition settled on.</td></tr>
+<tr><td><code>time_reference</code></td><td>The partition's spelling, <code>unspecified</code> included.</td></tr>
+<tr><td><code>rows_contiguous_by_key</code></td><td><code>true</code>.</td></tr>
+</tbody></table>
+</div>
+<p>The three partition keys are here <strong>exactly</strong>, because the filename is one-way.</p>
+<h2 id="reading-it-back"><a class="header" href="#reading-it-back">Reading it back</a></h2>
+<p><code>add --parquet</code> takes a <strong>file, a directory, or a partition stem</strong> — <code>out/SingleTimeSeries.f64.utc</code>
+names the pair — and commits <strong>one transaction per partition</strong>, so a partition that fails leaves the
+ones already committed alone.</p>
+<p>The import is a <strong>merge join</strong>. Both files are sorted by the array key, so it walks them together:
+read the next values group into one array, file every series row carrying that key, move on. Peak
+memory is one values group plus one row group of each file, never a partition. The store's write
+path already recognizes an array it holds, so the second through thousandth adds of one array are
+catalog inserts only.</p>
+<p>Both dangling sides are errors, each naming the key:</p>
+<ul>
+<li>a <strong>series row whose key names no values group</strong> has no array to read;</li>
+<li>a <strong>values group no series row claims</strong> is an array nothing would file.</li>
+</ul>
+<p>Either means the two halves came from different exports, or one was truncated. A <code>.series.parquet</code>
+with no <code>.values.parquet</code> beside it is refused for the same reason, before anything is read.</p>
+<p><strong>Keys must be contiguous.</strong> A key that reappears after another key's rows, in either file, is
+refused with a message saying to sort by <code>data_hash</code>, <code>time_axis</code>. Stitching it back together would
+mean holding the whole file, which is what the layout exists to avoid. A file you have re-sorted in
+a query engine must meet the same rule.</p>
+<p><code>add</code> never accepts an id, so the <code>id</code> column is reported at <code>--dry-run</code> and then dropped. Identity
+on import is the row's own <code>KeyIdentity</code> columns, as for any add.</p>
+<p>Refused rather than coerced:</p>
+<ul>
+<li><strong>Nulls</strong>, in any column. The store holds none, and NaN is a value rather than an absence.</li>
+<li><strong>Timestamps finer than a millisecond.</strong> Seconds and milliseconds cross as they are; microseconds
+and nanoseconds only when every value is a whole millisecond, the rule the store's write path
+enforces on every instant it records.</li>
+<li><strong>Rows that leave a declared grid.</strong> A <code>SingleTimeSeries</code> whose <code>resolution</code> says <code>PT1H</code> must walk
+one — checked against the grid that resolution <em>generates</em>, not against successive differences,
+since <code>P1M</code> clamps to month end.</li>
+<li><strong><code>Struct</code> and <code>List</code> value columns.</strong> Those are the decoded form this version does not write.</li>
+<li><strong>A <code>DeterministicSingleTimeSeries</code> partition.</strong> The type is derived from a stored
+<code>SingleTimeSeries</code> rather than added; import that and run <code>transform</code>.</li>
+</ul>
+<p>A dense forecast is placed by its <strong>coordinates</strong>, not its row order, so a file a query engine
+sorted or partitioned still reads correctly. Every slot must be filled exactly once: a cube has no
+hole to leave, and two rows for one slot means they disagree. Its grid comes from the series file's
+<code>resolution</code>, <code>interval</code> and <code>horizon</code> rather than being reverse-engineered — a merely
+self-consistent set of rows would give a plausible wrong answer, since a one-window forecast is
+indistinguishable from a static series and overlapping windows make the interval ambiguous.</p>
+<h3 id="data_hash-is-a-checksum"><a class="header" href="#data_hash-is-a-checksum"><code>data_hash</code> is a checksum</a></h3>
+<p>The import re-encodes each group, hashes it, and refuses a mismatch naming the key. If you edited
+values in a query engine, either recompute the hash or pass <strong><code>--no-checksum</code></strong>, which waives the
+comparison and leaves the pair as nothing but a join key. Dropping the column is not the remedy: a
+values file without it has no key, and no key means no series file to join to.</p>
+<p>For composite kinds the hash is over the <strong>decoded points</strong>, not the packed bytes: a partition
+re-pads them to its widest series, so hashing the padding would make an untouched export fail its
+own checksum — and it is what lets two composite series whose curves are the same points at
+different paddings share one values group. One consequence: for a composite series this column is
+not the <code>data_hash</code> the catalog holds, and <code>id</code> is the way back to that.</p>
+<h3 id="foreign-files"><a class="header" href="#foreign-files">Foreign files</a></h3>
+<p>A values file with <strong>no series file beside it</strong> is a foreign file — anything with a <code>timestamp</code> and
+a <code>value</code> column. It carries no catalog rows, so the inline flags supply what a series row would
+have. It is read as one series per distinct <code>(data_hash, time_axis)</code> if those columns exist, and as
+exactly one series if they do not.</p>
+<p>What the columns do not say is inferred, and each inference takes the reading that assumes least:</p>
+<div class="table-wrapper"><table><thead><tr><th>Missing</th><th>Read as</th></tr></thead><tbody>
+<tr><td><code>time_series_type</code></td><td><code>SingleTimeSeries</code> when the timestamps walk a grid, <code>NonSequentialTimeSeries</code> otherwise. <code>PersistentTimeSeries</code> is never inferred — name it with <code>--type</code>.</td></tr>
+<tr><td><code>element_type</code></td><td>The leaf Arrow type. A <code>FixedSizeList&lt;double&gt;[3]</code> becomes <code>f64</code> with element shape <code>[3]</code> — <em>dense</em>, not <code>tuple(3,f64)</code>, because the bytes cannot say.</td></tr>
+<tr><td><code>time_reference</code></td><td>The timestamp column's Arrow zone; a column with no zone reads as <code>zoneless</code>, since a naive timestamp is a wall clock.</td></tr>
+<tr><td><code>name</code>, <code>owner_id</code>, <code>owner_type</code></td><td>Nothing. All three are refused rather than defaulted — owner 0 is a real owner, not a sentinel — so pass <code>--name</code>, <code>--owner-id</code>, <code>--owner-type</code>.</td></tr>
+</tbody></table>
+</div>
+<h3 id="inline-flags"><a class="header" href="#inline-flags">Inline flags</a></h3>
+<p>They fall into three groups, and the split follows the project's usual rule.</p>
+<p><strong>Overrides</strong> replace a column for every series in the partition: <code>--owner-id</code>, <code>--owner-type</code>,
+<code>--owner-category</code>, <code>--name</code>, <code>--feature</code>, <code>--time-reference</code>, and the five free-form descriptors
+<code>--units</code>, <code>--quantity-kind</code>, <code>--unit-system</code>, <code>--component-field</code>, <code>--application-data</code>. Passing an
+empty string clears a descriptor, since the empty string is how this format spells "absent" anyway.</p>
+<p><strong>Assertions</strong> state something a file cannot, so a file that contradicts one is an error rather than
+being silently replaced: <code>--element-type</code> (<code>tuple(3,f64)</code> states the reading the bytes cannot),
+<code>--element-shape</code>, <code>--resolution</code>, and <code>--type</code>. On a foreign file, which says nothing to
+contradict, an assertion is simply the answer — <code>--resolution PT1H</code> names the grid, and the rows are
+then checked against the grid it generates.</p>
+<p><strong>Refused</strong> with <code>--parquet</code>, by name rather than silently dropped: <code>--initial-timestamp</code>,
+<code>--interval</code>, <code>--horizon</code>, <code>--count</code>, <code>--percentile</code>, <code>--scenario-count</code>, <code>--layout</code>, <code>--owner-map</code>,
+<code>--owner-id-from</code>. The values imply the grid — a <code>SingleTimeSeries</code>' anchor is its first timestamp
+and a forecast's windows are its <code>issue_time</code> column — so a flag naming one is either redundant or a
+contradiction nothing should have to adjudicate, and <code>--layout</code> describes a CSV's columns. A foreign
+<strong>forecast</strong> — a values file with an <code>issue_time</code> column and no series file — is consequently not
+supported; export one and keep both halves.</p>
+<h2 id="querying-it"><a class="header" href="#querying-it">Querying it</a></h2>
+<p>The join is the whole idiom:</p>
+<pre><code class="language-sql">SELECT s.name, s.owner_id, s.units, max(v.value) AS peak
+FROM 'parquet/SingleTimeSeries.f64.utc.values.parquet' v
+JOIN 'parquet/SingleTimeSeries.f64.utc.series.parquet' s USING (data_hash, time_axis)
+GROUP BY s.name, s.owner_id, s.units;
+</code></pre>
+<p>A view flattens it once and hides the join from everything after:</p>
+<pre><code class="language-sql">CREATE VIEW load AS
+SELECT s.*, v.timestamp, v.value
+FROM 'parquet/SingleTimeSeries.f64.utc.values.parquet' v
+JOIN 'parquet/SingleTimeSeries.f64.utc.series.parquet' s USING (data_hash, time_axis);
+
+SELECT timestamp, value FROM load WHERE owner_id = 42 AND name = 'load' ORDER BY timestamp;
+</code></pre>
+<p>That view is the denormalized table this format deliberately does not write: materializing it costs
+exactly what the layout saves, and a query engine that keeps it as a view pays nothing.</p>
+<h2 id="what-a-round-trip-does-not-preserve"><a class="header" href="#what-a-round-trip-does-not-preserve">What a round trip does not preserve</a></h2>
+<ul>
+<li><strong>The catalog id.</strong> <code>add</code> never accepts one — "never reissued" is a guarantee of the catalog's
+<code>AUTOINCREMENT</code>, and a caller free to name an id could re-file a retired one — so the <code>id</code> column
+is reported at <code>--dry-run</code> and then ignored. The destination assigns fresh ids.</li>
+<li><strong>An empty-string descriptor.</strong> The empty string is how the format writes "absent", so a stored
+empty string reads back as absent. <code>unit_system</code>'s unset state means <em>unspecified</em> rather than
+natural units, and the empty string preserves that.</li>
+<li><strong>A composite series' padding.</strong> Values round-trip exactly — an improvement over CSV, where floats
+pass through decimal text — but a composite is re-padded on the way out and shrunk to its own
+width on the way back, so its stored <code>data_hash</code> may differ from the original's.</li>
+</ul>
+<p>An <strong>empty series</strong> is not a round-trip caveat but a refusal: the export <strong>fails</strong>, naming every
+empty series it was asked for and writing nothing. A values file has one row per value, so an empty
+series would be a series row whose key matches no values group — which is exactly what a truncated
+export looks like, and there is no way to write one a reader could tell apart from damage. Narrow
+the selection past it.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="element-types"><a class="header" href="#element-types">Element Types</a></h1>
 <p>Every stored array carries an <strong><code>element_type</code></strong>: what its elements mean, and — for the composite
 kinds — how one timestep's values are laid out across the array's trailing dimensions.</p>
@@ -7135,6 +7649,28 @@ target.add_parent_child_associations(exported)?;
 <span class="boring">}</span></code></pre></pre>
 <p>Neither association catalog is exposed over the <a href="reference/./grpc-api.html">gRPC server</a> or the
 <a href="reference/./cli.html"><code>infrastore</code> CLI</a>.</p>
+<h3 id="store-attributes-1"><a class="header" href="#store-attributes-1">Store attributes</a></h3>
+<p>Key/value provenance about the <strong>artifact as a whole</strong>, as opposed to a row. See
+<a href="reference/../explanation/data-model.html#store-attributes">Store attributes</a> for the model.</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>fn set_store_attribute(&amp;mut self, key: &amp;str, value: &amp;str) -&gt; Result&lt;()&gt;;
+fn get_store_attribute(&amp;self, key: &amp;str) -&gt; Result&lt;Option&lt;String&gt;&gt;;
+fn list_store_attributes(&amp;self) -&gt; Result&lt;BTreeMap&lt;String, String&gt;&gt;;
+fn remove_store_attribute(&amp;mut self, key: &amp;str) -&gt; Result&lt;bool&gt;;
+<span class="boring">}</span></code></pre></pre>
+<pre><code class="language-rust ignore">store.set_store_attribute("creator", "sienna-build")?;
+store.set_store_attribute("source_system", "WECC 2032 ADS")?;
+
+assert_eq!(store.get_store_attribute("creator")?.as_deref(), Some("sienna-build"));
+assert_eq!(store.get_store_attribute("absent")?, None);   // a question, not an error
+assert!(store.remove_store_attribute("creator")?);        // true: it was there
+assert!(!store.remove_store_attribute("creator")?);       // false: it was not</code></pre>
+<p>A <code>set</code> replaces rather than appending. Both writers take part in the ambient transaction and return
+<a href="reference/rust-api.html#errors"><code>TimeSeriesError::ReadOnlyStore</code></a> on a read-only store; both refuse an empty key and any
+key beginning with <code>RESERVED_STORE_ATTRIBUTE_PREFIX</code> (<code>"infrastore."</code>) with <code>InvalidParameter</code>.</p>
+<p><code>list_store_attributes</code> returns a <code>BTreeMap</code>, so the ordering does not depend on insertion history —
+two stores' attribute sets compare and print the same way.</p>
 <h3 id="restoring-a-catalog-from-a-document"><a class="header" href="#restoring-a-catalog-from-a-document">Restoring a catalog from a document</a></h3>
 <p>An artifact is two files, but a consumer that already carries the association rows in JSON of its
 own — PowerSystems ships a <code>system.json</code> beside a <code>time_series.h5</code> — has no reason to move the
@@ -8146,6 +8682,8 @@ pub fn hash_hex(hash: &amp;[u8; 32]) -&gt; String;
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>pub const DATA_FORMAT_VERSION: &amp;str = "0.11.0";
+// The key prefix `set_store_attribute` / `remove_store_attribute` refuse.
+pub const RESERVED_STORE_ATTRIBUTE_PREFIX: &amp;str = "infrastore.";
 <span class="boring">}</span></code></pre></pre>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="python-api"><a class="header" href="#python-api">Python API</a></h1>
 <p>The PyO3 binding is importable as the <code>infrastore</code> module (package <code>infrastore</code>). It is built as an
@@ -8771,12 +9309,61 @@ the object it came from and survives a Parquet round trip: <code>name</code>, <c
 has no constant step), and whichever of <code>units</code>, <code>quantity_kind</code>, <code>unit_system</code>, <code>component_field</code>,
 and <code>application_data</code> were declared. An undeclared one is <strong>absent</strong> rather than empty, so
 <code>b"units" in table.schema.metadata</code> answers "was a label declared?".</p>
+<p><code>time_reference</code> is the exception: it is always written, and a series that records no spelling gets
+the literal <code>b"unspecified"</code>. Arrow's timestamp type has a zone or it has none, and <em>unspecified</em>
+has no third spelling — an unspecified reference produces a UTC-zoned column, the same as <code>"utc"</code> —
+so omitting the key would leave that column as the only evidence and <code>from_arrow</code> would hand back a
+series claiming <code>utc</code>, which it never did. <code>unspecified</code> is a metadata encoding only: it is not a
+value <code>time_reference=</code> accepts on any constructor.</p>
 <p>The value column is named <code>value</code> rather than after the series so that tables from different
 components concatenate without renaming; the series' own name is in the metadata.</p>
 <p>A <code>PersistentTimeSeries</code> table has <strong>one row per breakpoint, not per instant</strong> — it is the sparse
 step function as stored. Resampling onto a dense grid is the caller's to do, and needs a grid the
 series does not carry: there is no value before the first breakpoint, so a grid starting earlier has
 no answer to give.</p>
+<p>Also written, and not part of the descriptive set above: <code>element_shape</code>, as a JSON list (<code>[]</code> for a
+scalar element). It is a fact about the data rather than a label, so it is written even when empty,
+and the CLI's Parquet export writes the same key — the two producers write one schema.</p>
+<h3 id="from_arrow"><a class="header" href="#from_arrow"><code>from_arrow()</code></a></h3>
+<p>The inverse, on the same three types, and a reader of <strong>foreign</strong> tables too — anything with a
+<code>timestamp</code> and a <code>value</code> column, whether or not it carries the metadata <code>to_arrow()</code> writes:</p>
+<pre><code class="language-python">series = SingleTimeSeries.from_arrow(series.to_arrow())            # exact round trip
+
+import pyarrow.parquet as pq
+SingleTimeSeries.from_arrow(pq.read_table("load.parquet"))         # written by anything
+NonSequentialTimeSeries.from_arrow(table, name="irregular")
+PersistentTimeSeries.from_arrow(table, name="steps")
+</code></pre>
+<p>The inference rules are the ones <code>infrastore add --parquet</code> applies to a foreign file, stated once
+under <a href="reference/parquet-format.html#foreign-files">Foreign files</a> in the Parquet layout reference so the two
+implementations cannot drift apart quietly. In short: what the metadata says is used; what it does
+not say is inferred from the Arrow schema, taking the reading that assumes least.</p>
+<div class="table-wrapper"><table><thead><tr><th>Missing</th><th>Read as</th></tr></thead><tbody>
+<tr><td><code>resolution</code></td><td>Inferred from the timestamps, which must then walk a grid.</td></tr>
+<tr><td><code>element_type</code></td><td>The leaf Arrow type. A <code>fixed_size_list&lt;double&gt;[3]</code> becomes <code>f64</code> with shape <code>(rows, 3)</code> — <em>dense</em>, not <code>tuple(3,f64)</code>, because the bytes cannot say.</td></tr>
+<tr><td><code>time_reference</code></td><td>The timestamp column's zone; a column with no zone reads as <code>zoneless</code>, since a naive timestamp is a wall clock. A metadata <code>unspecified</code> beats the zone and gives back <code>None</code>.</td></tr>
+<tr><td><code>name</code></td><td>Nothing. A name is part of a series' identity, so pass <code>name=</code>.</td></tr>
+</tbody></table>
+</div>
+<p>Every keyword overrides the metadata, with one exception: <strong><code>element_type</code> is an assertion.</strong>
+<code>element_type="tuple(3,f64)"</code> states the reading the bytes cannot, and a value that contradicts the
+table's own raises <code>InvalidParameterError</code> rather than replacing it — the rule this project applies
+to every assertion.</p>
+<p>Refused rather than coerced: <strong>nulls</strong> in either column (the store holds none, and NaN is a value
+rather than an absence); a <strong>microsecond or nanosecond timestamp that is not a whole millisecond</strong>
+(the store's own precision, and rounding one would move it); <strong>rows that leave a declared grid</strong>,
+checked against the grid the resolution generates rather than against successive differences, since
+<code>P1M</code> clamps to month end; and <strong><code>struct</code>/<code>list</code> value columns</strong>, which are the decoded form
+<code>to_arrow()</code> does not produce.</p>
+<p><code>from_arrow</code> is not the whole catalog row: a table records no owner and no catalog id, because
+<code>to_arrow()</code> is a method on a value object and a series built here is not filed anywhere. Pass the
+result to <code>Store.add_time_series</code> with the owner you want, as you would any other series.</p>
+<p><code>from_arrow</code> covers the three static types. A <strong>dense forecast</strong> has a file shape of its own -- a
+values file of <code>issue_time</code>, <code>timestamp</code>, <code>value</code> (plus <code>percentile</code> or <code>scenario</code>) keyed by the
+array, which the CLI writes and reads with <code>export -f parquet</code> and <code>add --parquet</code>.
+<code>to_arrow_windows()</code> is deliberately not that shape: it returns a dict of per-window tables, which
+is an in-memory analysis form rather than anything that could be one Parquet file, so the two are
+not competing spellings of the same thing.</p>
 <h2 id="nonsequentialtimeseries-2"><a class="header" href="#nonsequentialtimeseries-2"><code>NonSequentialTimeSeries</code></a></h2>
 <pre><code class="language-python">NonSequentialTimeSeries(
     timestamps: list[datetime],
@@ -9352,6 +9939,32 @@ store.remove_parent_child_associations(parent_types=["Bus"])   # -&gt; 1
 </code></pre>
 <p>Neither association catalog is exposed over the <a href="reference/grpc-api.html">gRPC server</a> or the
 <a href="reference/cli.html"><code>infrastore</code> CLI</a>.</p>
+<h3 id="store-attributes-2"><a class="header" href="#store-attributes-2">Store attributes</a></h3>
+<p>Key/value provenance about the <strong>artifact as a whole</strong>, as opposed to a supplemental attribute
+(which belongs to a component) or <code>application_data</code> (which belongs to one series). See
+<a href="reference/../explanation/data-model.html#store-attributes">Store attributes</a> for the model.</p>
+<pre><code class="language-python">def set_store_attribute(self, key: str, value: str) -&gt; None: ...
+def get_store_attribute(self, key: str) -&gt; str | None: ...
+def list_store_attributes(self) -&gt; dict[str, str]: ...
+def remove_store_attribute(self, key: str) -&gt; bool: ...
+</code></pre>
+<pre><code class="language-python">store.set_store_attribute("creator", "sienna-build")
+store.set_store_attribute("source_system", "WECC 2032 ADS")
+
+store.get_store_attribute("creator")      # 'sienna-build'
+store.get_store_attribute("absent")       # None — a question, not an exception
+store.list_store_attributes()             # {'creator': ..., 'source_system': ...}
+store.remove_store_attribute("creator")   # True; a second call is False
+</code></pre>
+<p>A <code>set</code> replaces rather than appending. <code>None</code> and <code>""</code> are different answers: a key set to the
+empty string is present. An empty key or one beginning with <code>infrastore.</code> — reserved, on removal as
+well as on write — raises <code>InvalidParameterError</code>; a write to a read-only store raises
+<code>ReadOnlyStoreError</code>.</p>
+<p>The store never interprets a value, so structure rides in the text:</p>
+<pre><code class="language-python">import json
+store.set_store_attribute("provenance", json.dumps({"pipeline": "nightly", "run": 412}))
+json.loads(store.get_store_attribute("provenance"))   # {'pipeline': 'nightly', 'run': 412}
+</code></pre>
 <h3 id="openapi-row-association-serde"><a class="header" href="#openapi-row-association-serde">OpenAPI-row association serde</a></h3>
 <p>Direct JSON serde of the two association catalogs, in the wire spelling
 <a href="https://github.com/Sienna-Platform/SiennaSchemas">SiennaSchemas</a> defines (<code>TimeSeries/*.json</code>,
@@ -10513,6 +11126,27 @@ remove_parent_child_associations!(store; parent_types=["Bus"])   # 1
 </code></pre>
 <p>Neither association catalog is exposed over the <a href="reference/./grpc-api.html">gRPC server</a> or the
 <a href="reference/./cli.html"><code>infrastore</code> CLI</a>.</p>
+<h3 id="store-attributes-3"><a class="header" href="#store-attributes-3">Store attributes</a></h3>
+<p>Key/value provenance about the <strong>artifact as a whole</strong>, as opposed to a supplemental attribute
+(which belongs to a component) or <code>application_data</code> (which belongs to one series). See
+<a href="reference/../explanation/data-model.html#store-attributes">Store attributes</a> for the model.</p>
+<pre><code class="language-julia">set_store_attribute!(store, key::AbstractString, value::AbstractString) -&gt; Nothing
+get_store_attribute(store, key::AbstractString)  -&gt; Union{Nothing,String}
+list_store_attributes(store)                     -&gt; Dict{String,String}
+remove_store_attribute!(store, key::AbstractString) -&gt; Bool
+</code></pre>
+<pre><code class="language-julia">set_store_attribute!(store, "creator", "sienna-build")
+set_store_attribute!(store, "source_system", "WECC 2032 ADS")
+
+get_store_attribute(store, "creator")      # "sienna-build"
+get_store_attribute(store, "absent")       # nothing — a question, not an error
+list_store_attributes(store)               # Dict("creator" =&gt; ..., "source_system" =&gt; ...)
+remove_store_attribute!(store, "creator")  # true; a second call is false
+</code></pre>
+<p>A <code>set</code> replaces rather than appending. <code>nothing</code> and <code>""</code> are different answers: a key set to the
+empty string is present. An empty key or one beginning with <code>infrastore.</code> — reserved, on removal as
+well as on write — throws <code>InvalidParameterError</code>; a write to a read-only store throws
+<code>ReadOnlyStoreError</code>.</p>
 <h3 id="openapi-row-association-serde-1"><a class="header" href="#openapi-row-association-serde-1">OpenAPI-row association serde</a></h3>
 <p>Direct JSON serde of the two association catalogs, in the wire spelling
 <a href="https://github.com/Sienna-Platform/SiennaSchemas">SiennaSchemas</a> defines (<code>TimeSeries/*.json</code>,
@@ -11747,6 +12381,55 @@ free(json);
 </code></pre>
 <p>Neither association catalog is exposed over the <a href="reference/./grpc-api.html">gRPC server</a> or the
 <a href="reference/./cli.html"><code>infrastore</code> CLI</a>.</p>
+<h2 id="store-attributes-4"><a class="header" href="#store-attributes-4">Store Attributes</a></h2>
+<p>Key/value provenance about the artifact as a whole. See
+<a href="reference/../explanation/data-model.html#store-attributes">Store attributes</a> for the model.</p>
+<pre><code class="language-c">int32_t infrastore_store_set_store_attribute(InfraStore *store,
+                                             const char *key,
+                                             const char *value);
+int32_t infrastore_store_get_store_attribute(const InfraStore *store,
+                                             const char *key,
+                                             char **out_value,
+                                             uint64_t *out_len);
+int32_t infrastore_store_list_store_attributes(const InfraStore *store,
+                                               char **out_json,
+                                               uint64_t *out_len);
+int32_t infrastore_store_remove_store_attribute(InfraStore *store,
+                                                const char *key,
+                                                bool *out_removed);
+</code></pre>
+<pre><code class="language-c">infrastore_store_set_store_attribute(store, "creator", "sienna-build");
+
+char *value = NULL;
+uint64_t len = 0;
+infrastore_store_get_store_attribute(store, "creator", &amp;value, &amp;len);
+if (value != NULL) {          /* NULL means the key is unset */
+    puts(value);
+    infrastore_string_free(value);
+}
+
+char *json = NULL;
+infrastore_store_list_store_attributes(store, &amp;json, &amp;len);   /* {"creator":"sienna-build"} */
+infrastore_string_free(json);
+
+bool removed = false;
+infrastore_store_remove_store_attribute(store, "creator", &amp;removed);
+</code></pre>
+<p>Two conventions to note:</p>
+<ul>
+<li><strong><code>get</code> spells "unset" as a null <code>*out_value</code>, not as a zero <code>*out_len</code>.</strong> A key set to the empty
+string is a legitimate value, and the two must stay distinguishable. An unset key is
+<code>INFRASTORE_OK</code>, not <code>INFRASTORE_ERR_NOT_FOUND</code>.</li>
+<li><strong><code>list</code> returns a JSON object</strong>, following the owned-string convention, rather than an
+array-of-pairs buffer — the ABI has no pair type and this needs no new one.</li>
+</ul>
+<p>Unlike the JSON payloads every other owned-string export produces, a value is the caller's own text
+and can contain an interior NUL; <code>get</code> reports one as <code>INFRASTORE_ERR_INTEGRITY</code> rather than
+returning a value truncated at it. An empty key or one beginning with <code>infrastore.</code> (reserved, on
+removal as well as on write) is <code>INFRASTORE_ERR_INVALID_PARAMETER</code>; a write to a read-only store is
+<code>INFRASTORE_ERR_READ_ONLY</code>.</p>
+<p>The read half is available over the <a href="reference/./grpc-api.html">gRPC server</a>; the writes are not, like every
+other write.</p>
 <h2 id="openapi-row-association-serde-2"><a class="header" href="#openapi-row-association-serde-2">OpenAPI-row Association Serde</a></h2>
 <p>Direct JSON serde of the two association catalogs, in the wire spelling
 <a href="https://github.com/Sienna-Platform/SiennaSchemas">SiennaSchemas</a> defines (<code>TimeSeries/*.json</code>,
@@ -11857,6 +12540,8 @@ too, reads included: no message or RPC covers <code>supplemental_attribute_assoc
 <tr><td><code>GetForecastSummary</code></td><td><code>GetForecastSummaryReq</code></td><td><code>GetForecastSummaryResp</code></td><td>Grouped forecast summary</td></tr>
 <tr><td><code>CheckStaticConsistency</code></td><td><code>CheckStaticConsistencyReq</code></td><td><code>CheckStaticConsistencyResp</code></td><td>Per-resolution static-grid check</td></tr>
 <tr><td><code>VerifyIntegrity</code></td><td><code>VerifyIntegrityReq</code></td><td><code>VerifyIntegrityResp</code></td><td>Recompute and compare stored hashes</td></tr>
+<tr><td><code>ListStoreAttributes</code></td><td><code>ListStoreAttributesReq</code></td><td><code>ListStoreAttributesResp</code></td><td>Every store attribute</td></tr>
+<tr><td><code>GetStoreAttribute</code></td><td><code>GetStoreAttributeReq</code></td><td><code>GetStoreAttributeResp</code></td><td>One store attribute's value</td></tr>
 </tbody></table>
 </div>
 <p>Every RPC is named for the <code>Store</code> method it exposes, and its request and response are <code>&lt;Rpc&gt;Req</code> /
@@ -12093,6 +12778,24 @@ store is readable, which is how to confirm the upgrade landed.</p>
 <p>A catalog written by a <em>newer</em> build is <code>CatalogTooNew</code> and is refused outright; there is no
 downgrade. See
 <a href="reference/../explanation/design-choices.html#upgrade-a-store-in-place-rather-than-bricking-it">Upgrade a store in place</a>.</p>
+<h2 id="store-attributes-5"><a class="header" href="#store-attributes-5">Store Attributes</a></h2>
+<p>The read half of the artifact's key/value provenance — see
+<a href="reference/../explanation/data-model.html#store-attributes">Store attributes</a>. Setting one is a write, and
+writes need local filesystem access, so they stay off this service.</p>
+<pre><code class="language-proto">message ListStoreAttributesReq {}
+message ListStoreAttributesResp {
+  map&lt;string, string&gt; attributes = 1;
+}
+
+message GetStoreAttributeReq  { string key = 1; }
+message GetStoreAttributeResp { optional string value = 1; }
+</code></pre>
+<p><code>value</code> is <strong>absent</strong> when the artifact carries no such key — not <code>NOT_FOUND</code>, mirroring
+<code>Store::get_store_attribute</code>: a caller asking whether a key is there is asking a question, where
+<code>GetMetadataById</code> deals with a caller holding an id it believes in. <code>optional</code> rather than an empty
+string, because a key set to <code>""</code> is a legitimate value.</p>
+<p>A protobuf map is unordered on the wire, so the core's sorted-by-key ordering does not survive the
+trip; <code>RemoteClient::list_store_attributes</code> collects into a <code>BTreeMap</code> and restores it.</p>
 <h2 id="authentication-1"><a class="header" href="#authentication-1">Authentication</a></h2>
 <p>When the server is configured with <code>method = "api_key"</code>, clients must send the key in the
 <strong><code>x-api-key</code></strong> request metadata (header). The server checks the supplied key against every
@@ -12138,10 +12841,11 @@ let hydrated = client.list_metadata_by_ids(&amp;live).await?;
 <code>list_metadata_by_ids</code>, <code>get_metadata_by_id</code>, <code>association_exists</code>, <code>has_any_time_series</code>,
 <code>read_by_id</code>, <code>read_by_ids</code>, <code>get_resolutions</code>, <code>get_intervals</code>, <code>get_counts</code>, <code>counts_by_type</code>,
 <code>time_series_counts_detailed</code>, <code>get_forecast_parameters</code>, <code>list_owner_ids</code>, <code>static_summary</code>,
-<code>forecast_summary</code>, <code>check_static_consistency</code>, <code>verify_integrity</code>. The id-taking ones accept
-<code>infrastore_core::TimeSeriesId</code>, the same newtype the local <code>Store</code> uses, so an <code>owner_id</code> cannot be
-passed where a series id belongs. See the <a href="reference/../guides/server.html">gRPC Server guide</a> for end-to-end
-usage and adding an API key to client requests.</p>
+<code>forecast_summary</code>, <code>check_static_consistency</code>, <code>verify_integrity</code>, <code>list_store_attributes</code>,
+<code>get_store_attribute</code>. The id-taking ones accept <code>infrastore_core::TimeSeriesId</code>, the same newtype
+the local <code>Store</code> uses, so an <code>owner_id</code> cannot be passed where a series id belongs. See the
+<a href="reference/../guides/server.html">gRPC Server guide</a> for end-to-end usage and adding an API key to client
+requests.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="server-configuration"><a class="header" href="#server-configuration">Server Configuration</a></h1>
 <p>The gRPC server is configured by a single TOML file passed with <code>--config</code>. The starting point is
 <code>examples/server.toml</code>.</p>
@@ -12237,12 +12941,13 @@ in the consumer's object graph — which is why the association flags are bare i
 <p><code>--store</code> (or <code>INFRASTORE_STORE</code>) is required by every command except <code>template</code> and <code>completions</code>.</p>
 <p><code>-f</code>/<code>--format</code> applies to every command, read and write alike. The read/inspection commands
 (<code>list</code>, <code>get</code>, <code>grid</code>, <code>info</code>, <code>export</code>, <code>names</code>, <code>owner-types</code>, <code>owners</code>, <code>exists</code>, <code>stats</code>,
-<code>store-info</code>, <code>arrays</code>, <code>summary</code>, <code>attributes</code>, <code>links</code>, <code>diff</code>, <code>verify</code>, <code>check-consistency</code>,
-<code>resolutions</code>, <code>params</code>, <code>compact</code>, and <code>add --dry-run</code>) render their results in it. The write
-commands (<code>init</code>, <code>add</code>, <code>merge</code>, <code>remove</code>, <code>copy</code>, <code>replace-owner</code>, <code>clear</code>, <code>transform</code>,
-<code>persist</code>, <code>plot</code>, <code>attach</code>, <code>detach</code>, <code>link</code>, <code>unlink</code>, <code>reassign</code>) report their outcome in it:
-prose under <code>table</code>, and a one-object status document under <code>json</code>/<code>jsonl</code>, so a scripted mutation
-pipes into <code>jq</code> the way a scripted query does.</p>
+<code>store-info</code>, <code>store-attr list</code>, <code>store-attr get</code>, <code>arrays</code>, <code>summary</code>, <code>attributes</code>, <code>links</code>,
+<code>diff</code>, <code>verify</code>, <code>check-consistency</code>, <code>resolutions</code>, <code>params</code>, <code>compact</code>, and <code>add --dry-run</code>)
+render their results in it. The write commands (<code>init</code>, <code>add</code>, <code>merge</code>, <code>remove</code>, <code>copy</code>,
+<code>replace-owner</code>, <code>clear</code>, <code>transform</code>, <code>persist</code>, <code>plot</code>, <code>attach</code>, <code>detach</code>, <code>link</code>, <code>unlink</code>,
+<code>reassign</code>, <code>store-attr set</code>, <code>store-attr remove</code>) report their outcome in it: prose under <code>table</code>,
+and a one-object status document under <code>json</code>/<code>jsonl</code>, so a scripted mutation pipes into <code>jq</code> the
+way a scripted query does.</p>
 <pre><code class="language-console">$ infrastore --store s.h5 -f json --yes remove --all --owner-id 42 | jq .removed
 3
 </code></pre>
@@ -12343,7 +13048,7 @@ example can never name a flag the command does not have.</p>
 <tr><td><code>get</code></td><td>Read and display a single series' values.</td></tr>
 <tr><td><code>grid</code></td><td>Render N series as N columns against one shared time axis.</td></tr>
 <tr><td><code>info</code></td><td>Metadata, content hash, HDF5 location, and stats for one series.</td></tr>
-<tr><td><code>export</code></td><td>Write series values to CSV/JSON files (<code>--dir</code>), or stdout for one match.</td></tr>
+<tr><td><code>export</code></td><td>Write series values to CSV/JSON/Parquet files (<code>--dir</code>), or stdout for one match.</td></tr>
 </tbody></table>
 </div>
 <pre><code class="language-sh">infrastore --store demo.h5 list                                   # everything in the store
@@ -12354,7 +13059,51 @@ infrastore --store demo.h5 get --name load --tail --limit 24      # the last day
 infrastore --store demo.h5 -f csv grid --name-glob 'load_*' --resolution PT1H
 infrastore --store demo.h5 info --name load --no-stats            # catalog only, no array read
 infrastore --store demo.h5 -f csv export --name-glob 'load_*' --dir out/
+infrastore --store demo.h5 -f parquet export --name-glob 'load_*' --dir out/
 </code></pre>
+<h4 id="parquet"><a class="header" href="#parquet">Parquet</a></h4>
+<p><code>-f parquet export --dir &lt;DIR&gt;</code> writes one <strong>file pair</strong> per <code>(type, value type, time reference)</code>
+partition: <code>&lt;stem&gt;.values.parquet</code> holds every distinct array once, one row per value, and
+<code>&lt;stem&gt;.series.parquet</code> holds one catalog row per series. Both carry the array key
+<code>(data_hash, time_axis)</code> and are sorted by it, so they join on it — which is what keeps a profile
+shared by a thousand components from being written a thousand times.</p>
+<p><code>add --parquet &lt;PATH&gt;</code> reads them back, from a file, a directory, or a partition stem
+(<code>out/SingleTimeSeries.f64.utc</code> names the pair). The import is a merge join over the two halves, one
+transaction per partition, and a dangling key on either side is an error — as is a pair whose
+footers disagree about the partition they describe, which is what half of one export beside half of
+another looks like. <code>--no-checksum</code> waives the <code>data_hash</code> comparison for values edited in a query
+engine.</p>
+<p>The inline flags split three ways: the owner, the name, the features and the five free-form
+descriptors are <strong>overrides</strong>; <code>--element-type</code>, <code>--element-shape</code>, <code>--resolution</code> and <code>--type</code> are
+<strong>assertions</strong>, which a contradicting file turns into an error and which name the reading for a
+foreign file; and the grid flags (<code>--initial-timestamp</code>, <code>--interval</code>, <code>--horizon</code>, <code>--count</code>,
+<code>--percentile</code>, <code>--scenario-count</code>) and the CSV layout flags (<code>--layout</code>, <code>--owner-map</code>,
+<code>--owner-id-from</code>) are <strong>refused</strong>, because the values already carry the grid.
+<a href="reference/parquet-format.html">Parquet layout</a> is the format reference — both column sets, the array key,
+<code>time_axis</code> per type, footer keys, and the rules the import applies to a foreign file.</p>
+<p>Three limits on the export, all deliberate:</p>
+<ul>
+<li><strong><code>--dir</code> is required.</strong> Parquet's footer sits at the end of the file and its offsets point
+backwards, so a writer has to seek and a pipe cannot.</li>
+<li><strong><code>--dir</code> must hold no <code>.parquet</code> files yet.</strong> <code>add --parquet &lt;dir&gt;</code> imports every partition it
+finds, so a narrower export written over an earlier one would leave the earlier partitions in
+place for the next import to file silently. The export neither merges nor sweeps; empty the
+directory or name a fresh one. Other files in it are not in the way.</li>
+<li><strong>An empty series fails it.</strong> Every selected series with no values is named, and nothing is
+written — a series row whose key matches no values rows is indistinguishable from a truncated
+export, so it is refused rather than represented. Narrow the selection past it.</li>
+<li><strong><code>-f parquet</code> is only accepted on <code>export</code>.</strong> It is a binary container, not a rendering of a
+result; there is no <code>list -f parquet</code>.</li>
+</ul>
+<p>Parquet is <strong>on by default</strong> -- in the released binaries and in <code>cargo install infrastore-cli</code>
+alike. It is still a cargo feature (<code>parquet</code>), so <code>--no-default-features --features vendored</code>
+builds a binary without the Arrow dependency tree. That binary accepts <code>-f parquet</code> and <code>--parquet</code>
+and fails with the feature to rebuild with, rather than reporting <code>parquet</code> as an unknown format --
+which is also why <code>--help</code>, the shell completions, and the examples on this page read the same in
+both builds.</p>
+<p>The Arrow tree deliberately stays out of the <strong>library</strong> crates: <code>infrastore-core</code>, <code>infrastore-py</code>,
+and <code>infrastore-ffi</code> never link it. A binding that wants Parquet has <code>to_arrow()</code> and its host
+language's own writer, which is a much smaller ask than linking Arrow into a wheel or a cdylib.</p>
 <h4 id="bounding-the-rows"><a class="header" href="#bounding-the-rows">Bounding the rows</a></h4>
 <p><code>get</code> and <code>grid</code> separate the flags that <em>select data</em> from the flags that <em>bound a display</em>, and
 the two reach different formats:</p>
@@ -12393,7 +13142,7 @@ usually a different component, not a shorter view of the same sweep.</p>
 <h3 id="write-data"><a class="header" href="#write-data">Write data</a></h3>
 <div class="table-wrapper"><table><thead><tr><th>Command</th><th>Purpose</th></tr></thead><tbody>
 <tr><td><code>init</code></td><td>Create an empty store with an explicit compression and catalog policy.</td></tr>
-<tr><td><code>add</code></td><td>Add one or more series from a descriptor JSON + CSV, or from flags.</td></tr>
+<tr><td><code>add</code></td><td>Add one or more series from a descriptor JSON + CSV, from Parquet, or from flags.</td></tr>
 <tr><td><code>merge</code></td><td>Copy matching series from another store into this one.</td></tr>
 <tr><td><code>transform</code></td><td>Derive <code>DeterministicSingleTimeSeries</code> from stored <code>SingleTimeSeries</code>.</td></tr>
 <tr><td><code>remove</code></td><td>Delete a single series, or every match with <code>--all</code> (prompts unless <code>--force</code>).</td></tr>
@@ -12409,6 +13158,7 @@ infrastore --store demo.h5 add --descriptor batch.json --replace --batch-size 50
 infrastore --store demo.h5 add --csv load.csv --owner-id 42 --owner-type Generator \
     --name load --type SingleTimeSeries --element-type f64 \
     --resolution PT1H --initial-timestamp 2024-01-01T00:00:00Z
+infrastore --store demo.h5 add --parquet out/
 infrastore --store demo.h5 merge --from other.h5 --name-glob 'load_*'
 infrastore --store demo.h5 transform --horizon PT24H --interval PT1H
 infrastore --store demo.h5 remove --owner-id 42 --name load --type SingleTimeSeries
@@ -12452,6 +13202,7 @@ in-terminal check, <code>get --plot</code> draws a sparkline with no file involv
 <div class="table-wrapper"><table><thead><tr><th>Command</th><th>Purpose</th></tr></thead><tbody>
 <tr><td><code>stats</code></td><td>Association, owner, and distinct-array counts.</td></tr>
 <tr><td><code>store-info</code></td><td>HDF5 + SQLite paths and sizes, on-disk format version, catalog revision.</td></tr>
+<tr><td><code>store-attr</code></td><td>Key/value provenance stamped on the whole artifact (<code>list</code>/<code>get</code>/<code>set</code>/<code>remove</code>).</td></tr>
 <tr><td><code>upgrade</code></td><td>Bring a store written by an older build up to this one's catalog revision.</td></tr>
 <tr><td><code>arrays</code></td><td>Distinct stored arrays: content hash, HDF5 location, series sharing each.</td></tr>
 <tr><td><code>summary</code></td><td>Grouped static and/or forecast summaries (<code>--static-only</code>/<code>--forecast-only</code>).</td></tr>
@@ -12461,12 +13212,32 @@ in-terminal check, <code>get --plot</code> draws a sparkline with no file involv
 </div>
 <pre><code class="language-sh">infrastore --store demo.h5 stats
 infrastore --store demo.h5 store-info
+infrastore --store demo.h5 store-attr list
+infrastore --store demo.h5 store-attr set creator sienna-build
+infrastore --store demo.h5 store-attr get creator
+infrastore --store demo.h5 store-attr remove creator
 infrastore --store demo.h5 upgrade
 infrastore --store demo.h5 arrays --data-hash 2018057b
 infrastore --store demo.h5 summary --static-only
 infrastore --store demo.h5 resolutions
 infrastore --store demo.h5 params --resolution PT1H --interval PT1H
 </code></pre>
+<p><code>store-attr</code> reads and writes <strong>store attributes</strong> — free-form key/value provenance about the
+artifact as a whole: who built it, from what source system, under which of your own schema versions.
+The store never interprets a value, in the same spirit as a series' <code>application_data</code>; store JSON
+if you want structure. See <a href="reference/../explanation/data-model.html#store-attributes">Store attributes</a>.</p>
+<p>Do not confuse it with <code>attributes</code>, which lists component &lt;-&gt; supplemental-attribute associations —
+a different thing entirely, which is why this command carries the <code>store-</code> prefix.</p>
+<p>Three details worth knowing:</p>
+<ul>
+<li><code>set</code> replaces rather than appending. An artifact records one creator, not a history of them.</li>
+<li><code>get</code> prints the bare value, so <code>$(infrastore store-attr get creator)</code> is the value and nothing
+else, and <strong>exits 1 when the key is unset</strong> so a script can branch on it. <code>remove</code> instead reports
+<code>removed: false</code> and exits 0 — there the outcome is the output.</li>
+<li>Keys beginning with <code>infrastore.</code> are reserved, on removal as well as on write.</li>
+</ul>
+<p><code>store-info</code> reports whatever is there under <code>store_attributes</code>, so <code>infrastore -f json store-info</code>
+is the one call that answers "what is this artifact" completely.</p>
 <p><code>upgrade</code> is the writable open that runs the catalog migration ladder. It is needed only for a store
 written by an older infrastore: such a store reports <code>the store's catalog is at revision N …</code> on
 every read, because every read command opens it <strong>read-only</strong> and therefore cannot upgrade it.
@@ -12543,6 +13314,7 @@ infrastore completions zsh &gt; ~/.zfunc/_infrastore
 <pre><code class="language-text">infrastore --store &lt;PATH&gt; init [--compression &lt;none|deflate[:LEVEL]&gt;] [--no-shuffle] [--catalog &lt;attached|in-memory&gt;]
 infrastore --store &lt;PATH&gt; add --descriptor &lt;FILE.json|-&gt; [--csv &lt;FILE.csv&gt;] [--dry-run] [--replace] [--batch-size N] [-q|--quiet] [--compression &lt;SPEC&gt;] [--no-shuffle] [--catalog &lt;MODE&gt;]
 infrastore --store &lt;PATH&gt; add --csv &lt;FILE.csv&gt; --owner-id &lt;I&gt; --owner-type &lt;T&gt; --name &lt;N&gt; --type &lt;T&gt; --element-type &lt;E&gt; [DESCRIPTOR FIELDS...]
+infrastore --store &lt;PATH&gt; add --parquet &lt;PATH&gt; [--parquet &lt;PATH&gt;...] [--no-checksum] [DESCRIPTOR FIELDS...]
 infrastore --store &lt;PATH&gt; merge --from &lt;PATH.h5&gt; [SELECTOR...] [--replace] [--dry-run]
 infrastore --store &lt;PATH&gt; list    [SELECTOR...] [--limit N] [--wide]
 infrastore --store &lt;PATH&gt; get     [SELECTOR...] [--time-range START..END] [--limit N | --full] [--tail] [--stride N] [--plot [--plot-width COLS]] [--window N | --issue-time &lt;TS&gt;]
@@ -12564,6 +13336,10 @@ infrastore --store &lt;PATH&gt; persist --dest &lt;PATH.h5&gt; [--force] [--dry-
 infrastore --store &lt;PATH&gt; compact [--force]
 infrastore --store &lt;PATH&gt; stats
 infrastore --store &lt;PATH&gt; store-info
+infrastore --store &lt;PATH&gt; store-attr list
+infrastore --store &lt;PATH&gt; store-attr get    &lt;KEY&gt;
+infrastore --store &lt;PATH&gt; store-attr set    &lt;KEY&gt; &lt;VALUE&gt;
+infrastore --store &lt;PATH&gt; store-attr remove &lt;KEY&gt;
 infrastore --store &lt;PATH&gt; upgrade
 infrastore --store &lt;PATH&gt; arrays [SELECTOR...] [--data-hash &lt;HEX&gt;]
 infrastore --store &lt;PATH&gt; attributes [--component-id &lt;I&gt;] [--attribute-id &lt;I&gt;] [--component-type &lt;T&gt;] [--attribute-type &lt;T&gt;] [--summary]

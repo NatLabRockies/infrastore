@@ -235,6 +235,14 @@ executable. Clear the quarantine flag with <code>xattr -d com.apple.quarantine .
 </code></pre>
 <p>This compiles HDF5 from vendored sources, so it needs <code>cmake</code> and a C compiler (see
 <a href="#build-prerequisites">Build Prerequisites</a>) and takes a few minutes on the first build.</p>
+<p>Parquet support (<code>export -f parquet</code>, <code>add --parquet</code>) is on by default, which is what pulls in the
+Arrow dependency tree. To leave it out -- a smaller binary and a shorter build, at the cost of those
+two flags:</p>
+<pre><code class="language-sh">cargo install infrastore-cli --no-default-features --features vendored
+</code></pre>
+<p>That binary still accepts the flags and names the feature to rebuild with, rather than reporting
+<code>parquet</code> as an unknown format. The Arrow tree reaches only the CLI: <code>infrastore-core</code>, the Python
+wheel, and the FFI cdylib never link it.</p>
 <h2 id="julia"><a class="header" href="#julia">Julia</a></h2>
 <p><code>InfraStore.jl</code> is registered in the Julia General registry:</p>
 <pre><code class="language-julia">using Pkg
@@ -302,6 +310,7 @@ installed:</p>
 <tr><td><code>infrastore-py</code></td><td>PyO3 bindings, <code>abi3-py311</code> wheel</td></tr>
 <tr><td><code>infrastore-ffi</code></td><td>C ABI cdylib (the foundation of the Julia binding)</td></tr>
 <tr><td><code>infrastore-cli</code></td><td><code>infrastore</code> CLI binary (CSV add/read, inspect on-disk stores)</td></tr>
+<tr><td><code>infrastore-parquet</code></td><td>Parquet export/import behind the CLI's default-on <code>parquet</code> feature</td></tr>
 <tr><td><code>infrastore-bench</code></td><td><code>infrastore-bench</code> binary (bulk-ingest + simulation-read benchmarks)</td></tr>
 </tbody></table>
 </div>
