@@ -623,3 +623,26 @@ report's, which cannot both be Parquet. **Decision:** the report renders as a ta
 `-f json`/`-f jsonl` was asked for, so `-f parquet export` prints a readable summary and
 `-f json ... export` still gives a script one object — with `partitions`, `rows` and `empty` in it,
 since the partition layout is what a caller most wants to know afterwards.
+
+### 7.19 What the first code review found (fixed 2026-09-08)
+
+The PR's automated review found eight defects in the long-table implementation, all confirmed
+against the code and fixed in one commit, each with a test:
+
+- `PartitionKey`'s `Ord` was derived from the filename slug while `Eq` compared the exact reference,
+  so two zones that slug alike (`a/b`, `a_b`) compared `Equal` and the export's `BTreeMap` pooled
+  them into one file with one timestamp zone. The order now keys the reference by variant and
+  storage string; only the filename is sanitized.
+- A collision suffix (`_2`) was not itself reserved, so a key whose natural slug was that name
+  overwrote the moved file. Every name handed out is tracked, and a candidate increments until free.
+- A null in a text column read as the empty string, and a null in an integer column as whatever the
+  buffer held, despite the format's no-nulls rule; in an identity column that filed rows under a
+  different series. Both are refused, naming the column.
+- The documented foreign-file fallback for `time_reference` (the Arrow zone when neither column nor
+  footer says) returned `None`, relabeling a zoned foreign file as unspecified. The grouper keeps
+  the timestamp column's zone and derives `utc`, `zoneless`, or the named zone from it.
+- Exporting into a directory that already held `.parquet` files left the stale partitions for the
+  next `add --parquet <dir>` to import. The export refuses such a directory; §2.8 and the CLI
+  reference say so.
+- `bindings.md` still described "one schema, two producers", and a CLI reference example named a
+  per-series file the partitioned export never writes.

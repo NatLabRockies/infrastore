@@ -694,6 +694,120 @@ fn nulls_are_refused_rather_than_coerced() {
 }
 
 #[test]
+fn a_foreign_file_takes_its_spelling_from_the_arrow_zone() {
+    use arrow::array::{ArrayRef, Float64Array, RecordBatch, TimestampMillisecondArray};
+    use arrow::datatypes::{Field, Schema};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let options = ImportOptions {
+        name: Some("load".into()),
+        owner_id: Some(7),
+        owner_type: Some("Bus".into()),
+        ..Default::default()
+    };
+    let write = |file: &str, zone: Option<&str>| {
+        let mut stamps = TimestampMillisecondArray::from(vec![
+            t0().timestamp_millis(),
+            t0().timestamp_millis() + 3_600_000,
+        ]);
+        if let Some(z) = zone {
+            stamps = stamps.with_timezone(z);
+        }
+        let stamps: ArrayRef = std::sync::Arc::new(stamps);
+        let values: ArrayRef = std::sync::Arc::new(Float64Array::from(vec![1.0, 2.0]));
+        let schema = Schema::new(vec![
+            Field::new("timestamp", stamps.data_type().clone(), false),
+            Field::new("value", values.data_type().clone(), false),
+        ]);
+        let batch =
+            RecordBatch::try_new(std::sync::Arc::new(schema), vec![stamps, values]).expect("batch");
+        let path = dir.path().join(file);
+        write_batch(&path, &batch);
+        path
+    };
+    let reference = |path: &Path| {
+        let back = read_file(path, &options).expect("a foreign file imports");
+        let TimeSeriesData::SingleTimeSeries(s) = &back[0].data else {
+            panic!("expected a SingleTimeSeries, got {:?}", back[0].data);
+        };
+        s.time_reference.clone()
+    };
+    // No footer, no column: the zone is all there is, and it is not nothing.
+    assert_eq!(
+        reference(&write("utc.parquet", Some("UTC"))),
+        Some(TimeReference::Utc)
+    );
+    assert_eq!(
+        reference(&write("denver.parquet", Some("America/Denver"))),
+        Some(TimeReference::Zone("America/Denver".into()))
+    );
+    assert_eq!(
+        reference(&write("naive.parquet", None)),
+        Some(TimeReference::Zoneless)
+    );
+}
+
+#[test]
+fn a_null_in_a_text_or_integer_column_is_refused() {
+    use arrow::array::{
+        ArrayRef, Float64Array, Int64Array, RecordBatch, StringArray, TimestampMillisecondArray,
+    };
+    use arrow::datatypes::{Field, Schema};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let stamps = || -> ArrayRef {
+        std::sync::Arc::new(
+            TimestampMillisecondArray::from(vec![
+                t0().timestamp_millis(),
+                t0().timestamp_millis() + 3_600_000,
+            ])
+            .with_timezone("UTC"),
+        )
+    };
+    let values = || -> ArrayRef { std::sync::Arc::new(Float64Array::from(vec![1.0, 2.0])) };
+    let options = ImportOptions {
+        name: Some("load".into()),
+        owner_id: Some(1),
+        owner_type: Some("Bus".into()),
+        ..Default::default()
+    };
+
+    // A null descriptor is not an absent one: absent is the empty string.
+    let units: ArrayRef = std::sync::Arc::new(StringArray::from(vec![Some("MW"), None]));
+    let schema = Schema::new(vec![
+        Field::new("timestamp", stamps().data_type().clone(), false),
+        Field::new("value", values().data_type().clone(), false),
+        Field::new("units", units.data_type().clone(), true),
+    ]);
+    let batch = RecordBatch::try_new(std::sync::Arc::new(schema), vec![stamps(), values(), units])
+        .expect("batch");
+    let path = dir.path().join("null_text.parquet");
+    write_batch(&path, &batch);
+    let err = read_file(&path, &options).expect_err("a null descriptor is refused");
+    assert!(
+        err.to_string().contains("`units` column has nulls"),
+        "{err}"
+    );
+
+    // A null identity column would file the rows under a different series.
+    let owner: ArrayRef = std::sync::Arc::new(Int64Array::from(vec![Some(1), None]));
+    let schema = Schema::new(vec![
+        Field::new("timestamp", stamps().data_type().clone(), false),
+        Field::new("value", values().data_type().clone(), false),
+        Field::new("owner_id", owner.data_type().clone(), true),
+    ]);
+    let batch = RecordBatch::try_new(std::sync::Arc::new(schema), vec![stamps(), values(), owner])
+        .expect("batch");
+    let path = dir.path().join("null_int.parquet");
+    write_batch(&path, &batch);
+    let err = read_file(&path, &options).expect_err("a null owner is refused");
+    assert!(
+        err.to_string().contains("`owner_id` column has nulls"),
+        "{err}"
+    );
+}
+
+#[test]
 fn a_contradicting_assertion_is_an_error() {
     let dir = tempfile::tempdir().expect("tempdir");
     let series = stored(plain(vec![(1, hourly("load", &[1.0]))]));

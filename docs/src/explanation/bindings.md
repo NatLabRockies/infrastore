@@ -185,12 +185,15 @@ the CLI. The feature stays switchable (`--no-default-features --features vendore
 binary), and the line it draws is between the binary and the **libraries**: `infrastore-core`,
 `infrastore-py`, and `infrastore-ffi` never link Arrow, which `cargo tree --edges normal` on each is
 the check for. The CLI is the only surface that reads and writes Parquet _files_
-(`export -f parquet`, `add --parquet`). Python reaches the same files through `to_arrow()` /
-`from_arrow` plus `pyarrow.parquet`, and the table those produce is deliberately identical to the
-one the CLI writes — one schema, two producers — so a file moves between them without changing
-meaning. Nothing else has it: the C ABI and Julia would need the whole Arrow tree in the cdylib for
-a format their host languages already have readers for, and the gRPC server serves values, not
-files.
+(`export -f parquet`, `add --parquet`): partitioned **long tables**, many series per file with every
+catalog column a table column, specified in the [Parquet layout](../reference/parquet-format.md)
+reference. Python's `to_arrow()` / `from_arrow` are a different, in-memory thing — one two-column
+table per series, with the descriptors in the schema metadata rather than in columns — and are not a
+reader or writer for the CLI's files; a Python user who wants one writes the per-series table with
+`pyarrow.parquet`, or hands the CLI's directory to DuckDB or polars. The relationship between the
+two is one sentence: the long table's columns are `to_arrow()`'s metadata keys turned into columns.
+Nothing else has it: the C ABI and Julia would need the whole Arrow tree in the cdylib for a format
+their host languages already have readers for, and the gRPC server serves values, not files.
 
 **Materialized timestamps** and **`from_timestamps`** both run in the core and reach Julia through
 two stateless ABI entry points, `infrastore_grid_timestamps` and `infrastore_infer_period`. That

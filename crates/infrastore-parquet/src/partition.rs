@@ -13,7 +13,7 @@
 //! essentially nothing, and a reader that scans a directory into one table still
 //! sees them.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use infrastore_core::{Dtype, ElementType, TimeReference, TimeSeriesType};
 
@@ -110,13 +110,24 @@ pub struct PartitionKey {
 /// for this crate's convenience, since neither has a meaningful order of its
 /// own. What is needed here is only *a* total order, so that a re-run of the
 /// same export names its files the same way.
+///
+/// The rendering must be **exact**, and agree with `Eq`: the zones `a/b` and
+/// `a_b` are different partitions that want different timestamp columns, and an
+/// order that flattened them the way the filename slug does would let a
+/// `BTreeMap` pool them into one file. So the reference is keyed by its variant
+/// and its storage string, and only the filename is sanitized.
 impl PartitionKey {
-    fn sort_key(&self) -> (i64, &ValueKind, String) {
-        (
-            self.time_series_type.code(),
-            &self.value_kind,
-            reference_slug(self.time_reference.as_ref()),
-        )
+    fn sort_key(&self) -> (i64, &ValueKind, Option<(u8, String)>) {
+        let reference = self.time_reference.as_ref().map(|r| {
+            let tag = match r {
+                TimeReference::Utc => 0,
+                TimeReference::FixedOffset(_) => 1,
+                TimeReference::Zone(_) => 2,
+                TimeReference::Zoneless => 3,
+            };
+            (tag, r.as_storage_string())
+        });
+        (self.time_series_type.code(), &self.value_kind, reference)
     }
 }
 
@@ -231,26 +242,23 @@ pub fn disambiguate(keys: &[PartitionKey]) -> BTreeMap<PartitionKey, String> {
     sorted.sort();
     sorted.dedup();
 
-    let mut taken: BTreeMap<String, usize> = BTreeMap::new();
+    // Every name handed out, case-folded because macOS and Windows filesystems
+    // treat two names differing only in case as one path. The suffixed names
+    // are tracked too: a key that naturally slugs to `foo_2` must not land on
+    // the file a collision was just moved to.
+    let mut taken: BTreeSet<String> = BTreeSet::new();
     let mut out = BTreeMap::new();
     for key in sorted {
         let base = key.file_name();
-        // Case-insensitively, because macOS and Windows filesystems treat two
-        // names differing only in case as one path.
-        let folded = base.to_lowercase();
-        let name = match taken.get_mut(&folded) {
-            None => {
-                taken.insert(folded, 1);
-                base
-            }
-            Some(seen) => {
-                *seen += 1;
-                let n = *seen;
-                let stem = base.strip_suffix(".parquet").unwrap_or(&base);
-                format!("{stem}_{n}.parquet")
-            }
-        };
-        out.insert(key.clone(), name);
+        let stem = base.strip_suffix(".parquet").unwrap_or(&base).to_string();
+        let mut candidate = base.clone();
+        let mut n = 1usize;
+        while taken.contains(&candidate.to_lowercase()) {
+            n += 1;
+            candidate = format!("{stem}_{n}.parquet");
+        }
+        taken.insert(candidate.to_lowercase());
+        out.insert(key.clone(), candidate);
     }
     out
 }

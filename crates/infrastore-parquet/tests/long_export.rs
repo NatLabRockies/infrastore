@@ -595,6 +595,25 @@ fn a_slug_is_one_way_and_the_footer_is_the_truth() {
 }
 
 #[test]
+fn a_directory_that_already_holds_parquet_files_is_refused() {
+    // `add --parquet <dir>` imports every file it finds, so a narrower export
+    // over an earlier one would leave stale partitions for the import to file.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let series = stored(vec![(
+        1,
+        TimeSeriesData::SingleTimeSeries(hourly("load", &[1.0, 2.0])),
+    )]);
+    write_partitions(dir.path(), &series).expect("first export");
+    let err = write_partitions(dir.path(), &series).expect_err("second export into the same dir");
+    assert!(err.to_string().contains("already holds"), "{err}");
+    assert!(err.to_string().contains(".parquet"), "{err}");
+    // A sibling non-parquet file is not in the way.
+    let clean = tempfile::tempdir().expect("tempdir");
+    std::fs::write(clean.path().join("notes.txt"), b"x").unwrap();
+    write_partitions(clean.path(), &series).expect("a stray text file does not block the export");
+}
+
+#[test]
 fn colliding_partitions_get_distinct_files() {
     // The consequence of a one-way slug: without this the second file would
     // silently overwrite the first.
@@ -611,6 +630,49 @@ fn colliding_partitions_get_distinct_files() {
     let distinct: BTreeSet<&String> = names.values().collect();
     assert_eq!(distinct.len(), 2, "{names:?}");
     assert!(names.values().all(|n| n.ends_with(".parquet")), "{names:?}");
+}
+
+#[test]
+fn partitions_that_share_a_slug_are_still_two_partitions() {
+    // `Ord` must agree with `Eq`: the zones `a/b` and `a_b` flatten to one
+    // filename, but they want different timestamp columns, and a BTreeMap keyed
+    // on a slug-derived order would pool them into one file.
+    let key = |zone: &str| PartitionKey {
+        time_series_type: TimeSeriesType::SingleTimeSeries,
+        value_kind: ValueKind::Dense {
+            dtype: Dtype::F64,
+            shape: vec![],
+        },
+        time_reference: Some(TimeReference::Zone(zone.into())),
+    };
+    assert_ne!(key("a/b").cmp(&key("a_b")), std::cmp::Ordering::Equal);
+    let set: BTreeSet<PartitionKey> = [key("a/b"), key("a_b")].into_iter().collect();
+    assert_eq!(set.len(), 2);
+}
+
+#[test]
+fn a_collision_suffix_is_itself_reserved() {
+    // Two keys slug to `...a_b...`; the second is moved to `_2`. A third key
+    // whose natural slug is already the `_2` name must not overwrite it.
+    let key = |zone: &str| PartitionKey {
+        time_series_type: TimeSeriesType::SingleTimeSeries,
+        value_kind: ValueKind::Dense {
+            dtype: Dtype::F64,
+            shape: vec![],
+        },
+        time_reference: Some(TimeReference::Zone(zone.into())),
+    };
+    // The zone `a_b_2` slugs to exactly the name the collision suffix produces.
+    let natural_2 = key("a_b_2").file_name();
+    let keys = vec![key("a/b"), key("a_b"), key("a_b_2")];
+    let names = disambiguate(&keys);
+    let distinct: BTreeSet<&String> = names.values().collect();
+    assert_eq!(distinct.len(), 3, "{names:?}");
+    assert_eq!(
+        names.values().filter(|n| **n == natural_2).count(),
+        1,
+        "{names:?}"
+    );
 }
 
 #[test]

@@ -195,10 +195,14 @@ per value, and every catalog column a table column. `add --parquet <PATH>` reads
 file or a whole directory. [Parquet layout](parquet-format.md) is the format reference — columns,
 partitioning, filenames, footer keys, and the rules the import applies to a foreign file.
 
-Two limits on the export, both deliberate:
+Three limits on the export, all deliberate:
 
 - **`--dir` is required.** Parquet's footer sits at the end of the file and its offsets point
   backwards, so a writer has to seek and a pipe cannot.
+- **`--dir` must hold no `.parquet` files yet.** `add --parquet <dir>` imports every one it finds,
+  so a narrower export written over an earlier one would leave the earlier partitions in place for
+  the next import to file silently. The export neither merges nor sweeps; empty the directory or
+  name a fresh one. Other files in it are not in the way.
 - **`-f parquet` is only accepted on `export`.** It is a binary container, not a rendering of a
   result; there is no `list -f parquet`.
 
@@ -279,7 +283,7 @@ infrastore --store demo.h5 add --descriptor batch.json --replace --batch-size 50
 infrastore --store demo.h5 add --csv load.csv --owner-id 42 --owner-type Generator \
     --name load --type SingleTimeSeries --element-type f64 \
     --resolution PT1H --initial-timestamp 2024-01-01T00:00:00Z
-infrastore --store demo.h5 add --parquet out/42_Generator_load_SingleTimeSeries.parquet
+infrastore --store demo.h5 add --parquet out/
 infrastore --store demo.h5 merge --from other.h5 --name-glob 'load_*'
 infrastore --store demo.h5 transform --horizon PT24H --interval PT1H
 infrastore --store demo.h5 remove --owner-id 42 --name load --type SingleTimeSeries

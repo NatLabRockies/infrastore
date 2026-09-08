@@ -195,6 +195,10 @@ struct Grouper<'a> {
     values: Vec<u8>,
     dtype: Option<Dtype>,
     element_dims: Vec<usize>,
+    /// The `timestamp` column's Arrow zone, `None` for a naive column, taken
+    /// from the first batch. It is the last resort for a foreign file that
+    /// names no `time_reference` anywhere.
+    zone: Option<Option<String>>,
     seen: HashSet<SeriesKey>,
     out: Vec<ImportedSeries>,
 }
@@ -211,6 +215,7 @@ impl<'a> Grouper<'a> {
             values: Vec::new(),
             dtype: None,
             element_dims: Vec::new(),
+            zone: None,
             seen: HashSet::new(),
             out: Vec::new(),
         }
@@ -221,6 +226,9 @@ impl<'a> Grouper<'a> {
             return Ok(());
         }
         let stamps = read_timestamps(batch, TIMESTAMP)?;
+        if self.zone.is_none() {
+            self.zone = Some(arrow_zone(batch, TIMESTAMP)?);
+        }
         let issued = batch
             .column_by_name(ISSUE_TIME)
             .map(|_| read_timestamps(batch, ISSUE_TIME))
@@ -513,8 +521,10 @@ impl<'a> Grouper<'a> {
         };
         match text {
             Some(text) => schema::decode_time_reference(&text).map_err(unsupported),
-            // A foreign file: the column's zone is all there is.
-            None => Ok(None),
+            // A foreign file: the column's zone is all there is, and it does
+            // say something — a naive column is a wall clock, a zoned one names
+            // its spelling. Only the literal `unspecified` means *none*.
+            None => reference_from_arrow_zone(self.zone.clone().flatten().as_deref()).map(Some),
         }
     }
 
@@ -696,23 +706,33 @@ fn text_column(batch: &RecordBatch, name: &str) -> Result<Option<Vec<String>>> {
         .as_any()
         .downcast_ref::<StringArray>()
         .ok_or_else(|| unsupported(format!("column `{name}` is not text")))?;
+    // A null is not an empty string. The format writes an absent descriptor
+    // *as* the empty string precisely so that no column is nullable; a null
+    // that reached here would otherwise become "absent" silently, and in an
+    // identity column would file the rows under a different series.
+    refuse_nulls(column, name)?;
     Ok(Some(
         (0..array.len())
-            .map(|i| {
-                if array.is_null(i) {
-                    String::new()
-                } else {
-                    array.value(i).to_string()
-                }
-            })
+            .map(|i| array.value(i).to_string())
             .collect(),
     ))
+}
+
+fn refuse_nulls(column: &ArrayRef, name: &str) -> Result<()> {
+    if column.null_count() > 0 {
+        return Err(unsupported(format!(
+            "the `{name}` column has nulls; the store holds none, and the format writes an \
+             absent value as the empty string rather than a null"
+        )));
+    }
+    Ok(())
 }
 
 fn int_column(batch: &RecordBatch, name: &str) -> Result<Option<Vec<i64>>> {
     let Some(column) = batch.column_by_name(name) else {
         return Ok(None);
     };
+    refuse_nulls(column, name)?;
     let values = match column.data_type() {
         DataType::Int64 => {
             let a = downcast::<Int64Array>(column, "int64")?;
@@ -729,6 +749,30 @@ fn int_column(batch: &RecordBatch, name: &str) -> Result<Option<Vec<i64>>> {
         }
     };
     Ok(Some(values))
+}
+
+/// The zone the `name` timestamp column carries, `None` for a naive column.
+fn arrow_zone(batch: &RecordBatch, name: &str) -> Result<Option<String>> {
+    let array = batch
+        .column_by_name(name)
+        .ok_or_else(|| unsupported(format!("the file has no `{name}` column")))?;
+    match array.data_type() {
+        DataType::Timestamp(_, zone) => Ok(zone.as_ref().map(|z| z.to_string())),
+        other => Err(unsupported(format!(
+            "column `{name}` is {other}, not a timestamp"
+        ))),
+    }
+}
+
+/// The spelling a timestamp column's own Arrow zone implies, for a file whose
+/// footer and `time_reference` column are both silent.
+pub fn reference_from_arrow_zone(zone: Option<&str>) -> Result<TimeReference> {
+    match zone {
+        None => Ok(TimeReference::Zoneless),
+        Some(z) if z.eq_ignore_ascii_case("UTC") => Ok(TimeReference::Utc),
+        Some(z) => TimeReference::parse(z)
+            .map_err(|e| unsupported(format!("the timestamp column's zone {z:?}: {e}"))),
+    }
 }
 
 fn downcast<'a, T: 'static>(array: &'a ArrayRef, what: &str) -> Result<&'a T> {

@@ -59,6 +59,35 @@ impl ExportReport {
     }
 }
 
+/// Refuse a destination that already holds `.parquet` files.
+///
+/// `add --parquet <dir>` imports every such file it finds, so a narrower export
+/// written over an earlier one would leave the earlier partitions in place and
+/// a later import would file them too, silently. The export neither merges nor
+/// sweeps: the caller empties the directory, or names a fresh one.
+fn refuse_stale_partitions(dir: &Path) -> Result<()> {
+    let stale: Vec<String> = std::fs::read_dir(dir)?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("parquet"))
+        })
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    if stale.is_empty() {
+        return Ok(());
+    }
+    Err(unsupported(format!(
+        "{} already holds {} .parquet file(s) ({}); export into an empty directory, since \
+         `add --parquet <dir>` imports every .parquet file it finds",
+        dir.display(),
+        stale.len(),
+        stale.iter().take(3).cloned().collect::<Vec<_>>().join(", "),
+    )))
+}
+
 /// Write `series` into `dir` as one Parquet file per partition.
 ///
 /// The pairs are `(catalog row, values)`, as `Store::list_metadata` and
@@ -69,6 +98,7 @@ pub fn write_partitions(
     series: &[(TimeSeriesMetadata, TimeSeriesData)],
 ) -> Result<ExportReport> {
     std::fs::create_dir_all(dir)?;
+    refuse_stale_partitions(dir)?;
 
     let mut report = ExportReport::default();
     let mut groups: BTreeMap<PartitionKey, Vec<usize>> = BTreeMap::new();
