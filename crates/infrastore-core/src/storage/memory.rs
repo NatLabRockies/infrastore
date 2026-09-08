@@ -8,7 +8,7 @@ use crate::error::{Result, TimeSeriesError};
 use crate::hash::array_hash;
 use crate::types::array::{Dtype, TypedArray};
 
-use super::{ArrayLayout, CompactionReport, IntegrityReport, PackGroup, StorageBackend};
+use super::{ArrayLayout, CompactionReport, IntegrityReport, PackGroup, StorageBackend, WriteMode};
 
 /// Pure in-memory storage backend.
 ///
@@ -32,12 +32,17 @@ impl MemoryBackend {
 }
 
 impl StorageBackend for MemoryBackend {
+    /// `_mode` is ignored: this backend has no chunking and no datasets, so
+    /// there is nothing a deferred write could coalesce into. Every put is
+    /// immediate, which satisfies [`WriteMode::Deferred`]'s contract — it
+    /// permits buffering, it does not require it.
     fn put_array(
         &mut self,
         hash: &[u8; 32],
         data: &TypedArray,
         _group: PackGroup,
         _layout: ArrayLayout,
+        _mode: WriteMode,
     ) -> Result<bool> {
         // If the slot was tombstoned, "reuse" it by clearing the marker.
         self.tombstoned.remove(hash);

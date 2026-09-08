@@ -16,7 +16,7 @@ use crate::metadata::{
 use crate::reader::{ForecastReader, StaticReader};
 use crate::storage::{
     ArrayLayout, ArrayLocation, CompactionReport, Compression, Hdf5Backend, IntegrityReport,
-    MemoryBackend, PackGroup, StorageBackend,
+    MemoryBackend, PackGroup, StorageBackend, WriteMode,
 };
 use crate::types::array::{Dtype, TypedArray};
 use crate::types::element_type::ElementType;
@@ -1555,15 +1555,27 @@ impl Store {
         self.txn.is_some()
     }
 
+    /// How a packed array put by this call must be written: buffered for the
+    /// block writer while a transaction is open, straight into the file
+    /// otherwise. See [`WriteMode`] and [`Self::begin_transaction`].
+    fn write_mode(&self) -> WriteMode {
+        if self.in_transaction() {
+            WriteMode::Deferred
+        } else {
+            WriteMode::Immediate
+        }
+    }
+
     /// Begin a transaction spanning any number of subsequent operations, so that
     /// adds, removals, and transforms either all take effect or none do.
     ///
     /// Every mutating entry point is already atomic on its own; this composes
-    /// several of them into one unit. It does *not* replace [`Self::bulk_add`] —
-    /// batching is still what buys block-sized HDF5 writes and feature-set
-    /// dedup, and a loop of single adds under a transaction gets neither. Open a
-    /// transaction when you need several *operations* to be atomic together, and
-    /// keep using a bulk add for each one.
+    /// several of them into one unit. Open a transaction when you need several
+    /// *operations* to be atomic together — and, as the cost section below says,
+    /// when a run of single adds should be written the way a batch is.
+    /// [`Self::bulk_add`] is still the direct spelling when the whole cohort is
+    /// in hand as a list, and it is still what dedups feature sets across a
+    /// batch.
     ///
     /// Both halves of the artifact roll back, by different means. SQLite rolls
     /// back its own statements. The HDF5 side, which has no transaction to
@@ -1581,14 +1593,32 @@ impl Store {
     ///
     /// # Cost
     ///
-    /// A transaction is also how a caller adding many series amortizes the
-    /// per-add HDF5 flush (see `flush_arrays_before_commit`): the flush
-    /// happens once for the span instead of once per call. Measured here on
-    /// 2000 single adds of a 24-step `f64` `SingleTimeSeries` against an
-    /// on-disk store, release build: ~1.07 s one at a time, ~0.12 s inside one
-    /// transaction. A bulk add does the same. The cost scales with the bytes a
-    /// call actually wrote, so re-adding data the store already holds is
-    /// already cheap.
+    /// A transaction is how a caller adding many series amortizes the per-add
+    /// HDF5 flush (see `flush_arrays_before_commit`): the flush happens once for
+    /// the span instead of once per call.
+    ///
+    /// It also changes *how* those adds are written. Nothing a transaction wrote
+    /// is durable until its outermost commit, so a packed single add inside one
+    /// owes the file nothing yet: instead of filling one slot of a
+    /// thousand-column growth pool — a read-modify-write of every timestamp-row
+    /// chunk in the pool, for one column — it accumulates into a pending block
+    /// per pool, and the block is written with the same block writer a bulk add
+    /// uses. The result is the dataset a single [`Self::add_time_series_bulk`]
+    /// of the same items would have produced: same names, same widths, same
+    /// chunking. A block is written out at the outermost commit, when a read
+    /// needs a physical position for one of its arrays ([`Self::locate_array`],
+    /// or an explicit [`Self::flush`] — an ordinary value read is served from
+    /// the block), and when it reaches the width the block writer spills at.
+    ///
+    /// Measured on 19 hourly `f64` `SingleTimeSeries` of 30,500 steps added one
+    /// at a time inside one transaction, against an on-disk store through the
+    /// Python binding, release build: ~10.2 s for that loop before, ~0.17 s now,
+    /// and the file 6.0 MB before against 3.3 MB after — one 1000-column pool
+    /// against the single 19-column dataset the bulk add writes.
+    ///
+    /// The price is memory: a pool's pending block holds its not-yet-written
+    /// arrays, which is the same memory the block writer allocates for the
+    /// equivalent bulk add, and is bounded per pool by the width it spills at.
     ///
     /// # Concurrency
     ///
@@ -1899,18 +1929,21 @@ impl Store {
     /// intentionally wide here. Use [`AddRequest`] + [`Self::add_time_series_bulk`]
     /// for ergonomic call sites.
     ///
-    /// **Adding many series one at a time is the slow path.** Each call outside
-    /// a transaction flushes the HDF5 file before its catalog row commits, so a
-    /// row can never name bytes the file did not receive (see
-    /// `flush_arrays_before_commit`), and that flush costs roughly the same
-    /// whether it pushes one array or a thousand — it is a walk of libhdf5's
-    /// metadata cache, not a write proportional to what changed. Wrap a run of
-    /// adds in [`Self::begin_transaction`], or use
-    /// [`Self::add_time_series_bulk`], and the flush happens once for the whole
-    /// span instead of once per series. Measured on 400 hourly week-long f64
-    /// series against an on-disk store, release build: ~2.1 s one at a time
-    /// against ~61 ms inside one transaction, with the bulk path unchanged from
-    /// before the flush existed.
+    /// **Adding many series one at a time outside a transaction is the slow
+    /// path**, for two reasons. Each such call flushes the HDF5 file before its
+    /// catalog row commits, so a row can never name bytes the file did not
+    /// receive (see `flush_arrays_before_commit`), and that flush costs roughly
+    /// the same whether it pushes one array or a thousand — it is a walk of
+    /// libhdf5's metadata cache, not a write proportional to what changed. And
+    /// each one writes a single column into a pool chunked one timestamp row at
+    /// a time, so it read-modify-writes every chunk of the pool it joins.
+    ///
+    /// Wrap a run of adds in [`Self::begin_transaction`], or use
+    /// [`Self::add_time_series_bulk`], and both costs go away: the flush happens
+    /// once for the whole span, and the span's adds are written together as
+    /// batch-sized blocks whose chunks are filled whole. Measured on 400 hourly
+    /// week-long f64 series against an on-disk store, release build: ~2.1 s one
+    /// at a time against ~61 ms inside one transaction.
     pub fn add_time_series(
         &mut self,
         owner_id: i64,
@@ -1945,10 +1978,27 @@ impl Store {
     ///
     /// This is a managed batch, so it takes the block-write path
     /// ([`Self::bulk_add`] internals): packed series are packed into batch-sized
-    /// datasets that fill whole chunks. A one-at-a-time un-managed loop should use
-    /// [`Self::add_time_series`], which packs incrementally into shared datasets.
+    /// datasets that fill whole chunks. A one-at-a-time un-managed loop outside a
+    /// transaction should use [`Self::add_time_series`], which packs
+    /// incrementally into shared datasets; inside one, either spelling is
+    /// buffered and written as a block (see [`Self::begin_transaction`]).
+    ///
+    /// **A single-item batch outside a transaction is the single add.** Sizing a
+    /// dataset to the batch is right for a cohort and wrong for a lone series: a
+    /// batch of one would claim a one-column dataset with an eight-byte chunk,
+    /// and a binding whose `add_time_series` *is* a one-item batch — Julia's,
+    /// through the C ABI — produced one such dataset per call: 19 series of
+    /// 30,500 steps left 19 one-column datasets and a 36 MB file. It therefore
+    /// delegates to the per-column path, which drops the array into the first
+    /// free slot of the shared pool, exactly as [`Self::add`] does. Inside a
+    /// transaction it does not, because there the deferred block writer already
+    /// coalesces successive one-item batches into one dataset — which is the
+    /// better answer, and the one this delegation cannot give.
     #[tracing::instrument(skip(self, items), fields(count = items.len()))]
     pub fn add_time_series_bulk(&mut self, items: Vec<AddRequest>) -> Result<Vec<TimeSeriesId>> {
+        if items.len() == 1 && !self.in_transaction() {
+            return self.add_per_column(items);
+        }
         self.flush_bulk_add(items)
     }
 
@@ -1985,6 +2035,10 @@ impl Store {
             .map(build_request_parts)
             .collect::<Result<_>>()?;
         resolve_irregular_layouts(&*self.backend, &items, &mut parts);
+        // Read before the savepoint borrows `self.metadata`: it cannot change
+        // during the loop, since opening a transaction is not something an add
+        // does.
+        let mode = self.write_mode();
 
         let tx = self.metadata.savepoint()?;
         let mut added = Vec::with_capacity(items.len());
@@ -2020,7 +2074,7 @@ impl Store {
                 &mut shared_sets,
                 staged,
             )?;
-            self.backend.put_array(&hash, data, group, layout)?;
+            self.backend.put_array(&hash, data, group, layout, mode)?;
             if !already_present {
                 staged.arrays.push(hash);
             }
@@ -2108,7 +2162,9 @@ impl Store {
                     .push(i);
             } else {
                 let already = self.backend.contains(&p.hash)?;
-                self.backend.put_array(&p.hash, array, p.group, p.layout)?;
+                let mode = self.write_mode();
+                self.backend
+                    .put_array(&p.hash, array, p.group, p.layout, mode)?;
                 if !already {
                     staged.arrays.push(p.hash);
                 }
@@ -2117,7 +2173,10 @@ impl Store {
         for (pool, idxs) in &packed_groups {
             let hashes: Vec<[u8; 32]> = idxs.iter().map(|&i| parts[i].hash).collect();
             let arrays: Vec<&TypedArray> = idxs.iter().map(|&i| request_array(&items[i])).collect();
-            let written = self.backend.put_packed_block(&hashes, &arrays, pool.3)?;
+            let mode = self.write_mode();
+            let written = self
+                .backend
+                .put_packed_block(&hashes, &arrays, pool.3, mode)?;
             for (j, &i) in idxs.iter().enumerate() {
                 if written[j] {
                     staged.arrays.push(parts[i].hash);
@@ -5407,7 +5466,10 @@ impl Store {
             let array = self
                 .backend
                 .get_array(hash, element_type.physical_dtype())?;
-            backend.put_array(hash, &array, plan.pool.3, layout)?;
+            // Immediate: this is a rewrite of a whole store into a fresh file,
+            // outside any transaction, and every pool was already reserved at
+            // its exact cohort width above.
+            backend.put_array(hash, &array, plan.pool.3, layout, WriteMode::Immediate)?;
         }
         Ok(())
     }

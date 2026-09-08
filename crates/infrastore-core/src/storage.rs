@@ -75,6 +75,35 @@ impl ArrayLayout {
     }
 }
 
+/// Whether a packed write must land in the file before it returns, or may be
+/// buffered and written with the block writer later.
+///
+/// [`WriteMode::Deferred`] is what a caller passes while a
+/// [`Store::begin_transaction`](crate::Store::begin_transaction) span is open.
+/// Nothing the transaction wrote is durable until its outermost commit anyway,
+/// so a single add inside one is free to accumulate into a per-pool pending
+/// block and be written together with its neighbours — which is what makes a
+/// loop of single adds produce the same datasets, widths, and chunking as one
+/// [`Store::add_time_series_bulk`](crate::Store::add_time_series_bulk) of the
+/// same items instead of filling one growth-pool slot at a time.
+///
+/// The mode is a *hint about timing*, never about content: a deferred array is
+/// visible to every read the moment it is accepted (backends that buffer serve
+/// it from the buffer, or write the block out first), it counts as stored for
+/// [`StorageBackend::contains`], and [`StorageBackend::remove_array`] unwinds it
+/// like any other. Only the standalone layouts ignore it — they are their own
+/// dataset, so there is nothing to coalesce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WriteMode {
+    /// Write into the file before returning. The mode outside a transaction,
+    /// and the only one a backend without a buffer implements.
+    Immediate,
+    /// May be buffered and written by [`StorageBackend::materialize_pending`],
+    /// by [`StorageBackend::flush`], or when the buffer reaches the width the
+    /// block writer would spill at.
+    Deferred,
+}
+
 impl Default for Compression {
     /// DEFLATE level 3 + shuffle.
     fn default() -> Self {
@@ -253,12 +282,18 @@ pub(crate) trait StorageBackend: Send + Sync {
     /// standalone variants store a self-contained multi-dimensional variable
     /// (native forecasts, and irregular series on an unshared axis), differing
     /// only in how the variable is chunked.
+    ///
+    /// `mode` says whether the bytes must reach the file before this returns;
+    /// see [`WriteMode`]. It changes when a packed array is written, never
+    /// whether it is stored: a [`WriteMode::Deferred`] put that returns `true`
+    /// is stored as far as every other method on this trait is concerned.
     fn put_array(
         &mut self,
         hash: &[u8; 32],
         data: &TypedArray,
         group: PackGroup,
         layout: ArrayLayout,
+        mode: WriteMode,
     ) -> Result<bool>;
 
     /// Whether a packed pool for `group` at this `(dtype, element_shape,
@@ -293,17 +328,40 @@ pub(crate) trait StorageBackend: Send + Sync {
     /// backend overrides it to create batch-sized datasets and fill whole chunks
     /// with one timestamp-row write per chunk, avoiding the per-column
     /// read-modify-write that the timestamp-major chunking imposes on single adds.
+    ///
+    /// `mode` carries the same meaning it has on [`Self::put_array`]. A
+    /// [`WriteMode::Deferred`] block joins the pending block for its pool rather
+    /// than claiming a dataset of its own, which is what lets a run of small
+    /// batches inside one transaction — a binding whose single add *is* a
+    /// one-item batch — coalesce into the dataset a single batch of them all
+    /// would have produced.
     fn put_packed_block(
         &mut self,
         hashes: &[[u8; 32]],
         arrays: &[&TypedArray],
         group: PackGroup,
+        mode: WriteMode,
     ) -> Result<Vec<bool>> {
         hashes
             .iter()
             .zip(arrays)
-            .map(|(hash, data)| self.put_array(hash, data, group, ArrayLayout::Packed))
+            .map(|(hash, data)| self.put_array(hash, data, group, ArrayLayout::Packed, mode))
             .collect()
+    }
+
+    /// Write out everything a [`WriteMode::Deferred`] put buffered, so that
+    /// afterwards no array this backend holds is still in a pending location.
+    ///
+    /// Called by [`Self::flush`] (which must do this *first*, so the file flush
+    /// covers the blocks it writes) and by any read that needs a buffered array
+    /// to have a physical position. A backend that never buffers has nothing to
+    /// do, which is the default.
+    ///
+    /// Failure leaves the pending state intact and retryable: the transaction
+    /// that owns those writes is still open, and rolling it back must still find
+    /// its arrays to unwind.
+    fn materialize_pending(&self) -> Result<()> {
+        Ok(())
     }
 
     /// Fetch the full array for `hash`, decoding its bytes as `dtype`.
@@ -519,6 +577,10 @@ pub(crate) trait StorageBackend: Send + Sync {
     fn verify(&self, arrays: &[([u8; 32], Dtype)]) -> Result<IntegrityReport>;
 
     /// Flush any in-memory state to disk (no-op for in-memory backends).
+    ///
+    /// Implementations that buffer deferred writes must call
+    /// [`Self::materialize_pending`] before flushing the file, so a flush is
+    /// still the point at which everything put so far is on disk.
     fn flush(&mut self) -> Result<()>;
 
     /// This file's generation stamp, pairing it with exactly one catalog.
@@ -602,7 +664,7 @@ pub(crate) fn check_dtype(hash: &[u8; 32], stored: Dtype, requested: Dtype) -> R
 /// the array's natural row-major sub-block of shape
 /// `[..outer.., len, ..inner..]`. For each outer index the `len` windows are
 /// contiguous, so the copy is one run per outer index. `out` is appended to.
-fn write_window_block(
+pub(crate) fn write_window_block(
     arr: &TypedArray,
     count_axis: usize,
     start: usize,

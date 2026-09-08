@@ -283,9 +283,20 @@ distinct time axes collide into one pool.
 The dataset shape is `(length, cols, *element_shape)` and chunking is `(1, cols, *element_shape)`,
 so one HDF5 chunk holds a single timestamp across every column — making a read across series by
 timestamp one chunk, and a buffered bulk write fill whole chunks. `cols` is chosen per dataset: a
-managed bulk write sizes it to the batch, while an incremental one-at-a-time write path uses a
-default width (`DEFAULT_COLS_PER_DATASET = 1000`). In both cases `cols` is capped so one chunk stays
-within a byte budget (`MAX_CHUNK_BYTES = 1 MiB`); a batch wider than the cap spills across datasets.
+managed write sizes it to the batch it has in hand, while an incremental one-at-a-time write path
+uses a default width (`DEFAULT_COLS_PER_DATASET = 1000`) and fills one of its slots per call. In
+both cases `cols` is capped so one chunk stays within a byte budget (`MAX_CHUNK_BYTES = 1 MiB`); a
+batch wider than the cap spills across datasets.
+
+"The batch it has in hand" is the whole of an `add_time_series_bulk` call — **or the whole span of
+an open transaction**. Nothing a transaction writes is durable until its outermost commit, so a
+single add inside one is buffered per pool rather than dropped into a growth-pool slot, and the
+buffered arrays are written with the same block writer at the commit (or when a read needs one of
+them to have a physical position, or when the buffer reaches the column cap above). A loop of single
+adds inside one transaction therefore produces exactly the datasets one bulk add of the same items
+produces; only an un-transactioned single add takes the default width. This is a write-time policy
+like every other choice on this page: the layouts it produces are ones the format already had, so it
+does not affect `data_format_version` and stores written either way stay mutually readable.
 
 - **Rows are timesteps, columns are series.** Column `i` holds one complete series.
 - **Hash companion dataset.** Each packed dataset has a sibling `{dataset}_h` dataset of `u8`,

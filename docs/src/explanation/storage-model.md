@@ -38,8 +38,9 @@ deleting the old one.
 `DeterministicSingleTimeSeries`). Arrays that share a `(dtype, element_shape, length, resolution)`
 are packed together as columns of one dataset named `sts_{dtype}_{shape}_{length}_{res}`, with shape
 `(length, cols, *element_shape)`. The column count `cols` is sized to the batch that created the
-dataset (capped so one chunk stays within a byte budget); an incremental, one-at-a-time write path
-uses a default width of 1,000:
+dataset (capped so one chunk stays within a byte budget) — where "the batch" is a bulk add's items
+or the whole span of an open transaction; only an incremental one-at-a-time write outside a
+transaction uses the default width of 1,000:
 
 ```mermaid
 flowchart TB
@@ -65,7 +66,9 @@ flowchart TB
   chunk holds a single timestamp across every column. The layout favors **bulk writes** (a batch
   fills whole chunks in one pass) and **reads across series by timestamp** (one timestamp is one
   chunk). The reverse directions are the slow ones, by design: reading a single series in full
-  touches every chunk band, and adding one series at a time rewrites a chunk band per timestep.
+  touches every chunk band, and adding one series at a time rewrites a chunk band per timestep —
+  which is why a run of single adds belongs inside a transaction, where they are buffered and
+  written as one block instead.
 - **A companion dataset holds the hashes.** For each packed dataset there is a sibling
   `{dataset}_h`, a `(cols, 64)` array of `u8`; row `i` holds the SHA-256 hex of column `i` as raw
   bytes, or is all-zero if the slot is free. This is the on-disk index the backend rebuilds on open.
@@ -185,7 +188,13 @@ sequenceDiagram
 - **Bulk writes are all-or-nothing.** `add_time_series_bulk` (and the buffered `bulk_add` session)
   group packed series by shape and stage each group as one batch-sized block — filling whole chunks
   — then insert every association in one transaction; any error rolls the whole batch back and
-  removes the staged arrays.
+  removes the staged arrays. A one-item batch outside a transaction is the exception: sizing a
+  dataset to a batch of one would claim a one-column dataset per call, so it takes the single-add
+  path and fills a shared pool's slot instead.
+- **Single adds inside a transaction take the block path too.** Nothing a transaction wrote is
+  durable until its outermost commit, so its packed adds are buffered per pool and written together
+  by the same block writer at the commit — see
+  [Make Transactions Span Operations](./design-choices.md#make-transactions-span-operations-without-enlisting-hdf5).
 
 On delete, the order reverses and is reference-counted: the association rows are removed inside a
 transaction, then an array column is only zeroed/freed if no remaining association references that
@@ -277,11 +286,13 @@ committing the rows that name them, so a process killed right after the call ret
 halves agreeing. Inside a transaction the flush is deferred to the outermost commit, and a call that
 wrote nothing new (a re-add of content the store already holds) skips it. The flush is not free — a
 caller adding series one at a time pays it per call — and a bulk add or a transaction is how to pay
-it once for many writes. `InMemory` suits a consumer that builds a store in a scratch directory
-beside its own volatile state — a `System` under construction, say. A crash loses that state
-regardless, so journaling the scratch catalog buys nothing, and skipping it removes per-commit WAL
-and fsync work. Arrays still stream to the HDF5 file, so this does **not** require the data to fit
-in memory. Nothing is durable until `persist_to`.
+it once for many writes. A transaction also holds that span's packed adds in a per-pool buffer and
+writes them as one block at the commit, so they land in the file the way a bulk add's do. `InMemory`
+suits a consumer that builds a store in a scratch directory beside its own volatile state — a
+`System` under construction, say. A crash loses that state regardless, so journaling the scratch
+catalog buys nothing, and skipping it removes per-commit WAL and fsync work. Arrays still stream to
+the HDF5 file, so this does **not** require the data to fit in memory. Nothing is durable until
+`persist_to`.
 
 Two caveats. Opening with `InMemory` reads `<path>.sqlite` into RAM but still opens the HDF5 half
 **in place**, so mutations land in the original file; a caller that means to leave the source

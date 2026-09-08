@@ -129,12 +129,23 @@ staging overlay to give a caller read-your-own-writes. And nesting is free: each
 savepoint, so an inner failure unwinds only its own work and leaves the enclosing transaction
 usable.
 
+**Append-only also means "not yet written".** A packed single add outside a transaction fills one
+slot of a thousand-column growth pool, and because that pool is chunked one timestamp row across
+every column, filling one column rewrites every chunk in it. Inside a transaction that write is owed
+to nobody until the outermost commit, so it is buffered per pool instead and the buffered arrays are
+written together with the same block writer a bulk add uses — at the commit, when a read needs one
+of them to have a physical position, or when the buffer reaches the width the block writer itself
+spills at. A loop of single adds inside one transaction therefore produces the file one bulk add of
+the same items produces: same dataset names, same widths, same chunking. Nothing about the format
+changes; these are layouts the bulk path already wrote.
+
 The costs are real and bound where this is worth using. A transaction holds the SQLite write lock
 until it finishes, so a concurrent writer on the same artifact blocks and then fails on its busy
-timeout. And a transaction is not a substitute for batching: block-sized HDF5 writes and feature-set
-dedup come from `bulk_add`, and a loop of single adds gets neither just because it is wrapped in a
-transaction. The two compose — batch each operation, and use a transaction when several of them must
-be atomic together.
+timeout. The buffer holds its not-yet-written arrays in memory — the same memory the equivalent bulk
+add allocates, bounded per pool by the width it spills at. And a transaction still does not replace
+batching for everything: feature-set dedup across a batch comes from `bulk_add`, which is also the
+direct spelling when the whole cohort is already in hand as a list. The two compose — batch each
+operation, and use a transaction when several of them must be atomic together.
 
 ## Upgrade a Store In Place Rather Than Bricking It
 
