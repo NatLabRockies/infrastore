@@ -5043,7 +5043,6 @@ fn write_naked_parquet(path: &Path) {
 
 #[cfg(feature = "parquet")]
 #[test]
-#[ignore = "the merge join reads a forecast partition in FEATURE_PLAN.md §2.12 phase 3"]
 fn a_dense_forecast_round_trips_through_its_own_partition() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("fc.h5");
@@ -5055,35 +5054,52 @@ fn a_dense_forecast_round_trips_through_its_own_partition() {
         &source,
         &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
     );
-    let file = fs::read_dir(&out).unwrap().next().unwrap().unwrap().path();
-    assert_eq!(file.file_name().unwrap(), "Deterministic.f64.utc.parquet");
-
-    let reader = fs::File::open(&file).unwrap();
-    let builder =
-        parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(reader).unwrap();
-    let columns: Vec<String> = builder
-        .schema()
-        .fields()
-        .iter()
-        .map(|f| f.name().clone())
-        .collect();
-    // A forecast's key columns are why it cannot share a table with a static
-    // series -- and every one of them is still required.
-    assert_eq!(columns[0], "timestamp");
-    assert_eq!(columns[1], "issue_time");
-    for expected in ["interval", "horizon", "resolution"] {
-        assert!(columns.contains(&expected.to_string()), "{columns:?}");
-    }
-    assert!(builder.schema().fields().iter().all(|f| !f.is_nullable()));
-    // 24 windows x 2 steps, flattened.
-    let rows: usize = builder
-        .build()
+    let mut files: Vec<String> = fs::read_dir(&out)
         .unwrap()
-        .map(|b| b.unwrap().num_rows())
-        .sum();
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    files.sort();
+    assert_eq!(
+        files,
+        vec![
+            "Deterministic.f64.utc.series.parquet".to_string(),
+            "Deterministic.f64.utc.values.parquet".to_string(),
+        ]
+    );
+
+    let builder = |name: &str| {
+        parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+            fs::File::open(out.join(name)).unwrap(),
+        )
+        .unwrap()
+    };
+    let columns = |name: &str| -> Vec<String> {
+        builder(name)
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect()
+    };
+
+    // A forecast's second time column is why it cannot share a values file with
+    // a static series -- and every column is still required.
+    let values = builder("Deterministic.f64.utc.values.parquet");
+    assert_eq!(
+        columns("Deterministic.f64.utc.values.parquet"),
+        vec!["data_hash", "time_axis", "timestamp", "issue_time", "value"]
+    );
+    assert!(values.schema().fields().iter().all(|f| !f.is_nullable()));
+    // The grid the coordinates belong to is the series half's, once per series.
+    let series = columns("Deterministic.f64.utc.series.parquet");
+    for expected in ["interval", "horizon", "resolution", "count"] {
+        assert!(series.contains(&expected.to_string()), "{series:?}");
+    }
+    // 24 windows x 2 steps, flattened -- once, however many series read it.
+    let rows: usize = values.build().unwrap().map(|b| b.unwrap().num_rows()).sum();
     assert_eq!(rows, 48);
 
-    run(&dest, &["add", "--parquet", file.to_str().unwrap()]);
+    run(&dest, &["add", "--parquet", out.to_str().unwrap()]);
     let listed = run(&dest, &["-f", "json", "list"]);
     let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
     let row = &listed["items"][0];

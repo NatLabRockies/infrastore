@@ -5,8 +5,8 @@
 //! preserved — the catalog id, a composite series' stored padding — is asserted
 //! too, because a silent change there would be worse than a loud one.
 //!
-//! The forecast tests at the end are still `#[ignore]`d: the export writes their
-//! partitions but the merge join reads them in §2.12 phase 3.
+//! The forecast tests at the end run the same loop over the three dense kinds,
+//! whose partitions carry two more key columns and a cube rather than a vector.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -1048,7 +1048,6 @@ fn deterministic(name: &str) -> TimeSeriesData {
 }
 
 #[test]
-#[ignore = "the merge join reads a forecast partition in FEATURE_PLAN.md §2.12 phase 3"]
 fn a_deterministic_forecast_round_trips() {
     let original = deterministic("day_ahead");
     let (back, _dir) = round_trip(plain(vec![(1, original.clone())]));
@@ -1062,7 +1061,34 @@ fn a_deterministic_forecast_round_trips() {
 }
 
 #[test]
-#[ignore = "the merge join reads a forecast partition in FEATURE_PLAN.md §2.12 phase 3"]
+fn forecasts_sharing_a_cube_share_one_values_group() {
+    // Normalization is not a static-series trick: a forecast run against a
+    // hundred identical units is one cube, and the values file holds it once.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let series = stored(plain(
+        (0..100)
+            .map(|owner| (owner, deterministic("day_ahead")))
+            .collect(),
+    ));
+    let report = write_partitions(dir.path(), &series).expect("export");
+    assert_eq!(report.arrays(), 1);
+    assert_eq!(report.series(), 100);
+    assert_eq!(report.rows(), 6, "3 steps x 2 windows, written once");
+
+    let back = read_partition(&pair(&report), &ImportOptions::default()).expect("import");
+    assert_eq!(back.len(), 100);
+    for one in &back {
+        let TimeSeriesData::Deterministic(got) = &one.data else {
+            panic!("expected a Deterministic");
+        };
+        let TimeSeriesData::Deterministic(want) = deterministic("day_ahead") else {
+            unreachable!()
+        };
+        assert_eq!(got, &want);
+    }
+}
+
+#[test]
 fn a_probabilistic_forecast_keeps_its_percentiles() {
     // The core requires percentiles to be strictly increasing, so the import can
     // sort the lane labels -- which is what makes it independent of the row
@@ -1093,7 +1119,6 @@ fn a_probabilistic_forecast_keeps_its_percentiles() {
 }
 
 #[test]
-#[ignore = "the merge join reads a forecast partition in FEATURE_PLAN.md §2.12 phase 3"]
 fn a_scenarios_forecast_round_trips() {
     let values: Vec<f64> = (0..12).map(|i| i as f64).collect();
     let mut forecast = infrastore_core::Scenarios::new(
@@ -1120,7 +1145,6 @@ fn a_scenarios_forecast_round_trips() {
 }
 
 #[test]
-#[ignore = "the merge join reads a forecast partition in FEATURE_PLAN.md §2.12 phase 3"]
 fn a_multidimensional_forecast_round_trips() {
     let values: Vec<f64> = (0..12).map(|i| i as f64).collect();
     let mut forecast = infrastore_core::Deterministic::new(
@@ -1146,7 +1170,6 @@ fn a_multidimensional_forecast_round_trips() {
 }
 
 #[test]
-#[ignore = "the merge join reads a forecast partition in FEATURE_PLAN.md §2.12 phase 3"]
 fn a_calendar_horizon_counts_its_steps_by_walking_the_grid() {
     // A month is not a fixed number of milliseconds, so `horizon / resolution`
     // is the wrong arithmetic.
@@ -1173,15 +1196,15 @@ fn a_calendar_horizon_counts_its_steps_by_walking_the_grid() {
 }
 
 #[test]
-#[ignore = "the merge join reads a forecast partition in FEATURE_PLAN.md §2.12 phase 3"]
 fn forecast_rows_are_placed_by_coordinates_not_order() {
-    // A query engine may rewrite a file in any order within a series; the
-    // coordinates are what put each value back where it belongs.
+    // A query engine may rewrite a values file in any order within one array;
+    // the coordinates are what put each value back where it belongs.
     let dir = tempfile::tempdir().expect("tempdir");
     let original = deterministic("day_ahead");
     let series = stored(plain(vec![(1, original.clone())]));
     let report = write_partitions(dir.path(), &series).expect("export");
-    let (schema, batch) = read_one(&report.partitions[0].values_path);
+    let path = &report.partitions[0].values_path;
+    let (schema, batch) = read_one(path);
 
     let n = batch.num_rows() as u32;
     let indices = arrow::array::UInt32Array::from((0..n).rev().collect::<Vec<_>>());
@@ -1190,11 +1213,12 @@ fn forecast_rows_are_placed_by_coordinates_not_order() {
         .iter()
         .map(|c| arrow::compute::take(c, &indices, None).unwrap())
         .collect();
-    let reversed = arrow::array::RecordBatch::try_new(schema.clone(), reversed).expect("rebuild");
-    let path = dir.path().join("reversed.parquet");
-    write_batch(&path, &reversed);
+    let reversed = arrow::array::RecordBatch::try_new(schema, reversed).expect("rebuild");
+    write_batch(path, &reversed);
 
-    let back = read_lone(&path, &ImportOptions::default()).expect("import");
+    // Reversed and still identical, checksum included: the cube is rebuilt from
+    // the coordinates, so the bytes it hashes are the ones it started with.
+    let back = read_partition(&pair(&report), &ImportOptions::default()).expect("import");
     let (TimeSeriesData::Deterministic(got), TimeSeriesData::Deterministic(want)) =
         (&back[0].data, &original)
     else {
@@ -1204,75 +1228,70 @@ fn forecast_rows_are_placed_by_coordinates_not_order() {
 }
 
 #[test]
-#[ignore = "the merge join reads a forecast partition in FEATURE_PLAN.md §2.12 phase 3"]
 fn a_forecast_missing_its_grid_columns_is_refused() {
-    // The rows say where a value belongs, not what the grid it belongs to is.
+    // The values rows say where each value belongs, not what the grid it belongs
+    // to is; that is the series file's job, and dropping it is not recoverable.
     let dir = tempfile::tempdir().expect("tempdir");
     let series = stored(plain(vec![(1, deterministic("day_ahead"))]));
     let report = write_partitions(dir.path(), &series).expect("export");
-    let (schema, batch) = read_one(&report.partitions[0].values_path);
+    let path = &report.partitions[0].series_path;
+    let (schema, batch) = read_one(path);
 
     let keep: Vec<usize> = (0..schema.fields().len())
         .filter(|i| schema.field(*i).name() != "horizon")
         .collect();
-    let projected = batch.project(&keep).expect("project");
-    let path = dir.path().join("no_horizon.parquet");
-    write_batch(&path, &projected);
+    write_batch(path, &batch.project(&keep).expect("project"));
 
-    let err = read_lone(&path, &ImportOptions::default()).expect_err("no horizon");
+    let err = read_partition(&pair(&report), &ImportOptions::default()).expect_err("no horizon");
     assert!(err.to_string().contains("horizon"), "{err}");
 }
 
 #[test]
-#[ignore = "the merge join reads a forecast partition in FEATURE_PLAN.md §2.12 phase 3"]
 fn a_forecast_short_of_its_grid_is_refused() {
     // A cube has no hole to leave, so a missing row cannot be filled in. The
-    // count is checked first, which is the more useful message.
+    // count is checked before the checksum, which is the more useful message:
+    // "the grid holds 6 values" says what to fix, "the hash differs" does not.
     let dir = tempfile::tempdir().expect("tempdir");
     let series = stored(plain(vec![(1, deterministic("day_ahead"))]));
     let report = write_partitions(dir.path(), &series).expect("export");
-    let (schema, batch) = read_one(&report.partitions[0].values_path);
+    let path = &report.partitions[0].values_path;
+    let (schema, batch) = read_one(path);
 
-    let keep: Vec<usize> = (0..schema.fields().len())
-        .filter(|i| schema.field(*i).name() != "data_hash")
-        .collect();
-    let projected = batch.project(&keep).expect("project");
-    let short = projected.slice(0, projected.num_rows() - 1);
-    let path = dir.path().join("short.parquet");
-    write_batch(&path, &short);
+    let short = batch.slice(0, batch.num_rows() - 1);
+    write_batch(
+        path,
+        &arrow::array::RecordBatch::try_new(schema, short.columns().to_vec()).unwrap(),
+    );
 
-    let err = read_lone(&path, &ImportOptions::default()).expect_err("a hole");
+    let err = read_partition(&pair(&report), &ImportOptions::default()).expect_err("a hole");
     assert!(err.to_string().contains("its grid holds"), "{err}");
 }
 
 #[test]
-#[ignore = "the merge join reads a forecast partition in FEATURE_PLAN.md §2.12 phase 3"]
 fn a_forecast_with_two_rows_for_one_slot_is_refused() {
     // The right number of rows, but one coordinate twice -- so somewhere else
     // has none, and the two rows disagree about the same value.
     let dir = tempfile::tempdir().expect("tempdir");
     let series = stored(plain(vec![(1, deterministic("day_ahead"))]));
     let report = write_partitions(dir.path(), &series).expect("export");
-    let (schema, batch) = read_one(&report.partitions[0].values_path);
+    let path = &report.partitions[0].values_path;
+    let (schema, batch) = read_one(path);
 
-    let keep: Vec<usize> = (0..schema.fields().len())
-        .filter(|i| schema.field(*i).name() != "data_hash")
-        .collect();
-    let projected = batch.project(&keep).expect("project");
-    let n = projected.num_rows() as u32;
     // Repeat row 0 in place of the last one.
+    let n = batch.num_rows() as u32;
     let mut indices: Vec<u32> = (0..n - 1).collect();
     indices.push(0);
     let indices = arrow::array::UInt32Array::from(indices);
-    let doubled: Vec<arrow::array::ArrayRef> = projected
+    let doubled: Vec<arrow::array::ArrayRef> = batch
         .columns()
         .iter()
         .map(|c| arrow::compute::take(c, &indices, None).unwrap())
         .collect();
-    let doubled = arrow::array::RecordBatch::try_new(projected.schema(), doubled).expect("rebuild");
-    let path = dir.path().join("doubled.parquet");
-    write_batch(&path, &doubled);
+    write_batch(
+        path,
+        &arrow::array::RecordBatch::try_new(schema, doubled).expect("rebuild"),
+    );
 
-    let err = read_lone(&path, &ImportOptions::default()).expect_err("a duplicate");
+    let err = read_partition(&pair(&report), &ImportOptions::default()).expect_err("a duplicate");
     assert!(err.to_string().contains("two rows for"), "{err}");
 }
