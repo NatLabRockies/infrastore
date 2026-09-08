@@ -587,7 +587,7 @@ fn row_count(row: &TimeSeriesMetadata, data: &TimeSeriesData) -> Result<usize> {
     Ok(series_rows(row, data)?.target.len())
 }
 
-/// One row of a long table, before it is a column: where the value sits on the
+/// One array's value rows, before they are columns: where each value sits on the
 /// grids, and where it sits in the stored array.
 struct SeriesRows<'a> {
     /// Empty for a static series, which has no windows.

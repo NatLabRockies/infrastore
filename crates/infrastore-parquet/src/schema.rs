@@ -1,8 +1,8 @@
-//! The names a long table uses, and the codecs for the values that are not
-//! plain text.
+//! The column names a partition's two files use, and the codecs for the values
+//! that are not plain text.
 //!
-//! Every one of these is a **column** of the table (and, for the three partition
-//! keys, also a footer entry). They are gathered here rather than beside the
+//! Every one of these is a **column** of one of the two files (and, for the
+//! three partition keys, also a footer entry). They are gathered here rather than beside the
 //! writer because the reader has to agree with them exactly, and a name that
 //! drifts between the two is a bug neither side can see.
 //!

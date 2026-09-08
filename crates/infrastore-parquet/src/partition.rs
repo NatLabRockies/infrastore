@@ -1,17 +1,18 @@
 //! What decides which file a series' rows go in, and what that file is called.
 //!
-//! A long table holds many series, and three things cannot vary within one
-//! Parquet table without nullable or ill-typed columns: the **set of key
+//! A partition holds many series, and three things cannot vary within one
+//! Parquet file without nullable or ill-typed columns: the **set of key
 //! columns** (a forecast has an `issue_time`, a static series does not), the
 //! **Arrow type of `value`**, and the **zone of `timestamp`**. So a selection is
 //! partitioned by the triple `(time_series_type, value type, time_reference)`
-//! and one file is written per distinct triple. Every column in a file is then
-//! required — there are no nullable columns anywhere in this format.
+//! and one file *pair* is written per distinct triple. Every column in either
+//! file is then required — there are no nullable columns anywhere in this
+//! format.
 //!
-//! The three keys are also written as ordinary columns. They are constant within
-//! a file, so they dictionary-encode to one entry per row group and cost
-//! essentially nothing, and a reader that scans a directory into one table still
-//! sees them.
+//! The three keys are also written as ordinary columns of the series file. They
+//! are constant within a partition, so they dictionary-encode to one entry and
+//! cost essentially nothing, and a reader that unions a directory into one
+//! relation still sees them.
 
 use std::collections::{BTreeMap, BTreeSet};
 

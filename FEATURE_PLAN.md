@@ -551,6 +551,16 @@ structurally identical to `NonSequentialTimeSeries` and differs only in what the
 rows, so guessing it would be guessing that; `--type` names it. The type is a partition key now, so
 a file this project wrote always states it.
 
+**Reversed again 2026-09-07 by the normalized layout.** The empty-series rule has now been all three
+things in turn: refused on import for want of an anchor, warned about on export, and — as of §2.9 —
+**refused on export**, naming every empty series and writing nothing. A partition is a values file
+and a series file that must describe the same arrays, so an empty series is a series row whose key
+matches no values group, which is exactly what a truncated export looks like. There is no way to
+represent one that a reader could tell apart from damage, so the export refuses rather than writing
+something ambiguous. The remedy is to narrow the selection past it.
+
+The `PersistentTimeSeries` half is untouched and still current.
+
 ### 7.10 A dense forecast's grid is required, not inferred (§2.4)
 
 §2.4 specifies the long table but not what the import may assume. Resolution, horizon, interval,
@@ -572,6 +582,17 @@ order-independent if the coordinates themselves are, and the first cut of the lo
 the window anchor from the first issue time it saw and the percentile labels in first-appearance
 order — both of which depend on file order. Both are now derived from the values (minimum issue
 time, sorted percentiles), which is what the claim was always meant to say.
+
+**Still current under the normalized layout (2026-09-07), with the source moved once more.** The
+grid columns now live in the **series file**, one row per series, rather than repeating beside every
+value — which is the whole point of normalizing, and does not change the finding: they are still
+required, and a partition whose series file lacks `horizon` is still refused naming it. The
+coordinates in the values file are still what places each row, and are still derived
+order-independently.
+
+One thing the move improves: a query that selects a subset of a forecast's values rows no longer
+carries the grid with it, because the grid was never in those rows. It carries the array key, and
+the grid is one join away.
 
 ### 7.11 `to_arrow_windows()` does not gain a long form (§2.4)
 
@@ -657,6 +678,12 @@ The consequence to know, and the format reference says it: for a composite serie
 **not** the `data_hash` the catalog holds, and `id` is the way back to that. Every other kind's is
 identical to the catalog's.
 
+**Now load-bearing rather than incidental (2026-09-07).** Under the normalized layout the canonical
+hash is not merely what the checksum compares — it is half the **array key**, so two composite
+series whose curves are the same points at different paddings land in one values group and are
+written once. The finding's consequence stands unchanged and matters more: for a composite series
+the `data_hash` column is not the catalog's, and `id` is the way back to that.
+
 ### 7.15 A missing owner is refused, not defaulted (§2.8, decided 2026-09-07)
 
 §2.8 says "a missing `name` or `owner_id` is an error". Before that was implemented a foreign file
@@ -678,6 +705,12 @@ reversed file produced a wrong answer rather than an error. **Decision:** both a
 values — the minimum issue time, and sorted percentiles. Sorting the percentiles loses nothing,
 because the core already refuses a `Probabilistic` whose percentiles are not strictly increasing, so
 there is no stored order to preserve.
+
+**Still current, and now asserted with the checksum live (2026-09-07).** The order-independence test
+used to read a reversed file with `data_hash` projected away. Under the normalized layout dropping
+that column turns the file into a foreign one, so the test edits the exported values file in place
+and reads the pair — which checks the stronger claim the finding was always making: a reversed file
+rebuilds to the same _bytes_, not merely to something that parses.
 
 ### 7.17 A forecast's per-step shape is not the catalog's `element_shape` (§2.2, found 2026-09-07)
 
@@ -719,6 +752,13 @@ against the code and fixed in one commit, each with a test:
 - `bindings.md` still described "one schema, two producers", and a CLI reference example named a
   per-series file the partitioned export never writes.
 
+**Six of the eight survive the normalized layout unchanged (2026-09-07)**: the `PartitionKey` order,
+the collision-suffix reservation, the no-nulls refusal, the Arrow-zone fallback, and the
+stale-directory check are all still in force and still tested. The null refusal moved with its
+columns — a null `units` or `owner_id` is now a **series file** defect, since those columns are no
+longer beside every value — and the eighth, the documentation fix, is superseded by the layout
+rewrite the docs phase carries.
+
 ### 7.20 What the second review found (fixed 2026-09-08)
 
 Two posted comments and six the reviewer had missed the first time, all confirmed and fixed with
@@ -740,6 +780,13 @@ tests:
   target on its own is split.
 - Three comments (the crate manifest, its crate-level doc, `deny.toml`) still said the CLI feature
   was off by default, and a proto field comment promised an order a protobuf map cannot carry.
+
+**All four survive the normalized layout (2026-09-07), two of them enlarged.** Streaming is now a
+merge join over two files rather than a group-by over one, and `read_partition_with` replaces
+`read_file_with` with the same sink contract; one transaction per **partition** replaces one per
+file. The row-group policy is unchanged and applies to the values file, where boundaries are array
+keys rather than series — which is what makes a row group's `data_hash` statistics worth having. The
+stale-directory check and the comment fixes are untouched.
 
 ### 7.21 `time_axis` comes from the values, not from the catalog row (§2.3, decided 2026-09-07)
 
@@ -780,4 +827,6 @@ files with and without the key columns — plus whatever they turn up.
 
 Phase 2 is scoped to the static types, so the nine forecast tests in `long_round_trip.rs` and the
 CLI forecast test keep an `#[ignore]` whose reason now names phase 3. They still compile against the
-new reader, so the attribute is the only thing phase 3 removes.
+new reader, so the attribute is the only thing phase 3 removes. (Phase 5 renamed the file to
+`partition_round_trip.rs`, and `long_export.rs` to `partition_export.rs`, since "long table" is not
+what either describes any more.)

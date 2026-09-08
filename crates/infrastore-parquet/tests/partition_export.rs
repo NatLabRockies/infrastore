@@ -1,8 +1,9 @@
-//! Partitioned long-table export of the three static types.
+//! Partitioned export of the three static types: the values/series file pair.
 //!
 //! The properties under test are the ones the format rests on: every column is
-//! required, one file never mixes value types or zones, each series' rows are
-//! contiguous and sorted, and the filename is safe on every platform CI runs on.
+//! required, one partition never mixes value types or zones, each array's rows
+//! are contiguous and sorted by the key both halves share, a shared array is
+//! written once, and the stem is safe on every platform CI runs on.
 
 use std::collections::BTreeSet;
 use std::path::Path;

@@ -1290,7 +1290,7 @@ fn read_lanes(batch: &RecordBatch) -> Result<Option<Vec<LaneValue>>> {
     Ok(None)
 }
 
-/// Rebuild a forecast's cube from its long table.
+/// Rebuild a forecast's cube from its values group.
 ///
 /// Rows are placed by their **coordinates**, not by their order, so a file a
 /// query engine sorted or partitioned still reads correctly. Every slot must be
