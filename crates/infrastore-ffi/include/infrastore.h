@@ -858,6 +858,32 @@ int32_t infrastore_store_rollback_transaction(struct InfraStore *handle);
 int32_t infrastore_store_in_transaction(struct InfraStore *handle, bool *out);
 
 /**
+ * The byte budget an open transaction's buffered adds are held to. Writes the
+ * figure through `out`.
+ *
+ * # Safety
+ *
+ * `out` must be a valid, writable `u64` pointer.
+ */
+int32_t infrastore_store_write_buffer_bytes(const struct InfraStore *handle, uint64_t *out);
+
+/**
+ * Set the byte budget an open transaction's buffered adds are held to, and
+ * through it how wide a dataset a span of single adds can write. See
+ * `Store::set_write_buffer_bytes` in the Rust core.
+ *
+ * The figure belongs to this handle, not to the artifact: nothing is
+ * persisted. `bytes` must be greater than zero, and lowering it under an open
+ * transaction writes out whatever the buffer already holds beyond the new
+ * figure, so this call can do file I/O and fail.
+ *
+ * # Safety
+ *
+ * Standard: see the crate-level ABI conventions.
+ */
+int32_t infrastore_store_set_write_buffer_bytes(struct InfraStore *handle, uint64_t bytes);
+
+/**
  * Flush pending store writes.
  *
  * # Safety

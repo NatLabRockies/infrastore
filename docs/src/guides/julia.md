@@ -196,8 +196,7 @@ in a descriptor are a duplicate. See
 
 `AddBatch` accepts the same `add_time_series!` calls as a `Store` but only accumulates them;
 `add_time_series_bulk!` commits the whole batch in one catalog transaction and takes the block-sized
-HDF5 write path. It is the way to load a system: an order of magnitude faster than a loop of single
-adds, and same-shaped series land in the same packed dataset.
+HDF5 write path, so same-shaped series land in the same packed dataset.
 
 ```julia
 batch = AddBatch()
@@ -206,6 +205,15 @@ for (id, ts) in series
 end
 ids = add_time_series_bulk!(store, batch)   # Vector{Int64}, in input order; all-or-nothing
 ```
+
+This is an order of magnitude faster than a bare loop of single adds, which pays one catalog
+transaction and one HDF5 flush per series. It is **not** faster than that same loop inside a
+[transaction](#transactions), which buffers and writes the identical datasets. What separates the
+two is one thing: the batch is written as a single block whatever its size, because you are already
+holding it, where the transaction holds its buffered adds to
+[`write_buffer_bytes`](#how-wide-a-dataset-a-span-writes) and spills past it. Reach for the batch
+when the whole cohort is in hand; reach for the loop when you would rather add each series as you
+build it than hold them all first, and raise the budget if you want the single dataset back.
 
 ### Transactions
 
@@ -236,8 +244,35 @@ two widths, or once the unwritten arrays across every group cross 128 MiB:
   actually binds — a 30,500-step `Float64` series is 244 KB a column, so its group spills at 550.
 
 And a span holding a **single** array fills a shared-pool slot rather than claiming a dataset one
-column wide. `add_time_series_bulk!` is still the direct way to say it when you already have the
-batch in hand.
+column wide.
+
+#### How wide a dataset a span writes
+
+The 128 MiB is a default, not a law. `set_write_buffer_bytes!` moves it, and with it how wide a
+dataset a run of single adds can produce:
+
+```julia
+set_write_buffer_bytes!(store, 1 << 30)   # 1 GiB
+transaction(store) do
+    for (id, ts) in series
+        add_time_series!(store, id, "Generator", Component, ts)
+    end
+end
+# one dataset, however many series that was
+```
+
+Raised far enough, the loop writes exactly what `add_time_series_bulk!` of the same series writes —
+and the memory it costs is the memory the batch was holding anyway. Measured on 400 hourly year-long
+`Float64` series, the two are already the same file in comparable time (~0.09 s either way, and
+~0.12–0.14 s for a `NonSequentialTimeSeries` cohort on one axis); at 2,000 they part only over that
+extra dataset, ~0.30 s as one batch against ~0.38 s as a loop, and raising the budget closes it.
+
+`write_buffer_bytes(store)` reads the figure back. It belongs to the handle, not to the artifact —
+nothing is persisted, and a store reopened elsewhere is back to 128 MiB. It is a budget for the
+writing process, so a machine that cannot afford another machine's choice does not inherit it.
+Lowering it mid-transaction writes out whatever the buffer already holds beyond the new figure; zero
+throws, since a pool's width floors at one column and a zero budget would mean a dataset per array
+rather than no buffering at all. The chunk-row ceiling above it does not move.
 
 ### Values that are not numbers
 

@@ -8,14 +8,17 @@ use crate::error::{Result, TimeSeriesError};
 use crate::hash::array_hash;
 use crate::types::array::{Dtype, TypedArray};
 
-use super::{ArrayLayout, CompactionReport, IntegrityReport, PackGroup, StorageBackend, WriteMode};
+use super::{
+    ArrayLayout, CompactionReport, IntegrityReport, MAX_PENDING_BYTES, PackGroup, StorageBackend,
+    WriteMode,
+};
 
 /// Pure in-memory storage backend.
 ///
 /// Used for `in_memory=true` stores and as the default test backend. Tracks a
 /// "tombstoned" set so the slot-reclamation behavior can be exercised against
 /// the same surface as the HDF5 backend.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct MemoryBackend {
     arrays: HashMap<[u8; 32], TypedArray>,
     tombstoned: HashSet<[u8; 32]>,
@@ -23,6 +26,22 @@ pub(crate) struct MemoryBackend {
     /// writes (unix milliseconds) rather than as `DateTime`s, so an in-memory
     /// store and a persisted one hand back byte-identical values.
     timestamps: HashMap<[u8; 32], Vec<i64>>,
+    /// Recorded, never acted on: this backend has no datasets to size and no
+    /// pending buffer to bound. Kept so the setting round-trips through a store
+    /// whichever backend it has, rather than reading back as something the
+    /// caller did not write.
+    write_buffer_bytes: usize,
+}
+
+impl Default for MemoryBackend {
+    fn default() -> Self {
+        Self {
+            arrays: HashMap::new(),
+            tombstoned: HashSet::new(),
+            timestamps: HashMap::new(),
+            write_buffer_bytes: MAX_PENDING_BYTES,
+        }
+    }
 }
 
 impl MemoryBackend {
@@ -32,6 +51,15 @@ impl MemoryBackend {
 }
 
 impl StorageBackend for MemoryBackend {
+    fn write_buffer_bytes(&self) -> usize {
+        self.write_buffer_bytes
+    }
+
+    fn set_write_buffer_bytes(&mut self, bytes: usize) -> Result<()> {
+        self.write_buffer_bytes = bytes;
+        Ok(())
+    }
+
     /// `_mode` is ignored: this backend has no chunking and no datasets, so
     /// there is nothing a deferred write could coalesce into. Every put is
     /// immediate, which satisfies [`WriteMode::Deferred`]'s contract — it

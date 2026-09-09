@@ -1628,12 +1628,16 @@ impl Store {
     /// equivalent bulk add. It is bounded twice — per pool at the width the
     /// block writer spills a batch at (one chunk row: 131,072 columns of scalar
     /// `f64`, fewer for wider elements or when that many columns would not fit
-    /// the byte ceiling), and across every pool at a fixed byte ceiling,
-    /// currently 128 MiB. Crossing either writes blocks out early,
+    /// the byte ceiling), and across every pool at a byte ceiling that defaults
+    /// to 128 MiB. Crossing either writes blocks out early,
     /// which costs an extra dataset and nothing else. A span far larger than
     /// the ceiling therefore stays bounded, at the price of spilling — but the
     /// arrays a caller has not yet handed over are not the store's memory, so
     /// the honest way to ingest more than that is still a bulk add per cohort.
+    ///
+    /// 128 MiB is the default, not a law: [`Self::set_write_buffer_bytes`]
+    /// moves the cross-pool ceiling, and with it how wide a dataset this span
+    /// can write.
     ///
     /// # Concurrency
     ///
@@ -1938,6 +1942,78 @@ impl Store {
     /// for an in-memory store.
     pub fn file_path(&self) -> Option<&Path> {
         self.file_path.as_deref()
+    }
+
+    /// The byte budget an open transaction's buffered adds are held to.
+    /// See [`Self::set_write_buffer_bytes`].
+    pub fn write_buffer_bytes(&self) -> usize {
+        self.backend.write_buffer_bytes()
+    }
+
+    /// Set the byte budget an open transaction's buffered adds are held to.
+    ///
+    /// Inside a transaction a packed add joins a pending block per pool rather
+    /// than filling a growth-pool slot, and the block becomes one dataset at
+    /// the commit (see [`Self::begin_transaction`]). This is the ceiling on
+    /// what those blocks hold across every pool: cross it and the widest block
+    /// is written out early, which costs an extra dataset and nothing else.
+    ///
+    /// It therefore decides **how wide a dataset a span of single adds can
+    /// produce**, which is the one thing left that
+    /// [`Self::add_time_series_bulk`] does differently — a batch handed over as
+    /// a list is written as one block with no budget applied, because the
+    /// caller is already holding it. Raise this to give a run of single adds
+    /// the same dataset the equivalent bulk add would write; the memory that
+    /// buys is the memory the bulk add's caller was holding anyway.
+    ///
+    /// The figure is a property of *this handle*, not of the artifact: nothing
+    /// is persisted, and a store reopened elsewhere is back to the default.
+    /// That is deliberate — it is a budget for the writing process, and a
+    /// machine that cannot afford the value another machine chose should not
+    /// inherit it.
+    ///
+    /// A per-pool block still stops at the width one chunk row holds
+    /// (`MAX_CHUNK_BYTES` over one column's element block), which no budget
+    /// raises: past that a dataset is spilled regardless, exactly as a bulk add
+    /// that wide spills.
+    ///
+    /// Takes effect immediately. Lowering it below what an open transaction has
+    /// already buffered writes blocks out before returning, so the new bound
+    /// holds from here rather than from the next add.
+    ///
+    /// An in-memory store records the figure and never acts on it: it has no
+    /// datasets to size.
+    ///
+    /// # Errors
+    ///
+    /// [`TimeSeriesError::InvalidParameter`] if `bytes` is zero — a pool's
+    /// width cap floors at one column, so a zero budget would not mean "do not
+    /// buffer" but "one dataset per array", which is the layout the block-of-one
+    /// rule exists to avoid.
+    pub fn set_write_buffer_bytes(&mut self, bytes: usize) -> Result<()> {
+        if bytes == 0 {
+            return Err(TimeSeriesError::InvalidParameter(
+                "write_buffer_bytes must be greater than zero".into(),
+            ));
+        }
+        self.backend.set_write_buffer_bytes(bytes)
+    }
+
+    /// Reopen the backend at `path` with `budget` re-applied.
+    ///
+    /// The figure lives in the backend, which is what enforces it, so the
+    /// getter can never report a budget that is not the one in force. The cost
+    /// is that a path swapping the backend under a live handle —
+    /// [`Self::compact`] and a same-path [`Self::persist_to`] both close the
+    /// file so a rename can replace it — must hand the figure to the
+    /// replacement or silently reset the caller's choice to the default.
+    /// Capture it before the swap, since the placeholder does not carry it.
+    ///
+    /// Re-applying to a freshly opened backend cannot evict: its buffer is
+    /// empty.
+    fn reopen_backend(&mut self, path: &Path, budget: usize) -> Result<()> {
+        self.backend = open_backend(path, self.read_only)?;
+        self.backend.set_write_buffer_bytes(budget)
     }
 
     /// Mirrors the spec's `add_time_series` signature; the public surface is
@@ -4915,6 +4991,7 @@ impl Store {
         // to go before the original is replaced (required on Windows, correct
         // everywhere). The placeholder backend is never observed: nothing else
         // runs between the swap and the reopen.
+        let budget = self.backend.write_buffer_bytes();
         drop(std::mem::replace(
             &mut self.backend,
             Box::new(MemoryBackend::new()) as Box<dyn StorageBackend>,
@@ -4925,7 +5002,7 @@ impl Store {
         }
         // Reopen before surfacing a rename failure, so a failed compaction
         // leaves the store usable instead of stranded on the placeholder.
-        self.backend = open_backend(&path, self.read_only)?;
+        self.reopen_backend(&path, budget)?;
         renamed?;
 
         // The `stat` after, taken on the replaced file rather than on the temp
@@ -5155,13 +5232,14 @@ impl Store {
         // nothing else runs in between.
         let own_file = self.file_path.clone().filter(|src| same_file(src, path));
         if let Some(src) = own_file {
+            let budget = self.backend.write_buffer_bytes();
             drop(std::mem::replace(
                 &mut self.backend,
                 Box::new(MemoryBackend::new()) as Box<dyn StorageBackend>,
             ));
             let swapped = staged
                 .and_then(|()| Self::swap_into_place(&tmp_h5, path, &tmp_sqlite, &sqlite_path));
-            self.backend = open_backend(&src, self.read_only)?;
+            self.reopen_backend(&src, budget)?;
             return swapped.inspect_err(|_| Self::clear_temps(&tmp_h5, &tmp_sqlite));
         }
 

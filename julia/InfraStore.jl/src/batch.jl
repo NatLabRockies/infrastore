@@ -5,9 +5,17 @@
 
 Accumulates pending add requests client-side; submit them with
 [`add_time_series_bulk!`](@ref), which commits the whole batch in one metadata
-transaction. This is the fast path for ingesting many time series: per-item
-`add_time_series!` calls pay one SQLite commit each, while a batch pays a
-single commit for all items.
+transaction. This is the fast path for ingesting many time series *outside a
+transaction*, where per-item `add_time_series!` calls pay one SQLite commit
+and one HDF5 flush each while a batch pays one of each for all of them.
+
+Inside a [`transaction`](@ref) it is not the fast path, because there is no
+slow one to beat: a per-item call's savepoint is released into the enclosing
+transaction rather than committed, and the adds buffer into the same blocks
+this batch would write. Use a batch when the whole cohort is already in hand,
+and a run of single adds when you would rather add each series as you build
+it; the one difference left is that the buffer spills at 128 MiB and a batch
+has no ceiling of its own.
 
 Use the same `add_time_series!` methods with an `AddBatch` first argument in
 place of the `Store`. The batch is drained by `add_time_series_bulk!` and may

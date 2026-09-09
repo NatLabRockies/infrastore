@@ -15,7 +15,7 @@ pub mod common;
 pub mod hdf5;
 pub mod memory;
 
-pub(crate) use common::PackGroup;
+pub(crate) use common::{MAX_PENDING_BYTES, PackGroup};
 
 // The concrete backends and the trait seam are internal: the public surface is
 // `Store`, which owns a boxed backend. (The `common` module stays `pub` so
@@ -641,6 +641,23 @@ pub(crate) trait StorageBackend: Send + Sync {
     /// on-disk backend reports the policy it was created or reopened with.
     fn compression(&self) -> Compression {
         Compression::None
+    }
+
+    /// The byte budget the pending blocks of an open transaction are held to,
+    /// and through it the width one packed dataset reaches. See
+    /// [`Self::set_write_buffer_bytes`].
+    fn write_buffer_bytes(&self) -> usize {
+        MAX_PENDING_BYTES
+    }
+
+    /// Set that budget. Takes effect from the next deferred put; a buffer
+    /// already over the new figure is written out before this returns, so the
+    /// bound holds from the moment it is set rather than from the next add.
+    ///
+    /// A backend that does not buffer records the figure and never acts on it,
+    /// so a caller reads back what it set either way.
+    fn set_write_buffer_bytes(&mut self, _bytes: usize) -> Result<()> {
+        Ok(())
     }
 }
 

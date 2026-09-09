@@ -2389,6 +2389,56 @@ pub unsafe extern "C" fn infrastore_store_in_transaction(
     INFRASTORE_OK
 }
 
+/// The byte budget an open transaction's buffered adds are held to. Writes the
+/// figure through `out`.
+///
+/// # Safety
+///
+/// `out` must be a valid, writable `u64` pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_store_write_buffer_bytes(
+    handle: *const InfraStoreHandle,
+    out: *mut u64,
+) -> i32 {
+    clear_error();
+    if out.is_null() {
+        set_error("out pointer is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let store = deref_handle!(ref handle);
+    unsafe { *out = store.inner.write_buffer_bytes() as u64 };
+    INFRASTORE_OK
+}
+
+/// Set the byte budget an open transaction's buffered adds are held to, and
+/// through it how wide a dataset a span of single adds can write. See
+/// `Store::set_write_buffer_bytes` in the Rust core.
+///
+/// The figure belongs to this handle, not to the artifact: nothing is
+/// persisted. `bytes` must be greater than zero, and lowering it under an open
+/// transaction writes out whatever the buffer already holds beyond the new
+/// figure, so this call can do file I/O and fail.
+///
+/// # Safety
+///
+/// Standard: see the crate-level ABI conventions.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_store_set_write_buffer_bytes(
+    handle: *mut InfraStoreHandle,
+    bytes: u64,
+) -> i32 {
+    clear_error();
+    let store = deref_handle!(mut handle);
+    // `usize` is 32-bit on some targets the workspace builds for; a budget
+    // wider than the address space is the caller asking for no ceiling at all,
+    // which is what saturating to `usize::MAX` gives them.
+    let bytes = usize::try_from(bytes).unwrap_or(usize::MAX);
+    match store.inner.set_write_buffer_bytes(bytes) {
+        Ok(()) => INFRASTORE_OK,
+        Err(e) => map_core_error(e),
+    }
+}
+
 /// Flush pending store writes.
 ///
 /// # Safety
