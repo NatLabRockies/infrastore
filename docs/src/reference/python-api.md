@@ -181,7 +181,8 @@ def add_time_series_bulk(self, items: list[dict]) -> list[int]: ...
 # `owner_type`, `owner_category`, `time_series`; optional `features`. Any other
 # key raises, as the misspelled keyword it almost always is.
 # All items commit in ONE metadata transaction (all-or-nothing), which is much
-# faster than looping over add_time_series. Results are in input order.
+# faster than looping over add_time_series *outside* a transaction; inside one,
+# the loop buffers and writes the same datasets. Results are in input order.
 
 # Every write returns the catalog `id` its row was filed under -- the handle to
 # record in your own object model, and what every read and removal

@@ -191,17 +191,28 @@ descriptor are a duplicate. See
 ### Add many series at once
 
 `add_time_series_bulk` takes a list of dicts mirroring `add_time_series`'s keyword arguments and
-commits them in one catalog transaction, taking the block-sized HDF5 write path. It is the way to
-load a system: an order of magnitude faster than a loop of single adds, and same-shaped series land
-in the same packed dataset.
+commits them in one catalog transaction, taking the block-sized HDF5 write path, so same-shaped
+series land in the same packed dataset.
+
+An item carries exactly the keys `add_time_series` takes as parameters — `owner_id`, `owner_type`,
+`owner_category`, `time_series`, and optionally `features` — and any other key raises, as the
+misspelled keyword it almost always is. Everything that _describes_ the values (`units`,
+`quantity_kind`, `unit_system`, `component_field`, `application_data`, `element_type`,
+`time_reference`) rides on the `time_series` object, exactly as it does on the single-series path.
 
 ```python
 ids = store.add_time_series_bulk([
     {"owner_id": i, "owner_type": "Generator", "owner_category": OwnerCategory.Component,
-     "time_series": series[i], "units": "MW"}
+     "time_series": series[i]}
     for i in range(len(series))
 ])   # one catalog id per item, in input order; all-or-nothing
 ```
+
+This is an order of magnitude faster than a bare loop of single adds, which pays one catalog
+transaction and one HDF5 flush per series. It is **not** faster than that same loop inside a
+[transaction](#transactions), which buffers and writes the identical datasets — reach for the bulk
+call when the whole cohort is already in hand as a list, and for the loop when you would rather
+build the series one at a time than materialize every one of them first.
 
 ### Transactions
 
@@ -235,7 +246,11 @@ two widths, or once the unwritten arrays across every group cross 128 MiB:
 
 And a span holding a **single** array fills a shared-pool slot rather than claiming a dataset one
 column wide. `add_time_series_bulk` is still the direct way to say it when you already have the
-batch in hand.
+batch in hand: it holds no ceiling of its own, so a cohort larger than 128 MiB lands as one dataset
+where the loop spills. Below the ceiling the two write the same file in comparable time — 400 hourly
+year-long `float64` series take under 0.1 s either way. Above it they diverge only by that extra
+dataset: 2,000 such series are ~0.26 s as one bulk call against ~0.31 s as a loop, one
+`(8760, 2000)` dataset against a `(8760, 1915)` and a `(8760, 85)`.
 
 ## Read a Series
 
