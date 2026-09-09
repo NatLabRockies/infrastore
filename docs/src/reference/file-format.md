@@ -324,6 +324,15 @@ A pool's block width is the **lower of two** ceilings, and the buffer as a whole
   add up to a global one, so a span touching several shapes is held to the total as well; crossing
   it writes out the widest block.
 
+`MAX_PENDING_BYTES` is the only one of the three a caller can move: `Store::set_write_buffer_bytes`
+in the Rust core, `store.write_buffer_bytes = n` in Python, `set_write_buffer_bytes!(store, n)` in
+Julia, `infrastore_store_set_write_buffer_bytes` across the C ABI. Raising it is how a run of single
+adds gets the dataset the bulk add of the same series writes, since a batch handed over as a list is
+written as one block with no budget applied at all — the caller is already holding it. The chunk-row
+ceiling above it does not move, and neither does the figure travel: it belongs to the handle that
+set it, not to the artifact, because it is a budget for the writing process rather than a property
+of the file.
+
 **A block of one is not a block.** If a span ends up holding a single array for a pool, it fills a
 growth-pool slot rather than claiming a dataset sized to one column — chunked `(1, 1)`, that would
 give a scalar `f64` series an eight-byte chunk per timestep, whose per-chunk overhead dwarfs the

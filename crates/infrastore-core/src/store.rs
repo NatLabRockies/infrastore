@@ -1940,6 +1940,61 @@ impl Store {
         self.file_path.as_deref()
     }
 
+    /// The byte budget an open transaction's buffered adds are held to.
+    /// See [`Self::set_write_buffer_bytes`].
+    pub fn write_buffer_bytes(&self) -> usize {
+        self.backend.write_buffer_bytes()
+    }
+
+    /// Set the byte budget an open transaction's buffered adds are held to.
+    ///
+    /// Inside a transaction a packed add joins a pending block per pool rather
+    /// than filling a growth-pool slot, and the block becomes one dataset at
+    /// the commit (see [`Self::begin_transaction`]). This is the ceiling on
+    /// what those blocks hold across every pool: cross it and the widest block
+    /// is written out early, which costs an extra dataset and nothing else.
+    ///
+    /// It therefore decides **how wide a dataset a span of single adds can
+    /// produce**, which is the one thing left that
+    /// [`Self::add_time_series_bulk`] does differently — a batch handed over as
+    /// a list is written as one block with no budget applied, because the
+    /// caller is already holding it. Raise this to give a run of single adds
+    /// the same dataset the equivalent bulk add would write; the memory that
+    /// buys is the memory the bulk add's caller was holding anyway.
+    ///
+    /// The figure is a property of *this handle*, not of the artifact: nothing
+    /// is persisted, and a store reopened elsewhere is back to the default.
+    /// That is deliberate — it is a budget for the writing process, and a
+    /// machine that cannot afford the value another machine chose should not
+    /// inherit it.
+    ///
+    /// A per-pool block still stops at the width one chunk row holds
+    /// (`MAX_CHUNK_BYTES` over one column's element block), which no budget
+    /// raises: past that a dataset is spilled regardless, exactly as a bulk add
+    /// that wide spills.
+    ///
+    /// Takes effect immediately. Lowering it below what an open transaction has
+    /// already buffered writes blocks out before returning, so the new bound
+    /// holds from here rather than from the next add.
+    ///
+    /// An in-memory store records the figure and never acts on it: it has no
+    /// datasets to size.
+    ///
+    /// # Errors
+    ///
+    /// [`TimeSeriesError::InvalidParameter`] if `bytes` is zero — a pool's
+    /// width cap floors at one column, so a zero budget would not mean "do not
+    /// buffer" but "one dataset per array", which is the layout the block-of-one
+    /// rule exists to avoid.
+    pub fn set_write_buffer_bytes(&mut self, bytes: usize) -> Result<()> {
+        if bytes == 0 {
+            return Err(TimeSeriesError::InvalidParameter(
+                "write_buffer_bytes must be greater than zero".into(),
+            ));
+        }
+        self.backend.set_write_buffer_bytes(bytes)
+    }
+
     /// Mirrors the spec's `add_time_series` signature; the public surface is
     /// intentionally wide here. Use [`AddRequest`] + [`Self::add_time_series_bulk`]
     /// for ergonomic call sites.

@@ -152,7 +152,16 @@ flag, and `closed` once closed.
 store.read_only -> bool
 store.catalog -> str            # "attached" or "memory"
 store.in_transaction -> bool
+store.write_buffer_bytes -> int         # settable; default 128 MiB
 ```
+
+`write_buffer_bytes` is the byte budget an open transaction's buffered adds are held to, and through
+it how wide a dataset a run of single adds writes: raise it and the loop produces what
+`add_time_series_bulk` of the same series produces, which applies no budget at all. It belongs to
+this `Store` object rather than the artifact (nothing is persisted), lowering it mid-transaction
+writes out what the buffer already holds beyond the new figure, and `0` raises
+`InvalidParameterError`. See
+[how wide a dataset a span writes](../guides/python.md#how-wide-a-dataset-a-span-writes).
 
 ### Methods
 

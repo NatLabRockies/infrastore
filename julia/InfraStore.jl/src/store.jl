@@ -385,6 +385,62 @@ function in_transaction(store::Store)
 end
 
 """
+    write_buffer_bytes(store) -> Int
+
+The byte budget an open transaction's buffered adds are held to. See
+[`set_write_buffer_bytes!`](@ref).
+"""
+function write_buffer_bytes(store::Store)
+    out = Ref{UInt64}(0)
+    _check(
+        @ccall lib_path().infrastore_store_write_buffer_bytes(
+            store::Ptr{Cvoid}, out::Ref{UInt64}
+        )::Int32
+    )
+    return Int(out[])
+end
+
+"""
+    set_write_buffer_bytes!(store, bytes)
+
+Set the byte budget an open transaction's buffered adds are held to, and through
+it **how wide a dataset a run of single adds can write**.
+
+Inside a [`transaction`](@ref) a packed add joins a pending block per shape
+group rather than filling a growth-pool slot, and each block becomes one dataset
+at the commit. This is the ceiling on what those blocks hold across every group:
+cross it and the widest is written out early, which costs an extra dataset and
+nothing else. Raise it to give a run of [`add_time_series!`](@ref) the dataset
+[`add_time_series_bulk!`](@ref) of the same series would write -- the memory
+that buys is the memory the batch was holding anyway.
+
+```julia
+set_write_buffer_bytes!(store, 1 << 30)   # 1 GiB
+transaction(store) do
+    for (id, ts) in series
+        add_time_series!(store, id, "Generator", Component, ts)
+    end
+end
+```
+
+The figure belongs to this handle, not to the artifact: nothing is persisted,
+and a store reopened elsewhere is back to the 128 MiB default. A per-group block
+still stops at the width one chunk row holds, which no budget raises. Setting it
+below what an open transaction has already buffered writes those blocks out
+immediately. Zero throws. An in-memory store records it without acting on it,
+having no datasets to size.
+"""
+function set_write_buffer_bytes!(store::Store, bytes::Integer)
+    bytes > 0 || throw(ArgumentError("bytes must be greater than zero, got $bytes"))
+    _check(
+        @ccall lib_path().infrastore_store_set_write_buffer_bytes(
+            store::Ptr{Cvoid}, UInt64(bytes)::UInt64
+        )::Int32
+    )
+    return nothing
+end
+
+"""
     transaction(f, store)
 
 Run `f()` inside a transaction: commit if it returns, roll back if it throws.

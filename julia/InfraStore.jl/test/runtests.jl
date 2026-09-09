@@ -4193,6 +4193,45 @@ end
     )
 end
 
+@testset "write buffer budget sets how wide a span writes" begin
+    # Inside a transaction a packed add joins a pending block per shape group,
+    # and each block becomes one dataset at the commit. The budget bounds what
+    # those blocks hold, so it decides how wide the dataset gets -- the one
+    # thing left separating a run of single adds from the batch of the same
+    # series. One column here is 24 Float64: 192 bytes.
+    column_bytes = 24 * 8
+    mkts(base) = SingleTimeSeries(
+        DateTime(2024, 1, 1), Hour(1), Float64[base + i for i in 0:23], "load"
+    )
+
+    mktempdir() do dir
+        path = joinpath(dir, "narrow.h5")
+        store = Store(; path=path)
+        @test write_buffer_bytes(store) == 128 << 20      # the default
+        set_write_buffer_bytes!(store, column_bytes * 4)
+        @test write_buffer_bytes(store) == column_bytes * 4
+        transaction(store) do
+            for owner in 1:10
+                add_time_series!(store, owner, "Generator", Component, mkts(owner * 100.0))
+            end
+        end
+        flush!(store)
+        # A four-column budget spills every fourth add, so the ten land as
+        # 4 + 4 + 2 -- and all ten are still one readable cohort.
+        @test length(list_metadata(store)) == 10
+        @test read_by_id(store, list_metadata(store)[1].id).data[1] == 100.0
+        close!(store)
+    end
+
+    # Zero is not "do not buffer": a pool's width cap floors at one column, so
+    # it would mean a dataset per array. Refused before it reaches the ABI.
+    store = Store(in_memory=true)
+    before = write_buffer_bytes(store)
+    @test_throws ArgumentError set_write_buffer_bytes!(store, 0)
+    @test write_buffer_bytes(store) == before
+    close!(store)
+end
+
 @testset "transactions span operations and reverse removals" begin
     store = Store(in_memory=true)
     mkts(base) = SingleTimeSeries(

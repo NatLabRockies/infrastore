@@ -2536,6 +2536,20 @@ impl StorageBackend for Hdf5Backend {
     fn compression(&self) -> Compression {
         Hdf5Backend::compression(self)
     }
+
+    fn write_buffer_bytes(&self) -> usize {
+        self.inner.lock().expect("mutex poisoned").max_pending_bytes
+    }
+
+    /// Lowering the budget below what the buffer already holds writes blocks
+    /// out on the spot rather than waiting for the next add, so the bound the
+    /// caller just asked for is true when the call returns. That is the one
+    /// case this can do file I/O, and the one case it can fail.
+    fn set_write_buffer_bytes(&mut self, bytes: usize) -> Result<()> {
+        let mut inner = self.inner.lock().expect("mutex poisoned");
+        inner.max_pending_bytes = bytes;
+        inner.evict_pending_over_budget()
+    }
 }
 
 /// Write `generation` into the file at `path`, replacing any existing stamp.

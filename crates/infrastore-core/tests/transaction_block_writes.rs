@@ -893,3 +893,143 @@ fn a_pending_block_spills_at_the_width_the_block_writer_spills_at() {
     }
     assert_eq!(packed_layout(&looped), packed_layout(&bulked));
 }
+
+// --- The write buffer budget ------------------------------------------------
+
+/// The budget is the last thing separating a span of single adds from the bulk
+/// add of the same items, so setting it moves that line.
+///
+/// One column here is 24 `f64`: 192 bytes. A budget of four columns' worth caps
+/// the pool at four, and ten adds land as 4 + 4 + 2 — the same split the block
+/// writer performs on a batch too wide for one chunk, arrived at by the other
+/// ceiling.
+#[test]
+fn the_write_buffer_budget_decides_how_wide_a_span_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    const COLUMN_BYTES: usize = 24 * 8;
+    let base = "sts_f64_s_24_PT1H".to_string();
+
+    let narrow = dir.path().join("narrow.h5");
+    {
+        let mut store = create_store(Some(&narrow), false).unwrap();
+        store.set_write_buffer_bytes(COLUMN_BYTES * 4).unwrap();
+        assert_eq!(store.write_buffer_bytes(), COLUMN_BYTES * 4);
+        store.begin_transaction().unwrap();
+        for owner in 1..=10 {
+            store.add(request(owner, owner as f64 * 100.0)).unwrap();
+        }
+        store.commit_transaction().unwrap();
+        store.flush().unwrap();
+    }
+    assert_eq!(
+        packed_layout(&narrow)
+            .into_iter()
+            .map(|(name, (shape, _))| (name, shape))
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([
+            (base.clone(), vec![24, 4]),
+            (format!("{base}__1"), vec![24, 4]),
+            (format!("{base}__2"), vec![24, 2]),
+        ]),
+        "a four-column budget spills every fourth add"
+    );
+
+    // The same span under a budget wide enough for all ten is the single
+    // dataset the bulk add of those items writes.
+    let wide = dir.path().join("wide.h5");
+    {
+        let mut store = create_store(Some(&wide), false).unwrap();
+        store.set_write_buffer_bytes(COLUMN_BYTES * 64).unwrap();
+        store.begin_transaction().unwrap();
+        for owner in 1..=10 {
+            store.add(request(owner, owner as f64 * 100.0)).unwrap();
+        }
+        store.commit_transaction().unwrap();
+        store.flush().unwrap();
+    }
+    let bulked = dir.path().join("bulked.h5");
+    {
+        let mut store = create_store(Some(&bulked), false).unwrap();
+        store
+            .add_time_series_bulk((1..=10).map(|o| request(o, o as f64 * 100.0)).collect())
+            .unwrap();
+        store.flush().unwrap();
+    }
+    assert_eq!(packed_layout(&wide), packed_layout(&bulked));
+    assert_eq!(packed_layout(&wide).len(), 1, "one block, no spill");
+}
+
+/// Lowering the budget under an open transaction is enforced there and then,
+/// not at the next add: the span below buffers six columns, drops the budget to
+/// two columns' worth, and the block is written out on the spot. The two adds
+/// after it are what is left to write at the commit.
+#[test]
+fn lowering_the_budget_writes_out_what_is_already_buffered() {
+    let dir = tempfile::tempdir().unwrap();
+    const COLUMN_BYTES: usize = 24 * 8;
+    let path = dir.path().join("evicted.h5");
+    {
+        let mut store = create_store(Some(&path), false).unwrap();
+        store.set_write_buffer_bytes(COLUMN_BYTES * 64).unwrap();
+        store.begin_transaction().unwrap();
+        for owner in 1..=6 {
+            store.add(request(owner, owner as f64 * 100.0)).unwrap();
+        }
+        store.set_write_buffer_bytes(COLUMN_BYTES * 2).unwrap();
+        for owner in 7..=8 {
+            store.add(request(owner, owner as f64 * 100.0)).unwrap();
+        }
+        store.commit_transaction().unwrap();
+        store.flush().unwrap();
+    }
+    let base = "sts_f64_s_24_PT1H".to_string();
+    assert_eq!(
+        packed_layout(&path)
+            .into_iter()
+            .map(|(name, (shape, _))| (name, shape))
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([
+            (base.clone(), vec![24, 6]),
+            (format!("{base}__1"), vec![24, 2]),
+        ]),
+        "the six buffered columns land when the budget drops below them"
+    );
+}
+
+/// Zero is not "do not buffer": a pool's width cap floors at one column, so it
+/// would mean a dataset per array — the layout the block-of-one rule exists to
+/// avoid. Refused rather than honored.
+#[test]
+fn a_zero_write_buffer_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = create_store(Some(&dir.path().join("s.h5")), false).unwrap();
+    let before = store.write_buffer_bytes();
+    assert!(matches!(
+        store.set_write_buffer_bytes(0),
+        Err(infrastore_core::TimeSeriesError::InvalidParameter(_))
+    ));
+    assert_eq!(
+        store.write_buffer_bytes(),
+        before,
+        "a refused set changes nothing"
+    );
+}
+
+/// An in-memory store has no datasets to size, so the figure is recorded and
+/// never acted on -- but it still reads back, so a caller writing to whichever
+/// backend it was handed does not get an answer it never wrote.
+#[test]
+fn an_in_memory_store_records_the_budget_without_acting_on_it() {
+    let mut store = create_store(None, true).unwrap();
+    store.set_write_buffer_bytes(4096).unwrap();
+    assert_eq!(store.write_buffer_bytes(), 4096);
+    store.begin_transaction().unwrap();
+    for owner in 1..=10 {
+        store.add(request(owner, owner as f64 * 100.0)).unwrap();
+    }
+    store.commit_transaction().unwrap();
+    assert_eq!(
+        store.list_metadata(ListFilter::default()).unwrap().len(),
+        10
+    );
+}

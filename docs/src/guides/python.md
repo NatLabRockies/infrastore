@@ -210,9 +210,13 @@ ids = store.add_time_series_bulk([
 
 This is an order of magnitude faster than a bare loop of single adds, which pays one catalog
 transaction and one HDF5 flush per series. It is **not** faster than that same loop inside a
-[transaction](#transactions), which buffers and writes the identical datasets — reach for the bulk
-call when the whole cohort is already in hand as a list, and for the loop when you would rather
-build the series one at a time than materialize every one of them first.
+[transaction](#transactions), which buffers and writes the identical datasets. What separates the
+two is one thing: this call writes the batch as a single block whatever its size, because you are
+already holding it, where the transaction holds its buffered adds to
+[`write_buffer_bytes`](#how-wide-a-dataset-a-span-writes) and spills past it. Reach for this when
+the whole cohort is in hand as a list; reach for the loop when you would rather build the series one
+at a time than materialize every one of them first, and raise the budget if you want the single
+dataset back.
 
 ### Transactions
 
@@ -245,12 +249,34 @@ two widths, or once the unwritten arrays across every group cross 128 MiB:
   actually binds — a 30,500-step `float64` series is 244 KB a column, so its group spills at 550.
 
 And a span holding a **single** array fills a shared-pool slot rather than claiming a dataset one
-column wide. `add_time_series_bulk` is still the direct way to say it when you already have the
-batch in hand: it holds no ceiling of its own, so a cohort larger than 128 MiB lands as one dataset
-where the loop spills. Below the ceiling the two write the same file in comparable time — 400 hourly
-year-long `float64` series take under 0.1 s either way. Above it they diverge only by that extra
-dataset: 2,000 such series are ~0.26 s as one bulk call against ~0.31 s as a loop, one
-`(8760, 2000)` dataset against a `(8760, 1915)` and a `(8760, 85)`.
+column wide.
+
+#### How wide a dataset a span writes
+
+The 128 MiB is a default, not a law. `write_buffer_bytes` sets it, and through it how wide a dataset
+a run of single adds can produce:
+
+```python
+store.write_buffer_bytes = 1 << 30      # 1 GiB
+with store.transaction():
+    for s in series:
+        store.add_time_series(owner_id=..., owner_type="Generator",
+                              owner_category=OwnerCategory.Component, time_series=s)
+# one dataset, however many series that was
+```
+
+Raised far enough, the loop writes exactly what `add_time_series_bulk` of the same series writes —
+and the memory it costs is the memory the bulk call's caller was holding anyway. Measured on 2,000
+hourly year-long `float64` series: at the default they are ~0.26 s as one bulk call against ~0.31 s
+as a loop, one `(8760, 2000)` dataset against a `(8760, 1915)` and a `(8760, 85)`; raise the budget
+and the loop lands the single dataset too.
+
+The figure belongs to the `Store` object, not to the artifact — nothing is persisted, and a store
+reopened elsewhere is back to 128 MiB. It is a budget for the writing process, so a machine that
+cannot afford another machine's choice does not inherit it. Lowering it mid-transaction writes out
+whatever the buffer already holds beyond the new figure; zero raises `InvalidParameterError`, since
+a pool's width floors at one column and a zero budget would mean a dataset per array rather than no
+buffering at all. The chunk-row ceiling above it does not move.
 
 ## Read a Series
 

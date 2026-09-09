@@ -4165,6 +4165,45 @@ impl PyStore {
         Ok(catalog_name(self.store()?.catalog_mode()))
     }
 
+    /// The byte budget an open transaction's buffered adds are held to, and
+    /// through it **how wide a dataset a run of single adds can write**.
+    ///
+    /// Inside a transaction a packed add joins a pending block per shape group
+    /// rather than filling a growth-pool slot, and each block becomes one
+    /// dataset at the commit. This is the ceiling on what those blocks hold
+    /// across every group: cross it and the widest is written out early, which
+    /// costs an extra dataset and nothing else. Raising it gives a loop of
+    /// `add_time_series` the dataset `add_time_series_bulk` of the same series
+    /// would write, and the memory that buys is the memory the bulk call's
+    /// caller was holding anyway:
+    ///
+    /// ```python
+    /// store.write_buffer_bytes = 1 << 30      # 1 GiB
+    /// with store.transaction():
+    ///     for s in series:
+    ///         store.add_time_series(owner_id=..., time_series=s, ...)
+    /// ```
+    ///
+    /// The figure belongs to this `Store` object, not to the artifact: nothing
+    /// is persisted, and a store reopened elsewhere is back to the 128 MiB
+    /// default. A per-group block still stops at the width one chunk row holds,
+    /// which no budget raises. Setting it below what an open transaction has
+    /// already buffered writes those blocks out immediately. Zero raises
+    /// `InvalidParameterError`. An in-memory store records it without acting on
+    /// it, having no datasets to size.
+    #[getter]
+    fn write_buffer_bytes(&self) -> PyResult<u64> {
+        Ok(self.store()?.write_buffer_bytes() as u64)
+    }
+
+    #[setter]
+    fn set_write_buffer_bytes(&mut self, bytes: u64) -> PyResult<()> {
+        let bytes = usize::try_from(bytes).unwrap_or(usize::MAX);
+        self.store_mut()?
+            .set_write_buffer_bytes(bytes)
+            .map_err(map_err)
+    }
+
     /// Close the store, dropping the underlying handle and flushing/releasing
     /// its files. Subsequent store operations raise `TimeSeriesError`. Idempotent
     /// (a second `close()` is a no-op).

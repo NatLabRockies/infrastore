@@ -43,11 +43,11 @@ Exported names (types first, then functions):
 `read_by_ids`, `read_only`, `remove_by_filter!`, `remove_by_ids!`,
 `remove_parent_child_associations!`, `remove_supplemental_attribute_associations!`,
 `replace_owner!`, `replace_parent_child_component_id!`,
-`replace_supplemental_attribute_component_id!`, `rollback_transaction!`, `static_grid`,
-`static_groups`, `static_read!`, `static_summary`, `static_timestamps`, `static_values`,
-`supplemental_attribute_counts_by_type`, `supplemental_attribute_summary`, `time_series_counts`,
-`timestamps`, `transaction`, `transform_single_time_series!`, `value_at`, `verify_integrity`,
-`zoned_timestamp`, `zoned_timestamps`.
+`replace_supplemental_attribute_component_id!`, `rollback_transaction!`, `set_write_buffer_bytes!`,
+`static_grid`, `static_groups`, `static_read!`, `static_summary`, `static_timestamps`,
+`static_values`, `supplemental_attribute_counts_by_type`, `supplemental_attribute_summary`,
+`time_series_counts`, `timestamps`, `transaction`, `transform_single_time_series!`, `value_at`,
+`verify_integrity`, `write_buffer_bytes`, `zoned_timestamp`, `zoned_timestamps`.
 
 ## Constructors
 
@@ -1041,6 +1041,14 @@ begin_transaction!(store) -> Nothing
 commit_transaction!(store) -> Nothing    # errors if no transaction is open
 rollback_transaction!(store) -> Nothing  # errors if no transaction is open
 in_transaction(store) -> Bool
+write_buffer_bytes(store) -> Int         # the budget an open transaction's buffered adds are held
+                                         # to, and so how wide a dataset a run of single adds writes
+set_write_buffer_bytes!(store, bytes) -> Nothing
+                                  # move it: raised, a run of single adds writes what
+                                  # add_time_series_bulk! of the same series writes, which applies no
+                                  # budget at all. Belongs to the handle, not the artifact (nothing
+                                  # is persisted). Lowering it mid-transaction writes out what the
+                                  # buffer holds beyond the new figure; 0 throws ArgumentError.
 clear!(store; owner_id=nothing, owner_category=nothing) -> Nothing
                                   # both `nothing`: remove every series in the store.
                                   # Scope to one owner by passing BOTH keywords — they identify the

@@ -338,6 +338,15 @@ impl Store {
     pub fn commit_transaction(&mut self) -> Result<()>;
     pub fn rollback_transaction(&mut self) -> Result<()>;
     pub fn in_transaction(&self) -> bool;
+    // The byte budget an open transaction's buffered adds are held to, and so
+    // how wide a dataset a run of single adds writes. Raised, the run produces
+    // what `add_time_series_bulk` of the same items produces -- a batch handed
+    // over as a list applies no budget, the caller already holding it. Belongs
+    // to this handle, not to the artifact: nothing is persisted. Lowering it
+    // under an open transaction writes out what the buffer already holds beyond
+    // the new figure; zero is `InvalidParameter`.
+    pub fn write_buffer_bytes(&self) -> usize;
+    pub fn set_write_buffer_bytes(&mut self, bytes: usize) -> Result<()>;
     // Write the whole store (arrays + catalog) to `path` + `<path>.sqlite`,
     // overwriting them. Works for on-disk *and* in-memory stores.
     pub fn persist_to(&mut self, path: &Path) -> Result<()>;
