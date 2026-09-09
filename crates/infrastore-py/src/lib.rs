@@ -4265,8 +4265,14 @@ impl PyStore {
 
     /// Add many time series in one call, committing the metadata catalog once
     /// for the whole batch. This is much faster than calling
-    /// `add_time_series` in a loop, which pays one SQLite transaction per
-    /// series.
+    /// `add_time_series` in a loop **outside a transaction**, where each call
+    /// pays its own SQLite transaction and its own HDF5 flush. Inside one it is
+    /// not faster: the per-call savepoints release into the enclosing
+    /// transaction rather than committing, and the adds buffer into the same
+    /// blocks this call writes. Reach for this when the whole batch is already
+    /// in hand; see `begin_transaction` for the run-of-single-adds spelling and
+    /// the one thing it costs (a pending buffer that spills at 128 MiB, where
+    /// this call has no ceiling of its own).
     ///
     /// `items` is a list of dicts whose keys mirror `add_time_series`'s
     /// parameters: `owner_id`, `owner_type`, `owner_category`, `time_series`,

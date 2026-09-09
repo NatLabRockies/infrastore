@@ -581,9 +581,10 @@ add_time_series_bulk!(store::Store, batch::AddBatch) -> Vector{Int64}   # ids, i
 
 `AddBatch` accepts the same `add_time_series!` methods as `Store` (every series and forecast type)
 but only accumulates the requests; `add_time_series_bulk!` commits the whole batch in **one**
-metadata transaction, which is much faster than per-item adds when ingesting many series. The submit
-is all-or-nothing: on error nothing is committed. The batch is drained by the call in either case
-and may be reused. `length(batch)` returns the number of pending requests.
+metadata transaction, which is much faster than per-item adds _outside_ a transaction; inside one,
+the same per-item calls buffer and write the same datasets. The submit is all-or-nothing: on error
+nothing is committed. The batch is drained by the call in either case and may be reused.
+`length(batch)` returns the number of pending requests.
 
 ### Lookups
 

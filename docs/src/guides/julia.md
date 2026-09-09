@@ -196,8 +196,7 @@ in a descriptor are a duplicate. See
 
 `AddBatch` accepts the same `add_time_series!` calls as a `Store` but only accumulates them;
 `add_time_series_bulk!` commits the whole batch in one catalog transaction and takes the block-sized
-HDF5 write path. It is the way to load a system: an order of magnitude faster than a loop of single
-adds, and same-shaped series land in the same packed dataset.
+HDF5 write path, so same-shaped series land in the same packed dataset.
 
 ```julia
 batch = AddBatch()
@@ -206,6 +205,12 @@ for (id, ts) in series
 end
 ids = add_time_series_bulk!(store, batch)   # Vector{Int64}, in input order; all-or-nothing
 ```
+
+This is an order of magnitude faster than a bare loop of single adds, which pays one catalog
+transaction and one HDF5 flush per series. It is **not** faster than that same loop inside a
+[transaction](#transactions), which buffers and writes the identical datasets — reach for the batch
+when the whole cohort is already in hand, and for the loop when you would rather add each series as
+you build it than hold them all first.
 
 ### Transactions
 
@@ -237,7 +242,11 @@ two widths, or once the unwritten arrays across every group cross 128 MiB:
 
 And a span holding a **single** array fills a shared-pool slot rather than claiming a dataset one
 column wide. `add_time_series_bulk!` is still the direct way to say it when you already have the
-batch in hand.
+batch in hand: it holds no ceiling of its own, so a cohort larger than 128 MiB lands as one dataset
+where the loop spills. Below the ceiling the two write the same file in comparable time — 400 hourly
+year-long `Float64` series are ~0.09 s either way, and a `NonSequentialTimeSeries` cohort on one
+axis ~0.12–0.14 s. Above it they diverge only by that extra dataset: 2,000 such series are ~0.30 s
+as one batch against ~0.38 s as a loop.
 
 ### Values that are not numbers
 
